@@ -241,7 +241,15 @@ path) · keybinds `Alt+a`/`Alt+c`/`Alt+1…9`.
 **Deferred:** `clave rebuild` from the store (cold/remote start) · custom
 `zellij pipe` plugin (only if simple rename fails) · one-shot LLM titles ·
 per-row colour tint · worktree auto-cleanup · `AskUserQuestion`-wait state ·
-per-agent remote `BreakPane`.
+per-agent remote `BreakPane` · **per-agent context-% battery** (see below).
+
+**Backlog — context battery:** show each active agent's context-window usage in
+the bar as a depleting battery glyph (e.g. 🔋 → 🪫). Per-turn token/usage data
+lives in the session jsonl; map cumulative usage → % of the model's context
+window → glyph. The extraction logic can be lifted from the user's
+**`rot-reducer`** project (`~/code/rot-reducer`), which already did the discovery
+on pulling context reporting out of Claude logs — start there rather than from
+scratch.
 
 **Risks to validate early:** cross-tab rename (§6.5); plugin honouring `#[fg=…]`
 in tab names; terminal sends Option-as-Meta (existing `Alt` binds already work →
