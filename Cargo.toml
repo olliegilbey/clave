@@ -1,0 +1,21 @@
+[package]
+name = "clave"
+version = "0.1.0"
+edition = "2024"
+description = "Conduct a fleet of Claude Code agents from a Zellij sidebar"
+license = "MIT"
+repository = "https://github.com/olliegilbey/clave"
+readme = "README.md"
+
+[dependencies]
+# CLI surface: add / spawn / hook / ls
+clap = { version = "4", features = ["derive"] }
+# Ergonomic error propagation throughout the binary
+anyhow = "1"
+# State store, Claude session jsonl, and hook-event payloads are all JSON
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# We mint each agent's Claude session id ourselves so hook events map back exactly
+uuid = { version = "1", features = ["v4"] }
+# Locate ~/.claude and ~/.local/state without hardcoding paths
+dirs = "6"
