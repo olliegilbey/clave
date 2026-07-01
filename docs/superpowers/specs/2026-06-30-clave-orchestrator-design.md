@@ -203,7 +203,8 @@ Spanish for *key/keystone* (keyboard-driven, central); archaic past tense of
 - Plugin model (`zellij-tile`, Rust→WASM): implement `ZellijPlugin` —
   `load(config)`, `update(Event) -> bool`, `pipe(PipeMessage) -> bool`,
   `render(rows, cols)`; `register_plugin!`, `request_permission`, `subscribe`.
-  Build to `wasm32-wasip1`, `crate-type = ["cdylib"]`; load via layout
+  Build to `wasm32-wasip1` as a **binary crate** (`src/main.rs` + `register_plugin!`,
+  matching zellij's official rust-plugin-example — not a cdylib); load via layout
   `plugin location="file:…wasm"`. Plugins can run commands (`RunCommands`) and read
   the Zellij-cwd filesystem (sandboxed).
 - Reference plugin: [`cfal/zellij-vertical-tabs`](https://github.com/cfal/zellij-vertical-tabs)
@@ -447,7 +448,7 @@ clave/
 ├─ Cargo.toml            # [workspace] members; default-members = ["crates/clave"]
 ├─ crates/
 │  ├─ clave/             # bin · native host target · add/spawn/hook/ls/setup/...
-│  ├─ clave-bar/         # [lib] crate-type=["cdylib"] · dep zellij-tile · wasm32-wasip1
+│  ├─ clave-bar/         # binary crate (src/main.rs + register_plugin!) · dep zellij-tile · wasm32-wasip1
 │  └─ clave-types/       # serde-only, target-agnostic · the pipe schema
 └─ justfile             # build/install orchestration
 ```
