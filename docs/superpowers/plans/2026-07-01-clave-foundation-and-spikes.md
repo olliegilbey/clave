@@ -8,6 +8,8 @@
 
 **Tech Stack:** Rust (edition 2024, resolver 3), `serde`/`serde_json`, `clap`, `uuid`, `dirs`, `zellij-tile` 0.44 (→ WASM), the real `claude` CLI (v2.1.197), Zellij 0.44.3, `fzf`/`zoxide` (later tasks), `just`.
 
+**Execution mode (read before dispatching):** Tasks 1–3 are fully automatable TDD — dispatch each to a fresh subagent (superpowers:subagent-driven-development), review, merge. Tasks 4–6 are **spikes with human-in-the-loop steps**: a subagent can author the harness scripts, layouts, and plugin code and run `cargo build`, but the *launch → approve permission prompt → observe glyph/colour/focus → run real `claude`* steps need a live TTY and a human watching. Split each spike task accordingly — subagent writes the artifacts; the main session + user run the interactive validation and record the findings log. **Never mark a spike PASS from a headless subagent.**
+
 ## Global Constraints
 
 _Every task's requirements implicitly include this section. Values copied verbatim from the canonical spec `docs/superpowers/specs/2026-06-30-clave-orchestrator-design.md`._
@@ -277,7 +279,7 @@ Run:
 cargo build -p clave-bar --target wasm32-wasip1
 ls -la target/wasm32-wasip1/debug/clave-bar.wasm
 ```
-Expected: compiles clean; `clave-bar.wasm` exists (a binary crate keeps the hyphen in the artifact name). If the build reports `main function not found`, `register_plugin!` isn't supplying the entry on this zellij-tile version — the empty `fn main` from Step 7 covers it. Any other failure: capture the error for S1 (Task 5).
+Expected: compiles clean; `clave-bar.wasm` exists (a binary crate keeps the hyphen in the artifact name). If the build reports `main function not found`, `register_plugin!` isn't supplying the entry on this zellij-tile version — the empty `fn main` from Step 7 covers it. Conversely, if it reports a **duplicate/conflicting `main`**, `register_plugin!` emits its own — delete the empty `fn main` from Step 7 and rebuild. Record which form compiled (it carries into every later `clave-bar` edit — Tasks 5 and 6 both re-write this file). Any other failure: capture the error for S1 (Task 5).
 
 - [ ] **Step 11: Commit**
 
@@ -661,7 +663,7 @@ Expected: the `.jsonl` exists. Record which mode (`-p` vs interactive) actually 
 Create `docs/superpowers/spikes/S0-S0b.md` capturing:
 - **S0 verdict** (PASS/FAIL): does a fresh `--session-id` create a jsonl? Which launch mode persists?
 - **S0 pre-existing-uuid behavior:** resume vs error (and therefore whether `clave spawn`'s "collision is a genuine error, surface it" stance (spec §6.1) holds).
-- **S0b verdict** (PASS/FAIL): did `munge_cwd` match disk for all three path shapes? If any mismatched, paste the actual dir name from the `grep -rl` output and the corrected rule.
+- **S0b verdict** (PASS/FAIL): did `munge_cwd` match disk for all three path shapes? If any mismatched, paste the actual dir name from the `grep -rl` output and the corrected rule. (S0b covers **ASCII paths only** — the `café → caf-` unit test pins *our* per-`char` rule, but Claude's handling of a non-ASCII cwd, byte-wise vs char-wise, is **unverified against disk**. Note it as a low-risk known-unknown; cwds are rarely non-ASCII, and if one ever mismatches, this is the place to look.)
 - **Fallbacks if FAIL:**
   - S0 fails (no create / always resumes) ⇒ the idempotency model in spec §6.1 is wrong — **stop and revise §4/§6.1 before writing `clave spawn`.**
   - S0b mismatch ⇒ derive the true rule from the observed dir name, update `munge_cwd` + its tests + spec §4, and re-run this spike.
@@ -838,6 +840,7 @@ Run: `zellij delete-session clave-s1 --force` (or `exit` the panes first).
 Create `docs/superpowers/spikes/S1.md`:
 - **Verdict (PASS/FAIL).** PASS = non-focused glyph/colour updated live on pipe, stale seq ignored, focus never moved.
 - **Plugin-load form:** did the binary-crate wasm load and render? If it failed to load, the **fallback** is a cdylib — add `[lib] crate-type=["cdylib"]`, move the code to `src/lib.rs`, drop `fn main`, and rebuild (artifact becomes `clave_bar.wasm`, so update the layout path). Record which form loaded.
+- **Render form:** the spec (§6.5) describes colour via zellij's `#[fg=…]` markup; this spike emits **raw ANSI SGR** instead. If the glyph shows as literal escape bytes rather than colour, switch `render()` to zellij's `Text`/`print_text_with_coordinates` builder (or `#[fg=red]` ribbon markup) and rebuild. Record which form actually colours the glyph — it sets the technique for the real §6.6 bar.
 - **Notes:** the exact permission prompt text, any Zellij log noise, ANSI rendering fidelity.
 - **On FAIL:** **STOP.** Do not start Task 6 or any subsystem. Revisit spec §3 (rename_tab painting / fork cfal) and re-brief.
 
@@ -915,7 +918,13 @@ impl ZellijPlugin for State {
             self.pane_to_tab.clear();
             for (tab_index, panes) in manifest.panes {
                 for p in panes {
-                    self.pane_to_tab.insert(p.id, tab_index);
+                    // Terminal and plugin panes have SEPARATE id spaces in Zellij
+                    // (PaneId::Terminal(u32) vs Plugin(u32)). The `$ZELLIJ_PANE_ID`
+                    // we register with (Step 4) is a TERMINAL id, so a plugin pane
+                    // sharing that number would false-match. Map terminal panes only.
+                    if !p.is_plugin {
+                        self.pane_to_tab.insert(p.id, tab_index);
+                    }
                 }
             }
         }
@@ -987,7 +996,7 @@ fn main() {}
 - [ ] **Step 3: Build the plugin**
 
 Run: `cargo build -p clave-bar --target wasm32-wasip1`
-Expected: compiles clean. If `Event::PaneUpdate`, `PaneManifest.panes`, `PaneInfo.id`, or `go_to_tab` do not match these names/shapes in `zellij-tile` 0.44, consult `docs.rs/zellij-tile/0.44` and adjust — record any signature deltas in S2.md (they matter for the real §6.6 build).
+Expected: compiles clean. If `Event::PaneUpdate`, `PaneManifest.panes`, `PaneInfo.id`, `PaneInfo.is_plugin`, or `go_to_tab` do not match these names/shapes in `zellij-tile` 0.44, consult `docs.rs/zellij-tile/0.44` and adjust — record any signature deltas in S2.md (they matter for the real §6.6 build).
 
 - [ ] **Step 4: Write a self-registration helper for test panes**
 
@@ -1064,6 +1073,7 @@ Create `docs/superpowers/spikes/S2.md`:
 - **`$ZELLIJ_PANE_ID` exported?** (yes/no; value seen).
 - **Verdict (PASS/FAIL):** did nav jump to the correct tab, and stay correct after reorder/close?
 - **`go_to_tab` indexing:** 0- or 1-based (what worked).
+- **pane id spaces:** confirm `$ZELLIJ_PANE_ID` matches a `!is_plugin` `PaneInfo.id` (terminal id space) and that filtering plugin panes was necessary/correct.
 - **zellij-tile API deltas:** any `Event::PaneUpdate`/`PaneManifest`/`PaneInfo`/`go_to_tab` signature differences from Step 2 (these carry into the real §6.6 plugin).
 - **Fallbacks if FAIL:** env var absent ⇒ register-while-active heuristic or match on pane cwd/title; wrong-tab focus ⇒ document the correct index mapping.
 
