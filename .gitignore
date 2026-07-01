@@ -2,3 +2,5 @@
 .DS_Store
 *.swp
 .claude/settings.local.json
+# subagent-driven-development scratch: task briefs, reports, progress ledger
+.superpowers/
