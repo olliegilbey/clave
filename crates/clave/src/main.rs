@@ -4,7 +4,7 @@
 //! them, names them from their session transcript, and repaints a status emoji
 //! into the tab title — driven by Claude Code hooks, not screen-scraping.
 //!
-//! See `docs/design.md` for the full spec and the reasoning behind each choice.
+//! See `docs/superpowers/specs/2026-06-30-clave-orchestrator-design.md` for the full spec.
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

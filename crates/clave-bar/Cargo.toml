@@ -1,0 +1,13 @@
+[package]
+name = "clave-bar"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# A Zellij plugin is a binary crate compiled to wasm32-wasip1 (src/main.rs +
+# register_plugin!), matching zellij's official rust-plugin-example — no `[lib]`
+# block. Fallback if S1 shows it does not load: a cdylib
+# (`[lib] crate-type=["cdylib"]`, move to src/lib.rs, artifact `clave_bar.wasm`).
+
+[dependencies]
+zellij-tile = { workspace = true }
