@@ -227,9 +227,10 @@ impl ZellijPlugin for State {
     }
 }
 
-// A binary crate needs a `main`; `register_plugin!` supplies the wasm plugin
-// entry points (load/update/render/pipe), not `main`, so this stays empty.
-fn main() {}
+// NOTE: no `fn main()` here — on zellij-tile 0.44 `register_plugin!` expands to
+// its OWN `main` (the wasm entry point) alongside the plugin exports
+// (load/update/render/pipe). A second `main` is a duplicate-definition error
+// (E0428). Confirmed in Task 1: the macro is the sole source of `main`.
 ```
 
 - [ ] **Step 8: Write the `justfile`**
@@ -773,9 +774,10 @@ impl ZellijPlugin for State {
     }
 }
 
-// A binary crate needs a `main`; `register_plugin!` supplies the plugin exports
-// (load/update/render/pipe), not `main`, so this stays empty.
-fn main() {}
+// NOTE: no `fn main()` here — on zellij-tile 0.44 `register_plugin!` expands to
+// its OWN `main` (the wasm entry point) alongside the plugin exports
+// (load/update/render/pipe). A second `main` is a duplicate-definition error
+// (E0428). Confirmed in Task 1: the macro is the sole source of `main`.
 ```
 
 - [ ] **Step 3: Build the plugin**
@@ -988,9 +990,10 @@ impl ZellijPlugin for State {
     }
 }
 
-// A binary crate needs a `main`; `register_plugin!` supplies the plugin exports
-// (load/update/render/pipe), not `main`, so this stays empty.
-fn main() {}
+// NOTE: no `fn main()` here — on zellij-tile 0.44 `register_plugin!` expands to
+// its OWN `main` (the wasm entry point) alongside the plugin exports
+// (load/update/render/pipe). A second `main` is a duplicate-definition error
+// (E0428). Confirmed in Task 1: the macro is the sole source of `main`.
 ```
 
 - [ ] **Step 3: Build the plugin**
