@@ -4,3 +4,4 @@
 //! out a lib — this is what lets the S0b spike and later tasks call `munge_cwd`.)
 
 // Modules are added per task. Task 3 adds `pub mod munge;`.
+pub mod munge;
