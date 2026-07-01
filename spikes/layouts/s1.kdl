@@ -1,0 +1,10 @@
+// S1 test layout: [ clave-bar | shell ] side by side. The plugin pane is on the
+// LEFT and we never focus it — we drive it entirely via `zellij pipe`.
+layout {
+    pane split_direction="vertical" {
+        pane size="26" {
+            plugin location="file:/Users/olliegilbey/code/clave/target/wasm32-wasip1/debug/clave-bar.wasm"
+        }
+        pane
+    }
+}

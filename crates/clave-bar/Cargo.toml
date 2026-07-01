@@ -11,3 +11,5 @@ license.workspace = true
 
 [dependencies]
 zellij-tile = { workspace = true }
+clave-types = { path = "../clave-types" }
+serde_json = { workspace = true }
