@@ -1,8 +1,17 @@
 //! The cwd → transcript-dir munging rule (spec §4). This is the JOIN KEY:
 //! `clave spawn`'s idempotency check computes
 //! `~/.claude/projects/<munge_cwd(cwd)>/<uuid>.jsonl` and tests existence.
-//! Claude replaces EVERY non-alphanumeric byte (not just `/`) with `-`, so a
-//! `.` becomes `-` too — critical for dotted and worktree paths. Pinned by S0b.
+//! Claude replaces EVERY non-alphanumeric character (not just `/`) with `-`, so
+//! a `.` becomes `-` too — critical for dotted and worktree paths.
+//!
+//! CANONICALIZE FIRST (verified on disk by S0b, 2026-07-01): Claude munges the
+//! PHYSICAL cwd — it reads `getcwd()`, which resolves symlinks (on macOS
+//! `/var` → `/private/var`, `/tmp` → `/private/tmp`). `munge_cwd` is a pure
+//! string transform, so callers (`clave spawn`, `clave add`) MUST resolve the
+//! cwd to its physical path (`std::fs::canonicalize`) BEFORE calling — else the
+//! join key misses the real jsonl, `spawn` takes the create path, and Claude
+//! aborts with `Session ID … is already in use`. The char-rule below matched
+//! disk exactly (worktree `--` included); only the input needed canonicalizing.
 
 /// Replace every ASCII-non-alphanumeric character in `cwd` with `-`, matching
 /// Claude Code's `~/.claude/projects/<dir>` naming (empirically

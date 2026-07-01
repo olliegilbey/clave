@@ -153,6 +153,16 @@ Spanish for *key/keystone* (keyboard-driven, central); archaic past tense of
   computes for its existence check, so the rule must live in one shared helper and be
   pinned by spike **S0b**. The old `/`→`-` shorthand was wrong and breaks any dotted
   or worktree path (worktrees live under `.claude-worktrees`).
+- **Canonicalize the cwd first — S0b, verified on disk 2026-07-01.** Claude munges the
+  **physical** cwd: it reads `getcwd()`, which resolves symlinks (macOS
+  `/var/folders/…` → `/private/var/folders/…`, `/tmp` → `/private/tmp`). So `clave`
+  must `std::fs::canonicalize` the cwd **before** `munge_cwd`, or the join key misses
+  the real jsonl, `clave spawn` wrongly takes the create path, and Claude aborts:
+  `Error: Session ID … is already in use` — also verified, so a pre-existing
+  `--session-id` is a **hard error** (exit 1), confirming §6.1. The `munge_cwd`
+  character rule matched disk exactly (worktree `--` included); only the input needed
+  canonicalizing. (Headless `-p` mode does persist the jsonl — used only by the S0b
+  harness; the product launches the interactive TUI per invariant #1.)
 - Append-only event stream; `type`s include
   `user`/`assistant`/`tool_use`/`tool_result`/`thinking`/`summary`/`system`. The
   **first user message** gives the initial label; a `summary` entry appears later and

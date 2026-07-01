@@ -1,77 +1,95 @@
 # Spike S0 + S0b — findings log
 
-**Harness:** `spikes/s0-create-and-munge.sh`
-**Status:** PENDING — this is the template; the harness has not been run yet. It
-launches real Claude sessions (network + tokens), so it is run interactively by
-a human with a live terminal, not by an agent.
+**Harness:** `spikes/s0-create-and-munge.sh` (the committed harness supersedes the
+plan's Task 4 Step 1 draft: it now canonicalizes the cwd before munging and pins
+`--model haiku`.)
+**Status:** ✅ RUN 2026-07-01 (main session drove it against real Claude via `claude -p`).
 
 **What's being verified:**
-- **S0:** does `claude --session-id <fresh-uuid>` *create* a new session and
-  write `~/.claude/projects/<munged-cwd>/<uuid>.jsonl`, rather than erroring or
-  resuming? The idempotency model in spec §6.1 (`clave spawn` checks for the
-  jsonl, creates on absence, `--resume`s on presence) rests entirely on this.
-- **S0b:** does our `munge_cwd` helper (Task 3;
-  `cargo run -q -p clave --example munge -- <path>`) compute the same
-  directory name Claude actually writes, across plain / dotted / worktree cwds?
+- **S0:** does `claude --session-id <fresh-uuid>` *create* a new session and write
+  `~/.claude/projects/<munged-cwd>/<uuid>.jsonl`, rather than erroring or resuming?
+- **S0b:** does `munge_cwd` compute the same directory name Claude actually writes,
+  across plain / dotted / worktree cwds?
 
 ---
 
-## S0 verdict: fresh `--session-id` creates a jsonl
+## S0 verdict: fresh `--session-id` creates a jsonl — ✅ PASS
 
-**Result:** PENDING — fill in after interactive run
+- A fresh `--session-id <uuid>` **creates** the session and writes the jsonl —
+  confirmed for all three cwd shapes.
+- **Launch mode:** headless **`-p` (print mode) DOES persist** the jsonl; the
+  interactive fallback (Step 3) was not needed.
 
-- Does a fresh `--session-id <uuid>` create the jsonl? (PASS/FAIL)
-- Which launch mode actually persisted: `-p` (headless print mode, Step 2) or
-  the interactive fallback (Step 3)? Record this — it doesn't change
-  `clave spawn` (which always launches interactively) but affects whether this
-  harness is reproducible as written.
-- Per-cwd results (plain / `dot.dir` / worktree): PASS or FAIL for each, with
-  the actual jsonl path observed.
+## S0 pre-existing-uuid behavior — ✅ HARD ERROR (confirms §6.1)
 
-## S0 pre-existing-uuid behavior: resume vs error
+Re-running `claude --session-id <same-uuid>`:
+```
+Error: Session ID b60387fb-…-565dfebee501 is already in use.
+   exit=1
+```
+- Exit code **1** — it does not silently resume.
+- Confirms spec §6.1 ("a UUID collision is a genuine error: surface it, don't silently
+  resume"). ⇒ `clave spawn` must detect the existing jsonl (via the *canonicalized*
+  join key) and use `--resume`; taking the create path on an existing session errors.
+- (The harness's `before=0 after=NA` counts were an artifact of the pre-fix
+  un-canonicalized path — the very bug S0b found. The collision error is the real
+  result.)
 
-**Result:** PENDING — fill in after interactive run
+## S0b verdict: munge_cwd matches disk — rule ✅ correct, INPUT must be canonicalized
 
-- Re-running `claude --session-id <same-uuid>` a second time: did the jsonl
-  grow (silently resumed) or did the command error / exit non-zero (hard
-  error)?
-- `BEFORE` line count: PENDING
-- `AFTER` line count: PENDING
-- Exit code of the second invocation: PENDING
-- **Does this confirm or contradict spec §6.1's stance** ("a UUID collision is
-  a genuine error: surface it, don't silently resume")? PENDING
+Sessions were created but landed at `-private-var-…` while `munge_cwd(logical cwd)`
+computed `-var-…`. The only delta: macOS `/var` → `/private/var`. Claude reads
+`getcwd()` (physical path, symlinks resolved) and munges *that*.
 
-## S0b verdict: munge_cwd matches disk
-
-**Result:** PENDING — fill in after interactive run
-
-| cwd shape | computed dir (munge) | actual dir (disk) | match? |
+| cwd shape | munge(logical) | munge(physical) = on disk | match |
 |---|---|---|---|
-| plain (`$ROOT/plain`) | | | PENDING |
-| dotted (`$ROOT/dot.dir`) | | | PENDING |
-| worktree (`$ROOT/base/.claude-worktrees/wt`) | | | PENDING |
+| plain | `-var-folders-…-plain` | `-private-var-folders-…-plain` | physical ✅ |
+| dotted (`dot.dir`) | `-var-…-dot-dir` | `-private-var-…-dot-dir` | physical ✅ |
+| worktree | `-var-…-base--claude-worktrees-wt` | `-private-var-…-base--claude-worktrees-wt` | physical ✅ |
 
-- If any mismatched: paste the actual dir name from the harness's
-  `grep -rl "$UUID" "$PROJECTS"` output here, and state the corrected rule.
-- **Known unknown (not covered by this spike):** S0b covers ASCII paths only.
-  The `café → caf-` unit test pins *our* per-`char` munging rule, but whether
-  Claude munges non-ASCII cwds byte-wise or char-wise is unverified against
-  disk. Low risk — cwds are rarely non-ASCII — but if a future mismatch shows
-  up, start here.
+Re-verified directly: `munge_cwd(pwd -P)` equals the on-disk dir for all three (the
+`~/.claude/projects/<that>` dir exists). The worktree `--` double-dash matched in both,
+so the `s/[^A-Za-z0-9]/-/g` **character rule is correct and unchanged**.
 
----
+**Corrected rule:** callers must `std::fs::canonicalize` the cwd (resolve symlinks to
+the physical path) **before** `munge_cwd`. Folded into spec §4, `munge.rs` module doc,
+and the ledger's carried-forward decisions (a hard requirement for the `clave spawn` /
+`clave add` subsystem plan). `munge_cwd` itself needs no change.
 
-## Fallbacks if FAIL
-
-- **S0 fails** (no create / always resumes on a fresh uuid) ⇒ the idempotency
-  model in spec §6.1 is wrong — **stop and revise §4/§6.1 before writing
-  `clave spawn`.**
-- **S0b mismatch** ⇒ derive the true rule from the observed dir name, update
-  `munge_cwd` + its unit tests + spec §4, and re-run this spike.
+**Known unknown (still uncovered):** S0b exercised ASCII paths only. Whether Claude
+munges a non-ASCII cwd byte-wise or char-wise is unverified on disk. Low risk.
 
 ---
 
-## Raw harness output
+## Cost note (raised by user, 2026-07-01)
 
-PENDING — paste the full stdout of `./spikes/s0-create-and-munge.sh` here
-(and, if Step 3's interactive fallback was needed, that transcript too).
+Initial concern: `claude -p` might bill the **API** (pay-per-token) rather than the
+subscription. On this run **no usage credits were observed to be spent**, so it appears
+to use the subscription — **treat as UNCONFIRMED**. The harness pins `--model haiku` as
+a cheap default regardless. Either way this touches the **test harness only**: the clave
+**product** never uses `-p` — `clave spawn` launches the interactive Claude TUI
+(invariant #1), which is subscription-billed.
+
+---
+
+## Fallbacks (not triggered — recorded for completeness)
+- S0 fail (no create / always resumes) ⇒ idempotency model wrong; revise §4/§6.1. — N/A, S0 passed.
+- S0b mismatch ⇒ derive the true rule, update munge_cwd + tests + §4, re-run. — Resolved: the rule was right; the fix is canonicalizing the input (spec §4 updated).
+
+---
+
+## Raw harness output (first run, pre-canonicalization-fix — this is what surfaced the finding)
+```
+=== S0 + S0b: fresh-uuid create + munge-matches-disk ===
+-- cwd=…/clave.spike/plain  uuid=d1ffc779-…
+   FAIL not at computed path: …/-var-folders-…-plain/d1ffc779-….jsonl
+   where did the uuid actually land? ->
+     …/-private-var-folders-…-plain/d1ffc779-….jsonl
+   (dot.dir and worktree identical: computed -var-…, actual -private-var-…)
+=== S0: pre-existing-uuid behavior (resume vs error) ===
+-- re-running with the SAME uuid:
+Error: Session ID b60387fb-…-565dfebee501 is already in use.
+   exit=1
+```
+The delta is uniformly the `/private` prefix, confirming the getcwd()-canonicalization
+finding. Re-running the (now-fixed) harness munges the physical path and reports PASS.

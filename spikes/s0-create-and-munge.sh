@@ -2,12 +2,20 @@
 # Spike S0 + S0b — does `claude --session-id <fresh-uuid>` CREATE a session
 # jsonl, and does our munge_cwd() match Claude's on-disk projects/<dir> naming?
 #
-# WARNING: launches REAL Claude sessions (network + tokens). Run deliberately.
+# WARNING: launches REAL Claude sessions. Pins `--model haiku` as a cheap default
+# for these throwaway creation-semantics sessions. (Whether `-p` bills the API
+# pay-per-token or the subscription is UNCONFIRMED — no usage credits were observed
+# on the 2026-07-01 run, suggesting subscription; haiku is cheap either way. The
+# clave PRODUCT never uses -p — `clave spawn` launches the interactive TUI.)
 set -euo pipefail
 
 PROJECTS="$HOME/.claude/projects"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 munge() { ( cd "$REPO" && cargo run -q -p clave --example munge -- "$1" ); }
+# Canonicalize to the PHYSICAL path before munging: Claude munges getcwd(), which
+# resolves symlinks (macOS /var → /private/var, /tmp → /private/tmp). Munging the
+# logical path misses the real dir — this is the S0b finding, verified 2026-07-01.
+real() { ( cd "$1" && pwd -P ); }
 
 # Three path shapes: plain, dotted, and a git worktree under .claude-worktrees.
 ROOT="$(mktemp -d)/clave.spike"          # dotted segment forces the `.`→`-` rule
@@ -20,11 +28,11 @@ echo "=== S0 + S0b: fresh-uuid create + munge-matches-disk ==="
 for CWD in "$ROOT/plain" "$ROOT/dot.dir" "$ROOT/base/.claude-worktrees/wt"; do
   UUID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
   echo "-- cwd=$CWD  uuid=$UUID"
-  # Primary: headless print mode. If it does not persist a jsonl, use the
-  # interactive fallback documented in S0-S0b.md.
-  ( cd "$CWD" && claude --session-id "$UUID" -p "reply with the single word: ok" >/dev/null 2>&1 ) \
+  # Primary: headless print mode, cheapest model. If it does not persist a jsonl,
+  # use the interactive fallback documented in S0-S0b.md.
+  ( cd "$CWD" && claude --session-id "$UUID" --model haiku -p "reply with the single word: ok" >/dev/null 2>&1 ) \
     || echo "   warn: claude -p exited non-zero"
-  DIR="$(munge "$CWD")"
+  DIR="$(munge "$(real "$CWD")")"        # munge the PHYSICAL cwd (S0b finding)
   JSONL="$PROJECTS/$DIR/$UUID.jsonl"
   if [[ -f "$JSONL" ]]; then
     echo "   PASS created + munge matches: $JSONL"
@@ -38,15 +46,14 @@ done
 echo
 echo "=== S0: pre-existing-uuid behavior (resume vs error) ==="
 UUID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
-CWD="$ROOT/plain"; DIR="$(munge "$CWD")"; JSONL="$PROJECTS/$DIR/$UUID.jsonl"
-( cd "$CWD" && claude --session-id "$UUID" -p "first message" >/dev/null 2>&1 ) || true
+CWD="$ROOT/plain"; DIR="$(munge "$(real "$CWD")")"; JSONL="$PROJECTS/$DIR/$UUID.jsonl"
+( cd "$CWD" && claude --session-id "$UUID" --model haiku -p "first message" >/dev/null 2>&1 ) || true
 BEFORE=$(wc -l < "$JSONL" 2>/dev/null || echo 0)
 echo "-- re-running with the SAME uuid:"
 # Capture the exit code WITHOUT letting `set -e` abort: a non-zero here is the
 # exact signal this section measures (collision ⇒ hard error), so it must be
-# reported, not fatal. The un-guarded original aborted the script before the
-# summary printed — hiding the very result we're after.
-rc=0; ( cd "$CWD" && claude --session-id "$UUID" -p "second message" ) || rc=$?
+# reported, not fatal to the script.
+rc=0; ( cd "$CWD" && claude --session-id "$UUID" --model haiku -p "second message" ) || rc=$?
 echo "   exit=$rc"
 AFTER=$(wc -l < "$JSONL" 2>/dev/null || echo NA)
 echo "   jsonl lines before=$BEFORE after=$AFTER"
