@@ -631,7 +631,11 @@ CWD="$ROOT/plain"; DIR="$(munge "$CWD")"; JSONL="$PROJECTS/$DIR/$UUID.jsonl"
 ( cd "$CWD" && claude --session-id "$UUID" -p "first message" >/dev/null 2>&1 ) || true
 BEFORE=$(wc -l < "$JSONL" 2>/dev/null || echo 0)
 echo "-- re-running with the SAME uuid:"
-( cd "$CWD" && claude --session-id "$UUID" -p "second message" ); echo "   exit=$?"
+# Capture the exit code WITHOUT letting `set -e` abort: a non-zero here is the
+# exact signal this section measures (collision ⇒ hard error), so it must be
+# reported, not fatal to the script.
+rc=0; ( cd "$CWD" && claude --session-id "$UUID" -p "second message" ) || rc=$?
+echo "   exit=$rc"
 AFTER=$(wc -l < "$JSONL" 2>/dev/null || echo NA)
 echo "   jsonl lines before=$BEFORE after=$AFTER"
 echo "   (grew ⇒ silently resumed; non-zero exit/error ⇒ collision is a hard error)"
