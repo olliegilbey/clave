@@ -1,8 +1,11 @@
-// S1 test layout: [ clave-bar | shell ] side by side. The plugin pane is on the
-// LEFT and we never focus it — we drive it entirely via `zellij pipe`.
+// S1 test layout: [ clave-bar | shell ] side by side. Plugin pane is LEFT and
+// half-width so its one-time ReadCliPipes permission prompt is readable.
+// Flow: mouse-click the LEFT pane to focus it → a permission prompt appears →
+// press `y` to grant (Zellij caches it by plugin path). Then mouse-click the
+// RIGHT shell pane and drive the plugin with `zellij pipe`, watching the left.
 layout {
     pane split_direction="vertical" {
-        pane size="26" {
+        pane size="50%" {
             plugin location="file:/Users/olliegilbey/code/clave/target/wasm32-wasip1/debug/clave-bar.wasm"
         }
         pane
