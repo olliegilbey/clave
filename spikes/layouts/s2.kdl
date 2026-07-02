@@ -1,0 +1,23 @@
+// S2 test layout: the clave-bar plugin in tab 1, plus two agent panes that
+// register themselves under uuids u1 and u2. Reorder/close tabs to test the
+// join's resilience.
+layout {
+    tab name="bar" {
+        pane split_direction="vertical" {
+            pane size="26" {
+                plugin location="file:/Users/olliegilbey/code/clave/target/wasm32-wasip1/debug/clave-bar.wasm"
+            }
+            pane
+        }
+    }
+    tab name="u1" {
+        pane command="/Users/olliegilbey/code/clave/spikes/s2-register.sh" {
+            args "u1"
+        }
+    }
+    tab name="u2" {
+        pane command="/Users/olliegilbey/code/clave/spikes/s2-register.sh" {
+            args "u2"
+        }
+    }
+}
