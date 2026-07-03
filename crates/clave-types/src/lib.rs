@@ -63,10 +63,19 @@ mod tests {
     fn status_serializes_as_spec_snake_case() {
         // Exactly the strings the spec (§5/§6.5) mandates.
         assert_eq!(serde_json::to_string(&Status::Idle).unwrap(), "\"idle\"");
-        assert_eq!(serde_json::to_string(&Status::Working).unwrap(), "\"working\"");
-        assert_eq!(serde_json::to_string(&Status::NeedsYou).unwrap(), "\"needs_you\"");
+        assert_eq!(
+            serde_json::to_string(&Status::Working).unwrap(),
+            "\"working\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Status::NeedsYou).unwrap(),
+            "\"needs_you\""
+        );
         assert_eq!(serde_json::to_string(&Status::Done).unwrap(), "\"done\"");
-        assert_eq!(serde_json::to_string(&Status::Failed).unwrap(), "\"failed\"");
+        assert_eq!(
+            serde_json::to_string(&Status::Failed).unwrap(),
+            "\"failed\""
+        );
     }
 
     #[test]
@@ -98,7 +107,10 @@ mod tests {
 
     #[test]
     fn register_roundtrips() {
-        let reg = Register { uuid: "u1".into(), pane_id: 42 };
+        let reg = Register {
+            uuid: "u1".into(),
+            pane_id: 42,
+        };
         let back: Register = serde_json::from_str(&serde_json::to_string(&reg).unwrap()).unwrap();
         assert_eq!(reg, back);
     }
