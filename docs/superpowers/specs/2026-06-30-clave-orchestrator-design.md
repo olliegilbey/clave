@@ -3,10 +3,19 @@
 > Terminal-native orchestration for a fleet of Claude Code agents, driven from a
 > Zellij sidebar.
 
-**Status:** decisions **locked** (post-brainstorm, 2026-06-30). This is the single
+**Status:** decisions **locked** (post-brainstorm, 2026-06-30; **revised
+2026-07-03** — the "vertical dynamic tabs" reframing, below). This is the single
 canonical spec; it supersedes the original `docs/design.md` brief, which now points
-here. Implementation has not started beyond the scaffold (`src/main.rs` clap
-skeleton, compiles green).
+here. Foundation + spikes S0/S0b/S1/S2 are implemented and **PASS** (§9).
+
+> **Revision 2026-07-03 (post-spikes reframing, brainstormed + approved):** the bar
+> is now *the tab bar, made vertical* — its **row set is Zellij's live tab list**
+> (every tab, Claude agent or plain terminal), its **order is interaction recency**,
+> and clave's pushed status is a **decoration layer** (glyph + colour) on agent rows.
+> Repo-grouping, the archiving subsystem, and context-sensitive nav (S6) are
+> deleted; clave's labels are written onto the **real tabs** via the plugin.
+> Changed: §1, §2 #2/#11, §3, §4 (Zellij facts), §5, §6.2/§6.4/§6.5/§6.6/§6.7/§6.8,
+> §7–§10.
 
 ---
 
@@ -37,26 +46,27 @@ Electron desktop app. `clave` brings the same orchestration UX into the terminal
 where the agents already live.
 
 **Core model:** one dedicated Zellij session; **one agent = one Zellij tab** running
-the *real* Claude Code TUI; a **vertical left bar** (a first-party Zellij plugin,
-`clave-bar`) lists agents grouped by repo and sorted by recency, each with a
-colour-coded status glyph; you add, archive, and jump between them with `Alt` keys
-that fire even while a Claude session has focus.
+the *real* Claude Code TUI — and a tab may equally be a **plain terminal** (clave
+doesn't care); a **vertical left bar** (a first-party Zellij plugin, `clave-bar`)
+lists **all tabs of the session**, sorted by interaction recency, agent tabs
+decorated with a colour-coded status glyph. You add and jump between them with `Alt`
+keys that fire even while a Claude session has focus, or by **clicking a row**. The
+bar hides/shows on `Alt+c`; everything else stays stock Zellij — floating panes
+(e.g. nvim over the working agents), splits, session-manager all keep working.
 
 ```
-┌────────────────────────┐
-│ dotfiles               │  ← repo group header (per-repo colour)
-│  ● main·fix-auth-flow   │  ● red  = needs you
-│  ● feat·add-navbar      │  ● amber = working
-│ clave                  │
-│  ● main·spawn-cmd       │  ● green = done & unread
-│  ● docs·update-readme   │  ● dim  = idle
-│  ✖ main·flaky-test      │  ✖ red  = failed
-└────────────────────────┘
+┌──────────────────────────┐
+│ ● clave·main·spawn-cmd    │  ← focused tab (row 1 = most recent, by construction)
+│ ● dots·main·fix-auth      │  ● red   = needs you
+│ ● dots·feat·add-navbar    │  ● amber = working
+│   ~/scratch (zsh)         │  ← plain terminal tab: name only, no glyph
+│ ● clave·docs·readme       │  ● green = done & unread
+│ ✖ clave·main·flaky-test   │  ✖ red = failed · ● dim = idle
+└──────────────────────────┘
 ```
 
 The status indicator is a **single glyph whose font colour encodes state** (not an
-emoji — emoji render inconsistently in the bar). The `cwd` segment of each label is
-tinted with a stable per-repo colour so repos are visually distinct.
+emoji — emoji render inconsistently in the bar).
 
 The name `clave`: the foundational rhythm an ensemble locks to (the orchestrator);
 Spanish for *key/keystone* (keyboard-driven, central); archaic past tense of
@@ -69,8 +79,10 @@ Spanish for *key/keystone* (keyboard-driven, central); archaic past tense of
 1. **The agent is the real Claude TUI.** Never parse or scrape its rendered output.
    Users keep vim mode, slash commands, everything.
 2. **`clave` owns identity.** The label (`cwd · branch · summary`) and colours are
-   computed by `clave` and rendered by `clave-bar`. The launch `--name` is a
-   courtesy push into Claude's own session list; never read `/rename` or `/color`
+   computed by `clave`; the label is written onto the **real Zellij tab**
+   (`rename_tab_with_id`, on label *change* only — so manual renames stick between
+   changes) and the bar renders `TabInfo.name` for every row. The launch `--name` is
+   a courtesy push into Claude's own session list; never read `/rename` or `/color`
    back — they are not exposed (see §4).
 3. **The minted UUID is the join key.** `clave` generates each session's UUID and
    passes it to `--session-id`. That UUID locates the transcript, correlates every
@@ -89,16 +101,18 @@ Spanish for *key/keystone* (keyboard-driven, central); archaic past tense of
    cross-tab rename; no sort/grouping in stock cfal — see §3/§4). Every further step
    up must be similarly earned.
 9. **One Cargo workspace, two artifacts, shared types.** A native binary
-   (`clave`, subcommands `add`/`spawn`/`hook`/`ls`/`archive`/`focus`/`snapshot`/`setup`)
+   (`clave`, subcommands `add`/`spawn`/`hook`/`ls`/`focus`/`snapshot`/`setup`)
    and a WASM plugin
    (`clave-bar`) share a `clave-types` crate so the pipe schema cannot drift (§7).
 10. **Keep the core provider-shaped, not Claude-welded.** Confine Claude specifics to
     the spawn + hook adapter; the status model and bar logic stay generic enough that
     another agent CLI could slot in later.
-11. **`clave-bar` renders from clave's pushed model, decoupled from Zellij tab
-    order.** This is what enables repo-grouping and recency-sort: the bar's display
-    order is *not* the tab order. Selection maps a displayed row → the agent's pane →
-    `go_to_tab`.
+11. **The bar's row set is Zellij's truth; order and decoration are clave's.**
+    (Revised 2026-07-03.) Rows come from `TabUpdate` — every tab, agent or plain,
+    appears and vanishes for free. Display order is **interaction recency**, not tab
+    order. clave's pushed status decorates agent rows (glyph/colour). Selection maps
+    a displayed row → the tab's focused pane → `focus_pane_with_id` (S2:
+    `go_to_tab` is a dead end).
 12. **clave is self-contained in its own session.** The dedicated `clave` Zellij
     session is launched with a clave-owned config; clave **never mutates the user's
     global Zellij config**. (Claude *hooks* are necessarily global — see §4 — but
@@ -117,9 +131,9 @@ Spanish for *key/keystone* (keyboard-driven, central); archaic past tense of
 | Agents in the current Zellij session | Rejected | Mixes orchestration with normal tabs; `Alt+1…9` and the bar become ambiguous. |
 | **Agents in a dedicated `clave` session** | **Chosen** | One isolated workspace (intent §1); bar always present; keybinds scoped to clave's own config (invariant #12). |
 | Repaint background tab via CLI `rename-tab` | Rejected | **No CLI cross-tab rename exists** (§4; zellij #4591/#4602). Renames only the active tab. |
-| Painter plugin + stock `cfal/zellij-vertical-tabs` | Rejected | Stock cfal renders in **tab order** with no sort/group concept (§4). Cannot do recency-sort, 2-level repo grouping, or an archive view — all required. |
-| Fork cfal | Rejected | Its architecture mirrors tab order via a format-string DSL; our model (render from pushed state) fights it; external repo → no shared types; fork drift. |
-| **First-party `clave-bar` WASM plugin** | **Chosen** | Renders directly from clave's agent model (invariant #11); shares `clave-types` with the binary (invariant #9); single repo, no drift; reference cfal (MIT) for technique only. |
+| Painter plugin + stock `cfal/zellij-vertical-tabs` | Rejected | Stock cfal renders in **tab order** with no sort concept (§4). Cannot do recency-sort (still required, 2026-07-03) or per-row status decoration from pushed state. |
+| Fork cfal | Rejected | Its architecture mirrors tab order via a format-string DSL; our model (clave-owned order + decoration) fights it; external repo → no shared types; fork drift. |
+| **First-party `clave-bar` WASM plugin** | **Chosen** | Owns row order + status decoration (invariant #11, revised); shares `clave-types` with the binary (invariant #9); single repo, no drift; reference cfal (MIT) for technique only. |
 | State store: SQLite | Rejected | Overkill; clave state won't bloat to needing it. |
 | **State store: single JSON + file lock + atomic rename** | **Chosen** | Simple, greppable, concurrency-safe for the hook fan-in. |
 | Engine language Go / Bun | **Rust** | Aligns with Zellij + zoxide; the WASM plugin is Rust/WASM, so one language shares types. |
@@ -192,10 +206,11 @@ Spanish for *key/keystone* (keyboard-driven, central); archaic past tense of
 - **No CLI path renames a background tab.** `zellij action rename-tab` renames the
   **active** tab only; renaming by index/id without focus is an open feature request
   ([zellij#4591], [zellij#4602]) — unimplemented in 0.44.3.
-- **Plugin API can rename any tab by index without stealing focus:**
-  `rename_tab(tab_position: u32, name)` — permission `ChangeApplicationState`. (We do
-  not use this in the chosen design — `clave-bar` renders its own list — but it
-  confirms the plugin layer is the only mechanism that can touch background tabs.)
+- **Plugin API can rename any tab without stealing focus:**
+  `rename_tab(tab_position, name)` / **`rename_tab_with_id(tab_id, name)`** —
+  permission `ChangeApplicationState`. (**We use the `_with_id` form** — 2026-07-03 —
+  to write clave's label onto the real tab; the plugin layer is the only mechanism
+  that can touch background tabs.)
 - **Plugins receive `zellij pipe` messages** via the `pipe()` trait method
   (`CliPipeInput`) — permission `ReadCliPipes`. `clave hook` pushes status with
   `zellij pipe --name clave-status -- '<json>'`.
@@ -203,8 +218,19 @@ Spanish for *key/keystone* (keyboard-driven, central); archaic past tense of
   (and `MessagePluginId <n> { … }`). This routes `Alt`-nav keys to `clave-bar` while
   Claude is focused, so the bar's *display order* (not tab order) drives navigation.
 - Native tab nav: `GoToTab <n>`, `GoToNextTab`, `GoToPreviousTab`.
-- `zellij action focus-pane` / plugin `go_to_tab(index)` / `focus_or_create_tab` move
-  focus to a pane/tab by id/index.
+- **Plugin nav (S2 verdict):** plugin `go_to_tab(index)` is a **silent no-op** in
+  practice — fed the correct live value from both keybind and CLI contexts, it never
+  switched (0-/1-based mismatch). The proven call is
+  **`focus_pane_with_id(PaneId::Terminal(pane_id), false, false)`** — focus the
+  pane; Zellij pulls its tab forward. `switch_tab_to(idx)` (what the stock tab-bar's
+  click handler uses) is plausible but untested here — candidate simplification only.
+- **Tab/pane truth for plugins** (verified against zellij-utils 0.44.3 `data.rs`,
+  2026-07-03): `TabUpdate → Vec<TabInfo>` (`position`, `name`, `active`, stable
+  `tab_id`); `PaneUpdate → PaneManifest` (`HashMap<tab_position, Vec<PaneInfo>>`;
+  `PaneInfo { id, is_plugin, is_focused, … }`) — both need `ReadApplicationState`.
+  `Mouse::LeftClick(line, col)` events reach plugin panes (row-click nav).
+  `hide_self()` / `show_self(bool)` exist (bar toggle; grid-reflow needs one live
+  check). `rename_tab_with_id(tab_id, name)` renames any tab by stable id.
 - `session_serialization true` re-runs each pane's **command** on resurrect (behind a
   "Press ENTER to run…" gate). ⇒ idempotent `spawn` (invariant #5).
 - A session can be launched with its own config + layout:
@@ -257,13 +283,12 @@ never serialises unrelated sessions' hooks.
 {
   "uuid":            "…",        // minted; --session-id; the join key (invariant #3)
   "cwd":             "/abs/path",
-  "repo_root":       "/abs/repo", // git toplevel of cwd; the grouping key
+  "repo_root":       "/abs/repo", // git toplevel of cwd; keys the add/resume picker (§6.3)
   "branch":          "main",
   "label":           "clave · main · spawn-cmd", // cwd · branch · summary (§6.4)
   "status":          "working",  // idle|working|needs_you|done|failed
   "last_interacted": 0,          // unix s; bumped on UserPromptSubmit → recency sort
   "last_visited":    0,          // unix s; bumped on focus → unread = done & !visited
-  "archived":        false,      // archived agents are hidden from the bar
   "worktree":        null,       // path if spawned in a git worktree, else null
   "label_source":    "first_prompt" // first_prompt|summary; once summary, stop re-scanning jsonl (§6.4)
 }
@@ -306,9 +331,9 @@ last-writer-by-`seq` wins with no lost update. The uuid→pane join lives in the
 ### 6.2 State store + `clave ls`
 **Goal:** the thin index everything reads/writes; `ls` prints agents + status.
 **Decided:** format/locking/atomicity per §5. `clave ls` reads the store and prints
-agents (grouped by repo, recency-sorted) with a glyph; `--json` emits the raw model;
-`--archived` includes archived rows. `clave snapshot` emits the live `AgentSnapshot`
-for plugin hydration.
+agents recency-sorted (repo as a column) with a glyph; `--json` emits the raw model.
+`clave snapshot` emits the live `AgentSnapshot` for plugin hydration (the bar
+self-hydrates on load via `RunCommands` — §6.6).
 
 ### 6.3 `clave add` (the `Alt+a` flow)
 **Goal:** pick a directory, open a tab, spawn-or-resume an agent, record it.
@@ -316,15 +341,19 @@ for plugin hydration.
 - Pick a repo/dir with **`fzf` over `zoxide query -l`** (fzf present; skim isn't);
   default-select the current cwd.
 - Consult the store for that `repo_root`:
-  - **Already running in clave** (live, not archived) → jump to it; no duplicate spawn.
+  - **Already running in clave** → jump to it (`clave-nav` pipe, S2); no duplicate
+    spawn. Liveness check: the uuid appears in `zellij action dump-layout` output —
+    every agent pane's baked command is `clave spawn <uuid>`, so live uuids are
+    greppable (verify the dump includes pane commands during implementation;
+    fallback: track liveness in the store via `SessionStart`/`SessionEnd` hooks).
   - Otherwise offer **new** vs **resume**:
     - *new:* mint UUID → derive label (§6.4) → create a tab whose pane command is
       `clave spawn <uuid> --name <label> --cwd <dir>` → record.
     - *resume:* **clave owns the picker** — `fzf` over the repo's resumable sessions
-      (its own store rows, incl. archived, plus prior Claude sessions discovered by
+      (its own store rows, plus prior Claude sessions discovered by
       scanning `~/.claude/projects/<munged-cwd>/*.jsonl` and deriving a label per
-      §6.4). Pick → known UUID → create a tab with the **same idempotent**
-      `clave spawn <uuid> …` command → record/unarchive.
+      §6.4, minus currently-live uuids). Pick → known UUID → create a tab with the
+      **same idempotent** `clave spawn <uuid> …` command → record.
   - *Rejected:* letting `claude --resume` show its own picker. It's tempting (no
     picker to build), but the UUID would only be known *after* launch (via the
     `SessionStart` hook), leaving the pane command as `claude --resume` — which
@@ -359,6 +388,11 @@ for plugin hydration.
   turn risks the hook timeout). Once a summary is found it sets `label_source =
   summary` and stops re-scanning. Then update the store + push the snapshot —
   event-driven, no watcher (invariant #4).
+- **Delivery (2026-07-03):** the label rides the snapshot; `clave-bar` writes it onto
+  the **real tab** via `rename_tab_with_id`, and only when the label *changes*
+  (tracked per-uuid) — no rename↔`TabUpdate` loop, and manual tab renames stick
+  until the next genuine label change. The bar renders `TabInfo.name` for every row,
+  so agent and plain tabs share one render path.
 - Truncation is the **plugin's** job: `clave-bar` clamps each row to the bar width
   (~22 cols, configurable) with a trailing `…`, prioritising the summary segment.
 - One-shot LLM titles: deferred.
@@ -386,9 +420,10 @@ for plugin hydration.
 - **Status = one glyph, colour encodes state** (rendered by the plugin via `#[fg]`):
   `●` red = needs you · `●` amber = working · `●` green = done & unread · `●` dim =
   idle · `✖` red = failed. (Glyph set is a config default; tweakable.)
-- **Unread:** `done` shows green until the agent's tab gains focus; on focus the
-  plugin bumps `last_visited` (via `clave focus <uuid>`) and the row falls to idle
-  dim. The plugin detects focus from `TabUpdate`/`PaneUpdate` (spike **S3**).
+- **Unread:** `done` shows green until the agent's tab gains focus; the plugin sees
+  the transition natively (`TabUpdate` `active`) and runs `clave focus <uuid>`
+  (`RunCommands`), which bumps `last_visited` and re-pushes — bar and `ls` agree.
+  Non-fatal on failure (self-heals on the next push). (Was spike S3 — now trivial.)
 - `clave setup` **additively and idempotently merges** the hooks into
   `~/.claude/settings.json`, preserving any existing hook arrays (never clobber the
   user's `SessionStart`/`PreToolUse`/etc.). On this machine `~/.claude` is a
@@ -398,43 +433,52 @@ for plugin hydration.
   mechanics stay out of the canonical design.
 
 ### 6.6 Bar + keybinds (`clave-bar` plugin)
-**Goal:** the vertical left bar, its ordering/grouping, and the `Alt` keys.
-**Decided:**
-- **First-party `clave-bar`** WASM plugin renders from clave's pushed `AgentSnapshot`
-  (invariant #11): **group by `repo_root`** (a dim repo-header row, tinted with a
-  stable per-repo colour) → **within group, sort by `last_interacted` desc**. Each
-  row: status glyph (state colour) + label (cwd in the repo colour · branch dim ·
-  summary). Archived agents are not rendered.
-- **uuid→tab join (spike S2):** the plugin keeps a `uuid → pane_id` map from
-  `clave-register` messages; at render/selection it finds the tab containing that
-  pane and its live position → `go_to_tab`.
-- **Navigation routes through the plugin** so it follows *display* order, not tab
-  order: keybinds use `MessagePlugin "clave-bar" { name:"nav"; payload:… }`. The
-  plugin computes the target row and calls `go_to_tab`.
-- **Keybinds** (in the clave session's own config, `shared_among "normal" "locked"`):
-  `Alt+a` add (Zellij `Run` → floating `clave add`, §6.3) · `Alt+c` toggle bar ·
-  `Alt+w` archive focused agent · `Alt+↑/↓` and `Alt+j/k` navigate agents (display
-  order, via `MessagePlugin` → plugin) · `Alt+1…9` jump to the Nth displayed agent
-  (agent rows only, skipping repo-header rows). Keep the user's existing `Alt+h/l` and
-  `Alt+y`.
-- **Context-sensitive nav (goal, spike S6):** when the bar is visible, `Alt+j/k/↑/↓`
-  navigate agents; when hidden (`Alt+c`), they fall back to normal Zellij focus
-  movement. The plugin owns this branch (it knows its own visibility); if visibility
-  detection proves fiddly, **fallback** = nav always means "navigate agents" inside
-  the clave session.
-- Per-row colour tint: **included** (per-repo cwd colour + state-coloured glyph),
-  since the plugin renders natively. Context-battery glyph: deferred (§10).
+**Goal:** the vertical, hideable, mouse-clickable tab bar with live status decoration.
+**Decided (revised 2026-07-03):**
+- **Three separated concerns:** row **set** = `TabUpdate` (all tabs, live; closed
+  tabs vanish for free) · row **order** = interaction recency · row **decoration** =
+  clave's pushed status (S1 pipe contract unchanged).
+- **Rows:** status glyph (agent tabs only; state colour) + `TabInfo.name`, clamped to
+  the bar width (~24 cols, configurable) with a trailing `…`. Plain tabs render
+  name-only. Focused row highlighted. No repo grouping, no per-repo colours
+  (deleted).
+- **Recency:** the plugin bumps a `tab_id` when it *becomes active* (`TabUpdate`
+  transition) or when its agent's `last_interacted` advances (snapshot). Sort desc;
+  never-focused agent-less tabs sink to the bottom in tab order. Agent recency
+  hydrates from the snapshot on reload; plain-tab recency is ephemeral (accepted).
+  Emergent property: the focused tab is always row 1, so **`Alt+2` ≈ alt-tab**.
+- **uuid→row join (spike S2 + `PaneManifest`):** `clave-register` gives
+  `uuid → pane_id`; `PaneManifest` gives pane → tab position; `TabInfo` gives
+  position → `tab_id`/name/active.
+- **Nav:** mouse `LeftClick(line)` → row → tab → its focused non-plugin pane →
+  `focus_pane_with_id` (S2-proven; `go_to_tab` is a dead end, §4). Keybinds route
+  `MessagePlugin … name:"clave-nav"` so they follow **display** order: `Alt+↑/↓` and
+  `Alt+j/k` = prev/next row · `Alt+1…9` = Nth row. (Attempt `switch_tab_to` as a
+  simplification during validation.)
+- **Other keybinds** (clave session config, `shared_among "normal" "locked"`):
+  `Alt+a` add (Zellij `Run` → floating `clave add`, §6.3) · `Alt+w` close tab
+  (native `CloseTab`, §6.7). Keep the user's existing `Alt+h/l` and `Alt+y`.
+- **Toggle (`Alt+c`):** a `clave-toggle` pipe broadcast; each per-tab instance calls
+  `hide_self()`/`show_self(false)`. Verify live: the grid reclaims the width, and
+  hidden instances still receive pipes. Fallback: `close_self()` + relaunch keybind.
+- **Instances:** one bar pane per tab (stock tab-bar pattern) via the session
+  layout's tab template (§6.8); pipes broadcast to all instances → identical state.
+  A bar-less tab (edge: a native new-tab that bypassed the template) still appears
+  in every other tab's bar — `TabUpdate` is session-wide.
+- **Permissions:** `ReadCliPipes + ChangeApplicationState + ReadApplicationState +
+  RunCommands` — the EXACT set `clave setup` pre-seeds under both key forms (§7;
+  all-or-nothing grant, S1/S2).
+- **Hygiene:** pipe handlers `eprintln!`-and-drop malformed payloads (zellij log);
+  `unblock_cli_pipe_input` runs unconditionally on every path (the `dd38ace`
+  pattern). Context-battery glyph: deferred (§10).
 
-### 6.7 Archiving
-**Goal:** keep the bar bounded; an ever-growing list is unusable in this format.
-**Decided:**
-- **Archive** (`Alt+w` / `clave archive <uuid>`) = close the agent's Zellij tab +
-  set `archived:true` in the store. Claude's jsonl persists, so it stays resumable.
-- The bar shows only **active** (non-archived, live) agents → bounded.
-- **Restore** = the `add`/resume picker (§6.3) surfaces archived sessions for the
-  repo; resuming one re-creates a tab (`clave spawn` resume path) and clears
-  `archived`.
-- Auto-archive (e.g. idle > N days) is **deferred**; v1 is manual.
+### 6.7 Archiving — DELETED (2026-07-03 reframing)
+The bar is bounded by construction: rows are the session's live tabs, so closing a
+tab (`Alt+w` → native `CloseTab`) removes its row. Claude's jsonl and the store row
+persist, so the §6.3 resume picker restores any past session — that *is* the
+archive. No `archived` flag in the store or pipe schema (drop the existing
+`Agent.archived` field); no archive subsystem. Pruning long-dead store rows:
+deferred.
 
 ### 6.8 Session model & keybind scoping
 **Goal:** isolate clave from the user's normal Zellij/Claude environment.
@@ -442,6 +486,10 @@ for plugin hydration.
 - Agents live in a **dedicated `clave` Zellij session**, launched with a clave-owned
   config + `agents` layout (`zellij --config … --layout … attach -c clave`). The
   `clave` shell command attaches-or-creates it.
+- The session layout defines a **tab template** (`[clave-bar (fixed width) | pane]`)
+  so *natively* created tabs get the bar too; `clave add` tabs use the one-shot temp
+  layout (§6.3). If `default_tab_template` proves parse-fragile (S1 note), fallback
+  = a new-tab keybind that passes an explicit layout file.
 - **Keybinds live only in the clave session config** (invariant #12) — the user's
   global Zellij config and other users' configs are untouched.
 - **Hooks remain global** (Claude limitation) but no-op fast for untracked sessions.
@@ -471,8 +519,11 @@ clave/
   so a plain host `cargo build` doesn't try to compile the WASM-only crate.
 - Install destinations differ: the `clave` binary → PATH; `clave-bar.wasm` → a fixed
   path the layout references (`plugin location="file:~/.local/share/clave/clave-bar.wasm"`).
-  `just install` copies both; `clave setup` writes/points the layout and additively
-  merges hooks into `~/.claude/settings.json` (§6.5).
+  `just install` copies both; `clave setup` writes/points the layout, additively
+  merges hooks into `~/.claude/settings.json` (§6.5), and **pre-seeds Zellij's
+  `permissions.kdl`** with clave-bar's exact permission set under both key forms
+  (§6.6 — grants are all-or-nothing and the prompt is unanswerable in the bar pane;
+  S1/S2).
 - Distribution (mechanism deferred): ship `clave-bar.wasm` as a release artifact; a
   future `cargo install clave` can `include_bytes!` the wasm and have `clave setup`
   extract it, so one install delivers both. Dev uses the file path directly.
@@ -492,9 +543,10 @@ Alt+a → clave add ──┐ pick repo (fzf/zoxide) · new|resume · mint/pick 
 Claude hooks ──► clave hook <event>   (stdin JSON; session_id == uuid)
                     │ update store (lock+atomic) · map status · bump recency
                     ▼ zellij pipe --name clave-status -- <AgentSnapshot>
-            clave-bar ──► group by repo · sort by recency · render glyph+colour
-                    ▲ Alt nav → MessagePlugin clave-bar → go_to_tab
-                    └ focus change → clave focus <uuid> → clears unread
+            clave-bar ──► rows = TabUpdate · order = recency · glyph on agent rows
+                    │      label change → rename_tab_with_id (the real tab)
+                    ▲ click / Alt nav → MessagePlugin clave-nav → focus_pane_with_id
+                    └ focus change (TabUpdate) → clave focus <uuid> → clears unread
 ```
 
 ---
@@ -504,6 +556,14 @@ Claude hooks ──► clave hook <event>   (stdin JSON; session_id == uuid)
 Each spike has a clear pass/fail and a fallback. **S0/S0b gate the join key**
 (idempotency breaks without them); **S1 gates the plugin architecture** (if it fails
 we revisit §3).
+
+> **Status (2026-07-03): S0/S0b/S1/S2 all PASS** (findings in
+> `docs/superpowers/spikes/`; mechanism deltas folded into §4/§6 — notably nav is
+> `focus_pane_with_id`, not `go_to_tab`). **S3 and S6 are deleted** by the reframing
+> (focus detection is native `TabUpdate`; nav keys always walk the bar). **S4 and S5
+> remain**, demoted to in-plan validation checkpoints, joined by three new small
+> ones: `hide_self` grid-reflow (§6.6), tab-template robustness (§6.8), and the
+> `switch_tab_to` simplification attempt (§4).
 
 - **S0 — `--session-id` create semantics.** `claude --session-id <fresh-uuid>` in a
   clean cwd *creates* a new session and writes
@@ -540,17 +600,18 @@ we revisit §3).
 
 ## 10. v1 scope / deferred / risks
 
-**v1:** dedicated `clave` session + `agents` layout · first-party `clave-bar`
-(repo-grouped, recency-sorted, glyph+colour status, per-repo cwd colour) · `clave
-spawn` (idempotent) · `clave add` (zoxide picker; new|resume via clave's own picker;
-worktree opt-in default-off) · status hooks → `clave hook` → snapshot push ·
-archiving (manual) · keybinds `Alt+a/c/w`, `Alt+↑/↓`, `Alt+j/k`, `Alt+1…9`
-(clave-session-scoped).
+**v1:** dedicated `clave` session, bar in every tab via the layout's tab template ·
+first-party `clave-bar` (all-tabs vertical list, recency-sorted, glyph+colour status
+on agent rows, mouse-click nav, `Alt+c` hide/show, real-tab renames) · `clave spawn`
+(idempotent) · `clave add` (zoxide picker; new|resume via clave's own picker;
+worktree opt-in default-off) · status hooks → `clave hook` → snapshot push · `clave
+setup` (hooks merge + permissions seed + config/layout) · keybinds `Alt+a/c/w`,
+`Alt+↑/↓`, `Alt+j/k`, `Alt+1…9` (clave-session-scoped).
 
-**Deferred:** `clave rebuild` (cold/remote start) · one-shot LLM titles · auto-archive
-· worktree auto-cleanup · `AskUserQuestion`-wait state · per-agent remote `BreakPane`
-· archived-view toggle in the bar · `cargo install`/`include_bytes!` packaging ·
-**per-agent context-% battery** (below).
+**Deferred:** `clave rebuild` (cold/remote start) · one-shot LLM titles · store-row
+pruning · worktree auto-cleanup · `AskUserQuestion`-wait state · per-agent remote
+`BreakPane` · an optional repo-grouped render mode · `cargo
+install`/`include_bytes!` packaging · **per-agent context-% battery** (below).
 
 **Backlog — context battery:** show each active agent's context-window usage in the
 bar as a depleting battery glyph (🔋 → 🪫). Per-turn token/usage data lives in the
@@ -565,10 +626,10 @@ before agents reconnect (spike **S4** covers *recovery* once run, not the gate
 itself). Mitigations to evaluate later: a `clave rebuild` boot path instead of relying
 on serialization, or a Zellij option to skip the gate if 0.44.3 exposes one.
 
-**Risks to validate early:** all of §9, especially **S0** (`--session-id` create) and
-**S0b** (munging) — the join key breaks without them — then **S1** (background
-repaint) and **S2** (pane join). Terminal sends Option-as-Meta — existing `Alt` binds
-already work, so almost certainly fine.
+**Risks to validate early:** the join-key and plugin-architecture risks are retired
+(S0/S0b/S1/S2 PASS). Remaining, all small: `hide_self` grid-reflow, tab-template
+robustness, the resurrection ENTER-gate UX (S4), `switch_tab_to`. Terminal sends
+Option-as-Meta — existing `Alt` binds already work, so almost certainly fine.
 
 ---
 
