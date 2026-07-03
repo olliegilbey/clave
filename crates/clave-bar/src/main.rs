@@ -1,7 +1,8 @@
 //! clave-bar — the Zellij WASM plugin that renders the agent sidebar.
 //! S1 scope: consume `clave-status` snapshots and render colored glyphs.
-//! S2 scope: map uuid → pane_id (from `clave-register`) → live tab position
-//! (from `PaneManifest`) and `go_to_tab` on a `clave-nav {uuid}` message.
+//! S2 scope: map uuid → pane_id (from `clave-register`) and, on a `clave-nav`
+//! message, jump focus straight to that agent's pane with `focus_pane_with_id`
+//! (Zellij pulls the pane's tab forward — no PaneManifest / tab-index needed).
 
 use std::collections::BTreeMap;
 use zellij_tile::prelude::*;
@@ -12,49 +13,46 @@ struct State {
     /// Highest snapshot seq applied so far (stale messages are discarded).
     seq: u64,
     agents: Vec<Agent>,
-    /// uuid → pane_id, learned from `clave-register` messages (spec §6.1).
+    /// uuid → pane_id, learned from `clave-register` messages (spec §6.1). This
+    /// is the entire join: on nav, `focus_pane_with_id(Terminal(pane_id))` pulls
+    /// the pane's tab forward, so no PaneManifest-derived pane→tab map is needed
+    /// (S2 finding — see the nav arm below).
     uuid_to_pane: BTreeMap<String, u32>,
-    /// pane_id → tab position, rebuilt from every `PaneManifest` (spec §6.6/S2).
-    pane_to_tab: BTreeMap<u32, usize>,
 }
 
 register_plugin!(State);
 
 impl ZellijPlugin for State {
     fn load(&mut self, _config: BTreeMap<String, String>) {
+        // ReadCliPipes: receive the status/register/nav pipes.
+        // ChangeApplicationState: call focus_pane_with_id (moves focus).
+        // NB (S2 finding): Zellij permission grants are ALL-OR-NOTHING per
+        // plugin. The pre-seeded permissions.kdl cache must grant this EXACT set
+        // (or a superset) under the plugin's location key, or Zellij raises a
+        // prompt — unanswerable in a narrow bar pane — and withholds ALL of
+        // them, which then hangs every `zellij pipe`. `clave setup` must seed it.
         request_permission(&[
-            PermissionType::ReadCliPipes, // receive status/register/nav pipes
-            // PaneUpdate delivers the PaneManifest (Zellij pane+tab state), which is
-            // gated behind ReadApplicationState — without it the subscription silently
-            // never fires and pane_to_tab stays empty, so every clave-nav no-ops.
-            PermissionType::ReadApplicationState,
-            PermissionType::ChangeApplicationState, // call go_to_tab
+            PermissionType::ReadCliPipes,
+            PermissionType::ChangeApplicationState,
         ]);
-        // PaneUpdate delivers the PaneManifest we use for pane→tab resolution.
-        subscribe(&[EventType::PaneUpdate]);
     }
 
-    fn update(&mut self, event: Event) -> bool {
-        if let Event::PaneUpdate(manifest) = event {
-            // manifest.panes: tab_position -> panes in that tab.
-            self.pane_to_tab.clear();
-            for (tab_index, panes) in manifest.panes {
-                for p in panes {
-                    // Terminal and plugin panes have SEPARATE id spaces in Zellij
-                    // (PaneId::Terminal(u32) vs Plugin(u32)). The `$ZELLIJ_PANE_ID`
-                    // we register with (Step 4) is a TERMINAL id, so a plugin pane
-                    // sharing that number would false-match. Map terminal panes only.
-                    if !p.is_plugin {
-                        self.pane_to_tab.insert(p.id, tab_index);
-                    }
-                }
-            }
-        }
-        false // no repaint needed for join-map bookkeeping
+    fn update(&mut self, _event: Event) -> bool {
+        // We subscribe to no events — the bar is driven entirely by pushed pipes
+        // (spec §5/§11). Kept as the trait requires it.
+        false
     }
 
     fn pipe(&mut self, message: PipeMessage) -> bool {
-        match message.name.as_str() {
+        // A CLI pipe (`zellij pipe`) BLOCKS its input side until a plugin
+        // unblocks it — capture the pipe_id now so we can release it after
+        // handling (see the unblock call at the end of this fn). Keybind-sourced
+        // messages (the production nav trigger, spec §6.6) carry no pipe_id.
+        let cli_pipe_id = match &message.source {
+            PipeSource::Cli(id) => Some(id.clone()),
+            _ => None,
+        };
+        let repaint = match message.name.as_str() {
             "clave-status" => {
                 let Some(payload) = message.payload else { return false };
                 let Ok(snap) = serde_json::from_str::<AgentSnapshot>(&payload) else {
@@ -77,7 +75,7 @@ impl ZellijPlugin for State {
                 false
             }
             "clave-nav" => {
-                // Payload: {"uuid":"..."} — jump focus to that agent's tab.
+                // Payload: {"uuid":"..."} — jump focus to that agent's pane.
                 let Some(payload) = message.payload else { return false };
                 let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) else {
                     return false;
@@ -86,16 +84,25 @@ impl ZellijPlugin for State {
                     return false;
                 };
                 if let Some(pane) = self.uuid_to_pane.get(uuid) {
-                    if let Some(tab) = self.pane_to_tab.get(pane) {
-                        // NOTE: confirm go_to_tab indexing during the spike —
-                        // PaneManifest tab keys and go_to_tab may differ by 1.
-                        go_to_tab((*tab as u32) + 1);
-                    }
+                    // Focus the registered TERMINAL pane directly by id — Zellij
+                    // brings its containing tab forward automatically. S2 finding:
+                    // this replaces the planned go_to_tab(tab_index) approach,
+                    // which was called with the right value yet was a silent
+                    // no-op (0- vs 1-based tab-index mismatch) AND required a
+                    // PaneManifest→pane→tab map we no longer keep.
+                    focus_pane_with_id(PaneId::Terminal(*pane), false, false);
                 }
                 false
             }
             _ => false,
+        };
+        // Release the blocked input side of the CLI pipe so `zellij pipe` RETURNS
+        // instead of hanging on its bidirectional connection. (Production nav is a
+        // keybind, not a CLI pipe, so this only affects the spike's shell driver.)
+        if let Some(id) = cli_pipe_id {
+            unblock_cli_pipe_input(&id);
         }
+        repaint
     }
 
     fn render(&mut self, _rows: usize, _cols: usize) {

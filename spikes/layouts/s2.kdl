@@ -1,8 +1,18 @@
 // S2 test layout: the clave-bar plugin in tab 1, plus two agent panes that
 // register themselves under uuids u1 and u2. Reorder/close tabs to test the
 // join's resilience.
+//
+// Each tab carries Zellij's built-in `zellij:tab-bar` strip (a plugin pane, so
+// it's filtered out of the join by `!p.is_plugin`). Our clave-bar renders no
+// chrome of its own, so WITHOUT this strip the session shows no tab names and a
+// focus jump is invisible — the strip makes `go_to_tab` observable. We place it
+// per-tab explicitly rather than via `default_tab_template` (which is parse-
+// fragile when mixed with other panes, per the S1 findings).
 layout {
     tab name="bar" {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
         pane split_direction="vertical" {
             pane size="26" {
                 plugin location="file:/Users/olliegilbey/code/clave/target/wasm32-wasip1/debug/clave-bar.wasm"
@@ -11,11 +21,17 @@ layout {
         }
     }
     tab name="u1" {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
         pane command="/Users/olliegilbey/code/clave/spikes/s2-register.sh" {
             args "u1"
         }
     }
     tab name="u2" {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
         pane command="/Users/olliegilbey/code/clave/spikes/s2-register.sh" {
             args "u2"
         }

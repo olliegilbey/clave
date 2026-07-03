@@ -1,0 +1,22 @@
+// Throwaway S2 keybind config — proves the PRODUCTION nav path (spec §6.6).
+//
+// In production the sidebar row's nav is a keybind → MessagePlugin, which
+// reaches clave-bar's pipe() with source=Keybind in the ATTACHED CLIENT's
+// context. The `zellij pipe --name clave-nav` CLI stand-in used elsewhere in
+// this spike reaches pipe() with source=Cli(pipe_id) — a context whose
+// go_to_tab never lands on the attached terminal (proven: the plugin logs
+// go_to_tab(3) but focus never moves). This config binds Ctrl+y to the real
+// keybind path so we can confirm go_to_tab works when triggered correctly.
+//
+// clear-defaults=false keeps Zellij's built-in keybinds so the throwaway
+// session stays navigable; launch with `zellij --config <this> -s clave-s2 -n <layout>`.
+keybinds clear-defaults=false {
+    shared_except "locked" {
+        bind "Ctrl y" {
+            MessagePlugin "file:/Users/olliegilbey/code/clave/target/wasm32-wasip1/debug/clave-bar.wasm" {
+                name "clave-nav"
+                payload "{\"uuid\":\"u2\"}"
+            }
+        }
+    }
+}
