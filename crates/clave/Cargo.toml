@@ -7,10 +7,22 @@ repository.workspace = true
 description = "Conduct a fleet of Claude Code agents from a Zellij sidebar"
 
 [dependencies]
+# CLI parsing.
 clap.workspace = true
+# Error context chaining.
 anyhow.workspace = true
+# JSON serialization.
 serde.workspace = true
 serde_json.workspace = true
+# Session UUIDs.
 uuid.workspace = true
+# Home directory discovery.
 dirs.workspace = true
+# State store locking (spec §5).
+fs4.workspace = true
+# Local types (Agent, AgentSnapshot, Status).
 clave-types = { path = "../clave-types" }
+
+[dev-dependencies]
+# Store tests write to throwaway dirs, never the real ~/.local/state/clave.
+tempfile.workspace = true

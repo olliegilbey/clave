@@ -20,5 +20,10 @@ dirs = "6"
 # Shared serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Advisory file locking for the state store (spec §5). fs4, NOT fs2 — fs2 is
+# unmaintained; the spec names fs4 explicitly.
+fs4 = "0.13"
+# Store tests write to throwaway dirs, never the real ~/.local/state/clave.
+tempfile = "3"
 # Zellij plugin
 zellij-tile = "0.44"
