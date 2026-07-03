@@ -10,7 +10,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use clave::{lsview, spawn, store};
+use clave::{hook, lsview, spawn, store};
 
 #[derive(Parser)]
 #[command(
@@ -109,7 +109,17 @@ fn main() -> Result<()> {
             // exec only returns on failure — surface it in the pane.
             Err(anyhow::anyhow!("exec claude failed: {err}"))
         }
-        Command::Hook { .. } => todo!("clave hook — task #6"),
+        Command::Hook { event } => {
+            // Zero-risk global citizen (§6.5): read stdin, do our best, and
+            // exit 0 unconditionally — a clave bug must never become a
+            // machine-wide Claude failure. Errors go to stderr only.
+            let mut input = String::new();
+            let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input);
+            if let Err(e) = hook::run_hook(&event, &input) {
+                eprintln!("clave hook: {e:#}");
+            }
+            Ok(()) // ALWAYS success
+        }
         Command::Ls { json } => {
             let paths = store::store_paths()?;
             let s = store::read_store(&paths)?;
