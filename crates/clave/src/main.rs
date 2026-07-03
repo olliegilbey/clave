@@ -7,10 +7,10 @@
 //!
 //! See `docs/superpowers/specs/2026-06-30-clave-orchestrator-design.md` for the full spec.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use clave::{lsview, store};
+use clave::{lsview, spawn, store};
 
 #[derive(Parser)]
 #[command(
@@ -84,7 +84,31 @@ fn main() -> Result<()> {
     match cli.command {
         // Each arm is implemented in its own task — see docs/design.md "v1 scope".
         Command::Add => todo!("clave add — task #4"),
-        Command::Spawn { .. } => todo!("clave spawn — task #2"),
+        Command::Spawn { uuid, name, cwd } => {
+            // S0b: canonicalize BEFORE munging — Claude keys the transcript
+            // dir off the PHYSICAL getcwd() path.
+            let physical = std::fs::canonicalize(&cwd)
+                .with_context(|| format!("canonicalizing --cwd {cwd}"))?;
+            let physical_str = physical.to_str().context("non-UTF8 cwd")?.to_string();
+            let home = dirs::home_dir().context("no home dir")?;
+            let mode = spawn::spawn_mode(&home, &physical_str, &uuid);
+            // Register uuid→pane BEFORE exec (this process is about to be
+            // replaced; best-effort — see register_pane).
+            spawn::register_pane(&uuid);
+            std::env::set_current_dir(&physical).context("entering --cwd")?;
+            use std::os::unix::process::CommandExt;
+            let err = match mode {
+                // --name only on create: the bar label is clave-owned (§6.1).
+                spawn::SpawnMode::Create => std::process::Command::new("claude")
+                    .args(["--session-id", &uuid, "--name", &name])
+                    .exec(),
+                spawn::SpawnMode::Resume => std::process::Command::new("claude")
+                    .args(["--resume", &uuid])
+                    .exec(),
+            };
+            // exec only returns on failure — surface it in the pane.
+            Err(anyhow::anyhow!("exec claude failed: {err}"))
+        }
         Command::Hook { .. } => todo!("clave hook — task #6"),
         Command::Ls { json } => {
             let paths = store::store_paths()?;
