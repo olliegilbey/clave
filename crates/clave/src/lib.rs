@@ -4,5 +4,6 @@
 //! out a lib — this is what lets the S0b spike and later tasks call `munge_cwd`.)
 
 // Modules are added per task. Task 2 adds `pub mod store;`.
+pub mod lsview;
 pub mod munge;
 pub mod store;

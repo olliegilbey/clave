@@ -149,6 +149,22 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
     }
 }
 
+/// `clave focus <uuid>` (§6.5): persist the "user looked at it" transition.
+/// Store-only — NO pipe push. Every bar instance saw the same TabUpdate focus
+/// transition and already repainted locally; this just makes the flip durable
+/// (and visible to `clave ls`). Unknown uuid is fine: the plugin can race an
+/// agent whose tab just closed.
+pub fn apply_focus(paths: &StorePaths, uuid: &str, now: u64) -> Result<()> {
+    with_store_mut(paths, |s| {
+        if let Some(r) = s.agents.get_mut(uuid) {
+            r.last_visited = now;
+            if r.status == Status::Done {
+                r.status = Status::Idle; // green "done & unread" → dim
+            }
+        }
+    })
+}
+
 /// Seconds since the epoch — the store's one timestamp format.
 pub fn now_unix() -> u64 {
     SystemTime::now()
@@ -215,6 +231,24 @@ mod tests {
         assert!(!p.dir.join("agents.json.tmp").exists());
         // The lockfile exists and was NOT renamed away (it is the lock anchor).
         assert!(p.lock.exists());
+    }
+
+    #[test]
+    fn focus_clears_done_to_idle_and_stamps_visit() {
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            let mut r = rec("u1");
+            r.status = Status::Done;
+            s.agents.insert("u1".into(), r);
+        })
+        .unwrap();
+        apply_focus(&p, "u1", 999).unwrap();
+        let s = read_store(&p).unwrap();
+        assert_eq!(s.agents["u1"].status, Status::Idle); // unread cleared
+        assert_eq!(s.agents["u1"].last_visited, 999);
+        // Unknown uuid: silently fine (plugin may race a just-closed agent).
+        apply_focus(&p, "ghost", 1000).unwrap();
     }
 
     #[test]
