@@ -5,7 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# Serde: compiles for host AND wasm (anti-drift invariant #9).
+# This is the shared pipe schema both artifacts must serialize the same way.
 serde = { workspace = true }
 
 [dev-dependencies]
+# serde_json: dev-only for round-trip tests; never in runtime deps.
+# Keeps the runtime schema slim and proves the compile-time split works.
 serde_json = { workspace = true }

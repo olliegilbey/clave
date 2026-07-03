@@ -17,6 +17,21 @@ pub enum Status {
     Failed,
 }
 
+impl Status {
+    /// The bar/ls glyph: one char whose FONT COLOUR encodes state (spec §6.5).
+    /// Returned as (glyph, ANSI SGR colour code) so both artifacts render
+    /// identically — raw ANSI SGR is proven to render in a plugin pane (S1).
+    pub fn glyph(self) -> (char, u8) {
+        match self {
+            Status::NeedsYou => ('●', 31), // red: waiting on the human
+            Status::Working => ('●', 33),  // amber: agent is running
+            Status::Done => ('●', 32),     // green: finished & unread
+            Status::Idle => ('●', 90),     // dim: read / no session
+            Status::Failed => ('✖', 31),   // red cross: turn failed
+        }
+    }
+}
+
 /// One agent row as the plugin renders it. Mirrors the store record's
 /// display-relevant fields (spec §5); the plugin never sees the store, only
 /// this snapshot.
@@ -24,18 +39,20 @@ pub enum Status {
 pub struct Agent {
     /// Minted session UUID — the join key (invariant #3).
     pub uuid: String,
+    /// Current working directory of the agent process.
     pub cwd: String,
     /// git toplevel of `cwd`; the grouping key in the bar.
     pub repo_root: String,
+    /// The current git branch the agent is on.
     pub branch: String,
     /// `cwd · branch · summary` (spec §6.4).
     pub label: String,
+    /// Per-agent status (latest-wins state machine, spec §6.5).
     pub status: Status,
     /// unix seconds; bumped on UserPromptSubmit → drives recency sort.
     pub last_interacted: u64,
     /// unix seconds; bumped on focus → `unread = done && !visited`.
     pub last_visited: u64,
-    pub archived: bool,
 }
 
 /// The full-replace snapshot `clave` pushes to `clave-bar` on every change
@@ -85,6 +102,47 @@ mod tests {
     }
 
     #[test]
+    fn status_glyph_encodes_state_colour() {
+        // Spec §6.5 glyph table — single source shared by the bar and `clave ls`.
+        assert_eq!(Status::NeedsYou.glyph(), ('●', 31)); // red
+        assert_eq!(Status::Working.glyph(), ('●', 33)); // amber
+        assert_eq!(Status::Done.glyph(), ('●', 32)); // green (done & unread)
+        assert_eq!(Status::Idle.glyph(), ('●', 90)); // dim
+        assert_eq!(Status::Failed.glyph(), ('✖', 31)); // red cross
+    }
+
+    #[test]
+    fn status_roundtrips_every_variant() {
+        // Exhaustive BOTH ways (the old deserialize test only covered needs_you).
+        for (v, s) in [
+            (Status::Idle, "\"idle\""),
+            (Status::Working, "\"working\""),
+            (Status::NeedsYou, "\"needs_you\""),
+            (Status::Done, "\"done\""),
+            (Status::Failed, "\"failed\""),
+        ] {
+            assert_eq!(serde_json::to_string(&v).unwrap(), s);
+            assert_eq!(serde_json::from_str::<Status>(s).unwrap(), v);
+        }
+    }
+
+    #[test]
+    fn agent_json_has_no_archived_field() {
+        // §6.7 deleted archiving; the pipe schema must not carry the field.
+        let a = Agent {
+            uuid: "u1".into(),
+            cwd: "/x".into(),
+            repo_root: "/x".into(),
+            branch: "main".into(),
+            label: "x · main".into(),
+            status: Status::Idle,
+            last_interacted: 0,
+            last_visited: 0,
+        };
+        assert!(!serde_json::to_string(&a).unwrap().contains("archived"));
+    }
+
+    #[test]
     fn snapshot_roundtrips() {
         let snap = AgentSnapshot {
             seq: 7,
@@ -97,7 +155,6 @@ mod tests {
                 status: Status::Working,
                 last_interacted: 1000,
                 last_visited: 0,
-                archived: false,
             }],
         };
         let json = serde_json::to_string(&snap).unwrap();
