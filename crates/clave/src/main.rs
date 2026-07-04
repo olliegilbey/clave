@@ -10,7 +10,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use clave::{hook, lsview, spawn, store};
+use clave::{hook, lsview, setup, spawn, store};
 
 #[derive(Parser)]
 #[command(
@@ -19,8 +19,10 @@ use clave::{hook, lsview, spawn, store};
     about = "Conduct a fleet of Claude Code agents from a Zellij sidebar"
 )]
 struct Cli {
+    /// Bare `clave` (no subcommand) attaches/creates the dedicated session
+    /// with clave's own config + layout (§6.8) — hence `Option`.
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -77,14 +79,20 @@ enum Command {
         /// The agent's session UUID (the store join key).
         uuid: String,
     },
+
+    /// Prepare the machine: generate config/layout, merge Claude hooks,
+    /// pre-seed the Zellij permission cache (§6.8/§7). Idempotent.
+    Setup,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        // Bare `clave` — no subcommand — attaches or creates the session.
+        None => setup::launch_session(),
         // Each arm is implemented in its own task — see docs/design.md "v1 scope".
-        Command::Add => todo!("clave add — task #4"),
-        Command::Spawn { uuid, name, cwd } => {
+        Some(Command::Add) => todo!("clave add — task #4"),
+        Some(Command::Spawn { uuid, name, cwd }) => {
             // S0b: canonicalize BEFORE munging — Claude keys the transcript
             // dir off the PHYSICAL getcwd() path.
             let physical = std::fs::canonicalize(&cwd)
@@ -109,7 +117,7 @@ fn main() -> Result<()> {
             // exec only returns on failure — surface it in the pane.
             Err(anyhow::anyhow!("exec claude failed: {err}"))
         }
-        Command::Hook { event } => {
+        Some(Command::Hook { event }) => {
             // Zero-risk global citizen (§6.5): read stdin, do our best, and
             // exit 0 unconditionally — a clave bug must never become a
             // machine-wide Claude failure. Errors go to stderr only.
@@ -120,7 +128,7 @@ fn main() -> Result<()> {
             }
             Ok(()) // ALWAYS success
         }
-        Command::Ls { json } => {
+        Some(Command::Ls { json }) => {
             let paths = store::store_paths()?;
             let s = store::read_store(&paths)?;
             if json {
@@ -130,7 +138,7 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Snapshot => {
+        Some(Command::Snapshot) => {
             // The bar hydrates on load by running `clave snapshot` via
             // run_command and parsing stdout (spec §6.2/§6.6, was spike S5).
             let paths = store::store_paths()?;
@@ -138,9 +146,10 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string(&store::snapshot_from(&s))?);
             Ok(())
         }
-        Command::Focus { uuid } => {
+        Some(Command::Focus { uuid }) => {
             let paths = store::store_paths()?;
             store::apply_focus(&paths, &uuid, store::now_unix())
         }
+        Some(Command::Setup) => setup::run_setup(),
     }
 }

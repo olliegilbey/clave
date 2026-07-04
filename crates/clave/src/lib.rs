@@ -7,5 +7,6 @@
 pub mod hook;
 pub mod lsview;
 pub mod munge;
+pub mod setup;
 pub mod spawn;
 pub mod store;

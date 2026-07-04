@@ -23,3 +23,13 @@ build-all: build build-bar
 
 test:
     cargo test
+
+# Copy both artifacts where the generated layout/config expect them:
+# the wasm into ~/.local/share/clave/, the binary onto PATH.
+install: build build-bar-release
+    mkdir -p ~/.local/share/clave
+    cp target/wasm32-wasip1/release/clave-bar.wasm ~/.local/share/clave/
+    cargo install --path crates/clave --locked
+
+clippy:
+    cargo clippy --workspace --all-targets -- -D warnings

@@ -17,9 +17,11 @@ clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 uuid = { version = "1", features = ["v4"] }
 dirs = "6"
-# Shared serialization
+# Shared serialization. preserve_order: Value maps keep insertion order, so
+# the settings.json hooks merge rewrites the user's file WITHOUT
+# alphabetizing their keys (never-clobber spirit — it may be dotfiles-tracked).
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 # Advisory file locking for the state store (spec §5). fs4, NOT fs2 — fs2 is
 # unmaintained; the spec names fs4 explicitly.
 fs4 = "0.13"
