@@ -5,9 +5,24 @@ edition.workspace = true
 license.workspace = true
 
 # A Zellij plugin is a binary crate compiled to wasm32-wasip1 (src/main.rs +
-# register_plugin!), matching zellij's official rust-plugin-example — no `[lib]`
-# block. Fallback if S1 shows it does not load: a cdylib
-# (`[lib] crate-type=["cdylib"]`, move to src/lib.rs, artifact `clave_bar.wasm`).
+# register_plugin!), matching zellij's official rust-plugin-example.
+#
+# The paired [lib]/[[bin]] split exists ONLY to host-test the pure model: the
+# bin calls zellij-tile shims that resolve to the wasm host import
+# `host_run_plugin_command`, which has NO symbol on the host target — so the
+# bin links for wasm32-wasip1 alone (Task 6 finding; would bite the old spike
+# bin identically). `test = false` keeps `cargo test -p clave-bar` from trying
+# (and failing) to build a host test-harness for that un-host-linkable bin;
+# `model` (zellij-tile-free) lives in the lib and tests cleanly on the host.
+
+[lib]
+name = "clave_bar"
+path = "src/lib.rs"
+
+[[bin]]
+name = "clave-bar"
+path = "src/main.rs"
+test = false
 
 [dependencies]
 zellij-tile = { workspace = true }
