@@ -10,7 +10,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use clave::{hook, lsview, setup, spawn, store};
+use clave::{add, hook, lsview, setup, spawn, store};
 
 #[derive(Parser)]
 #[command(
@@ -28,7 +28,13 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Add a new agent: pick a directory (zoxide), open a tab, spawn Claude.
-    Add,
+    Add {
+        /// Create a dedicated git worktree for the agent (§6.3): clave shells
+        /// out `git worktree add` itself so it owns the path (needed for the
+        /// munged jsonl check and the store record).
+        #[arg(long)]
+        worktree: bool,
+    },
 
     /// Resume-or-create the Claude session for a pane (idempotent).
     ///
@@ -91,7 +97,7 @@ fn main() -> Result<()> {
         // Bare `clave` — no subcommand — attaches or creates the session.
         None => setup::launch_session(),
         // Each arm is implemented in its own task — see docs/design.md "v1 scope".
-        Some(Command::Add) => todo!("clave add — task #4"),
+        Some(Command::Add { worktree }) => add::run_add(worktree),
         Some(Command::Spawn { uuid, name, cwd }) => {
             // S0b: canonicalize BEFORE munging — Claude keys the transcript
             // dir off the PHYSICAL getcwd() path.

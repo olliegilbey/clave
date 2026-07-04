@@ -1856,6 +1856,7 @@ Spec: §6.3 verbatim. Interactive command (fzf needs a TTY — it runs in a floa
   - `pub fn tab_layout(wasm: &str, label: &str, uuid: &str, cwd: &str) -> String` — the one-shot temp layout KDL
   - `pub struct ResumeCandidate { pub uuid: String, pub label: String }`
   - `pub fn resume_candidates(store: &Store, repo_root: &str, jsonl_stems: &[(String, u64)], live: &[String]) -> Vec<ResumeCandidate>` — store rows for the repo + jsonl-discovered sessions (stem = uuid, u64 = mtime), minus live uuids, mtime-recency ordered
+  - `pub fn merge_resume_record(existing: Option<&AgentRecord>, fresh: AgentRecord) -> AgentRecord` — step 7's update-or-insert decision: an existing row is preserved verbatim except status → Idle (resume must not clobber worktree cwd or earned label); no row → the fresh record
   - `pub fn run_add(worktree: bool) -> anyhow::Result<()>` — the interactive weave
 
 **Ordering note:** `wasm_path()`/`data_dir()` are defined in Task 8's `setup.rs`. If executing strictly in order, define them HERE in a small `pub mod paths`-style section of `add.rs` and have Task 8 move them into `setup.rs` — or (simpler, recommended) implement Task 8's Step 3 `paths` block first; the two tasks are otherwise independent. Flag whichever you did in the task report.
@@ -1898,6 +1899,37 @@ Spec: §6.3 verbatim. Interactive command (fzf needs a TTY — it runs in a floa
     #[test]
     fn sanitize_label_strips_kdl_breakers() {
         assert_eq!(sanitize_label("fix \"auth\"\nflow"), "fix auth flow");
+    }
+
+    #[test]
+    fn merge_resume_preserves_existing_row_and_resets_status() {
+        // The resume-clobber defect (plan-review fix): an existing WORKTREE
+        // row must survive a resume untouched except status → Idle. Blindly
+        // storing the fresh record would relocate the agent to the picked
+        // dir, so spawn's munged jsonl check would miss the worktree-keyed
+        // transcript and CREATE a colliding session instead of resuming.
+        let mut row = rec("u-wt");
+        row.cwd = "/repo/.claude-worktrees/abc12345".into();
+        row.worktree = Some("/repo/.claude-worktrees/abc12345".into());
+        row.repo_root = "/repo".into();
+        row.branch = "clave/abc12345".into();
+        row.label = "abc12345 · clave/abc12345 · fix auth".into();
+        row.label_source = LabelSource::Summary;
+        row.status = Status::Working; // stale — the pane is gone
+        row.last_interacted = 77;
+        row.last_visited = 42;
+        let fresh = rec("u-wt"); // what the weave derives from the PICKED dir
+        let merged = merge_resume_record(Some(&row), fresh.clone());
+        assert_eq!(merged.status, Status::Idle); // the ONLY changed field
+        assert_eq!(merged.cwd, row.cwd); // worktree cwd NOT relocated
+        assert_eq!(merged.worktree, row.worktree);
+        assert_eq!(merged.label, row.label); // earned label survives
+        assert_eq!(merged.label_source, LabelSource::Summary);
+        assert_eq!(merged.last_interacted, 77);
+        assert_eq!(merged.last_visited, 42);
+        // No store row (jsonl-only candidate): no better info exists — the
+        // fresh record is stored as-is.
+        assert_eq!(merge_resume_record(None, fresh.clone()), fresh);
     }
 
     #[test]
@@ -2027,6 +2059,31 @@ pub fn resume_candidates(
     list.sort_by(|a, b| b.0.cmp(&a.0));
     list.into_iter().map(|(_, c)| c).collect()
 }
+
+/// What to store when (re)recording an agent (plan-review fix to §6.3 step 7).
+///
+/// Resuming an agent that already has a store row must NOT clobber it: the
+/// row's `cwd` was canonicalized at creation and is WORKTREE-AWARE — replacing
+/// it with the picked dir would silently relocate a worktree agent to the repo
+/// root, bake the wrong `--cwd` into the tab layout, and make `clave spawn`
+/// munge the wrong project dir: it would miss the worktree-keyed jsonl and
+/// CREATE a fresh session (hard `--session-id` collision risk) instead of
+/// resuming. The row also carries earned state (label/label_source from
+/// hook.rs, last_visited/last_interacted) that a re-add has no business
+/// resetting. Re-adding a resumed agent only means "it is on screen again" —
+/// so status resets to Idle and EVERYTHING else is preserved.
+///
+/// No existing row (a jsonl-only candidate — discovered on disk, never
+/// tracked): no better info exists, store the fresh record as-is.
+pub fn merge_resume_record(existing: Option<&AgentRecord>, fresh: AgentRecord) -> AgentRecord {
+    match existing {
+        Some(row) => AgentRecord {
+            status: clave_types::Status::Idle,
+            ..row.clone()
+        },
+        None => fresh,
+    }
+}
 ```
 
 And the interactive weave (same file; every subprocess is commented with *why*):
@@ -2114,7 +2171,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
     let Some(choice) = fzf_pick(&["new".into(), "resume".into()], "agent> ")? else {
         return Ok(());
     };
-    let (uuid, worktree_path) = if choice == "resume" {
+    let (uuid, worktree_path, existing) = if choice == "resume" {
         // clave owns the picker (§6.3 — claude --resume's own picker would
         // break resurrection). Candidates: store rows + jsonl scan.
         let proj_dir = dirs::home_dir()
@@ -2146,7 +2203,11 @@ pub fn run_add(worktree: bool) -> Result<()> {
             .collect();
         let Some(picked) = fzf_pick(&lines, "resume> ")? else { return Ok(()) };
         let uuid = picked.rsplit('\t').next().context("picker line")?.to_string();
-        (uuid, None)
+        // The lock-free store copy is fine for DERIVING the tab's cwd/label
+        // (worst case one beat stale); the AUTHORITATIVE update-or-insert
+        // happens under the lock in step 7.
+        let existing = store.agents.get(&uuid).cloned();
+        (uuid, None, existing)
     } else {
         let uuid = uuid::Uuid::new_v4().to_string();
         // Worktree opt-in (§6.3): clave shells out itself (never claude -w)
@@ -2160,17 +2221,35 @@ pub fn run_add(worktree: bool) -> Result<()> {
         } else {
             None
         };
-        (uuid, wt)
+        (uuid, wt, None)
     };
 
-    // 5) The agent's cwd: the worktree if we made one, else the picked dir.
-    //    Canonicalize AGAIN for the worktree (it's brand new — S0b applies).
-    let agent_cwd = match &worktree_path {
-        Some(w) => std::fs::canonicalize(w)?.to_str().context("wt path")?.to_string(),
-        None => physical_str.clone(),
+    // 5) The agent's cwd for the TAB LAYOUT:
+    //    - resume WITH a store row → the ROW's cwd. It was canonicalized when
+    //      stored and is worktree-aware; recomputing from the picked dir would
+    //      bake the wrong `--cwd` for a worktree agent and break spawn's
+    //      jsonl-keyed resume (see merge_resume_record).
+    //    - fresh worktree → canonicalize AGAIN (it's brand new — S0b applies).
+    //    - else → the picked dir (already canonical from step 2).
+    let agent_cwd = match (&existing, &worktree_path) {
+        (Some(row), _) => row.cwd.clone(),
+        (None, Some(w)) => std::fs::canonicalize(w)?.to_str().context("wt path")?.to_string(),
+        (None, None) => physical_str.clone(),
     };
-    let dir_name = agent_cwd.rsplit('/').next().unwrap_or(&agent_cwd);
-    let label = sanitize_label(&format!("{dir_name} · {branch}"));
+    // The tab label: an existing row's label is real, possibly already the
+    // earned `dir · branch · words` from hook.rs — reopening the tab must not
+    // regress it to the base form. Sanitize at interpolation time (the stored
+    // label is preserved verbatim; only the KDL string needs to be safe).
+    let label = match &existing {
+        Some(row) => sanitize_label(&row.label),
+        None => {
+            let dir_name = agent_cwd.rsplit('/').next().unwrap_or(&agent_cwd);
+            // A NEW agent's label MUST be exactly `<dir_name> · <branch>`
+            // (space-middot-space) — hook.rs::refresh_label reconstructs this
+            // prefix byte-for-byte to gate the first-prompt upgrade (Task 5).
+            sanitize_label(&format!("{dir_name} · {branch}"))
+        }
+    };
 
     // 6) One-shot temp layout → new tab (§6.3). $TMPDIR, deleted after.
     let wasm = wasm_path()?.to_str().context("wasm path")?.to_string();
@@ -2185,22 +2264,26 @@ pub fn run_add(worktree: bool) -> Result<()> {
 
     // 7) Record + push (§6.3): the row exists BEFORE the first hook event so
     //    the hook's untracked fast path doesn't drop this agent's events.
+    //    UPDATE-OR-INSERT, not blind insert (plan-review fix): resuming an
+    //    agent with an existing row must preserve it — merge_resume_record
+    //    keeps everything and resets only status. The authoritative
+    //    existing-row lookup happens HERE, inside the lock (the step-4 copy
+    //    was lock-free and only derived layout inputs).
     let snap = with_store_mut(&paths, |s| {
-        s.agents.insert(
-            uuid.clone(),
-            AgentRecord {
-                uuid: uuid.clone(),
-                cwd: agent_cwd.clone(),
-                repo_root: repo_root.clone(),
-                branch: branch.clone(),
-                label: label.clone(),
-                status: clave_types::Status::Idle,
-                last_interacted: now_unix(),
-                last_visited: 0,
-                worktree: worktree_path.clone(),
-                label_source: LabelSource::FirstPrompt,
-            },
-        );
+        let fresh = AgentRecord {
+            uuid: uuid.clone(),
+            cwd: agent_cwd.clone(),
+            repo_root: repo_root.clone(),
+            branch: branch.clone(),
+            label: label.clone(),
+            status: clave_types::Status::Idle,
+            last_interacted: now_unix(),
+            last_visited: 0,
+            worktree: worktree_path.clone(),
+            label_source: LabelSource::FirstPrompt,
+        };
+        let merged = merge_resume_record(s.agents.get(&uuid), fresh);
+        s.agents.insert(uuid.clone(), merged);
         s.seq += 1;
         snapshot_from(s)
     })?;
