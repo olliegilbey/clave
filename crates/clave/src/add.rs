@@ -56,14 +56,19 @@ pub fn sanitize_label(s: &str) -> String {
 /// `zellij action new-tab --layout`, then deleted. Baking the command in is
 /// also what makes the tab resume on resurrection (S4).
 pub fn tab_layout(wasm: &str, label: &str, uuid: &str, cwd: &str) -> String {
+    // split_direction="vertical" is REQUIRED for a LEFT bar: zellij stacks
+    // sibling panes horizontally (rows) by default (Task 9 C1 finding; same
+    // wrapper as setup::layout_kdl and the S2 spike layout).
     format!(
         r#"layout {{
     tab name="{label}" focus=true {{
-        pane size=26 borderless=true {{
-            plugin location="file:{wasm}"
-        }}
-        pane cwd="{cwd}" command="clave" {{
-            args "spawn" "{uuid}" "--name" "{label}" "--cwd" "{cwd}"
+        pane split_direction="vertical" {{
+            pane size=26 borderless=true {{
+                plugin location="file:{wasm}"
+            }}
+            pane cwd="{cwd}" command="clave" {{
+                args "spawn" "{uuid}" "--name" "{label}" "--cwd" "{cwd}"
+            }}
         }}
     }}
 }}
@@ -429,6 +434,8 @@ mod tests {
         assert!(kdl.contains("\"spawn\" \"u-1\""));
         assert!(kdl.contains("cwd=\"/x\""));
         assert!(kdl.contains("name=\"x · main\""));
+        // Regression (Task 9 C1): the bar must be a LEFT column, not a top strip.
+        assert!(kdl.contains("split_direction=\"vertical\""));
     }
 
     #[test]
