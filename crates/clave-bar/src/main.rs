@@ -232,10 +232,10 @@ impl ZellijPlugin for State {
             }
             Event::Mouse(Mouse::LeftClick(line, _col)) => {
                 // §6.6: rows are mouse-clickable. line is the rendered row.
-                if line >= 0 {
-                    if let Some(fx) = self.model.click(line as usize) {
-                        self.run_effects(vec![fx]);
-                    }
+                if line >= 0
+                    && let Some(fx) = self.model.click(line as usize)
+                {
+                    self.run_effects(vec![fx]);
                 }
                 false
             }

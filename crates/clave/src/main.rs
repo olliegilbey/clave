@@ -154,7 +154,12 @@ fn main() -> Result<()> {
         }
         Some(Command::Focus { uuid }) => {
             let paths = store::store_paths()?;
-            store::apply_focus(&paths, &uuid, store::now_unix())
+            // Broadcast the flip: only the focused tab's bar repainted
+            // locally (zellij starves hidden instances of TabUpdates).
+            if let Some(snap) = store::apply_focus(&paths, &uuid, store::now_unix())? {
+                hook::push_snapshot(&snap);
+            }
+            Ok(())
         }
         Some(Command::Setup) => setup::run_setup(),
     }

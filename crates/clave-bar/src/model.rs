@@ -190,16 +190,20 @@ impl BarModel {
             let (tab_id, position) = (now_active.tab_id, now_active.position);
             if prev_active != Some(tab_id) {
                 self.bump(tab_id);
-                // Focused a Done agent → clear unread (render now, persist
-                // via MarkRead). BTreeSet.insert returns false if present —
-                // that's the exactly-once guard.
-                if let Some(a) = self.agent_at_position(position) {
-                    if a.status == Status::Done {
-                        let uuid = a.uuid.clone();
-                        if self.read_locally.insert(uuid.clone()) {
-                            effects.push(Effect::MarkRead { uuid });
-                        }
-                    }
+            }
+            // §6.5 unread clear — checked on EVERY TabUpdate, NOT on a
+            // prev!=now transition: zellij delivers TabUpdate only to the
+            // instance in the active tab (C3 live finding, 2026-07-06), so a
+            // hidden instance never observes a transition; receiving an
+            // update with our tab active IS the focus signal. Exactly-once
+            // comes from read_locally (reset by any non-Done snapshot) plus
+            // the delivery rule itself (hidden instances get no TabUpdate).
+            if let Some(a) = self.agent_at_position(position)
+                && a.status == Status::Done
+            {
+                let uuid = a.uuid.clone();
+                if self.read_locally.insert(uuid.clone()) {
+                    effects.push(Effect::MarkRead { uuid });
                 }
             }
         }
@@ -441,6 +445,24 @@ mod tests {
         // A later snapshot showing Working clears the local override.
         m.apply_snapshot(snap(2, vec![agent("u1", Status::Working, 200)]));
         assert_eq!(m.rows()[0].glyph, Some(('●', 33)));
+    }
+
+    #[test]
+    fn done_agent_clears_without_observable_transition() {
+        // Live C3 finding (2026-07-06): zellij delivers TabUpdate ONLY to the
+        // instance in the active tab, so an instance's stream always claims
+        // its own tab is active — there is never a prev!=now transition to
+        // observe. Receiving a TabUpdate at all IS the focus signal.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "t", true)]); // loaded with own tab active
+        m.apply_panes(vec![pane(0, 5, false, true)]);
+        m.register("u1".into(), 5);
+        // User leaves (this instance hears NOTHING), agent finishes via pipe:
+        m.apply_snapshot(snap(1, vec![agent("u1", Status::Done, 100)]));
+        // User returns: the update still says "own tab active" — must clear.
+        let fx = m.apply_tabs(vec![tab(10, 0, "t", true)]);
+        assert!(fx.contains(&Effect::MarkRead { uuid: "u1".into() }));
+        assert_eq!(m.rows()[0].glyph, Some(('●', 90))); // dim immediately
     }
 
     #[test]

@@ -149,19 +149,21 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
     }
 }
 
-/// `clave focus <uuid>` (§6.5): persist the "user looked at it" transition.
-/// Store-only — NO pipe push. Every bar instance saw the same TabUpdate focus
-/// transition and already repainted locally; this just makes the flip durable
-/// (and visible to `clave ls`). Unknown uuid is fine: the plugin can race an
-/// agent whose tab just closed.
-pub fn apply_focus(paths: &StorePaths, uuid: &str, now: u64) -> Result<()> {
+/// `clave focus <uuid>` (§6.5): persist the "user looked at it" transition
+/// and hand back a seq-bumped snapshot for the caller to push. Zellij only
+/// delivers TabUpdate to the ACTIVE tab's bar instance (C3 live finding), so
+/// exactly one instance repainted locally — the pipe push is how every other
+/// instance learns the flip. Unknown uuid returns None (no bump, no push):
+/// the plugin can race an agent whose tab just closed.
+pub fn apply_focus(paths: &StorePaths, uuid: &str, now: u64) -> Result<Option<AgentSnapshot>> {
     with_store_mut(paths, |s| {
-        if let Some(r) = s.agents.get_mut(uuid) {
-            r.last_visited = now;
-            if r.status == Status::Done {
-                r.status = Status::Idle; // green "done & unread" → dim
-            }
+        let r = s.agents.get_mut(uuid)?;
+        r.last_visited = now;
+        if r.status == Status::Done {
+            r.status = Status::Idle; // green "done & unread" → dim
         }
+        s.seq += 1; // monotonic pipe contract (§5)
+        Some(snapshot_from(s))
     })
 }
 
@@ -243,12 +245,20 @@ mod tests {
             s.agents.insert("u1".into(), r);
         })
         .unwrap();
-        apply_focus(&p, "u1", 999).unwrap();
+        // Returns a seq-bumped snapshot for the pipe push: only the focused
+        // tab's bar instance repaints locally (zellij starves hidden
+        // instances of TabUpdates — C3 finding), so the flip must broadcast.
+        let snap = apply_focus(&p, "u1", 999).unwrap().expect("row changed");
         let s = read_store(&p).unwrap();
         assert_eq!(s.agents["u1"].status, Status::Idle); // unread cleared
         assert_eq!(s.agents["u1"].last_visited, 999);
-        // Unknown uuid: silently fine (plugin may race a just-closed agent).
-        apply_focus(&p, "ghost", 1000).unwrap();
+        assert!(s.seq > 0); // §5 pipe contract: the push must be strictly newer
+        assert_eq!(snap.seq, s.seq);
+        assert_eq!(snap.agents[0].status, Status::Idle);
+        // Unknown uuid: silently fine (plugin may race a just-closed agent) —
+        // no snapshot, seq untouched.
+        assert!(apply_focus(&p, "ghost", 1000).unwrap().is_none());
+        assert_eq!(read_store(&p).unwrap().seq, s.seq);
     }
 
     #[test]
