@@ -43,6 +43,23 @@ impl State {
             .unwrap_or(false)
     }
 
+    /// tab_id of the tab hosting OUR pane, from the latest local data.
+    /// Trustworthy exactly when it matters: the executor check compares it
+    /// to the replicated current_tab, and only the truly-active instance
+    /// (fresh TabUpdate/PaneUpdate) can match.
+    fn own_tab_id(&self) -> Option<usize> {
+        let own = self.own_plugin_id?;
+        let pos = self
+            .plugin_panes
+            .iter()
+            .find(|(_, id)| *id == own)
+            .map(|(pos, _)| *pos)?;
+        self.last_tabs
+            .iter()
+            .find(|t| t.position == pos)
+            .map(|t| t.tab_id)
+    }
+
     fn model_tab_active_at(&self, position: usize) -> Option<bool> {
         // rows() is display-ordered; go through the raw tabs instead.
         // (model exposes rows; keep a tiny helper here off the same data we
@@ -66,6 +83,27 @@ impl State {
                     // its tab forward. go_to_tab is a known dead end.
                     focus_pane_with_id(PaneId::Terminal(pane_id), false, false);
                 }
+                Effect::SwitchTab { position } => {
+                    // 1-based, like the stock tab-bar's click handler. The
+                    // keybind broadcast makes every instance execute this
+                    // with the SAME position — idempotent duplicates.
+                    switch_tab_to(position as u32 + 1);
+                }
+                Effect::AnnounceVisit { tab_id } => {
+                    // Single-instance jumps (clicks) converge the other
+                    // instances over the pipe channel.
+                    run_command(
+                        &[
+                            "zellij",
+                            "pipe",
+                            "--name",
+                            "clave-visited",
+                            "--",
+                            &tab_id.to_string(),
+                        ],
+                        BTreeMap::new(),
+                    );
+                }
                 Effect::RenameTab { tab_id, name } if active => {
                     rename_tab_with_id(tab_id as u64, name);
                 }
@@ -74,7 +112,30 @@ impl State {
                     // local repaint already happened in the model.
                     run_command(&["clave", "focus", &uuid], BTreeMap::new());
                 }
+                Effect::Bind { uuid, tab_id } if active => {
+                    // Report the uuid→tab join to the store (§6.6 Design B);
+                    // `clave bind` RMWs and pushes the snapshot that carries
+                    // it to every instance.
+                    run_command(
+                        &["clave", "bind", &uuid, &tab_id.to_string()],
+                        BTreeMap::new(),
+                    );
+                }
                 _ => {} // non-active instance skips writes
+            }
+        }
+    }
+
+    /// §6.6 Design B bootstrap: only the ACTIVE instance reports binds — its
+    /// manifest is the fresh one; a hidden instance's stale positions would
+    /// bind agents to the wrong tabs.
+    fn fire_binds(&mut self) {
+        if self.is_active_instance()
+            && let Some(own) = self.own_tab_id()
+        {
+            let fx = self.model.bind_effects(own);
+            if !fx.is_empty() {
+                self.run_effects(fx);
             }
         }
     }
@@ -102,6 +163,7 @@ impl State {
                 Ok(snap) => {
                     let fx = self.model.apply_snapshot(snap);
                     self.run_effects(fx);
+                    self.fire_binds(); // a new agent row may need its bind
                     true
                 }
                 Err(e) => {
@@ -112,6 +174,7 @@ impl State {
             "clave-register" => match serde_json::from_str::<clave_types::Register>(payload) {
                 Ok(reg) => {
                     self.model.register(reg.uuid, reg.pane_id);
+                    self.fire_binds(); // the join input just landed
                     true // a row may just have gained its glyph
                 }
                 Err(e) => {
@@ -119,12 +182,33 @@ impl State {
                     false
                 }
             },
-            "clave-nav" => {
-                match self.model.nav(payload) {
-                    Some(fx) => self.run_effects(vec![fx]),
-                    None => eprintln!("clave-bar: unresolvable clave-nav {payload:?}"),
+            "clave-visited" => match payload.trim().parse::<usize>() {
+                Ok(tab_id) => {
+                    // Beacon only (executor election) — never reorders.
+                    self.model.beacon(tab_id);
+                    true // active-row highlight may move
                 }
-                false // focus change repaints via TabUpdate anyway
+                Err(e) => {
+                    eprintln!("clave-bar: bad clave-visited payload: {e}");
+                    false
+                }
+            },
+            // NO clave-touch/clave-touch-pane arms: tab order now travels
+            // INSIDE clave-status snapshots (store tab_timeline, §6.6) —
+            // fire-and-forget pipe deltas diverged per instance (C5 rd 5).
+            "clave-nav" => {
+                // Row jumps and dir walks need a FRESH tab set — only the
+                // active instance has one. Executor = the instance whose own
+                // tab is the replicated beacon (converged via visited pipes).
+                let executor = self
+                    .own_tab_id()
+                    .filter(|own| self.model.current_tab() == Some(*own));
+                let fx = self.model.nav(payload, executor);
+                if fx.is_empty() {
+                    return false; // non-executor, or unresolvable payload
+                }
+                self.run_effects(fx);
+                true // the beacon moved → active-row highlight repaint
             }
             "clave-toggle" => {
                 let hidden = self.model.toggle();
@@ -145,6 +229,15 @@ impl State {
 
 impl ZellijPlugin for State {
     fn load(&mut self, _config: BTreeMap<String, String>) {
+        // Version marker for the hot-reload workflow (`zellij action
+        // start-or-reload-plugin`): stamp the build so the zellij log tells
+        // you WHICH wasm produced a trace. Set by the rebuild recipe via
+        // CLAVE_BUILD_TAG; "dev" means an untagged local build.
+        eprintln!(
+            "clave-bar: loaded v{} build={}",
+            env!("CARGO_PKG_VERSION"),
+            option_env!("CLAVE_BUILD_TAG").unwrap_or("dev")
+        );
         // §6.6 permission set — EXACTLY these four; grants are all-or-nothing
         // per plugin and the prompt is unanswerable in the bar pane, so
         // `clave setup` pre-seeds permissions.kdl with THIS set (both key
@@ -162,7 +255,16 @@ impl ZellijPlugin for State {
             EventType::Mouse,
             EventType::RunCommandResult,
             EventType::PermissionRequestResult,
+            // NO InputReceived: it fires for EVERY keystroke INCLUDING the
+            // nav keybinds themselves (C5 round 4: each walk press touched
+            // the departing tab and the touch-spawn storm exhausted the
+            // server's fds). Plain tabs order by birth only — shell-command
+            // touches are parked (§6.6).
         ]);
+        // Stock tab-bar pattern: an unselectable pane receives clicks
+        // directly (no focus-stealing first click) and MoveFocus skips it —
+        // nothing the bar does needs focus (clicks, pipes, hide_self).
+        set_selectable(false);
         self.own_plugin_id = Some(get_plugin_ids().plugin_id);
     }
 
@@ -208,7 +310,42 @@ impl ZellijPlugin for State {
                     .collect();
                 self.last_tabs = metas.clone();
                 let fx = self.model.apply_tabs(metas);
+                // Zellij only delivers TabUpdate to the ACTIVE tab's instance
+                // (C3/C4 finding), so this instance broadcasts two things the
+                // hidden bars can't observe:
+                // 1. the focus BEACON (executor election; never reorders) —
+                //    announced only when the replicated beacon is stale;
+                // 2. a one-time BIRTH touch for a tab the timeline has never
+                //    seen (its creation moment; `clave touch` stamps time).
+                if let Some(active_id) = self.last_tabs.iter().find(|t| t.active).map(|t| t.tab_id)
+                    && self.is_active_instance()
+                {
+                    if self.model.current_tab() != Some(active_id) {
+                        self.model.beacon(active_id);
+                        run_command(
+                            &[
+                                "zellij",
+                                "pipe",
+                                "--name",
+                                "clave-visited",
+                                "--",
+                                &active_id.to_string(),
+                            ],
+                            BTreeMap::new(),
+                        );
+                    }
+                    if self.model.needs_birth_touch(active_id) {
+                        // Once-EVER per instance/tab, snapshot-aware but
+                        // echo-INDEPENDENT (C5 rd 4: echo-gated guards
+                        // re-fired per TabUpdate → spawn storm → server fd
+                        // exhaustion). `clave touch` stamps host time into
+                        // the STORE and pushes the snapshot that carries
+                        // the new order back to every instance.
+                        run_command(&["clave", "touch", &active_id.to_string()], BTreeMap::new());
+                    }
+                }
                 self.run_effects(fx);
+                self.fire_binds(); // fresh tab set → own-tab joins resolvable
                 true
             }
             Event::PaneUpdate(manifest) => {
@@ -228,14 +365,14 @@ impl ZellijPlugin for State {
                     }
                 }
                 self.model.apply_panes(metas);
+                self.fire_binds(); // fresh manifest → own-tab joins resolvable
                 true
             }
             Event::Mouse(Mouse::LeftClick(line, _col)) => {
                 // §6.6: rows are mouse-clickable. line is the rendered row.
-                if line >= 0
-                    && let Some(fx) = self.model.click(line as usize)
-                {
-                    self.run_effects(vec![fx]);
+                if line >= 0 {
+                    let fx = self.model.click(line as usize);
+                    self.run_effects(fx);
                 }
                 false
             }

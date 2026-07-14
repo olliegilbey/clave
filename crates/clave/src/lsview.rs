@@ -43,6 +43,7 @@ mod tests {
             last_visited: 0,
             worktree: None,
             label_source: LabelSource::FirstPrompt,
+            tab_id: None,
         }
     }
 

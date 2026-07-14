@@ -33,10 +33,11 @@ pub struct HookPayload {
     pub message: Option<String>,
 }
 
-/// §6.5's transition table, verbatim. Latest-wins: the CURRENT status is
-/// irrelevant; each event maps directly to the new one (a later lower-
-/// "priority" event must be able to downgrade needs_you after you answer).
-pub fn status_for_event(event: &str, message: Option<&str>) -> Option<Status> {
+/// §6.5's transition table. Latest-wins, with ONE status-aware exception
+/// (revised 2026-07-08): each event maps directly to the new status (a later
+/// lower-"priority" event must be able to downgrade needs_you after you
+/// answer), but the CLI's idle notification consults `current` — see below.
+pub fn status_for_event(event: &str, message: Option<&str>, current: Status) -> Option<Status> {
     match event {
         "UserPromptSubmit" => Some(Status::Working),
         "Stop" => Some(Status::Done),
@@ -44,12 +45,20 @@ pub fn status_for_event(event: &str, message: Option<&str>) -> Option<Status> {
         "SessionEnd" => Some(Status::Idle),
         "PermissionRequest" => Some(Status::NeedsYou),
         "Notification" => {
-            // §4: match the notification MESSAGE TEXT for the two needs-you
-            // cases. Substrings chosen from the live payloads observed in S1;
-            // Task 9 checkpoint C2 re-verifies them against the current CLI.
+            // §4: match the notification MESSAGE TEXT. Substrings chosen from
+            // the live payloads observed in S1; Task 9 C2 re-verified them
+            // against CLI 2.1.201.
             let m = message.unwrap_or("");
-            if m.contains("permission") || m.contains("waiting for your input") {
+            if m.contains("permission") {
+                // Permission prompt = blocked mid-turn: red, unconditionally.
                 Some(Status::NeedsYou)
+            } else if m.contains("waiting for your input") {
+                // The CLI fires this ~60s after EVERY turn. It means
+                // "blocked mid-turn" only while still working (an in-turn
+                // question/approval — no Stop yet). For a finished agent it
+                // is just an idle nag: swallowing it keeps red meaningful
+                // (green-until-read → grey already covers "turn over").
+                (current == Status::Working).then_some(Status::NeedsYou)
             } else {
                 None
             }
@@ -163,6 +172,45 @@ pub fn push_snapshot(snap: &AgentSnapshot) {
         .spawn();
 }
 
+/// The one store mutation a hook event performs, factored out of run_hook's
+/// lock closure so it unit-tests against a plain `Store`. Returns whether
+/// anything changed; bumps `seq` itself (exactly once) when it did.
+pub fn apply_hook_event(
+    s: &mut crate::store::Store,
+    uuid: &str,
+    event: &str,
+    payload: &HookPayload,
+    jsonl_tail: Option<&str>,
+    now: u64,
+) -> bool {
+    let Some(rec) = s.agents.get_mut(uuid) else {
+        return false; // raced a prune — fine
+    };
+    let mut changed = false;
+    if let Some(next) = status_for_event(event, payload.message.as_deref(), rec.status) {
+        changed |= rec.status != next;
+        rec.status = next;
+    }
+    let mut stamp = None;
+    if event == "UserPromptSubmit" {
+        rec.last_interacted = now; // recency (§6.6 order)
+        // §6.6 Design B: a prompt is a user COMMITMENT to the agent's TAB —
+        // stamp the store timeline through the bind, atomically with the
+        // bump (a bar-side stamp would race the user switching away).
+        stamp = rec.tab_id;
+        changed = true;
+    }
+    changed |= refresh_label(rec, event, payload, jsonl_tail);
+    if let Some(tab_id) = stamp {
+        let e = s.tab_timeline.entry(tab_id).or_insert(0);
+        *e = (*e).max(now);
+    }
+    if changed {
+        s.seq += 1; // monotonic pipe contract (§5)
+    }
+    changed
+}
+
 /// The whole hook flow. Errors bubble up ONLY so main can log them to
 /// stderr — main exits 0 no matter what (Global Constraint).
 pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
@@ -178,34 +226,19 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
     }
     let home = dirs::home_dir().unwrap_or_default();
     let snap = with_store_mut(&paths, |s| {
-        let Some(rec) = s.agents.get_mut(&uuid) else {
-            return None; // raced a prune — fine
-        };
-        let mut changed = false;
-        if let Some(next) = status_for_event(event, payload.message.as_deref()) {
-            changed |= rec.status != next;
-            rec.status = next;
-        }
-        if event == "UserPromptSubmit" {
-            rec.last_interacted = now_unix(); // recency (§6.6 order)
-            changed = true;
-        }
         // Label refresh only re-reads the jsonl while it's still cheap to
         // matter (§6.4): source==FirstPrompt and a label-bearing event.
-        let tail = if rec.label_source == LabelSource::FirstPrompt
-            && matches!(event, "Stop" | "UserPromptSubmit")
-        {
-            read_tail(&jsonl_path(&home, &rec.cwd, &uuid), 64 * 1024)
-        } else {
-            None
-        };
-        changed |= refresh_label(rec, event, &payload, tail.as_deref());
-        if changed {
-            s.seq += 1; // monotonic pipe contract (§5)
-            Some(snapshot_from(s))
-        } else {
-            None
-        }
+        let tail = s.agents.get(&uuid).and_then(|rec| {
+            if rec.label_source == LabelSource::FirstPrompt
+                && matches!(event, "Stop" | "UserPromptSubmit")
+            {
+                read_tail(&jsonl_path(&home, &rec.cwd, &uuid), 64 * 1024)
+            } else {
+                None
+            }
+        });
+        apply_hook_event(s, &uuid, event, &payload, tail.as_deref(), now_unix())
+            .then(|| snapshot_from(s))
     })?;
     if let Some(snap) = snap {
         push_snapshot(&snap);
@@ -231,39 +264,132 @@ mod tests {
             last_visited: 0,
             worktree: None,
             label_source: LabelSource::FirstPrompt,
+            tab_id: None,
         }
+    }
+
+    #[test]
+    fn prompt_stamps_bound_tabs_timeline_atomically() {
+        // §6.6 Design B: a prompt is a USER COMMITMENT to the agent's TAB.
+        // The hook stamps tab_timeline[bind] in the SAME locked write as the
+        // last_interacted bump — no bar round-trip, no switch-away race.
+        let mut s = crate::store::Store::default();
+        let mut r = rec("u1");
+        r.tab_id = Some(4);
+        s.agents.insert("u1".into(), r);
+        s.agents.insert("u2".into(), rec("u2")); // unbound
+        let p = HookPayload {
+            session_id: Some("u1".into()),
+            prompt: None,
+            message: None,
+        };
+        assert!(apply_hook_event(
+            &mut s,
+            "u1",
+            "UserPromptSubmit",
+            &p,
+            None,
+            1700
+        ));
+        assert_eq!(s.agents["u1"].last_interacted, 1700);
+        assert_eq!(s.tab_timeline.get(&4), Some(&1700));
+        assert_eq!(s.seq, 1); // one bump for the whole atomic change
+        // Unbound agent: interaction still recorded, no stamp to place.
+        assert!(apply_hook_event(
+            &mut s,
+            "u2",
+            "UserPromptSubmit",
+            &p,
+            None,
+            1800
+        ));
+        assert_eq!(s.agents["u2"].last_interacted, 1800);
+        assert_eq!(s.tab_timeline.len(), 1);
+        // Non-commitment events don't stamp the timeline (Stop ≠ user input).
+        assert!(apply_hook_event(&mut s, "u1", "Stop", &p, None, 1900));
+        assert_eq!(s.tab_timeline.get(&4), Some(&1700));
+        // Unknown uuid / no-op event: unchanged, no seq bump.
+        let seq = s.seq;
+        assert!(!apply_hook_event(&mut s, "ghost", "Stop", &p, None, 2000));
+        assert!(!apply_hook_event(
+            &mut s,
+            "u1",
+            "PreToolUse",
+            &p,
+            None,
+            2000
+        ));
+        assert_eq!(s.seq, seq);
     }
 
     #[test]
     fn state_machine_is_latest_wins() {
         // Spec §6.5 transition table, verbatim.
         assert_eq!(
-            status_for_event("UserPromptSubmit", None),
+            status_for_event("UserPromptSubmit", None, Status::Idle),
             Some(Status::Working)
         );
-        assert_eq!(status_for_event("Stop", None), Some(Status::Done));
-        assert_eq!(status_for_event("StopFailure", None), Some(Status::Failed));
-        assert_eq!(status_for_event("SessionEnd", None), Some(Status::Idle));
         assert_eq!(
-            status_for_event("PermissionRequest", None),
+            status_for_event("Stop", None, Status::Working),
+            Some(Status::Done)
+        );
+        assert_eq!(
+            status_for_event("StopFailure", None, Status::Working),
+            Some(Status::Failed)
+        );
+        assert_eq!(
+            status_for_event("SessionEnd", None, Status::Done),
+            Some(Status::Idle)
+        );
+        assert_eq!(
+            status_for_event("PermissionRequest", None, Status::Working),
             Some(Status::NeedsYou)
         );
-        // Notification matches on MESSAGE TEXT (§4): permission / idle prompts.
+        // Notification matches on MESSAGE TEXT (§4). Permission prompts are a
+        // mid-turn block → red regardless of current status.
         assert_eq!(
             status_for_event(
                 "Notification",
-                Some("Claude needs your permission to use Bash")
+                Some("Claude needs your permission to use Bash"),
+                Status::Done
+            ),
+            Some(Status::NeedsYou)
+        );
+        // §6.5 revised 2026-07-08: the CLI's ~60s idle nag fires after EVERY
+        // turn. It means "blocked mid-turn" ONLY while still working (an
+        // in-turn question/approval — no Stop yet). A finished agent stays
+        // done/idle: green-until-read already tells the user everything.
+        assert_eq!(
+            status_for_event(
+                "Notification",
+                Some("Claude is waiting for your input"),
+                Status::Working
             ),
             Some(Status::NeedsYou)
         );
         assert_eq!(
-            status_for_event("Notification", Some("Claude is waiting for your input")),
-            Some(Status::NeedsYou)
+            status_for_event(
+                "Notification",
+                Some("Claude is waiting for your input"),
+                Status::Done
+            ),
+            None
+        );
+        assert_eq!(
+            status_for_event(
+                "Notification",
+                Some("Claude is waiting for your input"),
+                Status::Idle
+            ),
+            None
         );
         // Other notifications don't touch status.
-        assert_eq!(status_for_event("Notification", Some("compacting…")), None);
+        assert_eq!(
+            status_for_event("Notification", Some("compacting…"), Status::Working),
+            None
+        );
         // Unknown events are a no-op — the global hook must never guess.
-        assert_eq!(status_for_event("PreToolUse", None), None);
+        assert_eq!(status_for_event("PreToolUse", None, Status::Idle), None);
     }
 
     #[test]

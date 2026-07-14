@@ -132,6 +132,9 @@ pub fn merge_resume_record(existing: Option<&AgentRecord>, fresh: AgentRecord) -
     match existing {
         Some(row) => AgentRecord {
             status: clave_types::Status::Idle,
+            // The resume opens a brand-new tab: the old bind is stale by
+            // definition. The new tab's bar re-binds on join (§6.6 B).
+            tab_id: None,
             ..row.clone()
         },
         None => fresh,
@@ -372,6 +375,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
             last_visited: 0,
             worktree: worktree_path.clone(),
             label_source: LabelSource::FirstPrompt,
+            tab_id: None,
         };
         let merged = merge_resume_record(s.agents.get(&uuid), fresh);
         s.agents.insert(uuid.clone(), merged);
@@ -401,6 +405,7 @@ mod tests {
             last_visited: 0,
             worktree: None,
             label_source: LabelSource::FirstPrompt,
+            tab_id: None,
         }
     }
 
@@ -460,9 +465,13 @@ mod tests {
         row.status = Status::Working; // stale — the pane is gone
         row.last_interacted = 77;
         row.last_visited = 42;
+        row.tab_id = Some(3); // the DEAD tab that hosted it last time
         let fresh = rec("u-wt"); // what the weave derives from the PICKED dir
         let merged = merge_resume_record(Some(&row), fresh.clone());
-        assert_eq!(merged.status, Status::Idle); // the ONLY changed field
+        assert_eq!(merged.status, Status::Idle);
+        // The resumed agent lands in a brand-new tab: the old bind is stale
+        // by definition — reset, the new tab's bar re-binds on join (§6.6 B).
+        assert_eq!(merged.tab_id, None);
         assert_eq!(merged.cwd, row.cwd); // worktree cwd NOT relocated
         assert_eq!(merged.worktree, row.worktree);
         assert_eq!(merged.label, row.label); // earned label survives

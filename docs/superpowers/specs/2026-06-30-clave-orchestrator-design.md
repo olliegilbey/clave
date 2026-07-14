@@ -290,9 +290,20 @@ never serialises unrelated sessions' hooks.
   "last_interacted": 0,          // unix s; bumped on UserPromptSubmit → recency sort
   "last_visited":    0,          // unix s; bumped on focus → unread = done & !visited
   "worktree":        null,       // path if spawned in a git worktree, else null
-  "label_source":    "first_prompt" // first_prompt|summary; once summary, stop re-scanning jsonl (§6.4)
+  "label_source":    "first_prompt", // first_prompt|summary; once summary, stop re-scanning jsonl (§6.4)
+  "tab_id":          4           // zellij tab hosting the agent (§6.6 B); null until bound; session-scoped
 }
 ```
+
+Beside `seq` and the agent map, the store holds `tab_timeline` (tab_id →
+unix s of the last user commitment, §6.6): written only by `clave touch`
+(locked RMW, max-merge) and the hook's prompt stamp, carried on every
+`AgentSnapshot`, replaced wholesale by each bar instance. The agent `tab_id`
+bind (written by `clave bind`, reported once by the agent tab's own bar) is
+how prompts reach the timeline and how every bar joins glyphs — local
+register/manifest joins diverge per instance (round 6). tab_ids are
+session-scoped → bare `clave` clears both the timeline and all binds when it
+creates (not re-attaches) the session.
 
 **`clave-types` (the pipe schema, shared by binary + plugin):** `clave` pushes the
 **full** (small) agent list to `clave-bar` on every change via
@@ -410,20 +421,33 @@ self-hydrates on load via `RunCommands` — §6.6).
   directly to the new status, so a later lower-"priority" event can downgrade an
   earlier one (else `needs_you` would stick red after you've answered). Transitions:
   `UserPromptSubmit → working` (bump `last_interacted`) · `Stop → done` ·
-  `StopFailure → failed` · `Notification[permission_prompt|idle_prompt] → needs_you` ·
+  `StopFailure → failed` · `Notification[permission_prompt] → needs_you` ·
+  `Notification[idle_prompt] → needs_you` **only if currently `working`** ·
   `PermissionRequest → needs_you` · `SessionEnd → idle`. The order
   `needs_you > working > done` is only a **tie-break** for genuinely simultaneous
   distinct signals. After computing status, update the store and push the snapshot.
   (The exact payload field/value to match for `Notification` is captured live in spike
   **S1**; §4's `permission_prompt|idle_prompt` matches against the notification
-  message text.)
+  message text.) **Idle-prompt discriminator (revised 2026-07-08, C-validation,
+  supersedes the 2026-07-06 keep-decision):** the CLI fires "waiting for your
+  input" ~60s after EVERY turn. Red must mean *blocked mid-turn* (permission
+  prompt, in-turn question/plan approval — the turn is still open, no Stop
+  yet, status `working`). For a finished agent (done/idle) the same
+  notification is only an idle nag and is swallowed — a completed turn is
+  already fully told by green-until-read → grey; always-red after 60s
+  destroys red's fleet-triage value.
 - **Status = one glyph, colour encodes state** (rendered by the plugin via `#[fg]`):
   `●` red = needs you · `●` amber = working · `●` green = done & unread · `●` dim =
   idle · `✖` red = failed. (Glyph set is a config default; tweakable.)
-- **Unread:** `done` shows green until the agent's tab gains focus; the plugin sees
-  the transition natively (`TabUpdate` `active`) and runs `clave focus <uuid>`
-  (`RunCommands`), which bumps `last_visited` and re-pushes — bar and `ls` agree.
-  Non-fatal on failure (self-heals on the next push). (Was spike S3 — now trivial.)
+- **Unread:** `done` shows green until the agent's tab gains focus. (Revised
+  2026-07-08, C3 live finding:) zellij delivers `TabUpdate` ONLY to the active
+  tab's plugin instance, so a focus *transition* is unobservable — receiving a
+  `TabUpdate` with a Done agent in the active tab IS the focus signal. That
+  instance runs `clave focus <uuid>` (`RunCommands`; exactly-once via the
+  local read-override + the delivery rule), which bumps `last_visited`, flips
+  the store row to idle, and **pushes a snapshot** so every hidden bar learns
+  the flip — bar and `ls` agree. Non-fatal on failure (self-heals on the next
+  push). (Was spike S3.)
 - `clave setup` **additively and idempotently merges** the hooks into
   `~/.claude/settings.json`, preserving any existing hook arrays (never clobber the
   user's `SessionStart`/`PreToolUse`/etc.). On this machine `~/.claude` is a
@@ -442,19 +466,59 @@ self-hydrates on load via `RunCommands` — §6.6).
   the bar width (~24 cols, configurable) with a trailing `…`. Plain tabs render
   name-only. Focused row highlighted. No repo grouping, no per-repo colours
   (deleted).
-- **Recency:** the plugin bumps a `tab_id` when it *becomes active* (`TabUpdate`
-  transition) or when its agent's `last_interacted` advances (snapshot). Sort desc;
-  never-focused agent-less tabs sink to the bottom in tab order. Agent recency
-  hydrates from the snapshot on reload; plain-tab recency is ephemeral (accepted).
-  Emergent property: the focused tab is always row 1, so **`Alt+2` ≈ alt-tab**.
+- **Order = last USER COMMITMENT (revised 2026-07-08 after C4/C5 live rounds;
+  user-ratified "Claude-desktop" model):** rows sort by one unified timeline
+  in unix seconds — when did the user last commit input to that tab. **Focus
+  never reorders**; the list holds still while you look around and navigate
+  (this is what makes walking the displayed order stable — no ping-pong).
+  The sort key is the STORE's `tab_timeline` map (tab_id → unix s) and
+  NOTHING else — no render-time joins (revised 2026-07-14 twice: C5 rd 5
+  killed instance-local pipe-delta merges; rd 6 killed the render-time
+  `last_interacted` join — register pipes don't replay and hidden manifests
+  go stale, so per-instance joins diverge and walking alternated between the
+  two agent tabs). The map is written only under the store lock and carried
+  on EVERY `AgentSnapshot`; each bar REPLACES its copy from each seq-gated
+  snapshot — the one channel that has never diverged. Writers:
+  - **Birth**: the active instance fires ONE `clave touch <tab_id>` per tab
+    (first TabUpdate for a tab neither the snapshot timeline nor its local
+    fired-set knows; guard is local and never echo-dependent — C5 rd 4).
+  - **Agent prompts (Design B)**: the store binds uuid→`tab_id`, reported
+    ONCE by the agent tab's own bar (`clave bind`, active-instance-gated —
+    the only fresh manifest; resume resets the bind, the new tab re-binds).
+    The `UserPromptSubmit` hook then stamps `tab_timeline[bind]` atomically
+    with the `last_interacted` bump — no bar round-trip, no switch-away
+    race. The bind also keys every bar's GLYPH/rename/unread joins off the
+    snapshot (fixes round 6's permanently-glyphless rows on late-loaded
+    instances).
+  tab_ids are session-scoped, so bare `clave` clears the timeline AND all
+  binds when it is about to CREATE (not re-attach) the session.
+  `InputReceived` is a DEAD END: it fires for every keystroke including nav
+  keybinds (rd 4: focus-reorder + spawn storm + server fd exhaustion).
+  Shell-command touches (`clave touch-pane` + preexec hook) are PARKED —
+  user declined shell config; plain tabs order by birth only.
+  Tie-break: tab position. A separate `clave-visited` beacon pipe tracks the
+  focused tab purely for nav-executor election — it has NO ordering effect.
 - **uuid→row join (spike S2 + `PaneManifest`):** `clave-register` gives
   `uuid → pane_id`; `PaneManifest` gives pane → tab position; `TabInfo` gives
   position → `tab_id`/name/active.
-- **Nav:** mouse `LeftClick(line)` → row → tab → its focused non-plugin pane →
-  `focus_pane_with_id` (S2-proven; `go_to_tab` is a dead end, §4). Keybinds route
-  `MessagePlugin … name:"clave-nav"` so they follow **display** order: `Alt+↑/↓` and
-  `Alt+j/k` = prev/next row · `Alt+1…9` = Nth row. (Attempt `switch_tab_to` as a
-  simplification during validation.)
+- **Nav (revised 2026-07-08, C5 rounds 1–3):** everything acts on the
+  DISPLAYED list, which is safe to walk because focus never reorders it:
+  - `Alt+↑/↓`/`Alt+j/k` step ±1 through the visible rows (wrapping);
+    `Alt+1…9` = Nth visible row; clicks jump the clicked row. All use
+    `switch_tab_to(position+1)` (the stock tab-bar's own mechanism; S2's
+    `go_to_tab` dead end was an unchased indexing quirk) and run on the
+    **executor only** — the instance whose own tab == the beacon
+    (`clave-visited`-replicated focus). It is the active instance: fresh tab
+    set, and the very bar the user is reading. Broadcast execution over
+    hidden instances' stale sets raced six divergent targets live (rd 2).
+  - **True alt-tab = native `ToggleTab` on `Alt+o`** (last two focused tabs,
+    server-side truth). Alt+2's old alt-tab trick died by design: row 2 no
+    longer swaps on focus.
+  - **uuid jumps** keep `focus_pane_with_id` (S2): the pane id is broadcast
+    truth, so every instance targets the same pane.
+  - The bar pane is `set_selectable(false)` (stock tab-bar pattern): clicks
+    reach the plugin without a focus-stealing first click, and `MoveFocus`
+    skips the bar.
 - **Other keybinds** (clave session config, `shared_among "normal" "locked"`):
   `Alt+a` add (Zellij `Run` → floating `clave add`, §6.3) · `Alt+w` close tab
   (native `CloseTab`, §6.7). Keep the user's existing `Alt+h/l` and `Alt+y`.
@@ -462,9 +526,16 @@ self-hydrates on load via `RunCommands` — §6.6).
   `hide_self()`/`show_self(false)`. Verify live: the grid reclaims the width, and
   hidden instances still receive pipes. Fallback: `close_self()` + relaunch keybind.
 - **Instances:** one bar pane per tab (stock tab-bar pattern) via the session
-  layout's tab template (§6.8); pipes broadcast to all instances → identical state.
-  A bar-less tab (edge: a native new-tab that bypassed the template) still appears
-  in every other tab's bar — `TabUpdate` is session-wide.
+  layout's tab template (§6.8). **Zellij event delivery (C3/C4 live finding,
+  2026-07-08): `TabUpdate` reaches ONLY the active tab's instance** — hidden
+  instances are event-starved, so per-instance transition detection and
+  active-instance write-gating are impossible. Pipes ARE broadcast to all
+  instances (buffered through plugin load; each CLI pipe also delivers one
+  empty EOF message — dropped). Everything cross-tab therefore rides pipes:
+  status snapshots, registration, visits. A bar-less tab (edge: a native
+  new-tab that bypassed the template) still appears in every other tab's bar —
+  the tab SET in any received `TabUpdate` is session-wide even though delivery
+  is not.
 - **Permissions:** `ReadCliPipes + ChangeApplicationState + ReadApplicationState +
   RunCommands` — the EXACT set `clave setup` pre-seeds under both key forms (§7;
   all-or-nothing grant, S1/S2).

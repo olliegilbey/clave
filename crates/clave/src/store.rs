@@ -54,6 +54,12 @@ pub struct AgentRecord {
     /// Worktree path if `clave add --worktree` created one (§6.3), else None.
     pub worktree: Option<String>,
     pub label_source: LabelSource,
+    /// Zellij tab id hosting this agent (§6.6 Design B), bound by the agent
+    /// tab's own bar via `clave bind`. Keys the hook's prompt→timeline stamp
+    /// and the bar's glyph join. Session-scoped: None until bound, reset on
+    /// session recreate (see clear_tab_timeline).
+    #[serde(default)]
+    pub tab_id: Option<usize>,
 }
 
 /// The whole store file. `seq` is the monotonic snapshot counter of the §5
@@ -67,6 +73,13 @@ pub struct Store {
     /// snapshots and `ls` output).
     #[serde(default)]
     pub agents: BTreeMap<String, AgentRecord>,
+    /// tab_id → unix seconds of the last user commitment (§6.6 row order).
+    /// Kept HERE, not per bar instance: instance-local copies fed by
+    /// fire-and-forget pipe deltas diverged live (C5 round 5) — the store
+    /// RMW is the one writer, and the map rides every snapshot push.
+    /// tab_ids are session-scoped: cleared on session (re)create.
+    #[serde(default)]
+    pub tab_timeline: BTreeMap<usize, u64>,
 }
 
 pub struct StorePaths {
@@ -132,6 +145,7 @@ pub fn with_store_mut<T>(paths: &StorePaths, f: impl FnOnce(&mut Store) -> T) ->
 pub fn snapshot_from(store: &Store) -> AgentSnapshot {
     AgentSnapshot {
         seq: store.seq,
+        tab_timeline: store.tab_timeline.clone(),
         agents: store
             .agents
             .values()
@@ -144,6 +158,7 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
                 status: r.status,
                 last_interacted: r.last_interacted,
                 last_visited: r.last_visited,
+                tab_id: r.tab_id,
             })
             .collect(),
     }
@@ -164,6 +179,51 @@ pub fn apply_focus(paths: &StorePaths, uuid: &str, now: u64) -> Result<Option<Ag
         }
         s.seq += 1; // monotonic pipe contract (§5)
         Some(snapshot_from(s))
+    })
+}
+
+/// `clave touch <tab_id>` (§6.6): stamp a user commitment on the STORE's
+/// tab timeline and hand back a seq-bumped snapshot for the pipe push.
+/// Max-merge so a late/duplicate older stamp can never regress the order
+/// (concurrent birth touches from multiple bar instances are expected).
+pub fn apply_touch(paths: &StorePaths, tab_id: usize, now: u64) -> Result<AgentSnapshot> {
+    with_store_mut(paths, |s| {
+        let e = s.tab_timeline.entry(tab_id).or_insert(0);
+        *e = (*e).max(now);
+        s.seq += 1; // monotonic pipe contract (§5)
+        snapshot_from(s)
+    })
+}
+
+/// `clave bind <uuid> <tab_id>` (§6.6 Design B): persist the uuid→tab join
+/// reported by the agent tab's own bar instance (the only one whose data is
+/// reliably fresh — it is active at spawn time). Snapshot back only on
+/// CHANGE, so a bar re-reporting an existing bind costs no push. Unknown
+/// uuid returns None (bar may race a pruned agent).
+pub fn apply_bind(paths: &StorePaths, uuid: &str, tab_id: usize) -> Result<Option<AgentSnapshot>> {
+    with_store_mut(paths, |s| {
+        let r = s.agents.get_mut(uuid)?;
+        if r.tab_id == Some(tab_id) {
+            return None;
+        }
+        r.tab_id = Some(tab_id);
+        s.seq += 1; // monotonic pipe contract (§5)
+        Some(snapshot_from(s))
+    })
+}
+
+/// Session (re)create hygiene: tab_ids are SESSION-scoped, so a fresh
+/// session must inherit neither dead tabs' commitments (reused ids) nor
+/// stale uuid→tab binds. No push — no bar instance exists yet at launch
+/// time; hydration reads the store.
+pub fn clear_tab_timeline(paths: &StorePaths) -> Result<()> {
+    with_store_mut(paths, |s| {
+        let bound = s.agents.values().any(|r| r.tab_id.is_some());
+        if !s.tab_timeline.is_empty() || bound {
+            s.tab_timeline.clear();
+            s.agents.values_mut().for_each(|r| r.tab_id = None);
+            s.seq += 1; // content changed ⇒ seq changed (§5)
+        }
     })
 }
 
@@ -199,6 +259,7 @@ mod tests {
             last_visited: 0,
             worktree: None,
             label_source: LabelSource::FirstPrompt,
+            tab_id: None,
         }
     }
 
@@ -266,10 +327,95 @@ mod tests {
         let mut s = Store::default();
         s.seq = 7;
         s.agents.insert("u1".into(), rec("u1"));
+        s.tab_timeline.insert(4, 1700);
+        s.agents.get_mut("u1").unwrap().tab_id = Some(4);
         let snap = snapshot_from(&s);
         assert_eq!(snap.seq, 7);
         assert_eq!(snap.agents.len(), 1);
         assert_eq!(snap.agents[0].uuid, "u1");
         assert_eq!(snap.agents[0].label, "x · main");
+        // §6.6 store-timeline: order rides every snapshot.
+        assert_eq!(snap.tab_timeline.get(&4), Some(&1700));
+        // §6.6 Design B: the uuid→tab bind rides it too (glyph join key).
+        assert_eq!(snap.agents[0].tab_id, Some(4));
+    }
+
+    #[test]
+    fn bind_records_tab_id_once_and_ignores_unknown_or_unchanged() {
+        // `clave bind <uuid> <tab_id>` (§6.6 Design B): the agent tab's own
+        // bar reports its join to the store so every OTHER instance can key
+        // glyphs/order off the snapshot instead of local joins (round 6:
+        // register pipes don't replay; hidden manifests go stale).
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            s.agents.insert("u1".into(), rec("u1"));
+        })
+        .unwrap();
+        let snap = apply_bind(&p, "u1", 4).unwrap().expect("bound");
+        assert_eq!(snap.agents[0].tab_id, Some(4));
+        assert_eq!(snap.seq, 1);
+        // Same bind again: no change, no seq bump, no push.
+        assert!(apply_bind(&p, "u1", 4).unwrap().is_none());
+        assert_eq!(read_store(&p).unwrap().seq, 1);
+        // A MOVED agent (pane broken out to a new tab) re-binds.
+        let snap = apply_bind(&p, "u1", 9).unwrap().expect("rebound");
+        assert_eq!(snap.agents[0].tab_id, Some(9));
+        // Unknown uuid: silently none (bar may race a pruned agent).
+        assert!(apply_bind(&p, "ghost", 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn clear_session_state_wipes_timeline_and_binds() {
+        // Both maps are keyed by session-scoped tab_ids — a recreated
+        // session must inherit neither.
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            s.agents.insert("u1".into(), rec("u1"));
+        })
+        .unwrap();
+        apply_touch(&p, 4, 1700).unwrap();
+        apply_bind(&p, "u1", 4).unwrap();
+        clear_tab_timeline(&p).unwrap();
+        let s = read_store(&p).unwrap();
+        assert!(s.tab_timeline.is_empty());
+        assert_eq!(s.agents["u1"].tab_id, None);
+    }
+
+    #[test]
+    fn touch_stamps_timeline_bumps_seq_and_never_regresses() {
+        // `clave touch <tab_id>` (§6.6): the ONE writer of tab order. Locked
+        // RMW here — per-instance pipe-delta merges diverged live (C5 rd 5).
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        let snap = apply_touch(&p, 4, 1700).unwrap();
+        assert_eq!(snap.tab_timeline.get(&4), Some(&1700));
+        assert_eq!(snap.seq, 1); // §5: every push strictly newer
+        // Later commitment moves it forward…
+        let snap = apply_touch(&p, 4, 2000).unwrap();
+        assert_eq!(snap.tab_timeline.get(&4), Some(&2000));
+        // …but a late/duplicate OLDER stamp can't regress it (max-merge).
+        let snap = apply_touch(&p, 4, 100).unwrap();
+        assert_eq!(snap.tab_timeline.get(&4), Some(&2000));
+        assert_eq!(snap.seq, 3);
+        // Persisted: a fresh read sees the same map.
+        assert_eq!(read_store(&p).unwrap().tab_timeline.get(&4), Some(&2000));
+    }
+
+    #[test]
+    fn clear_tab_timeline_wipes_session_scoped_ids() {
+        // tab_ids are SESSION-scoped: a recreated session reuses ids, so a
+        // stale timeline would order new tabs by dead tabs' commitments.
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        apply_touch(&p, 4, 1700).unwrap();
+        clear_tab_timeline(&p).unwrap();
+        let s = read_store(&p).unwrap();
+        assert!(s.tab_timeline.is_empty());
+        assert_eq!(s.seq, 2); // content changed ⇒ seq changed (§5 invariant)
+        // Idempotent: clearing an empty timeline changes nothing.
+        clear_tab_timeline(&p).unwrap();
+        assert_eq!(read_store(&p).unwrap().seq, 2);
     }
 }

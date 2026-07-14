@@ -48,6 +48,10 @@ pub fn config_kdl(wasm: &str) -> String {
         "        bind \"Alt c\" {{ MessagePlugin \"file:{wasm}\" {{ name \"clave-toggle\"; }}; }}\n"
     ));
     binds.push_str("        bind \"Alt w\" { CloseTab; }\n");
+    // Alt+↓/↑ walk the DISPLAYED list (§6.6 revised 2026-07-08: rows only
+    // reorder on user commitments, never on focus — so walking the visible
+    // order is stable, no ping-pong). Executor-gated in the plugin: only the
+    // active instance (fresh tab set, the bar being read) computes the step.
     binds.push_str(&format!(
         "        bind \"Alt j\" \"Alt Down\" {{ {} }}\n",
         nav("{\\\"dir\\\":\\\"next\\\"}")
@@ -56,6 +60,8 @@ pub fn config_kdl(wasm: &str) -> String {
         "        bind \"Alt k\" \"Alt Up\" {{ {} }}\n",
         nav("{\\\"dir\\\":\\\"prev\\\"}")
     ));
+    // True alt-tab (last two focused tabs) is NATIVE — server-side truth.
+    binds.push_str("        bind \"Alt o\" { ToggleTab; }\n");
     for n in 1..=9 {
         binds.push_str(&format!(
             "        bind \"Alt {n}\" {{ {} }}\n",
@@ -220,6 +226,15 @@ pub fn run_setup() -> Result<()> {
     Ok(())
 }
 
+/// Does `zellij list-sessions -n` output show `name` as a LIVE session?
+/// EXITED is not live: attaching resurrects a fresh session whose tab_ids
+/// restart from scratch.
+pub fn session_is_live(list_output: &str, name: &str) -> bool {
+    list_output
+        .lines()
+        .any(|l| l.split_whitespace().next() == Some(name) && !l.contains("EXITED"))
+}
+
 /// Bare `clave`: attach-or-create the dedicated session with OUR config +
 /// layout (§6.8 — the user's global zellij config is never touched).
 pub fn launch_session() -> Result<()> {
@@ -229,6 +244,18 @@ pub fn launch_session() -> Result<()> {
         config.exists() && layout.exists(),
         "run `clave setup` first"
     );
+    // §6.6 hygiene: tab_ids are SESSION-scoped, so when we're about to
+    // CREATE (not re-attach) the session, drop the previous session's tab
+    // timeline — reused ids would inherit dead tabs' commitments. Best
+    // effort: list-sessions exits non-zero when no sessions exist at all.
+    let live = std::process::Command::new("zellij")
+        .args(["list-sessions", "-n"])
+        .output()
+        .map(|o| session_is_live(&String::from_utf8_lossy(&o.stdout), "clave"))
+        .unwrap_or(false);
+    if !live {
+        crate::store::clear_tab_timeline(&crate::store::store_paths()?)?;
+    }
     use std::os::unix::process::CommandExt;
     let err = std::process::Command::new("zellij")
         .arg("--config")
@@ -243,6 +270,22 @@ pub fn launch_session() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_is_live_reads_zellij_list_sessions() {
+        // `zellij list-sessions -n` lines: `<name> [Created …]`, with
+        // ` (EXITED - attach to resurrect)` appended for dead sessions.
+        // EXITED counts as NOT live: attach resurrects a FRESH session whose
+        // tab_ids restart, so the stale timeline must be cleared then too.
+        let out = "chat [Created 5h ago]\nclave [Created 2m ago]\n";
+        assert!(session_is_live(out, "clave"));
+        let out = "clave [Created 2h ago] (EXITED - attach to resurrect)\n";
+        assert!(!session_is_live(out, "clave"));
+        // No sessions at all (list-sessions exits non-zero → empty string).
+        assert!(!session_is_live("", "clave"));
+        // Name must match the whole first token, not a prefix.
+        assert!(!session_is_live("clave-dev [Created 1m ago]\n", "clave"));
+    }
 
     #[test]
     fn hooks_merge_is_additive_and_idempotent() {

@@ -53,6 +53,12 @@ pub struct Agent {
     pub last_interacted: u64,
     /// unix seconds; bumped on focus → `unread = done && !visited`.
     pub last_visited: u64,
+    /// Zellij tab id hosting this agent (§6.6 Design B): bound ONCE by the
+    /// agent tab's own bar instance (`clave bind`) so glyph joins and prompt
+    /// stamps ride the snapshot — per-instance register/manifest joins
+    /// diverge (round 6). Session-scoped; None until bound / after recreate.
+    #[serde(default)]
+    pub tab_id: Option<usize>,
 }
 
 /// The full-replace snapshot `clave` pushes to `clave-bar` on every change
@@ -62,6 +68,13 @@ pub struct Agent {
 pub struct AgentSnapshot {
     pub seq: u64,
     pub agents: Vec<Agent>,
+    /// tab_id → unix seconds of the last user commitment to that tab (§6.6).
+    /// Lives in the STORE and rides every snapshot as seq-gated full state:
+    /// per-instance pipe-delta merges diverged live (C5 round 5) — the bar
+    /// REPLACES its copy from this map, never merges. `default` keeps
+    /// pre-field payloads parseable.
+    #[serde(default)]
+    pub tab_timeline: std::collections::BTreeMap<usize, u64>,
 }
 
 /// The `clave-register` payload a pane's `clave spawn` pipes to the plugin so it
@@ -138,6 +151,7 @@ mod tests {
             status: Status::Idle,
             last_interacted: 0,
             last_visited: 0,
+            tab_id: None,
         };
         assert!(!serde_json::to_string(&a).unwrap().contains("archived"));
     }
@@ -146,6 +160,7 @@ mod tests {
     fn snapshot_roundtrips() {
         let snap = AgentSnapshot {
             seq: 7,
+            tab_timeline: Default::default(),
             agents: vec![Agent {
                 uuid: "u1".into(),
                 cwd: "/Users/x/code/clave".into(),
@@ -155,11 +170,57 @@ mod tests {
                 status: Status::Working,
                 last_interacted: 1000,
                 last_visited: 0,
+                tab_id: None,
             }],
         };
         let json = serde_json::to_string(&snap).unwrap();
         let back: AgentSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(snap, back);
+    }
+
+    #[test]
+    fn agent_tab_id_roundtrips_and_defaults_none() {
+        // §6.6 Design B: the store binds uuid→tab_id (reported once by the
+        // agent tab's own bar) so ordering stamps AND glyph joins ride the
+        // snapshot instead of per-instance register/manifest joins — the
+        // third divergence channel found in round 6.
+        let mut a = Agent {
+            uuid: "u1".into(),
+            cwd: "/x".into(),
+            repo_root: "/x".into(),
+            branch: "main".into(),
+            label: "x · main".into(),
+            status: Status::Idle,
+            last_interacted: 0,
+            last_visited: 0,
+            tab_id: Some(4),
+        };
+        let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
+        assert_eq!(back.tab_id, Some(4));
+        // Pre-field payloads must parse as unbound.
+        a.tab_id = None;
+        let mut v: serde_json::Value = serde_json::to_value(&a).unwrap();
+        v.as_object_mut().unwrap().remove("tab_id");
+        let old: Agent = serde_json::from_value(v).unwrap();
+        assert_eq!(old.tab_id, None);
+    }
+
+    #[test]
+    fn snapshot_carries_tab_timeline_and_defaults_empty() {
+        // §6.6 store-timeline: row order ships IN the snapshot — seq-gated
+        // full-state replace, the one channel that never diverged (C5 rd 5:
+        // fire-and-forget pipe deltas diverged per instance).
+        let snap = AgentSnapshot {
+            seq: 1,
+            agents: vec![],
+            tab_timeline: std::collections::BTreeMap::from([(4usize, 1700u64)]),
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        let back: AgentSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.tab_timeline.get(&4), Some(&1700));
+        // Pre-field payloads (old store hydration) must still parse.
+        let old: AgentSnapshot = serde_json::from_str("{\"seq\":1,\"agents\":[]}").unwrap();
+        assert!(old.tab_timeline.is_empty());
     }
 
     #[test]

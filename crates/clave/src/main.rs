@@ -86,6 +86,28 @@ enum Command {
         uuid: String,
     },
 
+    /// Stamp "the user committed to this tab" (birth, for now) into the
+    /// STORE's tab timeline with host time, then push the snapshot that
+    /// carries the new order to every bar instance (§6.6; the wasm plugin
+    /// has no trustworthy clock, and per-instance pipe deltas diverged —
+    /// C5 round 5). Fired by the bar at tab birth.
+    Touch {
+        /// Zellij's stable tab id.
+        tab_id: usize,
+    },
+
+    /// Persist the uuid→tab_id join reported by the agent tab's own bar
+    /// (plugin-internal, §6.6 Design B). The bind keys the hook's
+    /// prompt→timeline stamp and every bar's glyph join — local
+    /// register/manifest joins diverge across instances (round 6).
+    #[command(hide = true)]
+    Bind {
+        /// The agent's session UUID (the store join key).
+        uuid: String,
+        /// Zellij's stable tab id hosting the agent's pane.
+        tab_id: usize,
+    },
+
     /// Prepare the machine: generate config/layout, merge Claude hooks,
     /// pre-seed the Zellij permission cache (§6.8/§7). Idempotent.
     Setup,
@@ -157,6 +179,23 @@ fn main() -> Result<()> {
             // Broadcast the flip: only the focused tab's bar repainted
             // locally (zellij starves hidden instances of TabUpdates).
             if let Some(snap) = store::apply_focus(&paths, &uuid, store::now_unix())? {
+                hook::push_snapshot(&snap);
+            }
+            Ok(())
+        }
+        Some(Command::Touch { tab_id }) => {
+            let paths = store::store_paths()?;
+            // Locked RMW in the store (the ONE order writer), then broadcast
+            // the seq-gated full state — the channel that never diverged.
+            let snap = store::apply_touch(&paths, tab_id, store::now_unix())?;
+            hook::push_snapshot(&snap);
+            Ok(())
+        }
+        Some(Command::Bind { uuid, tab_id }) => {
+            let paths = store::store_paths()?;
+            // Push only on CHANGE (apply_bind returns None otherwise) — a
+            // re-reported existing bind must not generate pipe traffic.
+            if let Some(snap) = store::apply_bind(&paths, &uuid, tab_id)? {
                 hook::push_snapshot(&snap);
             }
             Ok(())
