@@ -24,6 +24,10 @@ struct State {
     /// The last TabUpdate, verbatim — is_active_instance reads it (rows()
     /// is display-ordered, so it can't answer "is position P active").
     last_tabs: Vec<TabMeta>,
+    /// Peek-on-nav timers in flight: each armed peek starts one
+    /// set_timeout(1.0); only the LAST expiry sinks the bar, so a nav burst
+    /// keeps it expanded until ~1s after the final press.
+    pending_peeks: u32,
 }
 
 register_plugin!(State);
@@ -207,8 +211,15 @@ impl State {
             },
             "clave-visited" => match payload.trim().parse::<usize>() {
                 Ok(tab_id) => {
-                    // Beacon only (executor election) — never reorders.
-                    self.model.beacon(tab_id);
+                    // Beacon (executor election — never reorders) + peek:
+                    // a collapsed bar expands while the user navigates and
+                    // sinks ~1s after the last nav (timer per peek; the
+                    // Event::Timer arm below sinks only when the count of
+                    // pending timers drains to zero).
+                    if self.model.visited(tab_id) {
+                        self.pending_peeks += 1;
+                        set_timeout(0.9); // user-tuned: 1.0 felt a touch long
+                    }
                     true // active-row highlight may move
                 }
                 Err(e) => {
@@ -280,6 +291,7 @@ impl ZellijPlugin for State {
             EventType::Mouse,
             EventType::RunCommandResult,
             EventType::PermissionRequestResult,
+            EventType::Timer, // peek-on-nav sink (set_timeout per peek)
             // NO InputReceived: it fires for EVERY keystroke INCLUDING the
             // nav keybinds themselves (C5 round 4: each walk press touched
             // the departing tab and the touch-spawn storm exhausted the
@@ -379,6 +391,13 @@ impl ZellijPlugin for State {
                 self.model.apply_panes(metas);
                 self.fire_binds(); // fresh manifest → own-tab joins resolvable
                 true
+            }
+            Event::Timer(_) => {
+                // One expiry per armed peek; only the LAST sinks (nav burst
+                // = one visible expand, one sink). peek_expired() is false
+                // when a toggle already cancelled the peek — no repaint.
+                self.pending_peeks = self.pending_peeks.saturating_sub(1);
+                self.pending_peeks == 0 && self.model.peek_expired()
             }
             Event::Mouse(Mouse::LeftClick(line, _col)) => {
                 // §6.6: rows are mouse-clickable. line is the rendered row.

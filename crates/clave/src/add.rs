@@ -75,7 +75,7 @@ pub fn tab_layout(wasm: &str, label: &str, uuid: &str, cwd: &str) -> String {
         r#"layout {{
     tab name="{label}" focus=true {{
         pane split_direction="vertical" {{
-            pane size=26 borderless=true {{
+            pane size=30 borderless=true {{
                 plugin location="file:{wasm}"
             }}
             pane cwd="{cwd}" command="clave" {{

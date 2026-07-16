@@ -484,6 +484,24 @@ nav (auto-expand the bar ~2s on tab switch while collapsed).
 directions, all tabs at once, no focus jumps, rapid toggles safe; TEMP
 traces removed after).
 
+**Round 21 (2026-07-16, features on top of the PASS): 30 cols +
+peek-on-nav — user-validated live ("works brilliantly"), hot-reload
+only.** BAR_TARGET_COLS 26→30 plus both `size=` templates (setup/add);
+existing bars converge on the next toggle cycle, born-at-30 panes need a
+session recreate. Peek-on-nav: while collapsed, any nav expands the bar,
+sinking 0.9s (user-tuned from 1.0) after the last nav. Mechanism: the
+replicated `clave-visited` pipe calls model `visited()` = beacon + arm
+`peeking` + re-arm seek toward the template; main.rs counts one
+`set_timeout(0.9)` per armed peek and only the LAST expiry calls
+`peek_expired()` (sink), so nav bursts stay expanded. `width_seek` target
+is `collapsed && !peeking ? 4 : 30`; toggle clears `peeking` (explicit
+Alt+c outranks a peek; late timers are no-ops). Deliberate deviation from
+the sketched design: `beacon()` keeps its signature — the internal beacon
+callers (click/nav) can't start host timers, and their AnnounceVisit
+echoes back as clave-visited on every instance anyway, so arming peeks
+ONLY on the pipe path means a peek can never exist without its sink
+timer. Expanded bars ignore peeks.
+
 ## C7 — dump-layout liveness + resume picker
 - With one agent live: `zellij action dump-layout | grep -A2 clave` — baked
   `args "spawn" "<uuid>" …` present, on its own line.

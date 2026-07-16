@@ -56,9 +56,9 @@ pub enum Effect {
     GrowSelf,
 }
 
-/// The generated layouts give the bar `size=26` (setup::layout_kdl and
+/// The generated layouts give the bar `size=30` (setup::layout_kdl and
 /// add::tab_layout) — the expanded width the seek returns to.
-const BAR_TARGET_COLS: usize = 26;
+const BAR_TARGET_COLS: usize = 30;
 /// Collapsed width target (Alt+c): a glyph gutter — the state glyph plus a
 /// couple of name chars survive the renderer's own truncation, so "mini
 /// mode" needs no special render path. Zellij's resize floor may stop the
@@ -150,6 +150,10 @@ pub struct BarModel {
     /// Bar collapsed to the glyph gutter (Alt+c)? Round 20: purely a width
     /// state — the pane itself is never hidden or suppressed.
     pub collapsed: bool,
+    /// Peek-on-nav: a collapsed bar showing the template width because the
+    /// user is navigating. Armed by `visited` (the replicated clave-visited
+    /// pipe), cleared by `peek_expired` (main.rs's ~1s timer) or `toggle`.
+    peeking: bool,
 }
 
 impl BarModel {
@@ -159,6 +163,37 @@ impl BarModel {
     pub fn beacon(&mut self, tab_id: usize) {
         self.current_tab = Some(tab_id);
         self.organic_pending = false; // truth arrived; leftover flags are poison
+    }
+
+    /// The `clave-visited` pipe entry: beacon, plus peek-on-nav — a
+    /// collapsed bar expands while the user navigates. Returns true when a
+    /// peek was armed so main.rs starts the ~1s sink timer. ONLY this pipe
+    /// path arms peeks: the internal beacon callers (click/nav) can't start
+    /// host timers, and their AnnounceVisit echoes back as this very pipe
+    /// on every instance — a peek armed without a timer would stick.
+    pub fn visited(&mut self, tab_id: usize) -> bool {
+        self.beacon(tab_id);
+        if !self.collapsed {
+            return false; // expanded bars stay expanded — nothing to peek
+        }
+        self.peeking = true;
+        self.seek_budget = SEEK_BUDGET; // re-arm toward the template
+        self.seek_last_cols = None;
+        true
+    }
+
+    /// The LAST peek timer expired (main.rs counts one per nav, so a nav
+    /// burst sinks once, ~1s after the final press): sink back to the
+    /// gutter. Returns whether anything changed — false when a toggle
+    /// already cancelled the peek (a late timer must not re-arm the seek).
+    pub fn peek_expired(&mut self) -> bool {
+        if !self.peeking {
+            return false;
+        }
+        self.peeking = false;
+        self.seek_budget = SEEK_BUDGET; // re-arm toward the gutter
+        self.seek_last_cols = None;
+        true
     }
 
     /// Alt+o's bind pipes `clave-organic` alongside the native ToggleTab:
@@ -443,6 +478,7 @@ impl BarModel {
     /// kept — zellij's resize increment is an environment property.
     pub fn toggle(&mut self) -> bool {
         self.collapsed = !self.collapsed;
+        self.peeking = false; // an explicit toggle outranks a pending peek
         self.seek_budget = SEEK_BUDGET;
         self.seek_last_cols = None;
         self.collapsed
@@ -466,7 +502,9 @@ impl BarModel {
         if self.seek_budget == 0 {
             return Vec::new();
         }
-        let target = if self.collapsed {
+        // A peeking bar seeks the template width even though collapsed —
+        // the collapse resumes when the peek expires.
+        let target = if self.collapsed && !self.peeking {
             COLLAPSED_TARGET_COLS
         } else {
             BAR_TARGET_COLS
@@ -910,16 +948,16 @@ mod tests {
     #[test]
     fn seek_collapses_to_the_gutter_despite_coarse_steps() {
         // Round 20 (collapse-in-place): Alt+c drives OWN width between the
-        // template (26) and the glyph gutter (4) — the pane is never
+        // template (30) and the glyph gutter (4) — the pane is never
         // suppressed. Zellij resizes in ~5%-of-viewport steps (7–14 cols),
         // far coarser than either target: the step is LEARNED from each
         // resize's observed effect and acceptance is within half a step
         // (round-9 lesson: naive loops overshoot straight through).
         let mut m = BarModel::default();
         // Never toggled: geometry is the user's business.
-        assert_eq!(m.width_seek(26), Vec::<Effect>::new());
+        assert_eq!(m.width_seek(30), Vec::<Effect>::new());
         let mut m = collapsed_model();
-        let mut cols = 26i64;
+        let mut cols = 30i64;
         let mut acted = 0;
         loop {
             match m.width_seek(cols as usize).as_slice() {
@@ -940,20 +978,23 @@ mod tests {
     #[test]
     fn seek_expands_back_to_template_width() {
         let mut m = collapsed_model();
-        m.toggle(); // expanded again → seek re-armed toward 26
+        m.toggle(); // expanded again → seek re-armed toward 30
         let mut cols = 5i64;
         let mut acted = 0;
         loop {
             match m.width_seek(cols as usize).as_slice() {
-                [Effect::ShrinkSelf] => cols -= 7,
-                [Effect::GrowSelf] => cols += 7,
+                [Effect::ShrinkSelf] => cols -= 9,
+                [Effect::GrowSelf] => cols += 9,
                 [] => break,
                 other => panic!("unexpected seek effects: {other:?}"),
             }
             acted += 1;
             assert!(acted < 20, "did not converge");
         }
-        assert!((cols - 26).abs() <= 4, "ended at {cols} cols");
+        // Simulated step 9 (not 7): from 5 the 7-ladder lands ON 26, which
+        // the ±4 slack band accepts for either template width — 9 makes the
+        // end position actually distinguish 30 from the old 26.
+        assert!((cols - 30).abs() <= 4, "ended at {cols} cols");
     }
 
     #[test]
@@ -963,16 +1004,16 @@ mod tests {
         // guard makes zellij's resize FLOOR benign: at the floor cols stop
         // changing, so the seek stops firing instead of thrashing.
         let mut m = collapsed_model();
-        assert_eq!(m.width_seek(26), vec![Effect::ShrinkSelf]);
+        assert_eq!(m.width_seek(30), vec![Effect::ShrinkSelf]);
         for _ in 0..10 {
-            assert_eq!(m.width_seek(26), Vec::<Effect>::new());
+            assert_eq!(m.width_seek(30), Vec::<Effect>::new());
         }
-        // Landed (26 → 12): learned step 12, keep shrinking toward 4.
-        assert_eq!(m.width_seek(12), vec![Effect::ShrinkSelf]);
-        // Floor: zellij refuses to go below 12 — cols never change again,
+        // Landed (30 → 16): learned step 14, keep shrinking toward 4.
+        assert_eq!(m.width_seek(16), vec![Effect::ShrinkSelf]);
+        // Floor: zellij refuses to go below 16 — cols never change again,
         // the guard holds forever, no thrash.
         for _ in 0..10 {
-            assert_eq!(m.width_seek(12), Vec::<Effect>::new());
+            assert_eq!(m.width_seek(16), Vec::<Effect>::new());
         }
     }
 
@@ -981,9 +1022,9 @@ mod tests {
         // The round-9 live defect, seek edition: an overshoot past the
         // target is recovered by growing, and the half-step band accepts.
         let mut m = collapsed_model();
-        m.toggle(); // expanded → target 26
+        m.toggle(); // expanded → target 30
         assert_eq!(m.width_seek(13), vec![Effect::GrowSelf]);
-        // Landed (+14 → 27): learned step 14, |27−26| within half a step →
+        // Landed (+14 → 27): learned step 14, |27−30| within half a step →
         // accept and retire.
         assert_eq!(m.width_seek(27), Vec::<Effect>::new());
         assert_eq!(m.width_seek(13), Vec::<Effect>::new()); // retired
@@ -995,7 +1036,7 @@ mod tests {
         // than one resize step; learning that delta poisons the acceptance
         // band (step=60 accepted a 13-col bar as "close enough" to 26).
         let mut m = collapsed_model();
-        m.toggle(); // expanded → target 26
+        m.toggle(); // expanded → target 30
         assert_eq!(m.width_seek(75), vec![Effect::ShrinkSelf]);
         // External jump 75 → 15 (delta 60): recover, but don't learn 60.
         assert_eq!(m.width_seek(15), vec![Effect::GrowSelf]);
@@ -1014,6 +1055,46 @@ mod tests {
             .take_while(|fx| !fx.is_empty())
             .count();
         assert!(steps <= 16, "unbounded seek: {steps} steps");
+    }
+
+    #[test]
+    fn peek_expands_a_collapsed_bar_and_expiry_sinks_it() {
+        // Peek-on-nav: while collapsed, any nav (arriving as the replicated
+        // clave-visited pipe) briefly expands the bar; ~1s after the last
+        // nav it sinks back to the gutter.
+        let mut m = collapsed_model();
+        assert_eq!(m.width_seek(4), Vec::<Effect>::new()); // settled at gutter
+        assert!(m.visited(7), "collapsed bar must arm a peek");
+        assert_eq!(m.current_tab(), Some(7)); // still a beacon
+        // Peek re-armed the seek toward the TEMPLATE despite collapsed.
+        assert_eq!(m.width_seek(4), vec![Effect::GrowSelf]);
+        // A second nav during the peek re-arms (main.rs counts its timers).
+        assert!(m.visited(8));
+        // Expiry: sink back toward the gutter.
+        assert!(m.peek_expired());
+        assert_eq!(m.width_seek(30), vec![Effect::ShrinkSelf]);
+    }
+
+    #[test]
+    fn expanded_bars_ignore_peeks() {
+        let mut m = BarModel::default();
+        assert!(!m.visited(7), "expanded bar must not arm a peek");
+        assert_eq!(m.current_tab(), Some(7)); // beacon still lands
+        // No seek was armed — geometry stays the user's business.
+        assert_eq!(m.width_seek(30), Vec::<Effect>::new());
+    }
+
+    #[test]
+    fn toggle_cancels_a_peek_and_a_late_expiry_is_a_noop() {
+        let mut m = collapsed_model();
+        assert_eq!(m.width_seek(4), Vec::<Effect>::new());
+        assert!(m.visited(7));
+        // Alt+c mid-peek: now genuinely expanded; the peek flag must not
+        // survive to fight the user's explicit toggle.
+        m.toggle();
+        assert!(!m.peek_expired(), "late timer after a toggle is a no-op");
+        // Seek heads for the template (expanded), unpoisoned by the peek.
+        assert_eq!(m.width_seek(13), vec![Effect::GrowSelf]);
     }
     #[test]
     fn stale_instance_orders_and_decorates_from_snapshot_alone() {
