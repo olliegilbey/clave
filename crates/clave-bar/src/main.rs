@@ -24,23 +24,7 @@ struct State {
     /// The last TabUpdate, verbatim — is_active_instance reads it (rows()
     /// is display-ordered, so it can't answer "is position P active").
     last_tabs: Vec<TabMeta>,
-    /// Every bar pane's (pane_id, x, cols) from the last PaneUpdate — the
-    /// timer-paced repair retry works off this cache (round 17). Stale x
-    /// is safe: move-left on a leftmost pane is a zellij no-op; a stale
-    /// cols at worst re-fires one step and the learner's grow recovers.
-    last_bars: Vec<(u32, Option<usize>, usize)>,
-    /// Remaining timer-paced repair ticks (armed on toggle-show). A hard
-    /// cap so the timer chain always terminates even if some pane never
-    /// converges (non-executor instances stay armed forever by design).
-    repair_timer_ticks: u8,
 }
-
-/// Seconds between timer-paced repair retries — comfortably longer than
-/// zellij needs to apply a resize, so a retry means "the fire was lost",
-/// not "it hasn't landed yet" (the round-16 double-fire failure).
-const REPAIR_RETRY_SECS: f64 = 0.4;
-/// Timer ticks armed per toggle-show (~12s of paced retries).
-const REPAIR_TIMER_TICKS: u8 = 30;
 
 register_plugin!(State);
 
@@ -137,39 +121,27 @@ impl State {
                         BTreeMap::new(),
                     );
                 }
-                // C6 repair effects carry their target pane (round 16: the
-                // executor heals EVERY tab's bar — pane ids are global and
-                // these commands work cross-tab). Gated at the call sites.
-                Effect::MoveBarLeft { pane_id } => {
-                    move_pane_with_pane_id_in_direction(PaneId::Plugin(pane_id), Direction::Left);
+                // C6 width-seek effects are SELF-targeted (round 20: every
+                // instance drives only its own pane, with render feedback).
+                Effect::ShrinkSelf => {
+                    if let Some(own) = self.own_plugin_id {
+                        resize_pane_with_id(
+                            ResizeStrategy::new(Resize::Decrease, Some(Direction::Right)),
+                            PaneId::Plugin(own),
+                        );
+                    }
                 }
-                Effect::ShrinkBar { pane_id } => {
-                    resize_pane_with_id(
-                        ResizeStrategy::new(Resize::Decrease, Some(Direction::Right)),
-                        PaneId::Plugin(pane_id),
-                    );
-                }
-                Effect::GrowBar { pane_id } => {
-                    resize_pane_with_id(
-                        ResizeStrategy::new(Resize::Increase, Some(Direction::Right)),
-                        PaneId::Plugin(pane_id),
-                    );
+                Effect::GrowSelf => {
+                    if let Some(own) = self.own_plugin_id {
+                        resize_pane_with_id(
+                            ResizeStrategy::new(Resize::Increase, Some(Direction::Right)),
+                            PaneId::Plugin(own),
+                        );
+                    }
                 }
                 _ => {} // non-active instance skips writes
             }
         }
-    }
-
-    /// The EXECUTOR gate: is this instance's own tab the replicated beacon?
-    /// The only trustworthy "am I the one on screen" signal —
-    /// is_active_instance() is degenerate on hidden instances (their stale
-    /// tab sets always claim their own tab is active, C3), which is exactly
-    /// how round-11's repair storm started: toggle-show broadcast layout
-    /// events to every instance, and hidden ones "repaired" real panes in
-    /// other tabs off stale geometry, each change feeding the next.
-    fn is_executor(&self) -> bool {
-        self.own_tab_id()
-            .is_some_and(|own| self.model.current_tab() == Some(own))
     }
 
     /// §6.6 Design B bootstrap: only the ACTIVE instance reports binds — its
@@ -186,32 +158,14 @@ impl State {
         }
     }
 
-    /// Alt+c: hide, or re-show WITHOUT stealing focus. `show_self()` is a
-    /// focus action server-side (Action::FocusPluginPaneWithId → switches to
-    /// the pane's tab); on toggle-show EVERY hidden instance runs this, so N
-    /// racing focus calls threw the user onto an arbitrary tab (round 14).
-    /// `show_pane_with_id(.., should_focus_pane=false)` routes to
-    /// UnsuppressOrExpandPane instead: restores the pane into the tab that
-    /// owns it, no focus, no tab switch.
-    fn toggle_hidden(&mut self) {
-        let hidden = self.model.toggle();
-        // TEMP round-15 trace — remove after C6 closes.
-        eprintln!("clave-bar: TRACE toggle hidden={hidden}");
-        if hidden {
-            hide_self();
-        } else {
-            if let Some(own) = self.own_plugin_id {
-                show_pane_with_id(PaneId::Plugin(own), false, false);
-            } else {
-                show_self(false); // pre-load fallback; can't happen post-load()
-            }
-            // Arm the paced repair-retry chain (round 17): the unsuppress
-            // burst clobbers resizes fired mid-burst, and hidden tabs may
-            // get no further events to chain off — the timer both re-fires
-            // lost resizes and ticks event-starved panes along.
-            self.repair_timer_ticks = REPAIR_TIMER_TICKS;
-            set_timeout(REPAIR_RETRY_SECS);
-        }
+    /// Alt+c (round 20, collapse-in-place): flip the width target and let
+    /// the render-fed seek drive OWN pane width there. No hide_self /
+    /// show_self — suppress was structurally hostile (lossy re-insert,
+    /// damage flag blocks swap-layout restores, resizes emit no events for
+    /// hidden panes). Every instance stays visible, hears this pipe, and
+    /// converges its own pane with real feedback.
+    fn toggle_collapsed(&mut self) {
+        self.model.toggle();
     }
 
     /// One pipe message → model. Split out of pipe() so early returns here
@@ -221,7 +175,7 @@ impl State {
         let Some(payload) = message.payload.as_deref() else {
             // Toggle carries no payload; everything else must.
             if name == "clave-toggle" {
-                self.toggle_hidden();
+                self.toggle_collapsed();
                 return true;
             }
             eprintln!("clave-bar: dropped {name} pipe with empty payload");
@@ -287,7 +241,7 @@ impl State {
                 true // the beacon moved → active-row highlight repaint
             }
             "clave-toggle" => {
-                self.toggle_hidden();
+                self.toggle_collapsed();
                 true
             }
             other => {
@@ -326,7 +280,6 @@ impl ZellijPlugin for State {
             EventType::Mouse,
             EventType::RunCommandResult,
             EventType::PermissionRequestResult,
-            EventType::Timer, // paced C6 repair retries (round 17)
             // NO InputReceived: it fires for EVERY keystroke INCLUDING the
             // nav keybinds themselves (C5 round 4: each walk press touched
             // the departing tab and the touch-spawn storm exhausted the
@@ -409,15 +362,11 @@ impl ZellijPlugin for State {
             }
             Event::PaneUpdate(manifest) => {
                 let mut metas = Vec::new();
-                // Every bar pane's geometry, all tabs (round 16: the
-                // executor heals them all): (pane_id, x, cols).
-                let mut bars: Vec<(u32, Option<usize>, usize)> = Vec::new();
                 self.plugin_panes.clear();
                 for (tab_position, panes) in &manifest.panes {
                     for p in panes {
                         if p.is_plugin {
                             self.plugin_panes.push((*tab_position, p.id));
-                            bars.push((p.id, Some(p.pane_x), p.pane_columns));
                         }
                         metas.push(PaneMeta {
                             tab_position: *tab_position,
@@ -428,52 +377,8 @@ impl ZellijPlugin for State {
                     }
                 }
                 self.model.apply_panes(metas);
-                self.last_bars = bars.clone(); // timer retries work off this
                 self.fire_binds(); // fresh manifest → own-tab joins resolvable
-                // C6 re-show repair, move phase (needs x): width steps also
-                // chain via render() for the visible tab — zellij sends no
-                // PaneUpdate for the plugin's own resize's effect (round
-                // 10). EXECUTOR-ONLY (round 11): hidden instances' stale
-                // manifests fed a repair/announce storm; the one fresh
-                // instance now repairs every tab's bar instead (round 16).
-                if self.is_executor() {
-                    let fx = self.model.repair_tick(&bars);
-                    self.run_effects(fx);
-                } else if self.model.repair_armed() {
-                    // TEMP round-15 trace — remove after C6 closes.
-                    eprintln!(
-                        "clave-bar: TRACE repair skipped (PaneUpdate) own_tab={:?} beacon={:?}",
-                        self.own_tab_id(),
-                        self.model.current_tab()
-                    );
-                }
                 true
-            }
-            Event::Timer(_) => {
-                // Paced C6 repair retry (round 17): clear in-flight guards
-                // and re-fire anything the unsuppress burst clobbered.
-                // Executor-only like every repair path; the chain re-arms
-                // while work remains, hard-capped by repair_timer_ticks.
-                let mut acted = false;
-                if self.repair_timer_ticks > 0 {
-                    self.repair_timer_ticks -= 1;
-                    if self.model.repair_armed() {
-                        if self.is_executor() {
-                            let bars = self.last_bars.clone();
-                            let fx = self.model.repair_retry_tick(&bars);
-                            // TEMP round-17 trace — remove after C6 closes.
-                            eprintln!(
-                                "clave-bar: TRACE timer retry ticks_left={} fired={} bars={bars:?}",
-                                self.repair_timer_ticks,
-                                fx.len()
-                            );
-                            acted = !fx.is_empty();
-                            self.run_effects(fx);
-                        }
-                        set_timeout(REPAIR_RETRY_SECS);
-                    }
-                }
-                acted
             }
             Event::Mouse(Mouse::LeftClick(line, _col)) => {
                 // §6.6: rows are mouse-clickable. line is the rendered row.
@@ -508,24 +413,12 @@ impl ZellijPlugin for State {
         // either (every instance renders at least once after load) — the
         // render announce EMFILE-crashed the server. Announces now fire
         // only from apply_tabs on bounded triggers (birth / clave-organic).
-        // C6 repair, width phase: each of our resizes triggers a repaint
-        // (not a PaneUpdate), so chaining here converges within one visit
-        // instead of one step per tab activation (round 10). `cols` IS the
-        // pane's live width; x is unknowable here (None → width only).
-        // EXECUTOR-ONLY, same as the move phase (round 11 storm).
-        if let Some(own) = self.own_plugin_id
-            && self.is_executor()
-        {
-            let fx = self.model.repair_tick(&[(own, None, cols)]);
-            self.run_effects(fx);
-        } else if self.model.repair_armed() {
-            // TEMP round-15 trace — remove after C6 closes.
-            eprintln!(
-                "clave-bar: TRACE repair skipped (render) own_tab={:?} beacon={:?}",
-                self.own_tab_id(),
-                self.model.current_tab()
-            );
-        }
+        // C6 width seek (round 20, collapse-in-place): each of our resizes
+        // triggers a repaint with the new cols (round 10) — this render
+        // chain is the seek's feedback loop. SELF-targeted and ungated:
+        // every instance is always visible and drives only its own pane.
+        let fx = self.model.width_seek(cols);
+        self.run_effects(fx);
         // One line per tab, display-ordered. Active row inverted (SGR 7);
         // agent rows get their state glyph; plain tabs a 2-space gutter so
         // names align. Truncate to the pane width (raw ANSI is S1-proven).

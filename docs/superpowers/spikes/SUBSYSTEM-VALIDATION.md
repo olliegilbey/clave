@@ -446,6 +446,44 @@ exact, per tab, eventless). Repair machinery stays as the safety net for
 damaged tabs (manual resizes skip auto-relayout). Checkpoint commit at
 round 18; swap-layout build next._
 
+**Findings (2026-07-16, round 19 — swap layout: parsed perfectly, dead on
+arrival):** generated `swap_tiled_layout` (setup children-slot form merged
+into default_tab_template + explicit form in the one-shot tab layout) was
+verified with the REAL zellij-utils 0.44.3 parser (scratch tool
+`kdlcheck`): template = Vertical[bar Fixed(26) plugin, children] ✓; bare
+`NewTab` keybinds fall back to the session layout's swaps server-side ✓.
+Live: re-show STILL 50/50 (right; our move phase made it look left).
+Root cause in zellij source, decisive: `suppress_pane` → `extract_pane` →
+`set_is_tiled_damaged()` — **hiding the bar damages the tab's swap state,
+and `add_tiled_pane` only auto-relayouts when NOT damaged**, so an
+unsuppress can never trigger the swap relayout. Other damage-setters:
+`resize_pane_with_id` (our own repair!), `resize_whole_tab` (every window
+resize), close/extract/splits. Also this round: the zellij CLI incident —
+`zellij attach` variants from Claude's shell injected clave-layout tabs
+into the user's MAIN session (their bar instances renamed his tabs via
+store-bind tab-id collisions); session lifecycle is USER-driven only (see
+memory), and stale store binds self-heal on session recreate.
+
+**Findings (2026-07-16, round 20 — COLLAPSE-IN-PLACE, user-ratified):**
+never suppress. Alt+c flips a width target (26 ⇄ 4-col glyph gutter) and
+each instance's render-fed width seek drives its OWN pane there — every
+instance stays visible, so every instance has the feedback loop that was
+the one reliable mechanism of the whole saga. All tabs toggle
+simultaneously; zellij's resize floor stops the collapse around ~8 cols
+(stable — the in-flight guard makes the floor benign); collapsed bar
+keeps glyphs, truncated names, and the active-row highlight ("mini
+mode" for free from the existing truncating renderer). DELETED: suppress
+calls, move phase, executor gate on repair, per-pane repair map, x_ok,
+timer retry chain (~200 lines). Kept: learned+clamped step, half-step
+acceptance, in-flight guard, budget. Known quirk (accepted): a tab
+created while collapsed is born expanded (missed the pipe) — fix later by
+carrying the collapsed flag in store snapshots. Backlog (user): peek-on-
+nav (auto-expand the bar ~2s on tab switch while collapsed).
+
+**Verdict:** **PASS** (2026-07-16, round 20 live: expand/collapse both
+directions, all tabs at once, no focus jumps, rapid toggles safe; TEMP
+traces removed after).
+
 ## C7 — dump-layout liveness + resume picker
 - With one agent live: `zellij action dump-layout | grep -A2 clave` — baked
   `args "spawn" "<uuid>" …` present, on its own line.

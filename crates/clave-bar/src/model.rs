@@ -49,46 +49,29 @@ pub enum Effect {
     /// run_command(["clave","bind",uuid,tab_id]) — report the uuid→tab join
     /// to the STORE (§6.6 Design B), fired by the agent tab's own bar.
     Bind { uuid: String, tab_id: usize },
-    /// move_pane_with_pane_id_in_direction(Plugin(pane_id), Left) — C6
-    /// re-show repair. Round 16: the EXECUTOR heals every tab's bar (pane
-    /// ids are global, the commands cross-tab) — hidden instances get no
-    /// events, so self-only repair left other tabs broken until visited.
-    MoveBarLeft { pane_id: u32 },
-    /// resize_pane_with_id(Decrease→Right, Plugin(pane_id)) — C6 repair.
-    ShrinkBar { pane_id: u32 },
-    /// resize_pane_with_id(Increase→Right, Plugin(pane_id)) — C6 overshoot
+    /// resize_pane_with_id(Decrease→Right, own) — C6 collapse/expand seek.
+    ShrinkSelf,
+    /// resize_pane_with_id(Increase→Right, own) — C6 seek / overshoot
     /// recovery.
-    GrowBar { pane_id: u32 },
+    GrowSelf,
 }
 
 /// The generated layouts give the bar `size=26` (setup::layout_kdl and
-/// add::tab_layout) — repair shrinks a re-shown bar back toward this.
+/// add::tab_layout) — the expanded width the seek returns to.
 const BAR_TARGET_COLS: usize = 26;
-/// Repair steps allowed per show (each is a zellij layout action): enough
-/// for a 50% split on a wide screen at ~5%/step, small enough that a layout
-/// which refuses to converge isn't fought forever.
-const REPAIR_BUDGET: u32 = 16;
-
-/// Per-bar-pane C6 repair progress (see BarModel::repairs).
-#[derive(Debug, Default)]
-struct PaneRepair {
-    /// Remaining steps; zeroed when geometry reaches target (done for good).
-    budget: u32,
-    /// cols at this pane's last resize action — wait until zellij's effect
-    /// is visible (cols changed) before acting again, so in-flight resizes
-    /// can't double-fire, and the observed delta is the LEARNED step size.
-    last_cols: Option<usize>,
-    /// Has a manifest confirmed this pane's x == 0 since arming? Zellij
-    /// sometimes re-inserts at the remembered width but on the wrong SIDE
-    /// (round 15) — width-accept alone must not retire the pane, or a
-    /// correct-width bar stays stranded on the right forever.
-    x_ok: bool,
-}
-
-/// Deltas beyond this are relayout jumps or double-landed fires, not a
+/// Collapsed width target (Alt+c): a glyph gutter — the state glyph plus a
+/// couple of name chars survive the renderer's own truncation, so "mini
+/// mode" needs no special render path. Zellij's resize floor may stop the
+/// seek above this; wherever cols stop changing is accepted.
+const COLLAPSED_TARGET_COLS: usize = 4;
+/// Seek steps allowed per toggle (each is a real zellij layout action):
+/// enough for the widest transition at ~5%-of-viewport per step, small
+/// enough that a layout which refuses to converge isn't fought forever.
+const SEEK_BUDGET: u32 = 16;
+/// Deltas beyond this are external jumps (window resize, relayout), not a
 /// single zellij resize step (5% of viewport ≈ 7–14 cols on real screens) —
-/// learning one poisons the acceptance band for every pane (step=60 seen
-/// live, round 17: it accepted a 13-col bar as "close enough" to 26).
+/// learning one poisons the acceptance band (step=60 seen live, round 17:
+/// it accepted a 13-col bar as "close enough" to 26).
 const MAX_LEARNABLE_STEP: usize = 20;
 
 /// One rendered row, already in display order.
@@ -132,16 +115,23 @@ pub struct BarModel {
     /// Local unread-override: Done agents we've already cleared on focus.
     /// Render-side only; `clave focus` persists the real transition.
     read_locally: BTreeSet<String>,
-    /// C6 repair state per bar pane, armed on toggle-show for every plugin
-    /// pane KNOWN at that moment (bars in tabs created later get the
-    /// correct template and must not be touched). Round 16: keyed by pane
-    /// id because the EXECUTOR heals all tabs' bars — hidden instances get
-    /// no events (C3), so self-only repair stranded other tabs until visit.
-    repairs: BTreeMap<u32, PaneRepair>,
+    /// Remaining C6 width-seek steps; armed (reset to SEEK_BUDGET) on every
+    /// toggle, zeroed when own width reaches the current target. Round 20:
+    /// the bar is NEVER suppressed — Alt+c resizes each instance's OWN pane
+    /// between the template width and a glyph gutter. Every instance stays
+    /// visible, so every instance gets the render feedback that made the
+    /// own-pane width chain the one reliable mechanism of rounds 9–19
+    /// (suppress-based hide was structurally hostile: lossy re-insert,
+    /// damage flag blocks swap relayouts, plugin resizes emit no events).
+    seek_budget: u32,
+    /// cols at our last resize action — wait until zellij's effect is
+    /// visible (cols changed) before acting again, so in-flight resizes
+    /// can't double-fire, and the observed delta is the LEARNED step size.
+    seek_last_cols: Option<usize>,
     /// Zellij's resize increment as observed (≈5% of viewport); 0 until
-    /// learned from a resize's effect. Shared across panes — it's an
-    /// environment property, not per-pane state.
-    repair_step: usize,
+    /// learned from a resize's effect. An environment property — kept
+    /// across toggles.
+    seek_step: usize,
     /// tab_id of the last visited (focused) tab — replicated on every
     /// instance from the visited-pipe/nav broadcast streams. This is the nav
     /// walk base: the local TabInfo.active flag is stale everywhere except
@@ -157,8 +147,9 @@ pub struct BarModel {
     /// instance spoke; a stale instance must not answer a leftover flag
     /// with poison during a later event burst.
     organic_pending: bool,
-    /// Bar visibility (Alt+c). main.rs maps this to hide_self/show_self.
-    pub hidden: bool,
+    /// Bar collapsed to the glyph gutter (Alt+c)? Round 20: purely a width
+    /// state — the pane itself is never hidden or suppressed.
+    pub collapsed: bool,
 }
 
 impl BarModel {
@@ -440,160 +431,75 @@ impl BarModel {
         ]
     }
 
-    /// TEMP round-15: is any C6 repair still armed? Lets main.rs trace
-    /// "repair skipped by executor gate" without spamming every render.
-    pub fn repair_armed(&self) -> bool {
-        self.repairs.values().any(|r| r.budget > 0)
-    }
-
-    /// Alt+c. Returns the NEW hidden state; main.rs calls hide_self/show_self.
-    /// Re-show ARMS geometry repair for every bar pane known right now:
-    /// zellij re-inserts a shown pane as a fresh split (wrong side, 50% or
-    /// remembered width) instead of restoring its layout slot (C6 finding,
-    /// 2026-07-14). Per-show state starts fresh (round 15: a stale
-    /// last_cols "learned" the re-insert jump as a bogus step size); the
-    /// learned step itself is kept — zellij's resize increment is an
-    /// environment property that doesn't change between shows.
+    /// Alt+c (round 20, collapse-in-place): flip between the template width
+    /// and the glyph gutter, arming the width seek. The pane is NEVER
+    /// hidden or suppressed — suppress proved structurally hostile in
+    /// zellij 0.44 (lossy re-insert; `suppress_pane` marks the tab damaged,
+    /// which blocks swap-layout restores; plugin resizes emit no events, so
+    /// hidden panes could never heal without a visit). Width is the one
+    /// thing an always-visible pane can drive with real feedback: its own
+    /// renders. The compare base resets per toggle (round 15: a stale
+    /// last_cols "learned" a jump as a bogus step); the learned step is
+    /// kept — zellij's resize increment is an environment property.
     pub fn toggle(&mut self) -> bool {
-        self.hidden = !self.hidden;
-        if !self.hidden {
-            self.repairs = self
-                .panes
-                .iter()
-                .filter(|p| p.is_plugin)
-                .map(|p| {
-                    (
-                        p.pane_id,
-                        PaneRepair {
-                            budget: REPAIR_BUDGET,
-                            ..PaneRepair::default()
-                        },
-                    )
-                })
-                .collect();
-        }
-        self.hidden
+        self.collapsed = !self.collapsed;
+        self.seek_budget = SEEK_BUDGET;
+        self.seek_last_cols = None;
+        self.collapsed
     }
 
-    /// One C6 repair tick over every bar pane the caller can see: move each
-    /// to its tab's left edge, resize toward the template width, then
-    /// retire it for good — after that, pane geometry is the user's
-    /// business. Round 16: driven by the EXECUTOR only (the one instance
-    /// with fresh state, nav-proven); `bars` is (pane_id, x, cols) straight
-    /// from its manifest, so one toggle heals every tab without visits.
+    /// One width-seek step for OUR OWN pane, driven by render cols (each of
+    /// our resizes repaints us with the new width — the feedback loop
+    /// proven in rounds 9–10; zellij sends no events for plugin resizes).
     ///
-    /// Zellij resizes in ~5%-of-viewport increments (≈14 cols on a wide
-    /// screen), far coarser than the 26-col target — a naive "shrink while
-    /// too wide" overshoots straight through it (27 → 13, seen live,
-    /// round 9). So the step size is LEARNED from a resize's observed
-    /// effect, acceptance is "within half a step", and GrowBar recovers an
-    /// overshoot. Waiting for a pane's cols to actually change before
-    /// re-acting keeps in-flight resizes from double-firing. Budget-capped
-    /// so a layout that refuses to converge isn't fought forever.
-    ///
-    /// Called from TWO event paths: PaneUpdate (fresh manifest, knows every
-    /// pane's x) and render (x unknowable, own cols only — the caller
-    /// passes `[(own, None, cols)]`). The render path is what converges the
-    /// visible tab within one visit — zellij sends no PaneUpdate for the
-    /// plugin's own resize's effect, but the pane re-renders with the new
-    /// cols (round 10); other tabs' steps chain off the PaneUpdates their
-    /// resizes broadcast.
-    pub fn repair_tick(&mut self, bars: &[(u32, Option<usize>, usize)]) -> Vec<Effect> {
-        let mut fx = Vec::new();
-        // While hidden the bar panes are suppressed — firing at them is a
-        // no-op that burns budget (round 18 trace: the timer kept spending
-        // budget between a quick hide/show pair).
-        if self.hidden {
-            return fx;
+    /// Zellij resizes in ~5%-of-viewport increments (≈7–14 cols), far
+    /// coarser than the targets — a naive "shrink while too wide"
+    /// overshoots straight through them (27 → 13, round 9). So the step is
+    /// LEARNED from each resize's observed effect, acceptance is "within
+    /// half a step", and GrowSelf recovers an overshoot. Waiting for cols
+    /// to actually change before re-acting keeps in-flight resizes from
+    /// double-firing — which also makes zellij's resize FLOOR benign: at
+    /// the floor cols stop changing, so the seek just stops firing.
+    /// Budget-capped so a layout that refuses to converge isn't fought
+    /// forever.
+    pub fn width_seek(&mut self, own_cols: usize) -> Vec<Effect> {
+        if self.seek_budget == 0 {
+            return Vec::new();
         }
-        for &(pane_id, x, cols) in bars {
-            // Only panes armed at toggle-show; entries retire at budget 0.
-            let Some(st) = self.repairs.get_mut(&pane_id) else {
-                continue;
-            };
-            if st.budget == 0 {
-                continue;
-            }
-            // TEMP round-15/16 trace — remove after C6 closes.
-            eprintln!(
-                "clave-bar: TRACE repair pane={pane_id} x={x:?} cols={cols} budget={} last={:?} step={}",
-                st.budget, st.last_cols, self.repair_step
-            );
-            match x {
-                Some(x) if x > 0 => {
-                    st.budget -= 1;
-                    fx.push(Effect::MoveBarLeft { pane_id });
-                    continue;
+        let target = if self.collapsed {
+            COLLAPSED_TARGET_COLS
+        } else {
+            BAR_TARGET_COLS
+        };
+        match self.seek_last_cols {
+            Some(prev) if prev == own_cols => return Vec::new(), // in flight / floor
+            Some(prev) => {
+                let delta = prev.abs_diff(own_cols);
+                // Only a plausible single resize step is LEARNED — external
+                // jumps (window resizes) poisoned the band (round 17,
+                // step=60 accepted a 13-col bar).
+                if delta <= MAX_LEARNABLE_STEP {
+                    self.seek_step = delta;
                 }
-                Some(_) => st.x_ok = true, // at the left edge, confirmed
-                // Round 18: STRICT phase ordering — no width fire until a
-                // manifest confirms x == 0. Zellij's move is a geometry
-                // SWAP: width-resizing a bar still on the right (render
-                // can't know x) meant the landing move handed the shrunk
-                // width to the terminal and the terminal's half-screen
-                // width to the bar — the heal re-broke itself in a loop
-                // (the "focused tab never heals" report; its render chain
-                // was the fastest, so it always lost the race).
-                None if !st.x_ok => continue,
-                None => {} // left edge already confirmed: width may fire
             }
-            match st.last_cols {
-                // Resize in flight: never re-fire from event ticks — they
-                // can be milliseconds apart (round 16: a count-based retry
-                // double-fired before zellij applied the first resize).
-                // Only repair_retry_tick (time-paced) clears this guard.
-                Some(prev) if prev == cols => continue,
-                Some(prev) => {
-                    let delta = prev.abs_diff(cols);
-                    // Only a plausible single resize step is LEARNED —
-                    // relayout jumps poisoned the band (round 17, step=60).
-                    if delta <= MAX_LEARNABLE_STEP {
-                        self.repair_step = delta;
-                    }
-                }
-                None => {}
-            }
-            // Pre-learning slack of 8 (±4 cols): a bar already within a few
-            // cols of the template must be accepted, not nudged into an
-            // overshoot dance — zellij re-inserts at remembered widths like
-            // 29 (round 15), and its real step (~14) dwarfs the difference.
-            let step = self.repair_step.max(8) as i64;
-            let diff = cols as i64 - BAR_TARGET_COLS as i64;
-            let action = if 2 * diff > step {
-                Effect::ShrinkBar { pane_id }
-            } else if -2 * diff > step {
-                Effect::GrowBar { pane_id }
-            } else if st.x_ok {
-                st.budget = 0; // close enough + left edge: done, stay done
-                // TEMP round-15/16 trace — remove after C6 closes.
-                eprintln!("clave-bar: TRACE repair pane={pane_id} done at cols={cols}");
-                continue;
-            } else {
-                // Width fine but x unconfirmed (round 15): stay armed so a
-                // later manifest can still move a stranded bar off the right.
-                continue;
-            };
-            st.budget -= 1;
-            st.last_cols = Some(cols);
-            fx.push(action);
+            None => {}
         }
-        fx
-    }
-
-    /// The TIME-paced repair tick (main's ~400ms zellij timer): clears
-    /// every armed pane's in-flight guard first, so a resize that zellij
-    /// clobbered (the unsuppress burst relayouts every tab, round 16) or
-    /// silently dropped is re-fired. Events must never do this — during
-    /// bursts they arrive every ~1ms, far faster than zellij applies
-    /// resizes. Still budget-capped per pane, so a layout that refuses to
-    /// converge is not fought forever.
-    pub fn repair_retry_tick(&mut self, bars: &[(u32, Option<usize>, usize)]) -> Vec<Effect> {
-        for st in self.repairs.values_mut() {
-            if st.budget > 0 {
-                st.last_cols = None;
-            }
-        }
-        self.repair_tick(bars)
+        // Pre-learning slack of 8 (±4 cols): a bar already within a few
+        // cols of the target must be accepted, not nudged into an
+        // overshoot dance.
+        let step = self.seek_step.max(8) as i64;
+        let diff = own_cols as i64 - target as i64;
+        let action = if 2 * diff > step {
+            Effect::ShrinkSelf
+        } else if -2 * diff > step {
+            Effect::GrowSelf
+        } else {
+            self.seek_budget = 0; // close enough: done, stay done
+            return Vec::new();
+        };
+        self.seek_budget -= 1;
+        self.seek_last_cols = Some(own_cols);
+        vec![action]
     }
 }
 
@@ -993,325 +899,122 @@ mod tests {
         );
     }
 
-    /// A model with `bar_ids` known as plugin panes, toggled hide+show so
-    /// repair is armed for all of them.
-    fn armed(bar_ids: &[u32]) -> BarModel {
+    /// A model toggled once (expanded → collapsed): seek armed toward the
+    /// glyph gutter.
+    fn collapsed_model() -> BarModel {
         let mut m = BarModel::default();
-        m.apply_panes(
-            bar_ids
-                .iter()
-                .enumerate()
-                .map(|(i, id)| pane(i, *id, true, i == 0))
-                .collect(),
-        );
-        m.toggle(); // hidden — no repair while hidden
-        m.toggle(); // shown → arms repair for every known bar pane
+        m.toggle();
         m
     }
 
     #[test]
-    fn repair_converges_to_template_width_despite_coarse_steps() {
-        // C6 finding: zellij re-INSERTS a shown pane (50% split, wrong
-        // side) instead of restoring its layout geometry — the bar repairs
-        // itself. Round-9 refinement: zellij resizes in ~5%-of-viewport
-        // steps (~14 cols on a wide screen), so "shrink while > 26"
-        // overshot straight through the target (27 → 13 → disarm). The
-        // repair must LEARN the step from its own observed effect and stop
-        // within half a step of the template width.
+    fn seek_collapses_to_the_gutter_despite_coarse_steps() {
+        // Round 20 (collapse-in-place): Alt+c drives OWN width between the
+        // template (26) and the glyph gutter (4) — the pane is never
+        // suppressed. Zellij resizes in ~5%-of-viewport steps (7–14 cols),
+        // far coarser than either target: the step is LEARNED from each
+        // resize's observed effect and acceptance is within half a step
+        // (round-9 lesson: naive loops overshoot straight through).
         let mut m = BarModel::default();
-        m.apply_panes(vec![pane(0, 7, true, true)]);
-        // Never armed: geometry is the user's business.
-        assert_eq!(m.repair_tick(&[(7, Some(40), 140)]), Vec::<Effect>::new());
-        let mut m = armed(&[7]);
-        // Wrong side first: move left until x == 0.
-        assert_eq!(
-            m.repair_tick(&[(7, Some(40), 140)]),
-            vec![Effect::MoveBarLeft { pane_id: 7 }]
-        );
-        // Simulate zellij honouring each resize with a 14-col step.
-        let mut cols: i64 = 140;
+        // Never toggled: geometry is the user's business.
+        assert_eq!(m.width_seek(26), Vec::<Effect>::new());
+        let mut m = collapsed_model();
+        let mut cols = 26i64;
         let mut acted = 0;
         loop {
-            match m.repair_tick(&[(7, Some(0), cols as usize)]).as_slice() {
-                [Effect::ShrinkBar { pane_id: 7 }] => cols -= 14,
-                [Effect::GrowBar { pane_id: 7 }] => cols += 14,
+            match m.width_seek(cols as usize).as_slice() {
+                [Effect::ShrinkSelf] => cols -= 7,
+                [Effect::GrowSelf] => cols += 7,
                 [] => break,
-                other => panic!("unexpected repair effects: {other:?}"),
+                other => panic!("unexpected seek effects: {other:?}"),
             }
             acted += 1;
             assert!(acted < 20, "did not converge");
         }
-        // Converged within half a step of the 26-col template — and STAYS
-        // retired (manual resizes are sacred once geometry is right).
-        assert!((cols - 26).abs() <= 7, "ended at {cols} cols");
-        assert_eq!(m.repair_tick(&[(7, Some(40), 140)]), Vec::<Effect>::new());
+        // Within half a learned step of the 4-col gutter — and STAYS done
+        // (later geometry is the user's business until the next toggle).
+        assert!((cols - 4).abs() <= 4, "ended at {cols} cols");
+        assert_eq!(m.width_seek(140), Vec::<Effect>::new());
     }
 
     #[test]
-    fn repair_grows_back_from_an_overshoot_and_waits_for_effects() {
-        // The exact live defect: a previous repair overshot to 13 cols.
-        let mut m = armed(&[7]);
-        assert_eq!(
-            m.repair_tick(&[(7, Some(0), 13)]),
-            vec![Effect::GrowBar { pane_id: 7 }]
-        );
-        // Same cols again = our resize hasn't landed yet: WAIT, don't
-        // double-fire (in-flight actions were the round-9 overshoot risk).
-        assert_eq!(m.repair_tick(&[(7, Some(0), 13)]), Vec::<Effect>::new());
-        // Resize landed (+14 → 27): learned step 14, |27−26| within half a
-        // step → accept and retire.
-        assert_eq!(m.repair_tick(&[(7, Some(0), 27)]), Vec::<Effect>::new());
-        assert_eq!(m.repair_tick(&[(7, Some(0), 13)]), Vec::<Effect>::new()); // retired
-    }
-
-    #[test]
-    fn repair_at_correct_width_still_waits_to_confirm_left_edge() {
-        // Round-15 live defect (every-other-show breakage): zellij
-        // sometimes re-inserts the shown pane at its REMEMBERED width but
-        // on the wrong side. The width phase (render, x unknowable) saw
-        // "width fine" and zeroed the budget — the move phase never ran,
-        // leaving a correct-width bar stranded on the right. Width-accept
-        // may only retire the pane once a manifest has confirmed x == 0.
-        let mut m = armed(&[7]);
-        // Render arrives first: width already acceptable, but x is
-        // unconfirmed — no action, and repair must STAY armed.
-        assert_eq!(m.repair_tick(&[(7, None, 29)]), Vec::<Effect>::new());
-        // Manifest lands: wrong side → move left.
-        assert_eq!(
-            m.repair_tick(&[(7, Some(96), 29)]),
-            vec![Effect::MoveBarLeft { pane_id: 7 }]
-        );
-        // Move landed at the left edge: width ok + x confirmed → retire.
-        assert_eq!(m.repair_tick(&[(7, Some(0), 29)]), Vec::<Effect>::new());
-        // Retired for good: later geometry is the user's business.
-        assert_eq!(m.repair_tick(&[(7, Some(40), 140)]), Vec::<Effect>::new());
-    }
-
-    #[test]
-    fn repair_relearns_step_per_show_instead_of_across_hides() {
-        // Round-15 companion defect: last_cols survived across hide/show,
-        // so the FIRST width call of a new show "learned" the insert jump
-        // (|stale last − insert width|) as a step size — a huge bogus step
-        // (57 seen live) whose half-step acceptance band can swallow a
-        // genuinely wrong width. Arming resets the compare base (the
-        // learned step is kept — zellij's increment doesn't change).
-        let mut m = armed(&[7]);
-        // Converge a first show ending with last=Some(95) on the books.
-        assert_eq!(
-            m.repair_tick(&[(7, Some(0), 109)]),
-            vec![Effect::ShrinkBar { pane_id: 7 }]
-        );
-        assert_eq!(
-            m.repair_tick(&[(7, Some(0), 95)]),
-            vec![Effect::ShrinkBar { pane_id: 7 }] // step=14 learned
-        );
-        m.toggle();
-        m.toggle(); // second show: fresh compare base
-        // 40 cols is far off-template; a stale step of |95−40|=55 would
-        // fake-accept it (2·14 ≤ 55). Fresh state must keep shrinking.
-        assert_eq!(
-            m.repair_tick(&[(7, Some(0), 40)]),
-            vec![Effect::ShrinkBar { pane_id: 7 }]
-        );
-    }
-
-    #[test]
-    fn repair_width_chains_from_renders_within_one_visit() {
-        // Round-10 quirk: zellij sends no PaneUpdate for the plugin's own
-        // resize's effect, so a PaneUpdate-only loop advanced ONE step per
-        // tab VISIT (bars stepped down once per Alt+↓ landing). Renders DO
-        // follow each resize (the pane repaints with new cols) — width
-        // repair chains off render cols (x unknown there → None),
-        // converging within a single visit. Round 18: the chain may only
-        // start once a manifest has confirmed the left edge.
-        let mut m = armed(&[7]);
-        assert_eq!(m.repair_tick(&[(7, Some(0), 140)]).len(), 1); // x confirmed
-        let mut cols = 126i64;
+    fn seek_expands_back_to_template_width() {
+        let mut m = collapsed_model();
+        m.toggle(); // expanded again → seek re-armed toward 26
+        let mut cols = 5i64;
         let mut acted = 0;
         loop {
-            match m.repair_tick(&[(7, None, cols as usize)]).as_slice() {
-                [Effect::ShrinkBar { pane_id: 7 }] => cols -= 14,
-                [Effect::GrowBar { pane_id: 7 }] => cols += 14,
+            match m.width_seek(cols as usize).as_slice() {
+                [Effect::ShrinkSelf] => cols -= 7,
+                [Effect::GrowSelf] => cols += 7,
                 [] => break,
-                other => panic!("unexpected repair effects: {other:?}"),
+                other => panic!("unexpected seek effects: {other:?}"),
             }
             acted += 1;
             assert!(acted < 20, "did not converge");
         }
-        assert!((cols - 26).abs() <= 7, "ended at {cols} cols");
-        // Width-only repair never moves the pane (x is unknowable in
-        // render); the move arm needs a manifest with real x.
-        let mut m2 = armed(&[7]);
-        assert_eq!(
-            m2.repair_tick(&[(7, Some(40), 140)]),
-            vec![Effect::MoveBarLeft { pane_id: 7 }]
-        );
+        assert!((cols - 26).abs() <= 4, "ended at {cols} cols");
     }
 
     #[test]
-    fn repair_budget_caps_a_layout_that_never_converges() {
-        let mut m = armed(&[7]);
+    fn seek_waits_for_inflight_resizes_and_zellijs_floor() {
+        // In-flight guard (round-9 overshoot risk): same cols again = our
+        // resize hasn't landed yet — WAIT, don't double-fire. The same
+        // guard makes zellij's resize FLOOR benign: at the floor cols stop
+        // changing, so the seek stops firing instead of thrashing.
+        let mut m = collapsed_model();
+        assert_eq!(m.width_seek(26), vec![Effect::ShrinkSelf]);
+        for _ in 0..10 {
+            assert_eq!(m.width_seek(26), Vec::<Effect>::new());
+        }
+        // Landed (26 → 12): learned step 12, keep shrinking toward 4.
+        assert_eq!(m.width_seek(12), vec![Effect::ShrinkSelf]);
+        // Floor: zellij refuses to go below 12 — cols never change again,
+        // the guard holds forever, no thrash.
+        for _ in 0..10 {
+            assert_eq!(m.width_seek(12), Vec::<Effect>::new());
+        }
+    }
+
+    #[test]
+    fn seek_grows_back_from_an_overshoot() {
+        // The round-9 live defect, seek edition: an overshoot past the
+        // target is recovered by growing, and the half-step band accepts.
+        let mut m = collapsed_model();
+        m.toggle(); // expanded → target 26
+        assert_eq!(m.width_seek(13), vec![Effect::GrowSelf]);
+        // Landed (+14 → 27): learned step 14, |27−26| within half a step →
+        // accept and retire.
+        assert_eq!(m.width_seek(27), Vec::<Effect>::new());
+        assert_eq!(m.width_seek(13), Vec::<Effect>::new()); // retired
+    }
+
+    #[test]
+    fn seek_never_learns_an_external_jump_as_the_step_size() {
+        // Round-17 lesson kept: a window resize can slam cols by far more
+        // than one resize step; learning that delta poisons the acceptance
+        // band (step=60 accepted a 13-col bar as "close enough" to 26).
+        let mut m = collapsed_model();
+        m.toggle(); // expanded → target 26
+        assert_eq!(m.width_seek(75), vec![Effect::ShrinkSelf]);
+        // External jump 75 → 15 (delta 60): recover, but don't learn 60.
+        assert_eq!(m.width_seek(15), vec![Effect::GrowSelf]);
+        // 40 is far off-template; a step of 60 would fake-accept it.
+        assert_eq!(m.width_seek(40), vec![Effect::ShrinkSelf]);
+    }
+
+    #[test]
+    fn seek_budget_caps_a_layout_that_never_converges() {
+        let mut m = collapsed_model();
         // A pathological layout that thrashes (cols change but never reach
         // the target) must not be fought forever — each step is a real
         // zellij layout action.
         let steps = (0..64)
-            .map(|i| m.repair_tick(&[(7, Some(0), if i % 2 == 0 { 100 } else { 86 })]))
+            .map(|i| m.width_seek(if i % 2 == 0 { 100 } else { 86 }))
             .take_while(|fx| !fx.is_empty())
             .count();
-        assert!(steps <= 16, "unbounded repair: {steps} steps");
+        assert!(steps <= 16, "unbounded seek: {steps} steps");
     }
-
-    #[test]
-    fn repair_retry_tick_refires_a_clobbered_resize_events_never_do() {
-        // Round-16/17 live defect: the toggle-show unsuppress BURST
-        // relayouts every tab, clobbering resizes fired mid-burst back to
-        // 50%. The in-flight guard then waited forever for a cols change
-        // that was already reverted. Counting event observations as the
-        // retry signal failed live: renders tick every ~1ms during the
-        // burst, so the "retry" double-fired before zellij applied the
-        // FIRST resize (budget 15→13 in 4ms in the round-16 trace).
-        // Retries are therefore TIME-paced: only repair_retry_tick (main's
-        // 400ms zellij timer) clears the in-flight guard and re-fires.
-        let mut m = armed(&[7]);
-        assert_eq!(
-            m.repair_tick(&[(7, Some(0), 75)]),
-            vec![Effect::ShrinkBar { pane_id: 7 }]
-        );
-        // Event ticks NEVER re-fire while cols are unchanged, no matter
-        // how many arrive (they can be milliseconds apart).
-        for _ in 0..10 {
-            assert_eq!(m.repair_tick(&[(7, Some(0), 75)]), Vec::<Effect>::new());
-        }
-        // The paced timer tick presumes the fire lost and re-issues it.
-        assert_eq!(
-            m.repair_retry_tick(&[(7, Some(0), 75)]),
-            vec![Effect::ShrinkBar { pane_id: 7 }]
-        );
-        // Once a resize lands, convergence proceeds as usual.
-        assert_eq!(
-            m.repair_tick(&[(7, Some(0), 61)]),
-            vec![Effect::ShrinkBar { pane_id: 7 }]
-        );
-    }
-
-    #[test]
-    fn repair_never_learns_a_relayout_jump_as_the_step_size() {
-        // Round-17 live defect: step=60 in the trace. The learner
-        // attributed ANY observed delta to "zellij's resize increment" —
-        // including relayout jumps and double-landed fires (75→15). A
-        // poisoned step of 60 makes the half-step acceptance band ±30,
-        // which happily accepts a 13-col bar (the "too narrow" report) —
-        // and the step survives shows by design. Deltas beyond a plausible
-        // single resize must not be learned.
-        let mut m = armed(&[7]);
-        assert_eq!(
-            m.repair_tick(&[(7, Some(0), 75)]),
-            vec![Effect::ShrinkBar { pane_id: 7 }]
-        );
-        // A relayout slammed the pane to 15 (delta 60): recover via grow,
-        // but do NOT learn 60 as the step.
-        assert_eq!(
-            m.repair_tick(&[(7, Some(0), 15)]),
-            vec![Effect::GrowBar { pane_id: 7 }]
-        );
-        // 40 cols is far off-template. A learned step of 60 would accept
-        // it (2·14 ≤ 60); the unpoisoned step must keep shrinking.
-        assert_eq!(
-            m.repair_tick(&[(7, Some(0), 40)]),
-            vec![Effect::ShrinkBar { pane_id: 7 }]
-        );
-    }
-
-    #[test]
-    fn repair_never_resizes_before_the_left_edge_is_confirmed() {
-        // Round-18 live defect (the "focused tab never heals"): renders
-        // fired width resizes while the bar still sat on the RIGHT (x is
-        // unknowable in render), and zellij's move is a geometry SWAP —
-        // the landing MoveBarLeft handed the freshly-shrunk width to the
-        // terminal and the terminal's half-screen width to the bar. The
-        // executor's own tab has the fastest render chain, so it always
-        // lost this race and pumped 75→30→75 until the budget died.
-        let mut m = armed(&[7]);
-        // Renders before any manifest: width must NOT fire.
-        assert_eq!(m.repair_tick(&[(7, None, 75)]), Vec::<Effect>::new());
-        assert_eq!(m.repair_tick(&[(7, None, 75)]), Vec::<Effect>::new());
-        // Manifest: wrong side → move only.
-        assert_eq!(
-            m.repair_tick(&[(7, Some(75), 75)]),
-            vec![Effect::MoveBarLeft { pane_id: 7 }]
-        );
-        // Manifest confirms the left edge → width may fire, same tick.
-        assert_eq!(
-            m.repair_tick(&[(7, Some(0), 75)]),
-            vec![Effect::ShrinkBar { pane_id: 7 }]
-        );
-        // From here renders chain the width phase as usual.
-        assert_eq!(
-            m.repair_tick(&[(7, None, 61)]),
-            vec![Effect::ShrinkBar { pane_id: 7 }]
-        );
-    }
-
-    #[test]
-    fn repair_pauses_while_hidden() {
-        // Round-18: between a quick hide/show pair the timer kept firing
-        // at SUPPRESSED panes — no-ops that burned repair budget.
-        let mut m = armed(&[7]);
-        assert_eq!(
-            m.repair_tick(&[(7, Some(75), 75)]),
-            vec![Effect::MoveBarLeft { pane_id: 7 }]
-        );
-        m.toggle(); // hidden
-        assert_eq!(m.repair_tick(&[(7, Some(75), 75)]), Vec::<Effect>::new());
-        assert_eq!(
-            m.repair_retry_tick(&[(7, Some(75), 75)]),
-            Vec::<Effect>::new()
-        );
-        m.toggle(); // shown again → re-armed, repair resumes
-        assert_eq!(
-            m.repair_tick(&[(7, Some(75), 75)]),
-            vec![Effect::MoveBarLeft { pane_id: 7 }]
-        );
-    }
-
-    #[test]
-    fn executor_heals_every_tabs_bar_in_one_pass() {
-        // Round-16 live defect: repair was SELF-only, but hidden instances
-        // get no events (C3) — every other tab's bar sat broken (right
-        // side, wrong width) until the user visited it. One informed actor
-        // (the executor) must heal ALL bars from its fresh manifest: pane
-        // ids are global and the move/resize commands work cross-tab.
-        let mut m = armed(&[7, 8, 9]);
-        // One manifest tick: all three re-inserted wrong (right, 50%).
-        let fx = m.repair_tick(&[
-            (7, Some(96), 95),
-            (8, Some(96), 95),
-            (9, Some(96), 95),
-        ]);
-        assert_eq!(
-            fx,
-            vec![
-                Effect::MoveBarLeft { pane_id: 7 },
-                Effect::MoveBarLeft { pane_id: 8 },
-                Effect::MoveBarLeft { pane_id: 9 },
-            ]
-        );
-        // Panes progress independently: 7 landed left and converges by
-        // width; 9 is still mid-move; 8's resize is in flight (same cols).
-        let fx = m.repair_tick(&[(7, Some(0), 29), (8, Some(0), 95), (9, Some(48), 95)]);
-        assert_eq!(
-            fx,
-            vec![
-                Effect::ShrinkBar { pane_id: 8 },
-                Effect::MoveBarLeft { pane_id: 9 },
-            ]
-        );
-        // 7 retires only after x confirmed + width accepted — and a bar
-        // pane in a tab created AFTER the toggle (id 99) is never touched.
-        let fx = m.repair_tick(&[(7, Some(0), 29), (99, Some(96), 95)]);
-        assert_eq!(fx, Vec::<Effect>::new());
-    }
-
     #[test]
     fn stale_instance_orders_and_decorates_from_snapshot_alone() {
         // The round-6 regression test: an instance with NO registers and NO
