@@ -309,15 +309,173 @@ touch-push window).
   still hear pipes).
 - Falsifies → fallback: `close_self()` + relaunch bind (adjust §6.6 + log).
 
-**Verdict:** _pending_
+**Findings (2026-07-14, round 8):** hide PASS (all tabs, width reclaimed).
+Re-show FAIL: zellij re-INSERTS a shown pane instead of restoring its
+geometry — the bar came back as a 50% split on the RIGHT in every tab that
+existed at toggle time (tabs created after get the correct template).
+FIX (user-picked, implemented 2026-07-14): self-repair on show — toggle-show
+arms a budget-capped repair loop; each PaneUpdate steps OWN geometry toward
+the template (`move_pane_with_pane_id_in_direction(own, Left)` while x>0,
+then `resize_pane_with_id(Decrease→Right, own)` while cols>26), disarming
+at target or after 16 steps. Self-targeted → ungated (every instance fixes
+its own tab, lazily on its next PaneUpdate for hidden tabs). Bonus: one
+hide/show cycle heals tabs damaged by earlier toggles.
 
-## C7 — dump-layout liveness
+**Findings (2026-07-14, round 9):** repair WORKED (bars moved back left,
+lazily per-tab with a visible flicker — accepted) but OVERSHOT: zellij
+resizes in ~5%-of-viewport steps (~14 cols here), so "shrink while >26"
+blew through the target (27→13) and disarmed at ~13 cols. FIX (2026-07-15):
+repair LEARNS the step from its own resize's observed effect, accepts
+within half a step of 26 (exactness is impossible at that granularity),
+GrowSelf recovers overshoot, and it waits for cols to change before acting
+again (no double-fire on in-flight resizes). Also confirmed this round:
+new-agent pane serializes as `claude --session-id <uuid> …` (parser's new
+form → ▶ + jump worked); OLD agents stay `<defunct>` until respawned
+(pre-fix zombies) — heal via close+resume or session recreate. C8
+PRE-REGISTERED CONCERN: resurrection will re-run the serialized
+`claude --session-id <uuid>`, NOT the idempotent `clave spawn` — a create
+against an existing jsonl collides; S4's premise needs re-examining there.
+
+**Findings (2026-07-15, round 10):** learning-repair converged (bars
+healed to target width) but only ONE STEP PER TAB VISIT — zellij sends no
+PaneUpdate for the plugin's own resize's effect, so the PaneUpdate-driven
+loop stalled until the next activation. FIX: width repair also chains off
+render() (each resize triggers a repaint with the new cols; x is
+unknowable there so render drives width only, PaneUpdate drives the move)
+→ full convergence within a single visit. Per-tab lazy healing remains
+(hidden instances get neither events nor renders) — accepted.
+
+**Findings (2026-07-15, round 11):** width convergence OK but toggle
+triggered a REPAIR STORM — bars on random sides/widths, focus jumping,
+log shows a ~9ms clave-visited pipe storm + a zellij CliPipe 1s timeout.
+Chain: toggle-show broadcasts layout events to EVERY instance; hidden
+instances' repairs acted on STALE geometry against real panes in other
+tabs; every move/resize broadcast more events (and stale-active-claim
+re-announces) → feedback loop. The per-instance 16-step budget was the
+circuit breaker (storm self-extinguished — contrast rd-4's fd-exhaustion
+crash). Root lesson (C3 corollary, final form): `is_active_instance()` is
+NOT a gate — hidden instances' stale tab sets always claim active; the
+only trustworthy "on screen" signal is the EXECUTOR gate (own tab ==
+replicated beacon, nav-proven). FIX: repair (both phases) is now
+executor-gated. Healing stays lazy per-visit by construction.
+
+**Findings (2026-07-15, round 12):** executor-gating repair was NOT
+enough — the storm recurred on the gated build (log: pure clave-visited
+announces ~15/s for 12s + CliPipe timeouts). The storm is the BEACON WAR
+itself: TabUpdate-driven announces are poisoned BY DESIGN (hidden
+instances' stale sets always claim own-tab-active, C3; toggle bursts
+deliver TabUpdates to all; each announce spawns a CLI client whose attach
+appears to trigger further TabUpdates → self-sustaining). REDESIGN: the
+TabUpdate announce is DELETED; the beacon is announced from RENDER — the
+one signal only the on-screen bar receives (hidden panes never render,
+proven round 10) — so poison is structurally impossible. The departing
+bar's doomed last renders are suppressed after nav/click (flag cleared by
+the next TabUpdate, which for a hidden instance only arrives on
+reactivation). TEMP landing-announce trace added for this round's log
+check.
+
+**Findings (2026-07-15, round 13):** render-announce CRASHED THE SERVER
+(EMFILE, first Alt+c; log: 252 landing-announces, 460 events in the final
+second). Render is NOT visibility-gated either — every instance renders at
+least once after load, so all ten fresh bars saw beacon≠own and stormed.
+FINAL LESSON of the announce saga: any announce driven by per-instance
+"am I active" SELF-diagnosis is poisoned during bursts, regardless of
+gate or channel (TabUpdate rd 11, render rd 12/13). REDESIGN (bounded
+triggers only): announce fires from apply_tabs ONLY at (a) BIRTH — an
+instance's first-ever TabUpdate, once per lifetime (covers new tabs +
+loads/reloads), or (b) ORGANIC — Alt+o's bind now chains
+`ToggleTab; MessagePlugin clave-organic`, arming ONE announce on the next
+TabUpdate; any incoming beacon disarms leftover flags. Toggle bursts set
+neither flag ⇒ zero announces during churn, structurally. Nav/click
+announces unchanged (executor/local-computed, proven). Config regenerated
+(Alt+o bind changed) — SESSION RESTART REQUIRED (server died anyway).
+
+**Findings (2026-07-15, round 14 — source-level root cause, pre-test):**
+user re-reported multi-Alt+c layout throw-out + TAB SWITCHING on the
+bounded-announce build. Root-caused in zellij 0.44.3 SOURCE (server code
+fetched from GitHub, not inferred): `show_self()` is a FOCUS action —
+server maps it to `Action::FocusPluginPaneWithId` (zellij_exports.rs:2612),
+which switches to the pane's tab. On toggle-show EVERY hidden instance
+called it ⇒ ~10 racing focus actions ⇒ focus lands on an arbitrary tab +
+churn. The API's escape hatch: `show_pane_with_id(own, float=false,
+should_focus_pane=false)` routes to `ScreenInstruction::
+UnsuppressOrExpandPane` (zellij_exports.rs:2622) → tab.rs
+`unsuppress_or_expand_pane` — comment verbatim: "removes a pane from being
+suppressed (hidden) but does not focus it"; the screen handler finds the
+tab OWNING the pane (has_pane_with_pid includes suppressed_panes) and
+restores it there. FIX: `toggle_hidden()` helper in main.rs — show path
+now `show_pane_with_id(PaneId::Plugin(own), false, false)`; both toggle
+call sites deduped. Layout re-insert-as-split remains expected (repair
+heals per visit). Announce volume unchanged (bounded).
+
+**Findings (2026-07-15/16, rounds 15–18 — the repair saga, all live-traced):**
+- **Round 15** (alternating good/bad shows): no-focus show works, but zellij
+  alternates re-insert shapes — 50% split vs REMEMBERED width on the wrong
+  side. Width-accept disarmed the whole repair before the move phase ran.
+  FIX: `x_ok` — width-accept may only retire a pane after a manifest
+  confirmed x == 0. Also: per-show compare-base reset (stale last_cols
+  "learned" the re-insert jump as a step).
+- **Round 16** (multi-tab: only visited tabs healed): repair was SELF-only;
+  hidden instances get no events (C3) → per-visit healing. REDESIGN:
+  executor-heals-all — the one fresh instance repairs EVERY tab's bar
+  (pane ids are global, move/resize commands cross-tab; `move_pane_left`
+  on a leftmost pane is a verified no-op). Then: resizes fired mid-burst
+  were CLOBBERED by the unsuppress relayouts; an observation-count retry
+  double-fired in 4ms (renders tick ~1ms under burst). 
+- **Round 17** (too narrow + inconsistent): trace showed step=60 — the
+  learner attributed relayout jumps to "zellij's increment"; band ±30
+  accepted 13-col bars. FIX: learn only deltas ≤ 20; retries TIME-paced
+  via set_timeout(0.4) Timer chain (hard cap 30 ticks), never event-paced.
+- **Round 18** (focused tab never heals): renders fired width while the bar
+  still sat RIGHT (x unknowable in render); zellij's move is a geometry
+  SWAP → the landing move handed the shrunk width to the terminal — the
+  fastest render chain (own tab) always lost the race, pumping 75→30→75.
+  FIX: STRICT phase ordering (no width until manifest confirms x == 0) +
+  repair paused while hidden (budget burned at suppressed panes).
+- **FINAL CONSTRAINT (round 18, user-observed one-step-per-visit):** zellij
+  emits NO events for plugin-initiated resizes — the only feedback is the
+  plugin's OWN render. Cross-tab width healing is therefore structurally
+  blind (dead-reckoning, drift) or per-visit (rejected UX). Repair-by-
+  command has hit its ceiling.
+
+**Verdict:** _PIVOT (user-ratified 2026-07-16): declare a
+`swap_tiled_layout` in the generated layout matching the template — the
+50% re-insert IS zellij's default 2-pane swap layout; declaring our own
+makes zellij restore geometry natively on every unsuppress (instant,
+exact, per tab, eventless). Repair machinery stays as the safety net for
+damaged tabs (manual resizes skip auto-relayout). Checkpoint commit at
+round 18; swap-layout build next._
+
+## C7 — dump-layout liveness + resume picker
 - With one agent live: `zellij action dump-layout | grep -A2 clave` — baked
   `args "spawn" "<uuid>" …` present, on its own line.
 - `Alt+a` → same repo → expect jump to the running agent, no duplicate spawn.
 - Falsifies → fallback: SessionStart/SessionEnd liveness in the store (§6.3).
 
-**Verdict:** _pending_
+**Findings (2026-07-14, round 8):** FAIL, two root causes, both fixed:
+1. **`command="<defunct>"` decoded**: zellij serializes the LIVE pane
+   process (children of the pane's PID), not the baked layout command. The
+   pre-exec fire-and-forget `zellij pipe clave-register` child was inherited
+   by the exec'd claude, never reaped → permanent ZOMBIE → serialized as
+   `<defunct>` on EVERY agent pane (ps: each `claude --session-id …` had
+   exactly one Z child). Blinds liveness AND resurrection. FIX: register
+   pipe double-forked via `sh -c '"$@" &'` (sh reaped, grandchild reparents
+   to init); `live_uuids` parser now also matches the post-exec
+   `--session-id`/`--resume` arg forms.
+2. **Auto-jump design flaw**: "repo has a live agent → jump" (spec §6.3
+   pre-revision) forbids a SECOND agent in the same repo — user is right
+   that fleets-per-repo are the point; it only went unnoticed because
+   liveness was blind. The user hit the corollary live: resume-picking an
+   on-screen session opened it TWICE (same uuid two tabs; bind can point at
+   only one → the glyphless duplicate row in the round-8 screenshot). FIX:
+   auto-jump deleted; resume picker now lists live agents MARKED `▶` and a
+   live pick JUMPS (clave-nav uuid pipe); dead picks resume as before.
+   Spec §6.3 revised.
+Note: zombies from pre-fix agents persist until those panes close — re-test
+needs fresh agents (or a session recreate).
+
+**Verdict:** _fixes implemented; re-test owed (fresh agent → dump-layout
+shows real command; ▶ pick jumps; second agent in same repo works)_
 
 ## C8 — Resume + resurrection (S4) — include a WORKTREE agent
 - `Alt+w` the agent's tab; `Alt+a` → same repo → `resume` → pick it: conversation

@@ -43,8 +43,15 @@ pub fn spawn_mode(home: &Path, physical_cwd: &str, uuid: &str) -> SpawnMode {
 /// Register this pane with the bar: uuid → $ZELLIJ_PANE_ID (spike S2 verified
 /// the env var IS exported to layout `command` panes). Best-effort: a failed
 /// registration only costs nav-to-this-agent until the next register; it must
-/// NEVER stop the exec into Claude. Fire-and-forget spawn — `zellij pipe` can
-/// dawdle (S1) and the exec below replaces this process anyway.
+/// NEVER stop the exec into Claude.
+///
+/// DOUBLE-FORK, not a plain spawn (C7 finding, 2026-07-14): a directly
+/// spawned child is inherited by the exec'd claude, which never reaps it —
+/// the permanent ZOMBIE is then what zellij's session serializer reads as
+/// the pane's running command, so dump-layout said `<defunct>` for every
+/// agent pane, blinding the §6.3 liveness check and breaking resurrection.
+/// `sh -c '… &'` backgrounds the pipe, sh exits instantly (we reap it), and
+/// the grandchild reparents to init — nothing is left in the pane's tree.
 pub fn register_pane(uuid: &str) {
     let Ok(pane_id) = std::env::var("ZELLIJ_PANE_ID") else {
         eprintln!("clave spawn: ZELLIJ_PANE_ID unset; skipping bar registration");
@@ -65,12 +72,24 @@ pub fn register_pane(uuid: &str) {
             return;
         }
     };
-    let _ = Command::new("zellij")
-        .args(["pipe", "--name", "clave-register", "--", &payload])
+    // `"$@" &` keeps the payload out of shell-quoting territory: argv is
+    // passed verbatim after the `sh` placeholder. status() reaps sh itself.
+    let _ = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "\"$@\" >/dev/null 2>&1 &",
+            "sh",
+            "zellij",
+            "pipe",
+            "--name",
+            "clave-register",
+            "--",
+            &payload,
+        ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn();
+        .status();
 }
 
 #[cfg(test)]

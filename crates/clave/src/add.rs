@@ -16,9 +16,12 @@ use crate::store::{
     AgentRecord, LabelSource, Store, now_unix, snapshot_from, store_paths, with_store_mut,
 };
 
-/// Parse `zellij action dump-layout` for live agent uuids: every agent
-/// pane's serialized command is `clave` with args `"spawn" "<uuid>" …` (§6.3
-/// liveness check — the baked command doubles as the liveness marker).
+/// Parse `zellij action dump-layout` for live agent uuids (§6.3 liveness).
+/// Zellij serializes the LIVE pane process, not the baked layout command
+/// (C7 finding): after `clave spawn` execs, the pane serializes as
+/// `claude --session-id <uuid> …` or `claude --resume <uuid>`. The baked
+/// `clave` + `"spawn" "<uuid>"` form is matched too (pre-exec window, and
+/// zellij's fallback when the live read fails).
 pub fn live_uuids(dump_layout: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in dump_layout.lines() {
@@ -32,8 +35,17 @@ pub fn live_uuids(dump_layout: &str) -> Vec<String> {
             .filter(|(i, _)| i % 2 == 1) // odd indices are inside quotes
             .map(|(_, t)| t)
             .collect();
-        if let ["spawn", uuid, ..] = tokens.as_slice() {
-            out.push((*uuid).to_string());
+        match tokens.as_slice() {
+            ["spawn", uuid, ..] => out.push((*uuid).to_string()),
+            _ => {
+                if let Some(uuid) = tokens
+                    .windows(2)
+                    .find(|w| w[0] == "--session-id" || w[0] == "--resume")
+                    .map(|w| w[1])
+                {
+                    out.push(uuid.to_string());
+                }
+            }
         }
     }
     out
@@ -79,12 +91,16 @@ pub fn tab_layout(wasm: &str, label: &str, uuid: &str, cwd: &str) -> String {
 pub struct ResumeCandidate {
     pub uuid: String,
     pub label: String,
+    /// Currently on screen (uuid found in dump-layout): picking it JUMPS to
+    /// its tab — resuming a live session duplicates it (C7, round 7).
+    pub live: bool,
 }
 
 /// §6.3 resume picker input: this repo's store rows + jsonl-discovered
 /// sessions (`jsonl_stems` = (uuid, mtime) from listing the munged project
-/// dir), MINUS currently-live uuids. Recency (mtime) first; store labels
-/// beat bare uuids.
+/// dir). Live agents are included but MARKED (§6.3 revised 2026-07-14:
+/// many agents per repo; live = jump, dead = resume). Recency (mtime)
+/// first; store labels beat bare uuids.
 pub fn resume_candidates(
     store: &Store,
     repo_root: &str,
@@ -103,10 +119,10 @@ pub fn resume_candidates(
     }
     let mut list: Vec<(u64, ResumeCandidate)> = by_uuid
         .into_iter()
-        .filter(|(uuid, _)| !live.contains(uuid))
         .map(|(uuid, (mtime, label))| {
             let label = label.unwrap_or_else(|| uuid.clone());
-            (mtime, ResumeCandidate { uuid, label })
+            let live = live.contains(&uuid);
+            (mtime, ResumeCandidate { uuid, label, live })
         })
         .collect();
     list.sort_by(|a, b| b.0.cmp(&a.0));
@@ -209,24 +225,14 @@ pub fn run_add(worktree: bool) -> Result<()> {
     .map(|s| s.trim().to_string())
     .unwrap_or_else(|_| "-".to_string());
 
-    // 3) Liveness: an agent already running for this repo → just jump (§6.3).
+    // 3) Liveness input (§6.3 revised 2026-07-14: MANY agents per repo, so
+    //    no auto-jump here — live agents surface as jump entries in the
+    //    resume picker instead; the old first-live-agent jump made a second
+    //    agent in the same repo impossible).
     let dump = cmd_stdout("zellij", &["action", "dump-layout"]).unwrap_or_default();
     let live = live_uuids(&dump);
     let paths = store_paths()?;
     let store = crate::store::read_store(&paths)?;
-    if let Some(running) = store
-        .agents
-        .values()
-        .find(|r| r.repo_root == repo_root && live.contains(&r.uuid))
-    {
-        // clave-nav via the CLI pipe: works (S2), and `add` runs INSIDE the
-        // session so the env targets the right zellij.
-        let payload = format!("{{\"uuid\":\"{}\"}}", running.uuid);
-        let _ = Command::new("zellij")
-            .args(["pipe", "--name", "clave-nav", "--", &payload])
-            .status();
-        return Ok(());
-    }
 
     // 4) new vs resume.
     let Some(choice) = fzf_pick(&["new".into(), "resume".into()], "agent> ")? else {
@@ -267,7 +273,11 @@ pub fn run_add(worktree: bool) -> Result<()> {
         );
         let lines: Vec<String> = candidates
             .iter()
-            .map(|c| format!("{}\t{}", c.label, c.uuid)) // label shown, uuid carried
+            // label shown (live agents marked), uuid carried in the line.
+            .map(|c| {
+                let marker = if c.live { "▶ " } else { "  " };
+                format!("{marker}{}\t{}", c.label, c.uuid)
+            })
             .collect();
         let Some(picked) = fzf_pick(&lines, "resume> ")? else {
             return Ok(());
@@ -277,6 +287,17 @@ pub fn run_add(worktree: bool) -> Result<()> {
             .next()
             .context("picker line")?
             .to_string();
+        // A LIVE pick is a JUMP, not a resume — resuming an on-screen
+        // session opens it twice (C7, round 7). clave-nav via the CLI pipe:
+        // works (S2), and `add` runs INSIDE the session so the env targets
+        // the right zellij.
+        if candidates.iter().any(|c| c.uuid == uuid && c.live) {
+            let payload = format!("{{\"uuid\":\"{uuid}\"}}");
+            let _ = Command::new("zellij")
+                .args(["pipe", "--name", "clave-nav", "--", &payload])
+                .status();
+            return Ok(());
+        }
         // The lock-free store copy is fine for DERIVING the tab's cwd/label
         // (worst case one beat stale); the AUTHORITATIVE update-or-insert
         // happens under the lock in step 7.
@@ -428,6 +449,30 @@ mod tests {
         "#;
         assert_eq!(live_uuids(dump), vec!["3f2a-uuid-1", "9b1c-uuid-2"]);
         assert!(live_uuids("layout { tab { pane } }").is_empty());
+        // Zellij serializes the LIVE pane process, not the baked layout
+        // (C7 live finding): after `clave spawn` execs, the pane reads
+        // `claude --session-id <uuid> …` (create) or `claude --resume
+        // <uuid>` (resume). Both must count as live.
+        let dump = r#"
+            layout {
+                tab name="a" {
+                    pane command="claude" {
+                        args "--session-id" "exec-uuid-1" "--name" "x · main"
+                    }
+                }
+                tab name="b" {
+                    pane command="claude" {
+                        args "--resume" "exec-uuid-2"
+                    }
+                }
+                tab name="c" {
+                    pane command="<defunct>" {
+                        start_suspended true
+                    }
+                }
+            }
+        "#;
+        assert_eq!(live_uuids(dump), vec!["exec-uuid-1", "exec-uuid-2"]);
     }
 
     #[test]
@@ -484,10 +529,15 @@ mod tests {
     }
 
     #[test]
-    fn resume_candidates_exclude_live_and_sort_by_mtime() {
+    fn resume_candidates_mark_live_and_sort_by_mtime() {
+        // §6.3 revised (C7, 2026-07-14): many agents per repo. Live agents
+        // are NOT excluded — they appear MARKED so picking one JUMPS to its
+        // tab instead of duplicating the session (the round-7 defect: a live
+        // session resumed twice).
         let mut s = Store::default();
         let mut r = rec("u-live");
         r.repo_root = "/repo".into();
+        r.last_interacted = 300;
         s.agents.insert("u-live".into(), r);
         let mut r2 = rec("u-old");
         r2.repo_root = "/repo".into();
@@ -499,11 +549,15 @@ mod tests {
         ];
         let live = vec!["u-live".to_string()];
         let c = resume_candidates(&s, "/repo", &jsonls, &live);
-        // u-live excluded; u-disk (mtime 200) before u-old (100); the store
-        // label wins over the bare uuid when we have one.
-        assert_eq!(c.len(), 2);
-        assert_eq!(c[0].uuid, "u-disk");
-        assert_eq!(c[1].uuid, "u-old");
-        assert_eq!(c[1].label, "repo · main · old thing");
+        // mtime/interacted desc: u-live (300) > u-disk (200) > u-old (100);
+        // store label wins over the bare uuid when we have one.
+        assert_eq!(c.len(), 3);
+        assert_eq!(c[0].uuid, "u-live");
+        assert!(c[0].live);
+        assert_eq!(c[1].uuid, "u-disk");
+        assert!(!c[1].live);
+        assert_eq!(c[2].uuid, "u-old");
+        assert_eq!(c[2].label, "repo · main · old thing");
+        assert!(!c[2].live);
     }
 }

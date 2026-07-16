@@ -351,20 +351,28 @@ self-hydrates on load via `RunCommands` — §6.6).
 **Decided:**
 - Pick a repo/dir with **`fzf` over `zoxide query -l`** (fzf present; skim isn't);
   default-select the current cwd.
-- Consult the store for that `repo_root`:
-  - **Already running in clave** → jump to it (`clave-nav` pipe, S2); no duplicate
-    spawn. Liveness check: the uuid appears in `zellij action dump-layout` output —
-    every agent pane's baked command is `clave spawn <uuid>`, so live uuids are
-    greppable (verify the dump includes pane commands during implementation;
-    fallback: track liveness in the store via `SessionStart`/`SessionEnd` hooks).
-  - Otherwise offer **new** vs **resume**:
+- Offer **new** vs **resume** (revised 2026-07-14, C7: MANY agents per repo —
+  the old "repo has a live agent → auto-jump" rule made a second agent in the
+  same repo impossible and only went unnoticed because the liveness check was
+  blind, see below):
     - *new:* mint UUID → derive label (§6.4) → create a tab whose pane command is
       `clave spawn <uuid> --name <label> --cwd <dir>` → record.
     - *resume:* **clave owns the picker** — `fzf` over the repo's resumable sessions
       (its own store rows, plus prior Claude sessions discovered by
       scanning `~/.claude/projects/<munged-cwd>/*.jsonl` and deriving a label per
-      §6.4, minus currently-live uuids). Pick → known UUID → create a tab with the
-      **same idempotent** `clave spawn <uuid> …` command → record.
+      §6.4). Currently-LIVE agents are included but MARKED (`▶`): picking one
+      JUMPS to its tab (`clave-nav` uuid pipe, S2) — resuming a live session
+      opens it twice (found live, round 7). Dead pick → known UUID → create a
+      tab with the **same idempotent** `clave spawn <uuid> …` command → record.
+  - Liveness check: uuids greppable from `zellij action dump-layout`. C7
+    finding (2026-07-14): zellij serializes the LIVE pane process, not the
+    baked layout command — after `clave spawn` execs, that's
+    `claude --session-id <uuid>`/`--resume <uuid>` (parser matches all three
+    forms). CRITICALLY, a fire-and-forget child spawned pre-exec became a
+    permanent ZOMBIE under claude, and zellij serialized the pane as
+    `command="<defunct>"` — blinding liveness AND resurrection; the register
+    pipe is therefore double-forked (reparented to init, nothing left in the
+    pane's tree).
   - *Rejected:* letting `claude --resume` show its own picker. It's tempting (no
     picker to build), but the UUID would only be known *after* launch (via the
     `SessionStart` hook), leaving the pane command as `claude --resume` — which

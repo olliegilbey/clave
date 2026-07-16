@@ -61,7 +61,13 @@ pub fn config_kdl(wasm: &str) -> String {
         nav("{\\\"dir\\\":\\\"prev\\\"}")
     ));
     // True alt-tab (last two focused tabs) is NATIVE — server-side truth.
-    binds.push_str("        bind \"Alt o\" { ToggleTab; }\n");
+    // Alt+o = native ToggleTab PLUS a clave-organic pipe: the pipe arms the
+    // bounded beacon announce (the newly-active instance's next TabUpdate
+    // announces it — rounds 11–12: unbounded self-diagnosed announces
+    // stormed; organic switches must be explicitly signalled).
+    binds.push_str(&format!(
+        "        bind \"Alt o\" {{ ToggleTab; MessagePlugin \"file:{wasm}\" {{ name \"clave-organic\"; }}; }}\n"
+    ));
     for n in 1..=9 {
         binds.push_str(&format!(
             "        bind \"Alt {n}\" {{ {} }}\n",
