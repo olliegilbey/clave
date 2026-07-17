@@ -74,10 +74,18 @@ const SEEK_BUDGET: u32 = 16;
 /// it accepted a 13-col bar as "close enough" to 26).
 const MAX_LEARNABLE_STEP: usize = 20;
 
+/// Row identity (§6.6 C8): a live zellij tab, or a dormant store row
+/// (conversation with no tab yet — claude.ai-style list).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowKey {
+    Tab(usize),
+    Dormant(String),
+}
+
 /// One rendered row, already in display order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
-    pub tab_id: usize,
+    pub key: RowKey,
     pub name: String,
     pub active: bool,
     /// (glyph, ANSI colour) for agent rows; None for plain terminal tabs.
@@ -154,6 +162,11 @@ pub struct BarModel {
     /// user is navigating. Armed by `visited` (the replicated clave-visited
     /// pipe), cleared by `peek_expired` (main.rs's ~1s timer) or `toggle`.
     peeking: bool,
+    /// uuids with a `clave open` in flight (§6.6): set on fire, shown ↻.
+    /// Cleared when the row stops being dormant (tab appeared) or a stale=true
+    /// snapshot lands (open failed → ✗, retryable). First double-fire guard;
+    /// `clave open`'s liveness no-op is the second.
+    opening: BTreeSet<String>,
 }
 
 impl BarModel {
@@ -265,15 +278,55 @@ impl BarModel {
         out
     }
 
-    /// Display line N (0-based) → that row's (tab_id, position).
+    /// Display line N (0-based) → that LIVE row's (tab_id, position). A
+    /// dormant row resolves to None: it has no zellij tab to switch to. (§6.6
+    /// C8; Task 9 gives dormant clicks their own open-on-click semantics.)
     fn tab_for_line(&self, line: usize) -> Option<(usize, usize)> {
-        let row_tab = self.rows().get(line)?.tab_id;
+        let RowKey::Tab(row_tab) = self.rows().get(line)?.key else {
+            return None;
+        };
         let t = self.tabs.iter().find(|t| t.tab_id == row_tab)?;
         Some((t.tab_id, t.position))
     }
 
+    /// §6.6 C8 dormancy: no CURRENT tab carries the bind, and no REGISTERED
+    /// pane is present in the manifest. The pane-join leg is instance-local —
+    /// divergence only flickers a dormant row briefly (harmless) — but it
+    /// suppresses the duplicate row in the pre-bind beat after a tab spawns.
+    fn is_dormant(&self, a: &Agent) -> bool {
+        let tab_live = a
+            .tab_id
+            .is_some_and(|id| self.tabs.iter().any(|t| t.tab_id == id));
+        let pane_live = self
+            .uuid_to_pane
+            .get(&a.uuid)
+            .is_some_and(|p| self.tab_position_of_pane(*p).is_some());
+        !tab_live && !pane_live
+    }
+
+    /// Drop in-flight marks that resolved: the row went live (open succeeded)
+    /// or the snapshot flagged it stale (open failed). Called after every
+    /// input that changes the join picture.
+    fn prune_opening(&mut self) {
+        let resolved: Vec<String> = self
+            .opening
+            .iter()
+            .filter(|u| {
+                self.agents
+                    .iter()
+                    .find(|a| &&a.uuid == u)
+                    .is_none_or(|a| !self.is_dormant(a) || a.stale)
+            })
+            .cloned()
+            .collect();
+        for u in resolved {
+            self.opening.remove(&u);
+        }
+    }
+
     pub fn register(&mut self, uuid: String, pane_id: u32) {
         self.uuid_to_pane.insert(uuid, pane_id);
+        self.prune_opening();
     }
 
     /// Apply a full-replace snapshot (§5). Returns rename effects (label
@@ -315,6 +368,7 @@ impl BarModel {
                 self.read_locally.remove(&uuid);
             }
         }
+        self.prune_opening(); // stale=true clears ↻ → ✗; new binds clear it
         effects
     }
 
@@ -358,47 +412,76 @@ impl BarModel {
                 }
             }
         }
+        self.prune_opening(); // an appeared tab retires its ↻ mark
         effects
     }
 
     pub fn apply_panes(&mut self, panes: Vec<PaneMeta>) {
         self.panes = panes;
+        self.prune_opening();
     }
 
-    /// Rows in display order: last-user-commitment desc (sort_key: touches ∨
-    /// agent prompts, unix s), then tab position asc as the tiebreak (fresh
-    /// same-second tabs, and anything never committed to, sit in tab order).
+    /// Rows in display order (§6.6 C8): ONE unified recency-desc list — live
+    /// tabs keyed by the store tab_timeline, dormant store rows keyed by
+    /// last_interacted. Tiebreak: tab position for live rows (fresh
+    /// same-second tabs sit in tab order), uuid for dormant rows (stable).
     pub fn rows(&self) -> Vec<Row> {
-        let mut order: Vec<&TabMeta> = self.tabs.iter().collect();
-        order.sort_by(|a, b| {
-            let (ka, kb) = (self.sort_key(a), self.sort_key(b));
-            kb.cmp(&ka).then(a.position.cmp(&b.position))
-        });
-        order
-            .into_iter()
-            .map(|t| {
-                let glyph = self.agent_in_tab(t.tab_id).map(|a| {
-                    // Local unread override: render Done as Idle once seen.
-                    if a.status == Status::Done && self.read_locally.contains(&a.uuid) {
-                        Status::Idle.glyph()
-                    } else {
-                        a.status.glyph()
-                    }
-                });
+        // (sort_ts desc, tiebreak asc) — tiebreak: live rows by position,
+        // dormant by a large offset + stable index so they never interleave
+        // nondeterministically with same-second live rows.
+        let mut entries: Vec<(u64, usize, Row)> = Vec::new();
+        for t in &self.tabs {
+            let glyph = self.agent_in_tab(t.tab_id).map(|a| {
+                // Local unread override: render Done as Idle once seen.
+                if a.status == Status::Done && self.read_locally.contains(&a.uuid) {
+                    Status::Idle.glyph()
+                } else {
+                    a.status.glyph()
+                }
+            });
+            entries.push((
+                self.sort_key(t),
+                t.position,
                 Row {
-                    tab_id: t.tab_id,
+                    key: RowKey::Tab(t.tab_id),
                     name: t.name.clone(),
                     active: t.active,
                     glyph,
-                }
-            })
-            .collect()
+                },
+            ));
+        }
+        let mut dormant: Vec<&Agent> =
+            self.agents.iter().filter(|a| self.is_dormant(a)).collect();
+        dormant.sort_by(|a, b| a.uuid.cmp(&b.uuid)); // stable tiebreak input
+        for (i, a) in dormant.into_iter().enumerate() {
+            let glyph = if a.stale {
+                ('✗', 31) // open found the cwd missing (§5 stale)
+            } else if self.opening.contains(&a.uuid) {
+                ('↻', 33) // open in flight
+            } else {
+                ('◌', 90) // dormant conversation
+            };
+            entries.push((
+                a.last_interacted,
+                usize::MAX - i, // after any same-second live row, stable
+                Row {
+                    key: RowKey::Dormant(a.uuid.clone()),
+                    name: a.label.clone(),
+                    active: false,
+                    glyph: Some(glyph),
+                },
+            ));
+        }
+        entries.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        entries.into_iter().map(|(_, _, r)| r).collect()
     }
 
     /// Mouse click on rendered line N (0-based): jump to that row's tab.
     /// A click reaches exactly ONE instance (the visible bar), so the jump
     /// broadcasts a beacon for the other instances' executor election.
-    /// Focus is not a commitment — clicks never reorder.
+    /// Focus is not a commitment — clicks never reorder. A click on a dormant
+    /// row does NOTHING this task (tab_for_line → None); Task 9 adds
+    /// open-on-click.
     pub fn click(&mut self, line: usize) -> Vec<Effect> {
         let Some((tab_id, position)) = self.tab_for_line(line) else {
             return Vec::new();
@@ -447,7 +530,10 @@ impl BarModel {
             if rows.is_empty() {
                 return Vec::new();
             }
-            let cur = rows.iter().position(|r| r.tab_id == own).unwrap_or(0);
+            let cur = rows
+                .iter()
+                .position(|r| r.key == RowKey::Tab(own))
+                .unwrap_or(0);
             match dir {
                 "next" => Some((cur + 1) % rows.len()),
                 "prev" => Some((cur + rows.len() - 1) % rows.len()),
@@ -661,15 +747,15 @@ mod tests {
         let mut m = BarModel::default();
         m.apply_tabs(vec![tab(10, 0, "a", false), tab(11, 1, "b", false)]);
         m.apply_snapshot(snap_t(1, &[(10, 2000)]));
-        assert_eq!(m.rows()[0].tab_id, 10);
+        assert_eq!(m.rows()[0].key, RowKey::Tab(10));
         // New snapshot: b now leads, and a's old entry is GONE (replace
         // semantics — a merge would have kept a at 2000 and diverged).
         m.apply_snapshot(snap_t(2, &[(11, 1000)]));
         let rows = m.rows();
-        assert_eq!(rows[0].tab_id, 11);
+        assert_eq!(rows[0].key, RowKey::Tab(11));
         // A stale seq must not replace anything (§5 gate).
         m.apply_snapshot(snap_t(1, &[(10, 9000)]));
-        assert_eq!(m.rows()[0].tab_id, 11);
+        assert_eq!(m.rows()[0].key, RowKey::Tab(11));
     }
 
     #[test]
@@ -860,7 +946,7 @@ mod tests {
             ]
         );
         // Walking must not reorder: c is still row 1 after both walks.
-        assert_eq!(m.rows()[0].tab_id, 12);
+        assert_eq!(m.rows()[0].key, RowKey::Tab(12));
         // Clicks land on ONE instance (the visible bar): same effect shape.
         assert_eq!(
             m.click(1),
@@ -1121,11 +1207,126 @@ mod tests {
         m.apply_snapshot(s);
         let rows = m.rows();
         assert_eq!(
-            rows.iter().map(|r| r.tab_id).collect::<Vec<_>>(),
-            vec![11, 12, 10]
+            rows.iter().map(|r| r.key.clone()).collect::<Vec<_>>(),
+            vec![RowKey::Tab(11), RowKey::Tab(12), RowKey::Tab(10)]
         );
         assert_eq!(rows[0].glyph, Some(('●', 33))); // ag-a working
         assert_eq!(rows[1].glyph, Some(('●', 32))); // ag-b done
         assert_eq!(rows[2].glyph, None);
+    }
+
+    #[test]
+    fn store_rows_without_live_tabs_render_dormant() {
+        // §6.6 C8: row set = TabUpdate ∪ dormant store rows. An agent whose
+        // bind points at no current tab and whose registered pane is gone
+        // renders ◌ dim, labeled from the store, recency = last_interacted.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(1, 0, "shell", true)]); // one plain live tab
+        let mut a = agent("u-dormant", Status::Idle, None);
+        a.label = "repo · main · fix".into();
+        a.last_interacted = 500;
+        m.apply_snapshot(AgentSnapshot {
+            seq: 1,
+            agents: vec![a],
+            tab_timeline: Default::default(),
+        });
+        let rows = m.rows();
+        assert_eq!(rows.len(), 2);
+        let d = rows
+            .iter()
+            .find(|r| r.key == RowKey::Dormant("u-dormant".into()))
+            .expect("dormant row rendered");
+        assert_eq!(d.name, "repo · main · fix");
+        assert!(!d.active);
+        assert_eq!(d.glyph, Some(('◌', 90)));
+    }
+
+    #[test]
+    fn dormant_rows_sort_into_the_unified_recency_order() {
+        // One list, claude.ai-style: live tabs keyed by tab_timeline, dormant
+        // rows keyed by last_interacted, merged desc.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(1, 0, "live", true)]);
+        let mut old = agent("u-old", Status::Idle, None);
+        old.last_interacted = 100;
+        let mut new = agent("u-new", Status::Idle, None);
+        new.last_interacted = 900;
+        m.apply_snapshot(AgentSnapshot {
+            seq: 1,
+            agents: vec![old, new],
+            tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64)]),
+        });
+        let keys: Vec<_> = m.rows().into_iter().map(|r| r.key).collect();
+        assert_eq!(
+            keys,
+            vec![
+                RowKey::Dormant("u-new".into()), // 900
+                RowKey::Tab(1),                  // 500
+                RowKey::Dormant("u-old".into()), // 100
+            ]
+        );
+    }
+
+    #[test]
+    fn agent_with_live_tab_or_registered_pane_is_not_dormant() {
+        // The same uuid must never render twice: a bound live tab, OR a
+        // registered pane still present in the manifest (pre-bind beat, e.g.
+        // right after Alt+a's tab appears), suppresses the dormant row.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(7, 0, "agent-tab", true)]);
+        m.apply_snapshot(AgentSnapshot {
+            seq: 1,
+            agents: vec![agent("u1", Status::Working, Some(7))], // bound → live
+            tab_timeline: Default::default(),
+        });
+        assert!(
+            !m.rows()
+                .iter()
+                .any(|r| r.key == RowKey::Dormant("u1".into()))
+        );
+        // Bind gone (fresh session) but the pane join exists → still not dormant.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(7, 0, "agent-tab", true)]);
+        m.register("u2".into(), 42);
+        m.apply_panes(vec![pane(0, 42, false, true)]);
+        m.apply_snapshot(AgentSnapshot {
+            seq: 1,
+            agents: vec![agent("u2", Status::Working, None)],
+            tab_timeline: Default::default(),
+        });
+        assert!(
+            !m.rows()
+                .iter()
+                .any(|r| r.key == RowKey::Dormant("u2".into()))
+        );
+    }
+
+    #[test]
+    fn opening_and_stale_glyphs_decorate_dormant_rows() {
+        // ↻ while an open is in flight (set by open_effects, Task 9 — poke the
+        // set directly here); ✗ when the snapshot says stale. A stale=true
+        // snapshot also clears the in-flight mark (the open FAILED — the row
+        // must become retryable, not stuck ↻).
+        let mut m = BarModel::default();
+        let mut a = agent("u1", Status::Idle, None);
+        a.stale = true;
+        m.opening.insert("u1".into());
+        m.apply_snapshot(AgentSnapshot {
+            seq: 1,
+            agents: vec![a],
+            tab_timeline: Default::default(),
+        });
+        let rows = m.rows();
+        assert_eq!(rows[0].glyph, Some(('✗', 31)));
+        assert!(m.opening.is_empty(), "stale snapshot clears in-flight");
+        // In-flight (no stale): ↻.
+        let mut m = BarModel::default();
+        m.apply_snapshot(AgentSnapshot {
+            seq: 1,
+            agents: vec![agent("u2", Status::Idle, None)],
+            tab_timeline: Default::default(),
+        });
+        m.opening.insert("u2".into());
+        assert_eq!(m.rows()[0].glyph, Some(('↻', 33)));
     }
 }
