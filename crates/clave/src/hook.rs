@@ -224,7 +224,9 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
     if !read_store(&paths)?.agents.contains_key(&uuid) {
         return Ok(());
     }
-    let home = dirs::home_dir().unwrap_or_default();
+    // §6.9: claude_config_dir() (not raw home) so the sandbox override
+    // reaches the same jsonl tree real claude processes write to.
+    let claude_dir = crate::env::claude_config_dir().unwrap_or_default();
     let snap = with_store_mut(&paths, |s| {
         // Label refresh only re-reads the jsonl while it's still cheap to
         // matter (§6.4): source==FirstPrompt and a label-bearing event.
@@ -232,7 +234,7 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
             if rec.label_source == LabelSource::FirstPrompt
                 && matches!(event, "Stop" | "UserPromptSubmit")
             {
-                read_tail(&jsonl_path(&home, &rec.cwd, &uuid), 64 * 1024)
+                read_tail(&jsonl_path(&claude_dir, &rec.cwd, &uuid), 64 * 1024)
             } else {
                 None
             }

@@ -21,19 +21,19 @@ pub enum SpawnMode {
     Resume,
 }
 
-/// Where Claude Code stores this session's transcript. `physical_cwd` MUST
-/// already be canonicalized (S0b: Claude munges getcwd(), which resolves
-/// symlinks) — pass the output of `std::fs::canonicalize`, never raw user
-/// input, or the join key misses and create collides ("already in use").
-pub fn jsonl_path(home: &Path, physical_cwd: &str, uuid: &str) -> PathBuf {
-    home.join(".claude")
+/// Where Claude Code stores this session's transcript, under the given
+/// CLAUDE CONFIG DIR (`env::claude_config_dir()` — sandbox-aware, §6.9).
+/// `physical_cwd` MUST already be canonicalized (S0b) — pass
+/// `std::fs::canonicalize` output, never raw user input.
+pub fn jsonl_path(claude_dir: &Path, physical_cwd: &str, uuid: &str) -> PathBuf {
+    claude_dir
         .join("projects")
         .join(munge_cwd(physical_cwd))
         .join(format!("{uuid}.jsonl"))
 }
 
-pub fn spawn_mode(home: &Path, physical_cwd: &str, uuid: &str) -> SpawnMode {
-    if jsonl_path(home, physical_cwd, uuid).exists() {
+pub fn spawn_mode(claude_dir: &Path, physical_cwd: &str, uuid: &str) -> SpawnMode {
+    if jsonl_path(claude_dir, physical_cwd, uuid).exists() {
         SpawnMode::Resume
     } else {
         SpawnMode::Create
@@ -97,9 +97,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn jsonl_path_uses_munged_physical_cwd() {
-        let home = std::path::Path::new("/Users/x");
-        let p = jsonl_path(home, "/Users/x/code/clave", "u-1");
+    fn jsonl_path_uses_munged_physical_cwd_under_claude_dir() {
+        // §6.9: the CLAUDE CONFIG DIR is the parameter (not home) so the
+        // sandbox override flows through — real claude processes honor
+        // $CLAUDE_CONFIG_DIR and write transcripts to the same tree.
+        let claude = std::path::Path::new("/Users/x/.claude");
+        let p = jsonl_path(claude, "/Users/x/code/clave", "u-1");
         assert_eq!(
             p,
             std::path::PathBuf::from("/Users/x/.claude/projects/-Users-x-code-clave/u-1.jsonl")
@@ -109,13 +112,12 @@ mod tests {
     #[test]
     fn spawn_mode_is_resume_iff_jsonl_exists() {
         let d = tempfile::tempdir().unwrap();
-        let home = d.path();
+        let claude = d.path().join(".claude");
         let cwd = "/Users/x/code/clave";
-        assert_eq!(spawn_mode(home, cwd, "u-1"), SpawnMode::Create);
-        // Drop the jsonl where Claude would write it → next spawn resumes.
-        let dir = home.join(".claude/projects/-Users-x-code-clave");
+        assert_eq!(spawn_mode(&claude, cwd, "u-1"), SpawnMode::Create);
+        let dir = claude.join("projects/-Users-x-code-clave");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("u-1.jsonl"), b"{}").unwrap();
-        assert_eq!(spawn_mode(home, cwd, "u-1"), SpawnMode::Resume);
+        assert_eq!(spawn_mode(&claude, cwd, "u-1"), SpawnMode::Resume);
     }
 }

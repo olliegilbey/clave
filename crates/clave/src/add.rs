@@ -246,9 +246,8 @@ pub fn run_add(worktree: bool) -> Result<()> {
     let (uuid, worktree_path, existing) = if choice == "resume" {
         // clave owns the picker (§6.3 — claude --resume's own picker would
         // break resurrection). Candidates: store rows + jsonl scan.
-        let proj_dir = dirs::home_dir()
-            .context("home")?
-            .join(".claude/projects")
+        let proj_dir = crate::env::claude_config_dir()?
+            .join("projects")
             .join(crate::munge::munge_cwd(&physical_str));
         let mut stems: Vec<(String, u64)> = Vec::new();
         if let Ok(rd) = std::fs::read_dir(&proj_dir) {
@@ -410,6 +409,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
         snapshot_from(s)
     })?;
     push_snapshot(&snap);
+    crate::evlog::log_event("add", &format!("{uuid}: recorded ({choice})"));
     Ok(())
 }
 

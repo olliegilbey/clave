@@ -134,8 +134,9 @@ fn main() -> Result<()> {
             let physical = std::fs::canonicalize(&cwd)
                 .with_context(|| format!("canonicalizing --cwd {cwd}"))?;
             let physical_str = physical.to_str().context("non-UTF8 cwd")?.to_string();
-            let home = dirs::home_dir().context("no home dir")?;
-            let mode = spawn::spawn_mode(&home, &physical_str, &uuid);
+            let claude_dir = clave::env::claude_config_dir()?;
+            let mode = spawn::spawn_mode(&claude_dir, &physical_str, &uuid);
+            clave::evlog::log_event("spawn", &format!("{uuid}: {mode:?}"));
             // Register uuid→pane BEFORE exec (this process is about to be
             // replaced; best-effort — see register_pane).
             spawn::register_pane(&uuid);
