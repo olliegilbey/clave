@@ -115,11 +115,15 @@ pub fn run_scenario(name: &str) -> Result<()> {
 
     let now = crate::store::now_unix();
     let paths = crate::store::store_paths()?;
+    // A `?` mid-loop leaves the sandbox partially seeded — that's fine: it's
+    // fully recoverable with `clave dev reset` (wipes the whole sandbox root).
     for (i, a) in sc.agents.iter().enumerate() {
         let uuid = scenario_uuid(i as u32 + 1);
         let repo = root.join("repos").join(format!("{name}-{}", a.slug));
         std::fs::create_dir_all(&repo)?;
-        run_in(&repo, "git", &["init", "-q"])?;
+        // -b main: pin the branch — else init.defaultBranch (maybe `master`)
+        // would disagree with the store row's hardcoded `branch: "main"`.
+        run_in(&repo, "git", &["init", "-q", "-b", "main"])?;
         run_in(&repo, "git", &["commit", "--allow-empty", "-q", "-m", "seed"])?;
         let cwd = if a.worktree {
             let wt = repo.join(".claude-worktrees").join(&uuid[..8]);

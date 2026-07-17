@@ -247,12 +247,13 @@ pub fn run_setup() -> Result<()> {
     std::fs::write(dir.join("config.kdl"), config_kdl(wasm_str))?;
     std::fs::write(dir.join("layout.kdl"), layout_kdl(wasm_str))?;
 
-    // Hooks: read-merge-write ~/.claude/settings.json. The path may be a
-    // symlink into a dotfiles repo — fs::read/write follow it, which is
-    // exactly what we want (§6.5).
-    let settings_path = dirs::home_dir()
-        .context("home")?
-        .join(".claude/settings.json");
+    // Hooks: read-merge-write $CLAUDE_CONFIG_DIR/settings.json. The path may
+    // be a symlink into a dotfiles repo — fs::read/write follow it, which is
+    // exactly what we want (§6.5). Routed via claude_config_dir() (not
+    // hardcoded home) so `clave dev`'s sandbox (§6.9) merges hooks into its
+    // OWN settings.json — else sandbox sessions get no clave hooks and
+    // scenario agents never report status. Env unset ⇒ ~/.claude, unchanged.
+    let settings_path = crate::env::claude_config_dir()?.join("settings.json");
     let mut settings: serde_json::Value = match std::fs::read(&settings_path) {
         Ok(b) => serde_json::from_slice(&b).context("parsing ~/.claude/settings.json")?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
