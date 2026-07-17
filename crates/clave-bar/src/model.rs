@@ -54,7 +54,27 @@ pub enum Effect {
     /// resize_pane_with_id(Increase→Right, own) — C6 seek / overshoot
     /// recovery.
     GrowSelf,
+    /// set_timeout(DWELL_SECS) on the executor — §6.6 dormant dwell. `gen`
+    /// stamps the landing; expiry acts only if the cursor generation still
+    /// matches (walk-through safety).
+    ArmDwell { r#gen: u64 },
+    /// set_timeout(PEEK_SINK_SECS) + pending_peeks bump — a dormant-row nav
+    /// landing on a collapsed bar peeks like live nav does (no visited pipe
+    /// exists for it, so the model asks explicitly).
+    ArmPeek,
+    /// run_command(["clave","open",uuid]) — §6.3. Fired by dwell expiry and
+    /// explicit picks; the model has already marked the uuid in-flight (↻).
+    OpenAgent { uuid: String },
 }
+
+/// §6.6 C8: user-tuned (approved 2026-07-17) — do not normalize with the
+/// 0.9s peek sink.
+pub const DWELL_SECS: f64 = 0.4;
+pub const PEEK_SINK_SECS: f64 = 0.9;
+/// Event::Timer(f64) carries ELAPSED sleep seconds (server-side, v0.44.3
+/// zellij_exports.rs:2462) ≈ the requested duration — 0.4 vs 0.9 splits
+/// cleanly at 0.65.
+pub const TIMER_KIND_CUTOFF_SECS: f64 = 0.65;
 
 /// The generated layouts give the bar `size=30` (setup::layout_kdl and
 /// add::tab_layout) — the expanded width the seek returns to.
@@ -167,6 +187,13 @@ pub struct BarModel {
     /// snapshot lands (open failed → ✗, retryable). First double-fire guard;
     /// `clave open`'s liveness no-op is the second.
     opening: BTreeSet<String>,
+    /// §6.6 C8 virtual selection cursor: Some(uuid) while nav sits on a
+    /// dormant row (there is no tab to focus). Nav steps continue from it;
+    /// it resolves back to the focused-tab row on any live-row landing.
+    cursor: Option<String>,
+    /// Bumped on EVERY nav landing; ArmDwell carries it so a late timer for
+    /// an abandoned landing is provably stale.
+    cursor_gen: u64,
 }
 
 impl BarModel {
@@ -278,15 +305,38 @@ impl BarModel {
         out
     }
 
-    /// Display line N (0-based) → that LIVE row's (tab_id, position). A
-    /// dormant row resolves to None: it has no zellij tab to switch to. (§6.6
-    /// C8; Task 9 gives dormant clicks their own open-on-click semantics.)
-    fn tab_for_line(&self, line: usize) -> Option<(usize, usize)> {
-        let RowKey::Tab(row_tab) = self.rows().get(line)?.key else {
-            return None;
+    /// Explicit-open path (click / Alt+N / dwell expiry): mark in-flight and
+    /// emit the run. The `opening` guard is double-fire protection #1
+    /// (clave open's liveness no-op is #2). Stale rows may retry — the user
+    /// might have restored the dir.
+    fn open_effects(&mut self, uuid: &str) -> Vec<Effect> {
+        if self.opening.contains(uuid) {
+            return Vec::new();
+        }
+        self.opening.insert(uuid.to_string());
+        vec![Effect::OpenAgent {
+            uuid: uuid.to_string(),
+        }]
+    }
+
+    /// The dwell timer for landing `gen` expired (main.rs). Opens iff the
+    /// cursor still sits on that same landing and the row is still dormant.
+    pub fn dwell_expired(&mut self, r#gen: u64) -> Vec<Effect> {
+        if r#gen != self.cursor_gen {
+            return Vec::new(); // cursor moved on — walk-through, not intent
+        }
+        let Some(uuid) = self.cursor.clone() else {
+            return Vec::new();
         };
-        let t = self.tabs.iter().find(|t| t.tab_id == row_tab)?;
-        Some((t.tab_id, t.position))
+        let still_dormant = self
+            .agents
+            .iter()
+            .find(|a| a.uuid == uuid)
+            .is_some_and(|a| self.is_dormant(a));
+        if !still_dormant {
+            return Vec::new();
+        }
+        self.open_effects(&uuid)
     }
 
     /// §6.6 C8 dormancy: no CURRENT tab carries the bind, and no REGISTERED
@@ -480,17 +530,27 @@ impl BarModel {
     /// A click reaches exactly ONE instance (the visible bar), so the jump
     /// broadcasts a beacon for the other instances' executor election.
     /// Focus is not a commitment — clicks never reorder. A click on a dormant
-    /// row does NOTHING this task (tab_for_line → None); Task 9 adds
-    /// open-on-click.
+    /// row opens it immediately (§6.6 — no dwell for explicit picks).
     pub fn click(&mut self, line: usize) -> Vec<Effect> {
-        let Some((tab_id, position)) = self.tab_for_line(line) else {
+        let Some(row) = self.rows().get(line).cloned() else {
             return Vec::new();
         };
-        self.beacon(tab_id);
-        vec![
-            Effect::SwitchTab { position },
-            Effect::AnnounceVisit { tab_id },
-        ]
+        match row.key {
+            RowKey::Tab(tab_id) => {
+                let Some(position) =
+                    self.tabs.iter().find(|t| t.tab_id == tab_id).map(|t| t.position)
+                else {
+                    return Vec::new();
+                };
+                self.beacon(tab_id);
+                vec![
+                    Effect::SwitchTab { position },
+                    Effect::AnnounceVisit { tab_id },
+                ]
+            }
+            // Explicit pick: open immediately (§6.6 — no dwell for clicks).
+            RowKey::Dormant(uuid) => self.open_effects(&uuid),
+        }
     }
 
     /// The replicated focus truth — main.rs uses it as the row-jump executor
@@ -523,16 +583,24 @@ impl BarModel {
         let Some(own) = executor_own_tab else {
             return Vec::new();
         };
+        let rows = self.rows();
         let line = if let Some(n) = v.get("row").and_then(|n| n.as_u64()) {
             (n as usize).checked_sub(1) // 1-based → display line
         } else if let Some(dir) = v.get("dir").and_then(|d| d.as_str()) {
-            let rows = self.rows();
             if rows.is_empty() {
                 return Vec::new();
             }
-            let cur = rows
-                .iter()
-                .position(|r| r.key == RowKey::Tab(own))
+            // Walk base: the dormant cursor if set, else the executor's own
+            // tab row (§6.6 C8 — the cursor IS the position while walking
+            // through dormant rows).
+            let cur = self
+                .cursor
+                .as_ref()
+                .and_then(|u| {
+                    rows.iter()
+                        .position(|r| r.key == RowKey::Dormant(u.clone()))
+                })
+                .or_else(|| rows.iter().position(|r| r.key == RowKey::Tab(own)))
                 .unwrap_or(0);
             match dir {
                 "next" => Some((cur + 1) % rows.len()),
@@ -542,14 +610,46 @@ impl BarModel {
         } else {
             None
         };
-        let Some((tab_id, position)) = line.and_then(|l| self.tab_for_line(l)) else {
+        let is_dir_walk = v.get("dir").is_some();
+        let Some(row) = line.and_then(|l| rows.get(l).cloned()) else {
             return Vec::new();
         };
-        self.beacon(tab_id); // executor hand-off hint; pipe echo confirms
-        vec![
-            Effect::SwitchTab { position },
-            Effect::AnnounceVisit { tab_id },
-        ]
+        self.cursor_gen += 1; // every landing invalidates prior dwell arms
+        match row.key {
+            RowKey::Tab(tab_id) => {
+                self.cursor = None; // live landing: focus truth takes over
+                let Some(position) =
+                    self.tabs.iter().find(|t| t.tab_id == tab_id).map(|t| t.position)
+                else {
+                    return Vec::new();
+                };
+                self.beacon(tab_id); // executor hand-off hint; pipe echo confirms
+                vec![
+                    Effect::SwitchTab { position },
+                    Effect::AnnounceVisit { tab_id },
+                ]
+            }
+            RowKey::Dormant(uuid) => {
+                if !is_dir_walk {
+                    // Alt+N explicit pick: open immediately (§6.6).
+                    return self.open_effects(&uuid);
+                }
+                self.cursor = Some(uuid);
+                let mut fx = vec![Effect::ArmDwell {
+                    r#gen: self.cursor_gen,
+                }];
+                // A collapsed bar peeks while walking dormant rows too — live
+                // nav peeks via the visited pipe; there is no pipe here, so
+                // arm locally on the executor (the one visible bar).
+                if self.collapsed {
+                    self.peeking = true;
+                    self.seek_budget = SEEK_BUDGET;
+                    self.seek_last_cols = None;
+                    fx.push(Effect::ArmPeek);
+                }
+                fx
+            }
+        }
     }
 
     /// Alt+c (round 20, collapse-in-place): flip between the template width
@@ -1299,6 +1399,112 @@ mod tests {
                 .iter()
                 .any(|r| r.key == RowKey::Dormant("u2".into()))
         );
+    }
+
+    #[test]
+    fn nav_onto_dormant_row_arms_dwell_not_open() {
+        // §6.6 C8: stepping onto a dormant row moves a virtual cursor and arms
+        // a 0.4s dwell — it must NOT switch tabs, announce, or open.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(1, 0, "live", true)]);
+        let mut a = agent("u-d", Status::Idle, None);
+        a.last_interacted = 999; // dormant row sorts FIRST; live row is line 1
+        m.apply_snapshot(AgentSnapshot {
+            seq: 1,
+            agents: vec![a],
+            tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64)]),
+        });
+        m.beacon(1);
+        let fx = m.nav("{\"dir\":\"next\"}", Some(1)); // from live row 1, wrap → row 0 (dormant)
+        assert_eq!(fx, vec![Effect::ArmDwell { r#gen: 1 }]);
+        // Cursor moved; a second step continues FROM the cursor, back to live.
+        let fx = m.nav("{\"dir\":\"next\"}", Some(1));
+        assert!(fx.contains(&Effect::SwitchTab { position: 0 }));
+    }
+
+    #[test]
+    fn dwell_expiry_opens_only_if_cursor_still_there() {
+        // Walk-through safety: the gen stamps each landing; a stale gen (the
+        // cursor moved on) must be a no-op — this is what makes walking the
+        // unified list safe.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(1, 0, "live", true)]);
+        let mut a = agent("u-d", Status::Idle, None);
+        a.last_interacted = 999;
+        m.apply_snapshot(AgentSnapshot {
+            seq: 1,
+            agents: vec![a],
+            tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64)]),
+        });
+        m.beacon(1);
+        let fx = m.nav("{\"dir\":\"next\"}", Some(1));
+        let Effect::ArmDwell { r#gen } = fx[0] else { panic!() };
+        // Cursor moved away before expiry → stale gen, no open.
+        m.nav("{\"dir\":\"next\"}", Some(1));
+        assert!(m.dwell_expired(r#gen).is_empty());
+        // Land again and let it expire in place → exactly one open, marked ↻.
+        let fx = m.nav("{\"dir\":\"prev\"}", Some(1)); // back to dormant row 0
+        let Effect::ArmDwell { r#gen } = fx[0] else { panic!() };
+        assert_eq!(
+            m.dwell_expired(r#gen),
+            vec![Effect::OpenAgent { uuid: "u-d".into() }]
+        );
+        // In flight now: a repeat expiry (or landing) must not double-fire.
+        assert!(m.dwell_expired(r#gen).is_empty());
+    }
+
+    #[test]
+    fn explicit_picks_open_immediately() {
+        // Click and Alt+N skip the dwell — explicit intent is unambiguous.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(1, 0, "live", true)]);
+        let mut a = agent("u-d", Status::Idle, None);
+        a.last_interacted = 999;
+        m.apply_snapshot(AgentSnapshot {
+            seq: 1,
+            agents: vec![a],
+            tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64)]),
+        });
+        assert_eq!(
+            m.click(0), // dormant row is line 0
+            vec![Effect::OpenAgent { uuid: "u-d".into() }]
+        );
+        // Alt+1 (row payload) on a dormant row — new model, fresh state:
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(1, 0, "live", true)]);
+        let mut a = agent("u-d", Status::Idle, None);
+        a.last_interacted = 999;
+        m.apply_snapshot(AgentSnapshot {
+            seq: 1,
+            agents: vec![a],
+            tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64)]),
+        });
+        m.beacon(1);
+        assert_eq!(
+            m.nav("{\"row\":1}", Some(1)),
+            vec![Effect::OpenAgent { uuid: "u-d".into() }]
+        );
+    }
+
+    #[test]
+    fn dormant_landing_peeks_a_collapsed_bar() {
+        // §6.6: walking dormant rows must keep a collapsed bar peeked, same as
+        // live-row nav (whose peek rides the visited pipe — dormant landings
+        // have no pipe, so the model returns ArmPeek explicitly).
+        let mut m = BarModel::default();
+        m.toggle(); // collapsed
+        m.apply_tabs(vec![tab(1, 0, "live", true)]);
+        let mut a = agent("u-d", Status::Idle, None);
+        a.last_interacted = 999;
+        m.apply_snapshot(AgentSnapshot {
+            seq: 1,
+            agents: vec![a],
+            tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64)]),
+        });
+        m.beacon(1);
+        let fx = m.nav("{\"dir\":\"next\"}", Some(1));
+        assert!(fx.contains(&Effect::ArmPeek));
+        assert!(fx.iter().any(|e| matches!(e, Effect::ArmDwell { .. })));
     }
 
     #[test]

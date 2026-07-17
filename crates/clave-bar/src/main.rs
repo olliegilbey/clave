@@ -7,7 +7,9 @@ use std::collections::BTreeMap;
 
 // The pure model lives in the LIB half of this crate (src/lib.rs → model.rs)
 // so it host-tests without linking this bin's wasm host-import shims.
-use clave_bar::model::{BarModel, Effect, PaneMeta, TabMeta};
+use clave_bar::model::{
+    BarModel, DWELL_SECS, Effect, PEEK_SINK_SECS, PaneMeta, TIMER_KIND_CUTOFF_SECS, TabMeta,
+};
 use zellij_tile::prelude::*;
 
 #[derive(Default)]
@@ -28,6 +30,10 @@ struct State {
     /// set_timeout(1.0); only the LAST expiry sinks the bar, so a nav burst
     /// keeps it expanded until ~1s after the final press.
     pending_peeks: u32,
+    /// Dwell timers in flight (§6.6 C8): each dormant-row landing arms one
+    /// set_timeout(DWELL_SECS). All share one duration, so they fire in arm
+    /// order — FIFO gen matching is exact.
+    pending_dwells: std::collections::VecDeque<u64>,
 }
 
 register_plugin!(State);
@@ -143,6 +149,21 @@ impl State {
                         );
                     }
                 }
+                // §6.6 C8 dormant nav (ungated — click reaches exactly one
+                // instance, nav effects are executor-only by construction,
+                // and the model's `opening` guard + clave open's no-op make
+                // duplicates harmless).
+                Effect::ArmDwell { r#gen } => {
+                    self.pending_dwells.push_back(r#gen);
+                    set_timeout(DWELL_SECS);
+                }
+                Effect::ArmPeek => {
+                    self.pending_peeks += 1;
+                    set_timeout(PEEK_SINK_SECS);
+                }
+                Effect::OpenAgent { uuid } => {
+                    run_command(&["clave", "open", &uuid], BTreeMap::new());
+                }
                 _ => {} // non-active instance skips writes
             }
         }
@@ -218,7 +239,7 @@ impl State {
                     // pending timers drains to zero).
                     if self.model.visited(tab_id) {
                         self.pending_peeks += 1;
-                        set_timeout(0.9); // user-tuned: 1.0 felt a touch long
+                        set_timeout(PEEK_SINK_SECS); // user-tuned: 1.0 felt a touch long
                     }
                     true // active-row highlight may move
                 }
@@ -392,12 +413,27 @@ impl ZellijPlugin for State {
                 self.fire_binds(); // fresh manifest → own-tab joins resolvable
                 true
             }
-            Event::Timer(_) => {
-                // One expiry per armed peek; only the LAST sinks (nav burst
-                // = one visible expand, one sink). peek_expired() is false
-                // when a toggle already cancelled the peek — no repaint.
-                self.pending_peeks = self.pending_peeks.saturating_sub(1);
-                self.pending_peeks == 0 && self.model.peek_expired()
+            Event::Timer(elapsed) => {
+                // TWO timer kinds share this event; Timer carries the ELAPSED
+                // sleep (≈ requested duration, v0.44.3 zellij_exports.rs:2462)
+                // — 0.4s dwells and 0.9s peek sinks split cleanly at the
+                // cutoff.
+                if elapsed < TIMER_KIND_CUTOFF_SECS {
+                    let Some(r#gen) = self.pending_dwells.pop_front() else {
+                        return false;
+                    };
+                    let fx = self.model.dwell_expired(r#gen);
+                    let fired = !fx.is_empty();
+                    self.run_effects(fx);
+                    fired // repaint: the row flips to ↻
+                } else {
+                    // One expiry per armed peek; only the LAST sinks (nav
+                    // burst = one visible expand, one sink). peek_expired() is
+                    // false when a toggle already cancelled the peek — no
+                    // repaint.
+                    self.pending_peeks = self.pending_peeks.saturating_sub(1);
+                    self.pending_peeks == 0 && self.model.peek_expired()
+                }
             }
             Event::Mouse(Mouse::LeftClick(line, _col)) => {
                 // §6.6: rows are mouse-clickable. line is the rendered row.
