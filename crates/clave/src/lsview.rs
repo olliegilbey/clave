@@ -44,6 +44,7 @@ mod tests {
             worktree: None,
             label_source: LabelSource::FirstPrompt,
             tab_id: None,
+            stale: false,
         }
     }
 

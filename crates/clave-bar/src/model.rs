@@ -560,6 +560,7 @@ mod tests {
             last_interacted: 0,
             last_visited: 0,
             tab_id,
+            stale: false,
         }
     }
 
@@ -575,6 +576,7 @@ mod tests {
             last_interacted: 0,
             last_visited: 0,
             tab_id,
+            stale: false,
         }
     }
 

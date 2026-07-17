@@ -59,6 +59,12 @@ pub struct Agent {
     /// diverge (round 6). Session-scoped; None until bound / after recreate.
     #[serde(default)]
     pub tab_id: Option<usize>,
+    /// §5 (2026-07-17): `clave open` found the row's cwd missing → the bar
+    /// renders ✗ instead of ◌. A row flag, NOT a status (statuses are hook
+    /// lifecycle); cleared by a later successful open. `default` keeps
+    /// pre-field payloads parseable.
+    #[serde(default)]
+    pub stale: bool,
 }
 
 /// The full-replace snapshot `clave` pushes to `clave-bar` on every change
@@ -152,6 +158,7 @@ mod tests {
             last_interacted: 0,
             last_visited: 0,
             tab_id: None,
+            stale: false,
         };
         assert!(!serde_json::to_string(&a).unwrap().contains("archived"));
     }
@@ -171,6 +178,7 @@ mod tests {
                 last_interacted: 1000,
                 last_visited: 0,
                 tab_id: None,
+                stale: false,
             }],
         };
         let json = serde_json::to_string(&snap).unwrap();
@@ -194,6 +202,7 @@ mod tests {
             last_interacted: 0,
             last_visited: 0,
             tab_id: Some(4),
+            stale: false,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert_eq!(back.tab_id, Some(4));
@@ -203,6 +212,32 @@ mod tests {
         v.as_object_mut().unwrap().remove("tab_id");
         let old: Agent = serde_json::from_value(v).unwrap();
         assert_eq!(old.tab_id, None);
+    }
+
+    #[test]
+    fn agent_stale_roundtrips_and_defaults_false() {
+        // §5 (2026-07-17): `stale` = `clave open` found the row's cwd missing →
+        // bar ✗. A row flag, NOT a status (statuses are hook lifecycle).
+        let mut a = Agent {
+            uuid: "u1".into(),
+            cwd: "/x".into(),
+            repo_root: "/x".into(),
+            branch: "main".into(),
+            label: "x · main".into(),
+            status: Status::Idle,
+            last_interacted: 0,
+            last_visited: 0,
+            tab_id: None,
+            stale: true,
+        };
+        let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
+        assert!(back.stale);
+        // Pre-field payloads must parse as not-stale.
+        a.stale = false;
+        let mut v: serde_json::Value = serde_json::to_value(&a).unwrap();
+        v.as_object_mut().unwrap().remove("stale");
+        let old: Agent = serde_json::from_value(v).unwrap();
+        assert!(!old.stale);
     }
 
     #[test]

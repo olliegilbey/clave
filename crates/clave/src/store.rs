@@ -60,6 +60,12 @@ pub struct AgentRecord {
     /// session recreate (see clear_tab_timeline).
     #[serde(default)]
     pub tab_id: Option<usize>,
+    /// §5 (2026-07-17): `clave open` found the row's cwd missing → the bar
+    /// renders ✗ instead of ◌. A row flag, NOT a status (statuses are hook
+    /// lifecycle); cleared by a later successful open. `default` keeps
+    /// pre-field payloads parseable.
+    #[serde(default)]
+    pub stale: bool,
 }
 
 /// The whole store file. `seq` is the monotonic snapshot counter of the §5
@@ -161,6 +167,7 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
                 last_interacted: r.last_interacted,
                 last_visited: r.last_visited,
                 tab_id: r.tab_id,
+                stale: r.stale,
             })
             .collect(),
     }
@@ -214,6 +221,25 @@ pub fn apply_bind(paths: &StorePaths, uuid: &str, tab_id: usize) -> Result<Optio
     })
 }
 
+/// `clave open` outcome (§6.3, 2026-07-17): record whether the row's cwd was
+/// missing. Snapshot back only on CHANGE (a repeated stale open must not
+/// generate pipe traffic); None for unknown uuids.
+pub fn apply_open_result(
+    paths: &StorePaths,
+    uuid: &str,
+    stale: bool,
+) -> Result<Option<AgentSnapshot>> {
+    with_store_mut(paths, |s| {
+        let r = s.agents.get_mut(uuid)?;
+        if r.stale == stale {
+            return None;
+        }
+        r.stale = stale;
+        s.seq += 1; // monotonic pipe contract (§5)
+        Some(snapshot_from(s))
+    })
+}
+
 /// Session (re)create hygiene: tab_ids are SESSION-scoped, so a fresh
 /// session must inherit neither dead tabs' commitments (reused ids) nor
 /// stale uuid→tab binds. No push — no bar instance exists yet at launch
@@ -262,6 +288,7 @@ mod tests {
             worktree: None,
             label_source: LabelSource::FirstPrompt,
             tab_id: None,
+            stale: false,
         }
     }
 
@@ -403,6 +430,30 @@ mod tests {
         assert_eq!(snap.seq, 3);
         // Persisted: a fresh read sees the same map.
         assert_eq!(read_store(&p).unwrap().tab_timeline.get(&4), Some(&2000));
+    }
+
+    #[test]
+    fn open_result_sets_and_clears_stale_on_change_only() {
+        // §6.3 `clave open`: cwd missing → stale=true (bar ✗); a later
+        // successful open clears it. Snapshot back only on CHANGE (§5: no
+        // no-op pushes), None for unknown uuids (row may have been pruned).
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            s.agents.insert("u1".into(), rec("u1"));
+        })
+        .unwrap();
+        let snap = apply_open_result(&p, "u1", true).unwrap().expect("changed");
+        assert!(snap.agents[0].stale);
+        assert_eq!(snap.seq, 1);
+        // Same value again: no change, no seq bump, no push.
+        assert!(apply_open_result(&p, "u1", true).unwrap().is_none());
+        assert_eq!(read_store(&p).unwrap().seq, 1);
+        // Successful open clears it.
+        let snap = apply_open_result(&p, "u1", false).unwrap().expect("cleared");
+        assert!(!snap.agents[0].stale);
+        // Unknown uuid: silently none.
+        assert!(apply_open_result(&p, "ghost", true).unwrap().is_none());
     }
 
     #[test]
