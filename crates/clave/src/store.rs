@@ -90,10 +90,12 @@ pub struct StorePaths {
 
 /// Spec §5 names the literal path `~/.local/state/clave/`. Built from $HOME
 /// rather than `dirs::state_dir()` because the latter is `None` on macOS and
-/// we want one path on every platform.
+/// we want one path on every platform. `$CLAVE_STATE_DIR` overrides the whole
+/// dir (spec §6.9: the dev harness sandboxes the store).
 pub fn store_paths() -> Result<StorePaths> {
     let home = dirs::home_dir().context("cannot determine home directory")?;
-    let dir = home.join(".local").join("state").join("clave");
+    let default = home.join(".local").join("state").join("clave");
+    let dir = crate::env::dir_from(std::env::var("CLAVE_STATE_DIR").ok(), default);
     Ok(StorePaths {
         data: dir.join("agents.json"),
         lock: dir.join("agents.lock"),

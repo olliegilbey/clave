@@ -5,6 +5,7 @@
 
 // Modules are added per task. Task 2 adds `pub mod store;`.
 pub mod add;
+pub mod env;
 pub mod hook;
 pub mod lsview;
 pub mod munge;

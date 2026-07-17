@@ -11,8 +11,14 @@ use anyhow::{Context, Result};
 
 /// Where clave's generated artifacts live. NOT the repo: these files embed
 /// machine-absolute paths (the wasm location) and the repo is public.
+/// `$CLAVE_DATA_DIR` overrides the whole dir (spec §6.9: the dev harness sandboxes the store).
 pub fn data_dir() -> Result<PathBuf> {
-    Ok(dirs::home_dir().context("home")?.join(".local/share/clave"))
+    let home = dirs::home_dir().context("home")?;
+    let default = home.join(".local").join("share").join("clave");
+    Ok(crate::env::dir_from(
+        std::env::var("CLAVE_DATA_DIR").ok(),
+        default,
+    ))
 }
 
 pub fn wasm_path() -> Result<PathBuf> {
