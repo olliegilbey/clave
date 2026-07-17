@@ -10,7 +10,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use clave::{add, hook, lsview, setup, spawn, store};
+use clave::{add, hook, lsview, open, setup, spawn, store};
 
 #[derive(Parser)]
 #[command(
@@ -111,6 +111,14 @@ enum Command {
     /// Prepare the machine: generate config/layout, merge Claude hooks,
     /// pre-seed the Zellij permission cache (§6.8/§7). Idempotent.
     Setup,
+
+    /// Open a known store row's tab (plugin-internal, §6.3 C8): the bar fires
+    /// this when a dormant row's focus settles or on an explicit pick.
+    #[command(hide = true)]
+    Open {
+        /// The agent's session UUID (the store join key).
+        uuid: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -201,5 +209,6 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some(Command::Setup) => setup::run_setup(),
+        Some(Command::Open { uuid }) => open::run_open(&uuid),
     }
 }

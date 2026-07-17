@@ -10,6 +10,7 @@ pub mod evlog;
 pub mod hook;
 pub mod lsview;
 pub mod munge;
+pub mod open;
 pub mod setup;
 pub mod spawn;
 pub mod store;
