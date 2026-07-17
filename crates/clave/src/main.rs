@@ -10,7 +10,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use clave::{add, hook, lsview, open, setup, spawn, store};
+use clave::{add, dev, hook, lsview, open, setup, spawn, store};
 
 #[derive(Parser)]
 #[command(
@@ -119,6 +119,24 @@ enum Command {
         /// The agent's session UUID (the store join key).
         uuid: String,
     },
+
+    /// Live-validation harness (§6.9): seed sandboxed scenarios, dump status,
+    /// reset. The sandbox (session `clave-test`, own store/data/claude dirs)
+    /// can never touch the real session or ~/.claude.
+    Dev {
+        #[command(subcommand)]
+        action: DevAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum DevAction {
+    /// Seed a named scenario and print the launch command.
+    Scenario { name: String },
+    /// Dump sandbox store + live uuids + session liveness as JSON.
+    Status,
+    /// Wipe the sandbox (prints the kill-session command first).
+    Reset,
 }
 
 fn main() -> Result<()> {
@@ -211,5 +229,10 @@ fn main() -> Result<()> {
         }
         Some(Command::Setup) => setup::run_setup(),
         Some(Command::Open { uuid }) => open::run_open(&uuid),
+        Some(Command::Dev { action }) => match action {
+            DevAction::Scenario { name } => dev::run_scenario(&name),
+            DevAction::Status => dev::run_status(),
+            DevAction::Reset => dev::run_reset(),
+        },
     }
 }
