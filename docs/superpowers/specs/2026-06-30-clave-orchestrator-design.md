@@ -89,8 +89,14 @@ Spanish for *key/keystone* (keyboard-driven, central); archaic past tense of
    hook event, and joins the store row to its Zellij pane. Everything keys off it.
 4. **Status is event-driven, never polled.** Derive state from Claude hooks and turn
    lifecycle — not from screen text or timers.
-5. **Spawn is idempotent → restart-safe.** The pane command resumes-or-creates by
-   UUID, so Zellij resurrection restores conversations rather than starting fresh.
+5. **Spawn is idempotent → restart-safe.** (Revised 2026-07-17, C8 redesign.) The
+   pane command resumes-or-creates by UUID. Zellij session serialization is OFF
+   (§6.8) — it serializes the live *discovered* process (`claude --session-id`,
+   or even a mid-tool-call child), not the baked command, so it can never be the
+   resume path. Restart-safety is **clave-owned**: launch eager-loads the
+   most-recent agent, every other store row is a dormant bar row that opens on
+   settled focus (§6.6/§6.3 `clave open`). Idempotence is what makes eager-load,
+   `open`, and double-fires all safe.
 6. **Keys pass through a focused Claude.** All `clave` keybindings are `Alt`-prefixed
    and live in `shared_among "normal" "locked"`. Never depend on the space key or on
    Claude not having focus.
@@ -101,18 +107,22 @@ Spanish for *key/keystone* (keyboard-driven, central); archaic past tense of
    cross-tab rename; no sort/grouping in stock cfal — see §3/§4). Every further step
    up must be similarly earned.
 9. **One Cargo workspace, two artifacts, shared types.** A native binary
-   (`clave`, subcommands `add`/`spawn`/`hook`/`ls`/`focus`/`snapshot`/`setup`)
+   (`clave`, subcommands `add`/`open`/`spawn`/`hook`/`ls`/`focus`/`snapshot`/
+   `setup`/`dev`)
    and a WASM plugin
    (`clave-bar`) share a `clave-types` crate so the pipe schema cannot drift (§7).
 10. **Keep the core provider-shaped, not Claude-welded.** Confine Claude specifics to
     the spawn + hook adapter; the status model and bar logic stay generic enough that
     another agent CLI could slot in later.
-11. **The bar's row set is Zellij's truth; order and decoration are clave's.**
-    (Revised 2026-07-03.) Rows come from `TabUpdate` — every tab, agent or plain,
-    appears and vanishes for free. Display order is **interaction recency**, not tab
-    order. clave's pushed status decorates agent rows (glyph/colour). Selection maps
-    a displayed row → the tab's focused pane → `focus_pane_with_id` (S2:
-    `go_to_tab` is a dead end).
+11. **The bar's row set is Zellij's truth ∪ the store's memory; order and
+    decoration are clave's.** (Revised 2026-07-17, C8: dormant rows.) Live rows
+    come from `TabUpdate` — every tab, agent or plain, appears and vanishes for
+    free. Store rows with no live tab render as **dormant** conversation rows
+    (claude.ai-style list). Display order is **interaction recency**, not tab
+    order. clave's pushed status decorates agent rows (glyph/colour). Selection
+    maps a displayed row → the tab's focused pane → `focus_pane_with_id` (S2:
+    `go_to_tab` is a dead end); a dormant row has no pane — settled focus opens
+    it (§6.6).
 12. **clave is self-contained in its own session.** The dedicated `clave` Zellij
     session is launched with a clave-owned config; clave **never mutates the user's
     global Zellij config**. (Claude *hooks* are necessarily global — see §4 — but
@@ -291,7 +301,9 @@ never serialises unrelated sessions' hooks.
   "last_visited":    0,          // unix s; bumped on focus → unread = done & !visited
   "worktree":        null,       // path if spawned in a git worktree, else null
   "label_source":    "first_prompt", // first_prompt|summary; once summary, stop re-scanning jsonl (§6.4)
-  "tab_id":          4           // zellij tab hosting the agent (§6.6 B); null until bound; session-scoped
+  "tab_id":          4,          // zellij tab hosting the agent (§6.6 B); null until bound; session-scoped
+  "stale":           false       // 2026-07-17: `clave open` found cwd missing → bar ✗; NOT a status
+                                 // (statuses are hook lifecycle); cleared by a later successful open
 }
 ```
 
@@ -387,8 +399,23 @@ self-hydrates on load via `RunCommands` — §6.6).
   so `clave add` writes a **one-shot temp layout** (`$TMPDIR/clave-<uuid>.kdl`) with
   the `[ clave-bar | claude ]` template and the pane command
   `clave spawn <uuid> --name <label> --cwd <dir>` baked in, then runs
-  `zellij action new-tab --layout <that-file>` and deletes it. Baking the command into
-  the layout is also what makes it survive resurrection (spike **S4**).
+  `zellij action new-tab --layout <that-file>` and deletes it. Baking the command in
+  makes tab creation **idempotent** — resurrection is clave's job, not zellij's
+  (revised 2026-07-17; the old "survives resurrection" premise was false: zellij
+  serializes the live discovered process, see §6.8/S4).
+- **`clave open <uuid>` (added 2026-07-17, C8):** the non-interactive sibling of
+  `add`, invoked by the bar (executor instance, `run_command`) when a dormant row's
+  focus settles, and by explicit picks. No picker — the row is the choice. Flow:
+  store row lookup → **liveness no-op guard** (uuid in `dump-layout` per
+  `live_uuids` → do nothing; protects against dwell-timer/click double-fires) →
+  **staleness check** (row `cwd` missing on disk → no tab; set the row's `stale`
+  flag (§5) and push the snapshot so the bar shows ✗; a later successful open
+  clears it; recovery manual for now) → one-shot temp
+  layout (same `tab_layout`) → `zellij action new-tab --layout`, targeted at the
+  clave session via explicit env (never ambient). A vanished jsonl is NOT an
+  error: spawn's existence branch simply creates a fresh conversation under the
+  same uuid — accepted quirk. Worktree rows bake the worktree cwd (store row is
+  worktree-aware, Task 7).
 - **Worktree is opt-in, default off.** clave shells out to `git worktree add` itself
   (not Claude's `-w/--worktree`, §4) so it **owns the worktree path** — needed to
   compute the munged jsonl path for the idempotency check and to record `worktree` in
@@ -468,12 +495,19 @@ self-hydrates on load via `RunCommands` — §6.6).
 **Goal:** the vertical, hideable, mouse-clickable tab bar with live status decoration.
 **Decided (revised 2026-07-03):**
 - **Three separated concerns:** row **set** = `TabUpdate` (all tabs, live; closed
-  tabs vanish for free) · row **order** = interaction recency · row **decoration** =
-  clave's pushed status (S1 pipe contract unchanged).
+  tabs vanish for free) **∪ dormant store rows** (revised 2026-07-17: snapshot
+  agents with no live tab join — one unified conversation list, claude.ai-style;
+  source-agnostic, so jsonl adoption slots in later) · row **order** =
+  interaction recency · row **decoration** = clave's pushed status (S1 pipe
+  contract unchanged).
 - **Rows:** status glyph (agent tabs only; state colour) + `TabInfo.name`, clamped to
   the bar width (~24 cols, configurable) with a trailing `…`. Plain tabs render
   name-only. Focused row highlighted. No repo grouping, no per-repo colours
-  (deleted).
+  (deleted). **Dormant rows** (2026-07-17): ◌ glyph, dimmed, label from the
+  store row; transient ↻ while an open's spawn is in flight (flips to live via
+  the normal register/TabUpdate path — no bespoke completion signal); ✗ = stale
+  (open found the cwd missing). A dormant row that gains a tab becomes a live
+  row with the same uuid key — no handoff state.
 - **Order = last USER COMMITMENT (revised 2026-07-08 after C4/C5 live rounds;
   user-ratified "Claude-desktop" model):** rows sort by one unified timeline
   in unix seconds — when did the user last commit input to that tab. **Focus
@@ -506,6 +540,8 @@ self-hydrates on load via `RunCommands` — §6.6).
   user declined shell config; plain tabs order by birth only.
   Tie-break: tab position. A separate `clave-visited` beacon pipe tracks the
   focused tab purely for nav-executor election — it has NO ordering effect.
+  **Dormant rows** (2026-07-17) join the same timeline by the store row's
+  `last_interacted` (carried on the snapshot); they hold no tab commitment.
 - **uuid→row join (spike S2 + `PaneManifest`):** `clave-register` gives
   `uuid → pane_id`; `PaneManifest` gives pane → tab position; `TabInfo` gives
   position → `tab_id`/name/active.
@@ -524,6 +560,25 @@ self-hydrates on load via `RunCommands` — §6.6).
     longer swaps on focus.
   - **uuid jumps** keep `focus_pane_with_id` (S2): the pane id is broadcast
     truth, so every instance targets the same pane.
+  - **Dormant rows open on SETTLED focus, not on touch (2026-07-17, C8).**
+    Stepping onto a dormant row moves a **virtual selection cursor** (bar
+    highlight) WITHOUT switching tabs — there is no tab to switch to. Each
+    landing arms one `set_timeout(0.4)` (peek-timer pattern: only the last
+    expiry acts); if the cursor is still on that row at expiry, the executor
+    fires `run_command(["clave","open",<uuid>])` and shows ↻. Walking past a
+    dormant row therefore never spawns it — this is what makes the unified
+    list safe to walk. Subsequent nav steps continue from the cursor, which
+    resolves back to the focused-tab row when the opened tab takes focus
+    (`tab_layout` `focus=true`) or when nav lands on a live row. **Explicit
+    picks skip the dwell**: clicks and `Alt+1…9` on a dormant row open
+    immediately — explicit intent is unambiguous. The executor also keeps an
+    in-flight set: a row already ↻ accepts no further opens (first guard;
+    `clave open`'s liveness no-op is the second — belt and suspenders because
+    `live_uuids` can transiently miss a mid-tool-call agent, §10). The 0.4s
+    dwell is a named constant beside the 0.9s peek sink (both user-tuned;
+    don't normalize).
+    Nav ring caps (48h / max 10, numbered access to older rows) are DEFERRED
+    to the jsonl-adoption phase (§10) — store-only row counts don't need them.
   - The bar pane is `set_selectable(false)` (stock tab-bar pattern): clicks
     reach the plugin without a focus-stealing first click, and `MoveFocus`
     skips the bar.
@@ -552,12 +607,14 @@ self-hydrates on load via `RunCommands` — §6.6).
   pattern). Context-battery glyph: deferred (§10).
 
 ### 6.7 Archiving — DELETED (2026-07-03 reframing)
-The bar is bounded by construction: rows are the session's live tabs, so closing a
-tab (`Alt+w` → native `CloseTab`) removes its row. Claude's jsonl and the store row
-persist, so the §6.3 resume picker restores any past session — that *is* the
-archive. No `archived` flag in the store or pipe schema (drop the existing
-`Agent.archived` field); no archive subsystem. Pruning long-dead store rows:
-deferred.
+The bar is bounded by construction: rows are the session's live tabs plus the
+store's rows (small for now — dormant rows, 2026-07-17; the jsonl-adoption phase
+brings ring caps before the set grows unbounded, §10). Closing a tab (`Alt+w` →
+native `CloseTab`) removes its live row; the store row persists and the row falls
+back to dormant — the bar now surfaces the archive directly, and the §6.3 resume
+picker remains for repo-scoped discovery. No `archived` flag in the store or pipe
+schema (drop the existing `Agent.archived` field); no archive subsystem. Pruning
+long-dead store rows: deferred.
 
 ### 6.8 Session model & keybind scoping
 **Goal:** isolate clave from the user's normal Zellij/Claude environment.
@@ -565,6 +622,25 @@ deferred.
 - Agents live in a **dedicated `clave` Zellij session**, launched with a clave-owned
   config + `agents` layout (`zellij --config … --layout … attach -c clave`). The
   `clave` shell command attaches-or-creates it.
+- **`session_serialization false`** in the generated config (2026-07-17, C8).
+  Zellij's serializer records the *discovered* pane process — post-exec that is
+  `claude --session-id/--resume`, and mid-tool-call it is whatever child claude
+  has (`ps -ao ppid,args` ppid-priority, zellij-server `pty.rs`
+  `populate_session_layout_metadata`, v0.44.3) — so serialization-based
+  resurrection replays commands that collide or are plain wrong. OFF entirely:
+  no ENTER gates, no serialized-command repair. (`post_command_discovery_hook`
+  rewriting was considered and rejected: eager restore of everything, per-tty-
+  process `sh` forks every 60s tick, can't fix the tool-child case.)
+- **Cold start is clave-owned (lazy)**: when the session is not live,
+  `launch_session()` (1) best-effort `zellij delete-session --force clave` — an
+  EXITED session with stale serialized state would be *resurrected* by
+  `attach --create`, ignoring `--layout`; (2) composes the launch layout
+  **dynamically**: the bar-only template, plus — if the store is non-empty —
+  ONE tab for the most-recent row (`last_interacted`), pane command baked
+  `clave spawn <uuid> …` (resumes via the jsonl check), written to a temp file
+  and passed via `--layout`. Every other store row appears as a dormant bar row
+  (§6.6). Empty store → today's behavior unchanged. Tab-timeline/bind clearing
+  on create is unchanged (§5).
 - The session layout defines a **tab template** (`[clave-bar (fixed width) | pane]`)
   so *natively* created tabs get the bar too; `clave add` tabs use the one-shot temp
   layout (§6.3). If `default_tab_template` proves parse-fragile (S1 note), fallback
@@ -572,6 +648,39 @@ deferred.
 - **Keybinds live only in the clave session config** (invariant #12) — the user's
   global Zellij config and other users' configs are untouched.
 - **Hooks remain global** (Claude limitation) but no-op fast for untracked sessions.
+
+### 6.9 `clave dev` — live-validation harness (added 2026-07-17)
+**Goal:** one command puts the world into a named, repeatable state; the user
+drives a real session; Claude reads structured logs. Real tabs, real spawns,
+real jsonls — mock only the *content*. Minimal by design: a fixture-seeder plus
+a log. No recorder, no assertion runner, no CI.
+**Decided:**
+- **Full sandbox via env overrides**, threaded through the existing path
+  helpers: `CLAVE_SESSION` (default `clave`; harness uses `clave-test`),
+  `CLAVE_STATE_DIR` (store), `CLAVE_DATA_DIR` (config/layout/wasm), and
+  `CLAUDE_CONFIG_DIR` pointed at a sandbox dir so *real claude processes*
+  write jsonls/settings/hook wiring there — the user's `~/.claude` and real
+  clave session are untouchable from a scenario. Scenario repos are temp dirs
+  (plus a real `git worktree` for worktree flows).
+- **`clave dev scenario <name>`** seeds store rows + jsonls + dirs for a named
+  state and prints exactly ONE command for the user to run next. Deterministic
+  *readable* uuids (`c8s1-aaaa…`) so logs self-identify. Conversations are
+  seeded cheaply but genuinely: `claude -p --session-id <uuid> "reply ok"` in
+  the scenario cwd — a real resumable jsonl for a few tokens, so
+  resume-with-history is verified for real. Scenario names map 1:1 to
+  validation-checklist steps (`c8-cold-start`, `c8-worktree`, `c8-stale`, …).
+- **Session control stays the user's**: the harness never launches or kills
+  zellij sessions; it prints the env-prefixed commands. Sanctioned exception
+  (user-ratified 2026-07-17): commands *explicitly env-scoped to `clave-test`*
+  (seeding, `dump-layout` reads) are safe for Claude to run directly.
+- **Observability:** every clave CLI invocation appends one JSON line —
+  timestamp, argv, decision (e.g. `open: cwd missing → stale`), exit — to
+  `<state>/clave.log`; the bar keeps `eprintln!` → zellij log. `clave dev
+  status` dumps store + `live_uuids` + session liveness in one read. Per
+  checklist step: user runs the step; Claude reads `dev status` + the two
+  logs. Screenshots only for visual glyph checks.
+- **`clave dev reset`** wipes the sandbox (store, jsonls, temp repos,
+  worktrees) — printing the kill-session command for the user first.
 
 ---
 
@@ -662,13 +771,16 @@ we revisit §3).
 - **S3 — focus → unread.** The plugin detects the active-tab change and calls
   `clave focus <uuid>`; the green "done & unread" row falls to idle. *Fallback:* clear
   unread on the next `UserPromptSubmit` for that agent.
-- **S4 — tab creation + resurrection.** `clave add` builds a tab via a one-shot temp
-  layout (§6.3) whose pane command is `clave spawn <uuid>`; that command re-runs on
-  Zellij resurrect and resumes. Also test **cold-start reconciliation**: after a full
-  restart the plugin's uuid→pane map is empty and every pane sits behind the "Press
-  ENTER" gate — confirm the map rebuilds (each resumed `clave spawn` re-registers, or
-  the plugin rebuilds from `PaneManifest`) and status recovers. *Fallback:*
-  `clave rebuild` from the store.
+- **S4 — tab creation + resurrection.** (REDESIGNED 2026-07-17, C8: the original
+  premise — the baked `clave spawn` re-runs on Zellij resurrect — was FALSE.
+  Zellij serializes the *discovered* live process (ppid-priority `ps` scan): the
+  exec'd `claude --session-id <uuid>` (collides on re-run) or even a mid-tool-
+  call child like `cargo build`. Resolution = the old fallback, promoted:
+  resurrection is clave-owned.) Serialization OFF; cold start = bar + eager
+  most-recent tab (§6.8); every other store row is a dormant bar row opening on
+  settled focus via `clave open` (§6.6/§6.3). Cold-start reconciliation is
+  per-open: each resumed spawn re-registers its pane; the bar hydrates from
+  `clave snapshot` (S5).
 - **S5 — plugin hydration.** On (re)load, `clave-bar` hydrates via `clave snapshot`
   (`RunCommands`). *Fallback:* clave re-pushes the full snapshot on a timer/first hook.
 - **S6 — context-sensitive nav.** The plugin can tell whether the bar is
@@ -687,9 +799,15 @@ worktree opt-in default-off) · status hooks → `clave hook` → snapshot push 
 setup` (hooks merge + permissions seed + config/layout) · keybinds `Alt+a/c/w`,
 `Alt+↑/↓`, `Alt+j/k`, `Alt+1…9` (clave-session-scoped).
 
-**Deferred:** `clave rebuild` (cold/remote start) · one-shot LLM titles · store-row
-pruning · worktree auto-cleanup · `AskUserQuestion`-wait state · per-agent remote
-`BreakPane` · an optional repo-grouped render mode · `cargo
+**Deferred:** **jsonl adoption** (auto-import every claude session ever run —
+clave as the hub/controller for all claude sessions; ships WITH the nav ring
+caps: Alt+↑/↓ walks only rows from the last 48h capped at 10, older rows
+numbered + reachable only by a distinct number-referencing keybind, so nav
+never lazily opens its way through thousands of conversations — 2026-07-17) ·
+floating helper pane per agent tab (terminal/nvim in the agent's cwd,
+2026-07-17) · one-shot LLM titles · store-row pruning (incl. stale-✗ row
+recovery/removal UX) · worktree auto-cleanup · `AskUserQuestion`-wait state ·
+per-agent remote `BreakPane` · an optional repo-grouped render mode · `cargo
 install`/`include_bytes!` packaging · **per-agent context-% battery** (below).
 
 **Backlog — context battery:** show each active agent's context-window usage in the
@@ -699,11 +817,14 @@ the extraction logic from the user's **`rot-reducer`** project
 (`~/code/rot-reducer`), which already pulled context reporting out of Claude logs —
 start there.
 
-**Known limitation — resurrection friction:** Zellij's serialization gate needs one
-"Press ENTER" per pane on cold restart, so an N-agent fleet needs N confirmations
-before agents reconnect (spike **S4** covers *recovery* once run, not the gate
-itself). Mitigations to evaluate later: a `clave rebuild` boot path instead of relying
-on serialization, or a Zellij option to skip the gate if 0.44.3 exposes one.
+**Known edge — liveness vs tool children (2026-07-17):** with serialization off,
+`dump-layout` still reports the *discovered* command; an agent mid-tool-call can
+show its child (e.g. `cargo build`) instead of `claude --session-id`, so the
+`live_uuids` check can transiently miss a live agent. Consequence is now limited
+to add/open liveness (a false "dead" offer / a redundant open attempt guarded by
+the no-op check), no longer broken resurrection. Accepted; revisit only if it
+bites live. (The old ENTER-gate friction limitation is DELETED — serialization
+is off, so the gate never appears.)
 
 **Risks to validate early:** the join-key and plugin-architecture risks are retired
 (S0/S0b/S1/S2 PASS). Remaining, all small: `hide_self` grid-reflow, tab-template

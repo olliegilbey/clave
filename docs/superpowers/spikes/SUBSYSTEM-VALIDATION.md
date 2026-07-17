@@ -335,6 +335,11 @@ form → ▶ + jump worked); OLD agents stay `<defunct>` until respawned
 PRE-REGISTERED CONCERN: resurrection will re-run the serialized
 `claude --session-id <uuid>`, NOT the idempotent `clave spawn` — a create
 against an existing jsonl collides; S4's premise needs re-examining there.
+(RESOLVED 2026-07-17: confirmed against zellij-server v0.44.3 source —
+serialization records the ppid-priority *discovered* process, so even a
+resident-parent spawn wouldn't survive, and a mid-tool-call agent serializes
+as its child. C8 REDESIGNED: serialization off, clave-owned lazy
+resurrection — spec §6.8/§6.6/§6.3 `clave open`, new checklist below.)
 
 **Findings (2026-07-15, round 10):** learning-repair converged (bars
 healed to target width) but only ONE STEP PER TAB VISIT — zellij sends no
@@ -533,14 +538,24 @@ needs fresh agents (or a session recreate).
 **Verdict:** _fixes implemented; re-test owed (fresh agent → dump-layout
 shows real command; ▶ pick jumps; second agent in same repo works)_
 
-## C8 — Resume + resurrection (S4) — include a WORKTREE agent
-- `Alt+w` the agent's tab; `Alt+a` → same repo → `resume` → pick it: conversation
-  resumes with history; store row PRESERVED (label/worktree/cwd intact — the
-  Task 7 fix). Repeat with a `--worktree` agent: resumes in its worktree.
-- Real S4: `zellij kill-session clave`; relaunch `clave`; ENTER through the
-  serialization gates. Expect: tabs re-run baked `clave spawn` and RESUME;
-  bars rebuild (registers re-fire); glyphs recover after hydration/next event.
-  Note the ENTER-gate friction count (§10 known limitation).
+## C8 — Resume + resurrection (S4, REDESIGNED 2026-07-17: lazy clave-owned)
+Run in the `clave dev` sandbox (spec §6.9) — scenarios seed the states; the
+user drives; Claude reads `clave dev status` + clave.log + zellij.log.
+- Picker resume (unchanged surface): `Alt+w` an agent's tab; `Alt+a` → same
+  repo → `resume` → pick it: history resumes; store row PRESERVED
+  (label/worktree/cwd — Task 7 fix).
+- Cold start (`c8-cold-start`: 2 dormant + 1 recent): kill-session →
+  relaunch. Expect: NO ENTER gates; most-recent agent resumes focused with
+  history; other rows dormant ◌ in recency order.
+- Walk-through safety: Alt+↓ quickly THROUGH a dormant row to a live row —
+  the passed row must NOT open.
+- Dwell open: settle 0.4s on a dormant row → ↻ → live resume with history.
+  Repeat for the worktree row (`c8-worktree`): resumes in its worktree.
+- Explicit pick: click a dormant row → opens immediately (no dwell).
+- Stale (`c8-stale`): delete the row's cwd, dwell it → ✗, no tab, session
+  unaffected.
+- Second kill+relaunch: previously-opened rows dormant again except the most
+  recent; no `<defunct>` panes anywhere (`dump-layout`).
 
 **Verdict:** _pending_
 
