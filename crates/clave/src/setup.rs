@@ -119,6 +119,41 @@ pub fn layout_kdl(wasm: &str) -> String {
     )
 }
 
+/// §6.8 (C8): the launch layout, composed DYNAMICALLY at session-create
+/// time. Base = the bar template; store non-empty → ONE eager tab for the
+/// most-recent row, baked `clave spawn` (resumes via the jsonl check).
+/// Everything else surfaces as dormant bar rows (§6.6).
+pub fn launch_layout_kdl(wasm: &str, most_recent: Option<&crate::store::AgentRecord>) -> String {
+    let tab = match most_recent {
+        // The label is re-sanitized for KDL safety: it can be hook-derived
+        // (§6.5) and only add-time labels went through sanitize_label.
+        Some(r) => {
+            crate::add::tab_node(wasm, &crate::add::sanitize_label(&r.label), &r.uuid, &r.cwd)
+        }
+        None => "    tab name=\"clave\" focus=true\n".to_string(),
+    };
+    format!(
+        "// GENERATED at launch — §6.8 clave-owned cold start.\n\
+         layout {{\n\
+         \x20   default_tab_template split_direction=\"vertical\" {{\n\
+         \x20       pane size=30 borderless=true {{\n\
+         \x20           plugin location=\"file:{wasm}\"\n\
+         \x20       }}\n\
+         \x20       children\n\
+         \x20   }}\n{tab}}}\n"
+    )
+}
+
+/// Does `zellij list-sessions -n` mention this session at all (live OR
+/// EXITED)? An EXITED session must be DELETED before create: `attach
+/// --create` would resurrect its serialized state, ignoring `--layout`
+/// (§6.8) — replaying pre-C8 discovered commands.
+pub fn session_exists(list_output: &str, name: &str) -> bool {
+    list_output
+        .lines()
+        .any(|l| l.split_whitespace().next() == Some(name))
+}
+
 /// Additively merge clave's hook registrations into a settings.json value.
 /// Never touches existing entries; skips events already carrying our command.
 pub fn merge_hooks(settings: &mut serde_json::Value, clave_bin: &str) -> bool {
@@ -251,33 +286,53 @@ pub fn session_is_live(list_output: &str, name: &str) -> bool {
 }
 
 /// Bare `clave`: attach-or-create the dedicated session with OUR config +
-/// layout (§6.8 — the user's global zellij config is never touched).
+/// a DYNAMIC layout (§6.8 C8: eager most-recent tab; serialization is off,
+/// so a dead session is deleted, never resurrected).
 pub fn launch_session() -> Result<()> {
     let dir = data_dir()?;
-    let (config, layout) = (dir.join("config.kdl"), dir.join("layout.kdl"));
-    anyhow::ensure!(
-        config.exists() && layout.exists(),
-        "run `clave setup` first"
-    );
-    // §6.6 hygiene: tab_ids are SESSION-scoped, so when we're about to
-    // CREATE (not re-attach) the session, drop the previous session's tab
-    // timeline — reused ids would inherit dead tabs' commitments. Best
-    // effort: list-sessions exits non-zero when no sessions exist at all.
-    let live = std::process::Command::new("zellij")
+    let config = dir.join("config.kdl");
+    anyhow::ensure!(config.exists(), "run `clave setup` first");
+    let session = crate::env::session_name();
+    let list = std::process::Command::new("zellij")
         .args(["list-sessions", "-n"])
         .output()
-        .map(|o| session_is_live(&String::from_utf8_lossy(&o.stdout), "clave"))
-        .unwrap_or(false);
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let live = session_is_live(&list, &session);
     if !live {
+        // §6.6 hygiene: tab_ids are SESSION-scoped — drop the previous
+        // session's timeline + binds before a CREATE.
         crate::store::clear_tab_timeline(&crate::store::store_paths()?)?;
+        if session_exists(&list, &session) {
+            // Dead-but-serialized (pre-C8 state, or zellij's own cache):
+            // delete so attach --create builds from OUR layout.
+            let _ = std::process::Command::new("zellij")
+                .args(["delete-session", "--force", &session])
+                .status();
+        }
     }
+    // Compose the launch layout from the store (eager most-recent, §6.8).
+    // Harmless when live (attach ignores --layout for an existing session).
+    let store = crate::store::read_store(&crate::store::store_paths()?)?;
+    let most_recent = store.agents.values().max_by_key(|r| r.last_interacted);
+    let wasm = wasm_path()?;
+    let layout_text = launch_layout_kdl(wasm.to_str().context("wasm path")?, most_recent);
+    let layout = std::env::temp_dir().join(format!("clave-launch-{}.kdl", std::process::id()));
+    std::fs::write(&layout, layout_text)?;
+    crate::evlog::log_event(
+        "launch",
+        &format!(
+            "session={session} live={live} eager={:?}",
+            most_recent.map(|r| r.uuid.as_str())
+        ),
+    );
     use std::os::unix::process::CommandExt;
     let err = std::process::Command::new("zellij")
         .arg("--config")
         .arg(&config)
         .arg("--layout")
         .arg(&layout)
-        .args(["attach", "--create", "clave"])
+        .args(["attach", "--create", &session])
         .exec();
     Err(anyhow::anyhow!("exec zellij failed: {err}"))
 }
@@ -300,6 +355,51 @@ mod tests {
         assert!(!session_is_live("", "clave"));
         // Name must match the whole first token, not a prefix.
         assert!(!session_is_live("clave-dev [Created 1m ago]\n", "clave"));
+    }
+
+    #[test]
+    fn launch_layout_is_bar_only_when_store_empty() {
+        // §6.8 cold start, empty store: today's behavior — template + one
+        // plain tab, no agent tabs.
+        let kdl = launch_layout_kdl("/w.wasm", None);
+        assert!(kdl.contains("default_tab_template"));
+        assert!(kdl.contains("tab name=\"clave\" focus=true"));
+        assert!(!kdl.contains("\"spawn\""));
+    }
+
+    #[test]
+    fn launch_layout_eager_loads_only_the_most_recent_row() {
+        // §6.8: eagerness of exactly ONE — the most-recent agent resumes
+        // focused at launch; every other row stays dormant in the bar.
+        let mut r = crate::store::AgentRecord {
+            uuid: "u-recent".into(),
+            cwd: "/repo/.claude-worktrees/ab".into(), // worktree row: bake ITS cwd
+            repo_root: "/repo".into(),
+            branch: "main".into(),
+            label: "repo · main".into(),
+            status: clave_types::Status::Idle,
+            last_interacted: 100,
+            last_visited: 0,
+            worktree: Some("/repo/.claude-worktrees/ab".into()),
+            label_source: crate::store::LabelSource::FirstPrompt,
+            tab_id: None,
+            stale: false,
+        };
+        let kdl = launch_layout_kdl("/w.wasm", Some(&r));
+        assert!(kdl.contains("default_tab_template")); // native new-tabs still barred
+        assert!(kdl.contains("\"spawn\" \"u-recent\""));
+        assert!(kdl.contains("cwd=\"/repo/.claude-worktrees/ab\""));
+        // The eager tab replaces the plain placeholder tab entirely.
+        assert!(!kdl.contains("tab name=\"clave\" focus=true"));
+        r.label = "x".into(); // silence unused-mut if needed
+    }
+
+    #[test]
+    fn session_exists_vs_live_distinguish_exited() {
+        let out = "clave [Created 2h ago] (EXITED - attach to resurrect)\nother [Created 1m ago]\n";
+        assert!(session_exists(out, "clave"));
+        assert!(!session_is_live(out, "clave")); // existing fn, unchanged
+        assert!(!session_exists(out, "missing"));
     }
 
     #[test]

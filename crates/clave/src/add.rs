@@ -63,17 +63,14 @@ pub fn sanitize_label(s: &str) -> String {
         .join(" ")
 }
 
-/// The one-shot temp layout (§6.3): Zellij KDL has no variable substitution,
-/// so the uuid/label/cwd are baked in, the file is passed to
-/// `zellij action new-tab --layout`, then deleted. Baking the command in is
-/// also what makes the tab resume on resurrection (S4).
-pub fn tab_layout(wasm: &str, label: &str, uuid: &str, cwd: &str) -> String {
+/// The single agent-tab KDL node — shared verbatim by the §6.3 one-shot add
+/// layout and the §6.8 eager launch tab so the two can never drift.
+pub fn tab_node(wasm: &str, label: &str, uuid: &str, cwd: &str) -> String {
     // split_direction="vertical" is REQUIRED for a LEFT bar: zellij stacks
     // sibling panes horizontally (rows) by default (Task 9 C1 finding; same
     // wrapper as setup::layout_kdl and the S2 spike layout).
     format!(
-        r#"layout {{
-    tab name="{label}" focus=true {{
+        r#"    tab name="{label}" focus=true {{
         pane split_direction="vertical" {{
             pane size=30 borderless=true {{
                 plugin location="file:{wasm}"
@@ -83,9 +80,17 @@ pub fn tab_layout(wasm: &str, label: &str, uuid: &str, cwd: &str) -> String {
             }}
         }}
     }}
-}}
 "#
     )
+}
+
+/// The one-shot temp layout (§6.3): Zellij KDL has no variable substitution,
+/// so the uuid/label/cwd are baked in, the file is passed to
+/// `zellij action new-tab --layout`, then deleted. Baking the command in
+/// makes tab creation IDEMPOTENT — resurrection is clave's job, not
+/// zellij's (§6.8, C8 redesign 2026-07-17).
+pub fn tab_layout(wasm: &str, label: &str, uuid: &str, cwd: &str) -> String {
+    format!("layout {{\n{}}}\n", tab_node(wasm, label, uuid, cwd))
 }
 
 pub struct ResumeCandidate {
