@@ -41,12 +41,32 @@ pub fn run_open(uuid: &str) -> Result<()> {
     // sanctioned-commands rule): run_command children inherit the server's
     // env, but never bet on ambient state.
     let session = crate::env::session_name();
-    let dump = std::process::Command::new("zellij")
+    let output = std::process::Command::new("zellij")
         .env("ZELLIJ_SESSION_NAME", &session)
         .args(["action", "dump-layout"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default();
+        .output();
+    // A COMMAND failure (spawn error or non-zero exit) must be loud, not
+    // silently read as "no tabs live": swallowing it makes `is_live` false
+    // for a genuinely live agent and risks spawning a duplicate tab, which
+    // (unlike a bail here) is not retryable from the bar's dwell timer. A
+    // SUCCESSFUL-but-empty dump is different and expected — a bar-less
+    // session or the §10 mid-tool-call miss both legitimately read as
+    // empty — so only command failure bails; empty success flows through.
+    let dump = match output {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            crate::evlog::log_event(
+                "open",
+                &format!("{uuid}: dump-layout exited non-zero: {stderr}"),
+            );
+            anyhow::bail!("clave open: dump-layout failed: {stderr}");
+        }
+        Err(e) => {
+            crate::evlog::log_event("open", &format!("{uuid}: dump-layout spawn failed: {e}"));
+            anyhow::bail!("clave open: dump-layout spawn failed: {e}");
+        }
+    };
     let is_live = crate::add::live_uuids(&dump).contains(&uuid.to_string());
     let cwd_exists = std::path::Path::new(&row.cwd).is_dir();
     match open_decision(row, is_live, cwd_exists) {
