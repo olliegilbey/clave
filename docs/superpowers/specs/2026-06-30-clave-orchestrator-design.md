@@ -655,13 +655,20 @@ drives a real session; Claude reads structured logs. Real tabs, real spawns,
 real jsonls — mock only the *content*. Minimal by design: a fixture-seeder plus
 a log. No recorder, no assertion runner, no CI.
 **Decided:**
-- **Full sandbox via env overrides**, threaded through the existing path
-  helpers: `CLAVE_SESSION` (default `clave`; harness uses `clave-test`),
-  `CLAVE_STATE_DIR` (store), `CLAVE_DATA_DIR` (config/layout/wasm), and
-  `CLAUDE_CONFIG_DIR` pointed at a sandbox dir so *real claude processes*
-  write jsonls/settings/hook wiring there — the user's `~/.claude` and real
-  clave session are untouchable from a scenario. Scenario repos are temp dirs
-  (plus a real `git worktree` for worktree flows).
+- **Clave-state sandbox via env overrides** (REVISED 2026-07-18, live
+  finding + user ruling), threaded through the existing path helpers:
+  `CLAVE_SESSION` (default `clave`; harness uses `clave-test`),
+  `CLAVE_STATE_DIR` (store), `CLAVE_DATA_DIR` (config/layout/wasm).
+  **Claude's identity is deliberately NOT sandboxed**: the original
+  `CLAUDE_CONFIG_DIR` isolation dragged authentication along with it
+  (sandbox claude = "Not logged in"/stale-credential failures) — clave is
+  a thin wrapper for terminal control and claude's identity is not its
+  business. Scenario transcripts therefore land in the real
+  `~/.claude/projects`, tagged by the deterministic `c85c…` uuids;
+  `dev reset` removes exactly those. Hook events still land in the
+  SANDBOX store because hook processes inherit `CLAVE_STATE_DIR` from
+  their claude parent. Scenario repos are temp dirs (plus a real
+  `git worktree` for worktree flows).
 - **`clave dev scenario <name>`** seeds store rows + jsonls + dirs for a named
   state and prints exactly ONE command for the user to run next. Deterministic
   *readable* uuids (`c8s1-aaaa…`) so logs self-identify. Conversations are

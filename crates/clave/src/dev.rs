@@ -66,22 +66,30 @@ pub fn sandbox_root() -> Result<PathBuf> {
 }
 
 /// The ONE command printed for Ollie to launch the sandboxed session.
+///
+/// Deliberately NO CLAUDE_CONFIG_DIR (revised 2026-07-18, live finding +
+/// user ruling): sandboxing claude's identity dragged auth along with it
+/// ("Not logged in" / stale-credential failures) — clave is a thin wrapper
+/// for terminal control, and claude's identity is not its business. The
+/// sandbox isolates CLAVE's state only; scenario transcripts land in the
+/// real ~/.claude/projects tagged by the deterministic c85c uuids, and
+/// `dev reset` removes them by that tag.
 pub fn launch_command(root: &Path) -> String {
     format!(
-        "CLAVE_SESSION=clave-test CLAVE_STATE_DIR={0}/state CLAVE_DATA_DIR={0}/data CLAUDE_CONFIG_DIR={0}/claude clave",
+        "CLAVE_SESSION=clave-test CLAVE_STATE_DIR={0}/state CLAVE_DATA_DIR={0}/data clave",
         root.display()
     )
 }
 
-/// Point THIS process at the sandbox (children inherit — claude -p seeding
-/// and run_setup both land inside).
+/// Point THIS process at the sandbox (children inherit — the seeding
+/// `claude -p` runs as the REAL user identity but its hook invocations
+/// inherit CLAVE_STATE_DIR and land in the sandbox store).
 fn enter_sandbox(root: &Path) {
     // SAFETY: single-threaded CLI entry point; set before any spawn.
     unsafe {
         std::env::set_var("CLAVE_SESSION", "clave-test");
         std::env::set_var("CLAVE_STATE_DIR", root.join("state"));
         std::env::set_var("CLAVE_DATA_DIR", root.join("data"));
-        std::env::set_var("CLAUDE_CONFIG_DIR", root.join("claude"));
     }
 }
 
@@ -95,18 +103,17 @@ pub fn run_scenario(name: &str) -> Result<()> {
         })?;
     let root = sandbox_root()?;
     enter_sandbox(&root);
-    for d in ["state", "data", "claude", "repos"] {
+    for d in ["state", "data", "repos"] {
         std::fs::create_dir_all(root.join(d))?;
     }
-    // Sandbox claude identity: onboarding/account state (~/.claude.json →
-    // $CLAUDE_CONFIG_DIR/.claude.json). OAuth creds live in the macOS
-    // Keychain, which is machine-ambient — headless `claude -p` works.
+    // NO claude-identity sandboxing (2026-07-18 ruling — see
+    // launch_command): claude runs as the real user; transcripts go to the
+    // real ~/.claude/projects and are c85c-tagged for reset cleanup. Hooks
+    // are already registered in the real settings.json (run_setup below
+    // re-merges idempotently); hook processes inherit CLAVE_STATE_DIR from
+    // their claude parent, so events still land in the SANDBOX store.
     let home = dirs::home_dir().context("home")?;
-    let sandbox_cfg = root.join("claude/.claude.json");
-    if !sandbox_cfg.exists() && home.join(".claude.json").exists() {
-        std::fs::copy(home.join(".claude.json"), &sandbox_cfg)?;
-    }
-    // Sandbox hooks + config/layout + wasm: reuse the REAL wasm, then run
+    // Sandbox clave config/layout + wasm: reuse the REAL wasm, then run
     // the normal setup against the sandbox dirs (env already points there).
     let real_wasm = home.join(".local/share/clave/clave-bar.wasm");
     std::fs::copy(&real_wasm, root.join("data/clave-bar.wasm"))
@@ -188,13 +195,20 @@ pub fn run_status() -> Result<()> {
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default();
     let live_session = crate::setup::session_is_live(&list, "clave-test");
-    // Sanctioned §6.9 read: explicitly clave-test-scoped.
-    let dump = Command::new("zellij")
-        .env("ZELLIJ_SESSION_NAME", "clave-test")
-        .args(["action", "dump-layout"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default();
+    // Sanctioned §6.9 read: explicitly clave-test-scoped. GATED on
+    // liveness (live finding, 2026-07-18): `zellij action` against an
+    // absent/dead session BLOCKS indefinitely instead of erroring —
+    // an ungated dump-layout hung `dev status` for minutes pre-launch.
+    let dump = if live_session {
+        Command::new("zellij")
+            .env("ZELLIJ_SESSION_NAME", "clave-test")
+            .args(["action", "dump-layout"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     println!(
         "{}",
         serde_json::json!({
@@ -204,6 +218,14 @@ pub fn run_status() -> Result<()> {
         })
     );
     Ok(())
+}
+
+/// Is this file a scenario-seeded transcript? The deterministic uuid
+/// prefix (scenario_uuid) doubles as the cleanup tag — with claude
+/// identity un-sandboxed (2026-07-18), scenario jsonls live in the REAL
+/// ~/.claude/projects and reset must remove exactly them, nothing else.
+pub fn is_scenario_jsonl(file_name: &str) -> bool {
+    file_name.starts_with("00000000-0000-4000-8000-c85c") && file_name.ends_with(".jsonl")
 }
 
 pub fn run_reset() -> Result<()> {
@@ -216,6 +238,24 @@ pub fn run_reset() -> Result<()> {
     } else {
         println!("Sandbox already clean: {}", root.display());
     }
+    // Scenario transcripts in the real claude tree (c85c-tagged, see
+    // is_scenario_jsonl). Best-effort walk of projects/*/: a vanished dir
+    // or unreadable entry only skips itself.
+    let projects = crate::env::claude_config_dir()?.join("projects");
+    let mut removed = 0u32;
+    if let Ok(rd) = std::fs::read_dir(&projects) {
+        for proj in rd.flatten() {
+            if let Ok(files) = std::fs::read_dir(proj.path()) {
+                for f in files.flatten() {
+                    let name = f.file_name().to_string_lossy().into_owned();
+                    if is_scenario_jsonl(&name) && std::fs::remove_file(f.path()).is_ok() {
+                        removed += 1;
+                    }
+                }
+            }
+        }
+    }
+    println!("Scenario transcripts removed from {}: {removed}", projects.display());
     Ok(())
 }
 
@@ -259,14 +299,29 @@ mod tests {
     }
 
     #[test]
-    fn launch_command_is_fully_env_prefixed() {
-        // The ONE command printed for Ollie: everything sandboxed, nothing
-        // ambient (§6.9 — his real session/store/~/.claude untouchable).
+    fn launch_command_sandboxes_clave_state_only() {
+        // §6.9 revised 2026-07-18: CLAVE state is sandboxed; claude's
+        // identity is deliberately NOT (thin-wrapper ruling — sandboxing
+        // it dragged auth along and broke seeding).
         let cmd = launch_command(std::path::Path::new("/sb"));
         assert!(cmd.contains("CLAVE_SESSION=clave-test"));
         assert!(cmd.contains("CLAVE_STATE_DIR=/sb/state"));
         assert!(cmd.contains("CLAVE_DATA_DIR=/sb/data"));
-        assert!(cmd.contains("CLAUDE_CONFIG_DIR=/sb/claude"));
+        assert!(!cmd.contains("CLAUDE_CONFIG_DIR"));
         assert!(cmd.trim_end().ends_with("clave"));
+    }
+
+    #[test]
+    fn scenario_jsonl_tag_matches_exactly_the_seeded_uuids() {
+        // The cleanup tag must cover every scenario_uuid and nothing a
+        // real session could plausibly produce (v4 uuids are random).
+        assert!(is_scenario_jsonl(&format!("{}.jsonl", scenario_uuid(1))));
+        assert!(is_scenario_jsonl(&format!("{}.jsonl", scenario_uuid(99))));
+        assert!(!is_scenario_jsonl(
+            "a1b2c3d4-0000-4000-8000-c85c00000001.jsonl" // wrong prefix
+        ));
+        assert!(!is_scenario_jsonl(
+            "00000000-0000-4000-8000-c85c00000001.json" // not a transcript
+        ));
     }
 }
