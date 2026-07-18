@@ -133,6 +133,10 @@ enum Command {
 enum DevAction {
     /// Seed a named scenario and print the launch command.
     Scenario { name: String },
+    /// Attach/create the sandboxed clave-test session (sandbox env set
+    /// internally — the short form of the env-prefixed launch). Run this
+    /// yourself in a non-zellij terminal.
+    Launch,
     /// Dump sandbox store + live uuids + session liveness as JSON.
     Status,
     /// Wipe the sandbox (prints the kill-session command first).
@@ -231,6 +235,7 @@ fn main() -> Result<()> {
         Some(Command::Open { uuid }) => open::run_open(&uuid),
         Some(Command::Dev { action }) => match action {
             DevAction::Scenario { name } => dev::run_scenario(&name),
+            DevAction::Launch => dev::run_launch(),
             DevAction::Status => dev::run_status(),
             DevAction::Reset => dev::run_reset(),
         },

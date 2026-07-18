@@ -93,6 +93,16 @@ fn enter_sandbox(root: &Path) {
     }
 }
 
+/// `clave dev launch`: the sandbox session in one short command — sets the
+/// sandbox env (children inherit) and execs the NORMAL launch path.
+/// Session lifecycle stays the user's: this exists to be typed BY the
+/// user in a non-zellij terminal, replacing the printed env-var wall.
+pub fn run_launch() -> Result<()> {
+    let root = sandbox_root()?;
+    enter_sandbox(&root);
+    crate::setup::launch_session()
+}
+
 pub fn run_scenario(name: &str) -> Result<()> {
     let sc = SCENARIOS
         .iter()
@@ -179,8 +189,9 @@ pub fn run_scenario(name: &str) -> Result<()> {
         }
     }
     crate::evlog::log_event("dev", &format!("scenario {name} seeded"));
-    println!("\nScenario `{name}` ready. Launch (your command, your pane):\n");
-    println!("  {}", launch_command(&root));
+    println!("\nScenario `{name}` ready. Launch (your command, in a NON-zellij terminal):\n");
+    println!("  clave dev launch");
+    println!("\n(equivalent env form: {})", launch_command(&root));
     println!("\nWhen done: `clave dev reset` (prints the kill command first).");
     Ok(())
 }
