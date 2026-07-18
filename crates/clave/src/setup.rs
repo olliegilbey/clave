@@ -127,9 +127,10 @@ pub fn launch_layout_kdl(wasm: &str, most_recent: Option<&crate::store::AgentRec
     let tab = match most_recent {
         // The label is re-sanitized for KDL safety: it can be hook-derived
         // (§6.5) and only add-time labels went through sanitize_label.
-        Some(r) => {
-            crate::add::tab_node(wasm, &crate::add::sanitize_label(&r.label), &r.uuid, &r.cwd)
-        }
+        // BARE node (no bar pane): default_tab_template wraps explicit tab
+        // nodes too, so a bar-carrying node here rendered a DOUBLE bar in
+        // the eager tab (live finding, c8-cold-start 2026-07-18).
+        Some(r) => crate::add::tab_node_bare(&crate::add::sanitize_label(&r.label), &r.uuid, &r.cwd),
         None => "    tab name=\"clave\" focus=true\n".to_string(),
     };
     format!(
@@ -423,6 +424,11 @@ mod tests {
         assert!(kdl.contains("cwd=\"/repo/.claude-worktrees/ab\""));
         // The eager tab replaces the plain placeholder tab entirely.
         assert!(!kdl.contains("tab name=\"clave\" focus=true"));
+        // DOUBLE-BAR regression guard (live finding, 2026-07-18): the
+        // template wraps explicit tab nodes too, so the ONLY bar pane in
+        // the whole layout must be the template's — the eager tab node is
+        // BARE.
+        assert_eq!(kdl.matches("plugin location").count(), 1);
         r.label = "x".into(); // silence unused-mut if needed
     }
 

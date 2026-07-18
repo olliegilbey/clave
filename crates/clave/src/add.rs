@@ -63,8 +63,13 @@ pub fn sanitize_label(s: &str) -> String {
         .join(" ")
 }
 
-/// The single agent-tab KDL node — shared verbatim by the §6.3 one-shot add
-/// layout and the §6.8 eager launch tab so the two can never drift.
+/// The agent-tab KDL node WITH its own bar pane — for one-shot
+/// `zellij action new-tab --layout` files ONLY, which do NOT pass through
+/// the session's default_tab_template. A layout that HAS the template must
+/// use `tab_node_bare` instead: zellij wraps explicit tab nodes with the
+/// template too, so a bar-carrying node there renders a DOUBLE bar (live
+/// finding, c8-cold-start 2026-07-18 — the eager tab loaded two plugin
+/// instances in the same second and broke executor election).
 pub fn tab_node(wasm: &str, label: &str, uuid: &str, cwd: &str) -> String {
     // split_direction="vertical" is REQUIRED for a LEFT bar: zellij stacks
     // sibling panes horizontally (rows) by default (Task 9 C1 finding; same
@@ -78,6 +83,21 @@ pub fn tab_node(wasm: &str, label: &str, uuid: &str, cwd: &str) -> String {
             pane cwd="{cwd}" command="clave" {{
                 args "spawn" "{uuid}" "--name" "{label}" "--cwd" "{cwd}"
             }}
+        }}
+    }}
+"#
+    )
+}
+
+/// The bar-LESS agent-tab node for layouts that carry
+/// default_tab_template (the §6.8 launch layout): the template supplies
+/// the bar + vertical split, and this node's pane fills its `children`
+/// slot. Same baked idempotent spawn — only the bar pane differs.
+pub fn tab_node_bare(label: &str, uuid: &str, cwd: &str) -> String {
+    format!(
+        r#"    tab name="{label}" focus=true {{
+        pane cwd="{cwd}" command="clave" {{
+            args "spawn" "{uuid}" "--name" "{label}" "--cwd" "{cwd}"
         }}
     }}
 "#
