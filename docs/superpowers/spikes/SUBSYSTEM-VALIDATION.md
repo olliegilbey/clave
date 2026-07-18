@@ -565,6 +565,30 @@ real settings.json.
 - Second kill+relaunch: previously-opened rows dormant again except the most
   recent; no `<defunct>` panes anywhere (`dump-layout`).
 
+**Findings (2026-07-18, Alt+c dead in the sandbox — root-caused to the
+LAYOUTS, not the wasm):** instrumented trace proved the whole toggle chain
+fired (pipe → toggle → width_seek → ShrinkSelf) and zellij silently ate the
+resize. zellij 0.44.3 REFUSES `resize_pane_with_id` on fixed-size panes
+(`CantResizeFixedPanes`, tiled_pane_grid.rs `can_change_pane_size` — it
+flashes "FIXED!" on the pane) — and our generated layouts had ALWAYS given
+the bar a fixed `size=30` (26 pre-round-21). C6's collapse-in-place only
+ever passed on LAUNDERED geometry: rounds 9–18 resized panes zellij had
+re-INSERTED after hide/show (re-inserts get percent geoms), and the real
+session was born from serialized-cache resurrection, which rewrites sizes
+as percentages (`dump-layout` there: `size="5%"`). C8's serialization-off
+fresh-from-layout launches were the first honest fixed births — exposing
+the latent bug. FIX: all three layout generators emit `size="15%"`
+(flexible from birth) and BarModel arms the width seek at BIRTH (manual
+Default, budget=SEEK_BUDGET) so newborns converge from the window-dependent
+percent onto the exact template cols. Verified live: fresh `clave dev
+launch`, collapse+expand both directions PASS; birth convergence 28→done;
+peek 14⇄28 intact. Known accepted quirk: the collapsed FLOOR is
+granularity-dependent (zellij refuses shrinks below its min pane width, so
+the bar rests one resize-step above it — 14 cols on the dev window vs ~10
+in the real session; round-20 "wherever cols stop changing" ruling).
+Drift-on-window-resize (percent geometry, seek idle) BACKLOGGED
+(user-ratified 2026-07-18).
+
 **Verdict:** _pending_
 
 ## C9 — Hydration (S5)

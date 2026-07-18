@@ -106,8 +106,10 @@ pub fn classify_timer(elapsed: f64, pending_dwells: usize, pending_peeks: u32) -
     }
 }
 
-/// The generated layouts give the bar `size=30` (setup::layout_kdl and
-/// add::tab_layout) — the expanded width the seek returns to.
+/// The expanded width the seek converges to. The generated layouts
+/// (setup::layout_kdl and add::tab_layout) size the bar pane in PERCENT —
+/// a fixed `size=30` made zellij refuse every resize (CantResizeFixedPanes)
+/// — so births land near this and the birth-armed seek finishes the job.
 const BAR_TARGET_COLS: usize = 30;
 /// Collapsed width target (Alt+c): a glyph gutter — the state glyph plus a
 /// couple of name chars survive the renderer's own truncation, so "mini
@@ -142,7 +144,6 @@ pub struct Row {
     pub glyph: Option<(char, u8)>,
 }
 
-#[derive(Default)]
 pub struct BarModel {
     /// §5 pipe contract: apply only strictly-newer seq.
     seq: u64,
@@ -173,8 +174,8 @@ pub struct BarModel {
     /// Local unread-override: Done agents we've already cleared on focus.
     /// Render-side only; `clave focus` persists the real transition.
     read_locally: BTreeSet<String>,
-    /// Remaining C6 width-seek steps; armed (reset to SEEK_BUDGET) on every
-    /// toggle, zeroed when own width reaches the current target. Round 20:
+    /// Remaining C6 width-seek steps; armed at birth (see Default) and on
+    /// every toggle, zeroed when own width reaches the current target. Round 20:
     /// the bar is NEVER suppressed — Alt+c resizes each instance's OWN pane
     /// between the template width and a glyph gutter. Every instance stays
     /// visible, so every instance gets the render feedback that made the
@@ -224,6 +225,39 @@ pub struct BarModel {
     /// Bumped on EVERY nav landing; ArmDwell carries it so a late timer for
     /// an abandoned landing is provably stale.
     cursor_gen: u64,
+}
+
+impl Default for BarModel {
+    fn default() -> Self {
+        Self {
+            // Armed at BIRTH, not just on toggle: the generated layouts size
+            // the bar pane in PERCENT (fixed sizes make zellij refuse every
+            // resize — CantResizeFixedPanes, the Alt+c-dead finding,
+            // c8-cold-start 2026-07-18), so a newborn's cols are
+            // window-dependent and must converge on the template.
+            seek_budget: SEEK_BUDGET,
+            seq: 0,
+            agents: Vec::new(),
+            uuid_to_pane: BTreeMap::new(),
+            tabs: Vec::new(),
+            panes: Vec::new(),
+            timeline: BTreeMap::new(),
+            birth_touched: BTreeSet::new(),
+            renamed: BTreeMap::new(),
+            sent_binds: BTreeMap::new(),
+            read_locally: BTreeSet::new(),
+            seek_last_cols: None,
+            seek_step: 0,
+            current_tab: None,
+            birth_announced: false,
+            organic_pending: false,
+            collapsed: false,
+            peeking: false,
+            opening: BTreeSet::new(),
+            cursor: None,
+            cursor_gen: 0,
+        }
+    }
 }
 
 impl BarModel {
@@ -1188,6 +1222,19 @@ mod tests {
         let mut m = BarModel::default();
         m.toggle();
         m
+    }
+
+    #[test]
+    fn a_newborn_model_seeks_the_template_width() {
+        // The generated layouts size the bar pane in PERCENT — fixed sizes
+        // make zellij refuse every resize (CantResizeFixedPanes, the
+        // Alt+c-dead live finding, c8-cold-start 2026-07-18) — so a newborn
+        // bar's cols depend on the window. The seek must be armed at birth
+        // to converge on the exact template width from either side.
+        let mut m = BarModel::default();
+        assert_eq!(m.width_seek(45), vec![Effect::ShrinkSelf]);
+        let mut m = BarModel::default();
+        assert_eq!(m.width_seek(18), vec![Effect::GrowSelf]);
     }
 
     #[test]
