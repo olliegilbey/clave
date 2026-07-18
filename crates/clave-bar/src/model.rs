@@ -76,6 +76,36 @@ pub const PEEK_SINK_SECS: f64 = 0.9;
 /// cleanly at 0.65.
 pub const TIMER_KIND_CUTOFF_SECS: f64 = 0.65;
 
+/// The two timer kinds sharing zellij's single Event::Timer channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimerKind {
+    Dwell,
+    Peek,
+}
+
+/// Which timer kind does an expiry belong to? Normally split by elapsed
+/// (dwell 0.4 vs peek 0.9 — Timer carries the server-side elapsed sleep).
+/// HARDENING: a dwell timer delayed past the cutoff would otherwise never
+/// pop its gen and the FIFO would be off-by-one for the life of the
+/// instance (every later dwell pops the PREVIOUS landing's gen — a
+/// latching failure). When no peeks are pending but dwells are, a
+/// long-elapsed expiry can only be a late dwell — classify it as one.
+/// The reverse misclassification is impossible: a 0.9s sleep never
+/// reports < 0.9 elapsed. The collapsed-walk case heals the same way: a
+/// dormant landing arms BOTH a dwell and a peek, so an orphaned peek timer
+/// is reclassified as the late dwell and the queue rebalances — delayed
+/// opens are deferred, never lost.
+pub fn classify_timer(elapsed: f64, pending_dwells: usize, pending_peeks: u32) -> TimerKind {
+    // Short elapsed is always a dwell; a long one is a dwell ONLY when it
+    // can't be a peek (none pending) yet a dwell is owed — a late dwell.
+    let late_dwell = pending_peeks == 0 && pending_dwells > 0;
+    if elapsed < TIMER_KIND_CUTOFF_SECS || late_dwell {
+        TimerKind::Dwell
+    } else {
+        TimerKind::Peek
+    }
+}
+
 /// The generated layouts give the bar `size=30` (setup::layout_kdl and
 /// add::tab_layout) — the expanded width the seek returns to.
 const BAR_TARGET_COLS: usize = 30;
@@ -203,6 +233,14 @@ impl BarModel {
     pub fn beacon(&mut self, tab_id: usize) {
         self.current_tab = Some(tab_id);
         self.organic_pending = false; // truth arrived; leftover flags are poison
+        // Any real tab visit is live-focus truth, so the §6.6 selection must
+        // resolve back to the focused tab. Without this a dwell-open that
+        // FAILED (row goes ✗ stale but stays dormant, cursor pinned to it)
+        // would keep the selection highlight — and suppress the real active
+        // tab — through a NATIVE switch (Alt+o / zellij binds) that carries
+        // no clave-nav. The dormant nav branch sets `cursor` AFTER its (no)
+        // beacon call, so clearing here never races a fresh dormant landing.
+        self.cursor = None;
     }
 
     /// The `clave-visited` pipe entry: beacon, plus peek-on-nav — a
@@ -474,8 +512,23 @@ impl BarModel {
     /// Rows in display order (§6.6 C8): ONE unified recency-desc list — live
     /// tabs keyed by the store tab_timeline, dormant store rows keyed by
     /// last_interacted. Tiebreak: tab position for live rows (fresh
-    /// same-second tabs sit in tab order), uuid for dormant rows (stable).
+    /// same-second tabs sit in tab order); for same-second dormant rows,
+    /// stable and deterministic in uuid-DESCENDING order (uuid-ascending
+    /// sort under a `usize::MAX - i` key inverts to descending).
     pub fn rows(&self) -> Vec<Row> {
+        // §6.6 C8 virtual cursor: `Row.active` means "visually SELECTED".
+        // While nav sits on a dormant row, the selection follows the walk
+        // (claude.ai-style) — that dormant row reads active and EVERY live
+        // row drops its highlight, so the stale previous-tab highlight can't
+        // linger and mislead. Stale-cursor self-heal (documents review minor
+        // #7): a dwell-opened row goes LIVE, so this dormant-key lookup
+        // MISSES; selection falls back to the focused tab (tab.active) with
+        // no explicit cursor clear needed.
+        let selected_dormant: Option<&str> = self.cursor.as_deref().filter(|u| {
+            self.agents
+                .iter()
+                .any(|a| &a.uuid == u && self.is_dormant(a))
+        });
         // (sort_ts desc, tiebreak asc) — tiebreak: live rows by position,
         // dormant by a large offset + stable index so they never interleave
         // nondeterministically with same-second live rows.
@@ -495,7 +548,8 @@ impl BarModel {
                 Row {
                     key: RowKey::Tab(t.tab_id),
                     name: t.name.clone(),
-                    active: t.active,
+                    // A dormant selection steals the highlight from every tab.
+                    active: selected_dormant.is_none() && t.active,
                     glyph,
                 },
             ));
@@ -513,11 +567,14 @@ impl BarModel {
             };
             entries.push((
                 a.last_interacted,
-                usize::MAX - i, // after any same-second live row, stable
+                // After any same-second live row; among same-second dormant
+                // rows this renders uuid-DESCENDING (uuid-asc sort, key
+                // inverted) — stable and deterministic, which is all we need.
+                usize::MAX - i,
                 Row {
                     key: RowKey::Dormant(a.uuid.clone()),
                     name: a.label.clone(),
-                    active: false,
+                    active: selected_dormant == Some(a.uuid.as_str()),
                     glyph: Some(glyph),
                 },
             ));
@@ -1534,5 +1591,123 @@ mod tests {
         });
         m.opening.insert("u2".into());
         assert_eq!(m.rows()[0].glyph, Some(('↻', 33)));
+    }
+
+    #[test]
+    fn virtual_cursor_highlight_follows_the_dormant_walk() {
+        // §6.6 C8: nav onto a dormant row moves the SELECTION there — that
+        // row reads active and the previously-focused live tab drops its
+        // highlight (else the stale live highlight lingers and misleads).
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(1, 0, "live", true)]);
+        let mut a = agent("u-d", Status::Idle, None);
+        a.last_interacted = 999; // dormant sorts FIRST; live is line 1
+        m.apply_snapshot(AgentSnapshot {
+            seq: 1,
+            agents: vec![a],
+            tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64)]),
+        });
+        m.beacon(1);
+        // (a) walk onto the dormant row → it is active, the live tab is not.
+        m.nav("{\"dir\":\"next\"}", Some(1)); // live row 1 → wrap → dormant row 0
+        let rows = m.rows();
+        assert_eq!(rows[0].key, RowKey::Dormant("u-d".into()));
+        assert!(rows[0].active, "dormant selection highlighted");
+        assert!(!rows[1].active, "live tab drops its highlight");
+        // (b) a live landing clears the cursor → the tab highlights again.
+        m.nav("{\"dir\":\"next\"}", Some(1)); // dormant → wrap → live tab
+        let rows = m.rows();
+        assert!(!rows[0].active, "dormant no longer selected");
+        assert!(rows[1].active, "focused tab reclaims the highlight");
+    }
+
+    #[test]
+    fn stale_cursor_on_a_row_gone_live_self_heals_to_the_tab() {
+        // Review minor #7: a dwell-opened row goes LIVE while the cursor still
+        // names its uuid. The dormant-key lookup misses, so the highlight
+        // falls back to the focused tab — no explicit cursor clear needed.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(1, 0, "live", true)]);
+        let mut a = agent("u-d", Status::Idle, None);
+        a.last_interacted = 999;
+        m.apply_snapshot(AgentSnapshot {
+            seq: 1,
+            agents: vec![a],
+            tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64)]),
+        });
+        m.beacon(1);
+        m.nav("{\"dir\":\"next\"}", Some(1)); // cursor now on the dormant row
+        assert!(m.rows()[0].active); // dormant selected
+        // The row goes LIVE: u-d binds to a new tab (2). Cursor still names
+        // "u-d" but it no longer renders dormant.
+        m.apply_tabs(vec![tab(1, 0, "live", false), tab(2, 1, "u-d", true)]);
+        m.apply_snapshot(AgentSnapshot {
+            seq: 2,
+            agents: vec![agent("u-d", Status::Working, Some(2))],
+            tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64), (2usize, 600u64)]),
+        });
+        let rows = m.rows();
+        assert!(rows.iter().all(|r| r.key != RowKey::Dormant("u-d".into())));
+        let active: Vec<_> = rows
+            .iter()
+            .filter(|r| r.active)
+            .map(|r| r.key.clone())
+            .collect();
+        assert_eq!(
+            active,
+            vec![RowKey::Tab(2)],
+            "highlight self-heals to the focused tab"
+        );
+    }
+
+    #[test]
+    fn classify_timer_splits_by_elapsed_and_reclassifies_late_dwells() {
+        // Normal split both ways.
+        assert_eq!(classify_timer(DWELL_SECS, 1, 0), TimerKind::Dwell);
+        assert_eq!(classify_timer(PEEK_SINK_SECS, 0, 1), TimerKind::Peek);
+        // HARDENING: a dwell delayed past the cutoff with NO peeks pending is
+        // still a dwell — else its gen never pops and the FIFO latches
+        // off-by-one for the life of the instance.
+        assert_eq!(classify_timer(0.7, 2, 0), TimerKind::Dwell);
+        // A late expiry WITH peeks pending stays Peek — a 0.9s sleep never
+        // reports < 0.9, so this can't be a mis-delayed dwell.
+        assert_eq!(classify_timer(0.7, 1, 1), TimerKind::Peek);
+        // Nothing pending, long elapsed → Peek (default; the pop_front guard
+        // no-ops harmlessly).
+        assert_eq!(classify_timer(0.7, 0, 0), TimerKind::Peek);
+    }
+
+    #[test]
+    fn native_switch_beacon_clears_a_pinned_dormant_cursor() {
+        // Edge (Fix-1 heal): a dwell-open FAILS — the row stays dormant with
+        // the cursor pinned to it. A NATIVE tab switch (Alt+o / zellij binds)
+        // carries no clave-nav, only a visited-pipe beacon. That beacon must
+        // resolve the selection back to the focused tab, else the ✗ row keeps
+        // the highlight and the real active tab stays suppressed.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(1, 0, "live", false), tab(2, 1, "other", true)]);
+        let mut a = agent("u-d", Status::Idle, None);
+        a.last_interacted = 999; // dormant sorts FIRST
+        m.apply_snapshot(AgentSnapshot {
+            seq: 1,
+            agents: vec![a],
+            tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64), (2usize, 400u64)]),
+        });
+        m.beacon(1);
+        let fx = m.nav("{\"dir\":\"prev\"}", Some(1)); // land on the dormant row
+        let Effect::ArmDwell { r#gen } = fx[0] else { panic!() };
+        assert!(m.rows()[0].active, "dormant selected before the native switch");
+        // Native switch to tab 2 arrives as a visited-pipe beacon (no nav).
+        m.beacon(2);
+        let rows = m.rows();
+        assert!(!rows[0].active, "dormant row releases the highlight");
+        let active: Vec<_> = rows
+            .iter()
+            .filter(|r| r.active)
+            .map(|r| r.key.clone())
+            .collect();
+        assert_eq!(active, vec![RowKey::Tab(2)], "focused tab reclaims it");
+        // The now-orphaned dwell must no-op (cursor cleared).
+        assert!(m.dwell_expired(r#gen).is_empty());
     }
 }

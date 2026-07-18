@@ -21,8 +21,11 @@ build-bar-release:
 # Everything (host + plugin).
 build-all: build build-bar
 
+# --workspace is LOAD-BEARING: default-members excludes the wasm-only
+# clave-bar crate, so bare `cargo test` silently skips all 33 model.rs
+# tests — the divergence-critical ones (testing-strategy finding #1).
 test:
-    cargo test
+    cargo test --workspace
 
 # Copy both artifacts where the generated layout/config expect them:
 # the wasm into ~/.local/share/clave/, the binary onto PATH.

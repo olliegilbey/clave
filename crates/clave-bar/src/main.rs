@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 // The pure model lives in the LIB half of this crate (src/lib.rs → model.rs)
 // so it host-tests without linking this bin's wasm host-import shims.
 use clave_bar::model::{
-    BarModel, DWELL_SECS, Effect, PEEK_SINK_SECS, PaneMeta, TIMER_KIND_CUTOFF_SECS, TabMeta,
+    BarModel, DWELL_SECS, Effect, PEEK_SINK_SECS, PaneMeta, TabMeta, TimerKind, classify_timer,
 };
 use zellij_tile::prelude::*;
 
@@ -417,22 +417,27 @@ impl ZellijPlugin for State {
                 // TWO timer kinds share this event; Timer carries the ELAPSED
                 // sleep (≈ requested duration, v0.44.3 zellij_exports.rs:2462)
                 // — 0.4s dwells and 0.9s peek sinks split cleanly at the
-                // cutoff.
-                if elapsed < TIMER_KIND_CUTOFF_SECS {
-                    let Some(r#gen) = self.pending_dwells.pop_front() else {
-                        return false;
-                    };
-                    let fx = self.model.dwell_expired(r#gen);
-                    let fired = !fx.is_empty();
-                    self.run_effects(fx);
-                    fired // repaint: the row flips to ↻
-                } else {
-                    // One expiry per armed peek; only the LAST sinks (nav
-                    // burst = one visible expand, one sink). peek_expired() is
-                    // false when a toggle already cancelled the peek — no
-                    // repaint.
-                    self.pending_peeks = self.pending_peeks.saturating_sub(1);
-                    self.pending_peeks == 0 && self.model.peek_expired()
+                // cutoff. classify_timer also reclassifies a dwell delayed
+                // past the cutoff (else its gen never pops → FIFO latches
+                // off-by-one forever, dwell-to-open silently dies).
+                match classify_timer(elapsed, self.pending_dwells.len(), self.pending_peeks) {
+                    TimerKind::Dwell => {
+                        let Some(r#gen) = self.pending_dwells.pop_front() else {
+                            return false;
+                        };
+                        let fx = self.model.dwell_expired(r#gen);
+                        let fired = !fx.is_empty();
+                        self.run_effects(fx);
+                        fired // repaint: the row flips to ↻
+                    }
+                    TimerKind::Peek => {
+                        // One expiry per armed peek; only the LAST sinks (nav
+                        // burst = one visible expand, one sink). peek_expired()
+                        // is false when a toggle already cancelled the peek —
+                        // no repaint.
+                        self.pending_peeks = self.pending_peeks.saturating_sub(1);
+                        self.pending_peeks == 0 && self.model.peek_expired()
+                    }
                 }
             }
             Event::Mouse(Mouse::LeftClick(line, _col)) => {

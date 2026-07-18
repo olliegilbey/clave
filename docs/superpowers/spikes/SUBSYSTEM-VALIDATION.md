@@ -541,6 +541,12 @@ shows real command; ▶ pick jumps; second agent in same repo works)_
 ## C8 — Resume + resurrection (S4, REDESIGNED 2026-07-17: lazy clave-owned)
 Run in the `clave dev` sandbox (spec §6.9) — scenarios seed the states; the
 user drives; Claude reads `clave dev status` + clave.log + zellij.log.
+Sandbox isolation caveats (final review, 2026-07-18): the sandbox touches
+the real machine in exactly two sanctioned ways — (1) an additive grant for
+the sandbox wasm path in zellij's machine-global permissions.kdl (non-
+clobbering, keyed per wasm path; survives `dev reset`), (2) `claude -p`
+seeding authenticates via the shared macOS Keychain. Everything else
+(store, config, hooks, jsonls, session) is env-routed into the sandbox.
 - Picker resume (unchanged surface): `Alt+w` an agent's tab; `Alt+a` → same
   repo → `resume` → pick it: history resumes; store row PRESERVED
   (label/worktree/cwd — Task 7 fix).

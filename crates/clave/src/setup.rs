@@ -286,6 +286,19 @@ pub fn session_is_live(list_output: &str, name: &str) -> bool {
         .any(|l| l.split_whitespace().next() == Some(name) && !l.contains("EXITED"))
 }
 
+/// §6.8 eager-launch selection: the most-recent agent row whose cwd still
+/// EXISTS on disk. The cwd-existence filter mirrors `clave open`'s staleness
+/// branch (§6.3/§6.8): a deleted worktree as the most-recent row would bake a
+/// cold-start tab whose `clave spawn` dies at canonicalize — so skip it and
+/// fall through to the next viable row (none viable → None → bar-only layout).
+pub fn eager_row(store: &crate::store::Store) -> Option<&crate::store::AgentRecord> {
+    store
+        .agents
+        .values()
+        .filter(|r| std::path::Path::new(&r.cwd).is_dir())
+        .max_by_key(|r| r.last_interacted)
+}
+
 /// Bare `clave`: attach-or-create the dedicated session with OUR config +
 /// a DYNAMIC layout (§6.8 C8: eager most-recent tab; serialization is off,
 /// so a dead session is deleted, never resurrected).
@@ -306,16 +319,34 @@ pub fn launch_session() -> Result<()> {
         crate::store::clear_tab_timeline(&crate::store::store_paths()?)?;
         if session_exists(&list, &session) {
             // Dead-but-serialized (pre-C8 state, or zellij's own cache):
-            // delete so attach --create builds from OUR layout.
-            let _ = std::process::Command::new("zellij")
+            // delete so attach --create builds from OUR layout. Best-effort —
+            // launch must NOT die on a cleanup failure — but a SILENT failure
+            // would let attach resurrect the exact pre-C8 serialized state C8
+            // kills, invisibly. So capture the status and log any failure.
+            match std::process::Command::new("zellij")
                 .args(["delete-session", "--force", &session])
-                .status();
+                .status()
+            {
+                Ok(s) if s.success() => {}
+                Ok(s) => crate::evlog::log_event(
+                    "launch",
+                    &format!(
+                        "delete-session {session} exited {s} — attach may resurrect pre-C8 state"
+                    ),
+                ),
+                Err(e) => crate::evlog::log_event(
+                    "launch",
+                    &format!(
+                        "delete-session {session} did not run: {e} — attach may resurrect pre-C8 state"
+                    ),
+                ),
+            }
         }
     }
     // Compose the launch layout from the store (eager most-recent, §6.8).
     // Harmless when live (attach ignores --layout for an existing session).
     let store = crate::store::read_store(&crate::store::store_paths()?)?;
-    let most_recent = store.agents.values().max_by_key(|r| r.last_interacted);
+    let most_recent = eager_row(&store);
     let wasm = wasm_path()?;
     let layout_text = launch_layout_kdl(wasm.to_str().context("wasm path")?, most_recent);
     let layout = std::env::temp_dir().join(format!("clave-launch-{}.kdl", std::process::id()));
@@ -393,6 +424,46 @@ mod tests {
         // The eager tab replaces the plain placeholder tab entirely.
         assert!(!kdl.contains("tab name=\"clave\" focus=true"));
         r.label = "x".into(); // silence unused-mut if needed
+    }
+
+    #[test]
+    fn eager_row_skips_rows_whose_cwd_vanished() {
+        // §6.8: the most-recent row is only viable if its cwd still EXISTS —
+        // a deleted worktree as most-recent would bake a tab whose spawn dies
+        // at canonicalize. Skip it, fall through to the next viable row.
+        use crate::store::{AgentRecord, LabelSource, Store};
+        let live_dir =
+            std::env::temp_dir().join(format!("clave-eager-{}", std::process::id()));
+        std::fs::create_dir_all(&live_dir).unwrap();
+        let mk = |uuid: &str, cwd: &str, li: u64| AgentRecord {
+            uuid: uuid.into(),
+            cwd: cwd.into(),
+            repo_root: String::new(),
+            branch: String::new(),
+            label: uuid.into(),
+            status: clave_types::Status::Idle,
+            last_interacted: li,
+            last_visited: 0,
+            worktree: None,
+            label_source: LabelSource::FirstPrompt,
+            tab_id: None,
+            stale: false,
+        };
+        // Most-recent row's cwd is GONE; the older row's cwd exists.
+        let mut store = Store::default();
+        store
+            .agents
+            .insert("gone".into(), mk("gone", "/no/such/clave/eager/dir", 200));
+        store
+            .agents
+            .insert("live".into(), mk("live", live_dir.to_str().unwrap(), 100));
+        assert_eq!(eager_row(&store).map(|r| r.uuid.as_str()), Some("live"));
+        // Every row's cwd missing → None → bar-only layout.
+        let mut none = Store::default();
+        none.agents
+            .insert("gone".into(), mk("gone", "/no/such/clave/eager/dir", 200));
+        assert!(eager_row(&none).is_none());
+        let _ = std::fs::remove_dir_all(&live_dir);
     }
 
     #[test]
