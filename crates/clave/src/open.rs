@@ -82,6 +82,9 @@ pub fn run_open(uuid: &str) -> Result<()> {
             Ok(())
         }
         OpenDecision::Open => {
+            // Guard the stored cwd before baking it into KDL (see
+            // add::validate_cwd) — a `"`/control char breaks the layout.
+            crate::add::validate_cwd(&row.cwd)?;
             let wasm = crate::setup::wasm_path()?;
             let label = crate::add::sanitize_label(&row.label);
             let layout =

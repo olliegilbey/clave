@@ -25,6 +25,17 @@ pub fn wasm_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("clave-bar.wasm"))
 }
 
+/// Where `launch_session` writes the dynamically-composed launch layout.
+/// STABLE (not pid-suffixed) and inside the data dir alongside the generated
+/// config.kdl/layout.kdl: `launch_session` exec()s zellij and never returns
+/// (CommandExt::exec deliberately replaces the process so zellij owns the
+/// terminal), so no post-exec cleanup can run — a per-launch temp file would
+/// leak forever. One overwritten file: no accumulation, and it doubles as a
+/// debuggable artifact of the last cold start.
+pub fn launch_layout_path(dir: &std::path::Path) -> PathBuf {
+    dir.join("launch.kdl")
+}
+
 /// §6.6's exact permission set. Keep THIS list, load()'s request_permission
 /// call, and the seeded cache in lockstep — a partial cache match raises the
 /// unanswerable prompt and withholds everything.
@@ -304,6 +315,12 @@ pub fn eager_row(store: &crate::store::Store) -> Option<&crate::store::AgentReco
         .agents
         .values()
         .filter(|r| std::path::Path::new(&r.cwd).is_dir())
+        // TIE-BREAK (accepted): last_interacted is second-resolution, so two
+        // rows touched in the same second tie. `agents` is a BTreeMap and
+        // `max_by_key` keeps the LAST max seen, so ties resolve by uuid order
+        // — arbitrary but harmless: both rows are equally "most recent", and
+        // whichever loses is a live bar row a keystroke away. No wall-clock
+        // sub-second precision is worth carrying to make this deterministic.
         .max_by_key(|r| r.last_interacted)
 }
 
@@ -355,9 +372,18 @@ pub fn launch_session() -> Result<()> {
     // Harmless when live (attach ignores --layout for an existing session).
     let store = crate::store::read_store(&crate::store::store_paths()?)?;
     let most_recent = eager_row(&store);
+    // Guard the eager row's cwd before it's baked into the launch layout
+    // (add::validate_cwd) — a `"`/control char would emit malformed KDL and
+    // the whole session would fail to create.
+    if let Some(r) = most_recent {
+        crate::add::validate_cwd(&r.cwd)?;
+    }
     let wasm = wasm_path()?;
     let layout_text = launch_layout_kdl(wasm.to_str().context("wasm path")?, most_recent);
-    let layout = std::env::temp_dir().join(format!("clave-launch-{}.kdl", std::process::id()));
+    // STABLE path in the data dir, not a pid-suffixed temp file: the exec()
+    // below never returns, so nothing here can clean up — a unique-per-launch
+    // file would leak one KDL forever. Overwrite the one file each launch.
+    let layout = launch_layout_path(&dir);
     std::fs::write(&layout, layout_text)?;
     crate::evlog::log_event(
         "launch",
@@ -414,6 +440,19 @@ mod tests {
             assert!(kdl.contains("size=\"15%\""), "bar pane must be percent-sized:\n{kdl}");
             assert!(!kdl.contains("size=30"), "fixed size resurrects the FIXED! bug:\n{kdl}");
         }
+    }
+
+    #[test]
+    fn launch_layout_path_is_stable_and_in_data_dir() {
+        // Fix: launch_session exec()s zellij and never returns, so no cleanup
+        // runs — a pid-suffixed temp path leaked one KDL per launch. The path
+        // must be STABLE (same every launch → overwrite, no accumulation) and
+        // live in the data dir beside config.kdl/layout.kdl.
+        let dir = std::path::Path::new("/data/clave");
+        let p = launch_layout_path(dir);
+        assert_eq!(p, dir.join("launch.kdl"));
+        assert_eq!(launch_layout_path(dir), p); // deterministic, no pid suffix
+        assert!(!p.to_string_lossy().contains(&std::process::id().to_string()));
     }
 
     #[test]

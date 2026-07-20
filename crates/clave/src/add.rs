@@ -105,6 +105,23 @@ pub fn tab_node_bare(label: &str, uuid: &str, cwd: &str) -> String {
     )
 }
 
+/// Reject a cwd that can't be safely interpolated into generated KDL.
+/// `label` goes through `sanitize_label`, but a cwd is a REAL filesystem
+/// path — munging it (dropping a quote) would point the baked `--cwd`/
+/// `cwd="…"` at a directory that doesn't exist, so `clave spawn` would
+/// canonicalize-fail on the lie. A `"` or control char (legal-but-rare on
+/// unix) is the only thing that breaks the KDL string literal AND the spawn
+/// args; reject loudly at layout-assembly time so tab creation fails with a
+/// clear cause instead of emitting malformed KDL zellij silently rejects.
+/// Called at every seam that bakes a cwd (add/open/launch eager row).
+pub fn validate_cwd(cwd: &str) -> Result<()> {
+    anyhow::ensure!(
+        !cwd.contains('"') && !cwd.chars().any(char::is_control),
+        "cwd {cwd:?} contains a double-quote or control char — refusing to bake unsafe KDL (rename the directory)"
+    );
+    Ok(())
+}
+
 /// The one-shot temp layout (§6.3): Zellij KDL has no variable substitution,
 /// so the uuid/label/cwd are baked in, the file is passed to
 /// `zellij action new-tab --layout`, then deleted. Baking the command in
@@ -387,6 +404,9 @@ pub fn run_add(worktree: bool) -> Result<()> {
     };
 
     // 6) One-shot temp layout → new tab (§6.3). $TMPDIR, deleted after.
+    //    Guard the cwd before it's baked: canonicalize accepts paths with a
+    //    `"`/control char that would break the generated KDL (see validate_cwd).
+    validate_cwd(&agent_cwd)?;
     let wasm = wasm_path()?.to_str().context("wasm path")?.to_string();
     let layout = tab_layout(&wasm, &label, &uuid, &agent_cwd);
     let tmp = std::env::temp_dir().join(format!("clave-{uuid}.kdl"));
@@ -519,6 +539,20 @@ mod tests {
     #[test]
     fn sanitize_label_strips_kdl_breakers() {
         assert_eq!(sanitize_label("fix \"auth\"\nflow"), "fix auth flow");
+    }
+
+    #[test]
+    fn validate_cwd_rejects_kdl_breakers_but_passes_normal_paths() {
+        // A cwd is interpolated RAW into generated KDL (cwd="{cwd}" and the
+        // spawn args) — unlike label, it cannot be munged (a mangled path
+        // points nowhere, so `clave spawn` would canonicalize-fail on a lie).
+        // A `"` or control char is legal-but-rare on unix and breaks the KDL
+        // string literal, silently failing tab creation. Reject, don't munge.
+        assert!(validate_cwd("/repo/worktrees/ab").is_ok());
+        assert!(validate_cwd("/home/o/a b/dir").is_ok()); // spaces are fine
+        assert!(validate_cwd("/repo/\"evil\"").is_err()); // double-quote
+        assert!(validate_cwd("/repo/a\nb").is_err()); // control char
+        assert!(validate_cwd("/repo/a\tb").is_err());
     }
 
     #[test]

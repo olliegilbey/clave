@@ -1757,4 +1757,65 @@ mod tests {
         // The now-orphaned dwell must no-op (cursor cleared).
         assert!(m.dwell_expired(r#gen).is_empty());
     }
+
+    #[test]
+    fn late_dwell_with_sibling_peek_pending_defers_never_drops_the_open() {
+        // §6.6 collapsed-walk heal (model.rs ~86–107): a dormant landing on a
+        // collapsed bar arms BOTH a 0.4s dwell (gen) and a 0.9s peek from ONE
+        // landing. If the dwell's server-measured elapsed creeps past the
+        // 0.65 cutoff while its sibling peek is still pending, the FIRST
+        // expiry MUST classify as Peek (a 0.9s sleep can never report < 0.9,
+        // so late_dwell reclassification is DISABLED while peeks are pending)
+        // — the owed dwell is DEFERRED, not consumed. The peek's own later
+        // expiry, now with no peeks pending, reclassifies as the late dwell
+        // and the queue rebalances. Nothing tested the COMBINED path before;
+        // this pins that the delayed open is deferred, never lost.
+        let mut m = collapsed_model();
+        m.apply_tabs(vec![tab(1, 0, "live", true)]);
+        let mut a = agent("u-d", Status::Idle, None);
+        a.last_interacted = 999; // dormant sorts FIRST; live row is line 1
+        m.apply_snapshot(AgentSnapshot {
+            seq: 1,
+            agents: vec![a],
+            tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64)]),
+        });
+        m.beacon(1);
+        // (1) Walk onto the dormant row: one landing arms dwell + peek.
+        let fx = m.nav("{\"dir\":\"next\"}", Some(1)); // live row 1 → wrap → dormant row 0
+        let Effect::ArmDwell { r#gen } = *fx
+            .iter()
+            .find(|e| matches!(e, Effect::ArmDwell { .. }))
+            .expect("dormant landing arms a dwell")
+        else {
+            unreachable!()
+        };
+        assert!(fx.contains(&Effect::ArmPeek), "collapsed landing arms a peek");
+
+        // (2) The dwell's expiry arrives LATE (elapsed past the 0.65 cutoff)
+        // while the sibling peek is still pending — it MUST read as Peek, so
+        // the dwell is deferred, not spent on this expiry.
+        assert_eq!(
+            classify_timer(0.7, 1, 1),
+            TimerKind::Peek,
+            "late dwell defers to the pending peek — reclassification is off"
+        );
+
+        // (3) main.rs decrements the peek bookkeeping for that expiry; the
+        // SECOND expiry (the peek's own ~0.9s pop) now has no peeks pending
+        // but a dwell still owed → reclassify as the late Dwell.
+        assert_eq!(
+            classify_timer(PEEK_SINK_SECS, 1, 0),
+            TimerKind::Dwell,
+            "the peek expiry rebalances into the owed late dwell"
+        );
+
+        // (4) That late-dwell classification drives dwell_expired(gen): the
+        // cursor still sits on the same dormant landing, so the open the
+        // first expiry deferred is now delivered — deferred, never dropped.
+        assert_eq!(
+            m.dwell_expired(r#gen),
+            vec![Effect::OpenAgent { uuid: "u-d".into() }],
+            "the deferred open self-heals through the sibling peek expiry"
+        );
+    }
 }
