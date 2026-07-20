@@ -122,18 +122,19 @@ pub fn run_scenario(name: &str) -> Result<()> {
     // are already registered in the real settings.json (run_setup below
     // re-merges idempotently); hook processes inherit CLAVE_STATE_DIR from
     // their claude parent, so events still land in the SANDBOX store.
-    let home = dirs::home_dir().context("home")?;
-    // Sandbox clave config/layout + wasm: reuse the REAL wasm, then run
-    // the normal setup against the sandbox dirs (env already points there).
-    let real_wasm = home.join(".local/share/clave/clave-bar.wasm");
-    std::fs::copy(&real_wasm, root.join("data/clave-bar.wasm"))
-        .context("copy clave-bar.wasm (run the real `clave setup` first)")?;
+    // Sandbox clave config/layout: run the normal setup against the sandbox
+    // dirs (env already points there). The unversioned `clave-bar.wasm` is
+    // built straight into the sandbox data dir by `just dev-install` (§2 —
+    // the stable dir now holds only VERSIONED wasm, so there is nothing to
+    // copy from there); run_setup ensures it exists with a pointer to
+    // dev-install if not.
     crate::setup::run_setup()?;
 
     let now = crate::store::now_unix();
     let paths = crate::store::store_paths()?;
     // A `?` mid-loop leaves the sandbox partially seeded — that's fine: it's
-    // fully recoverable with `clave dev reset` (wipes the whole sandbox root).
+    // fully recoverable with `clave dev reset` (wipes scenario state; see
+    // SCENARIO_STATE_DIRS — the build artifact in data/ survives).
     for (i, a) in sc.agents.iter().enumerate() {
         let uuid = scenario_uuid(i as u32 + 1);
         let repo = root.join("repos").join(format!("{name}-{}", a.slug));
@@ -239,15 +240,40 @@ pub fn is_scenario_jsonl(file_name: &str) -> bool {
     file_name.starts_with("00000000-0000-4000-8000-c85c") && file_name.ends_with(".jsonl")
 }
 
+/// Scenario-state subdirs `dev reset` wipes. Deliberately EXCLUDES `data/`:
+/// that dir holds `clave-bar.wasm`, a build artifact installed once by
+/// `just dev-install`, not scenario state seeded by `dev scenario`. Wiping
+/// it used to break the documented reset → scenario → launch lifecycle —
+/// the next scenario's `run_setup` finds no wasm and aborts asking for a
+/// rebuild the user never asked for.
+const SCENARIO_STATE_DIRS: [&str; 2] = ["state", "repos"];
+
+/// Remove each of `SCENARIO_STATE_DIRS` under `root` that exists, leaving
+/// `data/` (and anything else) untouched. Returns the subset actually
+/// removed, for the caller's status message. Pure enough to unit-test
+/// against a tempdir — the real entry point is `run_reset`, which always
+/// calls this with the real `sandbox_root()`.
+fn wipe_scenario_state(root: &Path) -> Result<Vec<&'static str>> {
+    let mut wiped = Vec::new();
+    for d in SCENARIO_STATE_DIRS {
+        let p = root.join(d);
+        if p.exists() {
+            std::fs::remove_dir_all(&p)?;
+            wiped.push(d);
+        }
+    }
+    Ok(wiped)
+}
+
 pub fn run_reset() -> Result<()> {
     let root = sandbox_root()?;
     println!("If the session is running, kill it first (your command):\n");
     println!("  zellij kill-session clave-test && zellij delete-session --force clave-test\n");
-    if root.exists() {
-        std::fs::remove_dir_all(&root)?;
-        println!("Sandbox wiped: {}", root.display());
+    let wiped = wipe_scenario_state(&root)?;
+    if wiped.is_empty() {
+        println!("Scenario state already clean: {}", root.display());
     } else {
-        println!("Sandbox already clean: {}", root.display());
+        println!("Scenario state wiped ({}): {}", wiped.join(", "), root.display());
     }
     // Scenario transcripts in the real claude tree (c85c-tagged, see
     // is_scenario_jsonl). Best-effort walk of projects/*/: a vanished dir
@@ -283,6 +309,53 @@ fn run_in(dir: &Path, cmd: &str, args: &[&str]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scenario_state_dirs_excludes_the_data_build_artifact() {
+        // Fix: `dev reset` used to remove_dir_all the whole sandbox root,
+        // deleting data/clave-bar.wasm (a `just dev-install` build artifact,
+        // not scenario state) and silently breaking reset → scenario →
+        // launch. Reset must target ONLY scenario state.
+        assert_eq!(SCENARIO_STATE_DIRS, ["state", "repos"]);
+        assert!(!SCENARIO_STATE_DIRS.contains(&"data"));
+    }
+
+    #[test]
+    fn wipe_scenario_state_removes_state_and_repos_but_preserves_data() {
+        // Behavioral proof of the fix, against a real tempdir (never the
+        // real sandbox root): state/ and repos/ go, data/clave-bar.wasm —
+        // the just-dev-install build artifact — survives untouched.
+        let root = std::env::temp_dir()
+            .join(format!("clave-wipe-scenario-state-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root); // clean slate if a prior run leaked
+        std::fs::create_dir_all(root.join("state")).unwrap();
+        std::fs::create_dir_all(root.join("repos")).unwrap();
+        std::fs::create_dir_all(root.join("data")).unwrap();
+        std::fs::write(root.join("data").join("clave-bar.wasm"), b"wasm").unwrap();
+
+        let wiped = wipe_scenario_state(&root).unwrap();
+
+        assert_eq!(wiped, vec!["state", "repos"]);
+        assert!(!root.join("state").exists());
+        assert!(!root.join("repos").exists());
+        assert!(root.join("data").join("clave-bar.wasm").exists()); // survives
+
+        std::fs::remove_dir_all(&root).unwrap(); // test cleanup
+    }
+
+    #[test]
+    fn wipe_scenario_state_is_a_noop_on_an_already_clean_root() {
+        // No state/ or repos/ present (e.g. reset run twice in a row):
+        // nothing to remove, no error, empty report.
+        let root = std::env::temp_dir()
+            .join(format!("clave-wipe-scenario-state-clean-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        assert_eq!(wipe_scenario_state(&root).unwrap(), Vec::<&str>::new());
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn scenario_table_covers_the_c8_checklist() {

@@ -27,12 +27,36 @@ build-all: build build-bar
 test:
     cargo test --workspace
 
-# Copy both artifacts where the generated layout/config expect them:
-# the wasm into ~/.local/share/clave/, the binary onto PATH.
-install: build build-bar-release
-    mkdir -p ~/.local/share/clave
-    cp target/wasm32-wasip1/release/clave-bar.wasm ~/.local/share/clave/
-    cargo install --path crates/clave --locked
+# §2: the working-tree build for the sandbox + contributor shells. Builds the
+# bar wasm (build-tagged with the short SHA so the zellij log says which wasm
+# produced a trace) straight into the SANDBOX data dir, and `cargo install`s
+# the dev CLI onto PATH (~/.cargo/bin/clave). Stable sessions never run this
+# binary — they bake the versioned copy (see `release`). `just install` is
+# RETIRED: working-tree installs straight under the daily environment were the
+# foot-gun this split removes.
+# Build + install the working-tree wasm (into the sandbox) and dev CLI (§2).
+dev-install:
+    mkdir -p ~/.local/state/clave-dev/data
+    CLAVE_BUILD_TAG=$(git rev-parse --short HEAD 2>/dev/null || echo dev) cargo build -p clave-bar --release --target wasm32-wasip1
+    cp target/wasm32-wasip1/release/clave-bar.wasm ~/.local/state/clave-dev/data/
+    CLAVE_BUILD_TAG=$(git rev-parse --short HEAD 2>/dev/null || echo dev) cargo install --path crates/clave --locked
+
+# Cut a release (§2). `clave release` is the GATE: it refuses unless the tree
+# is clean AND HEAD carries the exact vX.Y.Z tag matching Cargo.toml — so a
+# dirty or untagged HEAD installs nothing. On a good cut it installs the
+# versioned wasm + CLI copy under ~/.local/share/clave/ and regenerates stable
+# config/layout/hooks so every generated reference points at the VERSIONED
+# paths. A running session, pinned to the files baked at its launch, is
+# untouched until its next cold start (running-session immunity). The build
+# tag is the exact tag when HEAD is tagged, else `untagged` (the gate then
+# refuses, cleanly). build-bar-release + the `-p clave` release build produce
+# the two artifacts the subcommand installs.
+# Gate on a clean, vX.Y.Z-tagged HEAD, then install versioned artifacts (§2).
+release: build-bar-release
+    CLAVE_BUILD_TAG=$(git describe --tags --exact-match HEAD 2>/dev/null || echo untagged) cargo build --release -p clave
+    ./target/release/clave release \
+        --wasm-src target/wasm32-wasip1/release/clave-bar.wasm \
+        --cli-src target/release/clave
 
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings

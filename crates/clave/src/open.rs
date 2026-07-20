@@ -86,9 +86,15 @@ pub fn run_open(uuid: &str) -> Result<()> {
             // add::validate_cwd) — a `"`/control char breaks the layout.
             crate::add::validate_cwd(&row.cwd)?;
             let wasm = crate::setup::wasm_path()?;
+            let binary = crate::release::runtime_binary();
             let label = crate::add::sanitize_label(&row.label);
-            let layout =
-                crate::add::tab_layout(wasm.to_str().context("wasm path")?, &label, uuid, &row.cwd);
+            let layout = crate::add::tab_layout(
+                &binary,
+                wasm.to_str().context("wasm path")?,
+                &label,
+                uuid,
+                &row.cwd,
+            );
             let tmp = std::env::temp_dir().join(format!("clave-open-{uuid}.kdl"));
             std::fs::write(&tmp, layout)?;
             let status = std::process::Command::new("zellij")

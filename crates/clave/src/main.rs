@@ -7,15 +7,19 @@
 //!
 //! See `docs/superpowers/specs/2026-06-30-clave-orchestrator-design.md` for the full spec.
 
-use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use std::path::Path;
 
-use clave::{add, dev, hook, lsview, open, setup, spawn, store};
+use anyhow::{Context, Result};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+
+use clave::{add, dev, hook, lsview, open, release, setup, spawn, store};
 
 #[derive(Parser)]
 #[command(
     name = "clave",
-    version,
+    // Version is set at parse time (`long_version`) so `--version` carries
+    // the build tag too (§2: "what am I running" in both environments) —
+    // option_env! can't be concatenated into a const &str for the derive.
     about = "Conduct a fleet of Claude Code agents from a Zellij sidebar"
 )]
 struct Cli {
@@ -127,6 +131,20 @@ enum Command {
         #[command(subcommand)]
         action: DevAction,
     },
+
+    /// Cut a release (invoked by `just release`, not for hand use): gate on a
+    /// clean tree + a HEAD `vX.Y.Z` tag matching this binary's version, then
+    /// install the versioned wasm + CLI copy and regenerate stable
+    /// config/layout/hooks at the versioned paths (§2).
+    #[command(hide = true)]
+    Release {
+        /// The freshly built release wasm to install as the versioned artifact.
+        #[arg(long)]
+        wasm_src: String,
+        /// The freshly built release CLI to install as the versioned copy.
+        #[arg(long)]
+        cli_src: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -144,7 +162,13 @@ enum DevAction {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    // Override clap's derive version with semver + build tag at parse time;
+    // clap still owns --version/--help exit behavior via get_matches(). clap's
+    // Str wants a &'static str, so leak the once-built string (harmless in a
+    // short-lived CLI — it lives for the whole process anyway).
+    let version: &'static str = Box::leak(release::long_version().into_boxed_str());
+    let matches = Cli::command().version(version).get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     match cli.command {
         // Bare `clave` — no subcommand — attaches or creates the session.
         None => setup::launch_session(),
@@ -239,5 +263,8 @@ fn main() -> Result<()> {
             DevAction::Status => dev::run_status(),
             DevAction::Reset => dev::run_reset(),
         },
+        Some(Command::Release { wasm_src, cli_src }) => {
+            release::run_release(Path::new(&wasm_src), Path::new(&cli_src))
+        }
     }
 }

@@ -21,8 +21,20 @@ pub fn data_dir() -> Result<PathBuf> {
     ))
 }
 
+/// The bar wasm this environment loads. Version-aware: a release installs
+/// `clave-bar-vX.Y.Z.wasm` and every generated reference points at it, so
+/// prefer the versioned artifact when it exists; the sandbox/dev install
+/// keeps the unversioned `clave-bar.wasm` (working-tree builds) and falls
+/// through to it. Keyed on THIS binary's version so a stable session
+/// resolves the exact wasm baked into its config at launch.
 pub fn wasm_path() -> Result<PathBuf> {
-    Ok(data_dir()?.join("clave-bar.wasm"))
+    let dir = data_dir()?;
+    let versioned = dir.join(crate::release::versioned_wasm_name(env!("CARGO_PKG_VERSION")));
+    Ok(if versioned.exists() {
+        versioned
+    } else {
+        dir.join("clave-bar.wasm")
+    })
 }
 
 /// Where `launch_session` writes the dynamically-composed launch layout.
@@ -48,7 +60,12 @@ pub const BAR_PERMISSIONS: [&str; 4] = [
 
 /// The clave session config: Alt keybinds in shared_among normal+locked
 /// (invariant #6 — they must fire while Claude has focus), defaults kept.
-pub fn config_kdl(wasm: &str) -> String {
+///
+/// `binary` is what the `Alt a` keybind's `Run` invokes: bare `clave` (PATH
+/// = the dev binary) for the sandbox/dev install, the versioned copy's
+/// ABSOLUTE path for a release (§2 binary split — a stable session must never
+/// fall through to `~/.cargo/bin/clave`). The caller's environment decides.
+pub fn config_kdl(binary: &str, wasm: &str) -> String {
     let nav = |payload: &str| {
         // Trailing `;` after the child block is REQUIRED: zellij's KDL parser
         // rejects a `}`-closed node that isn't terminated before the enclosing
@@ -58,9 +75,9 @@ pub fn config_kdl(wasm: &str) -> String {
         format!("MessagePlugin \"file:{wasm}\" {{ name \"clave-nav\"; payload \"{payload}\"; }};")
     };
     let mut binds = String::new();
-    binds.push_str(
-        "        bind \"Alt a\" { Run \"clave\" \"add\" { floating true; close_on_exit true; }; }\n",
-    );
+    binds.push_str(&format!(
+        "        bind \"Alt a\" {{ Run \"{binary}\" \"add\" {{ floating true; close_on_exit true; }}; }}\n"
+    ));
     binds.push_str(&format!(
         "        bind \"Alt c\" {{ MessagePlugin \"file:{wasm}\" {{ name \"clave-toggle\"; }}; }}\n"
     ));
@@ -140,14 +157,20 @@ pub fn layout_kdl(wasm: &str) -> String {
 /// time. Base = the bar template; store non-empty → ONE eager tab for the
 /// most-recent row, baked `clave spawn` (resumes via the jsonl check).
 /// Everything else surfaces as dormant bar rows (§6.6).
-pub fn launch_layout_kdl(wasm: &str, most_recent: Option<&crate::store::AgentRecord>) -> String {
+pub fn launch_layout_kdl(
+    binary: &str,
+    wasm: &str,
+    most_recent: Option<&crate::store::AgentRecord>,
+) -> String {
     let tab = match most_recent {
         // The label is re-sanitized for KDL safety: it can be hook-derived
         // (§6.5) and only add-time labels went through sanitize_label.
         // BARE node (no bar pane): default_tab_template wraps explicit tab
         // nodes too, so a bar-carrying node here rendered a DOUBLE bar in
         // the eager tab (live finding, c8-cold-start 2026-07-18).
-        Some(r) => crate::add::tab_node_bare(&crate::add::sanitize_label(&r.label), &r.uuid, &r.cwd),
+        Some(r) => {
+            crate::add::tab_node_bare(binary, &crate::add::sanitize_label(&r.label), &r.uuid, &r.cwd)
+        }
         None => "    tab name=\"clave\" focus=true\n".to_string(),
     };
     // size="15%" not size=30: fixed panes refuse resizes — see layout_kdl.
@@ -173,8 +196,36 @@ pub fn session_exists(list_output: &str, name: &str) -> bool {
         .any(|l| l.split_whitespace().next() == Some(name))
 }
 
-/// Additively merge clave's hook registrations into a settings.json value.
-/// Never touches existing entries; skips events already carrying our command.
+/// Is `cmd` a clave hook registration for `event` (any binary path form)?
+/// Matches `<bin> hook <EVENT>` where `<bin>`'s basename is `clave` or
+/// `clave-vX.Y.Z` — bare PATH `clave`, an absolute versioned copy, or an
+/// older version's absolute path all count. A foreign `my-bell`/`notify hook
+/// Stop` does NOT (its basename isn't ours), so replace-on-version-change
+/// never touches a user's own hook. The `clave-v` check requires a DIGIT
+/// immediately after the prefix (not just `starts_with`) — a foreign tool
+/// named `clave-vault` or `clave-verify` shares the textual prefix with our
+/// versioned binary name but is not ours, and must never be absorbed or
+/// rewritten by merge_hooks.
+pub fn is_clave_hook_command(cmd: &str, event: &str) -> bool {
+    let Some(bin) = cmd.strip_suffix(&format!(" hook {event}")) else {
+        return false;
+    };
+    matches!(
+        std::path::Path::new(bin).file_name().and_then(|n| n.to_str()),
+        Some(name) if name == "clave"
+            || name.strip_prefix("clave-v").is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit()))
+    )
+}
+
+/// Merge clave's hook registrations into a settings.json value, keyed on
+/// `clave_bin` (the command path to bake — bare `clave` for dev, the
+/// versioned copy's absolute path for a release).
+///
+/// Replace-on-version-change (§2): an existing clave hook entry — ANY prior
+/// version's command path — is REPLACED in place by `clave_bin`'s, never
+/// duplicated; a same-version re-run is idempotent (no change). Non-clave
+/// entries are never touched (the never-clobber invariant, §6.5). Returns
+/// whether anything changed.
 pub fn merge_hooks(settings: &mut serde_json::Value, clave_bin: &str) -> bool {
     // The §6.5 state machine's input events. PermissionRequest/StopFailure
     // are handled IF the CLI sends them, but registration sticks to the
@@ -187,18 +238,38 @@ pub fn merge_hooks(settings: &mut serde_json::Value, clave_bin: &str) -> bool {
         .expect("settings.json root must be an object");
     for ev in EVENTS {
         let cmd = format!("{clave_bin} hook {ev}");
+        let want = serde_json::json!(cmd);
         let arr = hooks
             .as_object_mut()
             .expect("hooks must be an object")
             .entry(ev)
             .or_insert_with(|| serde_json::json!([]));
         let entries = arr.as_array_mut().expect("hook event must be an array");
-        let present = entries.iter().any(|e| {
-            e["hooks"]
-                .as_array()
-                .is_some_and(|hs| hs.iter().any(|h| h["command"] == serde_json::json!(cmd)))
-        });
-        if !present {
+        // Find an existing clave entry (any version's path) and rewrite its
+        // command to the current binary — a version cut MUST NOT leave the
+        // prior release's hook behind (it would run the old CLI) nor stack a
+        // duplicate. Only OUR command strings are eligible; user hooks pass
+        // through untouched.
+        let mut found = false;
+        for e in entries.iter_mut() {
+            let Some(hs) = e.get_mut("hooks").and_then(|v| v.as_array_mut()) else {
+                continue;
+            };
+            for h in hs.iter_mut() {
+                let ours = h
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|c| is_clave_hook_command(c, ev));
+                if ours {
+                    found = true;
+                    if h["command"] != want {
+                        h["command"] = want.clone();
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if !found {
             entries.push(serde_json::json!({
                 "hooks": [ { "type": "command", "command": cmd } ]
             }));
@@ -252,19 +323,18 @@ pub fn merge_permissions_kdl(existing: &str, wasm_abs: &str) -> String {
     out
 }
 
-/// The whole setup weave. Idempotent by construction — every part merges.
-pub fn run_setup() -> Result<()> {
-    let dir = data_dir()?;
-    std::fs::create_dir_all(&dir)?;
-    let wasm = wasm_path()?;
-    let wasm_str = wasm.to_str().context("wasm path")?;
-    anyhow::ensure!(
-        wasm.exists(),
-        "{} missing — run `just install` first (it copies the built wasm here)",
-        wasm.display()
-    );
-    std::fs::write(dir.join("config.kdl"), config_kdl(wasm_str))?;
-    std::fs::write(dir.join("layout.kdl"), layout_kdl(wasm_str))?;
+/// The generation weave shared by `clave setup` (dev/sandbox) and `clave
+/// release` (stable): write config.kdl + layout.kdl baking `binary` into
+/// commands and `wasm` into plugin locations, merge the clave hooks
+/// (replace-on-version-change, keyed on `binary`), and seed the permission
+/// cache for `wasm`. Idempotent by construction — every part merges.
+///
+/// The two callers differ ONLY in what they pass: dev = (`"clave"`,
+/// unversioned wasm); release = (versioned CLI absolute path, versioned
+/// wasm). Everything version-shaped stays in the caller (§2).
+pub fn write_generated(dir: &std::path::Path, binary: &str, wasm: &str) -> Result<()> {
+    std::fs::write(dir.join("config.kdl"), config_kdl(binary, wasm))?;
+    std::fs::write(dir.join("layout.kdl"), layout_kdl(wasm))?;
 
     // Hooks: read-merge-write $CLAUDE_CONFIG_DIR/settings.json. The path may
     // be a symlink into a dotfiles repo — fs::read/write follow it, which is
@@ -278,7 +348,7 @@ pub fn run_setup() -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
         Err(e) => return Err(e).context("reading settings.json"),
     };
-    if merge_hooks(&mut settings, "clave") {
+    if merge_hooks(&mut settings, binary) {
         std::fs::write(&settings_path, serde_json::to_vec_pretty(&settings)?)?;
         println!("hooks merged into {}", settings_path.display());
     } else {
@@ -291,9 +361,26 @@ pub fn run_setup() -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let existing = std::fs::read_to_string(&cache).unwrap_or_default();
-    std::fs::write(&cache, merge_permissions_kdl(&existing, wasm_str))?;
+    std::fs::write(&cache, merge_permissions_kdl(&existing, wasm))?;
     println!("permissions seeded in {}", cache.display());
     Ok(())
+}
+
+/// `clave setup` — the DEV/sandbox machine prep: generate against bare
+/// `clave` (PATH = the dev binary) and the unversioned working-tree wasm.
+/// Stable machines are prepared by `just release` (→ `run_release`), which
+/// bakes versioned paths instead. Idempotent.
+pub fn run_setup() -> Result<()> {
+    let dir = data_dir()?;
+    std::fs::create_dir_all(&dir)?;
+    let wasm = wasm_path()?;
+    let wasm_str = wasm.to_str().context("wasm path")?;
+    anyhow::ensure!(
+        wasm.exists(),
+        "{} missing — run `just dev-install` first (it builds the sandbox wasm here)",
+        wasm.display()
+    );
+    write_generated(&dir, "clave", wasm_str)
 }
 
 /// Does `zellij list-sessions -n` output show `name` as a LIVE session?
@@ -379,7 +466,11 @@ pub fn launch_session() -> Result<()> {
         crate::add::validate_cwd(&r.cwd)?;
     }
     let wasm = wasm_path()?;
-    let layout_text = launch_layout_kdl(wasm.to_str().context("wasm path")?, most_recent);
+    // Bake the environment's clave into the eager tab's spawn: the versioned
+    // copy's absolute path in a stable session (immune to a newer PATH
+    // `clave`), bare `clave` in the dev/sandbox one (§2 binary split).
+    let binary = crate::release::runtime_binary();
+    let layout_text = launch_layout_kdl(&binary, wasm.to_str().context("wasm path")?, most_recent);
     // STABLE path in the data dir, not a pid-suffixed temp file: the exec()
     // below never returns, so nothing here can clean up — a unique-per-launch
     // file would leak one KDL forever. Overwrite the one file each launch.
@@ -434,8 +525,8 @@ mod tests {
         // cache, which rewrites sizes as percentages.
         for kdl in [
             layout_kdl("/w.wasm"),
-            launch_layout_kdl("/w.wasm", None),
-            crate::add::tab_layout("/w.wasm", "l", "u", "/c"),
+            launch_layout_kdl("clave", "/w.wasm", None),
+            crate::add::tab_layout("clave", "/w.wasm", "l", "u", "/c"),
         ] {
             assert!(kdl.contains("size=\"15%\""), "bar pane must be percent-sized:\n{kdl}");
             assert!(!kdl.contains("size=30"), "fixed size resurrects the FIXED! bug:\n{kdl}");
@@ -459,7 +550,7 @@ mod tests {
     fn launch_layout_is_bar_only_when_store_empty() {
         // §6.8 cold start, empty store: today's behavior — template + one
         // plain tab, no agent tabs.
-        let kdl = launch_layout_kdl("/w.wasm", None);
+        let kdl = launch_layout_kdl("clave", "/w.wasm", None);
         assert!(kdl.contains("default_tab_template"));
         assert!(kdl.contains("tab name=\"clave\" focus=true"));
         assert!(!kdl.contains("\"spawn\""));
@@ -483,7 +574,7 @@ mod tests {
             tab_id: None,
             stale: false,
         };
-        let kdl = launch_layout_kdl("/w.wasm", Some(&r));
+        let kdl = launch_layout_kdl("clave", "/w.wasm", Some(&r));
         assert!(kdl.contains("default_tab_template")); // native new-tabs still barred
         assert!(kdl.contains("\"spawn\" \"u-recent\""));
         assert!(kdl.contains("cwd=\"/repo/.claude-worktrees/ab\""));
@@ -592,13 +683,13 @@ mod tests {
         // session would replay discovered `claude --session-id` commands
         // (create-collision) or mid-tool-call children (pty.rs ppid-priority
         // discovery, v0.44.3 source-verified).
-        let kdl = config_kdl("/w.wasm");
+        let kdl = config_kdl("clave", "/w.wasm");
         assert!(kdl.contains("session_serialization false"));
     }
 
     #[test]
     fn generated_kdl_carries_the_wasm_path_and_alt_keys() {
-        let cfg = config_kdl("/data/clave-bar.wasm");
+        let cfg = config_kdl("clave", "/data/clave-bar.wasm");
         for key in [
             "Alt a", "Alt c", "Alt w", "Alt j", "Alt k", "Alt 1", "Alt 9",
         ] {
@@ -615,5 +706,106 @@ mod tests {
         // Regression (Task 9 C1): without the vertical wrapper the bar is a
         // 30-ROW strip on top, not a 30-col LEFT column.
         assert!(lay.contains("split_direction=\"vertical\""));
+    }
+
+    #[test]
+    fn generation_bakes_the_binary_passed_by_the_caller() {
+        // §2 binary split: stable bakes the versioned copy's ABSOLUTE path,
+        // sandbox keeps bare `clave` (PATH = the dev binary). The generation
+        // fns are pure over the binary — the caller's environment decides.
+        let abs = "/home/o/.local/share/clave/bin/clave-v0.1.0";
+        let cfg = config_kdl(abs, "/w.wasm");
+        // The keybind `Run` invokes the passed binary, not bare `clave`.
+        assert!(cfg.contains(&format!("Run \"{abs}\" \"add\"")));
+        assert!(!cfg.contains("Run \"clave\" \"add\""));
+        // Sandbox generation keeps bare `clave`.
+        assert!(config_kdl("clave", "/w.wasm").contains("Run \"clave\" \"add\""));
+        // The launch layout's eager-tab spawn bakes the same binary as its
+        // pane command (resurrection re-execs the SAME clave).
+        let r = crate::store::AgentRecord {
+            uuid: "u".into(),
+            cwd: "/c".into(),
+            repo_root: "/c".into(),
+            branch: "main".into(),
+            label: "l".into(),
+            status: clave_types::Status::Idle,
+            last_interacted: 0,
+            last_visited: 0,
+            worktree: None,
+            label_source: crate::store::LabelSource::FirstPrompt,
+            tab_id: None,
+            stale: false,
+        };
+        let lay = launch_layout_kdl(abs, "/w.wasm", Some(&r));
+        assert!(lay.contains(&format!("command=\"{abs}\"")));
+        assert!(!lay.contains("command=\"clave\""));
+    }
+
+    #[test]
+    fn is_clave_hook_command_matches_our_paths_not_foreign() {
+        // Bare PATH clave, an absolute versioned copy, and an older version's
+        // path all count as OURS (replace-on-version applies).
+        assert!(is_clave_hook_command("clave hook Stop", "Stop"));
+        assert!(is_clave_hook_command(
+            "/home/o/.local/share/clave/bin/clave-v0.1.0 hook Stop",
+            "Stop"
+        ));
+        assert!(is_clave_hook_command("/opt/clave-v0.0.9 hook Notification", "Notification"));
+        // Wrong event, or a foreign tool, or a non-hook command: NOT ours.
+        assert!(!is_clave_hook_command("clave hook Stop", "Notification"));
+        assert!(!is_clave_hook_command("my-bell", "Stop"));
+        assert!(!is_clave_hook_command("/x/notify hook Stop", "Stop"));
+        assert!(!is_clave_hook_command("clave add", "Stop"));
+        // A foreign tool merely PREFIXED with "clave-v" (clave-vault,
+        // clave-verify) is NOT ours — the basename check must require a
+        // DIGIT immediately after "clave-v", not just the substring.
+        assert!(!is_clave_hook_command("clave-vault hook Stop", "Stop"));
+        assert!(!is_clave_hook_command("/usr/local/bin/clave-verify hook Stop", "Stop"));
+    }
+
+    #[test]
+    fn merge_hooks_leaves_a_foreign_clave_v_prefixed_hook_untouched() {
+        // Regression: `clave-vault`/`clave-verify` share the "clave-v" prefix
+        // with our versioned binary name (clave-vN.N.N) but are unrelated
+        // tools — merge_hooks must never absorb or rewrite their entry.
+        let mut v: serde_json::Value = serde_json::json!({
+            "hooks": {
+                "Stop": [
+                    { "hooks": [ { "type": "command", "command": "clave-vault hook Stop" } ] }
+                ]
+            }
+        });
+        assert!(merge_hooks(&mut v, "clave")); // registers ours fresh, doesn't replace theirs
+        let stops = v["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(stops.len(), 2); // their entry + ours, not a rewrite
+        assert_eq!(stops[0]["hooks"][0]["command"], "clave-vault hook Stop"); // untouched
+        assert_eq!(stops[1]["hooks"][0]["command"], "clave hook Stop");
+    }
+
+    #[test]
+    fn merge_hooks_replaces_a_prior_version_in_place() {
+        // §2 replace-on-version-change: a version cut rewrites the existing
+        // clave hook command to the new path — never a duplicate, never the
+        // stale one left behind, and a user's own hook untouched.
+        let old = "/home/o/.local/share/clave/bin/clave-v0.1.0";
+        let new = "/home/o/.local/share/clave/bin/clave-v0.2.0";
+        let mut v: serde_json::Value = serde_json::json!({
+            "hooks": {
+                "Stop": [
+                    { "hooks": [ { "type": "command", "command": "my-bell" } ] },
+                    { "hooks": [ { "type": "command", "command": format!("{old} hook Stop") } ] }
+                ]
+            }
+        });
+        assert!(merge_hooks(&mut v, new)); // changed
+        let stops = v["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(stops.len(), 2); // user's + ours, NOT three
+        assert_eq!(stops[0]["hooks"][0]["command"], "my-bell"); // foreign untouched
+        assert_eq!(stops[1]["hooks"][0]["command"], format!("{new} hook Stop"));
+        // The other events were absent → freshly registered at the new path.
+        assert_eq!(v["hooks"]["Notification"][0]["hooks"][0]["command"], format!("{new} hook Notification"));
+        // Same-version re-run: idempotent (no change, no duplicate).
+        assert!(!merge_hooks(&mut v, new));
+        assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 2);
     }
 }

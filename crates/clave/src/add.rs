@@ -70,18 +70,21 @@ pub fn sanitize_label(s: &str) -> String {
 /// template too, so a bar-carrying node there renders a DOUBLE bar (live
 /// finding, c8-cold-start 2026-07-18 — the eager tab loaded two plugin
 /// instances in the same second and broke executor election).
-pub fn tab_node(wasm: &str, label: &str, uuid: &str, cwd: &str) -> String {
+pub fn tab_node(binary: &str, wasm: &str, label: &str, uuid: &str, cwd: &str) -> String {
     // split_direction="vertical" is REQUIRED for a LEFT bar: zellij stacks
     // sibling panes horizontally (rows) by default (Task 9 C1 finding; same
     // wrapper as setup::layout_kdl and the S2 spike layout). size="15%" not
     // size=30: fixed panes refuse resizes — see setup::layout_kdl.
+    // `command` bakes the environment's clave (§2 binary split): the
+    // versioned copy's absolute path in a stable session, bare `clave` in
+    // dev/sandbox — so the resurrected pane re-execs the SAME binary.
     format!(
         r#"    tab name="{label}" focus=true {{
         pane split_direction="vertical" {{
             pane size="15%" borderless=true {{
                 plugin location="file:{wasm}"
             }}
-            pane cwd="{cwd}" command="clave" {{
+            pane cwd="{cwd}" command="{binary}" {{
                 args "spawn" "{uuid}" "--name" "{label}" "--cwd" "{cwd}"
             }}
         }}
@@ -94,10 +97,11 @@ pub fn tab_node(wasm: &str, label: &str, uuid: &str, cwd: &str) -> String {
 /// default_tab_template (the §6.8 launch layout): the template supplies
 /// the bar + vertical split, and this node's pane fills its `children`
 /// slot. Same baked idempotent spawn — only the bar pane differs.
-pub fn tab_node_bare(label: &str, uuid: &str, cwd: &str) -> String {
+pub fn tab_node_bare(binary: &str, label: &str, uuid: &str, cwd: &str) -> String {
+    // `command` bakes the environment's clave — see tab_node.
     format!(
         r#"    tab name="{label}" focus=true {{
-        pane cwd="{cwd}" command="clave" {{
+        pane cwd="{cwd}" command="{binary}" {{
             args "spawn" "{uuid}" "--name" "{label}" "--cwd" "{cwd}"
         }}
     }}
@@ -127,8 +131,8 @@ pub fn validate_cwd(cwd: &str) -> Result<()> {
 /// `zellij action new-tab --layout`, then deleted. Baking the command in
 /// makes tab creation IDEMPOTENT — resurrection is clave's job, not
 /// zellij's (§6.8, C8 redesign 2026-07-17).
-pub fn tab_layout(wasm: &str, label: &str, uuid: &str, cwd: &str) -> String {
-    format!("layout {{\n{}}}\n", tab_node(wasm, label, uuid, cwd))
+pub fn tab_layout(binary: &str, wasm: &str, label: &str, uuid: &str, cwd: &str) -> String {
+    format!("layout {{\n{}}}\n", tab_node(binary, wasm, label, uuid, cwd))
 }
 
 pub struct ResumeCandidate {
@@ -408,7 +412,8 @@ pub fn run_add(worktree: bool) -> Result<()> {
     //    `"`/control char that would break the generated KDL (see validate_cwd).
     validate_cwd(&agent_cwd)?;
     let wasm = wasm_path()?.to_str().context("wasm path")?.to_string();
-    let layout = tab_layout(&wasm, &label, &uuid, &agent_cwd);
+    let binary = crate::release::runtime_binary();
+    let layout = tab_layout(&binary, &wasm, &label, &uuid, &agent_cwd);
     let tmp = std::env::temp_dir().join(format!("clave-{uuid}.kdl"));
     std::fs::write(&tmp, layout)?;
     let status = Command::new("zellij")
@@ -525,7 +530,7 @@ mod tests {
 
     #[test]
     fn tab_layout_bakes_the_idempotent_spawn() {
-        let kdl = tab_layout("/data/clave-bar.wasm", "x · main", "u-1", "/x");
+        let kdl = tab_layout("clave", "/data/clave-bar.wasm", "x · main", "u-1", "/x");
         // The bar pane, the baked spawn (idempotent resurrection, §6.3/S4),
         // and the cwd all present:
         assert!(kdl.contains("location=\"file:/data/clave-bar.wasm\""));
@@ -534,6 +539,12 @@ mod tests {
         assert!(kdl.contains("name=\"x · main\""));
         // Regression (Task 9 C1): the bar must be a LEFT column, not a top strip.
         assert!(kdl.contains("split_direction=\"vertical\""));
+        // §2 binary split: the pane command is the passed binary. A stable
+        // session bakes the versioned copy's absolute path instead of bare.
+        assert!(kdl.contains("command=\"clave\""));
+        let abs = tab_layout("/data/clave/bin/clave-v0.1.0", "/w", "l", "u", "/x");
+        assert!(abs.contains("command=\"/data/clave/bin/clave-v0.1.0\""));
+        assert!(!abs.contains("command=\"clave\""));
     }
 
     #[test]
