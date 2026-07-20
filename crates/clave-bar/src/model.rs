@@ -1818,4 +1818,594 @@ mod tests {
             "the deferred open self-heals through the sibling peek expiry"
         );
     }
+
+    // === Convergence harness (issue #10 item 2) ============================
+    //
+    // width_seek is the LAST survivor of the C6 repair saga (rounds 9–20):
+    // every event-driven repair failed because zellij emits NO events for a
+    // plugin's OWN resize (main.rs ~478; C6 round 18 FINAL CONSTRAINT) — the
+    // sole feedback is the plugin's own re-render with the new cols. This
+    // harness makes that render loop deterministic: a stand-in zellij that
+    // answers ShrinkSelf/GrowSelf by moving cols a coarse step and re-presents
+    // them, so the convergence contract the ledger only ever asserted
+    // anecdotally on live sessions gets pinned as an executable proof.
+
+    /// A test-side stand-in for zellij's tiled resize engine. Honest to the
+    /// ledger in three ways that each broke a real round:
+    ///  - `step` is COARSE (≈5% of viewport, 7–14 cols live; C6 round 9) — far
+    ///    bigger than the 4/30 targets, so a naive "shrink while too wide"
+    ///    overshoots straight through (27→13, round 9). width_seek must LEARN
+    ///    the step and accept within half of it.
+    ///  - `floor`: zellij REFUSES a resize below its min pane width
+    ///    (CantResizeFixedPanes / the granularity floor, C8 2026-07-18 — the
+    ///    bar rests one step above the true min). A refusal leaves cols
+    ///    UNCHANGED; that must not livelock (round 20: the in-flight guard
+    ///    makes the floor benign).
+    ///  - `latency`: a resize can land one render late, so the model re-sees
+    ///    the OLD cols once (prev == own_cols) before the effect shows — the
+    ///    double-fire in-flight guard (round 9) depends on that very beat.
+    struct SimZellij {
+        cols: usize,
+        step: usize,
+        floor: usize,
+        ceil: usize,
+        latency: bool,
+        pending: Option<Effect>,
+    }
+
+    impl SimZellij {
+        fn new(cols: usize, step: usize, floor: usize, ceil: usize, latency: bool) -> Self {
+            assert!(floor <= ceil, "sim floor {floor} above ceil {ceil}");
+            Self {
+                cols: cols.clamp(floor, ceil),
+                step: step.max(1), // a 0-col step would never move cols → livelock the SIM
+                floor,
+                ceil,
+                latency,
+                pending: None,
+            }
+        }
+
+        /// Apply one resize toward its direction, coarse and clamped. At the
+        /// floor/ceil zellij REFUSES (cols unchanged) — the loop must cope.
+        fn apply(&mut self, fx: &Effect) {
+            match fx {
+                Effect::ShrinkSelf => {
+                    self.cols = self.cols.saturating_sub(self.step).max(self.floor)
+                }
+                Effect::GrowSelf => self.cols = (self.cols + self.step).min(self.ceil),
+                _ => {}
+            }
+        }
+    }
+
+    /// A disturbance injected once, after `n` effect-emitting steps.
+    #[derive(Clone, Debug)]
+    enum Interrupt {
+        /// Alt+c mid-seek: flips the target and re-arms the budget (round 20).
+        Toggle,
+        /// A window reflow / relayout slams cols by a large delta mid-seek —
+        /// width_seek must NOT learn it as a step (round 17: step=60 poisoned
+        /// the acceptance band into calling a 13-col bar "close enough" to 26).
+        Jump(i64),
+    }
+
+    /// Drive width_seek in the render-feedback loop until the model goes SILENT
+    /// at stable cols (converged, floored, or budget-exhausted), returning the
+    /// largest per-segment effect-step count (a segment is the run between
+    /// budget re-arms — a Toggle starts a fresh one). A hard iteration cap
+    /// turns a non-terminating model (the whole point of the SEEK_BUDGET cap)
+    /// into a loud failure instead of a hang.
+    fn drive(
+        model: &mut BarModel,
+        sim: &mut SimZellij,
+        interrupt: Option<(u32, Interrupt)>,
+    ) -> u32 {
+        let mut seg = 0u32; // effect steps since the last (re-)arm
+        let mut max_seg = 0u32;
+        let mut fired = interrupt.is_none();
+        let mut iters = 0u32;
+        loop {
+            iters += 1;
+            assert!(iters < 1024, "width_seek livelocked at {} cols", sim.cols);
+            match model.width_seek(sim.cols).as_slice() {
+                [] => {
+                    // Model idle. Flush a deferred (latency) resize if queued;
+                    // otherwise cols are stable AND the model is quiet → done.
+                    if let Some(p) = sim.pending.take() {
+                        sim.apply(&p);
+                        continue;
+                    }
+                    return max_seg.max(seg);
+                }
+                [only] => {
+                    seg += 1;
+                    max_seg = max_seg.max(seg);
+                    if !fired
+                        && let Some((after, ref kind)) = interrupt
+                        && seg == after
+                    {
+                        fired = true;
+                        match kind {
+                            // Supersede the just-emitted resize: the user's
+                            // toggle re-aims the seek and re-arms the budget, so
+                            // a new segment begins.
+                            Interrupt::Toggle => {
+                                model.toggle();
+                                sim.pending = None;
+                                seg = 0;
+                                continue;
+                            }
+                            // The reflow overrides our resize outright.
+                            Interrupt::Jump(d) => {
+                                sim.cols = (sim.cols as i64 + d)
+                                    .clamp(sim.floor as i64, sim.ceil as i64)
+                                    as usize;
+                                continue;
+                            }
+                        }
+                    }
+                    if sim.latency {
+                        sim.pending = Some(only.clone());
+                    } else {
+                        sim.apply(only);
+                    }
+                }
+                other => panic!("width_seek emitted a non-resize effect: {other:?}"),
+            }
+        }
+    }
+
+    /// Half the effective acceptance band: width_seek stops when
+    /// `2*|cols-target| <= seek_step.max(8)` (the ±4 pre-learning slack, round
+    /// 20), where seek_step learns the sim's own step (≤ MAX_LEARNABLE_STEP).
+    fn band_half(step: usize) -> usize {
+        step.max(8) / 2
+    }
+
+    #[test]
+    fn harness_newborn_converges_on_the_template_from_above() {
+        // A percent-sized birth lands window-dependent and the birth-armed seek
+        // (C8 2026-07-18) must finish the job onto BAR_TARGET_COLS.
+        let mut m = BarModel::default();
+        let mut sim = SimZellij::new(60, 12, 0, 200, false);
+        drive(&mut m, &mut sim, None);
+        assert!(
+            sim.cols.abs_diff(BAR_TARGET_COLS) <= band_half(sim.step),
+            "newborn ended at {} (target {BAR_TARGET_COLS})",
+            sim.cols
+        );
+        // (c) silent forever at the converged width.
+        for _ in 0..4 {
+            assert_eq!(m.width_seek(sim.cols), Vec::<Effect>::new());
+        }
+    }
+
+    #[test]
+    fn harness_collapse_converges_on_the_gutter() {
+        let mut m = BarModel::default();
+        m.toggle(); // collapsed → target COLLAPSED_TARGET_COLS
+        let mut sim = SimZellij::new(30, 9, 0, 200, false);
+        drive(&mut m, &mut sim, None);
+        assert!(
+            sim.cols.abs_diff(COLLAPSED_TARGET_COLS) <= band_half(sim.step),
+            "collapse ended at {} (target {COLLAPSED_TARGET_COLS})",
+            sim.cols
+        );
+    }
+
+    #[test]
+    fn harness_floor_above_target_rests_benignly() {
+        // Round 20 ruling: "wherever cols stop changing is accepted." When the
+        // resize floor sits ABOVE the gutter target, the seek rests at the
+        // floor and the in-flight guard keeps it silent — no thrash.
+        let mut m = BarModel::default();
+        m.toggle();
+        let mut sim = SimZellij::new(30, 8, 12, 200, false); // floor 12 > target 4
+        drive(&mut m, &mut sim, None);
+        assert_eq!(sim.cols, 12, "did not rest at the floor");
+        for _ in 0..8 {
+            assert_eq!(m.width_seek(sim.cols), Vec::<Effect>::new());
+        }
+    }
+
+    #[test]
+    fn harness_latency_path_exercises_the_in_flight_guard() {
+        // With one-render latency the model re-sees the old cols once per step
+        // (prev == own_cols → the double-fire guard, round 9); convergence must
+        // survive it.
+        let mut m = BarModel::default();
+        let mut sim = SimZellij::new(70, 11, 0, 200, true);
+        drive(&mut m, &mut sim, None);
+        assert!(
+            sim.cols.abs_diff(BAR_TARGET_COLS) <= band_half(sim.step),
+            "latency seek ended at {}",
+            sim.cols
+        );
+    }
+
+    #[test]
+    fn harness_peek_cycle_expands_then_sinks() {
+        // Round 21 peek-on-nav: a collapsed bar seeks the TEMPLATE while
+        // peeking, then sinks to the gutter when the peek expires.
+        let mut m = BarModel::default();
+        m.toggle(); // collapsed
+        let mut sim = SimZellij::new(30, 8, 0, 200, false);
+        drive(&mut m, &mut sim, None); // settle at the gutter
+        assert!(sim.cols.abs_diff(COLLAPSED_TARGET_COLS) <= band_half(sim.step));
+        // A nav arms a peek (collapsed → template) and re-arms the seek.
+        assert!(m.visited(7));
+        drive(&mut m, &mut sim, None);
+        assert!(
+            sim.cols.abs_diff(BAR_TARGET_COLS) <= band_half(sim.step),
+            "peek did not expand to the template: {}",
+            sim.cols
+        );
+        // Expiry sinks back to the gutter.
+        assert!(m.peek_expired());
+        drive(&mut m, &mut sim, None);
+        assert!(
+            sim.cols.abs_diff(COLLAPSED_TARGET_COLS) <= band_half(sim.step),
+            "peek did not sink to the gutter: {}",
+            sim.cols
+        );
+    }
+
+    #[test]
+    fn harness_toggle_mid_seek_re_aims_at_the_new_target() {
+        // Alt+c mid-flight: the in-progress expand is abandoned and the seek
+        // re-aims at the gutter, still converging within one fresh budget.
+        let mut m = BarModel::default(); // expanded, target 30
+        let mut sim = SimZellij::new(5, 7, 0, 200, false);
+        let max_seg = drive(&mut m, &mut sim, Some((2, Interrupt::Toggle)));
+        assert!(
+            max_seg <= SEEK_BUDGET,
+            "a segment exceeded the budget: {max_seg}"
+        );
+        assert!(m.collapsed, "toggle should have collapsed the bar");
+        assert!(
+            sim.cols.abs_diff(COLLAPSED_TARGET_COLS) <= band_half(sim.step),
+            "post-toggle seek ended at {}",
+            sim.cols
+        );
+    }
+
+    // === Property tests (issue #10 item 3) =================================
+    // proptest generalizes the example-based tests over the model's
+    // divergence-critical invariants. Each property cites the ledger finding
+    // it guards. Host-side only: proptest is a dev-dependency and never reaches
+    // the wasm --target build (see crates/clave-bar/Cargo.toml).
+    mod proptests {
+        use super::super::*;
+        use super::{Interrupt, SimZellij, agent, drive, tab};
+        use proptest::prelude::*;
+
+        proptest! {
+            // Each case drives a full feedback loop; 128 keeps CI modest while
+            // still covering the start×step×floor×interrupt space densely.
+            #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
+
+            /// Property 1 — the convergence contract (a)–(d), C6 rounds 9/17/20.
+            #[test]
+            fn prop_width_seek_converges_or_bounds(
+                start in 0usize..=500,
+                step in 1usize..=20,
+                floor in 0usize..=40,
+                collapsed in any::<bool>(),
+                peeking in any::<bool>(),
+                latency in any::<bool>(),
+                interrupt in prop_oneof![
+                    Just(Option::<(u32, Interrupt)>::None),
+                    (1u32..=6).prop_map(|n| Some((n, Interrupt::Toggle))),
+                    (1u32..=6, prop_oneof![-200i64..=-25, 25i64..=200])
+                        .prop_map(|(n, d)| Some((n, Interrupt::Jump(d)))),
+                ],
+            ) {
+                // Arm the requested start state directly (private fields are
+                // reachable — this module is a descendant of `model`):
+                // collapsed/peeking pick the target, a fresh budget mimics the
+                // birth/toggle arming.
+                let mut m = BarModel {
+                    collapsed,
+                    peeking,
+                    seek_budget: SEEK_BUDGET,
+                    seek_last_cols: None,
+                    ..BarModel::default()
+                };
+                let mut sim = SimZellij::new(start, step, floor, 500, latency);
+                let max_seg = drive(&mut m, &mut sim, interrupt);
+
+                // (a) each budget segment terminates within SEEK_BUDGET emits.
+                prop_assert!(max_seg <= SEEK_BUDGET, "segment {} exceeded budget", max_seg);
+                // (d) an external jump is never learned as the step size.
+                prop_assert!(
+                    m.seek_step <= MAX_LEARNABLE_STEP,
+                    "learned an over-size step: {}",
+                    m.seek_step
+                );
+                // (c) silent forever at the resting width — no oscillation.
+                for _ in 0..4 {
+                    prop_assert!(
+                        m.width_seek(sim.cols).is_empty(),
+                        "storm at {} cols",
+                        sim.cols
+                    );
+                }
+                // (b) FLOOR-PERMITTING convergence: end within half the
+                // effective step of the active target, OR rested at the floor,
+                // OR the budget was spent mid-travel (round 20 admits all three
+                // as terminal states — (c) already proved the rest is quiet).
+                let target = if m.collapsed && !m.peeking {
+                    COLLAPSED_TARGET_COLS
+                } else {
+                    BAR_TARGET_COLS
+                };
+                let within = sim.cols.abs_diff(target) <= step.max(8) / 2;
+                let at_floor = sim.cols == floor;
+                let exhausted = max_seg == SEEK_BUDGET;
+                prop_assert!(
+                    within || at_floor || exhausted,
+                    "ended at {} (target {}, floor {}, seg {})",
+                    sim.cols, target, floor, max_seg
+                );
+            }
+
+            /// Property 2 — focus never reorders (§6.6: focus is a beacon, not a
+            /// commitment). Any assignment of the active flag, plus a beacon on
+            /// that tab, leaves rows() order identical.
+            #[test]
+            fn prop_focus_never_reorders(
+                n in 1usize..=5,
+                timeline in prop::collection::vec(0u64..1000, 5),
+            ) {
+                let ids: Vec<usize> = (0..n).map(|i| 10 + i).collect();
+                let build = |active: usize| {
+                    let mut m = BarModel::default();
+                    let tabs: Vec<_> = ids
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &id)| tab(id, i, &format!("t{id}"), i == active))
+                        .collect();
+                    m.apply_tabs(tabs);
+                    let tl: std::collections::BTreeMap<usize, u64> = ids
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &id)| (id, timeline[i]))
+                        .collect();
+                    m.apply_snapshot(AgentSnapshot { seq: 1, agents: vec![], tab_timeline: tl });
+                    m
+                };
+                let baseline: Vec<RowKey> =
+                    build(0).rows().into_iter().map(|r| r.key).collect();
+                for (active, &id) in ids.iter().enumerate() {
+                    let mut m = build(active);
+                    m.beacon(id); // live-focus truth on a different tab
+                    let order: Vec<RowKey> = m.rows().into_iter().map(|r| r.key).collect();
+                    prop_assert_eq!(&order, &baseline, "focus reordered rows");
+                }
+            }
+
+            /// Property 3 — rows() is deterministic and unified-recency-ordered:
+            /// live tabs key on the STORE tab_timeline (NOT the bound agent's
+            /// last_interacted — the round-6 divergence), dormant rows on
+            /// last_interacted, merged strictly descending.
+            #[test]
+            fn prop_rows_deterministic_and_recency_desc(
+                n in 1usize..=4,
+                tl_vals in prop::collection::vec(0u64..500, 4),
+                li_vals in prop::collection::vec(0u64..500, 4),
+                dormant_lis in prop::collection::vec(0u64..500, 0..4),
+            ) {
+                let mut m = BarModel::default();
+                let ids: Vec<usize> = (0..n).map(|i| 10 + i).collect();
+                let tabs: Vec<_> = ids
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &id)| tab(id, i, &format!("t{id}"), i == 0))
+                    .collect();
+                m.apply_tabs(tabs);
+                // Each live tab carries a bound agent whose last_interacted is
+                // INDEPENDENT of its timeline stamp — the case that separates a
+                // timeline sort from a last_interacted sort (round 6).
+                let mut agents: Vec<Agent> = ids
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &id)| {
+                        let mut a = agent(&format!("bound{id}"), Status::Working, Some(id));
+                        a.last_interacted = li_vals[i];
+                        a
+                    })
+                    .collect();
+                let mut li_by_uuid: std::collections::BTreeMap<String, u64> = Default::default();
+                for (j, li) in dormant_lis.iter().enumerate() {
+                    let mut a = agent(&format!("d{j}"), Status::Idle, None);
+                    a.last_interacted = *li;
+                    li_by_uuid.insert(a.uuid.clone(), *li);
+                    agents.push(a);
+                }
+                let timeline: std::collections::BTreeMap<usize, u64> = ids
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &id)| (id, tl_vals[i]))
+                    .collect();
+                m.apply_snapshot(AgentSnapshot { seq: 1, agents, tab_timeline: timeline.clone() });
+
+                // Determinism: identical inputs → identical rows.
+                prop_assert_eq!(m.rows(), m.rows());
+
+                // Unified recency: each row's sort ts (timeline for live, li for
+                // dormant) is non-increasing down the list.
+                let rows = m.rows();
+                let ts_of = |r: &Row| -> u64 {
+                    match &r.key {
+                        RowKey::Tab(id) => timeline.get(id).copied().unwrap_or(0),
+                        RowKey::Dormant(u) => li_by_uuid.get(u).copied().unwrap_or(0),
+                    }
+                };
+                for w in rows.windows(2) {
+                    prop_assert!(
+                        ts_of(&w[0]) >= ts_of(&w[1]),
+                        "recency inverted between {:?} and {:?}",
+                        w[0].key, w[1].key
+                    );
+                }
+            }
+
+            /// Property 4 — the §5 seq gate: a snapshot with seq ≤ current is
+            /// fully discarded (C5 round 5), leaving rows() AND the timeline
+            /// untouched.
+            #[test]
+            fn prop_stale_snapshot_is_a_full_noop(
+                cur_seq in 1u64..=50,
+                stale_delta in 0u64..=50,
+                tl0 in prop::collection::btree_map(0usize..8, 0u64..500, 0..5),
+                tl1 in prop::collection::btree_map(0usize..8, 0u64..500, 0..5),
+            ) {
+                let stale_seq = cur_seq.saturating_sub(stale_delta); // ≤ cur_seq
+                let mut m = BarModel::default();
+                m.apply_tabs(vec![tab(0, 0, "a", true), tab(1, 1, "b", false)]);
+                m.apply_snapshot(AgentSnapshot {
+                    seq: cur_seq,
+                    agents: vec![agent("u1", Status::Working, Some(0))],
+                    tab_timeline: tl0,
+                });
+                let rows0 = m.rows();
+                let timeline0 = m.timeline.clone();
+                m.apply_snapshot(AgentSnapshot {
+                    seq: stale_seq,
+                    agents: vec![agent("u2", Status::Failed, Some(1))],
+                    tab_timeline: tl1,
+                });
+                prop_assert_eq!(m.rows(), rows0, "stale snapshot mutated rows");
+                prop_assert_eq!(m.timeline.clone(), timeline0, "stale snapshot mutated timeline");
+            }
+
+            /// Property 5 — the timeline is REPLACED wholesale, never merged
+            /// (C5 round 5: per-instance merges diverged). After a strictly
+            /// newer snapshot with timeline T, the model's timeline == T exactly,
+            /// regardless of prior state.
+            #[test]
+            fn prop_timeline_is_replaced_wholesale(
+                tl0 in prop::collection::btree_map(0usize..8, 0u64..500, 0..5),
+                tl1 in prop::collection::btree_map(0usize..8, 0u64..500, 0..5),
+            ) {
+                let mut m = BarModel::default();
+                m.apply_snapshot(AgentSnapshot { seq: 1, agents: vec![], tab_timeline: tl0 });
+                m.apply_snapshot(AgentSnapshot {
+                    seq: 2,
+                    agents: vec![agent("u1", Status::Working, Some(3))],
+                    tab_timeline: tl1.clone(),
+                });
+                prop_assert_eq!(m.timeline.clone(), tl1);
+            }
+
+            /// Property 6 — nav closure (§6.6 C8), scoped precisely (fugu
+            /// review 2026-07-20): with the executor pinned to its birth tab
+            /// (as below — a single-instance view), every nav bumps
+            /// cursor_gen exactly once, a cursor that lands dormant is always
+            /// a DISPLAYED dormant row, and a stale-gen dwell is a no-op.
+            /// Walk PROGRESSION across focus-following executors (the live
+            /// multi-instance behavior, where own_tab moves with focus) is
+            /// deliberately not modeled here — that is live-validation
+            /// territory (TESTING.md).
+            #[test]
+            fn prop_nav_closure(
+                n in 1usize..=4,
+                dormant in 0usize..=3,
+                dirs in prop::collection::vec(any::<bool>(), 1..=12),
+            ) {
+                let mut m = BarModel::default();
+                let ids: Vec<usize> = (0..n).map(|i| 10 + i).collect();
+                let tabs: Vec<_> = ids
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &id)| tab(id, i, &format!("t{id}"), i == 0))
+                    .collect();
+                m.apply_tabs(tabs);
+                let mut agents = vec![];
+                for j in 0..dormant {
+                    let mut a = agent(&format!("d{j}"), Status::Idle, None);
+                    a.last_interacted = 100 + j as u64; // distinct, all dormant
+                    agents.push(a);
+                }
+                m.apply_snapshot(AgentSnapshot {
+                    seq: 1,
+                    agents,
+                    tab_timeline: ids.iter().map(|&id| (id, 50u64)).collect(),
+                });
+                m.beacon(ids[0]);
+                let own = ids[0];
+                for d in dirs {
+                    let before = m.cursor_gen;
+                    let payload = if d { "{\"dir\":\"next\"}" } else { "{\"dir\":\"prev\"}" };
+                    m.nav(payload, Some(own));
+                    // Rows are non-empty (≥1 live tab) → every dir lands once.
+                    prop_assert_eq!(m.cursor_gen, before + 1, "gen did not bump once per nav");
+                    if let Some(u) = m.cursor.clone() {
+                        let rows = m.rows();
+                        prop_assert!(
+                            rows.iter().any(|r| r.key == RowKey::Dormant(u.clone())),
+                            "cursor on a row that is not displayed: {}",
+                            u
+                        );
+                    }
+                }
+                // A dwell stamped before any landing (gen 0) is provably stale.
+                prop_assert!(m.dwell_expired(0).is_empty(), "stale-gen dwell fired");
+            }
+
+            /// Property 7a — classify_timer, spec-phrased partial contract
+            /// (fugu review 2026-07-20: the original property re-derived the
+            /// function's own branch expression, so a logic bug could never
+            /// diverge from the test's expectation). This half states the
+            /// doc-comment's FIRST claim on its own terms: a short elapsed is
+            /// ALWAYS a dwell — a 0.9s peek sleep never reports < 0.9
+            /// (model.rs ~93), so whatever the pending counters say, a
+            /// sub-cutoff expiry can only be the dwell timer.
+            #[test]
+            fn prop_classify_timer_short_elapsed_is_always_dwell(
+                elapsed in 0.0f64..TIMER_KIND_CUTOFF_SECS,
+                dwells in 0usize..5,
+                peeks in 0u32..5,
+            ) {
+                prop_assert_eq!(classify_timer(elapsed, dwells, peeks), TimerKind::Dwell);
+            }
+
+            /// Property 7b — the doc-comment's second claim, independently
+            /// phrased: a long-elapsed expiry while a peek IS pending belongs
+            /// to that peek — the late-dwell rescue exists only for the
+            /// no-peek-pending case and must never steal an owned peek
+            /// (otherwise a collapsed bar's sink timer would be eaten and the
+            /// gutter never re-sunk). The rescue corner itself is a fixed
+            /// boundary, pinned in classify_timer_late_dwell_rescue_boundary.
+            #[test]
+            fn prop_classify_timer_pending_peek_owns_long_expiries(
+                over in 0.0f64..2.0,
+                dwells in 0usize..5,
+                peeks in 1u32..5,
+            ) {
+                prop_assert_eq!(
+                    classify_timer(TIMER_KIND_CUTOFF_SECS + over, dwells, peeks),
+                    TimerKind::Peek
+                );
+            }
+        }
+
+        /// The late-dwell rescue corner (companion to properties 7a/7b): a
+        /// long elapsed with NO peek pending but a dwell owed is reclassified
+        /// as that dwell (the FIFO off-by-one hardening, model.rs ~88-92);
+        /// with nothing owed at all it stays a peek (harmless default — an
+        /// unowned peek expiry is dropped by the caller).
+        #[test]
+        fn classify_timer_late_dwell_rescue_boundary() {
+            assert_eq!(
+                classify_timer(TIMER_KIND_CUTOFF_SECS, 1, 0),
+                TimerKind::Dwell
+            );
+            assert_eq!(
+                classify_timer(TIMER_KIND_CUTOFF_SECS, 0, 0),
+                TimerKind::Peek
+            );
+        }
+    }
 }

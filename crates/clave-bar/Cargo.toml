@@ -28,3 +28,13 @@ test = false
 zellij-tile = { workspace = true }
 clave-types = { path = "../clave-types" }
 serde_json = { workspace = true }
+
+# Host-side property tests for the pure model (src/model.rs #[cfg(test)],
+# issue #10 item 3). A dev-dependency compiles ONLY for `cargo test` on the
+# host target — it never reaches the `cargo build --target wasm32-wasip1`
+# artifact (dev-deps are excluded from normal/plugin builds), so proptest's
+# non-wasm-friendly transitive deps (rusty-fork, tempfile, …) can't leak into
+# the shipped plugin. Not added to the workspace deps: clave-bar is its sole
+# consumer.
+[dev-dependencies]
+proptest = "1"

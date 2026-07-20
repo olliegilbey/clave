@@ -26,3 +26,22 @@ clave-types = { path = "../clave-types" }
 [dev-dependencies]
 # Store tests write to throwaway dirs, never the real ~/.local/state/clave.
 tempfile.workspace = true
+# Constructing AgentRecord for the launch-layout eager branch in the KDL
+# guardrail (Status lives in clave-types); the integration test crate can't
+# reach clave's own deps, so it needs its own handle.
+clave-types = { path = "../clave-types" }
+# KDL guardrail (issue #10 item 1): validate EVERY generated KDL artifact
+# against the SAME parser zellij 0.44.3 runs, so a template regression fails
+# `cargo test` instead of session launch. EXACT `=` pins on purpose — this
+# test is the version tripwire seed (issue #10 item 5 synergy): when a future
+# zellij bump changes KDL semantics, these pins force a deliberate re-vet
+# rather than silently drifting. zellij-utils=0.44.3 is already in Cargo.lock
+# (transitive via zellij-tile), and kdl=4.7.1 is the exact line zellij parses
+# permissions.kdl with — matching it gives well-formedness fidelity for the
+# permission cache, which has no public string entry point in zellij-utils.
+# Host-only isolation note: this dev-dep pulls zellij-utils' DEFAULT features;
+# it stays out of clave-bar's wasm32 build graph because the workspace uses
+# resolver = "3" (per-target, dev-dep-isolated feature unification) — if that
+# resolver setting ever changes, re-verify the wasm build's dep tree.
+zellij-utils = "=0.44.3"
+kdl = "=4.7.1"
