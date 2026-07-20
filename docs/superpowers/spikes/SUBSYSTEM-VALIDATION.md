@@ -589,21 +589,55 @@ in the real session; round-20 "wherever cols stop changing" ruling).
 Drift-on-window-resize (percent geometry, seek idle) BACKLOGGED
 (user-ratified 2026-07-18).
 
-**Verdict:** _pending_
+**Findings (2026-07-19/20, one bar stuck 10% while others collapsed to
+5%):** after a mid-session hot-reload + toggles during a window-halving,
+one instance's bar sat pinned at 10% — visible, idle, never sinking; a
+cross-tab expand+collapse double-toggle is structurally net-zero for
+background instances (one blind ±5pp step per event, no render feedback —
+the C6 round-10 constraint), so it could never right itself. A reload
+with all instances reborn in sync collapsed all three uniformly (traced:
+one synchronized toggle, all bars 5%). Diagnosis: collapse-state PARITY
+DESYNC — collapse is per-instance memory synced only by the broadcast
+pipe; a reload or missed pipe flips one instance forever. Round-20 known
+quirk, same family; the planned snapshot-carried collapsed flag
+(backlog) self-heals it. No production hot-reloads, severity low —
+BACKLOGGED with that fix.
+
+**Verdict:** **PASS** (2026-07-20, all live in the `clave dev` sandbox):
+cold start (no ENTER gates, most-recent eager+focused, rest dormant ◌ in
+recency order), dwell-open, click-open, nav walks, walk-through safety
+(passed rows don't open), `c8-worktree` (resumed IN the worktree path,
+store row intact), `c8-stale` (cwd missing → ✗, no tab, session healthy,
+`open` evlog line), second kill+relaunch (reopened rows dormant again, no
+defunct panes). Alt+c collapse validated post-fix (percent panes +
+birth seek). Picker resume not re-run — unchanged surface, C7-covered.
+Accepted quirks this round: collapsed floor is window-width-dependent;
+collapse parity desync on reload/missed-pipe (backlogged snapshot flag).
 
 ## C9 — Hydration (S5)
 - With agents in the store, kill+relaunch the session (or reload the plugin):
   bars show correct glyphs/labels BEFORE any new hook event; zellij log shows
   the `clave snapshot` run_command round-trip.
 
-**Verdict:** _pending_
+**Findings (2026-07-20):** validated via plugin hot-reload in the c8-stale
+sandbox session — reload wipes all plugin state, and the bar rehydrated
+both rows (live glyph + ✗ stale) with correct labels before any new hook
+event. UX note (user, same round): cursor on a dormant/stale row leaves
+the content pane showing the last REAL tab — designed (§6.6: no tab to
+focus; the glyph is the signal) but confusable; logged against the
+backlogged floating helper pane as the vehicle for row detail.
+
+**Verdict:** **PASS** (2026-07-20).
 
 ## C10 — Hook safety
 - Claude session OUTSIDE the clave session: zero interference;
   `time clave hook Stop <<< '{"session_id":"not-tracked"}'` <50ms, exit 0.
 - `echo garbage | clave hook Stop; echo $?` → 0.
 
-**Verdict:** _pending_
+**Verdict:** **PASS** (2026-07-20): untracked-session hook 6ms exit 0;
+garbage stdin exit 0. Continuous incidental evidence: the Claude Code
+sessions driving this whole validation ran OUTSIDE the clave session with
+hooks live — zero interference throughout Task 9.
 
 ---
 
