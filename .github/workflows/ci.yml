@@ -1,0 +1,37 @@
+# CI gate for the PR workflow (issue #3, design §3): main only moves via
+# PRs that keep these two checks green. Scope is deliberately the same as
+# the local gate — `cargo test --workspace` (the --workspace is
+# load-bearing, see justfile) plus a wasm compile of the plugin, which the
+# host-target test job never exercises. fmt/clippy are NOT gated yet: the
+# tree carries 4 parked lints + fmt drift, tracked in issue #9 — add them
+# here when that sweep lands.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+
+  wasm-build:
+    name: wasm-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p clave-bar --target wasm32-wasip1

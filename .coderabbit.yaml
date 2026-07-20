@@ -1,0 +1,36 @@
+# CodeRabbit config (issue #3, design §3): CodeRabbit is the first-pass
+# reviewer on every PR; the repo's own review flow (fugu / whole-branch)
+# is the second. Assertive profile on purpose — this repo's review culture
+# is dense why-comments and spec citations, and a chatty reviewer that
+# over-flags beats one that under-flags while the fleet-coordination loop
+# is still maturing.
+language: en-US
+reviews:
+  profile: assertive
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  auto_review:
+    enabled: true
+    drafts: false
+  path_filters:
+    # Status handoffs and spike lore are session artifacts, not reviewable
+    # surface — they record what happened, they don't prescribe.
+    - "!docs/status/**"
+    - "!docs/superpowers/spikes/**"
+  path_instructions:
+    - path: "crates/**/*.rs"
+      instructions: |
+        Comments in this repo explain WHY and cite a spec section or
+        ledger finding, not WHAT. Flag comments that merely restate the
+        code. Tests use `cargo test --workspace` semantics — flag any
+        suggestion that would move clave-bar tests out of the workspace
+        gate.
+    - path: "crates/clave-bar/**"
+      instructions: |
+        This crate compiles to wasm32-wasip1 as a Zellij plugin. Flag any
+        introduction of host-only APIs (threads, filesystem beyond the
+        plugin's granted paths, std::process) into wasm code paths.
+chat:
+  auto_reply: true
