@@ -1,10 +1,10 @@
 # CI gate for the PR workflow (issue #3, design §3): main only moves via
-# PRs that keep these two checks green. Scope is deliberately the same as
-# the local gate — `cargo test --workspace` (the --workspace is
-# load-bearing, see justfile) plus a wasm compile of the plugin, which the
-# host-target test job never exercises. fmt/clippy are NOT gated yet: the
-# tree carries 4 parked lints + fmt drift, tracked in issue #9 — add them
-# here when that sweep lands.
+# PRs that keep these checks green. Scope is deliberately the same as the
+# local gate — `cargo test --workspace` (the --workspace is load-bearing,
+# see justfile) plus a wasm compile of the plugin, which the host-target
+# test job never exercises. fmt/clippy gated since the #9 sweep (2026-07-21)
+# zeroed the parked lints and reflowed the drift — keep them green; a red
+# lint job blocks the PR by design.
 name: ci
 
 on:
@@ -35,3 +35,17 @@ jobs:
           targets: wasm32-wasip1
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -p clave-bar --target wasm32-wasip1
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      # --all-targets so test/bench code is linted too — the parked lints
+      # lived in #[cfg(test)] blocks that a plain clippy run never visits.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
