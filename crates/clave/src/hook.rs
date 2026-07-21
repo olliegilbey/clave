@@ -135,10 +135,16 @@ pub fn refresh_label(
         .next()
         .filter(|s| !s.is_empty())
         .unwrap_or(&rec.cwd);
-    let prefix = format!("{dir} · {}", rec.branch);
+    // sanitize_label THROUGHOUT (fugu 2026-07-21, HIGH): hook-derived labels
+    // are baked into launch.kdl for the most-recent row (setup.rs) — a raw
+    // backslash/quote from prompt or summary text is a KDL parse error that
+    // can brick cold-start launch. Sanitizing the prefix too keeps the
+    // byte-for-byte first-prompt gate below aligned with add.rs's creation
+    // label, which is built through the same function.
+    let prefix = crate::add::sanitize_label(&format!("{dir} · {}", rec.branch));
     // Prefer a summary from the tail (Stop is when summaries appear)…
     if let Some(summary) = jsonl_tail.and_then(summary_from_tail) {
-        let label = format!("{prefix} · {}", first_words(&summary));
+        let label = crate::add::sanitize_label(&format!("{prefix} · {}", first_words(&summary)));
         rec.label = label;
         rec.label_source = LabelSource::Summary;
         return true;
@@ -150,7 +156,7 @@ pub fn refresh_label(
         && rec.label == prefix
         && let Some(p) = payload.prompt.as_deref().filter(|p| !p.trim().is_empty())
     {
-        rec.label = format!("{prefix} · {}", first_words(p));
+        rec.label = crate::add::sanitize_label(&format!("{prefix} · {}", first_words(p)));
         return true;
     }
     false
@@ -437,5 +443,26 @@ mod tests {
         assert_eq!(r.label_source, LabelSource::Summary);
         // 3) Once Summary, we STOP re-deriving (§6.4) — even with new input.
         assert!(!refresh_label(&mut r, "Stop", &p, Some(tail)));
+    }
+
+    #[test]
+    fn refresh_label_sanitizes_kdl_metacharacters() {
+        // Fugu 2026-07-21 (pre-v0.1.0, HIGH): hook-derived labels are baked
+        // into launch.kdl for the most-recent row (setup.rs) — a raw
+        // backslash is a KDL escape introducer and a raw quote closes the
+        // string literal, so an unsanitized label can brick cold-start
+        // launch. Labels must pass sanitize_label like add.rs-built ones.
+        let mut r = rec("u1");
+        let p = HookPayload {
+            session_id: Some("u1".into()),
+            prompt: Some(r#"fix the \d "regex" now"#.into()),
+            message: None,
+        };
+        assert!(refresh_label(&mut r, "UserPromptSubmit", &p, None));
+        assert!(
+            !r.label.contains('\\') && !r.label.contains('"'),
+            "unsanitized label: {}",
+            r.label
+        );
     }
 }
