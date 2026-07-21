@@ -3,6 +3,7 @@
 //! is a pure function above it so it can be unit-tested.
 
 use std::io::Write as _;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
@@ -138,41 +139,158 @@ pub fn tab_layout(binary: &str, wasm: &str, label: &str, uuid: &str, cwd: &str) 
 pub struct ResumeCandidate {
     pub uuid: String,
     pub label: String,
+    /// The worktree/checkout dir this transcript belongs to (§6.3 revised
+    /// 2026-07-21: `claude --resume` is project-dir-scoped, so resuming from
+    /// any other cwd fails with "No conversation found"). The tab must open
+    /// HERE, not in the picked repo dir — run_add bakes this into the layout.
+    pub cwd: String,
+    /// The branch of `cwd`'s worktree (None = detached). Carried so a resumed
+    /// jsonl-only candidate records/labels its OWN branch, not the picker's.
+    pub branch: Option<String>,
     /// Currently on screen (uuid found in dump-layout): picking it JUMPS to
     /// its tab — resuming a live session duplicates it (C7, round 7).
     pub live: bool,
 }
 
-/// §6.3 resume picker input: this repo's store rows + jsonl-discovered
-/// sessions (`jsonl_stems` = (uuid, mtime) from listing the munged project
-/// dir). Live agents are included but MARKED (§6.3 revised 2026-07-14:
-/// many agents per repo; live = jump, dead = resume). Recency (mtime)
-/// first; store labels beat bare uuids.
+/// One munged project dir's scan result, tagged with the worktree it maps to
+/// (§6.3 worktree-aware resume). `run_add` builds one per `git worktree list`
+/// entry (plus the picked dir); `resume_candidates` folds them into a single
+/// uuid-deduped, recency-sorted list with per-candidate cwd attribution.
+pub struct DirScan {
+    /// The (canonicalized) worktree/checkout path — the transcript's true cwd.
+    pub cwd: String,
+    /// The worktree's branch (None = detached HEAD).
+    pub branch: Option<String>,
+    /// False for the repo's main checkout; true for a registered worktree.
+    /// Drives the branch-suffixed `(wt)` label so picker rows are glanceable.
+    pub is_worktree: bool,
+    /// `(uuid, mtime)` from listing `~/.claude/projects/<munged cwd>/*.jsonl`.
+    pub stems: Vec<(String, u64)>,
+}
+
+/// A `git worktree list --porcelain` record: the worktree path and its branch
+/// (None when the record is `detached`).
+pub struct WorktreeEntry {
+    pub path: String,
+    pub branch: Option<String>,
+}
+
+/// Parse `git worktree list --porcelain` (§6.3 worktree-aware resume,
+/// 2026-07-21 finding). Records are blank-line separated; each opens with
+/// `worktree <path>` and may carry `branch refs/heads/<b>` or `detached`.
+/// Everything else (`HEAD <sha>`, `bare`, `locked`, blank, garbage) is
+/// ignored — porcelain is append-only, so unknown keys are forward-compatible.
+/// Pure over the string output; the shell-out stays in `run_add`.
+pub fn parse_worktrees(porcelain: &str) -> Vec<WorktreeEntry> {
+    let mut out: Vec<WorktreeEntry> = Vec::new();
+    for line in porcelain.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            // A new `worktree` line starts a new record (blank-line separator
+            // is implicit — we never need to see it).
+            out.push(WorktreeEntry {
+                path: path.to_string(),
+                branch: None,
+            });
+        } else if let Some(branch) = line.strip_prefix("branch refs/heads/") {
+            // strip past `refs/heads/` so slashed branches (`feat/x`) survive.
+            if let Some(cur) = out.last_mut() {
+                cur.branch = Some(branch.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// §6.3 resume picker input: this repo's store rows + jsonl-discovered sessions
+/// across EVERY worktree (`dirs`), not just the picked dir's — `claude
+/// --resume` is project-dir-scoped (2026-07-21), so a worktree session is
+/// invisible unless its own dir is scanned. Each candidate carries the cwd it
+/// belongs to. Live agents are included but MARKED (§6.3 revised 2026-07-14:
+/// many agents per repo; live = jump, dead = resume). Recency (mtime) first
+/// across all dirs; store labels beat bare uuids; dedup by uuid.
 pub fn resume_candidates(
     store: &Store,
     repo_root: &str,
-    jsonl_stems: &[(String, u64)],
+    dirs: &[DirScan],
     live: &[String],
 ) -> Vec<ResumeCandidate> {
-    let mut by_uuid: std::collections::BTreeMap<String, (u64, Option<String>)> = Default::default();
-    for (uuid, mtime) in jsonl_stems {
-        by_uuid.insert(uuid.clone(), (*mtime, None));
+    // value = (mtime, store_label, cwd, branch, is_worktree).
+    type Row = (u64, Option<String>, String, Option<String>, bool);
+    let mut by_uuid: std::collections::BTreeMap<String, Row> = Default::default();
+    for d in dirs {
+        for (uuid, mtime) in &d.stems {
+            by_uuid
+                .entry(uuid.clone())
+                // A uuid's jsonl is cwd-scoped, so cross-dir collisions are
+                // near-impossible; if one occurs, keep the most-recent copy
+                // and the cwd/branch IT belongs to.
+                .and_modify(|e| {
+                    if *mtime > e.0 {
+                        e.0 = *mtime;
+                        e.2 = d.cwd.clone();
+                        e.3 = d.branch.clone();
+                        e.4 = d.is_worktree;
+                    }
+                })
+                .or_insert((
+                    *mtime,
+                    None,
+                    d.cwd.clone(),
+                    d.branch.clone(),
+                    d.is_worktree,
+                ));
+        }
     }
     for r in store.agents.values().filter(|r| r.repo_root == repo_root) {
-        let e = by_uuid
-            .entry(r.uuid.clone())
-            .or_insert((r.last_interacted, None));
+        let e = by_uuid.entry(r.uuid.clone()).or_insert((
+            r.last_interacted,
+            None,
+            r.cwd.clone(),
+            Some(r.branch.clone()),
+            r.worktree.is_some(),
+        ));
+        // The store row is authoritative for label + cwd/branch: the cwd was
+        // canonicalized at creation and is worktree-aware (see
+        // merge_resume_record). is_worktree from disk (if the jsonl was found)
+        // is left intact — it reflects the same session.
         e.1 = Some(r.label.clone());
+        e.2 = r.cwd.clone();
+        e.3 = Some(r.branch.clone());
     }
     let mut list: Vec<(u64, ResumeCandidate)> = by_uuid
         .into_iter()
-        .map(|(uuid, (mtime, label))| {
-            let label = label.unwrap_or_else(|| uuid.clone());
+        .map(|(uuid, (mtime, store_label, cwd, branch, is_worktree))| {
+            let base = store_label.clone().unwrap_or_else(|| uuid.clone());
+            // §6.3 step 4: worktree candidates are branch-suffixed so the
+            // picker distinguishes them. A bare uuid gains ` · <branch>`
+            // (which worktree?); an EARNED store label already encodes its
+            // branch (hook.rs writes `dir · branch · words`), so it is NOT
+            // re-appended — only the `(wt)` marker is. Main-checkout
+            // candidates keep their label unchanged.
+            let label = if is_worktree {
+                if store_label.is_some() {
+                    sanitize_label(&format!("{base} (wt)"))
+                } else {
+                    let br = branch.as_deref().unwrap_or("-");
+                    sanitize_label(&format!("{base} · {br} (wt)"))
+                }
+            } else {
+                base
+            };
             let live = live.contains(&uuid);
-            (mtime, ResumeCandidate { uuid, label, live })
+            (
+                mtime,
+                ResumeCandidate {
+                    uuid,
+                    label,
+                    cwd,
+                    branch,
+                    live,
+                },
+            )
         })
         .collect();
-    list.sort_by(|a, b| b.0.cmp(&a.0));
+    list.sort_by_key(|c| std::cmp::Reverse(c.0));
     list.into_iter().map(|(_, c)| c).collect()
 }
 
@@ -240,6 +358,50 @@ fn cmd_stdout(cmd: &str, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// List a munged project dir's `<uuid>.jsonl` stems + mtimes (§6.3). Factored
+/// out of `run_add` so the worktree-aware resume loop can scan EVERY worktree's
+/// dir with the same rule. A missing dir (worktree never hosted a session)
+/// yields an empty vec — not an error.
+fn scan_jsonl_stems(proj_dir: &Path) -> Vec<(String, u64)> {
+    let mut stems = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(proj_dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "jsonl") {
+                let stem = p
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                let mtime = e
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                stems.push((stem, mtime));
+            }
+        }
+    }
+    stems
+}
+
+/// Branch to RECORD on a fresh store row (§6.3 worktree-aware resume; review
+/// finding 2026-07-21). `cand_branch == None` means two different things and
+/// must not be conflated: with `resumed == true` it is a candidate in a
+/// DETACHED worktree → record `-` (matching the picker row's display and the
+/// non-repo fallback), never the picked dir's HEAD — else an adopted detached
+/// worktree session claims e.g. `main`. Only a `new` agent (`resumed ==
+/// false`, no candidate) inherits the picked dir's branch.
+pub fn record_branch(resumed: bool, cand_branch: Option<&str>, picked_branch: &str) -> String {
+    match (resumed, cand_branch) {
+        (true, Some(b)) => b.to_string(),
+        (true, None) => "-".to_string(),
+        (false, _) => picked_branch.to_string(),
+    }
+}
+
 pub fn run_add(worktree: bool) -> Result<()> {
     // 1) Pick a directory: fzf over zoxide's ranked list, current dir first
     //    (§6.3 — fzf+zoxide are verified present on the target machine).
@@ -285,34 +447,57 @@ pub fn run_add(worktree: bool) -> Result<()> {
     let Some(choice) = fzf_pick(&["new".into(), "resume".into()], "agent> ")? else {
         return Ok(());
     };
-    let (uuid, worktree_path, existing) = if choice == "resume" {
+    let (uuid, worktree_path, existing, cand_cwd, cand_branch) = if choice == "resume" {
         // clave owns the picker (§6.3 — claude --resume's own picker would
-        // break resurrection). Candidates: store rows + jsonl scan.
-        let proj_dir = crate::env::claude_config_dir()?
-            .join("projects")
-            .join(crate::munge::munge_cwd(&physical_str));
-        let mut stems: Vec<(String, u64)> = Vec::new();
-        if let Ok(rd) = std::fs::read_dir(&proj_dir) {
-            for e in rd.flatten() {
-                let p = e.path();
-                if p.extension().is_some_and(|x| x == "jsonl") {
-                    let stem = p
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned();
-                    let mtime = e
-                        .metadata()
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
-                    stems.push((stem, mtime));
-                }
+        // break resurrection). Candidates: store rows + jsonl scan across
+        // EVERY worktree (2026-07-21 finding: `claude --resume` is
+        // project-dir-scoped, and real work spreads across git worktrees, so
+        // scanning only the picked dir hides worktree sessions). A non-repo
+        // dir has no worktrees → the loop below falls back to the picked dir
+        // alone, behavior unchanged.
+        let porcelain = cmd_stdout(
+            "git",
+            &["-C", &repo_root, "worktree", "list", "--porcelain"],
+        )
+        .unwrap_or_default();
+        let root_canon = std::fs::canonicalize(&repo_root).ok();
+        let projects = crate::env::claude_config_dir()?.join("projects");
+        let mut dirs: Vec<DirScan> = Vec::new();
+        let mut seen: std::collections::BTreeSet<String> = Default::default();
+        for w in parse_worktrees(&porcelain) {
+            // Canonicalize to match munge_cwd's physical-path rule (S0b) and
+            // to compare against the (physical) repo root. A vanished worktree
+            // dir canonicalize-fails → skip it.
+            let Ok(canon) = std::fs::canonicalize(&w.path) else {
+                continue;
+            };
+            let cwd = canon.to_string_lossy().into_owned();
+            if !seen.insert(cwd.clone()) {
+                continue;
             }
+            let is_worktree = root_canon.as_deref().is_none_or(|r| canon != r);
+            let proj = projects.join(crate::munge::munge_cwd(&cwd));
+            dirs.push(DirScan {
+                cwd,
+                branch: w.branch,
+                is_worktree,
+                stems: scan_jsonl_stems(&proj),
+            });
         }
-        let candidates = resume_candidates(&store, &repo_root, &stems, &live);
+        // Always scan the picked dir too: a subdir of the repo (not a worktree
+        // root) is not in `worktree list`, and pre-worktree behavior scanned
+        // exactly this dir. Its is_worktree stays false (it lives in the main
+        // checkout). physical_str is already canonical (step 2).
+        if seen.insert(physical_str.clone()) {
+            let proj = projects.join(crate::munge::munge_cwd(&physical_str));
+            dirs.push(DirScan {
+                cwd: physical_str.clone(),
+                branch: Some(branch.clone()),
+                is_worktree: false,
+                stems: scan_jsonl_stems(&proj),
+            });
+        }
+        let candidates = resume_candidates(&store, &repo_root, &dirs, &live);
         anyhow::ensure!(
             !candidates.is_empty(),
             "no resumable sessions for {repo_root}"
@@ -344,11 +529,17 @@ pub fn run_add(worktree: bool) -> Result<()> {
                 .status();
             return Ok(());
         }
+        // Carry the picked candidate's OWN cwd/branch (2026-07-21): a
+        // jsonl-only worktree session must resume in its worktree dir, not the
+        // picked repo dir, or `claude --resume` fails "No conversation found".
+        let cand = candidates.iter().find(|c| c.uuid == uuid);
+        let cand_cwd = cand.map(|c| c.cwd.clone());
+        let cand_branch = cand.and_then(|c| c.branch.clone());
         // The lock-free store copy is fine for DERIVING the tab's cwd/label
         // (worst case one beat stale); the AUTHORITATIVE update-or-insert
         // happens under the lock in step 7.
         let existing = store.agents.get(&uuid).cloned();
-        (uuid, None, existing)
+        (uuid, None, existing, cand_cwd, cand_branch)
     } else {
         let uuid = uuid::Uuid::new_v4().to_string();
         // Worktree opt-in (§6.3): clave shells out itself (never claude -w)
@@ -373,7 +564,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
         } else {
             None
         };
-        (uuid, wt, None)
+        (uuid, wt, None, None, None)
     };
 
     // 5) The agent's cwd for the TAB LAYOUT:
@@ -383,14 +574,25 @@ pub fn run_add(worktree: bool) -> Result<()> {
     //      jsonl-keyed resume (see merge_resume_record).
     //    - fresh worktree → canonicalize AGAIN (it's brand new — S0b applies).
     //    - else → the picked dir (already canonical from step 2).
+    //    - resume of a jsonl-only candidate → the CANDIDATE's cwd (the
+    //      worktree the transcript belongs to), not the picked dir: resume is
+    //      project-dir-scoped (2026-07-21). cand_cwd is None only in the `new`
+    //      branch, so the final arm keeps the picked-dir behavior there.
     let agent_cwd = match (&existing, &worktree_path) {
         (Some(row), _) => row.cwd.clone(),
         (None, Some(w)) => std::fs::canonicalize(w)?
             .to_str()
             .context("wt path")?
             .to_string(),
-        (None, None) => physical_str.clone(),
+        (None, None) => cand_cwd.clone().unwrap_or_else(|| physical_str.clone()),
     };
+    // The branch recorded/labelled for a jsonl-only resume must be the
+    // candidate's worktree branch — `-` when its worktree is detached — not
+    // the picked dir's HEAD (else a worktree session gets the main checkout's
+    // branch; review finding 2026-07-21). An existing row keeps its own branch
+    // via merge_resume_record; a fresh worktree uses the picked branch.
+    // `cand_cwd.is_some()` ⇔ this is a resume pick (set for every candidate).
+    let agent_branch = record_branch(cand_cwd.is_some(), cand_branch.as_deref(), &branch);
     // The tab label: an existing row's label is real, possibly already the
     // earned `dir · branch · words` from hook.rs — reopening the tab must not
     // regress it to the base form. Sanitize at interpolation time (the stored
@@ -402,8 +604,10 @@ pub fn run_add(worktree: bool) -> Result<()> {
             // CROSS-TASK COUPLING (Task 5): a NEW agent's label MUST be
             // exactly `<dir_name> · <branch>` (space-middot-space) —
             // hook.rs::refresh_label reconstructs this prefix byte-for-byte
-            // to gate the first-prompt upgrade.
-            sanitize_label(&format!("{dir_name} · {branch}"))
+            // to gate the first-prompt upgrade. Uses agent_branch (the
+            // candidate's worktree branch) so the record's branch and the
+            // reconstructed prefix agree for a resumed worktree session.
+            sanitize_label(&format!("{dir_name} · {agent_branch}"))
         }
     };
 
@@ -439,7 +643,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
             uuid: uuid.clone(),
             cwd: agent_cwd.clone(),
             repo_root: repo_root.clone(),
-            branch: branch.clone(),
+            branch: agent_branch.clone(),
             label: label.clone(),
             status: clave_types::Status::Idle,
             last_interacted: now_unix(),
@@ -616,12 +820,15 @@ mod tests {
         r2.repo_root = "/repo".into();
         r2.label = "repo · main · old thing".into();
         s.agents.insert("u-old".into(), r2);
-        let jsonls = vec![
-            ("u-old".to_string(), 100u64),
-            ("u-disk".to_string(), 200u64),
-        ];
+        // Single-dir scan (the main checkout): the pre-worktree shape.
+        let dirs = vec![DirScan {
+            cwd: "/repo".into(),
+            branch: Some("main".into()),
+            is_worktree: false,
+            stems: vec![("u-old".into(), 100u64), ("u-disk".into(), 200u64)],
+        }];
         let live = vec!["u-live".to_string()];
-        let c = resume_candidates(&s, "/repo", &jsonls, &live);
+        let c = resume_candidates(&s, "/repo", &dirs, &live);
         // mtime/interacted desc: u-live (300) > u-disk (200) > u-old (100);
         // store label wins over the bare uuid when we have one.
         assert_eq!(c.len(), 3);
@@ -632,5 +839,145 @@ mod tests {
         assert_eq!(c[2].uuid, "u-old");
         assert_eq!(c[2].label, "repo · main · old thing");
         assert!(!c[2].live);
+    }
+
+    #[test]
+    fn parse_worktrees_extracts_paths_and_branches() {
+        // §6.3 worktree-aware resume (2026-07-21 finding: `claude --resume` is
+        // project-dir-scoped). `git worktree list --porcelain` records are
+        // blank-line separated; each opens with `worktree <path>` and carries
+        // `branch refs/heads/<b>` or `detached`. Unknown lines are ignored.
+        let porcelain = "\
+worktree /Users/o/code/clave
+HEAD abc123
+branch refs/heads/main
+
+worktree /Users/o/code/clave/.claude/worktrees/feat-x
+HEAD def456
+branch refs/heads/feat/x
+
+worktree /Users/o/code/clave/.claude/worktrees/loose
+HEAD 999aaa
+detached
+
+garbage that should be ignored
+";
+        let w = parse_worktrees(porcelain);
+        assert_eq!(w.len(), 3);
+        assert_eq!(w[0].path, "/Users/o/code/clave");
+        assert_eq!(w[0].branch.as_deref(), Some("main"));
+        assert_eq!(w[1].path, "/Users/o/code/clave/.claude/worktrees/feat-x");
+        assert_eq!(w[1].branch.as_deref(), Some("feat/x")); // slash preserved
+        assert_eq!(w[2].path, "/Users/o/code/clave/.claude/worktrees/loose");
+        assert_eq!(w[2].branch, None); // detached → no branch
+        assert!(parse_worktrees("").is_empty());
+    }
+
+    #[test]
+    fn record_branch_detached_resume_is_dash_not_picker_head() {
+        // Review finding (2026-07-21): `cand_branch == None` conflates "no
+        // candidate (new agent)" with "candidate in a DETACHED worktree".
+        // A detached resume must record `-` (what the picker row shows, and
+        // the non-repo fallback), never the picked dir's HEAD — else the
+        // adopted lifeline worktree (recreated with `--detach`) claims `main`.
+        assert_eq!(record_branch(true, None, "main"), "-");
+        assert_eq!(record_branch(true, Some("feat/x"), "main"), "feat/x");
+        // A `new` agent (no candidate) inherits the picked dir's branch.
+        assert_eq!(record_branch(false, None, "main"), "main");
+    }
+
+    #[test]
+    fn resume_candidates_attributes_cwd_and_marks_worktrees() {
+        // §6.3 worktree-aware resume: candidates from EVERY worktree dir, each
+        // carrying its OWN cwd/branch so the tab resumes in its true dir.
+        let mut s = Store::default();
+        let mut main_row = rec("u-main");
+        main_row.repo_root = "/repo".into();
+        main_row.cwd = "/repo".into();
+        main_row.label = "repo · main · fix things".into();
+        main_row.last_interacted = 50;
+        s.agents.insert("u-main".into(), main_row);
+
+        let dirs = vec![
+            DirScan {
+                cwd: "/repo".into(),
+                branch: Some("main".into()),
+                is_worktree: false,
+                stems: vec![("u-main".into(), 50), ("u-disk-main".into(), 100)],
+            },
+            DirScan {
+                cwd: "/repo/.claude/worktrees/wt".into(),
+                branch: Some("feat/x".into()),
+                is_worktree: true,
+                stems: vec![("u-wt".into(), 300)],
+            },
+        ];
+        let live = vec!["u-wt".to_string()];
+        let c = resume_candidates(&s, "/repo", &dirs, &live);
+        // Recency desc ACROSS dirs: u-wt(300) > u-disk-main(100) > u-main(50).
+        assert_eq!(c.len(), 3);
+        // Worktree candidate: its OWN cwd carried, bare uuid gets branch + (wt).
+        assert_eq!(c[0].uuid, "u-wt");
+        assert_eq!(c[0].cwd, "/repo/.claude/worktrees/wt");
+        assert_eq!(c[0].branch.as_deref(), Some("feat/x"));
+        assert!(c[0].live);
+        assert_eq!(c[0].label, "u-wt · feat/x (wt)");
+        // Main-checkout jsonl-only: repo-root cwd, bare uuid, no (wt) marker.
+        assert_eq!(c[1].uuid, "u-disk-main");
+        assert_eq!(c[1].cwd, "/repo");
+        assert_eq!(c[1].label, "u-disk-main");
+        assert!(!c[1].live);
+        // Store row: earned label wins over uuid, store cwd kept.
+        assert_eq!(c[2].uuid, "u-main");
+        assert_eq!(c[2].cwd, "/repo");
+        assert_eq!(c[2].label, "repo · main · fix things");
+    }
+
+    #[test]
+    fn resume_candidates_store_label_beats_uuid_on_worktree_and_dedups() {
+        // Dedup by uuid across store + disk (§6.3 step 5). A worktree agent
+        // present BOTH as a store row and an on-disk jsonl collapses to ONE
+        // candidate: the earned store label wins (and already encodes the
+        // branch, so it is NOT re-appended), only the (wt) marker is added.
+        let mut s = Store::default();
+        let mut row = rec("u-wt");
+        row.repo_root = "/repo".into();
+        row.cwd = "/repo/wt".into();
+        row.worktree = Some("/repo/wt".into());
+        row.branch = "feat/x".into();
+        row.label = "wt · feat/x · earned".into();
+        row.last_interacted = 10;
+        s.agents.insert("u-wt".into(), row);
+        let dirs = vec![DirScan {
+            cwd: "/repo/wt".into(),
+            branch: Some("feat/x".into()),
+            is_worktree: true,
+            stems: vec![("u-wt".into(), 999)],
+        }];
+        let c = resume_candidates(&s, "/repo", &dirs, &[]);
+        assert_eq!(c.len(), 1); // deduped, not doubled
+        assert_eq!(c[0].uuid, "u-wt");
+        assert_eq!(c[0].cwd, "/repo/wt"); // store cwd kept
+        assert_eq!(c[0].label, "wt · feat/x · earned (wt)");
+    }
+
+    #[test]
+    fn picked_candidate_cwd_bakes_into_tab_layout() {
+        // §6.3 worktree-aware resume: the tab must open in the CANDIDATE's cwd
+        // (the worktree the transcript belongs to), NOT the picked repo dir —
+        // `claude --resume` is project-dir-scoped (2026-07-21). This pins the
+        // resume_candidates → tab_layout seam that run_add wires up.
+        let dirs = vec![DirScan {
+            cwd: "/repo/.claude/worktrees/wt".into(),
+            branch: Some("feat/x".into()),
+            is_worktree: true,
+            stems: vec![("u-wt".into(), 1)],
+        }];
+        let c = resume_candidates(&Store::default(), "/repo", &dirs, &[]);
+        let picked = &c[0];
+        let kdl = tab_layout("clave", "/w.wasm", &picked.label, &picked.uuid, &picked.cwd);
+        assert!(kdl.contains("cwd=\"/repo/.claude/worktrees/wt\""));
+        assert!(!kdl.contains("cwd=\"/repo\"")); // NOT the picker/root dir
+        assert!(kdl.contains("\"--cwd\" \"/repo/.claude/worktrees/wt\""));
     }
 }

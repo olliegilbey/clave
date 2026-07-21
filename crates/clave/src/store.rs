@@ -136,6 +136,12 @@ pub fn with_store_mut<T>(paths: &StorePaths, f: impl FnOnce(&mut Store) -> T) ->
     fs::create_dir_all(&paths.dir).context("creating store dir")?;
     let lock = fs::OpenOptions::new()
         .create(true)
+        // Contents are never read or written — this file exists only to hold
+        // an flock (spec §5 store locking, fugu 2026-07-01: the lock is a
+        // SEPARATE file, never the renamed-over data file, else concurrent
+        // hooks lose updates). `truncate(false)` spells out the existing
+        // default explicitly (no behavior change) — suspicious_open_options.
+        .truncate(false)
         .write(true)
         .open(&paths.lock)
         .context("opening lockfile")?;
@@ -379,8 +385,10 @@ mod tests {
 
     #[test]
     fn snapshot_mirrors_store_rows() {
-        let mut s = Store::default();
-        s.seq = 7;
+        let mut s = Store {
+            seq: 7,
+            ..Store::default()
+        };
         s.agents.insert("u1".into(), rec("u1"));
         s.tab_timeline.insert(4, 1700);
         s.agents.get_mut("u1").unwrap().tab_id = Some(4);

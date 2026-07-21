@@ -11,7 +11,7 @@ pub fn render_ls(store: &Store) -> String {
     let mut rows: Vec<_> = store.agents.values().collect();
     // Same rule the bar uses: most recently interacted first; stable
     // uuid tiebreak (BTreeMap iteration is already uuid-sorted).
-    rows.sort_by(|a, b| b.last_interacted.cmp(&a.last_interacted));
+    rows.sort_by_key(|r| std::cmp::Reverse(r.last_interacted));
     let mut out = String::new();
     for r in rows {
         let (glyph, colour) = r.status.glyph();
