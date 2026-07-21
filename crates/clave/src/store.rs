@@ -129,8 +129,10 @@ pub fn with_store_mut<T>(paths: &StorePaths, f: impl FnOnce(&mut Store) -> T) ->
     let lock = fs::OpenOptions::new()
         .create(true)
         // Contents are never read or written — this file exists only to hold
-        // an flock. `truncate(false)` spells out the existing default
-        // explicitly (no behavior change) to satisfy suspicious_open_options.
+        // an flock (spec §5 store locking, fugu 2026-07-01: the lock is a
+        // SEPARATE file, never the renamed-over data file, else concurrent
+        // hooks lose updates). `truncate(false)` spells out the existing
+        // default explicitly (no behavior change) — suspicious_open_options.
         .truncate(false)
         .write(true)
         .open(&paths.lock)
