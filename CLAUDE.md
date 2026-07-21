@@ -9,6 +9,11 @@ knowledge — read them, don't duplicate them here:
 - **[docs/dev/TESTING.md](docs/dev/TESTING.md)** — the live-validation SOP: the
   interaction contract, the sandbox lifecycle, the observability map, the
   instrumentation recipe, and the Zellij safety boundaries.
+- **[docs/status/](docs/status/)** — session handoffs, TRACKED (ruling
+  2026-07-21): they are the project's thinking-log history. Write yours
+  there at session end and include it in your PR; resume from the newest
+  one. They live in the MAIN checkout — a worktree only sees committed
+  ones (a fresh handoff written elsewhere is invisible until merged).
 
 ## Standing rules
 
