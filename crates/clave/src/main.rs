@@ -112,6 +112,24 @@ enum Command {
         tab_id: usize,
     },
 
+    /// Persist the bar collapse mode (plugin-internal, issue #5). The
+    /// `clave-toggle` broadcast flips every instance's memory instantly;
+    /// the ACTIVE instance then reports the absolute new mode here so the
+    /// store — the one writer — carries it in every snapshot, healing any
+    /// instance the broadcast missed (C8 parity-desync family).
+    #[command(hide = true)]
+    Collapse {
+        /// The absolute mode: true = gutter, false = expanded. Absolute so
+        /// duplicate/raced writes stay idempotent (never a flip).
+        /// ArgAction::Set is REQUIRED: clap-derive turns a bare `bool` field
+        /// into a SetTrue FLAG — as a positional that trips clap's
+        /// debug_assert on every parse and can never accept the literal
+        /// `true`/`false` the plugin passes (caught by CodeRabbit CLI on
+        /// PR #13; parse pinned in `collapse_cli_parses_absolute_values`).
+        #[arg(action = clap::ArgAction::Set)]
+        collapsed: bool,
+    },
+
     /// Prepare the machine: generate config/layout, merge Claude hooks,
     /// pre-seed the Zellij permission cache (§6.8/§7). Idempotent.
     Setup,
@@ -255,6 +273,16 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Some(Command::Collapse { collapsed }) => {
+            let paths = store::store_paths()?;
+            // Push only on CHANGE (apply_collapse returns None otherwise) —
+            // duplicate executor writes after a broadcast must not spam the
+            // pipe (round 11). The push heals every missed-pipe instance.
+            if let Some(snap) = store::apply_collapse(&paths, collapsed)? {
+                hook::push_snapshot(&snap);
+            }
+            Ok(())
+        }
         Some(Command::Setup) => setup::run_setup(),
         Some(Command::Open { uuid }) => open::run_open(&uuid),
         Some(Command::Dev { action }) => match action {
@@ -265,6 +293,28 @@ fn main() -> Result<()> {
         },
         Some(Command::Release { wasm_src, cli_src }) => {
             release::run_release(Path::new(&wasm_src), Path::new(&cli_src))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue #5 (CodeRabbit CLI, PR #13): the plugin shells
+    /// `clave collapse true|false` — pin that the positional literally
+    /// parses as a VALUE. Without ArgAction::Set, clap-derive makes a bare
+    /// bool a SetTrue flag: debug builds panic clap's debug_assert on
+    /// every parse and release builds reject the literal — a break no
+    /// workspace test caught because nothing exercised the CLI layer.
+    #[test]
+    fn collapse_cli_parses_absolute_values() {
+        for (arg, want) in [("true", true), ("false", false)] {
+            let cli = Cli::try_parse_from(["clave", "collapse", arg]).expect("must parse");
+            match cli.command {
+                Some(Command::Collapse { collapsed }) => assert_eq!(collapsed, want),
+                _ => panic!("parsed into the wrong command"),
+            }
         }
     }
 }
