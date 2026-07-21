@@ -73,6 +73,18 @@ fn every_zellij_crate_resolves_to_the_audited_version() {
              rethink, not deletion:\n{versions:?}"
         );
     }
+    // The dual-version count check runs BEFORE the per-entry version loop
+    // (CodeRabbit, PR #12): with a second kdl in the lock, the loop's
+    // generic mismatch panic would fire first and this scenario's own
+    // diagnostic — the one explaining the guardrail-vs-plugin split — would
+    // be dead code. Most-specific failure first.
+    let kdl_entries = versions.iter().filter(|(n, _)| n == "kdl").count();
+    assert_eq!(
+        kdl_entries, 1,
+        "expected exactly one kdl version in Cargo.lock, found {kdl_entries} \
+         — a second kdl means the permission-cache guardrail no longer \
+         parses with the grammar zellij uses:\n{versions:?}"
+    );
     // …and every entry must sit on its single audited line. A second version
     // appearing (cargo's silent dual-version resolution) is precisely the
     // guardrail-vs-plugin split described in the header — for the zellij
@@ -92,11 +104,4 @@ fn every_zellij_crate_resolves_to_the_audited_version() {
              {versions:?}"
         );
     }
-    let kdl_entries = versions.iter().filter(|(n, _)| n == "kdl").count();
-    assert_eq!(
-        kdl_entries, 1,
-        "expected exactly one kdl version in Cargo.lock, found {kdl_entries} \
-         — a second kdl means the permission-cache guardrail no longer \
-         parses with the grammar zellij uses:\n{versions:?}"
-    );
 }
