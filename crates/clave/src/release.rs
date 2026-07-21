@@ -82,10 +82,20 @@ pub fn release_gate(
     head_tags: &str,
     cargo_version: &str,
 ) -> std::result::Result<(), String> {
-    if !status_porcelain.trim().is_empty() {
+    // Untracked (`?? `) lines are NOT dirt (first-cut finding, 2026-07-21):
+    // status handoffs live untracked in docs/status/ by convention, and an
+    // untracked file is not in the tagged HEAD — it cannot make the built
+    // artifact differ from the tag (anything load-bearing yet untracked
+    // either fails the build or is dead weight). Tracked modifications and
+    // stages still refuse: those DO diverge the tree from the tag.
+    let tracked_dirt: Vec<&str> = status_porcelain
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.starts_with("?? "))
+        .collect();
+    if !tracked_dirt.is_empty() {
         return Err(format!(
             "working tree is dirty — commit or stash before a release cut:\n{}",
-            status_porcelain.trim_end()
+            tracked_dirt.join("\n")
         ));
     }
     let want = format!("v{cargo_version}");
@@ -225,6 +235,19 @@ mod tests {
     #[test]
     fn release_gate_refuses_dirty_tree() {
         let e = release_gate(" M crates/clave/src/setup.rs\n", "v0.1.0\n", "0.1.0").unwrap_err();
+        assert!(e.contains("dirty"));
+    }
+
+    #[test]
+    fn release_gate_ignores_untracked_files() {
+        // First-cut finding (2026-07-21): status handoffs live UNTRACKED in
+        // docs/status/ by convention, so `?? ` lines must not block a cut —
+        // untracked files are not in the tagged HEAD, so they cannot make
+        // the build differ from the tag. Tracked modifications still refuse,
+        // including when mixed with untracked noise.
+        assert!(release_gate("?? docs/status/x.md\n?? AGENTS.md\n", "v0.1.0\n", "0.1.0").is_ok());
+        let e =
+            release_gate("?? docs/status/x.md\n M src/lib.rs\n", "v0.1.0\n", "0.1.0").unwrap_err();
         assert!(e.contains("dirty"));
     }
 
