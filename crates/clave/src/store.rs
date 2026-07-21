@@ -86,6 +86,14 @@ pub struct Store {
     /// tab_ids are session-scoped: cleared on session (re)create.
     #[serde(default)]
     pub tab_timeline: BTreeMap<usize, u64>,
+    /// Bar collapse mode (issue #5): plugin-side per-instance memory synced
+    /// only by the toggle broadcast desynced live (C8 parity-desync — a
+    /// reload or missed pipe flips one instance forever). Same doctrine as
+    /// tab_timeline above: the store RMW is the one writer and the flag
+    /// rides every snapshot push, so instances hydrate at birth and heal on
+    /// every push. `default` (expanded) keeps pre-field store files loading.
+    #[serde(default)]
+    pub collapsed: bool,
 }
 
 pub struct StorePaths {
@@ -154,6 +162,7 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
     AgentSnapshot {
         seq: store.seq,
         tab_timeline: store.tab_timeline.clone(),
+        collapsed: store.collapsed,
         agents: store
             .agents
             .values()
@@ -216,6 +225,23 @@ pub fn apply_bind(paths: &StorePaths, uuid: &str, tab_id: usize) -> Result<Optio
             return None;
         }
         r.tab_id = Some(tab_id);
+        s.seq += 1; // monotonic pipe contract (§5)
+        Some(snapshot_from(s))
+    })
+}
+
+/// `clave collapse <true|false>` (issue #5): persist the bar collapse mode
+/// as an ABSOLUTE value — never a flip, so broadcast races and duplicate
+/// executor writes stay idempotent — and hand back a seq-bumped snapshot
+/// for the pipe push that heals any instance the `clave-toggle` broadcast
+/// missed. Snapshot back only on CHANGE (like apply_bind): a re-assert of
+/// the current mode must not generate pipe traffic (round 11: storms).
+pub fn apply_collapse(paths: &StorePaths, collapsed: bool) -> Result<Option<AgentSnapshot>> {
+    with_store_mut(paths, |s| {
+        if s.collapsed == collapsed {
+            return None;
+        }
+        s.collapsed = collapsed;
         s.seq += 1; // monotonic pipe contract (§5)
         Some(snapshot_from(s))
     })
@@ -367,6 +393,29 @@ mod tests {
         assert_eq!(snap.tab_timeline.get(&4), Some(&1700));
         // §6.6 Design B: the uuid→tab bind rides it too (glyph join key).
         assert_eq!(snap.agents[0].tab_id, Some(4));
+    }
+
+    #[test]
+    fn collapse_persists_absolute_value_and_dedupes() {
+        // `clave collapse` (issue #5): absolute value, seq-bumped RMW,
+        // change-gated push — the store copy of the C8 parity-desync fix.
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        let snap = apply_collapse(&p, true).unwrap().expect("changed");
+        assert!(snap.collapsed, "snapshot must carry the new mode");
+        // The FILE is the durable truth (CodeRabbit CLI, PR #13): assert the
+        // persisted store too, not just the in-memory snapshot projection.
+        assert!(read_store(&p).unwrap().collapsed);
+        assert_eq!(snap.seq, 1);
+        // Re-asserting the same mode: no change, no seq bump, no push —
+        // duplicate executor writes after a broadcast are free (round 11).
+        assert!(apply_collapse(&p, true).unwrap().is_none());
+        assert_eq!(read_store(&p).unwrap().seq, 1);
+        // Toggling back is a change again.
+        let snap = apply_collapse(&p, false).unwrap().expect("changed back");
+        assert!(!snap.collapsed);
+        assert!(!read_store(&p).unwrap().collapsed);
+        assert_eq!(snap.seq, 2);
     }
 
     #[test]

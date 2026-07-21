@@ -65,6 +65,12 @@ pub enum Effect {
     /// run_command(["clave","open",uuid]) — §6.3. Fired by dwell expiry and
     /// explicit picks; the model has already marked the uuid in-flight (↻).
     OpenAgent { uuid: String },
+    /// run_command(["clave","collapse",bool]) — issue #5 durability. Emitted
+    /// by toggle() (the write we owe the store) and by apply_snapshot's
+    /// one-shot re-assert (out-of-order write recovery). Bookkeeping runs on
+    /// every instance; main.rs gates EXECUTION to the active one, same as
+    /// MarkRead/Bind (one writer, round 11).
+    PersistCollapse { collapsed: bool },
 }
 
 /// §6.6 C8: user-tuned (approved 2026-07-17) — do not normalize with the
@@ -213,6 +219,18 @@ pub struct BarModel {
     /// user is navigating. Armed by `visited` (the replicated clave-visited
     /// pipe), cleared by `peek_expired` (main.rs's ~1s timer) or `toggle`.
     peeking: bool,
+    /// Issue #5 pending-write ledger: the collapse mode we still OWE the
+    /// store after a toggle (fix-review MAJOR: two rapid toggles spawn two
+    /// `clave collapse` subprocesses with no arrival-order guarantee — the
+    /// change-gate can swallow the correct write and the store's push then
+    /// overrides the user). Cleared when an accepted snapshot carries the
+    /// owed value; a contradicting accepted snapshot instead keeps USER
+    /// truth and re-asserts — at most once (`collapse_reasserted`), so two
+    /// instances with conflicting pendings can never ping-pong (round 11).
+    pending_collapse: Option<bool>,
+    /// The single re-assert of `pending_collapse` has been spent; the next
+    /// contradicting snapshot wins (wrong-but-consistent beats a storm).
+    collapse_reasserted: bool,
     /// uuids with a `clave open` in flight (§6.6): set on fire, shown ↻.
     /// Cleared when the row stops being dormant (tab appeared) or a stale=true
     /// snapshot lands (open failed → ✗, retryable). First double-fire guard;
@@ -253,6 +271,8 @@ impl Default for BarModel {
             organic_pending: false,
             collapsed: false,
             peeking: false,
+            pending_collapse: None,
+            collapse_reasserted: false,
             opening: BTreeSet::new(),
             cursor: None,
             cursor_gen: 0,
@@ -466,6 +486,39 @@ impl BarModel {
         // mode that diverged live (C5 round 5).
         self.timeline = snap.tab_timeline;
         let mut effects = Vec::new();
+        // Collapse parity heal (issue #5, C8 parity-desync): once
+        // seq-accepted, the store's flag is authoritative for any instance
+        // with no write in flight — this is what rescues a bar born after
+        // the toggle, reborn by a reload, or one that missed the broadcast.
+        // ON CHANGE ONLY: re-arming per snapshot would be a perpetual-seek
+        // storm (round 11), so an in-sync instance's seek state is left
+        // byte-untouched.
+        //
+        // The pending-write ledger (fix-review MAJOR) refines that
+        // authority: while we OWE the store a value, a snapshot carrying it
+        // is our write (or a peer's equal one) confirming — clear the debt,
+        // heal nothing. A snapshot CONTRADICTING the debt means our write
+        // was swallowed by an out-of-order sibling (two rapid toggles: the
+        // late-arriving stale value re-wrote the store) — keep USER truth
+        // and re-assert, exactly once; a second contradiction means someone
+        // else is authoritative after all, and wrong-but-consistent beats a
+        // two-instance re-assert ping-pong (round 11). Accepted transient
+        // (unchanged): an unrelated push between broadcast and write-landing
+        // briefly disagrees; the write's own push heals it.
+        match self.pending_collapse {
+            Some(want) if snap.collapsed == want => {
+                self.pending_collapse = None; // debt settled; local == want already
+            }
+            Some(want) if !self.collapse_reasserted => {
+                self.collapse_reasserted = true;
+                effects.push(Effect::PersistCollapse { collapsed: want });
+            }
+            Some(_) => {
+                self.pending_collapse = None; // retry spent: store wins
+                self.heal_collapse(snap.collapsed);
+            }
+            None => self.heal_collapse(snap.collapsed),
+        }
         // Borrow-friendly pass: snapshot views first, then mutate the guards.
         let views: Vec<(String, Status, String, Option<usize>)> = self
             .agents
@@ -753,12 +806,33 @@ impl BarModel {
     /// renders. The compare base resets per toggle (round 15: a stale
     /// last_cols "learned" a jump as a bogus step); the learned step is
     /// kept — zellij's resize increment is an environment property.
-    pub fn toggle(&mut self) -> bool {
+    /// The snapshot-authoritative collapse flip (issue #5): on CHANGE only,
+    /// mirror toggle()'s width-machine reset so the healed instance seeks
+    /// its new target; an already-in-sync instance is left byte-untouched
+    /// (per-snapshot re-arms would be a perpetual-seek storm, round 11).
+    fn heal_collapse(&mut self, collapsed: bool) {
+        if self.collapsed != collapsed {
+            self.collapsed = collapsed;
+            self.peeking = false; // authoritative flip outranks a peek
+            self.seek_budget = SEEK_BUDGET;
+            self.seek_last_cols = None;
+        }
+    }
+
+    pub fn toggle(&mut self) -> Vec<Effect> {
         self.collapsed = !self.collapsed;
         self.peeking = false; // an explicit toggle outranks a pending peek
         self.seek_budget = SEEK_BUDGET;
         self.seek_last_cols = None;
-        self.collapsed
+        // Issue #5 durability: record the ABSOLUTE mode we owe the store and
+        // emit the persist effect (executor-gated in main.rs — every
+        // instance flips + books, exactly one writes). A fresh toggle
+        // resets the re-assert budget: it is a new user intent.
+        self.pending_collapse = Some(self.collapsed);
+        self.collapse_reasserted = false;
+        vec![Effect::PersistCollapse {
+            collapsed: self.collapsed,
+        }]
     }
 
     /// One width-seek step for OUR OWN pane, driven by render cols (each of
@@ -859,6 +933,7 @@ mod tests {
 
     fn snap(seq: u64, agents: Vec<Agent>) -> AgentSnapshot {
         AgentSnapshot {
+            collapsed: false,
             seq,
             agents,
             tab_timeline: Default::default(),
@@ -868,6 +943,7 @@ mod tests {
     /// Snapshot carrying only a tab timeline (the §6.6 store-timeline).
     fn snap_t(seq: u64, timeline: &[(usize, u64)]) -> AgentSnapshot {
         AgentSnapshot {
+            collapsed: false,
             seq,
             agents: vec![],
             tab_timeline: timeline.iter().copied().collect(),
@@ -1388,6 +1464,138 @@ mod tests {
         // Seek heads for the template (expanded), unpoisoned by the peek.
         assert_eq!(m.width_seek(13), vec![Effect::GrowSelf]);
     }
+
+    /// Issue #5 path (a), birth-while-collapsed: a bar born after the toggle
+    /// (or reborn by a reload — path (b), identical state: fresh default)
+    /// missed the broadcast forever. Hydration must come from the snapshot
+    /// it fetches at startup, and must arm the seek toward the gutter.
+    #[test]
+    fn snapshot_hydrates_a_newborn_into_collapse() {
+        let mut m = BarModel::default();
+        let mut s = snap(1, vec![]);
+        s.collapsed = true;
+        m.apply_snapshot(s);
+        assert!(m.collapsed, "snapshot-carried flag did not hydrate");
+        // Born at template width among gutter bars → must shrink, exactly
+        // as if it had heard the toggle itself.
+        assert_eq!(m.width_seek(30), vec![Effect::ShrinkSelf]);
+    }
+
+    /// Issue #5 path (c), missed pipe: an instance that missed the toggle
+    /// broadcast heals from the next (seq-newer) snapshot push; an instance
+    /// already in the right state must NOT have its seek re-armed by that
+    /// same push (a per-snapshot re-arm would be a perpetual-seek storm,
+    /// round 11).
+    #[test]
+    fn snapshot_heals_a_desynced_instance_and_leaves_synced_ones_alone() {
+        // Desynced: expanded while the store says collapsed.
+        let mut missed = BarModel::default();
+        missed.apply_snapshot(snap(1, vec![])); // hydrated expanded, seq 1
+        let converged = missed.width_seek(30); // within band → seek done
+        assert_eq!(converged, Vec::<Effect>::new());
+        let mut heal = snap(2, vec![]);
+        heal.collapsed = true;
+        missed.apply_snapshot(heal);
+        assert!(missed.collapsed, "missed-pipe instance did not heal");
+        assert_eq!(
+            missed.width_seek(30),
+            vec![Effect::ShrinkSelf],
+            "healing must re-arm the seek toward the gutter"
+        );
+
+        // Synced: toggled locally (broadcast heard), then the store's own
+        // collapse push arrives carrying the SAME flag — state untouched.
+        let mut synced = BarModel::default();
+        synced.apply_snapshot(snap(1, vec![]));
+        synced.toggle(); // collapsed, seek armed
+        // Drain the seek to quiescence at the gutter floor.
+        assert_eq!(synced.width_seek(4), Vec::<Effect>::new());
+        let budget_before = synced.seek_budget;
+        let mut same = snap(2, vec![]);
+        same.collapsed = true;
+        let fx = synced.apply_snapshot(same);
+        assert!(synced.collapsed);
+        assert_eq!(
+            synced.seek_budget, budget_before,
+            "an unchanged snapshot flag must not re-arm the seek"
+        );
+        // The confirming push also settles the pending ledger silently —
+        // no re-assert traffic when writer and store agree.
+        assert!(
+            !fx.iter()
+                .any(|e| matches!(e, Effect::PersistCollapse { .. })),
+            "a confirming snapshot must not trigger a re-assert"
+        );
+    }
+
+    /// Issue #5 durability: a toggle books the write it owes the store and
+    /// emits the persist effect carrying the ABSOLUTE new mode (main.rs
+    /// executes it on the active instance only).
+    #[test]
+    fn toggle_emits_the_persist_effect_with_the_absolute_mode() {
+        let mut m = BarModel::default();
+        assert_eq!(
+            m.toggle(),
+            vec![Effect::PersistCollapse { collapsed: true }]
+        );
+        assert_eq!(
+            m.toggle(),
+            vec![Effect::PersistCollapse { collapsed: false }]
+        );
+    }
+
+    /// Fix-review MAJOR (issue #5): two rapid toggles spawn two writes with
+    /// no arrival-order guarantee — the stale one can win and the store's
+    /// push then contradicts the user. The pending ledger keeps USER truth
+    /// and re-asserts exactly once; a second contradiction yields to the
+    /// store (wrong-but-consistent beats a two-instance ping-pong, rd 11).
+    #[test]
+    fn out_of_order_write_is_reasserted_once_then_store_wins() {
+        let mut m = BarModel::default();
+        m.apply_snapshot(snap(1, vec![]));
+        m.toggle(); // → collapsed, owes true
+        m.toggle(); // → expanded, owes false (double Alt+c)
+        // The late 'true' write won the race; its push arrives:
+        let mut bad = snap(2, vec![]);
+        bad.collapsed = true;
+        let fx = m.apply_snapshot(bad);
+        assert!(!m.collapsed, "first contradiction must keep user truth");
+        assert!(
+            fx.contains(&Effect::PersistCollapse { collapsed: false }),
+            "the owed value must be re-asserted"
+        );
+        // The re-assert was lost too (pathological): a second contradicting
+        // push spends the retry and the store becomes authoritative.
+        let mut bad2 = snap(3, vec![]);
+        bad2.collapsed = true;
+        let fx = m.apply_snapshot(bad2);
+        assert!(m.collapsed, "retry spent: consistency over intent");
+        assert!(
+            !fx.iter()
+                .any(|e| matches!(e, Effect::PersistCollapse { .. })),
+            "no further re-asserts — the ledger is closed"
+        );
+        // Ledger clean again: a later store flip heals normally.
+        let mut heal = snap(4, vec![]);
+        heal.collapsed = false;
+        m.apply_snapshot(heal);
+        assert!(!m.collapsed);
+    }
+
+    /// Issue #5 seq-gate interplay: a STALE snapshot (seq <=) is discarded
+    /// wholesale — its collapsed flag included — so it can never fight a
+    /// fresher local toggle.
+    #[test]
+    fn stale_snapshot_cannot_flip_collapse() {
+        let mut m = BarModel::default();
+        m.apply_snapshot(snap(5, vec![]));
+        m.toggle(); // collapsed, locally, after seq 5
+        let mut stale = snap(5, vec![]); // same seq: stale by the gate
+        stale.collapsed = false;
+        m.apply_snapshot(stale);
+        assert!(m.collapsed, "a stale snapshot must not undo a local toggle");
+    }
+
     #[test]
     fn stale_instance_orders_and_decorates_from_snapshot_alone() {
         // The round-6 regression test: an instance with NO registers and NO
@@ -1430,6 +1638,7 @@ mod tests {
         a.label = "repo · main · fix".into();
         a.last_interacted = 500;
         m.apply_snapshot(AgentSnapshot {
+            collapsed: false,
             seq: 1,
             agents: vec![a],
             tab_timeline: Default::default(),
@@ -1456,6 +1665,7 @@ mod tests {
         let mut new = agent("u-new", Status::Idle, None);
         new.last_interacted = 900;
         m.apply_snapshot(AgentSnapshot {
+            collapsed: false,
             seq: 1,
             agents: vec![old, new],
             tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64)]),
@@ -1479,6 +1689,7 @@ mod tests {
         let mut m = BarModel::default();
         m.apply_tabs(vec![tab(7, 0, "agent-tab", true)]);
         m.apply_snapshot(AgentSnapshot {
+            collapsed: false,
             seq: 1,
             agents: vec![agent("u1", Status::Working, Some(7))], // bound → live
             tab_timeline: Default::default(),
@@ -1494,6 +1705,7 @@ mod tests {
         m.register("u2".into(), 42);
         m.apply_panes(vec![pane(0, 42, false, true)]);
         m.apply_snapshot(AgentSnapshot {
+            collapsed: false,
             seq: 1,
             agents: vec![agent("u2", Status::Working, None)],
             tab_timeline: Default::default(),
@@ -1514,6 +1726,7 @@ mod tests {
         let mut a = agent("u-d", Status::Idle, None);
         a.last_interacted = 999; // dormant row sorts FIRST; live row is line 1
         m.apply_snapshot(AgentSnapshot {
+            collapsed: false,
             seq: 1,
             agents: vec![a],
             tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64)]),
@@ -1536,6 +1749,7 @@ mod tests {
         let mut a = agent("u-d", Status::Idle, None);
         a.last_interacted = 999;
         m.apply_snapshot(AgentSnapshot {
+            collapsed: false,
             seq: 1,
             agents: vec![a],
             tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64)]),
@@ -1565,6 +1779,7 @@ mod tests {
         let mut a = agent("u-d", Status::Idle, None);
         a.last_interacted = 999;
         m.apply_snapshot(AgentSnapshot {
+            collapsed: false,
             seq: 1,
             agents: vec![a],
             tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64)]),
@@ -1579,6 +1794,7 @@ mod tests {
         let mut a = agent("u-d", Status::Idle, None);
         a.last_interacted = 999;
         m.apply_snapshot(AgentSnapshot {
+            collapsed: false,
             seq: 1,
             agents: vec![a],
             tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64)]),
@@ -1601,6 +1817,10 @@ mod tests {
         let mut a = agent("u-d", Status::Idle, None);
         a.last_interacted = 999;
         m.apply_snapshot(AgentSnapshot {
+            // Issue #5: snapshots now carry the store's collapse mode; after
+            // the toggle above, the real flow's store says collapsed too —
+            // `false` here would (correctly!) heal the bar back to expanded.
+            collapsed: true,
             seq: 1,
             agents: vec![a],
             tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64)]),
@@ -1622,6 +1842,7 @@ mod tests {
         a.stale = true;
         m.opening.insert("u1".into());
         m.apply_snapshot(AgentSnapshot {
+            collapsed: false,
             seq: 1,
             agents: vec![a],
             tab_timeline: Default::default(),
@@ -1632,6 +1853,7 @@ mod tests {
         // In-flight (no stale): ↻.
         let mut m = BarModel::default();
         m.apply_snapshot(AgentSnapshot {
+            collapsed: false,
             seq: 1,
             agents: vec![agent("u2", Status::Idle, None)],
             tab_timeline: Default::default(),
@@ -1650,6 +1872,7 @@ mod tests {
         let mut a = agent("u-d", Status::Idle, None);
         a.last_interacted = 999; // dormant sorts FIRST; live is line 1
         m.apply_snapshot(AgentSnapshot {
+            collapsed: false,
             seq: 1,
             agents: vec![a],
             tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64)]),
@@ -1678,6 +1901,7 @@ mod tests {
         let mut a = agent("u-d", Status::Idle, None);
         a.last_interacted = 999;
         m.apply_snapshot(AgentSnapshot {
+            collapsed: false,
             seq: 1,
             agents: vec![a],
             tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64)]),
@@ -1689,6 +1913,7 @@ mod tests {
         // "u-d" but it no longer renders dormant.
         m.apply_tabs(vec![tab(1, 0, "live", false), tab(2, 1, "u-d", true)]);
         m.apply_snapshot(AgentSnapshot {
+            collapsed: false,
             seq: 2,
             agents: vec![agent("u-d", Status::Working, Some(2))],
             tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64), (2usize, 600u64)]),
@@ -1736,6 +1961,7 @@ mod tests {
         let mut a = agent("u-d", Status::Idle, None);
         a.last_interacted = 999; // dormant sorts FIRST
         m.apply_snapshot(AgentSnapshot {
+            collapsed: false,
             seq: 1,
             agents: vec![a],
             tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64), (2usize, 400u64)]),
@@ -1775,6 +2001,10 @@ mod tests {
         let mut a = agent("u-d", Status::Idle, None);
         a.last_interacted = 999; // dormant sorts FIRST; live row is line 1
         m.apply_snapshot(AgentSnapshot {
+            // Issue #5: matches collapsed_model()'s store-side truth — a
+            // `false` flag would (correctly) heal the bar expanded and void
+            // the collapsed-landing peek this test pins.
+            collapsed: true,
             seq: 1,
             agents: vec![a],
             tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64)]),
@@ -2172,7 +2402,7 @@ mod tests {
                         .enumerate()
                         .map(|(i, &id)| (id, timeline[i]))
                         .collect();
-                    m.apply_snapshot(AgentSnapshot { seq: 1, agents: vec![], tab_timeline: tl });
+                    m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 1, agents: vec![], tab_timeline: tl });
                     m
                 };
                 let baseline: Vec<RowKey> =
@@ -2228,7 +2458,7 @@ mod tests {
                     .enumerate()
                     .map(|(i, &id)| (id, tl_vals[i]))
                     .collect();
-                m.apply_snapshot(AgentSnapshot { seq: 1, agents, tab_timeline: timeline.clone() });
+                m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 1, agents, tab_timeline: timeline.clone() });
 
                 // Determinism: identical inputs → identical rows.
                 prop_assert_eq!(m.rows(), m.rows());
@@ -2265,6 +2495,7 @@ mod tests {
                 let mut m = BarModel::default();
                 m.apply_tabs(vec![tab(0, 0, "a", true), tab(1, 1, "b", false)]);
                 m.apply_snapshot(AgentSnapshot {
+                    collapsed: false,
                     seq: cur_seq,
                     agents: vec![agent("u1", Status::Working, Some(0))],
                     tab_timeline: tl0,
@@ -2272,6 +2503,7 @@ mod tests {
                 let rows0 = m.rows();
                 let timeline0 = m.timeline.clone();
                 m.apply_snapshot(AgentSnapshot {
+                    collapsed: false,
                     seq: stale_seq,
                     agents: vec![agent("u2", Status::Failed, Some(1))],
                     tab_timeline: tl1,
@@ -2290,13 +2522,85 @@ mod tests {
                 tl1 in prop::collection::btree_map(0usize..8, 0u64..500, 0..5),
             ) {
                 let mut m = BarModel::default();
-                m.apply_snapshot(AgentSnapshot { seq: 1, agents: vec![], tab_timeline: tl0 });
+                m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 1, agents: vec![], tab_timeline: tl0 });
                 m.apply_snapshot(AgentSnapshot {
+                    collapsed: false,
                     seq: 2,
                     agents: vec![agent("u1", Status::Working, Some(3))],
                     tab_timeline: tl1.clone(),
                 });
                 prop_assert_eq!(m.timeline.clone(), tl1);
+            }
+
+            /// Property 5b — collapse hydration converges (issue #5, C8
+            /// parity-desync): under any interleaving of seq-fresh
+            /// snapshots, LOCAL toggles, and stale snapshots, the model
+            /// follows the pending-ledger contract: stale snapshots write
+            /// nothing (the seq gate); with no debt pending, a fresh
+            /// snapshot imposes the store flag; while a toggle's write is
+            /// owed, a confirming flag settles the debt, the first
+            /// contradiction is absorbed (user truth kept, one re-assert),
+            /// and a second contradiction yields to the store. The fold
+            /// below IS that spec restated — the mutation-catching burden
+            /// for each branch sits with the example tests around
+            /// `out_of_order_write_is_reasserted_once_then_store_wins`.
+            #[test]
+            fn prop_collapse_follows_last_accepted_writer(
+                ops in prop::collection::vec(
+                    prop_oneof![
+                        prop::bool::ANY.prop_map(Some), // fresh snapshot carrying f
+                        Just(None),                            // local toggle
+                    ],
+                    1..=16,
+                ),
+                stale_at in prop::collection::vec(prop::bool::ANY, 1..=16),
+            ) {
+                let mut m = BarModel::default();
+                let mut seq = 0u64;
+                let mut expected = false; // born expanded
+                // The spec-fold's ledger mirror: what the store is owed.
+                let mut pending: Option<bool> = None;
+                let mut reasserted = false;
+                for (op, inject_stale) in ops.iter().zip(stale_at.iter()) {
+                    match op {
+                        Some(flag) => {
+                            seq += 1;
+                            m.apply_snapshot(AgentSnapshot {
+                                collapsed: *flag,
+                                seq,
+                                agents: vec![],
+                                tab_timeline: Default::default(),
+                            });
+                            match pending {
+                                Some(w) if *flag == w => pending = None,
+                                Some(_) if !reasserted => reasserted = true,
+                                Some(_) => {
+                                    pending = None;
+                                    expected = *flag;
+                                }
+                                None => expected = *flag,
+                            }
+                        }
+                        None => {
+                            m.toggle();
+                            expected = !expected;
+                            pending = Some(expected);
+                            reasserted = false;
+                        }
+                    }
+                    if *inject_stale {
+                        // A replayed/out-of-order snapshot (seq <= current)
+                        // carrying the OPPOSITE flag must change nothing —
+                        // not even the pending ledger.
+                        m.apply_snapshot(AgentSnapshot {
+                            collapsed: !expected,
+                            seq,
+                            agents: vec![],
+                            tab_timeline: Default::default(),
+                        });
+                    }
+                    prop_assert_eq!(m.collapsed, expected);
+                }
             }
 
             /// Property 6 — nav closure (§6.6 C8), scoped precisely (fugu
@@ -2329,6 +2633,7 @@ mod tests {
                     agents.push(a);
                 }
                 m.apply_snapshot(AgentSnapshot {
+                    collapsed: false,
                     seq: 1,
                     agents,
                     tab_timeline: ids.iter().map(|&id| (id, 50u64)).collect(),

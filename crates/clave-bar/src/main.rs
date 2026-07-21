@@ -164,6 +164,20 @@ impl State {
                 Effect::OpenAgent { uuid } => {
                     run_command(&["clave", "open", &uuid], BTreeMap::new());
                 }
+                Effect::PersistCollapse { collapsed } if active => {
+                    // Issue #5: report the ABSOLUTE collapse mode to the
+                    // store (the one writer); its seq-bumped push heals any
+                    // instance the toggle broadcast missed. Every instance
+                    // books the pending write; only the active one runs it.
+                    run_command(
+                        &[
+                            "clave",
+                            "collapse",
+                            if collapsed { "true" } else { "false" },
+                        ],
+                        BTreeMap::new(),
+                    );
+                }
                 _ => {} // non-active instance skips writes
             }
         }
@@ -190,7 +204,14 @@ impl State {
     /// hidden panes). Every instance stays visible, hears this pipe, and
     /// converges its own pane with real feedback.
     fn toggle_collapsed(&mut self) {
-        self.model.toggle();
+        // Durability (issue #5): the broadcast flipped every instance's
+        // memory, but memory alone desyncs (C8 parity family — birth after
+        // toggle, reload, missed pipe). The model books the write it owes
+        // the store (pending ledger) and emits PersistCollapse; run_effects
+        // gates its EXECUTION to the active instance, same as MarkRead/Bind
+        // — one writer per toggle, absolute value, no push storm (rd 11).
+        let fx = self.model.toggle();
+        self.run_effects(fx);
     }
 
     /// One pipe message → model. Split out of pipe() so early returns here
