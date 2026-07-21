@@ -53,11 +53,15 @@ pub fn live_uuids(dump_layout: &str) -> Vec<String> {
 }
 
 /// Labels get interpolated into KDL string literals and fzf menu lines —
-/// strip the two things that break them (quotes, control chars).
+/// strip the things that break them: quotes, control chars, and backslash
+/// (KDL's escape introducer — a raw `\` is a parse error at whichever seam
+/// bakes the label, worst case launch.kdl; fugu 2026-07-21, guardrail test
+/// `backslash_label_is_guarded_through_real_parser` proves it on the real
+/// zellij parser).
 pub fn sanitize_label(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_control() { ' ' } else { c })
-        .filter(|c| *c != '"')
+        .filter(|c| *c != '"' && *c != '\\')
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -120,9 +124,11 @@ pub fn tab_node_bare(binary: &str, label: &str, uuid: &str, cwd: &str) -> String
 /// clear cause instead of emitting malformed KDL zellij silently rejects.
 /// Called at every seam that bakes a cwd (add/open/launch eager row).
 pub fn validate_cwd(cwd: &str) -> Result<()> {
+    // Backslash included (fugu 2026-07-21): it introduces a KDL escape, so a
+    // raw `\` in a baked cwd string is a layout parse error like a quote is.
     anyhow::ensure!(
-        !cwd.contains('"') && !cwd.chars().any(char::is_control),
-        "cwd {cwd:?} contains a double-quote or control char — refusing to bake unsafe KDL (rename the directory)"
+        !cwd.contains('"') && !cwd.contains('\\') && !cwd.chars().any(char::is_control),
+        "cwd {cwd:?} contains a double-quote, backslash, or control char — refusing to bake unsafe KDL (rename the directory)"
     );
     Ok(())
 }
@@ -169,6 +175,15 @@ pub struct DirScan {
     pub is_worktree: bool,
     /// `(uuid, mtime)` from listing `~/.claude/projects/<munged cwd>/*.jsonl`.
     pub stems: Vec<(String, u64)>,
+}
+
+/// The MAIN working tree's path from parsed porcelain output: git documents
+/// the main tree as the FIRST `worktree list` entry. This — not the picked
+/// dir's `rev-parse --show-toplevel`, which inside a LINKED worktree returns
+/// the worktree's own root — is the stable root that keys the store's
+/// `repo_root` and the `(wt)` marker (fugu 2026-07-21, HIGH).
+pub fn main_worktree_path(worktrees: &[WorktreeEntry]) -> Option<&str> {
+    worktrees.first().map(|w| w.path.as_str())
 }
 
 /// A `git worktree list --porcelain` record: the worktree path and its branch
@@ -444,7 +459,11 @@ pub fn run_add(worktree: bool) -> Result<()> {
     let Some(choice) = fzf_pick(&["new".into(), "resume".into()], "agent> ")? else {
         return Ok(());
     };
-    let (uuid, worktree_path, existing, cand_cwd, cand_branch) = if choice == "resume" {
+    // resume_root: the main tree's root when the resume arm computed one —
+    // it keys the store row so future picks from ANY dir of this repo find
+    // the earned label (fugu 2026-07-21). `new` keeps the picked toplevel.
+    let (uuid, worktree_path, existing, cand_cwd, cand_branch, resume_root) = if choice == "resume"
+    {
         // clave owns the picker (§6.3 — claude --resume's own picker would
         // break resurrection). Candidates: store rows + jsonl scan across
         // EVERY worktree (2026-07-21 finding: `claude --resume` is
@@ -457,11 +476,21 @@ pub fn run_add(worktree: bool) -> Result<()> {
             &["-C", &repo_root, "worktree", "list", "--porcelain"],
         )
         .unwrap_or_default();
-        let root_canon = std::fs::canonicalize(&repo_root).ok();
+        let worktrees = parse_worktrees(&porcelain);
+        // The MAIN tree's root, not the picked dir's toplevel (fugu
+        // 2026-07-21, HIGH): `rev-parse --show-toplevel` inside a linked
+        // worktree returns the WORKTREE's root, which would invert every
+        // (wt) marker and miss every store row keyed by the real repo_root.
+        // Non-repo pick → no porcelain → fall back to the picked dir.
+        let main_root = main_worktree_path(&worktrees)
+            .and_then(|p| std::fs::canonicalize(p).ok())
+            .and_then(|p| p.to_str().map(String::from))
+            .unwrap_or_else(|| repo_root.clone());
+        let root_canon = std::fs::canonicalize(&main_root).ok();
         let projects = crate::env::claude_config_dir()?.join("projects");
         let mut dirs: Vec<DirScan> = Vec::new();
         let mut seen: std::collections::BTreeSet<String> = Default::default();
-        for w in parse_worktrees(&porcelain) {
+        for w in &worktrees {
             // Canonicalize to match munge_cwd's physical-path rule (S0b) and
             // to compare against the (physical) repo root. A vanished worktree
             // dir canonicalize-fails → skip it.
@@ -476,7 +505,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
             let proj = projects.join(crate::munge::munge_cwd(&cwd));
             dirs.push(DirScan {
                 cwd,
-                branch: w.branch,
+                branch: w.branch.clone(),
                 is_worktree,
                 stems: scan_jsonl_stems(&proj),
             });
@@ -494,7 +523,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
                 stems: scan_jsonl_stems(&proj),
             });
         }
-        let candidates = resume_candidates(&store, &repo_root, &dirs, &live);
+        let candidates = resume_candidates(&store, &main_root, &dirs, &live);
         anyhow::ensure!(
             !candidates.is_empty(),
             "no resumable sessions for {repo_root}"
@@ -536,7 +565,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
         // (worst case one beat stale); the AUTHORITATIVE update-or-insert
         // happens under the lock in step 7.
         let existing = store.agents.get(&uuid).cloned();
-        (uuid, None, existing, cand_cwd, cand_branch)
+        (uuid, None, existing, cand_cwd, cand_branch, Some(main_root))
     } else {
         let uuid = uuid::Uuid::new_v4().to_string();
         // Worktree opt-in (§6.3): clave shells out itself (never claude -w)
@@ -561,7 +590,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
         } else {
             None
         };
-        (uuid, wt, None, None, None)
+        (uuid, wt, None, None, None, None)
     };
 
     // 5) The agent's cwd for the TAB LAYOUT:
@@ -639,7 +668,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
         let fresh = AgentRecord {
             uuid: uuid.clone(),
             cwd: agent_cwd.clone(),
-            repo_root: repo_root.clone(),
+            repo_root: resume_root.clone().unwrap_or_else(|| repo_root.clone()),
             branch: agent_branch.clone(),
             label: label.clone(),
             status: clave_types::Status::Idle,
@@ -868,6 +897,34 @@ garbage that should be ignored
         assert_eq!(w[2].path, "/Users/o/code/clave/.claude/worktrees/loose");
         assert_eq!(w[2].branch, None); // detached → no branch
         assert!(parse_worktrees("").is_empty());
+    }
+
+    #[test]
+    fn sanitize_label_strips_backslash() {
+        // Fugu 2026-07-21 (HIGH): backslash is KDL's escape introducer — a
+        // raw `\` in a label is a parse error at the seam that bakes it
+        // (worst case launch.kdl → bricked cold start). Filtered like `"`.
+        assert_eq!(sanitize_label(r"fix the \d regex"), "fix the d regex");
+    }
+
+    #[test]
+    fn validate_cwd_rejects_backslash() {
+        // Same KDL hazard as above, cwd side: refuse rather than bake.
+        assert!(validate_cwd(r"/home/o/we\ird").is_err());
+        assert!(validate_cwd("/home/o/fine").is_ok());
+    }
+
+    #[test]
+    fn main_worktree_path_is_first_porcelain_entry() {
+        // Fugu 2026-07-21 (HIGH): `rev-parse --show-toplevel` inside a
+        // LINKED worktree returns the worktree's own root, so it cannot key
+        // the store or the (wt) marker. `git worktree list` documents the
+        // main working tree as the FIRST entry — that is the stable root.
+        let w = parse_worktrees(
+            "worktree /repo\nbranch refs/heads/main\n\nworktree /repo/wt\nbranch refs/heads/f\n",
+        );
+        assert_eq!(main_worktree_path(&w), Some("/repo"));
+        assert_eq!(main_worktree_path(&[]), None);
     }
 
     #[test]
