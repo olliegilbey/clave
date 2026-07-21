@@ -403,6 +403,9 @@ mod tests {
         let p = tmp_paths(d.path());
         let snap = apply_collapse(&p, true).unwrap().expect("changed");
         assert!(snap.collapsed, "snapshot must carry the new mode");
+        // The FILE is the durable truth (CodeRabbit CLI, PR #13): assert the
+        // persisted store too, not just the in-memory snapshot projection.
+        assert!(read_store(&p).unwrap().collapsed);
         assert_eq!(snap.seq, 1);
         // Re-asserting the same mode: no change, no seq bump, no push —
         // duplicate executor writes after a broadcast are free (round 11).
@@ -411,6 +414,7 @@ mod tests {
         // Toggling back is a change again.
         let snap = apply_collapse(&p, false).unwrap().expect("changed back");
         assert!(!snap.collapsed);
+        assert!(!read_store(&p).unwrap().collapsed);
         assert_eq!(snap.seq, 2);
     }
 

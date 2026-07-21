@@ -121,6 +121,12 @@ enum Command {
     Collapse {
         /// The absolute mode: true = gutter, false = expanded. Absolute so
         /// duplicate/raced writes stay idempotent (never a flip).
+        /// ArgAction::Set is REQUIRED: clap-derive turns a bare `bool` field
+        /// into a SetTrue FLAG — as a positional that trips clap's
+        /// debug_assert on every parse and can never accept the literal
+        /// `true`/`false` the plugin passes (caught by CodeRabbit CLI on
+        /// PR #13; parse pinned in `collapse_cli_parses_absolute_values`).
+        #[arg(action = clap::ArgAction::Set)]
         collapsed: bool,
     },
 
@@ -287,6 +293,28 @@ fn main() -> Result<()> {
         },
         Some(Command::Release { wasm_src, cli_src }) => {
             release::run_release(Path::new(&wasm_src), Path::new(&cli_src))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue #5 (CodeRabbit CLI, PR #13): the plugin shells
+    /// `clave collapse true|false` — pin that the positional literally
+    /// parses as a VALUE. Without ArgAction::Set, clap-derive makes a bare
+    /// bool a SetTrue flag: debug builds panic clap's debug_assert on
+    /// every parse and release builds reject the literal — a break no
+    /// workspace test caught because nothing exercised the CLI layer.
+    #[test]
+    fn collapse_cli_parses_absolute_values() {
+        for (arg, want) in [("true", true), ("false", false)] {
+            let cli = Cli::try_parse_from(["clave", "collapse", arg]).expect("must parse");
+            match cli.command {
+                Some(Command::Collapse { collapsed }) => assert_eq!(collapsed, want),
+                _ => panic!("parsed into the wrong command"),
+            }
         }
     }
 }
