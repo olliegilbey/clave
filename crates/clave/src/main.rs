@@ -112,6 +112,18 @@ enum Command {
         tab_id: usize,
     },
 
+    /// Persist the bar collapse mode (plugin-internal, issue #5). The
+    /// `clave-toggle` broadcast flips every instance's memory instantly;
+    /// the ACTIVE instance then reports the absolute new mode here so the
+    /// store — the one writer — carries it in every snapshot, healing any
+    /// instance the broadcast missed (C8 parity-desync family).
+    #[command(hide = true)]
+    Collapse {
+        /// The absolute mode: true = gutter, false = expanded. Absolute so
+        /// duplicate/raced writes stay idempotent (never a flip).
+        collapsed: bool,
+    },
+
     /// Prepare the machine: generate config/layout, merge Claude hooks,
     /// pre-seed the Zellij permission cache (§6.8/§7). Idempotent.
     Setup,
@@ -251,6 +263,16 @@ fn main() -> Result<()> {
             // Push only on CHANGE (apply_bind returns None otherwise) — a
             // re-reported existing bind must not generate pipe traffic.
             if let Some(snap) = store::apply_bind(&paths, &uuid, tab_id)? {
+                hook::push_snapshot(&snap);
+            }
+            Ok(())
+        }
+        Some(Command::Collapse { collapsed }) => {
+            let paths = store::store_paths()?;
+            // Push only on CHANGE (apply_collapse returns None otherwise) —
+            // duplicate executor writes after a broadcast must not spam the
+            // pipe (round 11). The push heals every missed-pipe instance.
+            if let Some(snap) = store::apply_collapse(&paths, collapsed)? {
                 hook::push_snapshot(&snap);
             }
             Ok(())
