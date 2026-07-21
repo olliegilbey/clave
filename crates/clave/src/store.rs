@@ -507,7 +507,9 @@ mod tests {
         assert!(apply_open_result(&p, "u1", true).unwrap().is_none());
         assert_eq!(read_store(&p).unwrap().seq, 1);
         // Successful open clears it.
-        let snap = apply_open_result(&p, "u1", false).unwrap().expect("cleared");
+        let snap = apply_open_result(&p, "u1", false)
+            .unwrap()
+            .expect("cleared");
         assert!(!snap.agents[0].stale);
         // Unknown uuid: silently none.
         assert!(apply_open_result(&p, "ghost", true).unwrap().is_none());

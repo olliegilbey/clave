@@ -63,9 +63,10 @@ pub fn baked_binary(versioned_cli: Option<&Path>, installed: bool) -> String {
 /// current environment's data dir and probe it. Sandbox data dirs
 /// (`$CLAVE_DATA_DIR`) never hold a versioned copy → bare `clave`.
 pub fn runtime_binary() -> String {
-    let versioned = crate::setup::data_dir()
-        .ok()
-        .map(|d| d.join("bin").join(versioned_cli_name(env!("CARGO_PKG_VERSION"))));
+    let versioned = crate::setup::data_dir().ok().map(|d| {
+        d.join("bin")
+            .join(versioned_cli_name(env!("CARGO_PKG_VERSION")))
+    });
     let installed = versioned.as_deref().is_some_and(Path::exists);
     baked_binary(versioned.as_deref(), installed)
 }
@@ -139,10 +140,20 @@ pub fn run_release(wasm_src: &Path, cli_src: &Path) -> Result<()> {
     // Copy the built artifacts to their versioned homes. A live session
     // loads only the files baked into ITS config, so writing NEW versioned
     // files never disturbs it — the upgrade is atomic at the next launch.
-    std::fs::copy(wasm_src, &wasm_dst)
-        .with_context(|| format!("installing wasm {} → {}", wasm_src.display(), wasm_dst.display()))?;
-    std::fs::copy(cli_src, &cli_dst)
-        .with_context(|| format!("installing cli {} → {}", cli_src.display(), cli_dst.display()))?;
+    std::fs::copy(wasm_src, &wasm_dst).with_context(|| {
+        format!(
+            "installing wasm {} → {}",
+            wasm_src.display(),
+            wasm_dst.display()
+        )
+    })?;
+    std::fs::copy(cli_src, &cli_dst).with_context(|| {
+        format!(
+            "installing cli {} → {}",
+            cli_src.display(),
+            cli_dst.display()
+        )
+    })?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -159,7 +170,11 @@ pub fn run_release(wasm_src: &Path, cli_src: &Path) -> Result<()> {
     // replaces any prior clave hook entry (old version, or the dev bare
     // `clave`) rather than duplicating it.
     crate::setup::write_generated(&dir, cli_str, wasm_str)?;
-    println!("released v{version}:\n  {}\n  {}", wasm_dst.display(), cli_dst.display());
+    println!(
+        "released v{version}:\n  {}\n  {}",
+        wasm_dst.display(),
+        cli_dst.display()
+    );
     Ok(())
 }
 
@@ -209,8 +224,7 @@ mod tests {
 
     #[test]
     fn release_gate_refuses_dirty_tree() {
-        let e = release_gate(" M crates/clave/src/setup.rs\n", "v0.1.0\n", "0.1.0")
-            .unwrap_err();
+        let e = release_gate(" M crates/clave/src/setup.rs\n", "v0.1.0\n", "0.1.0").unwrap_err();
         assert!(e.contains("dirty"));
     }
 

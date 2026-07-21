@@ -641,8 +641,7 @@ impl BarModel {
                 },
             ));
         }
-        let mut dormant: Vec<&Agent> =
-            self.agents.iter().filter(|a| self.is_dormant(a)).collect();
+        let mut dormant: Vec<&Agent> = self.agents.iter().filter(|a| self.is_dormant(a)).collect();
         dormant.sort_by(|a, b| a.uuid.cmp(&b.uuid)); // stable tiebreak input
         for (i, a) in dormant.into_iter().enumerate() {
             let glyph = if a.stale {
@@ -681,8 +680,11 @@ impl BarModel {
         };
         match row.key {
             RowKey::Tab(tab_id) => {
-                let Some(position) =
-                    self.tabs.iter().find(|t| t.tab_id == tab_id).map(|t| t.position)
+                let Some(position) = self
+                    .tabs
+                    .iter()
+                    .find(|t| t.tab_id == tab_id)
+                    .map(|t| t.position)
                 else {
                     return Vec::new();
                 };
@@ -762,8 +764,11 @@ impl BarModel {
         match row.key {
             RowKey::Tab(tab_id) => {
                 self.cursor = None; // live landing: focus truth takes over
-                let Some(position) =
-                    self.tabs.iter().find(|t| t.tab_id == tab_id).map(|t| t.position)
+                let Some(position) = self
+                    .tabs
+                    .iter()
+                    .find(|t| t.tab_id == tab_id)
+                    .map(|t| t.position)
                 else {
                     return Vec::new();
                 };
@@ -1756,13 +1761,17 @@ mod tests {
         });
         m.beacon(1);
         let fx = m.nav("{\"dir\":\"next\"}", Some(1));
-        let Effect::ArmDwell { r#gen } = fx[0] else { panic!() };
+        let Effect::ArmDwell { r#gen } = fx[0] else {
+            panic!()
+        };
         // Cursor moved away before expiry → stale gen, no open.
         m.nav("{\"dir\":\"next\"}", Some(1));
         assert!(m.dwell_expired(r#gen).is_empty());
         // Land again and let it expire in place → exactly one open, marked ↻.
         let fx = m.nav("{\"dir\":\"prev\"}", Some(1)); // back to dormant row 0
-        let Effect::ArmDwell { r#gen } = fx[0] else { panic!() };
+        let Effect::ArmDwell { r#gen } = fx[0] else {
+            panic!()
+        };
         assert_eq!(
             m.dwell_expired(r#gen),
             vec![Effect::OpenAgent { uuid: "u-d".into() }]
@@ -1968,8 +1977,13 @@ mod tests {
         });
         m.beacon(1);
         let fx = m.nav("{\"dir\":\"prev\"}", Some(1)); // land on the dormant row
-        let Effect::ArmDwell { r#gen } = fx[0] else { panic!() };
-        assert!(m.rows()[0].active, "dormant selected before the native switch");
+        let Effect::ArmDwell { r#gen } = fx[0] else {
+            panic!()
+        };
+        assert!(
+            m.rows()[0].active,
+            "dormant selected before the native switch"
+        );
         // Native switch to tab 2 arrives as a visited-pipe beacon (no nav).
         m.beacon(2);
         let rows = m.rows();
@@ -2019,7 +2033,10 @@ mod tests {
         else {
             unreachable!()
         };
-        assert!(fx.contains(&Effect::ArmPeek), "collapsed landing arms a peek");
+        assert!(
+            fx.contains(&Effect::ArmPeek),
+            "collapsed landing arms a peek"
+        );
 
         // (2) The dwell's expiry arrives LATE (elapsed past the 0.65 cutoff)
         // while the sibling peek is still pending — it MUST read as Peek, so

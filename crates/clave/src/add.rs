@@ -133,7 +133,10 @@ pub fn validate_cwd(cwd: &str) -> Result<()> {
 /// makes tab creation IDEMPOTENT — resurrection is clave's job, not
 /// zellij's (§6.8, C8 redesign 2026-07-17).
 pub fn tab_layout(binary: &str, wasm: &str, label: &str, uuid: &str, cwd: &str) -> String {
-    format!("layout {{\n{}}}\n", tab_node(binary, wasm, label, uuid, cwd))
+    format!(
+        "layout {{\n{}}}\n",
+        tab_node(binary, wasm, label, uuid, cwd)
+    )
 }
 
 pub struct ResumeCandidate {
@@ -232,13 +235,7 @@ pub fn resume_candidates(
                         e.4 = d.is_worktree;
                     }
                 })
-                .or_insert((
-                    *mtime,
-                    None,
-                    d.cwd.clone(),
-                    d.branch.clone(),
-                    d.is_worktree,
-                ));
+                .or_insert((*mtime, None, d.cwd.clone(), d.branch.clone(), d.is_worktree));
         }
     }
     for r in store.agents.values().filter(|r| r.repo_root == repo_root) {
