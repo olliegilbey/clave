@@ -667,3 +667,29 @@ _(fill as found; update spec §4/§6 in the SAME commit as any mechanism change)
      bumps). apply_tabs is now order-neutral. Spec §6.5/§6.6 revised in the
      same change. Known accepted quirk (pre-existing): an agent snapshot bump
      can overtake the focused tab's row until the next TabUpdate re-announces.
+
+- **#5 snapshot-carried collapse VALIDATED LIVE (2026-07-21, sandbox, two
+  bar instances):** (a) Alt+c narrows/widens every instance together;
+  (b) hot-reload while collapsed → all instances reincarnate straight into
+  the collapsed state (heal-at-birth — the strong variant, since expanded
+  is the serde default); (c) rapid double-Alt+c settles consistent, store
+  agrees (`collapsed` flipped with seq bump; pending-write ledger held).
+  This was the only possible verification of the `is_active_instance`
+  executor gate — it passed. The parity-desync family (C8) is closed.
+- **Zellij's serializer records an agent pane's MCP-server CHILD, not
+  `claude` (2026-07-21, → issue #6):** with MCP servers configured,
+  `dump-layout` showed agent panes as `uv … whatsapp-mcp … run main.py` —
+  so command-string parsing (`live_uuids`) was fully blind while three
+  agents were live. The bar was unaffected (it joins via store binds).
+  Consequence: `clave add` can offer a LIVE session as resume (double
+  attach) and `clave open`'s liveness gate degrades. Fix direction is
+  #6's Design-B: derive liveness from uuid→tab_id binds, never from
+  serialized command strings. Interim rule: navigate to live agents via
+  the bar, not Alt+a resume.
+- **Resuming a session that died with harness-tracked background work
+  auto-fires a turn (2026-07-21, → issue #17):** Claude Code injects an
+  orphan `<task-notification>` on resume; the reply is a full-context
+  UNCACHED turn, and the injected text reaches the UserPromptSubmit hook —
+  clave's first-prompt label upgrade permanently earned
+  `… · <task-notification> <task-id>…` for an adopted session. Quiesce
+  background tasks before killing a session you intend to adopt.

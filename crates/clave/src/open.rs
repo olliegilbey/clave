@@ -99,7 +99,12 @@ pub fn run_open(uuid: &str) -> Result<()> {
             std::fs::write(&tmp, layout)?;
             let status = std::process::Command::new("zellij")
                 .env("ZELLIJ_SESSION_NAME", &session)
-                .args(["action", "new-tab", "--layout", tmp.to_str().context("tmp")?])
+                .args([
+                    "action",
+                    "new-tab",
+                    "--layout",
+                    tmp.to_str().context("tmp")?,
+                ])
                 .status()?;
             let _ = std::fs::remove_file(&tmp);
             anyhow::ensure!(status.success(), "zellij action new-tab failed");

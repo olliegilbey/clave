@@ -334,11 +334,11 @@ impl ZellijPlugin for State {
             EventType::RunCommandResult,
             EventType::PermissionRequestResult,
             EventType::Timer, // peek-on-nav sink (set_timeout per peek)
-            // NO InputReceived: it fires for EVERY keystroke INCLUDING the
-            // nav keybinds themselves (C5 round 4: each walk press touched
-            // the departing tab and the touch-spawn storm exhausted the
-            // server's fds). Plain tabs order by birth only — shell-command
-            // touches are parked (§6.6).
+                              // NO InputReceived: it fires for EVERY keystroke INCLUDING the
+                              // nav keybinds themselves (C5 round 4: each walk press touched
+                              // the departing tab and the touch-spawn storm exhausted the
+                              // server's fds). Plain tabs order by birth only — shell-command
+                              // touches are parked (§6.6).
         ]);
         // Stock tab-bar pattern: an unselectable pane receives clicks
         // directly (no focus-stealing first click) and MoveFocus skips it —
