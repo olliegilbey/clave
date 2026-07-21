@@ -82,15 +82,22 @@ pub fn release_gate(
     head_tags: &str,
     cargo_version: &str,
 ) -> std::result::Result<(), String> {
-    // Untracked (`?? `) lines are NOT dirt (first-cut finding, 2026-07-21):
-    // status handoffs live untracked in docs/status/ by convention, and an
-    // untracked file is not in the tagged HEAD — it cannot make the built
-    // artifact differ from the tag (anything load-bearing yet untracked
-    // either fails the build or is dead weight). Tracked modifications and
-    // stages still refuse: those DO diverge the tree from the tag.
+    // Untracked (`?? `) lines are exempt ONLY under doc/local-tooling paths
+    // (first-cut finding + CodeRabbit P1, 2026-07-21): an in-progress
+    // handoff or local agent state must not block a cut, but a blanket
+    // untracked exemption is unsound — tracked code can REFERENCE an
+    // untracked file (e.g. a `mod foo;` whose `foo.rs` was never added),
+    // which builds locally yet cannot be reproduced from the tagged HEAD.
+    // docs/ and .claude/ and AGENTS.md are never cargo build inputs; any
+    // other untracked path refuses like tracked dirt does.
+    const UNTRACKED_EXEMPT: [&str; 3] = ["docs/", ".claude/", "AGENTS.md"];
     let tracked_dirt: Vec<&str> = status_porcelain
         .lines()
-        .filter(|l| !l.trim().is_empty() && !l.starts_with("?? "))
+        .filter(|l| !l.trim().is_empty())
+        .filter(|l| match l.strip_prefix("?? ") {
+            Some(path) => !UNTRACKED_EXEMPT.iter().any(|p| path.starts_with(p)),
+            None => true,
+        })
         .collect();
     if !tracked_dirt.is_empty() {
         return Err(format!(
@@ -246,6 +253,13 @@ mod tests {
         // the build differ from the tag. Tracked modifications still refuse,
         // including when mixed with untracked noise.
         assert!(release_gate("?? docs/status/x.md\n?? AGENTS.md\n", "v0.1.0\n", "0.1.0").is_ok());
+        assert!(release_gate("?? .claude/worktrees/x/y.rs\n", "v0.1.0\n", "0.1.0").is_ok());
+        // CodeRabbit P1 (2026-07-21): an untracked file OUTSIDE the doc/
+        // local-tooling allowlist can be a build input a tracked `mod`
+        // references — it builds locally but the tagged HEAD cannot
+        // reproduce the artifact. Refuse it like tracked dirt.
+        let e = release_gate("?? crates/clave/src/foo.rs\n", "v0.1.0\n", "0.1.0").unwrap_err();
+        assert!(e.contains("dirty"));
         let e =
             release_gate("?? docs/status/x.md\n M src/lib.rs\n", "v0.1.0\n", "0.1.0").unwrap_err();
         assert!(e.contains("dirty"));
