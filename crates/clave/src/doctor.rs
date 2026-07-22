@@ -428,6 +428,134 @@ pub fn render_failures(context: &str, findings: &[Finding]) -> String {
     out
 }
 
+/// Count clave hook entries per event — reuses is_clave_hook_command, the
+/// SAME matcher merge_hooks writes with (doctor never guesses a second form).
+pub fn hook_entry_counts(settings: &serde_json::Value) -> Vec<(String, usize)> {
+    crate::setup::HOOK_EVENTS
+        .iter()
+        .map(|ev| {
+            let n = settings
+                .get("hooks")
+                .and_then(|h| h.get(*ev))
+                .and_then(|a| a.as_array())
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .flat_map(|e| e.get("hooks").and_then(|v| v.as_array()).into_iter().flatten())
+                        .filter(|h| {
+                            h.get("command")
+                                .and_then(|c| c.as_str())
+                                .is_some_and(|c| crate::setup::is_clave_hook_command(c, ev))
+                        })
+                        .count()
+                })
+                .unwrap_or(0);
+            (ev.to_string(), n)
+        })
+        .collect()
+}
+
+fn tool_fact(tool: ToolId) -> ToolFact {
+    let discovered = crate::discover::discover(tool);
+    let version = discovered.as_ref().and_then(|d| {
+        let out = std::process::Command::new(&d.path).arg("--version").output().ok()?;
+        short_version(String::from_utf8_lossy(&out.stdout).lines().next()?)
+    });
+    ToolFact { discovered, version }
+}
+
+fn probe_pkg_manager() -> Option<PkgManager> {
+    // Probe order = priority (spec §Probes). apk also at /sbin (off-PATH).
+    for (bin, m) in [
+        ("brew", PkgManager::Brew),
+        ("apt-get", PkgManager::Apt),
+        ("dnf", PkgManager::Dnf),
+        ("pacman", PkgManager::Pacman),
+        ("apk", PkgManager::Apk),
+    ] {
+        if which::which_global(bin).is_ok() {
+            return Some(m);
+        }
+    }
+    crate::discover::is_executable(std::path::Path::new("/sbin/apk")).then_some(PkgManager::Apk)
+}
+
+/// ALL the IO, one place (spec §Architecture). Every probe is best-effort:
+/// gather() itself only fails on a missing home dir.
+pub fn gather() -> anyhow::Result<Facts> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("home dir"))?;
+    let dir = crate::setup::data_dir()?;
+    let wasm_path = crate::setup::wasm_path()?;
+    let settings: serde_json::Value = crate::env::claude_config_dir()
+        .ok()
+        .map(|d| d.join("settings.json"))
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let perms = crate::setup::permissions_cache_path()
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default();
+    let bin_dir = dir.join("bin");
+    let installed_releases = std::fs::read_dir(&bin_dir)
+        .map(|rd| {
+            rd.filter_map(|e| {
+                e.ok()?
+                    .file_name()
+                    .to_str()?
+                    .strip_prefix("clave-v")
+                    .map(str::to_string)
+            })
+            .collect()
+        })
+        .unwrap_or_default();
+    Ok(Facts {
+        home: home.clone(),
+        zellij: tool_fact(ToolId::Zellij),
+        claude: tool_fact(ToolId::Claude),
+        git: tool_fact(ToolId::Git),
+        fzf: tool_fact(ToolId::Fzf),
+        zoxide: tool_fact(ToolId::Zoxide),
+        pkg_manager: probe_pkg_manager(),
+        config_exists: dir.join("config.kdl").exists(),
+        layout_exists: dir.join("layout.kdl").exists(),
+        wasm_exists: wasm_path.exists(),
+        wasm_path,
+        has_embedded_wasm: crate::release::embedded_wasm().is_some(),
+        hook_counts: hook_entry_counts(&settings),
+        perms_seeded: crate::setup::permissions_seeded(
+            &perms,
+            crate::setup::wasm_path()?.to_str().unwrap_or(""),
+        ),
+        bin_dir_exists: bin_dir.is_dir(),
+        installed_releases,
+        // Linux-only check (spec §Check): macOS zellij doesn't use it —
+        // flagging there would be flutter#17781 noise.
+        xdg_runtime_dir: cfg!(target_os = "linux")
+            .then(|| std::env::var_os("XDG_RUNTIME_DIR").is_some()),
+        version_line: crate::release::long_version(),
+    })
+}
+
+/// `clave doctor`: report everything; exit 1 iff any Problem (mise's rule).
+pub fn run_doctor(json: bool) -> anyhow::Result<()> {
+    use std::io::IsTerminal;
+    let facts = gather()?;
+    let findings = diagnose(&facts);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "facts": facts, "findings": findings }))?
+        );
+    } else {
+        print!("{}", render_report(&findings, std::io::stdout().is_terminal()));
+    }
+    if findings.iter().any(|f| f.severity == Severity::Problem) {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -682,6 +810,20 @@ mod tests {
             label: "git 2.51.0 (/usr/bin/git)".into(), advice: vec![] }];
         let s = render_report(&ok, true);
         assert!(s.ends_with("• No issues found!\n"));
+    }
+
+    #[test]
+    fn hook_entry_counts_counts_only_clave_entries() {
+        let mut settings = serde_json::json!({});
+        crate::setup::merge_hooks(&mut settings, "clave");
+        let counts = hook_entry_counts(&settings);
+        assert_eq!(counts.len(), crate::setup::HOOK_EVENTS.len());
+        assert!(counts.iter().all(|(_, n)| *n == 1));
+        // A foreign hook on the same event does not count as ours.
+        let counts = hook_entry_counts(&serde_json::json!({
+            "hooks": { "Stop": [ { "hooks": [ { "type": "command", "command": "my-bell hook Stop" } ] } ] }
+        }));
+        assert_eq!(counts.iter().find(|(e, _)| e == "Stop").unwrap().1, 0);
     }
 
     #[test]

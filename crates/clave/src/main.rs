@@ -116,6 +116,14 @@ enum Command {
     /// pre-seed the Zellij permission cache (§6.8/§7). Idempotent.
     Setup,
 
+    /// Health report: required tools, picker deps, clave's own setup state,
+    /// environment traps. Diagnose-only — `clave setup` is the repair path.
+    Doctor {
+        /// Emit facts + findings as JSON instead of the grouped report.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Open a known store row's tab (plugin-internal, §6.3 C8): the bar fires
     /// this when a dormant row's focus settles or on an explicit pick.
     #[command(hide = true)]
@@ -256,6 +264,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some(Command::Setup) => setup::run_setup(),
+        Some(Command::Doctor { json }) => clave::doctor::run_doctor(json),
         Some(Command::Open { uuid }) => open::run_open(&uuid),
         Some(Command::Dev { action }) => match action {
             DevAction::Scenario { name } => dev::run_scenario(&name),
