@@ -197,6 +197,28 @@ pub struct BarModel {
     /// learned from a resize's effect. An environment property — kept
     /// across toggles.
     seek_step: usize,
+    /// Width at which the seek last came to REST — converged, exhausted, or
+    /// pinned against a zellij refusal wall. A render at exactly this width is
+    /// a no-op (the seek is done); only a DIFFERENT width can wake it. This is
+    /// the anchor the drift re-arm (issue #4) measures against: the old design
+    /// zeroed the budget on convergence and then went permanently silent, so a
+    /// window resize / split that drifted the pane off-target left the bar
+    /// parked until the next toggle/peek (F1, C8 backlog 2026-07-18).
+    seek_rest: Option<usize>,
+    /// One-render grace flag for the in-flight guard. cols unchanged since our
+    /// last resize means the effect either lands a beat late (latency, round 9
+    /// — do NOT double-fire) or was CLOBBERED by a relayout (issue #4). We
+    /// cannot tell the two apart in one render, so we grace exactly one beat
+    /// (matching the modelled one-render latency) and then, if still far off
+    /// target, re-drive — the budget bounds a clobber we cannot win.
+    seek_stalled: bool,
+    /// A candidate drifted width awaiting confirmation. While DORMANT, the very
+    /// first render at an off-target width could be a transient mid-relayout
+    /// value (or an oscillating/thrashing layout, round 20). We only re-arm the
+    /// seek once the SAME off-target width is seen twice — a stable drift, not
+    /// a flicker — so a thrashing layout and a user mid-drag never trigger a
+    /// perpetual re-seek (the "must not fight forever" bound).
+    seek_drift: Option<usize>,
     /// tab_id of the last visited (focused) tab — replicated on every
     /// instance from the visited-pipe/nav broadcast streams. This is the nav
     /// walk base: the local TabInfo.active flag is stale everywhere except
@@ -266,6 +288,9 @@ impl Default for BarModel {
             read_locally: BTreeSet::new(),
             seek_last_cols: None,
             seek_step: 0,
+            seek_rest: None,
+            seek_stalled: false,
+            seek_drift: None,
             current_tab: None,
             birth_announced: false,
             organic_pending: false,
@@ -309,8 +334,7 @@ impl BarModel {
             return false; // expanded bars stay expanded — nothing to peek
         }
         self.peeking = true;
-        self.seek_budget = SEEK_BUDGET; // re-arm toward the template
-        self.seek_last_cols = None;
+        self.arm_seek(); // re-arm toward the template
         true
     }
 
@@ -323,8 +347,7 @@ impl BarModel {
             return false;
         }
         self.peeking = false;
-        self.seek_budget = SEEK_BUDGET; // re-arm toward the gutter
-        self.seek_last_cols = None;
+        self.arm_seek(); // re-arm toward the gutter
         true
     }
 
@@ -792,13 +815,27 @@ impl BarModel {
                 // arm locally on the executor (the one visible bar).
                 if self.collapsed {
                     self.peeking = true;
-                    self.seek_budget = SEEK_BUDGET;
-                    self.seek_last_cols = None;
+                    self.arm_seek();
                     fx.push(Effect::ArmPeek);
                 }
                 fx
             }
         }
+    }
+
+    /// Re-arm the width seek toward the current target. Every user-intent
+    /// trigger (birth, toggle, peek, heal) resets the SAME machine: a fresh
+    /// budget, the compare base cleared (round 15: a stale last_cols "learned"
+    /// a jump as a bogus step), and — issue #4 — the rest/drift trackers wiped
+    /// so a new episode is not silenced by the width it previously settled at
+    /// nor by a stale drift candidate. The learned step is deliberately KEPT:
+    /// zellij's resize increment is an environment property, not per-episode.
+    fn arm_seek(&mut self) {
+        self.seek_budget = SEEK_BUDGET;
+        self.seek_last_cols = None;
+        self.seek_rest = None;
+        self.seek_stalled = false;
+        self.seek_drift = None;
     }
 
     /// Alt+c (round 20, collapse-in-place): flip between the template width
@@ -819,16 +856,14 @@ impl BarModel {
         if self.collapsed != collapsed {
             self.collapsed = collapsed;
             self.peeking = false; // authoritative flip outranks a peek
-            self.seek_budget = SEEK_BUDGET;
-            self.seek_last_cols = None;
+            self.arm_seek();
         }
     }
 
     pub fn toggle(&mut self) -> Vec<Effect> {
         self.collapsed = !self.collapsed;
         self.peeking = false; // an explicit toggle outranks a pending peek
-        self.seek_budget = SEEK_BUDGET;
-        self.seek_last_cols = None;
+        self.arm_seek();
         // Issue #5 durability: record the ABSOLUTE mode we owe the store and
         // emit the persist effect (executor-gated in main.rs — every
         // instance flips + books, exactly one writes). A fresh toggle
@@ -848,16 +883,24 @@ impl BarModel {
     /// coarser than the targets — a naive "shrink while too wide"
     /// overshoots straight through them (27 → 13, round 9). So the step is
     /// LEARNED from each resize's observed effect, acceptance is "within
-    /// half a step", and GrowSelf recovers an overshoot. Waiting for cols
-    /// to actually change before re-acting keeps in-flight resizes from
-    /// double-firing — which also makes zellij's resize FLOOR benign: at
-    /// the floor cols stop changing, so the seek just stops firing.
-    /// Budget-capped so a layout that refuses to converge isn't fought
-    /// forever.
+    /// half a step", and GrowSelf recovers an overshoot. Budget-capped so a
+    /// layout that refuses to converge isn't fought forever.
+    ///
+    /// Issue #4 (F1, C8 drift-on-window-resize backlog): the old design went
+    /// permanently silent the instant the budget hit zero, so a window
+    /// resize / split that drifted the pane off-target left the bar parked
+    /// until the next toggle/peek. The seek now RE-ARMS on drift — but under
+    /// three bounds so it can neither thrash nor fight a manual resize:
+    ///   1. `seek_rest` — the width we settled at is a no-op; a render there
+    ///      never wakes the seek (a converged/floored bar stays quiet).
+    ///   2. drift confirmation (`seek_drift`) — we re-arm only when the SAME
+    ///      off-target width is observed twice, so an oscillating layout
+    ///      (round 20) or a mid-drag flicker never triggers a re-seek.
+    ///   3. one-render grace (`seek_stalled`) + the refusal-wall rule — a
+    ///      resize that lands a beat late is not double-fired, and a width
+    ///      zellij simply refuses to leave (the granularity floor, C8) is
+    ///      accepted in place rather than hammered.
     pub fn width_seek(&mut self, own_cols: usize) -> Vec<Effect> {
-        if self.seek_budget == 0 {
-            return Vec::new();
-        }
         // A peeking bar seeks the template width even though collapsed —
         // the collapse resumes when the peek expires.
         let target = if self.collapsed && !self.peeking {
@@ -865,8 +908,90 @@ impl BarModel {
         } else {
             BAR_TARGET_COLS
         };
+        // Pre-learning slack of 8 (±4 cols): a bar already within a few
+        // cols of the target must be accepted, not nudged into an
+        // overshoot dance.
+        let step = self.seek_step.max(8) as i64;
+        let diff = own_cols as i64 - target as i64;
+        let within_band = 2 * diff.abs() <= step;
+
+        // (A) We already settled at exactly this width — a no-op render. Only a
+        // DIFFERENT width can wake the seek, so a converged or floored bar
+        // stays silent no matter how many times it is re-rendered. Clearing the
+        // drift candidate here is load-bearing: a layout that flickers between
+        // this rest width and one stable off-target width must NOT re-arm — the
+        // rest visit genuinely resets confirmation, so the off-target width's
+        // reappearance starts counting from scratch and never "confirms". A
+        // real reflow moves cols once to a new stable value and never revisits
+        // rest in between, so it still confirms and re-arms as intended (#4).
+        if self.seek_rest == Some(own_cols) {
+            self.seek_drift = None;
+            return Vec::new();
+        }
+
+        // (B) Dormant (budget spent). Decide between settling here and
+        // re-arming toward the target because an external relayout drifted us.
+        if self.seek_budget == 0 {
+            // The budget just ran out and cols are OUR OWN doing: either within
+            // the band (converged) or within a step of where we last acted —
+            // the tail of our final resize / a refusal wall zellij will not
+            // leave. Settle in place (round 20: "wherever cols stop changing is
+            // accepted"; the SEEK_BUDGET cap means we do not fight a stubborn
+            // layout past the cap). NOT a drift — re-arming here would chase our
+            // own in-flight resize forever (a step-1 layout under latency would
+            // never terminate).
+            let ours = self
+                .seek_last_cols
+                .is_some_and(|last| own_cols.abs_diff(last) <= step as usize);
+            if within_band || ours {
+                self.seek_rest = Some(own_cols);
+                self.seek_drift = None;
+                return Vec::new();
+            }
+            // cols jumped FAR from where we last acted while dormant — a window
+            // resize / split drifted us (issue #4). Confirm it is STABLE (same
+            // width twice) before re-arming, so a thrashing layout or a user
+            // mid-drag never provokes a perpetual re-seek.
+            if self.seek_drift != Some(own_cols) {
+                self.seek_drift = Some(own_cols);
+                return Vec::new();
+            }
+            self.arm_seek(); // stable drift confirmed → re-seek the target
+        }
+
+        // (C) Active seek: learn the step / honour the in-flight beat.
         match self.seek_last_cols {
-            Some(prev) if prev == own_cols => return Vec::new(), // in flight / floor
+            Some(prev) if prev == own_cols => {
+                // cols unchanged since our last resize. Grace EXACTLY one render
+                // first: a resize can land a beat late (latency, round 9), and
+                // that beat is also when its effect finally teaches us the step.
+                // Settling or re-driving before the grace would (a) double-fire
+                // an in-flight resize and (b) mistake it for a wall.
+                // The one-render grace is calibrated to the ledger's modelled
+                // ONE-render resize latency (a subsystem-wide assumption, round
+                // 9 / C6). If live zellij ever lands a resize LATER than that
+                // under burst, the cost of the misdiagnosis is only a
+                // SEEK_BUDGET-bounded re-drive, recovered by the half-step band —
+                // a live-validation watch item, not a correctness hole.
+                if !self.seek_stalled {
+                    self.seek_stalled = true;
+                    return Vec::new();
+                }
+                // Still unchanged after the grace → zellij genuinely refused.
+                if diff.abs() <= step {
+                    // NEAR the target: the granularity floor (zellij refuses
+                    // shrinks below its min pane width, so the bar rests one
+                    // step above it, C8 2026-07-18). Accept and stay silent —
+                    // this keeps the collapsed floor benign, as the old
+                    // in-flight guard did, with no burst of refused resizes.
+                    self.seek_budget = 0;
+                    self.seek_rest = Some(own_cols);
+                    return Vec::new();
+                }
+                // FAR from the target and still not moving: a relayout CLOBBERED
+                // our resize (issue #4). Fall through and re-drive; the budget
+                // bounds a clobber we cannot win.
+            }
             Some(prev) => {
                 let delta = prev.abs_diff(own_cols);
                 // Only a plausible single resize step is LEARNED — external
@@ -878,17 +1003,18 @@ impl BarModel {
             }
             None => {}
         }
-        // Pre-learning slack of 8 (±4 cols): a bar already within a few
-        // cols of the target must be accepted, not nudged into an
-        // overshoot dance.
+        self.seek_stalled = false;
+
+        // (D) Act. Re-read the step in case (C) just learned it.
         let step = self.seek_step.max(8) as i64;
-        let diff = own_cols as i64 - target as i64;
         let action = if 2 * diff > step {
             Effect::ShrinkSelf
         } else if -2 * diff > step {
             Effect::GrowSelf
         } else {
-            self.seek_budget = 0; // close enough: done, stay done
+            // Converged: settle and stay done at exactly this width.
+            self.seek_budget = 0;
+            self.seek_rest = Some(own_cols);
             return Vec::new();
         };
         self.seek_budget -= 1;
@@ -1372,21 +1498,89 @@ mod tests {
 
     #[test]
     fn seek_waits_for_inflight_resizes_and_zellijs_floor() {
-        // In-flight guard (round-9 overshoot risk): same cols again = our
-        // resize hasn't landed yet — WAIT, don't double-fire. The same
-        // guard makes zellij's resize FLOOR benign: at the floor cols stop
-        // changing, so the seek stops firing instead of thrashing.
-        let mut m = collapsed_model();
+        // In-flight guard, issue-#4 edition. cols unchanged since our resize
+        // means the effect either lands a beat late (round-9 double-fire risk —
+        // WAIT) or was CLOBBERED by a relayout (must recover, not hang). The
+        // old guard could not tell the two apart, so it WAITED FOREVER — the
+        // very stall that left a drifted bar parked (F1). Now: grace exactly
+        // one render, then re-drive; the budget bounds a clobber we cannot win.
+        let mut m = collapsed_model(); // target 4
         assert_eq!(m.width_seek(30), vec![Effect::ShrinkSelf]);
-        for _ in 0..10 {
-            assert_eq!(m.width_seek(30), Vec::<Effect>::new());
-        }
+        // FAR off target and still 30: one render of grace, no double-fire.
+        assert_eq!(m.width_seek(30), Vec::<Effect>::new());
+        // Still 30 after the grace → the resize was clobbered; re-drive (#4).
+        assert_eq!(m.width_seek(30), vec![Effect::ShrinkSelf]);
         // Landed (30 → 16): learned step 14, keep shrinking toward 4.
         assert_eq!(m.width_seek(16), vec![Effect::ShrinkSelf]);
-        // Floor: zellij refuses to go below 16 — cols never change again,
-        // the guard holds forever, no thrash.
+        // Floor: |16 − 4| is within a learned step, so zellij's refusal to
+        // shrink further is a NEAR-target wall — accepted in place (round 20:
+        // "wherever cols stop changing is accepted") and silent forever, with
+        // no burst of refused resizes. This keeps the collapsed floor benign.
         for _ in 0..10 {
             assert_eq!(m.width_seek(16), Vec::<Effect>::new());
+        }
+    }
+
+    #[test]
+    fn idle_seek_re_arms_when_a_relayout_drifts_it_off_target() {
+        // Issue #4 (F1): the old seek went permanently silent at budget 0, so a
+        // window resize / split that drifted the bar off-target left it parked
+        // until the next toggle/peek. It must now re-seek — but only after the
+        // drift is CONFIRMED stable (same width twice), so a mid-drag flicker
+        // or a thrashing layout never provokes a perpetual re-seek.
+        let mut m = collapsed_model(); // target 4
+        // Converge to the gutter and go dormant.
+        assert_eq!(m.width_seek(30), vec![Effect::ShrinkSelf]);
+        assert_eq!(m.width_seek(6), Vec::<Effect>::new()); // within band → done
+        assert_eq!(m.seek_budget, 0, "seek should be dormant after converging");
+        // A relayout slams the pane wide (6 → 140). The FIRST render only
+        // observes it (could be a transient mid-relayout value); no action yet.
+        assert_eq!(m.width_seek(140), Vec::<Effect>::new());
+        // The SAME off-target width a second time is a stable drift → re-arm
+        // and seek back toward the gutter.
+        assert_eq!(m.width_seek(140), vec![Effect::ShrinkSelf]);
+    }
+
+    #[test]
+    fn idle_seek_ignores_an_oscillating_layout_and_a_resting_width() {
+        // The two bounds that keep the drift re-arm from fighting forever.
+        let mut m = collapsed_model(); // target 4
+        assert_eq!(m.width_seek(30), vec![Effect::ShrinkSelf]);
+        assert_eq!(m.width_seek(6), Vec::<Effect>::new()); // settled at ~gutter
+        // (1) A render at the exact settled width is a no-op, however often it
+        // repeats — a converged bar never wakes itself.
+        for _ in 0..8 {
+            assert_eq!(m.width_seek(6), Vec::<Effect>::new());
+        }
+        // (2) A layout that never holds still (alternating off-target widths)
+        // is never CONFIRMED, so it never re-arms — no perpetual re-seek
+        // (round 20). Both widths are far from the gutter target.
+        for cols in [200, 100, 200, 100, 200, 100] {
+            assert_eq!(
+                m.width_seek(cols),
+                Vec::<Effect>::new(),
+                "an unstable width must not re-arm the seek"
+            );
+        }
+    }
+
+    #[test]
+    fn idle_seek_oscillating_between_rest_and_one_off_target_never_re_arms() {
+        // A layout that flickers between the SETTLED width and a single stable
+        // off-target width must also never re-arm: a rest visit has to genuinely
+        // reset the drift candidate, or the off-target width's every-other-render
+        // reappearance would spuriously "confirm" (round 20: never fight a
+        // layout that will not hold still). A real reflow, by contrast, moves
+        // cols ONCE to a new stable value and never revisits rest in between.
+        let mut m = collapsed_model(); // target 4
+        assert_eq!(m.width_seek(30), vec![Effect::ShrinkSelf]);
+        assert_eq!(m.width_seek(6), Vec::<Effect>::new()); // settled at ~gutter
+        for cols in [200, 6, 200, 6, 200, 6] {
+            assert_eq!(
+                m.width_seek(cols),
+                Vec::<Effect>::new(),
+                "a rest↔off-target flicker must not re-arm the seek"
+            );
         }
     }
 
@@ -2137,12 +2331,20 @@ mod tests {
         Jump(i64),
     }
 
+    /// A relayout keeps re-rendering the plugin even after the seek falls
+    /// silent; this many CONSECUTIVE silent re-presentations of the same cols
+    /// (with no queued resize) is our proof the bar has genuinely settled, as
+    /// opposed to being one render away from noticing a clobber-drift (issue
+    /// #4). Two suffices: the seek's own recovery (grace + drift confirmation)
+    /// never needs more than one silent render before it acts again.
+    const SETTLE_RENDERS: u32 = 2;
+
     /// Drive width_seek in the render-feedback loop until the model goes SILENT
     /// at stable cols (converged, floored, or budget-exhausted), returning the
     /// largest per-segment effect-step count (a segment is the run between
-    /// budget re-arms — a Toggle starts a fresh one). A hard iteration cap
-    /// turns a non-terminating model (the whole point of the SEEK_BUDGET cap)
-    /// into a loud failure instead of a hang.
+    /// budget re-arms — a Toggle or an issue-#4 drift re-arm starts a fresh
+    /// one). A hard iteration cap turns a non-terminating model (the whole
+    /// point of the SEEK_BUDGET cap) into a loud failure instead of a hang.
     fn drive(
         model: &mut BarModel,
         sim: &mut SimZellij,
@@ -2152,20 +2354,41 @@ mod tests {
         let mut max_seg = 0u32;
         let mut fired = interrupt.is_none();
         let mut iters = 0u32;
+        let mut settle = 0u32; // consecutive idle re-renders at stable cols
         loop {
             iters += 1;
             assert!(iters < 1024, "width_seek livelocked at {} cols", sim.cols);
-            match model.width_seek(sim.cols).as_slice() {
+            let budget_before = model.seek_budget;
+            let fx = model.width_seek(sim.cols);
+            // A drift re-arm (issue #4) hands the seek a fresh budget — hence a
+            // fresh segment, exactly as a Toggle does. Reset the per-segment
+            // counter so assertion (a) bounds each episode, not the sum across
+            // re-arms.
+            if model.seek_budget > budget_before {
+                seg = 0;
+            }
+            match fx.as_slice() {
                 [] => {
                     // Model idle. Flush a deferred (latency) resize if queued;
-                    // otherwise cols are stable AND the model is quiet → done.
+                    // that is progress, not settling.
                     if let Some(p) = sim.pending.take() {
                         sim.apply(&p);
+                        settle = 0;
                         continue;
                     }
-                    return max_seg.max(seg);
+                    // No queued resize and the model is quiet. Re-present the
+                    // current cols: a genuinely settled bar stays silent, but a
+                    // bar left off-target by a clobbered resize (issue #4) needs
+                    // the next render to notice and re-seek. Sustained silence
+                    // across SETTLE_RENDERS re-presentations means settled.
+                    settle += 1;
+                    if settle >= SETTLE_RENDERS {
+                        return max_seg.max(seg);
+                    }
+                    continue;
                 }
                 [only] => {
+                    settle = 0;
                     seg += 1;
                     max_seg = max_seg.max(seg);
                     if !fired
