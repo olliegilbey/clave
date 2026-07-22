@@ -5,7 +5,7 @@
 //! permission cache pre-seeded (grants are all-or-nothing and the in-bar
 //! prompt is unanswerable — S1/S2).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -250,6 +250,10 @@ pub fn is_clave_hook_command(cmd: &str, event: &str) -> bool {
     )
 }
 
+/// The §6.5 state machine's input events — hook registration AND doctor's
+/// exactly-one-entry check key off the same list.
+pub const HOOK_EVENTS: [&str; 4] = ["UserPromptSubmit", "Stop", "Notification", "SessionEnd"];
+
 /// Merge clave's hook registrations into a settings.json value, keyed on
 /// `clave_bin` (the command path to bake — bare `clave` for dev, the
 /// versioned copy's absolute path for a release).
@@ -260,16 +264,12 @@ pub fn is_clave_hook_command(cmd: &str, event: &str) -> bool {
 /// entries are never touched (the never-clobber invariant, §6.5). Returns
 /// whether anything changed.
 pub fn merge_hooks(settings: &mut serde_json::Value, clave_bin: &str) -> bool {
-    // The §6.5 state machine's input events. PermissionRequest/StopFailure
-    // are handled IF the CLI sends them, but registration sticks to the
-    // documented set; Notification covers the needs-you cases.
-    const EVENTS: [&str; 4] = ["UserPromptSubmit", "Stop", "Notification", "SessionEnd"];
     let mut changed = false;
     let hooks = settings
         .as_object_mut()
         .map(|o| o.entry("hooks").or_insert_with(|| serde_json::json!({})))
         .expect("settings.json root must be an object");
-    for ev in EVENTS {
+    for ev in HOOK_EVENTS {
         let cmd = format!("{clave_bin} hook {ev}");
         let want = serde_json::json!(cmd);
         let arr = hooks
@@ -278,29 +278,48 @@ pub fn merge_hooks(settings: &mut serde_json::Value, clave_bin: &str) -> bool {
             .entry(ev)
             .or_insert_with(|| serde_json::json!([]));
         let entries = arr.as_array_mut().expect("hook event must be an array");
-        // Find an existing clave entry (any version's path) and rewrite its
-        // command to the current binary — a version cut MUST NOT leave the
-        // prior release's hook behind (it would run the old CLI) nor stack a
-        // duplicate. Only OUR command strings are eligible; user hooks pass
-        // through untouched.
+        // Keep EXACTLY ONE clave hook per event (review 2026-07-22, Fix 4):
+        // rewrite the FIRST clave match (any version's path) to the current
+        // command — a version cut MUST NOT leave the prior release's hook
+        // behind — and REMOVE every subsequent clave match, because Claude
+        // fires ALL matching hooks and duplicates double-fire. Only OUR
+        // command strings are eligible; user hooks pass through untouched.
         let mut found = false;
         for e in entries.iter_mut() {
             let Some(hs) = e.get_mut("hooks").and_then(|v| v.as_array_mut()) else {
                 continue;
             };
-            for h in hs.iter_mut() {
+            hs.retain_mut(|h| {
                 let ours = h
                     .get("command")
                     .and_then(|v| v.as_str())
                     .is_some_and(|c| is_clave_hook_command(c, ev));
-                if ours {
-                    found = true;
-                    if h["command"] != want {
-                        h["command"] = want.clone();
-                        changed = true;
-                    }
+                if !ours {
+                    return true; // foreign hook — never touch
                 }
-            }
+                if found {
+                    changed = true; // a duplicate clave hook — drop it
+                    return false;
+                }
+                found = true;
+                if h["command"] != want {
+                    h["command"] = want.clone();
+                    changed = true;
+                }
+                true
+            });
+        }
+        // Drop entry objects whose hooks array emptied out (all its hooks were
+        // duplicate clave matches we removed) — never leave a hollow
+        // {"hooks": []}. Foreign-bearing entries can't empty (foreign is kept).
+        let before = entries.len();
+        entries.retain(|e| {
+            e.get("hooks")
+                .and_then(|v| v.as_array())
+                .is_none_or(|a| !a.is_empty())
+        });
+        if entries.len() != before {
+            changed = true;
         }
         if !found {
             entries.push(serde_json::json!({
@@ -356,6 +375,12 @@ pub fn merge_permissions_kdl(existing: &str, wasm_abs: &str) -> String {
     out
 }
 
+/// Is our grant present in the permission-cache text? Same key form
+/// merge_permissions_kdl writes — doctor never guesses a second format.
+pub fn permissions_seeded(existing: &str, wasm_abs: &str) -> bool {
+    existing.contains(&format!("\"file:{wasm_abs}\""))
+}
+
 /// The generation weave shared by `clave setup` (dev/sandbox) and `clave
 /// release` (stable): write config.kdl + layout.kdl baking `binary` into
 /// commands and `wasm` into plugin locations, merge the clave hooks
@@ -376,6 +401,9 @@ pub fn write_generated(dir: &std::path::Path, binary: &str, wasm: &str) -> Resul
     // OWN settings.json — else sandbox sessions get no clave hooks and
     // scenario agents never report status. Env unset ⇒ ~/.claude, unchanged.
     let settings_path = crate::env::claude_config_dir()?.join("settings.json");
+    if let Some(parent) = settings_path.parent() {
+        std::fs::create_dir_all(parent)?; // fresh box: ~/.claude may not exist yet
+    }
     let mut settings: serde_json::Value = match std::fs::read(&settings_path) {
         Ok(b) => serde_json::from_slice(&b).context("parsing ~/.claude/settings.json")?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
@@ -399,6 +427,38 @@ pub fn write_generated(dir: &std::path::Path, binary: &str, wasm: &str) -> Resul
     Ok(())
 }
 
+/// Write the embedded wasm as the VERSIONED artifact — which wasm_path()
+/// already prefers — if absent (spec §Distribution). Write-if-absent keeps
+/// re-runs idempotent and honors running-session immunity (§2).
+pub fn extract_embedded(dir: &Path, bytes: &[u8], version: &str) -> Result<PathBuf> {
+    let dest = dir.join(crate::release::versioned_wasm_name(version));
+    if !dest.exists() {
+        std::fs::write(&dest, bytes)
+            .with_context(|| format!("extracting embedded wasm to {}", dest.display()))?;
+    }
+    Ok(dest)
+}
+
+/// Install the running exe as the versioned CLI copy `<data>/bin/clave-vX.Y.Z`
+/// (codex P2 on PR #29, 2026-07-22). Baking current_exe into config/hooks was
+/// not enough: `runtime_binary()` — which add/open/the eager launch layout
+/// bake into agent-tab commands — keys on this copy's EXISTENCE and fell back
+/// to bare `clave`, so a `./clave` single-file install launched fine but every
+/// agent tab failed to spawn. Installing the copy converges the single-file
+/// install with `just release`'s model: one versioned artifact, every baked
+/// reference absolute, and the scp'd file becomes disposable after setup.
+/// Write-if-absent for the same reason as the wasm (running-session immunity).
+pub fn install_cli_copy(dir: &Path, exe: &Path, version: &str) -> Result<PathBuf> {
+    let bin_dir = dir.join("bin");
+    std::fs::create_dir_all(&bin_dir)?;
+    let dest = bin_dir.join(crate::release::versioned_cli_name(version));
+    if !dest.exists() {
+        std::fs::copy(exe, &dest)
+            .with_context(|| format!("installing CLI copy to {}", dest.display()))?;
+    }
+    Ok(dest)
+}
+
 /// `clave setup` — the DEV/sandbox machine prep: generate against bare
 /// `clave` (PATH = the dev binary) and the unversioned working-tree wasm.
 /// Stable machines are prepared by `just release` (→ `run_release`), which
@@ -406,14 +466,41 @@ pub fn write_generated(dir: &std::path::Path, binary: &str, wasm: &str) -> Resul
 pub fn run_setup() -> Result<()> {
     let dir = data_dir()?;
     std::fs::create_dir_all(&dir)?;
-    let wasm = wasm_path()?;
-    let wasm_str = wasm.to_str().context("wasm path")?;
+    // Fix 7 (review 2026-07-22): extract the embedded wasm FIRST and
+    // unconditionally — write-if-absent on the VERSIONED name. Previously we
+    // extracted only when wasm_path() reported nothing; but wasm_path() falls
+    // back to a stale unversioned clave-bar.wasm, so a leftover sandbox wasm
+    // made wasm.exists() true and the release's versioned wasm never landed —
+    // config got baked against the stale file. Extracting before resolving
+    // both fixes that and removes the old nested branch.
+    let binary = if let Some(bytes) = crate::release::embedded_wasm() {
+        extract_embedded(&dir, bytes, env!("CARGO_PKG_VERSION"))?;
+        // Release single-file install: install the versioned CLI copy, then
+        // bake through runtime_binary() — the SAME resolution add/open/launch
+        // use at tab-bake time, so setup and runtime can never disagree about
+        // which binary agent tabs run (codex P2 on PR #29, 2026-07-22).
+        // current_exe canonicalized so the copy survives a symlinked invoker.
+        match std::env::current_exe().and_then(std::fs::canonicalize).ok() {
+            Some(exe) => {
+                install_cli_copy(&dir, &exe, env!("CARGO_PKG_VERSION"))?;
+                crate::release::runtime_binary()
+            }
+            // Unresolvable current_exe: bare `clave` beats refusing setup.
+            None => "clave".to_string(),
+        }
+    } else {
+        // Dev/sandbox: bare `clave` deliberately — PATH resolves to the
+        // freshly cargo-installed dev binary, which is what should run there.
+        "clave".to_string()
+    };
+    let wasm = wasm_path()?; // prefers the versioned artifact just extracted
     anyhow::ensure!(
         wasm.exists(),
         "{} missing — run `just dev-install` first (it builds the sandbox wasm here)",
         wasm.display()
     );
-    write_generated(&dir, "clave", wasm_str)
+    let wasm_str = wasm.to_str().context("wasm path")?;
+    write_generated(&dir, &binary, wasm_str)
 }
 
 /// Does `zellij list-sessions -n` output show `name` as a LIVE session?
@@ -444,15 +531,115 @@ pub fn eager_row(store: &crate::store::Store) -> Option<&crate::store::AgentReco
         .max_by_key(|r| r.last_interacted)
 }
 
+/// First-run consent (spec §First run): the plan prints ALWAYS; the prompt
+/// fires only on a TTY — never prompt without one (Homebrew 2026). Pure
+/// over (tty, read line) so the gate is unit-testable.
+pub fn confirm_proceed(is_tty: bool, input: Option<&str>) -> bool {
+    if !is_tty {
+        return true; // invoking `clave` IS the named intent; setup is idempotent
+    }
+    matches!(
+        input.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("") | Some("y") | Some("yes") | None
+    )
+}
+
+pub fn first_run_plan(data_dir: &Path, settings_path: &Path) -> String {
+    format!(
+        "First run — clave needs to prepare this machine:\n\
+         \n\
+         \x20 • generate session config + layout in {}\n\
+         \x20 • register status hooks in {} (additive — your existing hooks are never touched)\n\
+         \x20 • pre-seed Zellij's plugin permission cache\n",
+        data_dir.display(),
+        settings_path.display()
+    )
+}
+
+/// Should launch re-run setup because a release binary was UPGRADED (review
+/// 2026-07-22, Fix 3)? launch_session only ran setup on a MISSING config, so
+/// an upgraded release binary (new version, embedded wasm) with existing
+/// config never extracted its new versioned wasm and kept launching the OLD
+/// bar — exactly the CLI/bar drift invariant #9 exists to kill. True only
+/// when config already exists (first run is the other branch's job), this is
+/// a release build, and THIS version's wasm has not been extracted yet.
+/// Running-session immunity holds automatically: live sessions reference the
+/// old files baked into their config, untouched by re-running setup.
+pub fn needs_version_refresh(
+    config_exists: bool,
+    has_embedded: bool,
+    versioned_wasm_exists: bool,
+) -> bool {
+    config_exists && has_embedded && !versioned_wasm_exists
+}
+
 /// Bare `clave`: attach-or-create the dedicated session with OUR config +
 /// a DYNAMIC layout (§6.8 C8: eager most-recent tab; serialization is off,
 /// so a dead session is deleted, never resurrected).
 pub fn launch_session() -> Result<()> {
+    // Preflight BEFORE anything (spec §Preflight): zellij because we exec
+    // it; claude because the eager tab's spawn would otherwise fail INSIDE
+    // a pane — the worst place to read an error.
+    crate::doctor::preflight(
+        &[
+            crate::discover::ToolId::Zellij,
+            crate::discover::ToolId::Claude,
+        ],
+        "clave can't start — missing required tools:",
+    )?;
     let dir = data_dir()?;
     let config = dir.join("config.kdl");
-    anyhow::ensure!(config.exists(), "run `clave setup` first");
+    let config_exists = config.exists();
+    if !config_exists {
+        // First run (spec §First run): plan → TTY-gated consent → setup.
+        use std::io::IsTerminal;
+        let settings = crate::env::claude_config_dir()?.join("settings.json");
+        println!("{}", first_run_plan(&dir, &settings));
+        let is_tty = std::io::stdin().is_terminal();
+        let input = if is_tty {
+            print!("Proceed? [Y/n] ");
+            use std::io::Write;
+            std::io::stdout().flush()?;
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line)?;
+            Some(line)
+        } else {
+            None
+        };
+        anyhow::ensure!(
+            confirm_proceed(is_tty, input.as_deref()),
+            "aborted — run `clave setup` when ready"
+        );
+        run_setup()?;
+    } else {
+        // Upgrade-refresh (review 2026-07-22, Fix 3): a release binary whose
+        // config exists but whose THIS-version wasm is not yet extracted was
+        // just upgraded — re-run setup so the new versioned wasm lands and the
+        // bar can never go stale. Idempotent, no consent prompt (the user
+        // consented at first run; this is the same mutation set).
+        let versioned = dir.join(crate::release::versioned_wasm_name(env!(
+            "CARGO_PKG_VERSION"
+        )));
+        if needs_version_refresh(
+            config_exists,
+            crate::release::embedded_wasm().is_some(),
+            versioned.exists(),
+        ) {
+            println!(
+                "clave {}: refreshing setup for this version",
+                env!("CARGO_PKG_VERSION")
+            );
+            run_setup()?;
+        }
+    }
+    // Discovered once, used for every zellij invocation in this launch —
+    // an off-PATH zellij (e.g. ~/.cargo/bin over SSH) still works (spec
+    // §Discovery: found off-PATH ⇒ use the absolute path).
+    let zellij = crate::discover::discover(crate::discover::ToolId::Zellij)
+        .map(|d| d.path)
+        .unwrap_or_else(|| std::path::PathBuf::from("zellij")); // preflight guarantees Some
     let session = crate::env::session_name();
-    let list = std::process::Command::new("zellij")
+    let list = std::process::Command::new(&zellij)
         .args(["list-sessions", "-n"])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
@@ -468,7 +655,7 @@ pub fn launch_session() -> Result<()> {
             // launch must NOT die on a cleanup failure — but a SILENT failure
             // would let attach resurrect the exact pre-C8 serialized state C8
             // kills, invisibly. So capture the status and log any failure.
-            match std::process::Command::new("zellij")
+            match std::process::Command::new(&zellij)
                 .args(["delete-session", "--force", &session])
                 .status()
             {
@@ -517,7 +704,7 @@ pub fn launch_session() -> Result<()> {
         ),
     );
     use std::os::unix::process::CommandExt;
-    let err = std::process::Command::new("zellij")
+    let err = std::process::Command::new(&zellij)
         .arg("--config")
         .arg(&config)
         .arg("--layout")
@@ -719,6 +906,14 @@ mod tests {
     }
 
     #[test]
+    fn permissions_seeded_detects_our_grant() {
+        let seeded = merge_permissions_kdl("", "/data/clave-bar.wasm");
+        assert!(permissions_seeded(&seeded, "/data/clave-bar.wasm"));
+        assert!(!permissions_seeded("", "/data/clave-bar.wasm"));
+        assert!(!permissions_seeded(&seeded, "/other/clave-bar.wasm"));
+    }
+
+    #[test]
     fn config_disables_session_serialization() {
         // §6.8 (2026-07-17, C8): resurrection is clave-owned; a serialized
         // session would replay discovered `claude --session-id` commands
@@ -839,6 +1034,48 @@ mod tests {
     }
 
     #[test]
+    fn merge_hooks_dedupes_duplicate_clave_entries_keeping_one() {
+        // Fix 4 (review 2026-07-22): merge_hooks rewrote EVERY matching clave
+        // hook in place but never removed duplicates — Claude fires ALL
+        // matching hooks, so two clave Stop entries double-fire. Per event,
+        // keep exactly ONE clave hook (rewrite the first, drop the rest);
+        // never touch a foreign hook in the same array.
+        let mut v: serde_json::Value = serde_json::json!({
+            "hooks": {
+                "Stop": [
+                    { "hooks": [ { "type": "command", "command": "clave hook Stop" } ] },
+                    { "hooks": [ { "type": "command", "command": "/old/path/clave-v0.0.9 hook Stop" } ] },
+                    { "hooks": [ { "type": "command", "command": "my-bell hook Stop" } ] }
+                ]
+            }
+        });
+        assert!(merge_hooks(&mut v, "clave")); // changed: the duplicate was removed
+        let stops = v["hooks"]["Stop"].as_array().unwrap();
+        // Exactly one surviving clave Stop entry, at the current command.
+        let clave: Vec<_> = stops
+            .iter()
+            .filter(|e| {
+                e["hooks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|h| is_clave_hook_command(h["command"].as_str().unwrap_or(""), "Stop"))
+            })
+            .collect();
+        assert_eq!(clave.len(), 1);
+        assert_eq!(clave[0]["hooks"][0]["command"], "clave hook Stop");
+        // The foreign my-bell entry survives untouched.
+        assert!(
+            stops
+                .iter()
+                .any(|e| e["hooks"][0]["command"] == "my-bell hook Stop")
+        );
+        // Idempotent second run: nothing left to dedupe.
+        assert!(!merge_hooks(&mut v, "clave"));
+        assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
     fn merge_hooks_leaves_a_foreign_clave_v_prefixed_hook_untouched() {
         // Regression: `clave-vault`/`clave-verify` share the "clave-v" prefix
         // with our versioned binary name (clave-vN.N.N) but are unrelated
@@ -855,6 +1092,79 @@ mod tests {
         assert_eq!(stops.len(), 2); // their entry + ours, not a rewrite
         assert_eq!(stops[0]["hooks"][0]["command"], "clave-vault hook Stop"); // untouched
         assert_eq!(stops[1]["hooks"][0]["command"], "clave hook Stop");
+    }
+
+    #[test]
+    fn extract_embedded_is_write_if_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = extract_embedded(dir.path(), b"wasm-bytes", "0.1.0").unwrap();
+        assert_eq!(p.file_name().unwrap(), "clave-bar-v0.1.0.wasm");
+        assert_eq!(std::fs::read(&p).unwrap(), b"wasm-bytes");
+        // Second call must NOT rewrite — a live session's loaded wasm is
+        // never touched (§2 running-session immunity).
+        extract_embedded(dir.path(), b"DIFFERENT", "0.1.0").unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"wasm-bytes");
+    }
+
+    #[test]
+    fn needs_version_refresh_only_when_release_wasm_is_stale() {
+        // Fix 3 (review 2026-07-22): an upgraded release binary with existing
+        // config must re-extract its NEW versioned wasm, else it launches the
+        // OLD bar forever (invariant #9 drift). True ONLY for
+        // (config present, embedded, this version's wasm absent).
+        assert!(needs_version_refresh(true, true, false));
+        // Wasm already current → no refresh (idempotent, no needless setup).
+        assert!(!needs_version_refresh(true, true, true));
+        // Dev build (no embedded wasm) → the sandbox flow owns wasm placement.
+        assert!(!needs_version_refresh(true, false, false));
+        // First run (no config) is handled by the other branch, never here.
+        assert!(!needs_version_refresh(false, true, false));
+        assert!(!needs_version_refresh(false, false, false));
+        assert!(!needs_version_refresh(false, true, true));
+    }
+
+    #[test]
+    fn install_cli_copy_is_write_if_absent_under_bin() {
+        // Codex P2 (PR #29): the versioned CLI copy is what runtime_binary()
+        // keys on — a single-file install must create it or every agent tab
+        // bakes bare `clave`. Write-if-absent mirrors the wasm extraction
+        // (running-session immunity).
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("clave-download");
+        std::fs::write(&exe, b"binary-v1").unwrap();
+        let dest = install_cli_copy(dir.path(), &exe, "0.1.0").unwrap();
+        assert_eq!(dest, dir.path().join("bin").join("clave-v0.1.0"));
+        assert_eq!(std::fs::read(&dest).unwrap(), b"binary-v1");
+        // Second install with different content must NOT rewrite.
+        std::fs::write(&exe, b"binary-v2").unwrap();
+        install_cli_copy(dir.path(), &exe, "0.1.0").unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"binary-v1");
+    }
+
+    #[test]
+    fn confirm_proceed_tty_gating_and_default_yes() {
+        // Never prompt without a TTY (Homebrew 2026 rule) → proceed.
+        assert!(confirm_proceed(false, None));
+        // TTY: empty/y/Y/yes proceed; n/no abort.
+        for yes in ["", "y", "Y", "yes", " y "] {
+            assert!(confirm_proceed(true, Some(yes)), "{yes:?}");
+        }
+        for no in ["n", "N", "no", "nope"] {
+            assert!(!confirm_proceed(true, Some(no)), "{no:?}");
+        }
+    }
+
+    #[test]
+    fn first_run_plan_names_the_three_mutations() {
+        let s = first_run_plan(
+            Path::new("/home/u/.local/share/clave"),
+            Path::new("/home/u/.claude/settings.json"),
+        );
+        assert!(s.contains("First run"));
+        assert!(s.contains("/home/u/.local/share/clave"));
+        assert!(s.contains("/home/u/.claude/settings.json"));
+        assert!(s.contains("additive"));
+        assert!(s.contains("permission cache"));
     }
 
     #[test]

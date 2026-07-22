@@ -149,6 +149,14 @@ enum Command {
     /// pre-seed the Zellij permission cache (§6.8/§7). Idempotent.
     Setup,
 
+    /// Health report: required tools, picker deps, clave's own setup state,
+    /// environment traps. Diagnose-only — `clave setup` is the repair path.
+    Doctor {
+        /// Emit facts + findings as JSON instead of the grouped report.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Open a known store row's tab (plugin-internal, §6.3 C8): the bar fires
     /// this when a dormant row's focus settles or on an explicit pick.
     #[command(hide = true)]
@@ -221,12 +229,31 @@ fn main() -> Result<()> {
             spawn::register_pane(&uuid);
             std::env::set_current_dir(&physical).context("entering --cwd")?;
             use std::os::unix::process::CommandExt;
+            // Discovered claude (spec §Discovery): the pane env may lack the
+            // interactive PATH (nvm/local-install), so exec the absolute
+            // path — resolved FRESH each spawn (the command is replayed on
+            // resurrection and must survive reinstalls).
+            let claude = clave::discover::discover(clave::discover::ToolId::Claude)
+                .map(|d| d.path)
+                .ok_or_else(|| {
+                    // Reuse the canonical copy (coderabbit 2026-07-22): an
+                    // ad-hoc string here is exactly the drift the one-copy-
+                    // module rule exists to prevent — this pane message and
+                    // doctor's must stay the same words.
+                    let advice =
+                        clave::doctor::missing_advice(clave::discover::ToolId::Claude, None)
+                            .join("\n");
+                    anyhow::anyhow!(
+                        "claude not found\n{advice}\n\
+                         (or set CLAVE_CLAUDE_BIN to its location)"
+                    )
+                })?;
             let err = match mode {
                 // --name only on create: the bar label is clave-owned (§6.1).
-                spawn::SpawnMode::Create => std::process::Command::new("claude")
+                spawn::SpawnMode::Create => std::process::Command::new(&claude)
                     .args(["--session-id", &uuid, "--name", &name])
                     .exec(),
-                spawn::SpawnMode::Resume => std::process::Command::new("claude")
+                spawn::SpawnMode::Resume => std::process::Command::new(&claude)
                     .args(["--resume", &uuid])
                     .exec(),
             };
@@ -310,6 +337,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some(Command::Setup) => setup::run_setup(),
+        Some(Command::Doctor { json }) => clave::doctor::run_doctor(json),
         Some(Command::Open { uuid }) => open::run_open(&uuid),
         Some(Command::Dev { action }) => match action {
             DevAction::Scenario { name } => dev::run_scenario(&name),

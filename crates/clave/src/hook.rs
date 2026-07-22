@@ -206,7 +206,11 @@ pub fn push_snapshot(snap: &AgentSnapshot) {
     let Ok(payload) = serde_json::to_string(snap) else {
         return;
     };
-    let _ = Command::new("zellij")
+    // Discovered path (codex P2 on PR #29): hooks run as claude's children,
+    // whose env may lack the interactive PATH — an off-PATH zellij made every
+    // status push a silent no-op. Fire-and-forget stays: failure here must
+    // never become a hook failure (§6.5 zero-risk citizen).
+    let _ = Command::new(crate::discover::tool_path(crate::discover::ToolId::Zellij))
         .args(["pipe", "--name", "clave-status", "--", &payload])
         .stdin(Stdio::null())
         .stdout(Stdio::null())

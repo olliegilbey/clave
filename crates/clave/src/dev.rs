@@ -198,16 +198,31 @@ pub fn run_scenario(name: &str) -> Result<()> {
             repo.clone()
         };
         let cwd = std::fs::canonicalize(&cwd)?; // S0b: claude munges getcwd()
-        // A REAL resumable jsonl for a few tokens (§6.9): resume-with-
-        // history is verified for real, not mocked.
-        println!("seeding {uuid} ({})…", a.slug);
-        let st = Command::new("claude")
-            .current_dir(&cwd)
-            .args(["-p", "--session-id", &uuid, "Reply with exactly: ok"])
-            .status()
-            .context("running claude -p (is claude on PATH?)")?;
-        anyhow::ensure!(st.success(), "claude -p seeding failed for {uuid}");
         let cwd_str = cwd.to_str().context("cwd utf8")?.to_string();
+        // A REAL resumable jsonl for a few tokens (§6.9): resume-with-
+        // history is verified for real, not mocked. Resume-or-create like
+        // spawn (S0): scenario UUIDs are deterministic and claude's identity
+        // is never sandboxed, so a prior run's transcript persists and
+        // `--session-id` reuse is REFUSED — an existing jsonl means this
+        // agent is already seeded, which is the goal state, not an error.
+        if seed_needed(&crate::env::claude_config_dir()?, &cwd_str, &uuid) {
+            println!("seeding {uuid} ({})…", a.slug);
+            // Discovered claude (coderabbit CLI, 2026-07-22): a contributor
+            // whose claude lives off PATH (nvm, ~/.claude/local) could not
+            // seed a scenario at all. Unlike dev.rs's zellij calls — session
+            // lifecycle the human drives — this is a real exec clave owns.
+            let st = Command::new(crate::discover::tool_path(crate::discover::ToolId::Claude))
+                .current_dir(&cwd)
+                .args(["-p", "--session-id", &uuid, "Reply with exactly: ok"])
+                .status()
+                .context("running claude -p (is claude discoverable?)")?;
+            anyhow::ensure!(st.success(), "claude -p seeding failed for {uuid}");
+        } else {
+            println!(
+                "{uuid} ({}) already seeded — reusing its transcript",
+                a.slug
+            );
+        }
         crate::store::with_store_mut(&paths, |s| {
             s.agents.insert(
                 uuid.clone(),
@@ -248,7 +263,13 @@ pub fn run_status() -> Result<()> {
     let root = sandbox_root()?;
     enter_sandbox(&root);
     let store = crate::store::read_store(&crate::store::store_paths()?)?;
-    let list = Command::new("zellij")
+    // Discovered zellij (2026-07-22): both reads below swallow failure with
+    // unwrap_or_default, so an off-PATH zellij would report "no live session"
+    // rather than erroring — and CLAUDE.md tells agents to gate the session
+    // lifecycle on exactly this output. A false negative here is worse than
+    // a loud failure.
+    let zellij = crate::discover::tool_path(crate::discover::ToolId::Zellij);
+    let list = Command::new(&zellij)
         .args(["list-sessions", "-n"])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
@@ -259,7 +280,7 @@ pub fn run_status() -> Result<()> {
     // absent/dead session BLOCKS indefinitely instead of erroring —
     // an ungated dump-layout hung `dev status` for minutes pre-launch.
     let dump = if live_session {
-        Command::new("zellij")
+        Command::new(&zellij)
             .env("ZELLIJ_SESSION_NAME", "clave-test")
             .args(["action", "dump-layout"])
             .output()
@@ -360,9 +381,38 @@ fn run_in(dir: &Path, cmd: &str, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// Does this scenario agent still need its `claude -p` seed? Existence of
+/// the munged jsonl drives the branch (S0 — the same rule `claude --resume`
+/// itself enforces), via the SAME `spawn_mode` check the pane path uses, so
+/// scenario seeding (§6.9) and pane spawning can never disagree about what
+/// "already exists" means.
+fn seed_needed(claude_dir: &Path, physical_cwd: &str, uuid: &str) -> bool {
+    matches!(
+        crate::spawn::spawn_mode(claude_dir, physical_cwd, uuid),
+        crate::spawn::SpawnMode::Create
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seeding_skips_an_already_seeded_session() {
+        // Deterministic scenario UUIDs + never-sandboxed claude identity
+        // (§6.9 ruling) ⇒ a prior run's transcript persists in the REAL
+        // ~/.claude, and claude REFUSES --session-id reuse ("already in
+        // use", found live 2026-07-22). An existing jsonl is the GOAL
+        // state, not an error — resume-or-create, exactly like spawn (S0).
+        let claude = tempfile::tempdir().unwrap();
+        let cwd = "/tmp/clave-dev/repos/c8-cold-start-x";
+        let uuid = scenario_uuid(1);
+        assert!(seed_needed(claude.path(), cwd, &uuid));
+        let jsonl = crate::spawn::jsonl_path(claude.path(), cwd, &uuid);
+        std::fs::create_dir_all(jsonl.parent().unwrap()).unwrap();
+        std::fs::write(&jsonl, "{}").unwrap();
+        assert!(!seed_needed(claude.path(), cwd, &uuid));
+    }
 
     #[test]
     fn scenario_state_dirs_excludes_the_data_build_artifact() {

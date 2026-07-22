@@ -1,0 +1,8 @@
+# Injected into dist's build job BEFORE `cargo build` (spec §Distribution):
+# build the bar wasm first, then export CLAVE_BAR_WASM so build.rs embeds it.
+- name: Build clave-bar wasm
+  run: |
+    rustup target add wasm32-wasip1
+    cargo build -p clave-bar --release --target wasm32-wasip1
+    echo "CLAVE_BAR_WASM=$GITHUB_WORKSPACE/target/wasm32-wasip1/release/clave-bar.wasm" >> "$GITHUB_ENV"
+    echo "CLAVE_BUILD_TAG=$(git describe --tags --exact-match HEAD 2>/dev/null || git rev-parse --short HEAD)" >> "$GITHUB_ENV"

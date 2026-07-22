@@ -361,7 +361,7 @@ pub fn merge_resume_record(existing: Option<&AgentRecord>, fresh: AgentRecord) -
 /// so this works inside the Alt+a floating pane; stdin carries the menu,
 /// stdout the choice. None = user aborted (Esc) → caller exits quietly.
 fn fzf_pick(lines: &[String], prompt: &str) -> Result<Option<String>> {
-    let mut child = Command::new("fzf")
+    let mut child = Command::new(tool_path(crate::discover::ToolId::Fzf))
         .args(["--prompt", prompt, "--height", "100%"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -380,13 +380,34 @@ fn fzf_pick(lines: &[String], prompt: &str) -> Result<Option<String>> {
     Ok((!picked.is_empty()).then_some(picked))
 }
 
-fn cmd_stdout(cmd: &str, args: &[&str]) -> Result<String> {
+fn cmd_stdout(cmd: impl AsRef<std::ffi::OsStr>, args: &[&str]) -> Result<String> {
+    let cmd = cmd.as_ref();
     let out = Command::new(cmd)
         .args(args)
         .output()
-        .with_context(|| format!("running {cmd}"))?;
-    anyhow::ensure!(out.status.success(), "{cmd} {args:?} failed");
+        .with_context(|| format!("running {}", cmd.to_string_lossy()))?;
+    anyhow::ensure!(
+        out.status.success(),
+        "{} {args:?} failed",
+        cmd.to_string_lossy()
+    );
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+// tool_path moved to discover::tool_path (codex P2 on PR #29): hook and open
+// need the same discovered-or-bare resolution, so it lives with discovery.
+use crate::discover::tool_path;
+
+/// The Alt+a keybind runs add in a floating pane with close_on_exit=true —
+/// an abort's message would flash and VANISH (spec §Preflight pane-hold).
+/// Block on Enter so the guidance is readable; TTY-gated so scripted
+/// invocations never hang.
+fn hold_open_if_tty() {
+    use std::io::IsTerminal;
+    if std::io::stdin().is_terminal() {
+        eprintln!("\npress Enter to close");
+        let _ = std::io::stdin().read_line(&mut String::new());
+    }
 }
 
 /// List a munged project dir's `<uuid>.jsonl` stems + mtimes (§6.3). Factored
@@ -434,12 +455,33 @@ pub fn record_branch(resumed: bool, cand_branch: Option<&str>, picked_branch: &s
 }
 
 pub fn run_add(worktree: bool) -> Result<()> {
+    // Preflight (spec §Preflight): the fzf weave, git/claude, and zellij
+    // itself are all needed before any tab exists — abort BEFORE creating
+    // anything. Zellij included (coderabbit CLI, 2026-07-22): run_add execs
+    // `zellij action new-tab`, so an undiscoverable zellij would otherwise
+    // fail AFTER the picker and the store row, leaving orphaned state.
+    if let Err(e) = crate::doctor::preflight(
+        &[
+            crate::discover::ToolId::Fzf,
+            crate::discover::ToolId::Zoxide,
+            crate::discover::ToolId::Git,
+            crate::discover::ToolId::Claude,
+            crate::discover::ToolId::Zellij,
+        ],
+        "clave add needs tools that are missing:",
+    ) {
+        eprintln!("{e}");
+        eprintln!("You can install them from another tab without leaving the session.");
+        hold_open_if_tty();
+        anyhow::bail!("missing dependencies for `clave add`");
+    }
+
     // 1) Pick a directory: fzf over zoxide's ranked list, current dir first
     //    (§6.3 — fzf+zoxide are verified present on the target machine).
     let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
     let mut dirs: Vec<String> = vec![cwd.clone()];
     dirs.extend(
-        cmd_stdout("zoxide", &["query", "-l"])?
+        cmd_stdout(tool_path(crate::discover::ToolId::Zoxide), &["query", "-l"])?
             .lines()
             .map(String::from),
     );
@@ -452,14 +494,16 @@ pub fn run_add(worktree: bool) -> Result<()> {
     //    physical path: repo_root, munged jsonl dir, the spawn command.
     let physical = std::fs::canonicalize(&dir).with_context(|| format!("canonicalizing {dir}"))?;
     let physical_str = physical.to_str().context("non-UTF8 dir")?.to_string();
-    let repo_root = cmd_stdout(
-        "git",
-        &["-C", &physical_str, "rev-parse", "--show-toplevel"],
-    )
-    .map(|s| s.trim().to_string())
-    .unwrap_or_else(|_| physical_str.clone()); // non-repo dirs are fine
+    // Route every git/zellij invocation through discovery (review 2026-07-22,
+    // Fix 2): doctor promises off-PATH tools are used by absolute path, so
+    // add must not fall back to bare `git`/`zellij` — an off-PATH git (SSH,
+    // ~/.local/bin) would break repo detection preflight already passed.
+    let git = tool_path(crate::discover::ToolId::Git);
+    let repo_root = cmd_stdout(&git, &["-C", &physical_str, "rev-parse", "--show-toplevel"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| physical_str.clone()); // non-repo dirs are fine
     let branch = cmd_stdout(
-        "git",
+        &git,
         &["-C", &physical_str, "rev-parse", "--abbrev-ref", "HEAD"],
     )
     .map(|s| s.trim().to_string())
@@ -469,7 +513,8 @@ pub fn run_add(worktree: bool) -> Result<()> {
     //    no auto-jump here — live agents surface as jump entries in the
     //    resume picker instead; the old first-live-agent jump made a second
     //    agent in the same repo impossible).
-    let dump = cmd_stdout("zellij", &["action", "dump-layout"]).unwrap_or_default();
+    let zellij = tool_path(crate::discover::ToolId::Zellij); // Fix 2 (review 2026-07-22)
+    let dump = cmd_stdout(&zellij, &["action", "dump-layout"]).unwrap_or_default();
     let paths = store_paths()?;
     let store = crate::store::read_store(&paths)?;
     // Issue #6: liveness from the store's binds (authoritative — command
@@ -500,7 +545,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
         // dir has no worktrees → the loop below falls back to the picked dir
         // alone, behavior unchanged.
         let porcelain = cmd_stdout(
-            "git",
+            &git, // discovered path (review 2026-07-22) — same promise as every git call here
             &["-C", &repo_root, "worktree", "list", "--porcelain"],
         )
         .unwrap_or_default();
@@ -578,7 +623,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
         // the right zellij.
         if candidates.iter().any(|c| c.uuid == uuid && c.live) {
             let payload = format!("{{\"uuid\":\"{uuid}\"}}");
-            let _ = Command::new("zellij")
+            let _ = Command::new(&zellij) // discovered above (Fix 2)
                 .args(["pipe", "--name", "clave-nav", "--", &payload])
                 .status();
             return Ok(());
@@ -603,7 +648,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
             let short = &uuid[..8];
             let path = format!("{repo_root}/.claude-worktrees/{short}");
             cmd_stdout(
-                "git",
+                &git, // discovered above (Fix 2)
                 &[
                     "-C",
                     &repo_root,
@@ -674,7 +719,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
     let layout = tab_layout(&binary, &wasm, &label, &uuid, &agent_cwd);
     let tmp = std::env::temp_dir().join(format!("clave-{uuid}.kdl"));
     std::fs::write(&tmp, layout)?;
-    let status = Command::new("zellij")
+    let status = Command::new(&zellij) // discovered above (Fix 2)
         .args([
             "action",
             "new-tab",

@@ -6,6 +6,8 @@
 // Modules are added per task. Task 2 adds `pub mod store;`.
 pub mod add;
 pub mod dev;
+pub mod discover;
+pub mod doctor;
 pub mod env;
 pub mod evlog;
 pub mod hook;

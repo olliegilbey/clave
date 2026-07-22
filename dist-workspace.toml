@@ -1,0 +1,23 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist'
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.32.0"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+# shell only: checksummed + attested; README still leads with explicit download
+# (spec §Distribution).
+installers = ["shell"]
+# Target platforms to build apps for (Rust target-triple syntax).
+# musl, not gnu: static binaries — no toolchain assumptions on the remote box
+# (spec §Distribution). No Windows: clave drives zellij, which is unix-only.
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]
+# GitHub artifact attestations: provenance beats cargo install, which has no
+# crate-level attestations (spec §Distribution).
+github-attestations = true
+# Injected into dist's build job BEFORE cargo build: compiles the bar wasm and
+# exports CLAVE_BAR_WASM so build.rs embeds it (spec §Distribution).
+github-build-setup = "build-wasm-setup.yml"
