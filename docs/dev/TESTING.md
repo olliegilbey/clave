@@ -213,8 +213,19 @@ make — see the instrumentation recipe):
 
 ```bash
 ZELLIJ_SESSION_NAME=clave-test zellij action start-or-reload-plugin \
-  "file:$HOME/.local/state/clave-dev/data/clave-bar.wasm"
+  "file:$HOME/.local/state/clave-dev/data/clave-bar.wasm" -c clave_binary=clave
 ```
+
+> The `-c` is load-bearing, not optional. A plugin's configuration is half of
+> its zellij identity, and `reload_plugin` matches on `(location,
+> configuration)` exactly (`zellij-server/src/plugins/wasm_bridge.rs:686-697`).
+> Without it the command matches nothing, the reload loop body never runs, and
+> the command still **exits 0** — you would be validating stale wasm while
+> believing the reload worked. The sandbox bakes bare `clave` (#44), so
+> `clave_binary=clave` is the value there; a stable session would need its
+> versioned absolute path. `PluginUserConfiguration`'s `FromStr`
+> (`zellij-utils/src/input/layout.rs:563-576`) is comma-separated `key=value`,
+> so a path containing a comma would not survive — none of ours do.
 
 **List sessions** (read-only, safe anywhere):
 

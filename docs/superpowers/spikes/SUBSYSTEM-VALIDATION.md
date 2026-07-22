@@ -292,14 +292,25 @@ walking coherent, no alternation/skips; prompted agent rises to top (hook
 stamp path); glyphs on every bar including late-loaded instances;
 permission → red; green-until-read → grey on visit (intended §6.5). Design
 B verified live. **Hot-reload PROVEN**: `zellij action
-start-or-reload-plugin "file:$HOME/.local/share/clave/clave-bar.wasm"`
-reloaded BOTH live instances within 10ms (log `loaded v0.1.0 build=…`
-lines, tag from CLAVE_BUILD_TAG at build time); no visible flicker, state
-rebuilt from hydration. New iteration loop: rebuild tagged wasm + cp +
-reload — session recreate only for store-schema/config changes. Residual
-watch-items: Alt+o barely exercised; one unreproduced "tab 4 not on top"
-sighting in round 6 (store stamps were correct; likely the ~100ms
-touch-push window).
+start-or-reload-plugin "file:$HOME/.local/share/clave/clave-bar.wasm" -c
+clave_binary=clave` reloaded BOTH live instances within 10ms (log `loaded
+v0.1.0 build=…` lines, tag from CLAVE_BUILD_TAG at build time); no visible
+flicker, state rebuilt from hydration. New iteration loop: rebuild tagged
+wasm + cp + reload — session recreate only for store-schema/config
+changes. Residual watch-items: Alt+o barely exercised; one unreproduced
+"tab 4 not on top" sighting in round 6 (store stamps were correct; likely
+the ~100ms touch-push window).
+
+> The `-c` above is added in hindsight, not what round 7 actually ran
+> (predates #44's config injection) — recorded so this entry can't be
+> copied as a working invocation today. It is load-bearing, not optional:
+> a plugin's configuration is half its zellij identity, and `reload_plugin`
+> matches on `(location, configuration)` exactly
+> (`zellij-server/src/plugins/wasm_bridge.rs:686-697`). Without it the
+> command matches nothing, the reload loop body never runs, and the
+> command still **exits 0** — silently validating stale wasm. The sandbox
+> bakes bare `clave` (#44), so `clave_binary=clave` is the value there; a
+> stable session would need its versioned absolute path.
 
 **Verdict:** **PASS** (2026-07-14, round 7 — TEMP traces removed after)
 
