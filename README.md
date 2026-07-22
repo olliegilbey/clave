@@ -35,13 +35,21 @@ splitting the screen into panes. Logo: the two-stick percussion instrument.
   exactly to the right tab and repaint its emoji.
 - **Conversations survive restarts** — each pane runs an idempotent
   resume-or-create, so Zellij serialization brings every agent back.
-- **Keyboard-first**: `Alt+a` add · `Alt+c` toggle bar · `Alt+1…9` jump. Every
-  key fires straight through a focused Claude session.
+- **Keyboard-first**: `Alt+a` add · `Alt+c` toggle bar · `Alt+t`/`Alt+w` new and
+  close tab · `Alt+↑/↓` walk the fleet · `Alt+1…9` jump. Every key fires
+  straight through a focused Claude session.
 
 ## Status
 
 🚧 Early days. The full design and rationale live in
 [`docs/design.md`](docs/design.md).
+
+**If you build from source**, note that a working-tree `cargo install` puts
+`clave` on your `PATH` where it can drive an already-running session — the
+plugin still resolves its CLI through `PATH` ([#44](https://github.com/olliegilbey/clave/issues/44)).
+Don't install while a session is live; see
+[CONTRIBUTING](CONTRIBUTING.md#the-one-leak-clave-on-path-43-44) for the rule
+and the one-line diagnosis.
 
 ## License
 

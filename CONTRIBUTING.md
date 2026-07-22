@@ -48,6 +48,45 @@ Both surfaces launch from a **plain, non-zellij terminal** — clave creates or
 attaches the multiplexer session itself. Launching from inside a zellij session
 nests them.
 
+### The one leak: `clave` on `PATH` (#43, #44)
+
+The table above says the two surfaces use different binaries, and the generated
+`config.kdl` honours that — keybinds bake the *absolute* versioned path. But
+`clave-bar` also shells out to the CLI on its own (`snapshot`, `open`, `bind`,
+`focus`, `touch`, `prune-tabs`, `add`), and today it invokes plain **`clave`**,
+resolved through `PATH`. `just dev-install` puts a working-tree build at
+`~/.cargo/bin/clave` — the same name the daily surface answers to.
+
+So a dev build **can** drive a stable session, and on 2026-07-22 it did: a stale
+`0.1.0` binary on `PATH` served `clave open` inside a `v0.1.1` session and
+composed tab layouts pointing at the *old* wasm. Because zellij keys plugin
+identity on file location, every tab opened that way loaded a **second bar** —
+two populations, no shared beacon state, dead navigation. The release itself was
+correct; only the binary the plugin reached for was wrong.
+
+**Until #44 lands, treat this as a hard rule: never `cargo install` or
+`just dev-install` while a stable session is running** — including from a
+worktree, and including agent-driven builds. When a dev round ends, restore the
+stable binary before daily driving:
+
+```sh
+cp ~/.local/share/clave/bin/clave-vX.Y.Z ~/.cargo/bin/clave
+```
+
+**Diagnosis is one grep**, because the bar logs its version at every load
+(zellij's log lives under the OS temp dir, e.g.
+`$TMPDIR/zellij-$UID/zellij-log/zellij.log` on macOS):
+
+```sh
+grep 'clave-bar: loaded' "$TMPDIR"/zellij-*/zellij-log/zellij.log | tail
+```
+
+Every line must report the **same** version. Mixed versions mean mixed plugins:
+the symptom is a duplicate sidebar and half-working navigation. #44 removes the
+leak by passing the binary's absolute path into the plugin at config-generation
+time, so the bar can no longer be pointed at a different clave than the one that
+launched the session.
+
 ## The release model
 
 A version cut is a deliberate, tagged, reproducible act — never an accident of
