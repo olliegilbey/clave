@@ -135,6 +135,35 @@ pub fn tilde(path: &Path, home: &Path) -> String {
     }
 }
 
+/// Unix exec-bit check for known-location candidates. A readable-but-not-
+/// executable file is not a hit — matching what exec() would do.
+pub fn is_executable(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+/// The IO shell: gather probes, delegate to resolve() (pure). Everything
+/// here is best-effort — a failed read_dir is an empty nvm list, not an
+/// error; discovery answers "where is it", never "why not".
+pub fn discover(tool: ToolId) -> Option<Discovered> {
+    let override_val = std::env::var(tool.override_var()).ok();
+    // which_global, NOT which: cwd must never satisfy a probe (spec §Probes).
+    let path_hit = which::which_global(tool.bin_name()).ok();
+    let home = dirs::home_dir()?;
+    let nvm_versions: Vec<String> = std::fs::read_dir(home.join(".nvm/versions/node"))
+        .map(|rd| rd.filter_map(|e| Some(e.ok()?.file_name().to_str()?.to_string())).collect())
+        .unwrap_or_default();
+    let known_hits: Vec<PathBuf> = candidate_dirs(tool, &home, &nvm_versions)
+        .into_iter()
+        .map(|d| d.join(tool.bin_name()))
+        // ~/.claude/local/claude: candidate_dirs yields ~/.claude/local as a
+        // DIR, so the join above already forms the full binary path. apk's
+        // /sbin home is covered by the pkg-manager probe, not tool discovery.
+        .filter(|p| is_executable(p))
+        .collect();
+    resolve(override_val.as_deref(), path_hit, &known_hits)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,5 +231,18 @@ mod tests {
         let home = Path::new("/home/u");
         assert_eq!(tilde(Path::new("/home/u/.local/bin/claude"), home), "~/.local/bin/claude");
         assert_eq!(tilde(Path::new("/usr/bin/git"), home), "/usr/bin/git");
+    }
+
+    #[test]
+    fn is_executable_requires_the_exec_bit() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("tool");
+        std::fs::write(&f, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!is_executable(&f));
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(is_executable(&f));
+        assert!(!is_executable(&dir.path().join("absent")));
     }
 }

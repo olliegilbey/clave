@@ -20,6 +20,8 @@ uuid.workspace = true
 dirs.workspace = true
 # State store locking (spec §5).
 fs4.workspace = true
+# Binary discovery beyond PATH (spec §Discovery).
+which.workspace = true
 # Local types (Agent, AgentSnapshot, Status).
 clave-types = { path = "../clave-types" }
 

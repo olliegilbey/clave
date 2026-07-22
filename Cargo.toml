@@ -25,6 +25,10 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # Advisory file locking for the state store (spec §5). fs4, NOT fs2 — fs2 is
 # unmaintained; the spec names fs4 explicitly.
 fs4 = "0.13"
+# Binary discovery (spec §Discovery). which_global ONLY — plain which()
+# respects cwd, and clave runs in arbitrary project dirs where a ./brew
+# would satisfy the probe.
+which = "8"
 # Store tests write to throwaway dirs, never the real ~/.local/state/clave.
 tempfile = "3"
 # Zellij plugin
