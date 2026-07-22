@@ -44,11 +44,29 @@ pub enum Effect {
     /// run_command zellij pipe clave-visited — converge the other instances
     /// after a single-instance jump (mouse click).
     AnnounceVisit { tab_id: usize },
+    /// run_command zellij pipe clave-visited — SAME beacon as AnnounceVisit,
+    /// but for the #23 stranded-beacon re-anchor after a tab close. A DISTINCT
+    /// variant so run_effects can gate it to the active instance: toggle bursts
+    /// deliver the fresh set to ALL instances (doc:371-394), so an ungated
+    /// re-anchor announce would revive the per-instance beacon war (round-13
+    /// EMFILE class). Birth/organic announces stay AnnounceVisit (ungated,
+    /// live-validated).
+    ReanchorVisit { tab_id: usize },
     /// run_command(["clave","focus",uuid]) — persist the unread clear.
     MarkRead { uuid: String },
     /// run_command(["clave","bind",uuid,tab_id]) — report the uuid→tab join
     /// to the STORE (§6.6 Design B), fired by the agent tab's own bar.
     Bind { uuid: String, tab_id: usize },
+    /// run_command(["clave","prune-tabs", stale_ids…]) — drop store binds and
+    /// tab_timeline entries for CLOSED tabs (#6/F3). Carries the OBSERVED-STALE
+    /// ids (bound-or-timelined ids ABSENT from the delivered live set), NOT the
+    /// live set — removing specific dead ids is idempotent and commutes, so
+    /// two out-of-order prunes can't clobber a tab neither observed die (the
+    /// full-live-set "retain-only" payload could unbind a tab created after the
+    /// prune was computed). Executor-gated in main.rs (keeps duplicate prunes
+    /// to the active bar). Zellij reuses tab_ids (screen.rs:1617), so this is
+    /// correctness, not just hygiene.
+    PruneTabs { stale_ids: Vec<usize> },
     /// resize_pane_with_id(Decrease→Right, own) — C6 collapse/expand seek.
     ShrinkSelf,
     /// resize_pane_with_id(Increase→Right, own) — C6 seek / overshoot
@@ -575,22 +593,48 @@ impl BarModel {
     pub fn apply_tabs(&mut self, tabs: Vec<TabMeta>) -> Vec<Effect> {
         self.tabs = tabs;
         let mut effects = Vec::new();
-        // Bounded beacon announce (rounds 11–12): only at BIRTH (first
-        // TabUpdate this instance ever gets — new tab or plugin load) or
-        // when ARMED by Alt+o's clave-organic pipe. Never self-diagnosed
-        // beyond that: per-instance active claims are stale during bursts
-        // (C3) and every unbounded announce design stormed.
-        let armed = !self.birth_announced || self.organic_pending;
+        let live: BTreeSet<usize> = self.tabs.iter().map(|t| t.tab_id).collect();
+        // #23 (2026-07-21): a tab CLOSE (Ctrl+D) can STRAND the nav beacon —
+        // current_tab still names the closed tab, so executor election (which
+        // wants current_tab == some instance's own live tab, main.rs
+        // handle_pipe clave-nav) matches nobody and dir-nav goes dead until a
+        // mouse click reseeds it. The beacon is stranded exactly when it points
+        // outside the live set.
+        let stranded = self.current_tab.is_some_and(|id| !live.contains(&id));
+        // Bounded beacon announce (rounds 11–12). Two DISTINCT triggers, on
+        // purpose:
+        //   birth/organic → AnnounceVisit (UNGATED): birth's first-TabUpdate
+        //     announce and Alt+o's organic one-shot are live-validated ungated;
+        //     left byte-identical.
+        //   stranded (#23) → ReanchorVisit (GATED in run_effects to the active
+        //     instance). It CANNOT ride the ungated path: TabUpdate normally
+        //     reaches only the active instance (C3), BUT toggle bursts deliver
+        //     the FRESH set to ALL instances (doc:371-394, main.rs apply_tabs
+        //     note) — so between the close and the reseed pipe landing, every
+        //     hidden bar whose beacon is still the closed tab would ALSO trip
+        //     `stranded` and pipe, reviving the per-instance beacon war that
+        //     EMFILE-crashed the server (round 13). Gating pipes it once.
+        // All triggers self-clear: birth fires once, organic is one-shot, and
+        // the local current_tab mutation makes `stranded` false next pass on
+        // EVERY instance (so even a burst-tripped hidden bar arms at most once,
+        // and only the active one actually pipes). Accepted trade: if
+        // is_active_instance is transiently false on the close TabUpdate
+        // (PaneUpdate lag), the reseed is DROPPED and nav stays stranded until a
+        // click — the pre-fix symptom, but in a narrow window and strictly
+        // better than a storm.
+        let birth_or_organic = !self.birth_announced || self.organic_pending;
         self.birth_announced = true;
         self.organic_pending = false; // consumed either way
-        if armed
-            && let Some(active) = self.tabs.iter().find(|t| t.active)
-            && self.current_tab != Some(active.tab_id)
+        if let Some(active_id) = self.tabs.iter().find(|t| t.active).map(|t| t.tab_id)
+            && self.current_tab != Some(active_id)
         {
-            self.current_tab = Some(active.tab_id);
-            effects.push(Effect::AnnounceVisit {
-                tab_id: active.tab_id,
-            });
+            if birth_or_organic {
+                self.current_tab = Some(active_id);
+                effects.push(Effect::AnnounceVisit { tab_id: active_id });
+            } else if stranded {
+                self.current_tab = Some(active_id);
+                effects.push(Effect::ReanchorVisit { tab_id: active_id });
+            }
         }
         if let Some(now_active) = self.tabs.iter().find(|t| t.active) {
             // §6.5 unread clear — checked on EVERY TabUpdate, NOT on a
@@ -608,6 +652,62 @@ impl BarModel {
                 if self.read_locally.insert(uuid.clone()) {
                     effects.push(Effect::MarkRead { uuid });
                 }
+            }
+        }
+        // #6/F3 store hygiene: on ANY TabUpdate, tell the store which OBSERVED
+        // ids just died (bound-or-timelined ids absent from this delivered live
+        // set) so it drops their binds + tab_timeline entries. Correctness, not
+        // just hygiene — zellij REUSES tab_ids (get_new_tab_id = max-key+1,
+        // screen.rs:1617; a closed top tab's id returns on the next new tab), so
+        // a survivor entry would let a reused-id tab inherit a dead agent's
+        // glyph/order.
+        //
+        // The payload is the STALE ids, not the live set. Order-safety: two
+        // fire-and-forget `clave prune-tabs` have no arrival order (the collapse
+        // pending-write class); removing SPECIFIC dead ids is idempotent and
+        // commutes, so a late prune can only re-remove ids already judged dead —
+        // it never touches a tab it did not observe die. (The full-live-set
+        // "retain only these" payload had the opposite property: a late prune
+        // would strip the bind of ANY tab created after it was computed → live
+        // agent rendered dormant → #6 double-attach via a race.)
+        //
+        // Emission is DETECTION-driven, NOT gated on a set-change (Codex P2):
+        // a close TabUpdate that arrives BEFORE the matching PaneUpdate finds
+        // is_active_instance() false (stale plugin_panes), so run_effects drops
+        // the prune — a set-change gate would then never re-emit for that same
+        // set and the stale bind would make a DEAD agent read LIVE to
+        // bound_live_uuids (jump-only, un-resumable) for an unbounded window.
+        // Re-deriving staleness every TabUpdate makes retry automatic: the
+        // TabUpdate after the PaneUpdate lands re-derives the same stale set and
+        // re-emits, now executing. It stays bounded because (a) removals are
+        // idempotent so duplicate emissions in the echo window are harmless;
+        // (b) the store push echo clears self.agents/self.timeline, so a clean
+        // store self-limits — a steady focus-move TabUpdate derives an EMPTY
+        // stale set and spawns nothing; (c) it is TabUpdate-rate, not
+        // render-rate — the C5 rd-4 spawn-storm bar was PER-RENDER triggers;
+        // (d) run_effects executor-gates it, so hidden instances (incl.
+        // burst-delivered fresh sets, doc:371-394) never spawn anything. Honest
+        // residual: a PERMANENTLY-failing store write retries at TabUpdate rate
+        // — a failure mode that already breaks bind/collapse identically. Never
+        // treat an EMPTY live set as "all died": closing the last tab closes the
+        // session, so it is a degenerate update, not a real signal.
+        if !live.is_empty() {
+            let mut stale: BTreeSet<usize> = self
+                .agents
+                .iter()
+                .filter_map(|a| a.tab_id)
+                .filter(|id| !live.contains(id))
+                .collect();
+            stale.extend(
+                self.timeline
+                    .keys()
+                    .copied()
+                    .filter(|id| !live.contains(id)),
+            );
+            if !stale.is_empty() {
+                effects.push(Effect::PruneTabs {
+                    stale_ids: stale.into_iter().collect(), // BTreeSet → sorted, deduped
+                });
             }
         }
         self.prune_opening(); // an appeared tab retires its ↻ mark
@@ -1377,6 +1477,121 @@ mod tests {
         assert_eq!(m.nav("not json", Some(10)), Vec::<Effect>::new());
         assert_eq!(m.nav("{\"row\":9}", Some(10)), Vec::<Effect>::new());
         assert_eq!(m.click(9), Vec::<Effect>::new());
+    }
+
+    #[test]
+    fn tab_close_reanchors_the_stranded_beacon() {
+        // #23 live finding (day one of v0.1.0, 2026-07-21): Ctrl+D closes the
+        // focused tab; zellij focuses a survivor and sends ITS bar a TabUpdate,
+        // but the replicated beacon (current_tab) still names the CLOSED tab.
+        // Executor election keys on current_tab == own live tab (main.rs
+        // handle_pipe clave-nav), so a stranded beacon matches NO instance and
+        // Alt+↑/↓ goes dead until a mouse click reseeds it. apply_tabs must
+        // re-anchor to the post-close active tab — via a DISTINCT, gated
+        // effect (birth/organic stay ungated + byte-identical).
+        let mut m = BarModel::default();
+        // Birth on tab 11 (active): announces once via the PLAIN (ungated)
+        // AnnounceVisit — birth's ungated announce is live-validated. c_tab=11.
+        let fx = m.apply_tabs(vec![tab(10, 0, "a", false), tab(11, 1, "b", true)]);
+        assert!(fx.contains(&Effect::AnnounceVisit { tab_id: 11 }));
+        assert_eq!(m.current_tab(), Some(11));
+        // Tab 11 (the user's focused tab) closes; zellij focuses the survivor
+        // (10) and delivers THIS now-active bar a TabUpdate lacking 11. The
+        // stranded re-anchor emits a DISTINCT effect (ReanchorVisit) that
+        // run_effects gates to the active instance — toggle bursts deliver the
+        // fresh set to ALL instances (doc:371-394), so an ungated announce here
+        // would be a beacon war (round-13 EMFILE class).
+        let fx = m.apply_tabs(vec![tab(10, 0, "a", true)]);
+        assert!(
+            fx.contains(&Effect::ReanchorVisit { tab_id: 10 }),
+            "a stranded beacon must re-anchor via the GATED ReanchorVisit"
+        );
+        assert!(
+            fx.iter()
+                .all(|e| !matches!(e, Effect::AnnounceVisit { .. })),
+            "the stranded path must NOT emit the ungated AnnounceVisit"
+        );
+        assert_eq!(m.current_tab(), Some(10));
+        // Bounded: a further TabUpdate with the same (now-consistent) beacon
+        // must NOT re-announce (no round-11 storm) — the local current_tab
+        // mutation self-clears `stranded` per instance, so even a hidden bar
+        // that trips it during a burst fires at most once, and only the active
+        // one actually pipes.
+        let fx = m.apply_tabs(vec![tab(10, 0, "a", true)]);
+        assert!(
+            fx.iter().all(|e| !matches!(
+                e,
+                Effect::AnnounceVisit { .. } | Effect::ReanchorVisit { .. }
+            )),
+            "re-anchor must not re-fire once the beacon is live again"
+        );
+    }
+
+    #[test]
+    fn tab_close_prunes_stale_ids_and_retries_until_echo_clears() {
+        // #6/F3 + Codex P2: on tab CLOSE the model emits the OBSERVED-STALE ids
+        // (bound-or-timelined ids absent from the delivered live set) — NOT the
+        // live set, so out-of-order prunes commute (idempotent removes) and a
+        // late one can't unbind a tab created after it. Emission is
+        // DETECTION-driven, NOT set-change-gated: a close TabUpdate arriving
+        // before its PaneUpdate finds is_active_instance() false → run_effects
+        // DROPS the prune; a set-change gate would then never re-emit and the
+        // stale bind would make a dead agent read LIVE (jump-only, un-resumable)
+        // for an unbounded window. So a REPEAT TabUpdate, while the stale entry
+        // is still in the mirror, MUST re-emit (the retry that lands once the
+        // PaneUpdate arrives); only the store echo clearing the mirror silences.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "a", true), tab(11, 1, "b", false)]);
+        let mut s = snap(1, vec![agent("u-b", Status::Working, Some(11))]);
+        s.tab_timeline = [(10usize, 100u64), (11, 200)].into();
+        m.apply_snapshot(s);
+        // Tab 11 closes → its bind (u-b) and timeline entry are the stale ids.
+        let fx = m.apply_tabs(vec![tab(10, 0, "a", true)]);
+        assert!(
+            fx.contains(&Effect::PruneTabs {
+                stale_ids: vec![11]
+            }),
+            "a closed tab must prune EXACTLY the stale id, never the live set"
+        );
+        // RETRY (contract inverted, P2): the SAME live set, while the mirror
+        // still shows u-b bound to 11 (echo pending — e.g. the first prune was
+        // dropped because is_active_instance() was false pre-PaneUpdate), MUST
+        // re-emit. A set-change gate would wrongly stay silent here.
+        let fx = m.apply_tabs(vec![tab(10, 0, "a", true)]);
+        assert!(
+            fx.contains(&Effect::PruneTabs {
+                stale_ids: vec![11]
+            }),
+            "prune must retry while the stale entry persists in the mirror"
+        );
+        // The store's prune echoes back (u-b unbound, timeline trimmed): the
+        // SAME TabUpdate now derives an EMPTY stale set → detection self-limits.
+        m.apply_snapshot(snap_t(2, &[(10, 100)]));
+        let fx = m.apply_tabs(vec![tab(10, 0, "a", true)]);
+        assert!(
+            fx.iter().all(|e| !matches!(e, Effect::PruneTabs { .. })),
+            "a clean store must cost no prune subprocess (self-limiting)"
+        );
+        // A plain focus-move on the clean store also stays silent.
+        let fx = m.apply_tabs(vec![tab(10, 0, "a", true), tab(12, 1, "c", false)]);
+        assert!(fx.iter().all(|e| !matches!(e, Effect::PruneTabs { .. })));
+    }
+
+    #[test]
+    fn birth_and_steady_state_never_prune() {
+        // Detection self-limit (P2): silence comes from an EMPTY derived stale
+        // set, not a set-change gate. A fresh instance (no binds/timeline yet)
+        // derives nothing stale at birth, and an all-live set derives nothing
+        // stale on every focus-move — only genuinely-absent ids emit.
+        let mut m = BarModel::default();
+        let fx = m.apply_tabs(vec![tab(10, 0, "a", true), tab(11, 1, "b", false)]);
+        assert!(fx.iter().all(|e| !matches!(e, Effect::PruneTabs { .. })));
+        let mut s = snap(1, vec![agent("u-b", Status::Working, Some(11))]);
+        s.tab_timeline = [(10usize, 100u64), (11, 200)].into();
+        m.apply_snapshot(s);
+        // Focus moves (active flag flips) but every id is still live: no prune.
+        let fx = m.apply_tabs(vec![tab(10, 0, "a", false), tab(11, 1, "b", true)]);
+        assert!(fx.iter().all(|e| !matches!(e, Effect::PruneTabs { .. })));
     }
 
     #[test]

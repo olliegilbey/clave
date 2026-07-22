@@ -112,6 +112,21 @@ enum Command {
         tab_id: usize,
     },
 
+    /// Prune store binds + tab_timeline entries for CLOSED tabs
+    /// (plugin-internal, #6/F3). The active bar reports the ids it observed DIE
+    /// (stale = bound-or-timelined but absent from the live set) whenever the
+    /// set changes; the store removes exactly those. Removing specific dead ids
+    /// is order-safe (idempotent, commutes) — a full-live-set "retain" payload
+    /// would race-unbind a tab created after it was computed. zellij reuses
+    /// tab_ids (screen.rs:1617), so this is correctness, not just hygiene.
+    #[command(hide = true)]
+    PruneTabs {
+        /// The zellij tab ids observed dead (the stale set). Empty is a no-op
+        /// (nothing observed dead → nothing to remove).
+        #[arg(trailing_var_arg = true)]
+        stale_ids: Vec<usize>,
+    },
+
     /// Persist the bar collapse mode (plugin-internal, issue #5). The
     /// `clave-toggle` broadcast flips every instance's memory instantly;
     /// the ACTIVE instance then reports the absolute new mode here so the
@@ -273,6 +288,17 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Some(Command::PruneTabs { stale_ids }) => {
+            let paths = store::store_paths()?;
+            // Push only on CHANGE (apply_prune_tabs returns None otherwise) — a
+            // prune that matched nothing (already-removed dead ids: idempotent
+            // late arrival) must not spam the pipe. The push drops the closed
+            // tab's agent to a dormant row on every instance.
+            if let Some(snap) = store::apply_prune_tabs(&paths, &stale_ids)? {
+                hook::push_snapshot(&snap);
+            }
+            Ok(())
+        }
         Some(Command::Collapse { collapsed }) => {
             let paths = store::store_paths()?;
             // Push only on CHANGE (apply_collapse returns None otherwise) —
@@ -315,6 +341,20 @@ mod tests {
                 Some(Command::Collapse { collapsed }) => assert_eq!(collapsed, want),
                 _ => panic!("parsed into the wrong command"),
             }
+        }
+    }
+
+    /// #6/F3: the plugin shells `clave prune-tabs <stale-id>…` with the ids it
+    /// observed die (the inverted, order-safe payload — see apply_prune_tabs).
+    /// Same ledger rule as the collapse test above — every new CLI surface gets
+    /// a parse pin, because clap-derive shape bugs panic debug builds at the
+    /// parse layer and no workspace test reaches it.
+    #[test]
+    fn prune_tabs_cli_parses_variadic_ids() {
+        let cli = Cli::try_parse_from(["clave", "prune-tabs", "3", "1", "7"]).expect("must parse");
+        match cli.command {
+            Some(Command::PruneTabs { stale_ids }) => assert_eq!(stale_ids, vec![3, 1, 7]),
+            _ => panic!("parsed into the wrong command"),
         }
     }
 }

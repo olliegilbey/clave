@@ -69,6 +69,32 @@ pub fn status_for_event(event: &str, message: Option<&str>, current: Status) -> 
     }
 }
 
+/// Harness-injected prefixes that must NEVER be treated as user intent for
+/// labelling (issue #17, observed live 2026-07-21): resuming a session that
+/// died with a pending background task makes Claude Code auto-fire a turn
+/// whose "prompt" is an orphaned `<task-notification>` tag, not anything the
+/// user typed. Because earned labels stick (§6.4: no self-heal), letting one
+/// through once bakes it permanently. This list is expected to grow as more
+/// injected shapes surface — keep it one named const so every check-site
+/// stays in sync. Note: issue #24's rename tier (extracting a `customTitle`
+/// for user-driven renames) sits ABOVE this guard and is separate — this
+/// const only prevents MIS-earning, it adds no rename affordance.
+const HARNESS_INJECTED_PREFIXES: &[&str] = &[
+    "<task-notification",
+    "<system-reminder",
+    "<local-command-caveat",
+    "<command-name",
+];
+
+/// True if `text`'s trimmed start matches a harness-injected tag (#17). We
+/// check the START, not a substring search, and we never try to strip the
+/// tag and use what follows — an injected body is harness text end to end,
+/// not user intent with a prefix to peel off.
+fn is_harness_injected(text: &str) -> bool {
+    let t = text.trim_start();
+    HARNESS_INJECTED_PREFIXES.iter().any(|p| t.starts_with(p))
+}
+
 /// First 4 words, hard cap 32 chars — enough to recognise, short enough for
 /// a ~24-col bar row after the `dir · branch ·` prefix is truncated (§6.4:
 /// final clamping is the RENDERER's job; this just bounds the stored label).
@@ -142,8 +168,14 @@ pub fn refresh_label(
     // byte-for-byte first-prompt gate below aligned with add.rs's creation
     // label, which is built through the same function.
     let prefix = crate::add::sanitize_label(&format!("{dir} · {}", rec.branch));
-    // Prefer a summary from the tail (Stop is when summaries appear)…
-    if let Some(summary) = jsonl_tail.and_then(summary_from_tail) {
+    // Prefer a summary from the tail (Stop is when summaries appear)… unless
+    // it's harness-injected text (#17, defensive: summaries come from the
+    // CLI's own compaction, not the prompt path that triggered the live
+    // defect, but the same "never earn from injected text" rule applies).
+    if let Some(summary) = jsonl_tail
+        .and_then(summary_from_tail)
+        .filter(|s| !is_harness_injected(s))
+    {
         let label = crate::add::sanitize_label(&format!("{prefix} · {}", first_words(&summary)));
         rec.label = label;
         rec.label_source = LabelSource::Summary;
@@ -151,10 +183,14 @@ pub fn refresh_label(
     }
     // …else, on the first prompt, use the prompt text from the payload.
     // "First" = the label is still the bare `dir · branch` from `clave add`.
+    // is_harness_injected (#17) skips the upgrade ENTIRELY for an injected
+    // prompt — not strip-and-use-remainder — so label_source stays
+    // FirstPrompt and the next REAL prompt still earns the label.
     // (Collapsed into an edition-2024 let-chain — clippy::collapsible_if.)
     if event == "UserPromptSubmit"
         && rec.label == prefix
         && let Some(p) = payload.prompt.as_deref().filter(|p| !p.trim().is_empty())
+        && !is_harness_injected(p)
     {
         rec.label = crate::add::sanitize_label(&format!("{prefix} · {}", first_words(p)));
         return true;
@@ -443,6 +479,72 @@ mod tests {
         assert_eq!(r.label_source, LabelSource::Summary);
         // 3) Once Summary, we STOP re-deriving (§6.4) — even with new input.
         assert!(!refresh_label(&mut r, "Stop", &p, Some(tail)));
+    }
+
+    #[test]
+    fn injected_task_notification_does_not_earn_label_but_next_prompt_does() {
+        // Issue #17, observed live 2026-07-21: resuming a session that died
+        // with a pending background task makes Claude Code auto-fire a turn
+        // whose "prompt" is an orphaned <task-notification> tag, not user
+        // intent. Before this guard, refresh_label's first-prompt upgrade
+        // earned it verbatim and the garbage label stuck forever (earned
+        // labels don't self-heal). Skip the upgrade entirely: label stays
+        // bare so the label_source is still FirstPrompt for the next turn.
+        let mut r = rec("u1");
+        let injected = HookPayload {
+            session_id: Some("u1".into()),
+            prompt: Some("<task-notification> <task-id>bai</task-notification>".into()),
+            message: None,
+        };
+        assert!(!refresh_label(&mut r, "UserPromptSubmit", &injected, None));
+        assert_eq!(r.label, "x · main"); // unchanged — still the bare prefix
+        assert_eq!(r.label_source, LabelSource::FirstPrompt); // still eligible
+
+        // The next REAL prompt earns the label exactly as before the guard.
+        let real = HookPayload {
+            session_id: Some("u1".into()),
+            prompt: Some("fix the flaky auth test".into()),
+            message: None,
+        };
+        assert!(refresh_label(&mut r, "UserPromptSubmit", &real, None));
+        assert_eq!(r.label, "x · main · fix the flaky auth");
+    }
+
+    #[test]
+    fn every_injected_prefix_is_blocked_on_both_earn_paths() {
+        // #17 breadth (CodeRabbit, PR #25): the const is expected to GROW, and
+        // a prefix that guards only one earn path is a latent re-leak — so
+        // table-drive EVERY prefix through BOTH paths, with leading whitespace
+        // (the guard trims start, matching how the harness pads injections).
+        for prefix in HARNESS_INJECTED_PREFIXES {
+            let injected_text = format!("  \n\t{prefix}> payload we must never earn");
+            // First-prompt path: the upgrade is skipped outright.
+            let mut r = rec("u1");
+            let p = HookPayload {
+                session_id: Some("u1".into()),
+                prompt: Some(injected_text.clone()),
+                message: None,
+            };
+            assert!(
+                !refresh_label(&mut r, "UserPromptSubmit", &p, None),
+                "prompt path leaked for prefix {prefix}"
+            );
+            assert_eq!(r.label, "x · main");
+            assert_eq!(r.label_source, LabelSource::FirstPrompt);
+            // Summary path: an injected summary must not flip the source
+            // either (defensive — summaries come from the CLI's own
+            // compaction, but the rule is "never earn from injected text").
+            let tail = format!(
+                "{{\"type\":\"summary\",\"summary\":{}}}\n",
+                serde_json::to_string(&injected_text).unwrap()
+            );
+            assert!(
+                !refresh_label(&mut r, "Stop", &p, Some(&tail)),
+                "summary path leaked for prefix {prefix}"
+            );
+            assert_eq!(r.label, "x · main");
+            assert_eq!(r.label_source, LabelSource::FirstPrompt);
+        }
     }
 
     #[test]
