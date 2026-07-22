@@ -291,6 +291,17 @@ Proceed? [Y/n]
   of this.
 - Preflight (zellij, claude) runs *before* the plan, so the guidance for a
   missing dep is the first thing a fresh user sees, not a mid-setup failure.
+- **Upgrade refresh** (review 2026-07-22): when config EXISTS but this
+  release binary's versioned wasm is not yet on disk (a binary upgrade),
+  launch auto-runs the idempotent setup with a one-line notice and no
+  consent prompt — the user consented to this mutation set at first run.
+  Without this, an upgraded CLI would run the old bar forever (the drift
+  invariant #9 kills). Running-session immunity holds: live sessions keep
+  the files baked at their launch.
+- **Release setup bakes `current_exe()`** (review 2026-07-22), not bare
+  `clave`: a single-file `./clave` install must not require itself on PATH
+  for its generated keybinds/hooks to work. Dev builds keep bare `clave`
+  (the sandbox flow deliberately resolves via PATH).
 
 ## Distribution: cargo-dist + embedded wasm
 
