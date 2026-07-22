@@ -18,6 +18,11 @@ build-bar:
 build-bar-release:
     cargo build -p clave-bar --release --target wasm32-wasip1
 
+# Local release-parity build: the CLI with the bar wasm EMBEDDED (spec
+# §Distribution) — what cargo-dist produces in CI, buildable on any clone.
+dist-build: build-bar-release
+    CLAVE_BAR_WASM=$(pwd)/target/wasm32-wasip1/release/clave-bar.wasm cargo build --release -p clave
+
 # Everything (host + plugin).
 build-all: build build-bar
 

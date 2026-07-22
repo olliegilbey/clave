@@ -5,7 +5,7 @@
 //! permission cache pre-seeded (grants are all-or-nothing and the in-bar
 //! prompt is unanswerable — S1/S2).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -366,6 +366,18 @@ pub fn write_generated(dir: &std::path::Path, binary: &str, wasm: &str) -> Resul
     Ok(())
 }
 
+/// Write the embedded wasm as the VERSIONED artifact — which wasm_path()
+/// already prefers — if absent (spec §Distribution). Write-if-absent keeps
+/// re-runs idempotent and honors running-session immunity (§2).
+pub fn extract_embedded(dir: &Path, bytes: &[u8], version: &str) -> Result<PathBuf> {
+    let dest = dir.join(crate::release::versioned_wasm_name(version));
+    if !dest.exists() {
+        std::fs::write(&dest, bytes)
+            .with_context(|| format!("extracting embedded wasm to {}", dest.display()))?;
+    }
+    Ok(dest)
+}
+
 /// `clave setup` — the DEV/sandbox machine prep: generate against bare
 /// `clave` (PATH = the dev binary) and the unversioned working-tree wasm.
 /// Stable machines are prepared by `just release` (→ `run_release`), which
@@ -374,12 +386,22 @@ pub fn run_setup() -> Result<()> {
     let dir = data_dir()?;
     std::fs::create_dir_all(&dir)?;
     let wasm = wasm_path()?;
+    if !wasm.exists() {
+        match crate::release::embedded_wasm() {
+            // Release binary: self-contained — extract and use the versioned
+            // artifact (spec §Distribution: one file IS the install).
+            Some(bytes) => {
+                extract_embedded(&dir, bytes, env!("CARGO_PKG_VERSION"))?;
+            }
+            // Dev build: wasm placement belongs to the sandbox flow.
+            None => anyhow::bail!(
+                "{} missing — run `just dev-install` first (it builds the sandbox wasm here)",
+                wasm.display()
+            ),
+        }
+    }
+    let wasm = wasm_path()?; // re-resolve: extraction creates the preferred versioned file
     let wasm_str = wasm.to_str().context("wasm path")?;
-    anyhow::ensure!(
-        wasm.exists(),
-        "{} missing — run `just dev-install` first (it builds the sandbox wasm here)",
-        wasm.display()
-    );
     write_generated(&dir, "clave", wasm_str)
 }
 
@@ -780,6 +802,18 @@ mod tests {
         assert_eq!(stops.len(), 2); // their entry + ours, not a rewrite
         assert_eq!(stops[0]["hooks"][0]["command"], "clave-vault hook Stop"); // untouched
         assert_eq!(stops[1]["hooks"][0]["command"], "clave hook Stop");
+    }
+
+    #[test]
+    fn extract_embedded_is_write_if_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = extract_embedded(dir.path(), b"wasm-bytes", "0.1.0").unwrap();
+        assert_eq!(p.file_name().unwrap(), "clave-bar-v0.1.0.wasm");
+        assert_eq!(std::fs::read(&p).unwrap(), b"wasm-bytes");
+        // Second call must NOT rewrite — a live session's loaded wasm is
+        // never touched (§2 running-session immunity).
+        extract_embedded(dir.path(), b"DIFFERENT", "0.1.0").unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"wasm-bytes");
     }
 
     #[test]

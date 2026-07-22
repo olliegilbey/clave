@@ -29,6 +29,14 @@ pub fn versioned_cli_name(version: &str) -> String {
     format!("clave-v{version}")
 }
 
+/// The bar wasm baked into this binary at build time, if any (spec
+/// §Distribution). Empty marker ⇒ dev build ⇒ None: the sandbox flow owns
+/// wasm placement there (just dev-install).
+pub fn embedded_wasm() -> Option<&'static [u8]> {
+    static BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/clave-bar.embedded"));
+    (!BYTES.is_empty()).then_some(BYTES)
+}
+
 /// `clave --version` payload: semver + build tag. Mirrors the bar's load()
 /// pattern (`option_env!("CLAVE_BUILD_TAG")` fallback `"dev"`) so "what am I
 /// running" is answerable in both environments — `just release` bakes the
@@ -188,6 +196,12 @@ mod tests {
         // No data dir resolvable at all → bare `clave`.
         assert_eq!(baked_binary(None, false), "clave");
         assert_eq!(baked_binary(None, true), "clave");
+    }
+
+    #[test]
+    fn dev_builds_embed_no_wasm() {
+        // cargo test runs without CLAVE_BAR_WASM → empty marker → None.
+        assert!(embedded_wasm().is_none());
     }
 
     #[test]
