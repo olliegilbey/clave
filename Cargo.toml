@@ -33,3 +33,8 @@ which = "8"
 tempfile = "3"
 # Zellij plugin
 zellij-tile = "0.44"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

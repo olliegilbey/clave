@@ -24,6 +24,12 @@ name = "clave-bar"
 path = "src/main.rs"
 test = false
 
+# Excluded from cargo-dist: the bar ships EMBEDDED in the clave CLI (spec
+# §Distribution) — dist would otherwise try to build this wasm-only bin
+# natively for every release target, and it cannot link off wasm32-wasip1.
+[package.metadata.dist]
+dist = false
+
 [dependencies]
 zellij-tile = { workspace = true }
 clave-types = { path = "../clave-types" }
