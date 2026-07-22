@@ -224,10 +224,7 @@ pub fn launch_layout_kdl(
         None => "    tab name=\"clave\" focus=true\n".to_string(),
     };
     // size="15%" not size=30: fixed panes refuse resizes — see layout_kdl.
-    // The plugin's configuration is HALF of zellij's identity for it: pipe
-    // destinations match on (location, configuration) exactly, so this key
-    // must equal what config_kdl bakes into every MessagePlugin keybind or
-    // each keypress launches a second bar (#44).
+    // `clave_binary` identity requirement: see layout_kdl.
     format!(
         "// GENERATED at launch — §6.8 clave-owned cold start.\n\
          layout {{\n\

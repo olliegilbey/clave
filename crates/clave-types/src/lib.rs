@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Lives in the shared crate because BOTH sides must agree: `clave` emits it
 /// into config.kdl's MessagePlugin keybinds and into every layout `plugin`
-/// node, and `clave-bar` reads it at `load()`. Zellij matches a pipe's
+/// node, and `clave-bar` will read it at `load()`. Zellij matches a pipe's
 /// destination on (location, configuration) EXACTLY
 /// (zellij-server/src/plugins/wasm_bridge.rs:1676-1686), so a typo on one side
 /// silently spawns a second bar instead of erroring.

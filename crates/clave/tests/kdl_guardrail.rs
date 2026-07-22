@@ -381,15 +381,37 @@ fn keybind_and_layout_plugin_configurations_match() {
         );
     }
 
+    // `keybinds.0` (walked by keybind_pipe_configs) is a HashMap<InputMode,
+    // …>, so `kb`'s element order is NOT stable across runs — comparing
+    // layouts against an arbitrary `kb[N]` below would only catch a mismatch
+    // when that particular element happens to land there. Proven live: adding
+    // an extra key to only the nav closure's MessagePlugin config and running
+    // a `kb[0]`-only comparison 40 times gave 9 passes / 31 failures. An EXTRA
+    // key breaks plugin identity exactly as fatally as a missing one (#44), so
+    // assert the keybind side is internally coherent FIRST — every entry
+    // equal to every other — before picking any one of them as the agreed
+    // value the layouts are checked against.
+    for c in &kb[1..] {
+        assert_eq!(
+            c, &kb[0],
+            "config.kdl's MessagePlugin keybinds disagree with each other on \
+             their configuration — some keypresses will address a DIFFERENT \
+             plugin than others (#44):\n{cfg}"
+        );
+    }
+    let agreed_keybind_config = kb[0].clone();
+
     let r = eager_record();
     let launch_eager = setup::launch_layout_kdl(BIN_ABS, WASM, Some(&r));
     let launch_empty = setup::launch_layout_kdl(BIN_ABS, WASM, None);
     let one_shot = add::tab_layout(BIN_ABS, WASM, "lbl", "u-1", "/home/o/x");
+    let layout_kdl = setup::layout_kdl(BIN_ABS, WASM);
 
     for (what, text) in [
         ("launch.kdl (eager most-recent tab)", &launch_eager),
         ("launch.kdl (empty store, bar-only)", &launch_empty),
         ("add/open one-shot tab layout", &one_shot),
+        ("layout.kdl (generated, not passed to zellij)", &layout_kdl),
     ] {
         let plugins = layout_plugin_configs(text, what);
         assert!(
@@ -405,11 +427,10 @@ fn keybind_and_layout_plugin_configurations_match() {
             );
             // The pair must MATCH, not merely both be present.
             assert_eq!(
-                p, &kb[0],
+                p, &agreed_keybind_config,
                 "{what}'s plugin configuration differs from config.kdl's \
                  keybind configuration — every keybind press will launch a \
-                 SECOND bar (#44):\nlayout={p:?}\nkeybind={:?}",
-                kb[0]
+                 SECOND bar (#44):\nlayout={p:?}\nkeybind={agreed_keybind_config:?}"
             );
         }
     }
