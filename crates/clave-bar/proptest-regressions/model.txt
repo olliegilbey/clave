@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 547c31c889659961e08de9e795d53ab947182f785266ea506bb1b6f55f37d7aa # shrinks to start = 500, step = 1, floor = 0, collapsed = false, peeking = false, latency = false, interrupt = Some((1, Jump(25)))
+cc 73578a1f323e1ce87673cf3769f87111c03d762497c0e74ec665d3efdff9a1f7 # shrinks to start = 35, step = 10, floor = 0, collapsed = false, peeking = false, latency = true, interrupt = None
+cc 4f4615535bcad9f93118330b0f91c9a5a08b9dac9273b3164a63c78fec4ca740 # shrinks to start = 416, step = 1, floor = 0, collapsed = true, peeking = false, latency = true, interrupt = Some((5, Jump(88)))
