@@ -349,6 +349,9 @@ pub fn write_generated(dir: &std::path::Path, binary: &str, wasm: &str) -> Resul
     // OWN settings.json — else sandbox sessions get no clave hooks and
     // scenario agents never report status. Env unset ⇒ ~/.claude, unchanged.
     let settings_path = crate::env::claude_config_dir()?.join("settings.json");
+    if let Some(parent) = settings_path.parent() {
+        std::fs::create_dir_all(parent)?; // fresh box: ~/.claude may not exist yet
+    }
     let mut settings: serde_json::Value = match std::fs::read(&settings_path) {
         Ok(b) => serde_json::from_slice(&b).context("parsing ~/.claude/settings.json")?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
@@ -439,15 +442,74 @@ pub fn eager_row(store: &crate::store::Store) -> Option<&crate::store::AgentReco
         .max_by_key(|r| r.last_interacted)
 }
 
+/// First-run consent (spec §First run): the plan prints ALWAYS; the prompt
+/// fires only on a TTY — never prompt without one (Homebrew 2026). Pure
+/// over (tty, read line) so the gate is unit-testable.
+pub fn confirm_proceed(is_tty: bool, input: Option<&str>) -> bool {
+    if !is_tty {
+        return true; // invoking `clave` IS the named intent; setup is idempotent
+    }
+    matches!(
+        input.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("") | Some("y") | Some("yes") | None
+    )
+}
+
+pub fn first_run_plan(data_dir: &Path, settings_path: &Path) -> String {
+    format!(
+        "First run — clave needs to prepare this machine:\n\
+         \n\
+         \x20 • generate session config + layout in {}\n\
+         \x20 • register status hooks in {} (additive — your existing hooks are never touched)\n\
+         \x20 • pre-seed Zellij's plugin permission cache\n",
+        data_dir.display(),
+        settings_path.display()
+    )
+}
+
 /// Bare `clave`: attach-or-create the dedicated session with OUR config +
 /// a DYNAMIC layout (§6.8 C8: eager most-recent tab; serialization is off,
 /// so a dead session is deleted, never resurrected).
 pub fn launch_session() -> Result<()> {
+    // Preflight BEFORE anything (spec §Preflight): zellij because we exec
+    // it; claude because the eager tab's spawn would otherwise fail INSIDE
+    // a pane — the worst place to read an error.
+    crate::doctor::preflight(
+        &[crate::discover::ToolId::Zellij, crate::discover::ToolId::Claude],
+        "clave can't start — missing required tools:",
+    )?;
     let dir = data_dir()?;
     let config = dir.join("config.kdl");
-    anyhow::ensure!(config.exists(), "run `clave setup` first");
+    if !config.exists() {
+        // First run (spec §First run): plan → TTY-gated consent → setup.
+        use std::io::IsTerminal;
+        let settings = crate::env::claude_config_dir()?.join("settings.json");
+        println!("{}", first_run_plan(&dir, &settings));
+        let is_tty = std::io::stdin().is_terminal();
+        let input = if is_tty {
+            print!("Proceed? [Y/n] ");
+            use std::io::Write;
+            std::io::stdout().flush()?;
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line)?;
+            Some(line)
+        } else {
+            None
+        };
+        anyhow::ensure!(
+            confirm_proceed(is_tty, input.as_deref()),
+            "aborted — run `clave setup` when ready"
+        );
+        run_setup()?;
+    }
+    // Discovered once, used for every zellij invocation in this launch —
+    // an off-PATH zellij (e.g. ~/.cargo/bin over SSH) still works (spec
+    // §Discovery: found off-PATH ⇒ use the absolute path).
+    let zellij = crate::discover::discover(crate::discover::ToolId::Zellij)
+        .map(|d| d.path)
+        .unwrap_or_else(|| std::path::PathBuf::from("zellij")); // preflight guarantees Some
     let session = crate::env::session_name();
-    let list = std::process::Command::new("zellij")
+    let list = std::process::Command::new(&zellij)
         .args(["list-sessions", "-n"])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
@@ -463,7 +525,7 @@ pub fn launch_session() -> Result<()> {
             // launch must NOT die on a cleanup failure — but a SILENT failure
             // would let attach resurrect the exact pre-C8 serialized state C8
             // kills, invisibly. So capture the status and log any failure.
-            match std::process::Command::new("zellij")
+            match std::process::Command::new(&zellij)
                 .args(["delete-session", "--force", &session])
                 .status()
             {
@@ -512,7 +574,7 @@ pub fn launch_session() -> Result<()> {
         ),
     );
     use std::os::unix::process::CommandExt;
-    let err = std::process::Command::new("zellij")
+    let err = std::process::Command::new(&zellij)
         .arg("--config")
         .arg(&config)
         .arg("--layout")
@@ -828,6 +890,29 @@ mod tests {
         // never touched (§2 running-session immunity).
         extract_embedded(dir.path(), b"DIFFERENT", "0.1.0").unwrap();
         assert_eq!(std::fs::read(&p).unwrap(), b"wasm-bytes");
+    }
+
+    #[test]
+    fn confirm_proceed_tty_gating_and_default_yes() {
+        // Never prompt without a TTY (Homebrew 2026 rule) → proceed.
+        assert!(confirm_proceed(false, None));
+        // TTY: empty/y/Y/yes proceed; n/no abort.
+        for yes in ["", "y", "Y", "yes", " y "] {
+            assert!(confirm_proceed(true, Some(yes)), "{yes:?}");
+        }
+        for no in ["n", "N", "no", "nope"] {
+            assert!(!confirm_proceed(true, Some(no)), "{no:?}");
+        }
+    }
+
+    #[test]
+    fn first_run_plan_names_the_three_mutations() {
+        let s = first_run_plan(Path::new("/home/u/.local/share/clave"), Path::new("/home/u/.claude/settings.json"));
+        assert!(s.contains("First run"));
+        assert!(s.contains("/home/u/.local/share/clave"));
+        assert!(s.contains("/home/u/.claude/settings.json"));
+        assert!(s.contains("additive"));
+        assert!(s.contains("permission cache"));
     }
 
     #[test]

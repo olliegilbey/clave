@@ -428,6 +428,27 @@ pub fn render_failures(context: &str, findings: &[Finding]) -> String {
     out
 }
 
+/// Per-command dependency gate (spec §Preflight): only UNDISCOVERABLE tools
+/// halt — off-PATH finds pass silently (clave uses the absolute path).
+/// Prints nothing on success, no clean-bill banner.
+pub fn preflight(required: &[ToolId], context: &str) -> anyhow::Result<()> {
+    let missing: Vec<Finding> = required
+        .iter()
+        .filter(|t| crate::discover::discover(**t).is_none())
+        .map(|t| Finding {
+            group: Group::RequiredTools,
+            severity: Severity::Problem,
+            label: format!("{} not found", t.bin_name()),
+            advice: missing_advice(*t, probe_pkg_manager()),
+        })
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("{}", render_failures(context, &missing)))
+    }
+}
+
 /// Count clave hook entries per event — reuses is_clave_hook_command, the
 /// SAME matcher merge_hooks writes with (doctor never guesses a second form).
 pub fn hook_entry_counts(settings: &serde_json::Value) -> Vec<(String, usize)> {
@@ -824,6 +845,20 @@ mod tests {
             "hooks": { "Stop": [ { "hooks": [ { "type": "command", "command": "my-bell hook Stop" } ] } ] }
         }));
         assert_eq!(counts.iter().find(|(e, _)| e == "Stop").unwrap().1, 0);
+    }
+
+    #[test]
+    fn preflight_failure_text_carries_full_remediation() {
+        // Pure path: build the failure the way preflight does.
+        let missing = vec![Finding {
+            group: Group::RequiredTools,
+            severity: Severity::Problem,
+            label: "zellij not found".into(),
+            advice: missing_advice(ToolId::Zellij, None),
+        }];
+        let s = render_failures("clave can't start — missing required tools:", &missing);
+        assert!(s.contains("zellij.dev/documentation/installation"));
+        assert!(s.contains("github.com/zellij-org/zellij/releases"));
     }
 
     #[test]
