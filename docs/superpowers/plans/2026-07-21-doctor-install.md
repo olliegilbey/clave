@@ -524,14 +524,16 @@ dist-build: build-bar-release
 - [ ] **Step 5: Run tests + local roundtrip**
 
 Run: `cargo test --workspace 2>&1 | grep -E "test result" | tail -3` — all pass.
-Run: `just dist-build && CLAVE_DATA_DIR=$(mktemp -d) ./target/release/clave setup && ls $CLAVE_DATA_DIR` — wait: env var must reach setup; run instead:
+Local roundtrip — `HOME` itself is redirected because `run_setup` also writes
+the Zellij permission cache at a home-derived path with NO env override
+(setup.rs `permissions_cache_path`); `$HOME` sandboxes every write at once:
 
 ```bash
 just dist-build
-T=$(mktemp -d) && CLAVE_DATA_DIR=$T CLAUDE_CONFIG_DIR=$T ./target/release/clave setup; ls -la $T
+T=$(mktemp -d) && HOME=$T CLAVE_DATA_DIR=$T/data CLAUDE_CONFIG_DIR=$T/claude ./target/release/clave setup; ls -la $T/data
 ```
 
-Expected: `clave-bar-v0.1.0.wasm` present alongside config.kdl/layout.kdl (this proves the embed→extract path with zero pre-installed wasm).
+Expected: `clave-bar-v0.1.0.wasm` present alongside config.kdl/layout.kdl (this proves the embed→extract path with zero pre-installed wasm), and NOTHING outside `$T` is touched.
 
 - [ ] **Step 6: Commit**
 
@@ -1744,6 +1746,17 @@ pub fn first_run_plan(data_dir: &Path, settings_path: &Path) -> String {
         settings_path.display()
     )
 }
+```
+
+Also fix a pre-existing fresh-box bug found in Task 3's roundtrip: `run_setup`'s
+settings.json write path assumes the config dir exists (`~/.claude` on real
+machines, but a first-run box may lack it). In the settings-write section of
+`write_generated`, before the `std::fs::write(&settings_path, …)` call, add:
+
+```rust
+    if let Some(parent) = settings_path.parent() {
+        std::fs::create_dir_all(parent)?; // fresh box: ~/.claude may not exist yet
+    }
 ```
 
 Rewire `launch_session` — at the very top add:
