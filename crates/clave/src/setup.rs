@@ -409,22 +409,22 @@ pub fn setup_binary(has_embedded: bool, current_exe: Option<&Path>) -> String {
 pub fn run_setup() -> Result<()> {
     let dir = data_dir()?;
     std::fs::create_dir_all(&dir)?;
-    let wasm = wasm_path()?;
-    if !wasm.exists() {
-        match crate::release::embedded_wasm() {
-            // Release binary: self-contained — extract and use the versioned
-            // artifact (spec §Distribution: one file IS the install).
-            Some(bytes) => {
-                extract_embedded(&dir, bytes, env!("CARGO_PKG_VERSION"))?;
-            }
-            // Dev build: wasm placement belongs to the sandbox flow.
-            None => anyhow::bail!(
-                "{} missing — run `just dev-install` first (it builds the sandbox wasm here)",
-                wasm.display()
-            ),
-        }
+    // Fix 7 (review 2026-07-22): extract the embedded wasm FIRST and
+    // unconditionally — write-if-absent on the VERSIONED name. Previously we
+    // extracted only when wasm_path() reported nothing; but wasm_path() falls
+    // back to a stale unversioned clave-bar.wasm, so a leftover sandbox wasm
+    // made wasm.exists() true and the release's versioned wasm never landed —
+    // config got baked against the stale file. Extracting before resolving
+    // both fixes that and removes the old nested branch.
+    if let Some(bytes) = crate::release::embedded_wasm() {
+        extract_embedded(&dir, bytes, env!("CARGO_PKG_VERSION"))?;
     }
-    let wasm = wasm_path()?; // re-resolve: extraction creates the preferred versioned file
+    let wasm = wasm_path()?; // prefers the versioned artifact just extracted
+    anyhow::ensure!(
+        wasm.exists(),
+        "{} missing — run `just dev-install` first (it builds the sandbox wasm here)",
+        wasm.display()
+    );
     let wasm_str = wasm.to_str().context("wasm path")?;
     // Fix 1 (review 2026-07-22): release installs bake the running binary's
     // absolute path (self-contained, PATH-independent); dev/sandbox keeps bare
@@ -487,6 +487,23 @@ pub fn first_run_plan(data_dir: &Path, settings_path: &Path) -> String {
     )
 }
 
+/// Should launch re-run setup because a release binary was UPGRADED (review
+/// 2026-07-22, Fix 3)? launch_session only ran setup on a MISSING config, so
+/// an upgraded release binary (new version, embedded wasm) with existing
+/// config never extracted its new versioned wasm and kept launching the OLD
+/// bar — exactly the CLI/bar drift invariant #9 exists to kill. True only
+/// when config already exists (first run is the other branch's job), this is
+/// a release build, and THIS version's wasm has not been extracted yet.
+/// Running-session immunity holds automatically: live sessions reference the
+/// old files baked into their config, untouched by re-running setup.
+pub fn needs_version_refresh(
+    config_exists: bool,
+    has_embedded: bool,
+    versioned_wasm_exists: bool,
+) -> bool {
+    config_exists && has_embedded && !versioned_wasm_exists
+}
+
 /// Bare `clave`: attach-or-create the dedicated session with OUR config +
 /// a DYNAMIC layout (§6.8 C8: eager most-recent tab; serialization is off,
 /// so a dead session is deleted, never resurrected).
@@ -500,7 +517,8 @@ pub fn launch_session() -> Result<()> {
     )?;
     let dir = data_dir()?;
     let config = dir.join("config.kdl");
-    if !config.exists() {
+    let config_exists = config.exists();
+    if !config_exists {
         // First run (spec §First run): plan → TTY-gated consent → setup.
         use std::io::IsTerminal;
         let settings = crate::env::claude_config_dir()?.join("settings.json");
@@ -521,6 +539,24 @@ pub fn launch_session() -> Result<()> {
             "aborted — run `clave setup` when ready"
         );
         run_setup()?;
+    } else {
+        // Upgrade-refresh (review 2026-07-22, Fix 3): a release binary whose
+        // config exists but whose THIS-version wasm is not yet extracted was
+        // just upgraded — re-run setup so the new versioned wasm lands and the
+        // bar can never go stale. Idempotent, no consent prompt (the user
+        // consented at first run; this is the same mutation set).
+        let versioned = dir.join(crate::release::versioned_wasm_name(env!("CARGO_PKG_VERSION")));
+        if needs_version_refresh(
+            config_exists,
+            crate::release::embedded_wasm().is_some(),
+            versioned.exists(),
+        ) {
+            println!(
+                "clave {}: refreshing setup for this version",
+                env!("CARGO_PKG_VERSION")
+            );
+            run_setup()?;
+        }
     }
     // Discovered once, used for every zellij invocation in this launch —
     // an off-PATH zellij (e.g. ~/.cargo/bin over SSH) still works (spec
@@ -910,6 +946,23 @@ mod tests {
         // never touched (§2 running-session immunity).
         extract_embedded(dir.path(), b"DIFFERENT", "0.1.0").unwrap();
         assert_eq!(std::fs::read(&p).unwrap(), b"wasm-bytes");
+    }
+
+    #[test]
+    fn needs_version_refresh_only_when_release_wasm_is_stale() {
+        // Fix 3 (review 2026-07-22): an upgraded release binary with existing
+        // config must re-extract its NEW versioned wasm, else it launches the
+        // OLD bar forever (invariant #9 drift). True ONLY for
+        // (config present, embedded, this version's wasm absent).
+        assert!(needs_version_refresh(true, true, false));
+        // Wasm already current → no refresh (idempotent, no needless setup).
+        assert!(!needs_version_refresh(true, true, true));
+        // Dev build (no embedded wasm) → the sandbox flow owns wasm placement.
+        assert!(!needs_version_refresh(true, false, false));
+        // First run (no config) is handled by the other branch, never here.
+        assert!(!needs_version_refresh(false, true, false));
+        assert!(!needs_version_refresh(false, false, false));
+        assert!(!needs_version_refresh(false, true, true));
     }
 
     #[test]
