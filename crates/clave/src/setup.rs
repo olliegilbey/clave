@@ -886,4 +886,100 @@ mod tests {
         assert!(!merge_hooks(&mut v, new));
         assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 2);
     }
+
+    /// Pull the `X.Y.Z` out of a `clave-bar-vX.Y.Z.wasm` or `clave-vX.Y.Z`
+    /// basename. Test-only: it exists to let
+    /// `generated_artifact_set_is_version_coherent` compare versions found
+    /// in generated KDL text, not to be a general path parser. Returns None
+    /// for a bare/unversioned reference (dev's `"clave"`, an unversioned
+    /// `clave-bar.wasm`) — those carry no version to compare, so the caller
+    /// only compares the `Some(_)` results.
+    fn extract_version(path: &str) -> Option<String> {
+        let name = std::path::Path::new(path).file_name()?.to_str()?;
+        let v = match name.strip_prefix("clave-bar-v") {
+            Some(rest) => rest.strip_suffix(".wasm")?,
+            None => name.strip_prefix("clave-v")?,
+        };
+        // Well-formed guard: must be dot-separated all-digit segments
+        // (rejects "clave-vault"/"clave-verify" style false positives, and
+        // any truncated/malformed match) — same shape as
+        // is_clave_hook_command's digit-after-prefix check above.
+        let well_formed = !v.is_empty()
+            && v.split('.')
+                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+        well_formed.then(|| v.to_string())
+    }
+
+    /// Every distinct version referenced in `text` via a
+    /// `clave-bar-vX.Y.Z.wasm` or `clave-vX.Y.Z` path. Tokenizes on
+    /// everything that can't appear inside a bare path (KDL's quotes,
+    /// braces, the `file:` scheme colon, whitespace) so `"file:/d/clave-
+    /// bar-v0.1.1.wasm"` and `Run "/d/bin/clave-v0.1.1" "add"` both yield
+    /// their embedded version.
+    fn versions_in(text: &str) -> std::collections::BTreeSet<String> {
+        text.split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '/')))
+            .filter_map(extract_version)
+            .collect()
+    }
+
+    #[test]
+    fn generated_artifact_set_is_version_coherent() {
+        // Regression for the #43/#44 field incident (2026-07-22): a stale
+        // dev binary — still built at 0.1.0 — ran the cold start and wrote
+        // launch.kdl baking `clave-bar-v0.1.0.wasm`/`clave-v0.1.0`, while
+        // `just release` had already regenerated config.kdl/layout.kdl at
+        // v0.1.1. Zellij keys plugin IDENTITY on file location, so the two
+        // wasm paths loaded as two SEPARATE plugin instances — a duplicate
+        // sidebar in every tab and dead navigation (no shared beacon/pipe
+        // state, #43). Nothing checked that config_kdl/layout_kdl/
+        // launch_layout_kdl agreed on a version before this test; it's a
+        // pure-function, hermetic check (no filesystem — generation is pure
+        // over its (binary, wasm) args per write_generated's doc comment) so
+        // a mismatched caller is caught at test time, not in production.
+        //
+        // Does NOT cover: two different BINARIES generating different files
+        // across separate runs (e.g. a dev cargo-install racing a release
+        // install) — that's a runtime/doctor check, tracked as #47.
+        let wasm = "/data/clave/clave-bar-v0.1.1.wasm";
+        let binary = "/data/clave/bin/clave-v0.1.1";
+        let r = crate::store::AgentRecord {
+            uuid: "u".into(),
+            cwd: "/c".into(),
+            repo_root: "/c".into(),
+            branch: "main".into(),
+            label: "l".into(),
+            status: clave_types::Status::Idle,
+            last_interacted: 0,
+            last_visited: 0,
+            worktree: None,
+            label_source: crate::store::LabelSource::FirstPrompt,
+            tab_id: None,
+            stale: false,
+        };
+        let cfg = config_kdl(binary, wasm);
+        let lay = layout_kdl(wasm);
+        // The launch layout is composed at launch time and takes the eager
+        // agent row — synthesize one so the eager-tab's baked `command=`
+        // (the version-bearing binary reference) is present to check too.
+        let launch = launch_layout_kdl(binary, wasm, Some(&r));
+
+        let versions: std::collections::BTreeSet<String> =
+            [cfg.as_str(), lay.as_str(), launch.as_str()]
+                .iter()
+                .flat_map(|t| versions_in(t))
+                .collect();
+        assert_eq!(
+            versions.len(),
+            1,
+            "generated artifact set must reference exactly ONE version \
+             (#43/#44: a mixed set loads a second, independent plugin \
+             instance), found {versions:?}:\nconfig={cfg}\nlayout={lay}\nlaunch={launch}"
+        );
+
+        // Second guard: every path actually carrying a version is non-empty
+        // and well-formed (extract_version's digit-segment check already
+        // enforces this on each match — assert the artifacts produced at
+        // least one, so this test can't pass on an empty/no-op input).
+        assert!(!versions.is_empty(), "no versioned reference found at all");
+    }
 }
