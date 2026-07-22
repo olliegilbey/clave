@@ -114,6 +114,26 @@ impl State {
                         BTreeMap::new(),
                     );
                 }
+                Effect::ReanchorVisit { tab_id } if active => {
+                    // #23: same clave-visited beacon as AnnounceVisit, but
+                    // GATED to the active instance — a toggle burst delivers the
+                    // fresh set to every bar (doc:371-394), so an ungated
+                    // re-anchor would be a per-instance beacon war (round-13
+                    // EMFILE class). Accepted trade (see model apply_tabs): a
+                    // transiently-false active check drops the reseed and nav
+                    // stays stranded until a click — narrow, and storm-free.
+                    run_command(
+                        &[
+                            "zellij",
+                            "pipe",
+                            "--name",
+                            "clave-visited",
+                            "--",
+                            &tab_id.to_string(),
+                        ],
+                        BTreeMap::new(),
+                    );
+                }
                 Effect::RenameTab { tab_id, name } if active => {
                     rename_tab_with_id(tab_id as u64, name);
                 }
@@ -130,6 +150,19 @@ impl State {
                         &["clave", "bind", &uuid, &tab_id.to_string()],
                         BTreeMap::new(),
                     );
+                }
+                Effect::PruneTabs { stale_ids } if active => {
+                    // #6/F3: report the OBSERVED-STALE ids (not the live set) so
+                    // the store removes exactly those binds/timeline entries —
+                    // idempotent removals commute, so two out-of-order prunes
+                    // can't clobber a tab neither saw die. Executor-gated (like
+                    // Bind): keeps duplicate prunes to the active bar. The model
+                    // gates emission to set-changes, so this fires ~once per
+                    // close, not per TabUpdate.
+                    let mut argv: Vec<String> = vec!["clave".into(), "prune-tabs".into()];
+                    argv.extend(stale_ids.iter().map(usize::to_string));
+                    let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+                    run_command(&refs, BTreeMap::new());
                 }
                 // C6 width-seek effects are SELF-targeted (round 20: every
                 // instance drives only its own pane, with render feedback).
@@ -164,6 +197,20 @@ impl State {
                 Effect::OpenAgent { uuid } => {
                     run_command(&["clave", "open", &uuid], BTreeMap::new());
                 }
+                Effect::PersistCollapse { collapsed } if active => {
+                    // Issue #5: report the ABSOLUTE collapse mode to the
+                    // store (the one writer); its seq-bumped push heals any
+                    // instance the toggle broadcast missed. Every instance
+                    // books the pending write; only the active one runs it.
+                    run_command(
+                        &[
+                            "clave",
+                            "collapse",
+                            if collapsed { "true" } else { "false" },
+                        ],
+                        BTreeMap::new(),
+                    );
+                }
                 _ => {} // non-active instance skips writes
             }
         }
@@ -190,7 +237,14 @@ impl State {
     /// hidden panes). Every instance stays visible, hears this pipe, and
     /// converges its own pane with real feedback.
     fn toggle_collapsed(&mut self) {
-        self.model.toggle();
+        // Durability (issue #5): the broadcast flipped every instance's
+        // memory, but memory alone desyncs (C8 parity family — birth after
+        // toggle, reload, missed pipe). The model books the write it owes
+        // the store (pending ledger) and emits PersistCollapse; run_effects
+        // gates its EXECUTION to the active instance, same as MarkRead/Bind
+        // — one writer per toggle, absolute value, no push storm (rd 11).
+        let fx = self.model.toggle();
+        self.run_effects(fx);
     }
 
     /// One pipe message → model. Split out of pipe() so early returns here
@@ -313,11 +367,11 @@ impl ZellijPlugin for State {
             EventType::RunCommandResult,
             EventType::PermissionRequestResult,
             EventType::Timer, // peek-on-nav sink (set_timeout per peek)
-            // NO InputReceived: it fires for EVERY keystroke INCLUDING the
-            // nav keybinds themselves (C5 round 4: each walk press touched
-            // the departing tab and the touch-spawn storm exhausted the
-            // server's fds). Plain tabs order by birth only — shell-command
-            // touches are parked (§6.6).
+                              // NO InputReceived: it fires for EVERY keystroke INCLUDING the
+                              // nav keybinds themselves (C5 round 4: each walk press touched
+                              // the departing tab and the touch-spawn storm exhausted the
+                              // server's fds). Plain tabs order by birth only — shell-command
+                              // touches are parked (§6.6).
         ]);
         // Stock tab-bar pattern: an unselectable pane receives clicks
         // directly (no focus-stealing first click) and MoveFocus skips it —

@@ -81,6 +81,15 @@ pub struct AgentSnapshot {
     /// pre-field payloads parseable.
     #[serde(default)]
     pub tab_timeline: std::collections::BTreeMap<usize, u64>,
+    /// Bar collapse mode (issue #5, C8 parity-desync family): per-instance
+    /// memory synced only by the `clave-toggle` broadcast desynced live — a
+    /// tab born after a toggle, a plugin reload, or one missed pipe flips an
+    /// instance forever. Riding the seq-gated snapshot lets instances
+    /// hydrate at birth and heal on every push from the one store writer.
+    /// `default` (false = expanded) keeps pre-field payloads parseable and
+    /// matches the born-expanded default.
+    #[serde(default)]
+    pub collapsed: bool,
 }
 
 /// The `clave-register` payload a pane's `clave spawn` pipes to the plugin so it
@@ -168,6 +177,7 @@ mod tests {
         let snap = AgentSnapshot {
             seq: 7,
             tab_timeline: Default::default(),
+            collapsed: false,
             agents: vec![Agent {
                 uuid: "u1".into(),
                 cwd: "/Users/x/code/clave".into(),
@@ -249,6 +259,7 @@ mod tests {
             seq: 1,
             agents: vec![],
             tab_timeline: std::collections::BTreeMap::from([(4usize, 1700u64)]),
+            collapsed: false,
         };
         let json = serde_json::to_string(&snap).unwrap();
         let back: AgentSnapshot = serde_json::from_str(&json).unwrap();
@@ -256,6 +267,25 @@ mod tests {
         // Pre-field payloads (old store hydration) must still parse.
         let old: AgentSnapshot = serde_json::from_str("{\"seq\":1,\"agents\":[]}").unwrap();
         assert!(old.tab_timeline.is_empty());
+    }
+
+    #[test]
+    fn snapshot_carries_collapsed_and_defaults_false() {
+        // Issue #5 (C8 parity-desync): the collapse mode rides the snapshot
+        // so instances hydrate/heal from the store writer. An old-wire
+        // payload without the field must parse as expanded (false) — the
+        // born-expanded default — for old-CLI/new-plugin interop.
+        let snap = AgentSnapshot {
+            seq: 2,
+            agents: vec![],
+            tab_timeline: Default::default(),
+            collapsed: true,
+        };
+        let back: AgentSnapshot =
+            serde_json::from_str(&serde_json::to_string(&snap).unwrap()).unwrap();
+        assert!(back.collapsed);
+        let old: AgentSnapshot = serde_json::from_str("{\"seq\":1,\"agents\":[]}").unwrap();
+        assert!(!old.collapsed);
     }
 
     #[test]

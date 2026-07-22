@@ -29,7 +29,9 @@ pub fn data_dir() -> Result<PathBuf> {
 /// resolves the exact wasm baked into its config at launch.
 pub fn wasm_path() -> Result<PathBuf> {
     let dir = data_dir()?;
-    let versioned = dir.join(crate::release::versioned_wasm_name(env!("CARGO_PKG_VERSION")));
+    let versioned = dir.join(crate::release::versioned_wasm_name(env!(
+        "CARGO_PKG_VERSION"
+    )));
     Ok(if versioned.exists() {
         versioned
     } else {
@@ -168,9 +170,12 @@ pub fn launch_layout_kdl(
         // BARE node (no bar pane): default_tab_template wraps explicit tab
         // nodes too, so a bar-carrying node here rendered a DOUBLE bar in
         // the eager tab (live finding, c8-cold-start 2026-07-18).
-        Some(r) => {
-            crate::add::tab_node_bare(binary, &crate::add::sanitize_label(&r.label), &r.uuid, &r.cwd)
-        }
+        Some(r) => crate::add::tab_node_bare(
+            binary,
+            &crate::add::sanitize_label(&r.label),
+            &r.uuid,
+            &r.cwd,
+        ),
         None => "    tab name=\"clave\" focus=true\n".to_string(),
     };
     // size="15%" not size=30: fixed panes refuse resizes — see layout_kdl.
@@ -531,7 +536,10 @@ pub fn launch_session() -> Result<()> {
     // it; claude because the eager tab's spawn would otherwise fail INSIDE
     // a pane — the worst place to read an error.
     crate::doctor::preflight(
-        &[crate::discover::ToolId::Zellij, crate::discover::ToolId::Claude],
+        &[
+            crate::discover::ToolId::Zellij,
+            crate::discover::ToolId::Claude,
+        ],
         "clave can't start — missing required tools:",
     )?;
     let dir = data_dir()?;
@@ -564,7 +572,9 @@ pub fn launch_session() -> Result<()> {
         // just upgraded — re-run setup so the new versioned wasm lands and the
         // bar can never go stale. Idempotent, no consent prompt (the user
         // consented at first run; this is the same mutation set).
-        let versioned = dir.join(crate::release::versioned_wasm_name(env!("CARGO_PKG_VERSION")));
+        let versioned = dir.join(crate::release::versioned_wasm_name(env!(
+            "CARGO_PKG_VERSION"
+        )));
         if needs_version_refresh(
             config_exists,
             crate::release::embedded_wasm().is_some(),
@@ -693,8 +703,14 @@ mod tests {
             launch_layout_kdl("clave", "/w.wasm", None),
             crate::add::tab_layout("clave", "/w.wasm", "l", "u", "/c"),
         ] {
-            assert!(kdl.contains("size=\"15%\""), "bar pane must be percent-sized:\n{kdl}");
-            assert!(!kdl.contains("size=30"), "fixed size resurrects the FIXED! bug:\n{kdl}");
+            assert!(
+                kdl.contains("size=\"15%\""),
+                "bar pane must be percent-sized:\n{kdl}"
+            );
+            assert!(
+                !kdl.contains("size=30"),
+                "fixed size resurrects the FIXED! bug:\n{kdl}"
+            );
         }
     }
 
@@ -708,7 +724,10 @@ mod tests {
         let p = launch_layout_path(dir);
         assert_eq!(p, dir.join("launch.kdl"));
         assert_eq!(launch_layout_path(dir), p); // deterministic, no pid suffix
-        assert!(!p.to_string_lossy().contains(&std::process::id().to_string()));
+        assert!(
+            !p.to_string_lossy()
+                .contains(&std::process::id().to_string())
+        );
     }
 
     #[test]
@@ -759,8 +778,7 @@ mod tests {
         // a deleted worktree as most-recent would bake a tab whose spawn dies
         // at canonicalize. Skip it, fall through to the next viable row.
         use crate::store::{AgentRecord, LabelSource, Store};
-        let live_dir =
-            std::env::temp_dir().join(format!("clave-eager-{}", std::process::id()));
+        let live_dir = std::env::temp_dir().join(format!("clave-eager-{}", std::process::id()));
         std::fs::create_dir_all(&live_dir).unwrap();
         let mk = |uuid: &str, cwd: &str, li: u64| AgentRecord {
             uuid: uuid.into(),
@@ -923,7 +941,10 @@ mod tests {
             "/home/o/.local/share/clave/bin/clave-v0.1.0 hook Stop",
             "Stop"
         ));
-        assert!(is_clave_hook_command("/opt/clave-v0.0.9 hook Notification", "Notification"));
+        assert!(is_clave_hook_command(
+            "/opt/clave-v0.0.9 hook Notification",
+            "Notification"
+        ));
         // Wrong event, or a foreign tool, or a non-hook command: NOT ours.
         assert!(!is_clave_hook_command("clave hook Stop", "Notification"));
         assert!(!is_clave_hook_command("my-bell", "Stop"));
@@ -933,7 +954,10 @@ mod tests {
         // clave-verify) is NOT ours — the basename check must require a
         // DIGIT immediately after "clave-v", not just the substring.
         assert!(!is_clave_hook_command("clave-vault hook Stop", "Stop"));
-        assert!(!is_clave_hook_command("/usr/local/bin/clave-verify hook Stop", "Stop"));
+        assert!(!is_clave_hook_command(
+            "/usr/local/bin/clave-verify hook Stop",
+            "Stop"
+        ));
     }
 
     #[test]
@@ -958,17 +982,21 @@ mod tests {
         let clave: Vec<_> = stops
             .iter()
             .filter(|e| {
-                e["hooks"].as_array().unwrap().iter().any(|h| {
-                    is_clave_hook_command(h["command"].as_str().unwrap_or(""), "Stop")
-                })
+                e["hooks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|h| is_clave_hook_command(h["command"].as_str().unwrap_or(""), "Stop"))
             })
             .collect();
         assert_eq!(clave.len(), 1);
         assert_eq!(clave[0]["hooks"][0]["command"], "clave hook Stop");
         // The foreign my-bell entry survives untouched.
-        assert!(stops
-            .iter()
-            .any(|e| e["hooks"][0]["command"] == "my-bell hook Stop"));
+        assert!(
+            stops
+                .iter()
+                .any(|e| e["hooks"][0]["command"] == "my-bell hook Stop")
+        );
         // Idempotent second run: nothing left to dedupe.
         assert!(!merge_hooks(&mut v, "clave"));
         assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 2);
@@ -1052,7 +1080,10 @@ mod tests {
 
     #[test]
     fn first_run_plan_names_the_three_mutations() {
-        let s = first_run_plan(Path::new("/home/u/.local/share/clave"), Path::new("/home/u/.claude/settings.json"));
+        let s = first_run_plan(
+            Path::new("/home/u/.local/share/clave"),
+            Path::new("/home/u/.claude/settings.json"),
+        );
         assert!(s.contains("First run"));
         assert!(s.contains("/home/u/.local/share/clave"));
         assert!(s.contains("/home/u/.claude/settings.json"));
@@ -1081,7 +1112,10 @@ mod tests {
         assert_eq!(stops[0]["hooks"][0]["command"], "my-bell"); // foreign untouched
         assert_eq!(stops[1]["hooks"][0]["command"], format!("{new} hook Stop"));
         // The other events were absent → freshly registered at the new path.
-        assert_eq!(v["hooks"]["Notification"][0]["hooks"][0]["command"], format!("{new} hook Notification"));
+        assert_eq!(
+            v["hooks"]["Notification"][0]["hooks"][0]["command"],
+            format!("{new} hook Notification")
+        );
         // Same-version re-run: idempotent (no change, no duplicate).
         assert!(!merge_hooks(&mut v, new));
         assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 2);

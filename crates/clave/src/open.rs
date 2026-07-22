@@ -20,6 +20,18 @@ pub enum OpenDecision {
     Open,
 }
 
+/// Liveness for `clave open` (issue #6): the STORE bind is authoritative —
+/// `row.tab_id` is Some iff the bar has it bound to a live (un-pruned) tab —
+/// with the dump-layout command scan kept only as an ADDITIVE fallback for a
+/// non-MCP agent whose bind hasn't landed. Command parsing alone went blind
+/// under MCP servers (zellij serializes the `uv … run main.py` child, not
+/// `claude`, C7 corollary 2026-07-21), so a live agent read as dead and a
+/// dwell-open spawned a DUPLICATE tab. The intended dwell path opens a DORMANT
+/// row (tab_id None), so the bind check is a pure safety add there.
+pub fn open_is_live(row: &AgentRecord, dump_layout: &str) -> bool {
+    row.tab_id.is_some() || crate::add::live_uuids(dump_layout).contains(&row.uuid)
+}
+
 pub fn open_decision(_row: &AgentRecord, is_live: bool, cwd_exists: bool) -> OpenDecision {
     if is_live {
         OpenDecision::AlreadyLive
@@ -67,7 +79,9 @@ pub fn run_open(uuid: &str) -> Result<()> {
             anyhow::bail!("clave open: dump-layout spawn failed: {e}");
         }
     };
-    let is_live = crate::add::live_uuids(&dump).contains(&uuid.to_string());
+    // Issue #6: bind-first liveness (dump-layout scan is the additive
+    // fallback) — `open_is_live` fixes the MCP-blind duplicate-tab spawn.
+    let is_live = open_is_live(row, &dump);
     let cwd_exists = std::path::Path::new(&row.cwd).is_dir();
     match open_decision(row, is_live, cwd_exists) {
         OpenDecision::AlreadyLive => {
@@ -99,7 +113,12 @@ pub fn run_open(uuid: &str) -> Result<()> {
             std::fs::write(&tmp, layout)?;
             let status = std::process::Command::new("zellij")
                 .env("ZELLIJ_SESSION_NAME", &session)
-                .args(["action", "new-tab", "--layout", tmp.to_str().context("tmp")?])
+                .args([
+                    "action",
+                    "new-tab",
+                    "--layout",
+                    tmp.to_str().context("tmp")?,
+                ])
                 .status()?;
             let _ = std::fs::remove_file(&tmp);
             anyhow::ensure!(status.success(), "zellij action new-tab failed");
@@ -134,6 +153,26 @@ mod tests {
             tab_id: None,
             stale: false,
         }
+    }
+
+    #[test]
+    fn open_is_live_prefers_the_store_bind_over_command_scan() {
+        // Issue #6: the STORE bind is the authoritative liveness signal —
+        // row.tab_id is Some iff the bar has it bound to a live (un-pruned)
+        // tab. A bound row reads live even when the command scan is BLIND (the
+        // MCP-child serialization that made live_uuids miss a live agent and
+        // dwell-open spawn a duplicate tab). The dump-layout scan stays only as
+        // an ADDITIVE fallback for a non-MCP agent whose bind hasn't landed.
+        let mut bound = rec("u1");
+        bound.tab_id = Some(3);
+        assert!(open_is_live(&bound, "layout { tab { pane } }")); // bind wins, scan empty
+        let unbound = rec("u2"); // tab_id None
+        assert!(!open_is_live(&unbound, "layout { tab { pane } }"));
+        // Fallback: an unbound row still visible in dump-layout (non-MCP agent,
+        // bind lag) reads live via the command scan (args on its own line, the
+        // real dump-layout shape live_uuids parses).
+        let dump = "tab {\n  pane command=\"claude\" {\n    args \"--resume\" \"u2\"\n  }\n}";
+        assert!(open_is_live(&unbound, dump));
     }
 
     #[test]

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::discover::{tilde, Discovered, ToolId, Via};
+use crate::discover::{Discovered, ToolId, Via, tilde};
 
 /// The zellij version the validation ledger pins behavior to (permission-
 /// cache format, pane-resize semantics). Mismatch WARNS, never halts.
@@ -130,7 +130,10 @@ pub fn missing_advice(tool: ToolId, mgr: Option<PkgManager>) -> Vec<String> {
             let (pkg, url) = match tool {
                 ToolId::Git => ("git", "https://git-scm.com/downloads"),
                 ToolId::Fzf => ("fzf", "https://github.com/junegunn/fzf#installation"),
-                _ => ("zoxide", "https://github.com/ajeetdsouza/zoxide#installation"),
+                _ => (
+                    "zoxide",
+                    "https://github.com/ajeetdsouza/zoxide#installation",
+                ),
             };
             match mgr {
                 Some(m) => vec![
@@ -148,7 +151,12 @@ pub fn missing_advice(tool: ToolId, mgr: Option<PkgManager>) -> Vec<String> {
 
 /// One tool → one Finding: on PATH (Ok) / off-PATH (Warn, functional —
 /// clave uses the absolute path) / missing (Problem + remediation).
-pub fn diagnose_tool(tool: ToolId, fact: &ToolFact, mgr: Option<PkgManager>, home: &Path) -> Finding {
+pub fn diagnose_tool(
+    tool: ToolId,
+    fact: &ToolFact,
+    mgr: Option<PkgManager>,
+    home: &Path,
+) -> Finding {
     let group = tool_group(tool);
     let name = tool.bin_name();
     match &fact.discovered {
@@ -180,7 +188,9 @@ pub fn diagnose_tool(tool: ToolId, fact: &ToolFact, mgr: Option<PkgManager>, hom
                 return Finding {
                     group,
                     severity: Severity::Warn,
-                    label: format!("zellij {got} ({shown}) — clave is tested against {TESTED_ZELLIJ}"),
+                    label: format!(
+                        "zellij {got} ({shown}) — clave is tested against {TESTED_ZELLIJ}"
+                    ),
                     advice: vec![
                         "Permission-cache format and pane sizing are pinned to the tested".into(),
                         format!("version; if the bar misbehaves, install {TESTED_ZELLIJ}."),
@@ -191,7 +201,12 @@ pub fn diagnose_tool(tool: ToolId, fact: &ToolFact, mgr: Option<PkgManager>, hom
                 Some(v) => format!("{name} {v} ({shown})"),
                 None => format!("{name} ({shown})"),
             };
-            Finding { group, severity: Severity::Ok, label, advice: vec![] }
+            Finding {
+                group,
+                severity: Severity::Ok,
+                label,
+                advice: vec![],
+            }
         }
     }
 }
@@ -220,7 +235,11 @@ pub fn diagnose(f: &Facts) -> Vec<Finding> {
         advice,
     };
     out.push(if f.config_exists && f.layout_exists {
-        setup(Severity::Ok, "config.kdl + layout.kdl generated".into(), vec![])
+        setup(
+            Severity::Ok,
+            "config.kdl + layout.kdl generated".into(),
+            vec![],
+        )
     } else {
         setup(
             Severity::Problem,
@@ -275,7 +294,11 @@ pub fn diagnose(f: &Facts) -> Vec<Finding> {
             ],
         )
     } else {
-        setup(Severity::Ok, "Claude hooks merged (1 entry per event)".into(), vec![])
+        setup(
+            Severity::Ok,
+            "Claude hooks merged (1 entry per event)".into(),
+            vec![],
+        )
     });
     out.push(if f.perms_seeded {
         setup(Severity::Ok, "Zellij plugin permissions pre-seeded".into(), vec![])
@@ -289,7 +312,8 @@ pub fn diagnose(f: &Facts) -> Vec<Finding> {
     // Release skew — maintainer machinery; end users (no <data>/bin) never
     // see it (spec §Check: conditional on the dir existing).
     if f.bin_dir_exists {
-        let current = crate::discover::semver_key(f.version_line.split_whitespace().next().unwrap_or(""));
+        let current =
+            crate::discover::semver_key(f.version_line.split_whitespace().next().unwrap_or(""));
         let newest = f
             .installed_releases
             .iter()
@@ -304,9 +328,11 @@ pub fn diagnose(f: &Facts) -> Vec<Finding> {
                     "unreleased code (CONTRIBUTING: the binary split).".into(),
                 ],
             )),
-            (_, Some((_, nv))) => {
-                out.push(setup(Severity::Ok, format!("stable release installed (v{nv})"), vec![]))
-            }
+            (_, Some((_, nv))) => out.push(setup(
+                Severity::Ok,
+                format!("stable release installed (v{nv})"),
+                vec![],
+            )),
             _ => {}
         }
     }
@@ -351,11 +377,20 @@ impl Group {
     }
 }
 
-const GROUP_ORDER: [Group; 4] = [Group::RequiredTools, Group::AgentPicker, Group::Setup, Group::Environment];
+const GROUP_ORDER: [Group; 4] = [
+    Group::RequiredTools,
+    Group::AgentPicker,
+    Group::Setup,
+    Group::Environment,
+];
 
 fn glyphs(fancy: bool) -> (&'static str, &'static str, &'static str) {
     // (ok-bullet, warn, problem) — degrades to ASCII off-TTY (spec §Arch).
-    if fancy { ("•", "!", "✗") } else { ("-", "!", "x") }
+    if fancy {
+        ("•", "!", "✗")
+    } else {
+        ("-", "!", "x")
+    }
 }
 
 fn header_glyph(sev: Severity, fancy: bool) -> &'static str {
@@ -378,7 +413,11 @@ pub fn render_report(findings: &[Finding], fancy: bool) -> String {
         if rows.is_empty() {
             continue;
         }
-        let worst = rows.iter().map(|f| f.severity).max().unwrap_or(Severity::Ok);
+        let worst = rows
+            .iter()
+            .map(|f| f.severity)
+            .max()
+            .unwrap_or(Severity::Ok);
         if worst > Severity::Ok {
             bad_groups += 1;
         }
@@ -402,9 +441,14 @@ pub fn render_report(findings: &[Finding], fancy: bool) -> String {
     }
     // Flutter-style close.
     if bad_groups > 0 {
-        out.push_str(&format!("! Doctor found issues in {bad_groups} categories.\n"));
+        out.push_str(&format!(
+            "! Doctor found issues in {bad_groups} categories.\n"
+        ));
     } else {
-        out.push_str(&format!("{} No issues found!\n", if fancy { "•" } else { "-" }));
+        out.push_str(&format!(
+            "{} No issues found!\n",
+            if fancy { "•" } else { "-" }
+        ));
     }
     out
 }
@@ -462,7 +506,12 @@ pub fn hook_entry_counts(settings: &serde_json::Value) -> Vec<(String, usize)> {
                 .map(|entries| {
                     entries
                         .iter()
-                        .flat_map(|e| e.get("hooks").and_then(|v| v.as_array()).into_iter().flatten())
+                        .flat_map(|e| {
+                            e.get("hooks")
+                                .and_then(|v| v.as_array())
+                                .into_iter()
+                                .flatten()
+                        })
                         .filter(|h| {
                             h.get("command")
                                 .and_then(|c| c.as_str())
@@ -479,10 +528,16 @@ pub fn hook_entry_counts(settings: &serde_json::Value) -> Vec<(String, usize)> {
 fn tool_fact(tool: ToolId) -> ToolFact {
     let discovered = crate::discover::discover(tool);
     let version = discovered.as_ref().and_then(|d| {
-        let out = std::process::Command::new(&d.path).arg("--version").output().ok()?;
+        let out = std::process::Command::new(&d.path)
+            .arg("--version")
+            .output()
+            .ok()?;
         short_version(String::from_utf8_lossy(&out.stdout).lines().next()?)
     });
-    ToolFact { discovered, version }
+    ToolFact {
+        discovered,
+        version,
+    }
 }
 
 fn probe_pkg_manager() -> Option<PkgManager> {
@@ -566,10 +621,15 @@ pub fn run_doctor(json: bool) -> anyhow::Result<()> {
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&serde_json::json!({ "facts": facts, "findings": findings }))?
+            serde_json::to_string_pretty(
+                &serde_json::json!({ "facts": facts, "findings": findings })
+            )?
         );
     } else {
-        print!("{}", render_report(&findings, std::io::stdout().is_terminal()));
+        print!(
+            "{}",
+            render_report(&findings, std::io::stdout().is_terminal())
+        );
     }
     if findings.iter().any(|f| f.severity == Severity::Problem) {
         std::process::exit(1);
@@ -585,7 +645,10 @@ mod tests {
 
     fn found(path: &str, via: Via, ver: Option<&str>) -> ToolFact {
         ToolFact {
-            discovered: Some(Discovered { path: PathBuf::from(path), via }),
+            discovered: Some(Discovered {
+                path: PathBuf::from(path),
+                via,
+            }),
             version: ver.map(str::to_string),
         }
     }
@@ -602,39 +665,63 @@ mod tests {
 
     #[test]
     fn tool_off_path_warns_but_is_functional() {
-        let f = found("/home/u/.claude/local/claude", Via::KnownLocation, Some("2.1.4"));
+        let f = found(
+            "/home/u/.claude/local/claude",
+            Via::KnownLocation,
+            Some("2.1.4"),
+        );
         let d = diagnose_tool(ToolId::Claude, &f, None, Path::new("/home/u"));
         assert_eq!(d.severity, Severity::Warn);
         assert!(d.label.contains("~/.claude/local/claude"));
         assert!(d.label.contains("not on your PATH"));
-        assert!(d.advice.iter().any(|l| l.contains("clave will use this path directly")));
+        assert!(
+            d.advice
+                .iter()
+                .any(|l| l.contains("clave will use this path directly"))
+        );
         assert!(d.advice.iter().any(|l| l.contains("alias is not enough")));
     }
 
     #[test]
     fn missing_tool_is_a_problem_with_remediation() {
-        let none = ToolFact { discovered: None, version: None };
+        let none = ToolFact {
+            discovered: None,
+            version: None,
+        };
         let d = diagnose_tool(ToolId::Fzf, &none, Some(PkgManager::Brew), Path::new("/h"));
         assert_eq!(d.severity, Severity::Problem);
         assert_eq!(d.label, "fzf not found");
         // Hedged pkg-manager line (flutter voice) + indented command + URL.
-        assert!(d.advice.iter().any(|l| l.contains("likely available from your package manager")));
+        assert!(
+            d.advice
+                .iter()
+                .any(|l| l.contains("likely available from your package manager"))
+        );
         assert!(d.advice.iter().any(|l| l == "    brew install fzf"));
-        assert!(d.advice.iter().any(|l| l.contains("github.com/junegunn/fzf")));
+        assert!(
+            d.advice
+                .iter()
+                .any(|l| l.contains("github.com/junegunn/fzf"))
+        );
     }
 
     #[test]
     fn zellij_and_claude_remediation_is_url_only() {
         // Even with a probed manager, NEVER print an install command for
         // these two (zellij absent from distro repos; InstallFix for claude).
-        for (tool, url) in [(ToolId::Zellij, "zellij.dev"), (ToolId::Claude, "code.claude.com")] {
+        for (tool, url) in [
+            (ToolId::Zellij, "zellij.dev"),
+            (ToolId::Claude, "code.claude.com"),
+        ] {
             let adv = missing_advice(tool, Some(PkgManager::Apt));
             assert!(adv.iter().any(|l| l.contains(url)), "{tool:?}");
             assert!(!adv.iter().any(|l| l.contains("apt-get")), "{tool:?}");
         }
-        assert!(missing_advice(ToolId::Zellij, Some(PkgManager::Apt))
-            .iter()
-            .any(|l| l.contains("github.com/zellij-org/zellij/releases")));
+        assert!(
+            missing_advice(ToolId::Zellij, Some(PkgManager::Apt))
+                .iter()
+                .any(|l| l.contains("github.com/zellij-org/zellij/releases"))
+        );
     }
 
     #[test]
@@ -646,16 +733,28 @@ mod tests {
         assert!(d.label.contains(TESTED_ZELLIJ));
         // Exact match is Ok; unparseable is Warn, never Problem.
         let ok = found("/u/zellij", Via::PathLookup, Some("0.44.3"));
-        assert_eq!(diagnose_tool(ToolId::Zellij, &ok, None, Path::new("/h")).severity, Severity::Ok);
+        assert_eq!(
+            diagnose_tool(ToolId::Zellij, &ok, None, Path::new("/h")).severity,
+            Severity::Ok
+        );
         let weird = found("/u/zellij", Via::PathLookup, None);
-        assert_eq!(diagnose_tool(ToolId::Zellij, &weird, None, Path::new("/h")).severity, Severity::Warn);
+        assert_eq!(
+            diagnose_tool(ToolId::Zellij, &weird, None, Path::new("/h")).severity,
+            Severity::Warn
+        );
     }
 
     #[test]
     fn short_version_takes_first_numeric_token() {
         assert_eq!(short_version("zellij 0.44.3").as_deref(), Some("0.44.3"));
-        assert_eq!(short_version("git version 2.51.0").as_deref(), Some("2.51.0"));
-        assert_eq!(short_version("2.1.4 (Claude Code)").as_deref(), Some("2.1.4"));
+        assert_eq!(
+            short_version("git version 2.51.0").as_deref(),
+            Some("2.51.0")
+        );
+        assert_eq!(
+            short_version("2.1.4 (Claude Code)").as_deref(),
+            Some("2.1.4")
+        );
         assert_eq!(short_version("v0.9.6").as_deref(), Some("v0.9.6"));
         assert_eq!(short_version("no digits here"), None);
         assert_eq!(short_version(""), None);
@@ -664,8 +763,14 @@ mod tests {
     #[test]
     fn pkg_manager_install_lines_match_the_mise_prefixes() {
         assert_eq!(PkgManager::Brew.install_line("fzf"), "brew install fzf");
-        assert_eq!(PkgManager::Apt.install_line("fzf"), "sudo apt-get install -y fzf");
-        assert_eq!(PkgManager::Dnf.install_line("fzf"), "sudo dnf install -y fzf");
+        assert_eq!(
+            PkgManager::Apt.install_line("fzf"),
+            "sudo apt-get install -y fzf"
+        );
+        assert_eq!(
+            PkgManager::Dnf.install_line("fzf"),
+            "sudo dnf install -y fzf"
+        );
         assert_eq!(PkgManager::Pacman.install_line("fzf"), "sudo pacman -S fzf");
         assert_eq!(PkgManager::Apk.install_line("fzf"), "sudo apk add fzf");
     }
@@ -684,7 +789,10 @@ mod tests {
             wasm_path: PathBuf::from("/home/u/.local/share/clave/clave-bar-v0.1.0.wasm"),
             wasm_exists: true,
             has_embedded_wasm: true,
-            hook_counts: crate::setup::HOOK_EVENTS.iter().map(|e| (e.to_string(), 1)).collect(),
+            hook_counts: crate::setup::HOOK_EVENTS
+                .iter()
+                .map(|e| (e.to_string(), 1))
+                .collect(),
             perms_seeded: true,
             bin_dir_exists: false,
             installed_releases: vec![],
@@ -726,7 +834,10 @@ mod tests {
         let mut facts = base_facts();
         facts.hook_counts[1].1 = 0; // Stop unregistered
         let f = diagnose(&facts);
-        assert!(f.iter().any(|x| x.severity == Severity::Problem && x.label.contains("hooks")));
+        assert!(
+            f.iter()
+                .any(|x| x.severity == Severity::Problem && x.label.contains("hooks"))
+        );
         facts.hook_counts[1].1 = 2; // duplicate — Claude fires ALL matches
         let f = diagnose(&facts);
         let dup = f.iter().find(|x| x.label.contains("duplicate")).unwrap();
@@ -752,7 +863,11 @@ mod tests {
         facts.bin_dir_exists = true;
         facts.installed_releases = vec!["0.1.0".into()];
         // current == newest → Ok mention.
-        assert!(diagnose(&facts).iter().any(|x| x.severity == Severity::Ok && x.label.contains("0.1.0")));
+        assert!(
+            diagnose(&facts)
+                .iter()
+                .any(|x| x.severity == Severity::Ok && x.label.contains("0.1.0"))
+        );
         facts.version_line = "0.2.0 (dev)".into();
         let f = diagnose(&facts);
         let s = f.iter().find(|x| x.label.contains("ahead")).unwrap();
@@ -765,9 +880,16 @@ mod tests {
         let mut facts = base_facts();
         facts.xdg_runtime_dir = Some(false);
         let f = diagnose(&facts);
-        let x = f.iter().find(|x| x.label.contains("XDG_RUNTIME_DIR")).unwrap();
+        let x = f
+            .iter()
+            .find(|x| x.label.contains("XDG_RUNTIME_DIR"))
+            .unwrap();
         assert_eq!(x.severity, Severity::Warn);
-        assert!(x.advice.iter().any(|l| l.contains("zellij-org/zellij#3708")));
+        assert!(
+            x.advice
+                .iter()
+                .any(|l| l.contains("zellij-org/zellij#3708"))
+        );
         // None (macOS) → check skipped entirely.
         facts.xdg_runtime_dir = None;
         assert!(!diagnose(&facts).iter().any(|x| x.label.contains("XDG")));
@@ -775,9 +897,15 @@ mod tests {
 
     fn sample_findings() -> Vec<Finding> {
         vec![
-            Finding { group: Group::RequiredTools, severity: Severity::Ok,
-                label: "zellij 0.44.3 (/opt/homebrew/bin/zellij)".into(), advice: vec![] },
-            Finding { group: Group::AgentPicker, severity: Severity::Problem,
+            Finding {
+                group: Group::RequiredTools,
+                severity: Severity::Ok,
+                label: "zellij 0.44.3 (/opt/homebrew/bin/zellij)".into(),
+                advice: vec![],
+            },
+            Finding {
+                group: Group::AgentPicker,
+                severity: Severity::Problem,
                 label: "fzf not found".into(),
                 advice: vec![
                     "It is likely available from your package manager:".into(),
@@ -785,10 +913,14 @@ mod tests {
                     "    brew install fzf".into(),
                     String::new(),
                     "or see https://github.com/junegunn/fzf#installation".into(),
-                ] },
-            Finding { group: Group::Setup, severity: Severity::Warn,
+                ],
+            },
+            Finding {
+                group: Group::Setup,
+                severity: Severity::Warn,
                 label: "Zellij plugin permissions not pre-seeded".into(),
-                advice: vec!["Run `clave setup`.".into()] },
+                advice: vec!["Run `clave setup`.".into()],
+            },
         ]
     }
 
@@ -827,8 +959,12 @@ mod tests {
 
     #[test]
     fn all_ok_report_says_so() {
-        let ok = vec![Finding { group: Group::RequiredTools, severity: Severity::Ok,
-            label: "git 2.51.0 (/usr/bin/git)".into(), advice: vec![] }];
+        let ok = vec![Finding {
+            group: Group::RequiredTools,
+            severity: Severity::Ok,
+            label: "git 2.51.0 (/usr/bin/git)".into(),
+            advice: vec![],
+        }];
         let s = render_report(&ok, true);
         assert!(s.ends_with("• No issues found!\n"));
     }
@@ -863,7 +999,10 @@ mod tests {
 
     #[test]
     fn render_failures_is_problems_only() {
-        let s = render_failures("clave can't start — missing required tools:", &sample_findings());
+        let s = render_failures(
+            "clave can't start — missing required tools:",
+            &sample_findings(),
+        );
         let expected = "\
 clave can't start — missing required tools:
 

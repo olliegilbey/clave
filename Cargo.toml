@@ -31,8 +31,12 @@ fs4 = "0.13"
 which = "8"
 # Store tests write to throwaway dirs, never the real ~/.local/state/clave.
 tempfile = "3"
-# Zellij plugin
-zellij-tile = "0.44"
+# Zellij plugin — EXACT pin (#9, fugu nit): clave leans on observed 0.44.3
+# semantics (permission-cache format, pane-resize refusals, serializer
+# behavior — see the validation ledger). The zellij_pin_tripwire test fails
+# loudly if this and the vendored kdl/zellij-utils lines ever drift apart;
+# bump all of them together, deliberately, after re-validating live.
+zellij-tile = "=0.44.3"
 
 # The profile that 'dist' will build with
 [profile.dist]

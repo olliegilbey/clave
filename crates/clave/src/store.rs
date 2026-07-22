@@ -86,6 +86,14 @@ pub struct Store {
     /// tab_ids are session-scoped: cleared on session (re)create.
     #[serde(default)]
     pub tab_timeline: BTreeMap<usize, u64>,
+    /// Bar collapse mode (issue #5): plugin-side per-instance memory synced
+    /// only by the toggle broadcast desynced live (C8 parity-desync — a
+    /// reload or missed pipe flips one instance forever). Same doctrine as
+    /// tab_timeline above: the store RMW is the one writer and the flag
+    /// rides every snapshot push, so instances hydrate at birth and heal on
+    /// every push. `default` (expanded) keeps pre-field store files loading.
+    #[serde(default)]
+    pub collapsed: bool,
 }
 
 pub struct StorePaths {
@@ -128,6 +136,12 @@ pub fn with_store_mut<T>(paths: &StorePaths, f: impl FnOnce(&mut Store) -> T) ->
     fs::create_dir_all(&paths.dir).context("creating store dir")?;
     let lock = fs::OpenOptions::new()
         .create(true)
+        // Contents are never read or written — this file exists only to hold
+        // an flock (spec §5 store locking, fugu 2026-07-01: the lock is a
+        // SEPARATE file, never the renamed-over data file, else concurrent
+        // hooks lose updates). `truncate(false)` spells out the existing
+        // default explicitly (no behavior change) — suspicious_open_options.
+        .truncate(false)
         .write(true)
         .open(&paths.lock)
         .context("opening lockfile")?;
@@ -154,6 +168,7 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
     AgentSnapshot {
         seq: store.seq,
         tab_timeline: store.tab_timeline.clone(),
+        collapsed: store.collapsed,
         agents: store
             .agents
             .values()
@@ -211,11 +226,89 @@ pub fn apply_touch(paths: &StorePaths, tab_id: usize, now: u64) -> Result<AgentS
 /// uuid returns None (bar may race a pruned agent).
 pub fn apply_bind(paths: &StorePaths, uuid: &str, tab_id: usize) -> Result<Option<AgentSnapshot>> {
     with_store_mut(paths, |s| {
-        let r = s.agents.get_mut(uuid)?;
-        if r.tab_id == Some(tab_id) {
+        if !s.agents.contains_key(uuid) {
+            return None; // bar may race a pruned agent
+        }
+        // Evict any OTHER agent still bound to this tab_id. zellij reuses
+        // tab_ids (get_new_tab_id = max-key+1, screen.rs:1617), so a reused id
+        // could otherwise leave a dead agent AND the new one both claiming the
+        // tab — the bar's glyph join (agent_in_tab) would decorate it with
+        // whichever uuid sorts first. One tab hosts one agent: the freshest
+        // bind wins. (Prune_tabs is the primary cleaner; this closes the
+        // close-then-immediately-reuse window where the id never went absent.)
+        let mut evicted = false;
+        for r in s.agents.values_mut() {
+            if r.uuid != uuid && r.tab_id == Some(tab_id) {
+                r.tab_id = None;
+                evicted = true;
+            }
+        }
+        let already = s.agents.get(uuid).and_then(|r| r.tab_id) == Some(tab_id);
+        if already && !evicted {
+            return None; // re-report of an existing bind, no collision → free
+        }
+        if let Some(r) = s.agents.get_mut(uuid) {
+            r.tab_id = Some(tab_id);
+        }
+        s.seq += 1; // monotonic pipe contract (§5)
+        Some(snapshot_from(s))
+    })
+}
+
+/// `clave prune-tabs <stale tab ids…>` (#6/F3): drop tab_timeline entries and
+/// clear agent tab_id binds for EXACTLY the ids listed — the ones the bar
+/// observed die on a close. Session recreate wiped these wholesale
+/// (clear_tab_timeline); mid-session tab CLOSE left them to grow unbounded —
+/// and, since zellij REUSES tab_ids (get_new_tab_id = max-key+1, screen.rs:1617),
+/// a survivor entry would let a reused-id tab inherit a dead agent's glyph/order.
+///
+/// REMOVE-LISTED, not retain-carried: the payload is the DEAD ids, so two
+/// fire-and-forget prunes (no arrival-order guarantee — the collapse
+/// pending-write class) COMMUTE and are idempotent; a late prune can only
+/// re-remove ids already judged dead, never strip a bind for a tab it never
+/// observed close. (A retain-only-live payload would clobber the bind of ANY
+/// tab created after the prune was computed → live agent rendered dormant → the
+/// #6 double-attach via a race.) Change-gated (no push when nothing matched).
+/// Self-heal lives in the bar's detection (staleness re-derived each set
+/// change), so a lost push is re-emitted while the entry persists. Residual: if
+/// a listed id is REUSED within the subprocess-latency window a late removal
+/// could unbind the new tenant — `apply_bind` eviction is the backstop and the
+/// window is milliseconds. Empty payload = no-op (nothing observed dead).
+/// None = no change.
+pub fn apply_prune_tabs(paths: &StorePaths, stale_ids: &[usize]) -> Result<Option<AgentSnapshot>> {
+    with_store_mut(paths, |s| {
+        if stale_ids.is_empty() {
+            return None; // nothing observed dead
+        }
+        let before = s.tab_timeline.len();
+        s.tab_timeline.retain(|id, _| !stale_ids.contains(id));
+        let mut changed = s.tab_timeline.len() != before;
+        for r in s.agents.values_mut() {
+            if r.tab_id.is_some_and(|id| stale_ids.contains(&id)) {
+                r.tab_id = None;
+                changed = true;
+            }
+        }
+        if !changed {
+            return None; // §5: no no-op pushes
+        }
+        s.seq += 1; // monotonic pipe contract (§5)
+        Some(snapshot_from(s))
+    })
+}
+
+/// `clave collapse <true|false>` (issue #5): persist the bar collapse mode
+/// as an ABSOLUTE value — never a flip, so broadcast races and duplicate
+/// executor writes stay idempotent — and hand back a seq-bumped snapshot
+/// for the pipe push that heals any instance the `clave-toggle` broadcast
+/// missed. Snapshot back only on CHANGE (like apply_bind): a re-assert of
+/// the current mode must not generate pipe traffic (round 11: storms).
+pub fn apply_collapse(paths: &StorePaths, collapsed: bool) -> Result<Option<AgentSnapshot>> {
+    with_store_mut(paths, |s| {
+        if s.collapsed == collapsed {
             return None;
         }
-        r.tab_id = Some(tab_id);
+        s.collapsed = collapsed;
         s.seq += 1; // monotonic pipe contract (§5)
         Some(snapshot_from(s))
     })
@@ -353,8 +446,10 @@ mod tests {
 
     #[test]
     fn snapshot_mirrors_store_rows() {
-        let mut s = Store::default();
-        s.seq = 7;
+        let mut s = Store {
+            seq: 7,
+            ..Store::default()
+        };
         s.agents.insert("u1".into(), rec("u1"));
         s.tab_timeline.insert(4, 1700);
         s.agents.get_mut("u1").unwrap().tab_id = Some(4);
@@ -367,6 +462,29 @@ mod tests {
         assert_eq!(snap.tab_timeline.get(&4), Some(&1700));
         // §6.6 Design B: the uuid→tab bind rides it too (glyph join key).
         assert_eq!(snap.agents[0].tab_id, Some(4));
+    }
+
+    #[test]
+    fn collapse_persists_absolute_value_and_dedupes() {
+        // `clave collapse` (issue #5): absolute value, seq-bumped RMW,
+        // change-gated push — the store copy of the C8 parity-desync fix.
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        let snap = apply_collapse(&p, true).unwrap().expect("changed");
+        assert!(snap.collapsed, "snapshot must carry the new mode");
+        // The FILE is the durable truth (CodeRabbit CLI, PR #13): assert the
+        // persisted store too, not just the in-memory snapshot projection.
+        assert!(read_store(&p).unwrap().collapsed);
+        assert_eq!(snap.seq, 1);
+        // Re-asserting the same mode: no change, no seq bump, no push —
+        // duplicate executor writes after a broadcast are free (round 11).
+        assert!(apply_collapse(&p, true).unwrap().is_none());
+        assert_eq!(read_store(&p).unwrap().seq, 1);
+        // Toggling back is a change again.
+        let snap = apply_collapse(&p, false).unwrap().expect("changed back");
+        assert!(!snap.collapsed);
+        assert!(!read_store(&p).unwrap().collapsed);
+        assert_eq!(snap.seq, 2);
     }
 
     #[test]
@@ -392,6 +510,81 @@ mod tests {
         assert_eq!(snap.agents[0].tab_id, Some(9));
         // Unknown uuid: silently none (bar may race a pruned agent).
         assert!(apply_bind(&p, "ghost", 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn prune_tabs_removes_listed_stale_ids_order_safe_and_change_gated() {
+        // #6/F3: mid-session tab CLOSE left binds + tab_timeline entries to grow
+        // unbounded, and — with tab_id reuse (screen.rs:1617) — a survivor
+        // decorates a reused-id tab. The bar reports the DEAD ids it observed;
+        // the store REMOVES exactly those (not "retain the live set") so
+        // out-of-order prunes commute and can't unbind a tab they never saw die.
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            let mut live = rec("u-live");
+            live.tab_id = Some(10);
+            s.agents.insert("u-live".into(), live);
+            let mut dead = rec("u-dead");
+            dead.tab_id = Some(11); // its tab just closed
+            s.agents.insert("u-dead".into(), dead);
+        })
+        .unwrap();
+        apply_touch(&p, 10, 100).unwrap();
+        apply_touch(&p, 11, 200).unwrap(); // stale timeline entry
+        // Stale set is {11}: remove EXACTLY 11's bind + timeline entry; 10 (a
+        // tab the prune never observed die) is untouched — the order-safety.
+        let snap = apply_prune_tabs(&p, &[11]).unwrap().expect("pruned");
+        let s = read_store(&p).unwrap();
+        assert_eq!(s.agents["u-live"].tab_id, Some(10), "live bind untouched");
+        assert_eq!(s.agents["u-dead"].tab_id, None, "dead bind cleared");
+        assert!(s.tab_timeline.contains_key(&10));
+        assert!(!s.tab_timeline.contains_key(&11), "stale timeline dropped");
+        assert!(snap.agents.iter().all(|a| a.tab_id != Some(11)));
+        // Idempotent late arrival: re-removing an already-dead id → no change,
+        // no push, no seq bump (this is what makes two out-of-order prunes safe).
+        let seq = read_store(&p).unwrap().seq;
+        assert!(apply_prune_tabs(&p, &[11]).unwrap().is_none());
+        assert_eq!(read_store(&p).unwrap().seq, seq);
+        // Empty payload (nothing observed dead) → no-op.
+        assert!(apply_prune_tabs(&p, &[]).unwrap().is_none());
+        assert_eq!(read_store(&p).unwrap().agents["u-live"].tab_id, Some(10));
+    }
+
+    #[test]
+    fn bind_evicts_a_reused_tab_id_from_the_previous_agent() {
+        // zellij reuses tab_ids (get_new_tab_id = max-key+1, screen.rs:1617):
+        // if a dead agent's bind survived a close, a NEW agent binding the
+        // REUSED id must EVICT it — one tab hosts one agent, else the bar's
+        // glyph join (agent_in_tab) decorates the tab with whichever uuid sorts
+        // first (a dead agent's colour). Belt-and-suspenders with prune_tabs.
+        // Fixture (CodeRabbit MINOR): u-new ALREADY holds Some(11) too, so the
+        // call hits the `already && evicted` path — it must NOT short-circuit
+        // the no-op return (that would leave the dead bind in place); it must
+        // evict u-dead AND emit a snapshot.
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            let mut dead = rec("u-dead");
+            dead.tab_id = Some(11); // survived a close, still bound to 11
+            s.agents.insert("u-dead".into(), dead);
+            let mut newer = rec("u-new");
+            newer.tab_id = Some(11); // already bound to the reused id → `already`
+            s.agents.insert("u-new".into(), newer);
+        })
+        .unwrap();
+        // `already && evicted`: u-new is unchanged but u-dead IS evicted, so the
+        // write is real — a snapshot must come back (not the no-op None).
+        let snap = apply_bind(&p, "u-new", 11)
+            .unwrap()
+            .expect("collision eviction must push even when the binder is unchanged");
+        let s = read_store(&p).unwrap();
+        assert_eq!(s.agents["u-new"].tab_id, Some(11), "new agent stays bound");
+        assert_eq!(
+            s.agents["u-dead"].tab_id, None,
+            "reused id evicted the dead bind"
+        );
+        assert!(snap.agents.iter().filter(|a| a.tab_id == Some(11)).count() == 1);
     }
 
     #[test]
@@ -450,7 +643,9 @@ mod tests {
         assert!(apply_open_result(&p, "u1", true).unwrap().is_none());
         assert_eq!(read_store(&p).unwrap().seq, 1);
         // Successful open clears it.
-        let snap = apply_open_result(&p, "u1", false).unwrap().expect("cleared");
+        let snap = apply_open_result(&p, "u1", false)
+            .unwrap()
+            .expect("cleared");
         assert!(!snap.agents[0].stale);
         // Unknown uuid: silently none.
         assert!(apply_open_result(&p, "ghost", true).unwrap().is_none());

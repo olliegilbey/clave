@@ -70,14 +70,21 @@ pub fn resolve(
     known_hits: &[PathBuf],
 ) -> Option<Discovered> {
     if let Some(o) = override_val {
-        return Some(Discovered { path: PathBuf::from(o), via: Via::Override });
+        return Some(Discovered {
+            path: PathBuf::from(o),
+            via: Via::Override,
+        });
     }
     if let Some(p) = path_hit {
-        return Some(Discovered { path: p, via: Via::PathLookup });
+        return Some(Discovered {
+            path: p,
+            via: Via::PathLookup,
+        });
     }
-    known_hits
-        .first()
-        .map(|p| Discovered { path: p.clone(), via: Via::KnownLocation })
+    known_hits.first().map(|p| Discovered {
+        path: p.clone(),
+        via: Via::KnownLocation,
+    })
 }
 
 /// Curated known locations, priority order (spec §Discovery). `nvm_versions`
@@ -156,7 +163,10 @@ pub fn discover(tool: ToolId) -> Option<Discovered> {
     let known_hits: Vec<PathBuf> = dirs::home_dir()
         .map(|home| {
             let nvm_versions: Vec<String> = std::fs::read_dir(home.join(".nvm/versions/node"))
-                .map(|rd| rd.filter_map(|e| Some(e.ok()?.file_name().to_str()?.to_string())).collect())
+                .map(|rd| {
+                    rd.filter_map(|e| Some(e.ok()?.file_name().to_str()?.to_string()))
+                        .collect()
+                })
                 .unwrap_or_default();
             candidate_dirs(tool, &home, &nvm_versions)
                 .into_iter()
@@ -180,12 +190,26 @@ mod tests {
     #[test]
     fn override_beats_path_beats_known() {
         let known = [PathBuf::from("/known/claude")];
-        let r = resolve(Some("/ovr/claude"), Some(PathBuf::from("/path/claude")), &known).unwrap();
-        assert_eq!((r.path.as_path(), r.via), (Path::new("/ovr/claude"), Via::Override));
+        let r = resolve(
+            Some("/ovr/claude"),
+            Some(PathBuf::from("/path/claude")),
+            &known,
+        )
+        .unwrap();
+        assert_eq!(
+            (r.path.as_path(), r.via),
+            (Path::new("/ovr/claude"), Via::Override)
+        );
         let r = resolve(None, Some(PathBuf::from("/path/claude")), &known).unwrap();
-        assert_eq!((r.path.as_path(), r.via), (Path::new("/path/claude"), Via::PathLookup));
+        assert_eq!(
+            (r.path.as_path(), r.via),
+            (Path::new("/path/claude"), Via::PathLookup)
+        );
         let r = resolve(None, None, &known).unwrap();
-        assert_eq!((r.path.as_path(), r.via), (Path::new("/known/claude"), Via::KnownLocation));
+        assert_eq!(
+            (r.path.as_path(), r.via),
+            (Path::new("/known/claude"), Via::KnownLocation)
+        );
         assert_eq!(resolve(None, None, &[]), None);
     }
 
@@ -201,7 +225,11 @@ mod tests {
     #[test]
     fn candidate_dirs_shared_list_and_claude_specifics() {
         let home = Path::new("/home/u");
-        let dirs = candidate_dirs(ToolId::Claude, home, &["v20.11.0".into(), "v22.1.0".into(), "v9.0.0".into()]);
+        let dirs = candidate_dirs(
+            ToolId::Claude,
+            home,
+            &["v20.11.0".into(), "v22.1.0".into(), "v9.0.0".into()],
+        );
         // Shared prefix (order = priority).
         assert_eq!(dirs[0], home.join(".local/bin"));
         assert!(dirs.contains(&PathBuf::from("/opt/homebrew/bin")));
@@ -237,7 +265,10 @@ mod tests {
     #[test]
     fn tilde_abbreviates_home() {
         let home = Path::new("/home/u");
-        assert_eq!(tilde(Path::new("/home/u/.local/bin/claude"), home), "~/.local/bin/claude");
+        assert_eq!(
+            tilde(Path::new("/home/u/.local/bin/claude"), home),
+            "~/.local/bin/claude"
+        );
         assert_eq!(tilde(Path::new("/usr/bin/git"), home), "/usr/bin/git");
     }
 

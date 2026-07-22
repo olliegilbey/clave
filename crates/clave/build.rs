@@ -5,7 +5,8 @@
 //! marker and the sandbox flow (just dev-install) is untouched.
 fn main() {
     println!("cargo:rerun-if-env-changed=CLAVE_BAR_WASM");
-    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("clave-bar.embedded");
+    let out =
+        std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("clave-bar.embedded");
     match std::env::var("CLAVE_BAR_WASM") {
         Ok(src) => {
             std::fs::copy(&src, &out).expect("CLAVE_BAR_WASM is set but unreadable");

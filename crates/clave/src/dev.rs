@@ -33,23 +33,58 @@ pub const SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "c8-cold-start",
         agents: &[
-            ScenarioAgent { slug: "recent", ago_secs: 60, worktree: false, delete_cwd_after: false },
-            ScenarioAgent { slug: "mid", ago_secs: 3_600, worktree: false, delete_cwd_after: false },
-            ScenarioAgent { slug: "old", ago_secs: 86_400, worktree: false, delete_cwd_after: false },
+            ScenarioAgent {
+                slug: "recent",
+                ago_secs: 60,
+                worktree: false,
+                delete_cwd_after: false,
+            },
+            ScenarioAgent {
+                slug: "mid",
+                ago_secs: 3_600,
+                worktree: false,
+                delete_cwd_after: false,
+            },
+            ScenarioAgent {
+                slug: "old",
+                ago_secs: 86_400,
+                worktree: false,
+                delete_cwd_after: false,
+            },
         ],
     },
     Scenario {
         name: "c8-worktree",
         agents: &[
-            ScenarioAgent { slug: "main", ago_secs: 60, worktree: false, delete_cwd_after: false },
-            ScenarioAgent { slug: "wt", ago_secs: 3_600, worktree: true, delete_cwd_after: false },
+            ScenarioAgent {
+                slug: "main",
+                ago_secs: 60,
+                worktree: false,
+                delete_cwd_after: false,
+            },
+            ScenarioAgent {
+                slug: "wt",
+                ago_secs: 3_600,
+                worktree: true,
+                delete_cwd_after: false,
+            },
         ],
     },
     Scenario {
         name: "c8-stale",
         agents: &[
-            ScenarioAgent { slug: "alive", ago_secs: 60, worktree: false, delete_cwd_after: false },
-            ScenarioAgent { slug: "gone", ago_secs: 3_600, worktree: false, delete_cwd_after: true },
+            ScenarioAgent {
+                slug: "alive",
+                ago_secs: 60,
+                worktree: false,
+                delete_cwd_after: false,
+            },
+            ScenarioAgent {
+                slug: "gone",
+                ago_secs: 3_600,
+                worktree: false,
+                delete_cwd_after: true,
+            },
         ],
     },
 ];
@@ -104,13 +139,10 @@ pub fn run_launch() -> Result<()> {
 }
 
 pub fn run_scenario(name: &str) -> Result<()> {
-    let sc = SCENARIOS
-        .iter()
-        .find(|s| s.name == name)
-        .with_context(|| {
-            let names: Vec<_> = SCENARIOS.iter().map(|s| s.name).collect();
-            format!("unknown scenario {name}; have: {names:?}")
-        })?;
+    let sc = SCENARIOS.iter().find(|s| s.name == name).with_context(|| {
+        let names: Vec<_> = SCENARIOS.iter().map(|s| s.name).collect();
+        format!("unknown scenario {name}; have: {names:?}")
+    })?;
     let root = sandbox_root()?;
     enter_sandbox(&root);
     for d in ["state", "data", "repos"] {
@@ -142,13 +174,24 @@ pub fn run_scenario(name: &str) -> Result<()> {
         // -b main: pin the branch — else init.defaultBranch (maybe `master`)
         // would disagree with the store row's hardcoded `branch: "main"`.
         run_in(&repo, "git", &["init", "-q", "-b", "main"])?;
-        run_in(&repo, "git", &["commit", "--allow-empty", "-q", "-m", "seed"])?;
+        run_in(
+            &repo,
+            "git",
+            &["commit", "--allow-empty", "-q", "-m", "seed"],
+        )?;
         let cwd = if a.worktree {
             let wt = repo.join(".claude-worktrees").join(&uuid[..8]);
             run_in(
                 &repo,
                 "git",
-                &["worktree", "add", "-q", "-b", &format!("clave/{}", &uuid[..8]), wt.to_str().context("wt")?],
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    &format!("clave/{}", &uuid[..8]),
+                    wt.to_str().context("wt")?,
+                ],
             )?;
             wt
         } else {
@@ -171,7 +214,10 @@ pub fn run_scenario(name: &str) -> Result<()> {
                 .context("running claude -p (is claude on PATH?)")?;
             anyhow::ensure!(st.success(), "claude -p seeding failed for {uuid}");
         } else {
-            println!("{uuid} ({}) already seeded — reusing its transcript", a.slug);
+            println!(
+                "{uuid} ({}) already seeded — reusing its transcript",
+                a.slug
+            );
         }
         crate::store::with_store_mut(&paths, |s| {
             s.agents.insert(
@@ -180,7 +226,11 @@ pub fn run_scenario(name: &str) -> Result<()> {
                     uuid: uuid.clone(),
                     cwd: cwd_str.clone(),
                     repo_root: repo.to_string_lossy().into_owned(),
-                    branch: if a.worktree { format!("clave/{}", &uuid[..8]) } else { "main".into() },
+                    branch: if a.worktree {
+                        format!("clave/{}", &uuid[..8])
+                    } else {
+                        "main".into()
+                    },
                     label: format!("{}-{} · seeded", name, a.slug),
                     status: clave_types::Status::Idle,
                     last_interacted: now.saturating_sub(a.ago_secs),
@@ -281,7 +331,11 @@ pub fn run_reset() -> Result<()> {
     if wiped.is_empty() {
         println!("Scenario state already clean: {}", root.display());
     } else {
-        println!("Scenario state wiped ({}): {}", wiped.join(", "), root.display());
+        println!(
+            "Scenario state wiped ({}): {}",
+            wiped.join(", "),
+            root.display()
+        );
     }
     // Scenario transcripts in the real claude tree (c85c-tagged, see
     // is_scenario_jsonl). Best-effort walk of projects/*/: a vanished dir
@@ -300,7 +354,10 @@ pub fn run_reset() -> Result<()> {
             }
         }
     }
-    println!("Scenario transcripts removed from {}: {removed}", projects.display());
+    println!(
+        "Scenario transcripts removed from {}: {removed}",
+        projects.display()
+    );
     Ok(())
 }
 
@@ -361,8 +418,8 @@ mod tests {
         // Behavioral proof of the fix, against a real tempdir (never the
         // real sandbox root): state/ and repos/ go, data/clave-bar.wasm —
         // the just-dev-install build artifact — survives untouched.
-        let root = std::env::temp_dir()
-            .join(format!("clave-wipe-scenario-state-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("clave-wipe-scenario-state-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root); // clean slate if a prior run leaked
         std::fs::create_dir_all(root.join("state")).unwrap();
         std::fs::create_dir_all(root.join("repos")).unwrap();
@@ -383,8 +440,10 @@ mod tests {
     fn wipe_scenario_state_is_a_noop_on_an_already_clean_root() {
         // No state/ or repos/ present (e.g. reset run twice in a row):
         // nothing to remove, no error, empty report.
-        let root = std::env::temp_dir()
-            .join(format!("clave-wipe-scenario-state-clean-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "clave-wipe-scenario-state-clean-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
 

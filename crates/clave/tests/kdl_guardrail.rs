@@ -204,3 +204,22 @@ fn guardrail_rejects_broken_layout_kdl() {
          load-bearing:\n{broken}"
     );
 }
+
+#[test]
+fn backslash_label_is_guarded_through_real_parser() {
+    // Fugu 2026-07-21 (pre-v0.1.0, HIGH): backslash is KDL's escape
+    // introducer — `\d` is not a valid escape, so a raw backslash in a label
+    // must FAIL zellij's parser. Tripwire premise first: if a future zellij
+    // kdl accepts it, this assert flips and the guard can be reconsidered.
+    let raw = add::tab_layout(BIN_ABS, WASM, r"fix the \d regex", "u-1", "/home/o/x");
+    assert!(
+        Layout::from_str(&raw, "guardrail:raw-backslash".into(), None, None).is_err(),
+        "premise broken: zellij's KDL parser now ACCEPTS a raw backslash — re-vet the guard\n---\n{raw}"
+    );
+    // The guard: the same label THROUGH sanitize_label must parse clean.
+    let label = add::sanitize_label(r"fix the \d regex");
+    let kdl = add::tab_layout(BIN_ABS, WASM, &label, "u-1", "/home/o/x");
+    assert_layout_ok(&kdl, "add/open tab layout (backslash-bearing label)");
+    // And a backslash-bearing cwd must be REFUSED, not baked.
+    assert!(add::validate_cwd(r"/home/o/we\ird").is_err());
+}
