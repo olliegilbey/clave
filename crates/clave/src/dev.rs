@@ -263,7 +263,13 @@ pub fn run_status() -> Result<()> {
     let root = sandbox_root()?;
     enter_sandbox(&root);
     let store = crate::store::read_store(&crate::store::store_paths()?)?;
-    let list = Command::new("zellij")
+    // Discovered zellij (2026-07-22): both reads below swallow failure with
+    // unwrap_or_default, so an off-PATH zellij would report "no live session"
+    // rather than erroring — and CLAUDE.md tells agents to gate the session
+    // lifecycle on exactly this output. A false negative here is worse than
+    // a loud failure.
+    let zellij = crate::discover::tool_path(crate::discover::ToolId::Zellij);
+    let list = Command::new(&zellij)
         .args(["list-sessions", "-n"])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
@@ -274,7 +280,7 @@ pub fn run_status() -> Result<()> {
     // absent/dead session BLOCKS indefinitely instead of erroring —
     // an ungated dump-layout hung `dev status` for minutes pre-launch.
     let dump = if live_session {
-        Command::new("zellij")
+        Command::new(&zellij)
             .env("ZELLIJ_SESSION_NAME", "clave-test")
             .args(["action", "dump-layout"])
             .output()
