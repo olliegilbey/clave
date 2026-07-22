@@ -511,6 +511,43 @@ mod tests {
     }
 
     #[test]
+    fn every_injected_prefix_is_blocked_on_both_earn_paths() {
+        // #17 breadth (CodeRabbit, PR #25): the const is expected to GROW, and
+        // a prefix that guards only one earn path is a latent re-leak — so
+        // table-drive EVERY prefix through BOTH paths, with leading whitespace
+        // (the guard trims start, matching how the harness pads injections).
+        for prefix in HARNESS_INJECTED_PREFIXES {
+            let injected_text = format!("  \n\t{prefix}> payload we must never earn");
+            // First-prompt path: the upgrade is skipped outright.
+            let mut r = rec("u1");
+            let p = HookPayload {
+                session_id: Some("u1".into()),
+                prompt: Some(injected_text.clone()),
+                message: None,
+            };
+            assert!(
+                !refresh_label(&mut r, "UserPromptSubmit", &p, None),
+                "prompt path leaked for prefix {prefix}"
+            );
+            assert_eq!(r.label, "x · main");
+            assert_eq!(r.label_source, LabelSource::FirstPrompt);
+            // Summary path: an injected summary must not flip the source
+            // either (defensive — summaries come from the CLI's own
+            // compaction, but the rule is "never earn from injected text").
+            let tail = format!(
+                "{{\"type\":\"summary\",\"summary\":{}}}\n",
+                serde_json::to_string(&injected_text).unwrap()
+            );
+            assert!(
+                !refresh_label(&mut r, "Stop", &p, Some(&tail)),
+                "summary path leaked for prefix {prefix}"
+            );
+            assert_eq!(r.label, "x · main");
+            assert_eq!(r.label_source, LabelSource::FirstPrompt);
+        }
+    }
+
+    #[test]
     fn refresh_label_sanitizes_kdl_metacharacters() {
         // Fugu 2026-07-21 (pre-v0.1.0, HIGH): hook-derived labels are baked
         // into launch.kdl for the most-recent row (setup.rs) — a raw
