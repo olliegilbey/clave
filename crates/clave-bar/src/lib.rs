@@ -10,3 +10,4 @@
 //! `use clave_bar::model::…`.
 
 pub mod model;
+pub mod plugin_config;
