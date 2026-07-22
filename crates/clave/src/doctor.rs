@@ -340,6 +340,94 @@ pub fn diagnose(f: &Facts) -> Vec<Finding> {
     out
 }
 
+impl Group {
+    fn title(self) -> &'static str {
+        match self {
+            Group::RequiredTools => "Required tools",
+            Group::AgentPicker => "Agent picker — needed by `clave add`",
+            Group::Setup => "clave setup",
+            Group::Environment => "Environment",
+        }
+    }
+}
+
+const GROUP_ORDER: [Group; 4] = [Group::RequiredTools, Group::AgentPicker, Group::Setup, Group::Environment];
+
+fn glyphs(fancy: bool) -> (&'static str, &'static str, &'static str) {
+    // (ok-bullet, warn, problem) — degrades to ASCII off-TTY (spec §Arch).
+    if fancy { ("•", "!", "✗") } else { ("-", "!", "x") }
+}
+
+fn header_glyph(sev: Severity, fancy: bool) -> &'static str {
+    match (sev, fancy) {
+        (Severity::Ok, true) => "✓",
+        (Severity::Ok, false) => "ok",
+        (Severity::Warn, _) => "!",
+        (Severity::Problem, true) => "✗",
+        (Severity::Problem, false) => "x",
+    }
+}
+
+/// The grouped doctor view (spec §Reference output — golden-locked).
+pub fn render_report(findings: &[Finding], fancy: bool) -> String {
+    let (ok_b, warn_b, prob_b) = glyphs(fancy);
+    let mut out = String::new();
+    let mut bad_groups = 0;
+    for g in GROUP_ORDER {
+        let rows: Vec<&Finding> = findings.iter().filter(|f| f.group == g).collect();
+        if rows.is_empty() {
+            continue;
+        }
+        let worst = rows.iter().map(|f| f.severity).max().unwrap_or(Severity::Ok);
+        if worst > Severity::Ok {
+            bad_groups += 1;
+        }
+        out.push_str(&format!("[{}] {}\n", header_glyph(worst, fancy), g.title()));
+        for f in rows {
+            let bullet = match f.severity {
+                Severity::Ok => ok_b,
+                Severity::Warn => warn_b,
+                Severity::Problem => prob_b,
+            };
+            out.push_str(&format!("    {bullet} {}\n", f.label));
+            for line in &f.advice {
+                if line.is_empty() {
+                    out.push('\n');
+                } else {
+                    out.push_str(&format!("      {line}\n"));
+                }
+            }
+        }
+        out.push('\n');
+    }
+    // Flutter-style close.
+    if bad_groups > 0 {
+        out.push_str(&format!("! Doctor found issues in {bad_groups} categories.\n"));
+    } else {
+        out.push_str(&format!("{} No issues found!\n", if fancy { "•" } else { "-" }));
+    }
+    out
+}
+
+/// Preflight's failures-only view: identical Finding copy, no groups, no
+/// clean-bill noise (spec §Preflight). Always fancy=… no — always plain
+/// glyph ✗: preflight output goes to a terminal by construction (launch/add
+/// are interactive); keep one form for golden stability.
+pub fn render_failures(context: &str, findings: &[Finding]) -> String {
+    let mut out = format!("{context}\n\n");
+    for f in findings.iter().filter(|f| f.severity == Severity::Problem) {
+        out.push_str(&format!("✗ {}\n", f.label));
+        for line in &f.advice {
+            if line.is_empty() {
+                out.push('\n');
+            } else {
+                out.push_str(&format!("  {line}\n"));
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -534,5 +622,82 @@ mod tests {
         // None (macOS) → check skipped entirely.
         facts.xdg_runtime_dir = None;
         assert!(!diagnose(&facts).iter().any(|x| x.label.contains("XDG")));
+    }
+
+    fn sample_findings() -> Vec<Finding> {
+        vec![
+            Finding { group: Group::RequiredTools, severity: Severity::Ok,
+                label: "zellij 0.44.3 (/opt/homebrew/bin/zellij)".into(), advice: vec![] },
+            Finding { group: Group::AgentPicker, severity: Severity::Problem,
+                label: "fzf not found".into(),
+                advice: vec![
+                    "It is likely available from your package manager:".into(),
+                    String::new(),
+                    "    brew install fzf".into(),
+                    String::new(),
+                    "or see https://github.com/junegunn/fzf#installation".into(),
+                ] },
+            Finding { group: Group::Setup, severity: Severity::Warn,
+                label: "Zellij plugin permissions not pre-seeded".into(),
+                advice: vec!["Run `clave setup`.".into()] },
+        ]
+    }
+
+    #[test]
+    fn render_report_groups_glyphs_and_summary() {
+        let s = render_report(&sample_findings(), true);
+        let expected = "\
+[✓] Required tools
+    • zellij 0.44.3 (/opt/homebrew/bin/zellij)
+
+[✗] Agent picker — needed by `clave add`
+    ✗ fzf not found
+      It is likely available from your package manager:
+
+          brew install fzf
+
+      or see https://github.com/junegunn/fzf#installation
+
+[!] clave setup
+    ! Zellij plugin permissions not pre-seeded
+      Run `clave setup`.
+
+! Doctor found issues in 2 categories.
+";
+        assert_eq!(s, expected);
+    }
+
+    #[test]
+    fn render_report_ascii_fallback_when_not_a_tty() {
+        let s = render_report(&sample_findings(), false);
+        assert!(s.contains("[ok] Required tools"));
+        assert!(s.contains("[x] Agent picker"));
+        assert!(s.contains("    x fzf not found"));
+        assert!(!s.contains('✓') && !s.contains('✗') && !s.contains('•'));
+    }
+
+    #[test]
+    fn all_ok_report_says_so() {
+        let ok = vec![Finding { group: Group::RequiredTools, severity: Severity::Ok,
+            label: "git 2.51.0 (/usr/bin/git)".into(), advice: vec![] }];
+        let s = render_report(&ok, true);
+        assert!(s.ends_with("• No issues found!\n"));
+    }
+
+    #[test]
+    fn render_failures_is_problems_only() {
+        let s = render_failures("clave can't start — missing required tools:", &sample_findings());
+        let expected = "\
+clave can't start — missing required tools:
+
+✗ fzf not found
+  It is likely available from your package manager:
+
+      brew install fzf
+
+  or see https://github.com/junegunn/fzf#installation
+";
+        assert_eq!(s, expected);
+        assert!(!s.contains("permissions")); // Warn not included
     }
 }
