@@ -178,12 +178,22 @@ pub fn discover(tool: ToolId) -> Option<Discovered> {
     // home still resolve via override/PATH).
     let known_hits: Vec<PathBuf> = dirs::home_dir()
         .map(|home| {
-            let nvm_versions: Vec<String> = std::fs::read_dir(home.join(".nvm/versions/node"))
-                .map(|rd| {
-                    rd.filter_map(|e| Some(e.ok()?.file_name().to_str()?.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
+            // Claude-only (coderabbit 2026-07-22): discover() is on a HOT
+            // path — hook::push_snapshot resolves zellij on every Stop /
+            // Notification / UserPromptSubmit / SessionEnd — and only the
+            // Claude arm of candidate_dirs consults nvm, so listing
+            // ~/.nvm/versions/node for any other tool is pure wasted I/O
+            // paid on every hook event.
+            let nvm_versions: Vec<String> = if tool == ToolId::Claude {
+                std::fs::read_dir(home.join(".nvm/versions/node"))
+                    .map(|rd| {
+                        rd.filter_map(|e| Some(e.ok()?.file_name().to_str()?.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             candidate_dirs(tool, &home, &nvm_versions)
                 .into_iter()
                 .map(|d| d.join(tool.bin_name()))

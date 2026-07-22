@@ -236,9 +236,16 @@ fn main() -> Result<()> {
             let claude = clave::discover::discover(clave::discover::ToolId::Claude)
                 .map(|d| d.path)
                 .ok_or_else(|| {
+                    // Reuse the canonical copy (coderabbit 2026-07-22): an
+                    // ad-hoc string here is exactly the drift the one-copy-
+                    // module rule exists to prevent — this pane message and
+                    // doctor's must stay the same words.
+                    let advice =
+                        clave::doctor::missing_advice(clave::discover::ToolId::Claude, None)
+                            .join("\n");
                     anyhow::anyhow!(
-                        "claude not found — install it: https://code.claude.com/docs\n\
-                     (or set CLAVE_CLAUDE_BIN to its location)"
+                        "claude not found\n{advice}\n\
+                         (or set CLAVE_CLAUDE_BIN to its location)"
                     )
                 })?;
             let err = match mode {
