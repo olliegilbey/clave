@@ -245,29 +245,48 @@ pub fn merge_hooks(settings: &mut serde_json::Value, clave_bin: &str) -> bool {
             .entry(ev)
             .or_insert_with(|| serde_json::json!([]));
         let entries = arr.as_array_mut().expect("hook event must be an array");
-        // Find an existing clave entry (any version's path) and rewrite its
-        // command to the current binary — a version cut MUST NOT leave the
-        // prior release's hook behind (it would run the old CLI) nor stack a
-        // duplicate. Only OUR command strings are eligible; user hooks pass
-        // through untouched.
+        // Keep EXACTLY ONE clave hook per event (review 2026-07-22, Fix 4):
+        // rewrite the FIRST clave match (any version's path) to the current
+        // command — a version cut MUST NOT leave the prior release's hook
+        // behind — and REMOVE every subsequent clave match, because Claude
+        // fires ALL matching hooks and duplicates double-fire. Only OUR
+        // command strings are eligible; user hooks pass through untouched.
         let mut found = false;
         for e in entries.iter_mut() {
             let Some(hs) = e.get_mut("hooks").and_then(|v| v.as_array_mut()) else {
                 continue;
             };
-            for h in hs.iter_mut() {
+            hs.retain_mut(|h| {
                 let ours = h
                     .get("command")
                     .and_then(|v| v.as_str())
                     .is_some_and(|c| is_clave_hook_command(c, ev));
-                if ours {
-                    found = true;
-                    if h["command"] != want {
-                        h["command"] = want.clone();
-                        changed = true;
-                    }
+                if !ours {
+                    return true; // foreign hook — never touch
                 }
-            }
+                if found {
+                    changed = true; // a duplicate clave hook — drop it
+                    return false;
+                }
+                found = true;
+                if h["command"] != want {
+                    h["command"] = want.clone();
+                    changed = true;
+                }
+                true
+            });
+        }
+        // Drop entry objects whose hooks array emptied out (all its hooks were
+        // duplicate clave matches we removed) — never leave a hollow
+        // {"hooks": []}. Foreign-bearing entries can't empty (foreign is kept).
+        let before = entries.len();
+        entries.retain(|e| {
+            e.get("hooks")
+                .and_then(|v| v.as_array())
+                .is_none_or(|a| !a.is_empty())
+        });
+        if entries.len() != before {
+            changed = true;
         }
         if !found {
             entries.push(serde_json::json!({
@@ -915,6 +934,44 @@ mod tests {
         // DIGIT immediately after "clave-v", not just the substring.
         assert!(!is_clave_hook_command("clave-vault hook Stop", "Stop"));
         assert!(!is_clave_hook_command("/usr/local/bin/clave-verify hook Stop", "Stop"));
+    }
+
+    #[test]
+    fn merge_hooks_dedupes_duplicate_clave_entries_keeping_one() {
+        // Fix 4 (review 2026-07-22): merge_hooks rewrote EVERY matching clave
+        // hook in place but never removed duplicates — Claude fires ALL
+        // matching hooks, so two clave Stop entries double-fire. Per event,
+        // keep exactly ONE clave hook (rewrite the first, drop the rest);
+        // never touch a foreign hook in the same array.
+        let mut v: serde_json::Value = serde_json::json!({
+            "hooks": {
+                "Stop": [
+                    { "hooks": [ { "type": "command", "command": "clave hook Stop" } ] },
+                    { "hooks": [ { "type": "command", "command": "/old/path/clave-v0.0.9 hook Stop" } ] },
+                    { "hooks": [ { "type": "command", "command": "my-bell hook Stop" } ] }
+                ]
+            }
+        });
+        assert!(merge_hooks(&mut v, "clave")); // changed: the duplicate was removed
+        let stops = v["hooks"]["Stop"].as_array().unwrap();
+        // Exactly one surviving clave Stop entry, at the current command.
+        let clave: Vec<_> = stops
+            .iter()
+            .filter(|e| {
+                e["hooks"].as_array().unwrap().iter().any(|h| {
+                    is_clave_hook_command(h["command"].as_str().unwrap_or(""), "Stop")
+                })
+            })
+            .collect();
+        assert_eq!(clave.len(), 1);
+        assert_eq!(clave[0]["hooks"][0]["command"], "clave hook Stop");
+        // The foreign my-bell entry survives untouched.
+        assert!(stops
+            .iter()
+            .any(|e| e["hooks"][0]["command"] == "my-bell hook Stop"));
+        // Idempotent second run: nothing left to dedupe.
+        assert!(!merge_hooks(&mut v, "clave"));
+        assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 2);
     }
 
     #[test]

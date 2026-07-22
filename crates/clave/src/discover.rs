@@ -149,18 +149,26 @@ pub fn discover(tool: ToolId) -> Option<Discovered> {
     let override_val = std::env::var(tool.override_var()).ok();
     // which_global, NOT which: cwd must never satisfy a probe (spec §Probes).
     let path_hit = which::which_global(tool.bin_name()).ok();
-    let home = dirs::home_dir()?;
-    let nvm_versions: Vec<String> = std::fs::read_dir(home.join(".nvm/versions/node"))
-        .map(|rd| rd.filter_map(|e| Some(e.ok()?.file_name().to_str()?.to_string())).collect())
+    // Fix 5 (review 2026-07-22): a missing $HOME must NOT kill an override or
+    // PATH hit that was already found — known-location probing is the only
+    // part that needs home, so scope the None to it (headless daemons with no
+    // home still resolve via override/PATH).
+    let known_hits: Vec<PathBuf> = dirs::home_dir()
+        .map(|home| {
+            let nvm_versions: Vec<String> = std::fs::read_dir(home.join(".nvm/versions/node"))
+                .map(|rd| rd.filter_map(|e| Some(e.ok()?.file_name().to_str()?.to_string())).collect())
+                .unwrap_or_default();
+            candidate_dirs(tool, &home, &nvm_versions)
+                .into_iter()
+                .map(|d| d.join(tool.bin_name()))
+                // ~/.claude/local/claude: candidate_dirs yields ~/.claude/local
+                // as a DIR, so the join above already forms the full binary
+                // path. apk's /sbin home is covered by the pkg-manager probe,
+                // not tool discovery.
+                .filter(|p| is_executable(p))
+                .collect()
+        })
         .unwrap_or_default();
-    let known_hits: Vec<PathBuf> = candidate_dirs(tool, &home, &nvm_versions)
-        .into_iter()
-        .map(|d| d.join(tool.bin_name()))
-        // ~/.claude/local/claude: candidate_dirs yields ~/.claude/local as a
-        // DIR, so the join above already forms the full binary path. apk's
-        // /sbin home is covered by the pkg-manager probe, not tool discovery.
-        .filter(|p| is_executable(p))
-        .collect();
     resolve(override_val.as_deref(), path_hit, &known_hits)
 }
 
