@@ -207,11 +207,15 @@ pub fn run_scenario(name: &str) -> Result<()> {
         // agent is already seeded, which is the goal state, not an error.
         if seed_needed(&crate::env::claude_config_dir()?, &cwd_str, &uuid) {
             println!("seeding {uuid} ({})…", a.slug);
-            let st = Command::new("claude")
+            // Discovered claude (coderabbit CLI, 2026-07-22): a contributor
+            // whose claude lives off PATH (nvm, ~/.claude/local) could not
+            // seed a scenario at all. Unlike dev.rs's zellij calls — session
+            // lifecycle the human drives — this is a real exec clave owns.
+            let st = Command::new(crate::discover::tool_path(crate::discover::ToolId::Claude))
                 .current_dir(&cwd)
                 .args(["-p", "--session-id", &uuid, "Reply with exactly: ok"])
                 .status()
-                .context("running claude -p (is claude on PATH?)")?;
+                .context("running claude -p (is claude discoverable?)")?;
             anyhow::ensure!(st.success(), "claude -p seeding failed for {uuid}");
         } else {
             println!(
@@ -372,8 +376,9 @@ fn run_in(dir: &Path, cmd: &str, args: &[&str]) -> Result<()> {
 }
 
 /// Does this scenario agent still need its `claude -p` seed? Existence of
-/// the munged jsonl drives the branch — the SAME check spawn_mode uses, so
-/// scenario seeding and pane spawning can never disagree about what
+/// the munged jsonl drives the branch (S0 — the same rule `claude --resume`
+/// itself enforces), via the SAME `spawn_mode` check the pane path uses, so
+/// scenario seeding (§6.9) and pane spawning can never disagree about what
 /// "already exists" means.
 fn seed_needed(claude_dir: &Path, physical_cwd: &str, uuid: &str) -> bool {
     matches!(

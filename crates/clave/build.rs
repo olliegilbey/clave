@@ -24,6 +24,13 @@ fn main() {
             );
             println!("cargo:rerun-if-changed={src}");
         }
-        Err(_) => std::fs::write(&out, []).expect("writing empty embed marker"),
+        // Only an UNSET var means "dev build" (coderabbit CLI, 2026-07-22):
+        // a non-unicode value is a misconfigured release, and swallowing it
+        // as absent would ship exactly the empty embed this guard exists to
+        // prevent.
+        Err(std::env::VarError::NotPresent) => {
+            std::fs::write(&out, []).expect("writing empty embed marker")
+        }
+        Err(e) => panic!("CLAVE_BAR_WASM is set but unusable: {e}"),
     }
 }

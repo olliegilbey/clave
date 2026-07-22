@@ -92,7 +92,9 @@ pub fn resolve(
 /// version pick is unit-testable.
 pub fn candidate_dirs(tool: ToolId, home: &Path, nvm_versions: &[String]) -> Vec<PathBuf> {
     // Shared: rc-file-only PATH additions and standard prefixes. ~/.cargo/bin
-    // covers cargo-installed zellij/zoxide; /sbin covers apk-adjacent boxes.
+    // covers cargo-installed zellij/zoxide. /sbin is NOT here — it only ever
+    // mattered for apk, which the package-manager probe handles separately
+    // (spec §Probes); listing it as a tool location was a stale claim.
     let mut dirs = vec![
         home.join(".local/bin"),
         PathBuf::from("/opt/homebrew/bin"),

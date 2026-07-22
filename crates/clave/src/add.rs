@@ -455,14 +455,18 @@ pub fn record_branch(resumed: bool, cand_branch: Option<&str>, picked_branch: &s
 }
 
 pub fn run_add(worktree: bool) -> Result<()> {
-    // Preflight (spec §Preflight): the fzf weave and git/claude are all
-    // needed before any tab exists — abort BEFORE creating anything.
+    // Preflight (spec §Preflight): the fzf weave, git/claude, and zellij
+    // itself are all needed before any tab exists — abort BEFORE creating
+    // anything. Zellij included (coderabbit CLI, 2026-07-22): run_add execs
+    // `zellij action new-tab`, so an undiscoverable zellij would otherwise
+    // fail AFTER the picker and the store row, leaving orphaned state.
     if let Err(e) = crate::doctor::preflight(
         &[
             crate::discover::ToolId::Fzf,
             crate::discover::ToolId::Zoxide,
             crate::discover::ToolId::Git,
             crate::discover::ToolId::Claude,
+            crate::discover::ToolId::Zellij,
         ],
         "clave add needs tools that are missing:",
     ) {

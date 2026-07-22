@@ -168,6 +168,30 @@ pub fn diagnose_tool(
         },
         Some(d) => {
             let shown = tilde(&d.path, home);
+            // Zellij version check runs FIRST (coderabbit CLI, 2026-07-22):
+            // ordering it after the off-PATH return meant an off-PATH zellij
+            // with version drift reported only "not on your PATH" and lost
+            // the version warning entirely — and an off-PATH cargo-installed
+            // zellij is exactly where drift is most likely. Both facts are
+            // Warn, so surfacing them together costs no severity, only text.
+            if tool == ToolId::Zellij && fact.version.as_deref() != Some(TESTED_ZELLIJ) {
+                let got = fact.version.as_deref().unwrap_or("unknown version");
+                let mut advice = vec![
+                    "Permission-cache format and pane sizing are pinned to the tested".into(),
+                    format!("version; if the bar misbehaves, install {TESTED_ZELLIJ}."),
+                ];
+                if d.via == Via::KnownLocation {
+                    advice.push("Also not on your PATH — clave uses this path directly.".into());
+                }
+                return Finding {
+                    group,
+                    severity: Severity::Warn,
+                    label: format!(
+                        "zellij {got} ({shown}) — clave is tested against {TESTED_ZELLIJ}"
+                    ),
+                    advice,
+                };
+            }
             // Off-PATH: works (we exec the absolute path) but worth knowing.
             if d.via == Via::KnownLocation {
                 return Finding {
@@ -178,22 +202,6 @@ pub fn diagnose_tool(
                         "clave will use this path directly; agent tabs are unaffected.".into(),
                         "Your interactive shell may still need it on PATH".into(),
                         "(a shell alias is not enough for spawned processes).".into(),
-                    ],
-                };
-            }
-            // Zellij only: version pinned to the validation ledger — any
-            // drift (or an unparseable version) warns, never halts.
-            if tool == ToolId::Zellij && fact.version.as_deref() != Some(TESTED_ZELLIJ) {
-                let got = fact.version.as_deref().unwrap_or("unknown version");
-                return Finding {
-                    group,
-                    severity: Severity::Warn,
-                    label: format!(
-                        "zellij {got} ({shown}) — clave is tested against {TESTED_ZELLIJ}"
-                    ),
-                    advice: vec![
-                        "Permission-cache format and pane sizing are pinned to the tested".into(),
-                        format!("version; if the bar misbehaves, install {TESTED_ZELLIJ}."),
                     ],
                 };
             }
@@ -278,28 +286,34 @@ pub fn diagnose(f: &Facts) -> Vec<Finding> {
         .filter(|(_, n)| *n > 1)
         .map(|(e, _)| e.as_str())
         .collect();
-    out.push(if !missing.is_empty() {
-        setup(
+    // Independent, not an if/else chain (coderabbit CLI, 2026-07-22): a
+    // settings.json can have BOTH an unregistered event and a duplicated one
+    // (a half-finished hand-edit), and the chain hid the duplicate — which is
+    // the one that silently double-fires.
+    if !missing.is_empty() {
+        out.push(setup(
             Severity::Problem,
             format!("Claude hooks not registered ({})", missing.join(", ")),
             vec!["Run `clave setup` — agents won't report status without them.".into()],
-        )
-    } else if !dup.is_empty() {
-        setup(
+        ));
+    }
+    if !dup.is_empty() {
+        out.push(setup(
             Severity::Problem,
             format!("duplicate clave hook entries ({})", dup.join(", ")),
             vec![
                 "Claude fires ALL matching hooks — duplicates double-fire events.".into(),
                 "Run `clave setup` to heal, or edit ~/.claude/settings.json.".into(),
             ],
-        )
-    } else {
-        setup(
+        ));
+    }
+    if missing.is_empty() && dup.is_empty() {
+        out.push(setup(
             Severity::Ok,
             "Claude hooks merged (1 entry per event)".into(),
             vec![],
-        )
-    });
+        ));
+    }
     out.push(if f.perms_seeded {
         setup(Severity::Ok, "Zellij plugin permissions pre-seeded".into(), vec![])
     } else {
@@ -439,11 +453,16 @@ pub fn render_report(findings: &[Finding], fancy: bool) -> String {
         }
         out.push('\n');
     }
-    // Flutter-style close.
+    // Flutter-style close. Singular/plural (coderabbit CLI, 2026-07-22): the
+    // golden test used a 2-category fixture, so "issues in 1 categories"
+    // shipped unnoticed — the commonest real case.
     if bad_groups > 0 {
-        out.push_str(&format!(
-            "! Doctor found issues in {bad_groups} categories.\n"
-        ));
+        let noun = if bad_groups == 1 {
+            "category"
+        } else {
+            "categories"
+        };
+        out.push_str(&format!("! Doctor found issues in {bad_groups} {noun}.\n"));
     } else {
         out.push_str(&format!(
             "{} No issues found!\n",
@@ -596,13 +615,13 @@ pub fn gather() -> anyhow::Result<Facts> {
         config_exists: dir.join("config.kdl").exists(),
         layout_exists: dir.join("layout.kdl").exists(),
         wasm_exists: wasm_path.exists(),
+        // Reuse the ONE resolved path (coderabbit CLI, 2026-07-22): calling
+        // wasm_path() twice could report the permission grant against a
+        // different file than the one shown, if extraction raced between.
+        perms_seeded: crate::setup::permissions_seeded(&perms, wasm_path.to_str().unwrap_or("")),
         wasm_path,
         has_embedded_wasm: crate::release::embedded_wasm().is_some(),
         hook_counts: hook_entry_counts(&settings),
-        perms_seeded: crate::setup::permissions_seeded(
-            &perms,
-            crate::setup::wasm_path()?.to_str().unwrap_or(""),
-        ),
         bin_dir_exists: bin_dir.is_dir(),
         installed_releases,
         // Linux-only check (spec §Check): macOS zellij doesn't use it —
@@ -955,6 +974,57 @@ mod tests {
         assert!(s.contains("[x] Agent picker"));
         assert!(s.contains("    x fzf not found"));
         assert!(!s.contains('✓') && !s.contains('✗') && !s.contains('•'));
+    }
+
+    #[test]
+    fn single_bad_group_uses_the_singular_noun() {
+        // coderabbit CLI 2026-07-22: the 2-category golden hid "issues in 1
+        // categories" — and one bad group is the commonest real case.
+        let one = vec![Finding {
+            group: Group::AgentPicker,
+            severity: Severity::Problem,
+            label: "fzf not found".into(),
+            advice: vec![],
+        }];
+        assert!(render_report(&one, true).ends_with("! Doctor found issues in 1 category.\n"));
+    }
+
+    #[test]
+    fn off_path_zellij_still_reports_version_drift() {
+        // coderabbit CLI 2026-07-22: the off-PATH branch used to return
+        // first, swallowing the version warning — and an off-PATH
+        // cargo-installed zellij is exactly where drift is likeliest.
+        let f = found(
+            "/home/u/.cargo/bin/zellij",
+            Via::KnownLocation,
+            Some("0.45.0"),
+        );
+        let d = diagnose_tool(ToolId::Zellij, &f, None, Path::new("/home/u"));
+        assert_eq!(d.severity, Severity::Warn);
+        assert!(d.label.contains("0.45.0") && d.label.contains(TESTED_ZELLIJ));
+        // Both facts surface: version drift AND the off-PATH note.
+        assert!(d.advice.iter().any(|l| l.contains("not on your PATH")));
+        // A tested-version off-PATH zellij keeps the plain off-PATH finding.
+        let ok = found(
+            "/home/u/.cargo/bin/zellij",
+            Via::KnownLocation,
+            Some(TESTED_ZELLIJ),
+        );
+        let d = diagnose_tool(ToolId::Zellij, &ok, None, Path::new("/home/u"));
+        assert!(d.label.contains("not on your PATH"));
+    }
+
+    #[test]
+    fn missing_and_duplicate_hooks_are_both_reported() {
+        // coderabbit CLI 2026-07-22: the if/else chain hid a duplicate when
+        // another event was also unregistered — the duplicate is the one that
+        // silently double-fires.
+        let mut facts = base_facts();
+        facts.hook_counts[0].1 = 0; // UserPromptSubmit unregistered
+        facts.hook_counts[1].1 = 2; // Stop duplicated
+        let f = diagnose(&facts);
+        assert!(f.iter().any(|x| x.label.contains("not registered")));
+        assert!(f.iter().any(|x| x.label.contains("duplicate")));
     }
 
     #[test]
