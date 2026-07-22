@@ -52,6 +52,25 @@ pub fn live_uuids(dump_layout: &str) -> Vec<String> {
     out
 }
 
+/// §6.3 liveness (issue #6): the uuids the STORE currently binds to a live
+/// tab. The bind is set by the agent tab's own bar via a pane-id join (S2) and
+/// PRUNED when the tab closes (§6.6 / `clave prune-tabs`), so a Some tab_id
+/// tracks the live tab SET — the "join binds against the live tab set" the
+/// issue asks for, materialized in the store. This is authoritative because
+/// serialized commands go BLIND under an MCP server: zellij serializes the
+/// pane's CHILD process (`uv … run main.py`), not `claude` (C7 corollary,
+/// 2026-07-21). `live_uuids` survives only as an ADDITIVE fallback for a
+/// non-MCP agent whose bind hasn't landed — it can ADD a uuid, never mask one,
+/// so it can't reintroduce the double-attach the bind-based signal fixes.
+pub fn bound_live_uuids(store: &Store) -> Vec<String> {
+    store
+        .agents
+        .values()
+        .filter(|r| r.tab_id.is_some())
+        .map(|r| r.uuid.clone())
+        .collect()
+}
+
 /// Labels get interpolated into KDL string literals and fzf menu lines —
 /// strip the things that break them: quotes, control chars, and backslash
 /// (KDL's escape introducer — a raw `\` is a parse error at whichever seam
@@ -451,9 +470,18 @@ pub fn run_add(worktree: bool) -> Result<()> {
     //    resume picker instead; the old first-live-agent jump made a second
     //    agent in the same repo impossible).
     let dump = cmd_stdout("zellij", &["action", "dump-layout"]).unwrap_or_default();
-    let live = live_uuids(&dump);
     let paths = store_paths()?;
     let store = crate::store::read_store(&paths)?;
+    // Issue #6: liveness from the store's binds (authoritative — command
+    // strings go blind under MCP servers), with the dump-layout scan folded in
+    // as an additive fallback for a bind that hasn't landed. Union: a uuid live
+    // by EITHER signal is a jump, never a resume (never a double-attach).
+    let mut live = bound_live_uuids(&store);
+    for u in live_uuids(&dump) {
+        if !live.contains(&u) {
+            live.push(u);
+        }
+    }
 
     // 4) new vs resume.
     let Some(choice) = fzf_pick(&["new".into(), "resume".into()], "agent> ")? else {
@@ -711,6 +739,23 @@ mod tests {
             tab_id: None,
             stale: false,
         }
+    }
+
+    #[test]
+    fn bound_live_uuids_derives_liveness_from_store_binds() {
+        // Issue #6 (2026-07-21): liveness must come from the store's uuid→tab_id
+        // binds, NOT serialized commands. dump-layout serializes an agent
+        // pane's CHILD process under an MCP server (`uv … run main.py`), not
+        // `claude`, so live_uuids was BLIND while three agents were live —
+        // `clave add` then offered a LIVE session as resume → double-attach.
+        // A bound agent (tab_id Some, kept honest by clave prune-tabs) is live;
+        // a dormant/closed-and-pruned one (tab_id None) is not.
+        let mut s = Store::default();
+        let mut bound = rec("u-live");
+        bound.tab_id = Some(7);
+        s.agents.insert("u-live".into(), bound);
+        s.agents.insert("u-dormant".into(), rec("u-dormant")); // tab_id None
+        assert_eq!(bound_live_uuids(&s), vec!["u-live".to_string()]);
     }
 
     #[test]
