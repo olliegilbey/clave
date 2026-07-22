@@ -83,7 +83,17 @@ pub fn baked_binary(versioned_cli: Option<&Path>, installed: bool) -> String {
 /// Keeping an ignored parameter (`let _ = …`) would just ship dead API
 /// surface for callers to puzzle over.
 pub fn binary_resolution_is_anomalous(installed: bool, siblings: &[String]) -> bool {
-    !installed && siblings.iter().any(|n| n.starts_with("clave-v"))
+    // Require a DIGIT right after `clave-v`, not a bare `starts_with` — same
+    // discipline as `is_clave_hook_command` (setup.rs), precedent cited there:
+    // a foreign `clave-vault`/`clave-verify` sibling shares the text prefix
+    // with our versioned copy name but is not one, and a false positive here
+    // trains the reader to ignore the warning (the exact failure mode #44's
+    // announcement exists to prevent).
+    !installed
+        && siblings.iter().any(|n| {
+            n.strip_prefix("clave-v")
+                .is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit()))
+        })
 }
 
 /// IO wrapper over `baked_binary`: resolve the versioned copy under the
@@ -349,6 +359,16 @@ mod tests {
         assert!(binary_resolution_is_anomalous(
             false,
             &["clave-v0.1.0".into()]
+        ));
+
+        // False-positive guard (review finding on #44): a foreign sibling
+        // sharing the `clave-v` TEXT prefix but no digit after it — e.g. a
+        // `clave-vault`/`clave-verify` binary someone else put in the same
+        // bin dir — must not be treated as our versioned copy.
+        assert!(!binary_resolution_is_anomalous(false, &["clave-vault".into()]));
+        assert!(!binary_resolution_is_anomalous(
+            false,
+            &["clave-verify".into()]
         ));
     }
 
