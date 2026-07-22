@@ -4,3 +4,6 @@
 .claude/settings.local.json
 # subagent-driven-development scratch: task briefs, reports, progress ledger
 .superpowers/
+
+# Agent worktrees live here; they are ephemeral checkouts, never repo content.
+.claude/worktrees/
