@@ -113,17 +113,18 @@ enum Command {
     },
 
     /// Prune store binds + tab_timeline entries for CLOSED tabs
-    /// (plugin-internal, #6/F3). The active bar reports the FULL live tab-id
-    /// set whenever the set changes; the store drops anything absent so a
-    /// mid-session close can't leak binds/timeline unboundedly — and, since
-    /// zellij reuses tab_ids (screen.rs:1617), a reused id can't inherit a
-    /// dead agent's decoration.
+    /// (plugin-internal, #6/F3). The active bar reports the ids it observed DIE
+    /// (stale = bound-or-timelined but absent from the live set) whenever the
+    /// set changes; the store removes exactly those. Removing specific dead ids
+    /// is order-safe (idempotent, commutes) — a full-live-set "retain" payload
+    /// would race-unbind a tab created after it was computed. zellij reuses
+    /// tab_ids (screen.rs:1617), so this is correctness, not just hygiene.
     #[command(hide = true)]
     PruneTabs {
-        /// The currently-live zellij tab ids (the full set). Empty is a no-op
-        /// (closing the last tab closes the session — never a wipe signal).
+        /// The zellij tab ids observed dead (the stale set). Empty is a no-op
+        /// (nothing observed dead → nothing to remove).
         #[arg(trailing_var_arg = true)]
-        tab_ids: Vec<usize>,
+        stale_ids: Vec<usize>,
     },
 
     /// Persist the bar collapse mode (plugin-internal, issue #5). The
@@ -287,12 +288,13 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Some(Command::PruneTabs { tab_ids }) => {
+        Some(Command::PruneTabs { stale_ids }) => {
             let paths = store::store_paths()?;
             // Push only on CHANGE (apply_prune_tabs returns None otherwise) — a
-            // set-change that pruned nothing must not spam the pipe. The push
-            // drops the closed tab's agent to a dormant row on every instance.
-            if let Some(snap) = store::apply_prune_tabs(&paths, &tab_ids)? {
+            // prune that matched nothing (already-removed dead ids: idempotent
+            // late arrival) must not spam the pipe. The push drops the closed
+            // tab's agent to a dormant row on every instance.
+            if let Some(snap) = store::apply_prune_tabs(&paths, &stale_ids)? {
                 hook::push_snapshot(&snap);
             }
             Ok(())
@@ -342,15 +344,16 @@ mod tests {
         }
     }
 
-    /// #6/F3: the plugin shells `clave prune-tabs <id>…` with the full live
-    /// set. Same ledger rule as the collapse test above — every new CLI
-    /// surface gets a parse pin, because clap-derive shape bugs panic debug
-    /// builds at the parse layer and no workspace test reaches it.
+    /// #6/F3: the plugin shells `clave prune-tabs <stale-id>…` with the ids it
+    /// observed die (the inverted, order-safe payload — see apply_prune_tabs).
+    /// Same ledger rule as the collapse test above — every new CLI surface gets
+    /// a parse pin, because clap-derive shape bugs panic debug builds at the
+    /// parse layer and no workspace test reaches it.
     #[test]
     fn prune_tabs_cli_parses_variadic_ids() {
         let cli = Cli::try_parse_from(["clave", "prune-tabs", "3", "1", "7"]).expect("must parse");
         match cli.command {
-            Some(Command::PruneTabs { tab_ids }) => assert_eq!(tab_ids, vec![3, 1, 7]),
+            Some(Command::PruneTabs { stale_ids }) => assert_eq!(stale_ids, vec![3, 1, 7]),
             _ => panic!("parsed into the wrong command"),
         }
     }

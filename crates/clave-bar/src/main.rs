@@ -151,14 +151,16 @@ impl State {
                         BTreeMap::new(),
                     );
                 }
-                Effect::PruneTabs { live_ids } if active => {
-                    // #6/F3: report the FULL live tab set so the store drops
-                    // binds/timeline for closed tabs. Executor-gated (like
-                    // Bind): a hidden instance's stale set would prune LIVE
-                    // tabs. The model already gates emission to set-changes, so
-                    // this fires ~once per close, not per TabUpdate.
+                Effect::PruneTabs { stale_ids } if active => {
+                    // #6/F3: report the OBSERVED-STALE ids (not the live set) so
+                    // the store removes exactly those binds/timeline entries —
+                    // idempotent removals commute, so two out-of-order prunes
+                    // can't clobber a tab neither saw die. Executor-gated (like
+                    // Bind): keeps duplicate prunes to the active bar. The model
+                    // gates emission to set-changes, so this fires ~once per
+                    // close, not per TabUpdate.
                     let mut argv: Vec<String> = vec!["clave".into(), "prune-tabs".into()];
-                    argv.extend(live_ids.iter().map(usize::to_string));
+                    argv.extend(stale_ids.iter().map(usize::to_string));
                     let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
                     run_command(&refs, BTreeMap::new());
                 }

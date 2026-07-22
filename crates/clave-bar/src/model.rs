@@ -57,12 +57,16 @@ pub enum Effect {
     /// run_command(["clave","bind",uuid,tab_id]) — report the uuid→tab join
     /// to the STORE (§6.6 Design B), fired by the agent tab's own bar.
     Bind { uuid: String, tab_id: usize },
-    /// run_command(["clave","prune-tabs", live_ids…]) — drop store binds and
-    /// tab_timeline entries for CLOSED tabs (#6/F3). Carries the FULL live set;
-    /// executor-gated in main.rs (a hidden instance's stale set would prune
-    /// LIVE tabs). Zellij reuses tab_ids (screen.rs:1617), so this is
+    /// run_command(["clave","prune-tabs", stale_ids…]) — drop store binds and
+    /// tab_timeline entries for CLOSED tabs (#6/F3). Carries the OBSERVED-STALE
+    /// ids (bound-or-timelined ids ABSENT from the delivered live set), NOT the
+    /// live set — removing specific dead ids is idempotent and commutes, so
+    /// two out-of-order prunes can't clobber a tab neither observed die (the
+    /// full-live-set "retain-only" payload could unbind a tab created after the
+    /// prune was computed). Executor-gated in main.rs (keeps duplicate prunes
+    /// to the active bar). Zellij reuses tab_ids (screen.rs:1617), so this is
     /// correctness, not just hygiene.
-    PruneTabs { live_ids: Vec<usize> },
+    PruneTabs { stale_ids: Vec<usize> },
     /// resize_pane_with_id(Decrease→Right, own) — C6 collapse/expand seek.
     ShrinkSelf,
     /// resize_pane_with_id(Increase→Right, own) — C6 seek / overshoot
@@ -260,13 +264,12 @@ pub struct BarModel {
     /// The live tab-id SET at our last apply_tabs, so the #6 prune fires only
     /// when the set actually CHANGES — a plain focus-move TabUpdate (same ids,
     /// different active flag) must cost no `clave prune-tabs` subprocess (the
-    /// C5 rd-4 spawn-storm lesson: bound triggers only). The prune carries the
-    /// full live set, so a NEXT close that leaves the closed id ABSENT still
-    /// cleans anything a missed push left behind — BUT if that id is REUSED
-    /// (screen.rs:1617 max-key+1) before the next set change it re-enters the
-    /// live set and is never detected stale; the `clave bind` eviction is the
-    /// backstop then, and only when the reused tab hosts a BINDING agent (a
-    /// plain tab on a reused id can transiently wear the dead glyph).
+    /// C5 rd-4 spawn-storm lesson: bound triggers only). Staleness is RE-DERIVED
+    /// from store-vs-live on every set change (self.agents / self.timeline
+    /// mirror the last snapshot), so a lost prune push is re-detected and
+    /// re-emitted while the stale entry persists — the self-heal lives in the
+    /// detection, and the emitted STALE-ids payload keeps late prunes from
+    /// touching tabs they never saw die (see Effect::PruneTabs).
     last_live_ids: BTreeSet<usize>,
 }
 
@@ -639,32 +642,57 @@ impl BarModel {
                 }
             }
         }
-        // #6/F3 store hygiene: when the live tab SET changes (a close), ask the
-        // store to drop any bind or tab_timeline entry whose tab is no longer
-        // live. Correctness, not just hygiene — zellij REUSES tab_ids
-        // (get_new_tab_id = max-key+1, screen.rs:1617; a closed top tab's id
-        // returns on the next new tab), so a survivor entry would let a
-        // reused-id tab inherit a dead agent's glyph/order. Gated to set CHANGES
-        // (last_live_ids) so a plain focus-move never spawns a subprocess (C5
-        // rd-4 spawn-storm bar); emitted only when something IS stale, so a
-        // steady all-live session stays quiet. Executor-gated in main.rs — a
-        // hidden instance whose set is fresh here is the common case (normally
-        // only the active tab gets TabUpdate, C3), but toggle bursts DO reach
-        // all instances (doc:371-394), and a stale set would prune LIVE tabs;
-        // the gate is what makes that safe. Never prune to EMPTY: closing the
-        // last tab closes the session, so an empty live set is a degenerate
-        // update, not a real "all tabs gone".
+        // #6/F3 store hygiene: when the live tab SET changes (a close), tell the
+        // store which OBSERVED ids just died so it drops their binds +
+        // tab_timeline entries. Correctness, not just hygiene — zellij REUSES
+        // tab_ids (get_new_tab_id = max-key+1, screen.rs:1617; a closed top
+        // tab's id returns on the next new tab), so a survivor entry would let a
+        // reused-id tab inherit a dead agent's glyph/order.
+        //
+        // The payload is the OBSERVED-STALE ids (bound-or-timelined ids absent
+        // from THIS delivered live set), not the live set. Order-safety: two
+        // fire-and-forget `clave prune-tabs` have no arrival order (the collapse
+        // pending-write class); removing SPECIFIC dead ids is idempotent and
+        // commutes, so a late prune can only re-remove ids already judged dead —
+        // it never touches a tab it did not observe die. The full-live-set
+        // "retain only these" payload had the opposite property: a late prune
+        // would strip the bind of ANY tab created after it was computed
+        // (concrete kill: new tab 8 binds, a stale prune{5,6} lands and unbinds
+        // 8 — no self-heal, bind_effects is sent_binds-guarded → live agent
+        // rendered dormant → #6 double-attach via a race).
+        //
+        // Gated to set CHANGES (last_live_ids) so a plain focus-move never
+        // spawns a subprocess (C5 rd-4 spawn-storm bar); emitted only when ids
+        // ARE stale. Executor-gated in main.rs — a fresh set is the common case
+        // (normally only the active tab gets TabUpdate, C3), but toggle bursts
+        // DO reach all instances (doc:371-394); gating keeps duplicate prunes to
+        // the active bar (idempotent regardless). Self-heal: staleness is
+        // re-derived from store-vs-live each set change, so a lost push is
+        // re-detected while the entry persists. Residual (now at the PRUNE
+        // layer, not detection): if the exact stale id is REUSED within the
+        // subprocess-latency window, a late removal could unbind the new
+        // tenant — apply_bind eviction is the backstop and the window is
+        // milliseconds (the full-set design clobbered ANY tab born in the
+        // window, unconditionally). Never treat an empty live set as "all died":
+        // closing the last tab closes the session, so it is a degenerate update.
         let set_changed = live != self.last_live_ids;
         self.last_live_ids = live.clone();
         if set_changed && !live.is_empty() {
-            let stale_bind = self
+            let mut stale: BTreeSet<usize> = self
                 .agents
                 .iter()
-                .any(|a| a.tab_id.is_some_and(|id| !live.contains(&id)));
-            let stale_timeline = self.timeline.keys().any(|id| !live.contains(id));
-            if stale_bind || stale_timeline {
+                .filter_map(|a| a.tab_id)
+                .filter(|id| !live.contains(id))
+                .collect();
+            stale.extend(
+                self.timeline
+                    .keys()
+                    .copied()
+                    .filter(|id| !live.contains(id)),
+            );
+            if !stale.is_empty() {
                 effects.push(Effect::PruneTabs {
-                    live_ids: live.iter().copied().collect(), // BTreeSet → sorted
+                    stale_ids: stale.into_iter().collect(), // BTreeSet → sorted, deduped
                 });
             }
         }
@@ -1376,20 +1404,24 @@ mod tests {
         // growth (fugu F3), and — because zellij REUSES tab_ids (screen.rs:1617
         // get_new_tab_id = max-key+1; a closed top tab's id returns on the next
         // new tab) — a survivor entry would decorate/order a REUSED-id tab with
-        // a dead agent's glyph. The active instance holds the fresh full live
-        // set (C3); apply_tabs asks the store to prune any bound-or-timelined id
-        // absent from it. Bounded to live-set CHANGES so steady-state
+        // a dead agent's glyph. apply_tabs emits the OBSERVED-STALE ids (bound-
+        // or-timelined ids absent from the delivered live set) — NOT the live
+        // set — so two out-of-order prunes commute (idempotent removes) and a
+        // late one can't unbind a tab created after it (CodeRabbit MAJOR, the
+        // full-set race). Bounded to live-set CHANGES so steady-state
         // focus-move TabUpdates (same ids, different active flag) cost nothing.
         let mut m = BarModel::default();
         m.apply_tabs(vec![tab(10, 0, "a", true), tab(11, 1, "b", false)]);
         let mut s = snap(1, vec![agent("u-b", Status::Working, Some(11))]);
         s.tab_timeline = [(10usize, 100u64), (11, 200)].into();
         m.apply_snapshot(s);
-        // Tab 11 closes → its bind (u-b) and timeline entry are now stale.
+        // Tab 11 closes → its bind (u-b) and timeline entry are the stale ids.
         let fx = m.apply_tabs(vec![tab(10, 0, "a", true)]);
         assert!(
-            fx.contains(&Effect::PruneTabs { live_ids: vec![10] }),
-            "a closed tab must prune its stale bind + timeline entry"
+            fx.contains(&Effect::PruneTabs {
+                stale_ids: vec![11]
+            }),
+            "a closed tab must prune EXACTLY the stale id, never the live set"
         );
         // Bounded: the SAME live set (a plain repaint) does not re-emit, even
         // though the model's own copy still shows the stale bind (echo pending).
