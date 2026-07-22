@@ -217,6 +217,10 @@ pub fn is_clave_hook_command(cmd: &str, event: &str) -> bool {
     )
 }
 
+/// The §6.5 state machine's input events — hook registration AND doctor's
+/// exactly-one-entry check key off the same list.
+pub const HOOK_EVENTS: [&str; 4] = ["UserPromptSubmit", "Stop", "Notification", "SessionEnd"];
+
 /// Merge clave's hook registrations into a settings.json value, keyed on
 /// `clave_bin` (the command path to bake — bare `clave` for dev, the
 /// versioned copy's absolute path for a release).
@@ -227,16 +231,12 @@ pub fn is_clave_hook_command(cmd: &str, event: &str) -> bool {
 /// entries are never touched (the never-clobber invariant, §6.5). Returns
 /// whether anything changed.
 pub fn merge_hooks(settings: &mut serde_json::Value, clave_bin: &str) -> bool {
-    // The §6.5 state machine's input events. PermissionRequest/StopFailure
-    // are handled IF the CLI sends them, but registration sticks to the
-    // documented set; Notification covers the needs-you cases.
-    const EVENTS: [&str; 4] = ["UserPromptSubmit", "Stop", "Notification", "SessionEnd"];
     let mut changed = false;
     let hooks = settings
         .as_object_mut()
         .map(|o| o.entry("hooks").or_insert_with(|| serde_json::json!({})))
         .expect("settings.json root must be an object");
-    for ev in EVENTS {
+    for ev in HOOK_EVENTS {
         let cmd = format!("{clave_bin} hook {ev}");
         let want = serde_json::json!(cmd);
         let arr = hooks
@@ -321,6 +321,12 @@ pub fn merge_permissions_kdl(existing: &str, wasm_abs: &str) -> String {
         out.push_str("}\n");
     }
     out
+}
+
+/// Is our grant present in the permission-cache text? Same key form
+/// merge_permissions_kdl writes — doctor never guesses a second format.
+pub fn permissions_seeded(existing: &str, wasm_abs: &str) -> bool {
+    existing.contains(&format!("\"file:{wasm_abs}\""))
 }
 
 /// The generation weave shared by `clave setup` (dev/sandbox) and `clave
@@ -697,6 +703,14 @@ mod tests {
         // Idempotent: re-merging replaces our blocks, not duplicates them.
         let again = merge_permissions_kdl(&merged, "/data/clave-bar.wasm");
         assert_eq!(again.matches("file:/data/clave-bar.wasm").count(), 1);
+    }
+
+    #[test]
+    fn permissions_seeded_detects_our_grant() {
+        let seeded = merge_permissions_kdl("", "/data/clave-bar.wasm");
+        assert!(permissions_seeded(&seeded, "/data/clave-bar.wasm"));
+        assert!(!permissions_seeded("", "/data/clave-bar.wasm"));
+        assert!(!permissions_seeded(&seeded, "/other/clave-bar.wasm"));
     }
 
     #[test]

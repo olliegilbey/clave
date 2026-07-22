@@ -7,6 +7,7 @@
 pub mod add;
 pub mod dev;
 pub mod discover;
+pub mod doctor;
 pub mod env;
 pub mod evlog;
 pub mod hook;
