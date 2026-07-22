@@ -102,18 +102,25 @@ pub fn tab_node(binary: &str, wasm: &str, label: &str, uuid: &str, cwd: &str) ->
     // `command` bakes the environment's clave (§2 binary split): the
     // versioned copy's absolute path in a stable session, bare `clave` in
     // dev/sandbox — so the resurrected pane re-execs the SAME binary.
+    // `clave_binary` must match config.kdl's MessagePlugin keybind
+    // configuration exactly (#44): zellij resolves a pipe's destination by
+    // (location, configuration) — a miss launches a SECOND bar instead of
+    // reaching this one.
     format!(
         r#"    tab name="{label}" focus=true {{
         pane split_direction="vertical" {{
             pane size="15%" borderless=true {{
-                plugin location="file:{wasm}"
+                plugin location="file:{wasm}" {{
+                    {key} "{binary}"
+                }}
             }}
             pane cwd="{cwd}" command="{binary}" {{
                 args "spawn" "{uuid}" "--name" "{label}" "--cwd" "{cwd}"
             }}
         }}
     }}
-"#
+"#,
+        key = clave_types::CLAVE_BINARY_KEY
     )
 }
 
