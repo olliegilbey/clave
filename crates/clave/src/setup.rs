@@ -83,6 +83,15 @@ pub fn config_kdl(binary: &str, wasm: &str) -> String {
     binds.push_str(&format!(
         "        bind \"Alt c\" {{ MessagePlugin \"file:{wasm}\" {{ name \"clave-toggle\"; }}; }}\n"
     ));
+    // Alt+t/Alt+w are the clave-owned tab pair. Alt+t exists because #28
+    // unbound stock Ctrl+t (it swallowed Claude Code's todo view), and Ctrl+t
+    // was the entry to zellij's tab mode — where `n` made a plain terminal
+    // tab, the maintainer's muscle-memory path (live finding 2026-07-22). A
+    // one-keystroke bind in clave's own Alt namespace is the replacement, and
+    // the generated layout's default_tab_template means the new tab gets its
+    // own bar pane automatically (no clave-agent row: plain tabs aren't store
+    // rows, same as the base `clave` tab).
+    binds.push_str("        bind \"Alt t\" { NewTab; }\n");
     binds.push_str("        bind \"Alt w\" { CloseTab; }\n");
     // Alt+↓/↑ walk the DISPLAYED list (§6.6 revised 2026-07-08: rows only
     // reorder on user commitments, never on focus — so walking the visible
@@ -751,7 +760,7 @@ mod tests {
     fn generated_kdl_carries_the_wasm_path_and_alt_keys() {
         let cfg = config_kdl("clave", "/data/clave-bar.wasm");
         for key in [
-            "Alt a", "Alt c", "Alt w", "Alt j", "Alt k", "Alt 1", "Alt 9",
+            "Alt a", "Alt c", "Alt t", "Alt w", "Alt j", "Alt k", "Alt 1", "Alt 9",
         ] {
             assert!(
                 cfg.contains(&format!("bind \"{key}\"")) || cfg.contains(&format!("\"{key}\"")),
