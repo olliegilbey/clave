@@ -963,23 +963,38 @@ mod tests {
         // (the version-bearing binary reference) is present to check too.
         let launch = launch_layout_kdl(binary, wasm, Some(&r));
 
-        let versions: std::collections::BTreeSet<String> =
-            [cfg.as_str(), lay.as_str(), launch.as_str()]
-                .iter()
-                .flat_map(|t| versions_in(t))
-                .collect();
-        assert_eq!(
-            versions.len(),
-            1,
-            "generated artifact set must reference exactly ONE version \
-             (#43/#44: a mixed set loads a second, independent plugin \
-             instance), found {versions:?}:\nconfig={cfg}\nlayout={lay}\nlaunch={launch}"
-        );
-
-        // Second guard: every path actually carrying a version is non-empty
-        // and well-formed (extract_version's digit-segment check already
-        // enforces this on each match — assert the artifacts produced at
-        // least one, so this test can't pass on an empty/no-op input).
-        assert!(!versions.is_empty(), "no versioned reference found at all");
+        // Check PER ARTIFACT, not over the union (Codex, PR #52): flattening
+        // first would let an artifact that lost its versioned reference
+        // entirely slip through, because the other two still contribute the
+        // same singleton. That regression is not benign — an unversioned
+        // `clave-bar.wasm` beside a versioned one is a DIFFERENT FILE, and
+        // zellij keys plugin identity on location, so it produces the exact
+        // two-plugin split this test exists to prevent. Each artifact must
+        // therefore carry a version, and they must all agree.
+        let artifacts = [("config", &cfg), ("layout", &lay), ("launch", &launch)];
+        let mut agreed: Option<String> = None;
+        for (name, text) in artifacts {
+            let found = versions_in(text);
+            assert_eq!(
+                found.len(),
+                1,
+                "{name}.kdl must carry exactly ONE version reference \
+                 (an unversioned or mixed path loads a second, independent \
+                 plugin instance — #43/#44), found {found:?}:\n{text}"
+            );
+            let v = found.into_iter().next().expect("checked len == 1");
+            match &agreed {
+                None => agreed = Some(v),
+                Some(prev) => assert_eq!(
+                    &v, prev,
+                    "generated artifact set must agree on ONE version \
+                     (#43/#44: the field incident was launch.kdl at v0.1.0 \
+                     while config/layout were v0.1.1); {name}.kdl disagrees:\
+                     \nconfig={cfg}\nlayout={lay}\nlaunch={launch}"
+                ),
+            }
+        }
+        // Vacuity guard: the loop above only proves agreement if it ran.
+        assert!(agreed.is_some(), "no versioned reference found at all");
     }
 }
