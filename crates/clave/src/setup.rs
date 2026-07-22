@@ -387,6 +387,21 @@ pub fn extract_embedded(dir: &Path, bytes: &[u8], version: &str) -> Result<PathB
     Ok(dest)
 }
 
+/// Which binary string setup bakes into generated config (review 2026-07-22,
+/// Fix 1). A release build (embedded wasm present) is a self-contained
+/// single-file install that may live OFF PATH (`./clave`) — bake its
+/// canonical absolute path so generated keybinds/hooks never silently require
+/// a `clave` on PATH (which would break the self-contained-install property).
+/// A dev/sandbox build keeps bare `clave` deliberately: PATH resolves to the
+/// freshly cargo-installed dev binary, which is what should run there.
+/// `current_exe = None` (unresolvable) falls back to bare `clave` safely.
+pub fn setup_binary(has_embedded: bool, current_exe: Option<&Path>) -> String {
+    match (has_embedded, current_exe) {
+        (true, Some(exe)) => exe.to_string_lossy().into_owned(),
+        _ => "clave".to_string(),
+    }
+}
+
 /// `clave setup` — the DEV/sandbox machine prep: generate against bare
 /// `clave` (PATH = the dev binary) and the unversioned working-tree wasm.
 /// Stable machines are prepared by `just release` (→ `run_release`), which
@@ -411,7 +426,12 @@ pub fn run_setup() -> Result<()> {
     }
     let wasm = wasm_path()?; // re-resolve: extraction creates the preferred versioned file
     let wasm_str = wasm.to_str().context("wasm path")?;
-    write_generated(&dir, "clave", wasm_str)
+    // Fix 1 (review 2026-07-22): release installs bake the running binary's
+    // absolute path (self-contained, PATH-independent); dev/sandbox keeps bare
+    // `clave`. current_exe canonicalized so the baked path survives symlinks.
+    let exe = std::env::current_exe().and_then(std::fs::canonicalize).ok();
+    let binary = setup_binary(crate::release::embedded_wasm().is_some(), exe.as_deref());
+    write_generated(&dir, &binary, wasm_str)
 }
 
 /// Does `zellij list-sessions -n` output show `name` as a LIVE session?
@@ -890,6 +910,21 @@ mod tests {
         // never touched (§2 running-session immunity).
         extract_embedded(dir.path(), b"DIFFERENT", "0.1.0").unwrap();
         assert_eq!(std::fs::read(&p).unwrap(), b"wasm-bytes");
+    }
+
+    #[test]
+    fn setup_binary_bakes_abs_path_in_release_bare_clave_in_dev() {
+        // Fix 1 (review 2026-07-22): a release build is a self-contained
+        // single-file install that may run OFF PATH (`./clave`) — bake its
+        // absolute path so generated keybinds/hooks never need `clave` on
+        // PATH. Dev/sandbox keeps bare `clave` so the freshly cargo-installed
+        // dev binary on PATH wins.
+        let exe = Path::new("/opt/clave/clave");
+        assert_eq!(setup_binary(true, Some(exe)), "/opt/clave/clave");
+        // Dev build (no embedded wasm): bare `clave` regardless of exe.
+        assert_eq!(setup_binary(false, Some(exe)), "clave");
+        // Release but current_exe unavailable → safe fallback to bare `clave`.
+        assert_eq!(setup_binary(true, None), "clave");
     }
 
     #[test]

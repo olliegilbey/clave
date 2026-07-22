@@ -301,14 +301,19 @@ pub fn run_add(worktree: bool) -> Result<()> {
     //    physical path: repo_root, munged jsonl dir, the spawn command.
     let physical = std::fs::canonicalize(&dir).with_context(|| format!("canonicalizing {dir}"))?;
     let physical_str = physical.to_str().context("non-UTF8 dir")?.to_string();
+    // Route every git/zellij invocation through discovery (review 2026-07-22,
+    // Fix 2): doctor promises off-PATH tools are used by absolute path, so
+    // add must not fall back to bare `git`/`zellij` — an off-PATH git (SSH,
+    // ~/.local/bin) would break repo detection preflight already passed.
+    let git = tool_path(crate::discover::ToolId::Git);
     let repo_root = cmd_stdout(
-        "git",
+        &git,
         &["-C", &physical_str, "rev-parse", "--show-toplevel"],
     )
     .map(|s| s.trim().to_string())
     .unwrap_or_else(|_| physical_str.clone()); // non-repo dirs are fine
     let branch = cmd_stdout(
-        "git",
+        &git,
         &["-C", &physical_str, "rev-parse", "--abbrev-ref", "HEAD"],
     )
     .map(|s| s.trim().to_string())
@@ -318,7 +323,8 @@ pub fn run_add(worktree: bool) -> Result<()> {
     //    no auto-jump here — live agents surface as jump entries in the
     //    resume picker instead; the old first-live-agent jump made a second
     //    agent in the same repo impossible).
-    let dump = cmd_stdout("zellij", &["action", "dump-layout"]).unwrap_or_default();
+    let zellij = tool_path(crate::discover::ToolId::Zellij); // Fix 2 (review 2026-07-22)
+    let dump = cmd_stdout(&zellij, &["action", "dump-layout"]).unwrap_or_default();
     let live = live_uuids(&dump);
     let paths = store_paths()?;
     let store = crate::store::read_store(&paths)?;
@@ -381,7 +387,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
         // the right zellij.
         if candidates.iter().any(|c| c.uuid == uuid && c.live) {
             let payload = format!("{{\"uuid\":\"{uuid}\"}}");
-            let _ = Command::new("zellij")
+            let _ = Command::new(&zellij) // discovered above (Fix 2)
                 .args(["pipe", "--name", "clave-nav", "--", &payload])
                 .status();
             return Ok(());
@@ -400,7 +406,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
             let short = &uuid[..8];
             let path = format!("{repo_root}/.claude-worktrees/{short}");
             cmd_stdout(
-                "git",
+                &git, // discovered above (Fix 2)
                 &[
                     "-C",
                     &repo_root,
@@ -458,7 +464,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
     let layout = tab_layout(&binary, &wasm, &label, &uuid, &agent_cwd);
     let tmp = std::env::temp_dir().join(format!("clave-{uuid}.kdl"));
     std::fs::write(&tmp, layout)?;
-    let status = Command::new("zellij")
+    let status = Command::new(&zellij) // discovered above (Fix 2)
         .args([
             "action",
             "new-tab",
