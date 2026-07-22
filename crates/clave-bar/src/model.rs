@@ -875,6 +875,22 @@ impl BarModel {
         }]
     }
 
+    /// Bring the seek to REST at `cols`: dormant, silent here, and — crucially
+    /// — anchored here. `seek_last_cols` MUST equal the width we came to rest
+    /// at, not the mid-flight position of the last emit (Codex PR #27 P2):
+    /// gate B measures a later drift as `|own − seek_last_cols|`, so a stale
+    /// emit anchor let a FAR external relayout that happened to land within a
+    /// learned step of that anchor be misread as our own resize settling —
+    /// parking the bar off-target, the F1 corner reborn. Every settle path
+    /// (convergence, gate-B accept, floor-accept) routes through here so the
+    /// anchor is always the true rest width.
+    fn settle_at(&mut self, cols: usize) {
+        self.seek_budget = 0;
+        self.seek_rest = Some(cols);
+        self.seek_last_cols = Some(cols);
+        self.seek_drift = None;
+    }
+
     /// One width-seek step for OUR OWN pane, driven by render cols (each of
     /// our resizes repaints us with the new width — the feedback loop
     /// proven in rounds 9–10; zellij sends no events for plugin resizes).
@@ -944,8 +960,7 @@ impl BarModel {
                 .seek_last_cols
                 .is_some_and(|last| own_cols.abs_diff(last) <= step as usize);
             if within_band || ours {
-                self.seek_rest = Some(own_cols);
-                self.seek_drift = None;
+                self.settle_at(own_cols);
                 return Vec::new();
             }
             // cols jumped FAR from where we last acted while dormant — a window
@@ -984,8 +999,7 @@ impl BarModel {
                     // step above it, C8 2026-07-18). Accept and stay silent —
                     // this keeps the collapsed floor benign, as the old
                     // in-flight guard did, with no burst of refused resizes.
-                    self.seek_budget = 0;
-                    self.seek_rest = Some(own_cols);
+                    self.settle_at(own_cols);
                     return Vec::new();
                 }
                 // FAR from the target and still not moving: a relayout CLOBBERED
@@ -1013,8 +1027,7 @@ impl BarModel {
             Effect::GrowSelf
         } else {
             // Converged: settle and stay done at exactly this width.
-            self.seek_budget = 0;
-            self.seek_rest = Some(own_cols);
+            self.settle_at(own_cols);
             return Vec::new();
         };
         self.seek_budget -= 1;
@@ -1539,6 +1552,33 @@ mod tests {
         // The SAME off-target width a second time is a stable drift → re-arm
         // and seek back toward the gutter.
         assert_eq!(m.width_seek(140), vec![Effect::ShrinkSelf]);
+    }
+
+    #[test]
+    fn drift_is_measured_from_the_rest_width_not_a_stale_emit_anchor() {
+        // Codex PR #27 P2: at convergence the seek goes dormant but the anchor
+        // used by gate B's `ours = |own − last| ≤ step` test must equal the
+        // width we CAME TO REST at, not the mid-flight position of the last
+        // emit. Otherwise a later EXTERNAL relayout that lands within a step of
+        // the STALE emit anchor (but far from rest) is misread as self-inflicted
+        // and accepted as rest — the F1 off-target park, reborn in a corner.
+        let mut m = collapsed_model(); // target 4
+        // Converge in coarse steps so the FINAL landing (→ 6) is many cols from
+        // the previous emit position (16): 30 → 16 → 6.
+        assert_eq!(m.width_seek(30), vec![Effect::ShrinkSelf]); // emit @30
+        assert_eq!(m.width_seek(16), vec![Effect::ShrinkSelf]); // learn 14, emit @16
+        assert_eq!(m.width_seek(6), Vec::<Effect>::new()); // learn 10, within band → REST @6
+        assert_eq!(m.seek_budget, 0, "must be dormant after converging");
+        // A stable external relayout parks the bar at 26 — FAR from the rest
+        // width 6 (|26−6| = 20), but within a learned step of the stale emit
+        // anchor 16 (|26−16| = 10 ≤ ~10). A genuine drift: confirm it (twice)
+        // and re-seek the gutter, NOT settle at 26.
+        assert_eq!(m.width_seek(26), Vec::<Effect>::new()); // observe
+        assert_eq!(
+            m.width_seek(26),
+            vec![Effect::ShrinkSelf],
+            "a far-from-rest drift must re-arm, not be classified as self-inflicted"
+        );
     }
 
     #[test]
