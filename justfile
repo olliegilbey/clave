@@ -35,10 +35,17 @@ test:
 # §2: the working-tree build for the sandbox + contributor shells. Builds the
 # bar wasm (build-tagged with the short SHA so the zellij log says which wasm
 # produced a trace) straight into the SANDBOX data dir, and `cargo install`s
-# the dev CLI onto PATH (~/.cargo/bin/clave). Stable sessions never run this
-# binary — they bake the versioned copy (see `release`). `just install` is
-# RETIRED: working-tree installs straight under the daily environment were the
-# foot-gun this split removes.
+# the dev CLI onto PATH (~/.cargo/bin/clave). `just install` is RETIRED:
+# working-tree installs straight under the daily environment were the foot-gun
+# this split removes.
+#
+# DANGER (#43/#44, proved in prod 2026-07-22): this does NOT leave a running
+# stable session alone. Stable BAKES the versioned copy for its keybinds, but
+# clave-bar shells out to bare `clave` on PATH for snapshot/open/bind/focus/
+# touch/prune-tabs — so this install hijacks a live fleet, and a version-skewed
+# `clave open` composes tab layouts pointing at the WRONG wasm, loading a second
+# bar and killing navigation. NEVER run this while daily-driving; restore with
+# `cp ~/.local/share/clave/bin/clave-vX.Y.Z ~/.cargo/bin/clave` afterwards.
 # Build + install the working-tree wasm (into the sandbox) and dev CLI (§2).
 dev-install:
     mkdir -p ~/.local/state/clave-dev/data

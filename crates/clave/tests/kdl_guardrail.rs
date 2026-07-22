@@ -92,6 +92,67 @@ fn config_kdl_parses_through_real_zellij_parser() {
 }
 
 #[test]
+fn config_kdl_unbinds_claude_code_keys_in_every_mode() {
+    // #28 semantic guardrail: a substring check proves the `unbind` node is
+    // EMITTED, but only merging it over zellij's real stock defaults — the
+    // exact thing `zellij --config` does — proves the five keys are actually
+    // GONE from every mode. Verified against zellij-utils 0.44.3 source:
+    //   * Config::from_kdl(cfg, Some(base)) seeds `base` then merges our doc
+    //     over it (kdl/mod.rs:4856-4865); clear-defaults=false keeps the base.
+    //   * A top-level `unbind` node is picked up by children().get("unbind")
+    //     and fed to unbind_keys_in_all_modes, which iterates Keybinds.0's
+    //     modes and .remove()s each key (kdl/mod.rs:4600, 4627) — AFTER binds
+    //     are merged, so it strips the stock binds.
+    use zellij_utils::data::{BareKey, InputMode, KeyWithModifier};
+
+    let base = Config::from_default_assets().expect("stock zellij 0.44.3 defaults must parse");
+    let merged = Config::from_kdl(&setup::config_kdl("clave", WASM), Some(base))
+        .expect("clave config.kdl must merge over stock defaults");
+
+    // Ctrl-modified char keys, spelled as the stock binds are (default.kdl:
+    // `Ctrl g/t/o/b/q`). Keybinds.0 is the public HashMap<InputMode, …> that
+    // unbind_keys_in_all_modes drains — iterating it is the faithful "every
+    // mode that survived the merge" check, no strum EnumIter needed.
+    let unbound = [
+        KeyWithModifier::new(BareKey::Char('g')).with_ctrl_modifier(),
+        KeyWithModifier::new(BareKey::Char('t')).with_ctrl_modifier(),
+        KeyWithModifier::new(BareKey::Char('o')).with_ctrl_modifier(),
+        KeyWithModifier::new(BareKey::Char('b')).with_ctrl_modifier(),
+        KeyWithModifier::new(BareKey::Char('q')).with_ctrl_modifier(),
+    ];
+    for (mode, binds) in &merged.keybinds.0 {
+        for key in &unbound {
+            assert!(
+                binds.get(key).is_none(),
+                "{key:?} is still bound in {mode:?} — a Claude Code key is swallowed (#28)"
+            );
+        }
+    }
+
+    // Non-vacuity: the fix must be SURGICAL, not a blanket clear (the #28
+    // ruling keeps clear-defaults=false so stock pane/resize/scroll/move
+    // remain). A stock bind we never touched must survive (Ctrl+p → Pane in
+    // Normal, default.kdl:206), and clave's own shared_among Alt+a add-bind
+    // must survive the merge too.
+    let ctrl_p = KeyWithModifier::new(BareKey::Char('p')).with_ctrl_modifier();
+    assert!(
+        merged
+            .keybinds
+            .get_actions_for_key_in_mode(&InputMode::Normal, &ctrl_p)
+            .is_some(),
+        "stock Ctrl+p (pane mode) must survive — the unbind must not clear defaults"
+    );
+    let alt_a = KeyWithModifier::new(BareKey::Char('a')).with_alt_modifier();
+    assert!(
+        merged
+            .keybinds
+            .get_actions_for_key_in_mode(&InputMode::Normal, &alt_a)
+            .is_some(),
+        "clave's Alt+a add-bind must survive the merge (invariant #6)"
+    );
+}
+
+#[test]
 fn layout_kdl_parses_through_real_zellij_parser() {
     assert_layout_ok(&setup::layout_kdl(WASM), "layout.kdl");
 }
