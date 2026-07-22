@@ -112,6 +112,20 @@ enum Command {
         tab_id: usize,
     },
 
+    /// Prune store binds + tab_timeline entries for CLOSED tabs
+    /// (plugin-internal, #6/F3). The active bar reports the FULL live tab-id
+    /// set whenever the set changes; the store drops anything absent so a
+    /// mid-session close can't leak binds/timeline unboundedly — and, since
+    /// zellij reuses tab_ids (screen.rs:1617), a reused id can't inherit a
+    /// dead agent's decoration.
+    #[command(hide = true)]
+    PruneTabs {
+        /// The currently-live zellij tab ids (the full set). Empty is a no-op
+        /// (closing the last tab closes the session — never a wipe signal).
+        #[arg(trailing_var_arg = true)]
+        tab_ids: Vec<usize>,
+    },
+
     /// Persist the bar collapse mode (plugin-internal, issue #5). The
     /// `clave-toggle` broadcast flips every instance's memory instantly;
     /// the ACTIVE instance then reports the absolute new mode here so the
@@ -269,6 +283,16 @@ fn main() -> Result<()> {
             // Push only on CHANGE (apply_bind returns None otherwise) — a
             // re-reported existing bind must not generate pipe traffic.
             if let Some(snap) = store::apply_bind(&paths, &uuid, tab_id)? {
+                hook::push_snapshot(&snap);
+            }
+            Ok(())
+        }
+        Some(Command::PruneTabs { tab_ids }) => {
+            let paths = store::store_paths()?;
+            // Push only on CHANGE (apply_prune_tabs returns None otherwise) — a
+            // set-change that pruned nothing must not spam the pipe. The push
+            // drops the closed tab's agent to a dormant row on every instance.
+            if let Some(snap) = store::apply_prune_tabs(&paths, &tab_ids)? {
                 hook::push_snapshot(&snap);
             }
             Ok(())

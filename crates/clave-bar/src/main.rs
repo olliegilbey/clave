@@ -114,6 +114,26 @@ impl State {
                         BTreeMap::new(),
                     );
                 }
+                Effect::ReanchorVisit { tab_id } if active => {
+                    // #23: same clave-visited beacon as AnnounceVisit, but
+                    // GATED to the active instance — a toggle burst delivers the
+                    // fresh set to every bar (doc:371-394), so an ungated
+                    // re-anchor would be a per-instance beacon war (round-13
+                    // EMFILE class). Accepted trade (see model apply_tabs): a
+                    // transiently-false active check drops the reseed and nav
+                    // stays stranded until a click — narrow, and storm-free.
+                    run_command(
+                        &[
+                            "zellij",
+                            "pipe",
+                            "--name",
+                            "clave-visited",
+                            "--",
+                            &tab_id.to_string(),
+                        ],
+                        BTreeMap::new(),
+                    );
+                }
                 Effect::RenameTab { tab_id, name } if active => {
                     rename_tab_with_id(tab_id as u64, name);
                 }
@@ -130,6 +150,17 @@ impl State {
                         &["clave", "bind", &uuid, &tab_id.to_string()],
                         BTreeMap::new(),
                     );
+                }
+                Effect::PruneTabs { live_ids } if active => {
+                    // #6/F3: report the FULL live tab set so the store drops
+                    // binds/timeline for closed tabs. Executor-gated (like
+                    // Bind): a hidden instance's stale set would prune LIVE
+                    // tabs. The model already gates emission to set-changes, so
+                    // this fires ~once per close, not per TabUpdate.
+                    let mut argv: Vec<String> = vec!["clave".into(), "prune-tabs".into()];
+                    argv.extend(live_ids.iter().map(usize::to_string));
+                    let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+                    run_command(&refs, BTreeMap::new());
                 }
                 // C6 width-seek effects are SELF-targeted (round 20: every
                 // instance drives only its own pane, with render feedback).

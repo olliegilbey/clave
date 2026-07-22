@@ -226,11 +226,68 @@ pub fn apply_touch(paths: &StorePaths, tab_id: usize, now: u64) -> Result<AgentS
 /// uuid returns None (bar may race a pruned agent).
 pub fn apply_bind(paths: &StorePaths, uuid: &str, tab_id: usize) -> Result<Option<AgentSnapshot>> {
     with_store_mut(paths, |s| {
-        let r = s.agents.get_mut(uuid)?;
-        if r.tab_id == Some(tab_id) {
-            return None;
+        if !s.agents.contains_key(uuid) {
+            return None; // bar may race a pruned agent
         }
-        r.tab_id = Some(tab_id);
+        // Evict any OTHER agent still bound to this tab_id. zellij reuses
+        // tab_ids (get_new_tab_id = max-key+1, screen.rs:1617), so a reused id
+        // could otherwise leave a dead agent AND the new one both claiming the
+        // tab — the bar's glyph join (agent_in_tab) would decorate it with
+        // whichever uuid sorts first. One tab hosts one agent: the freshest
+        // bind wins. (Prune_tabs is the primary cleaner; this closes the
+        // close-then-immediately-reuse window where the id never went absent.)
+        let mut evicted = false;
+        for r in s.agents.values_mut() {
+            if r.uuid != uuid && r.tab_id == Some(tab_id) {
+                r.tab_id = None;
+                evicted = true;
+            }
+        }
+        let already = s.agents.get(uuid).and_then(|r| r.tab_id) == Some(tab_id);
+        if already && !evicted {
+            return None; // re-report of an existing bind, no collision → free
+        }
+        if let Some(r) = s.agents.get_mut(uuid) {
+            r.tab_id = Some(tab_id);
+        }
+        s.seq += 1; // monotonic pipe contract (§5)
+        Some(snapshot_from(s))
+    })
+}
+
+/// `clave prune-tabs <live tab ids…>` (#6/F3): drop tab_timeline entries and
+/// clear agent tab_id binds whose tab is NO LONGER live. Session recreate
+/// wiped these wholesale (clear_tab_timeline); mid-session tab CLOSE left them
+/// to grow unbounded — and, since zellij REUSES tab_ids (get_new_tab_id =
+/// max-key+1, screen.rs:1617), a survivor entry would let a reused-id tab
+/// inherit a dead agent's glyph/order. The bar reports the FULL live set from
+/// the active instance's fresh TabUpdate (normally only the active tab gets
+/// TabUpdate — C3 — though toggle bursts reach all instances, which is why the
+/// bar EXECUTOR-gates this); the store retains only those. ABSOLUTE (full set),
+/// change-gated (no push when nothing was stale). A lost push self-heals on the
+/// next close ONLY IF the id stays ABSENT — if it is REUSED (screen.rs:1617)
+/// before then it re-enters the live set and is never re-detected stale;
+/// `apply_bind` eviction is the backstop, and only when the reused tab binds an
+/// agent. An EMPTY live set is refused as a degenerate update — closing the last
+/// tab closes the session, so "no live tabs" is never a real signal to wipe
+/// every bind. None = no change.
+pub fn apply_prune_tabs(paths: &StorePaths, live_ids: &[usize]) -> Result<Option<AgentSnapshot>> {
+    with_store_mut(paths, |s| {
+        if live_ids.is_empty() {
+            return None; // never wipe the store on a degenerate empty update
+        }
+        let before = s.tab_timeline.len();
+        s.tab_timeline.retain(|id, _| live_ids.contains(id));
+        let mut changed = s.tab_timeline.len() != before;
+        for r in s.agents.values_mut() {
+            if r.tab_id.is_some_and(|id| !live_ids.contains(&id)) {
+                r.tab_id = None;
+                changed = true;
+            }
+        }
+        if !changed {
+            return None; // §5: no no-op pushes
+        }
         s.seq += 1; // monotonic pipe contract (§5)
         Some(snapshot_from(s))
     })
@@ -449,6 +506,72 @@ mod tests {
         assert_eq!(snap.agents[0].tab_id, Some(9));
         // Unknown uuid: silently none (bar may race a pruned agent).
         assert!(apply_bind(&p, "ghost", 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn prune_tabs_drops_stale_binds_and_timeline_change_gated() {
+        // #6/F3: mid-session tab CLOSE left binds + tab_timeline entries to grow
+        // unbounded, and — with tab_id reuse (screen.rs:1617) — a survivor
+        // decorates a reused-id tab. The bar reports the FULL live set on close;
+        // the store drops anything absent. Change-gated (no push when clean),
+        // ABSOLUTE (the full set self-heals a missed push on the next close).
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            let mut live = rec("u-live");
+            live.tab_id = Some(10);
+            s.agents.insert("u-live".into(), live);
+            let mut dead = rec("u-dead");
+            dead.tab_id = Some(11); // its tab just closed
+            s.agents.insert("u-dead".into(), dead);
+        })
+        .unwrap();
+        apply_touch(&p, 10, 100).unwrap();
+        apply_touch(&p, 11, 200).unwrap(); // stale timeline entry
+        // Live set is {10}: 11 is gone → prune the bind AND the timeline entry.
+        let snap = apply_prune_tabs(&p, &[10]).unwrap().expect("pruned");
+        let s = read_store(&p).unwrap();
+        assert_eq!(s.agents["u-live"].tab_id, Some(10), "live bind kept");
+        assert_eq!(s.agents["u-dead"].tab_id, None, "dead bind cleared");
+        assert!(s.tab_timeline.contains_key(&10));
+        assert!(!s.tab_timeline.contains_key(&11), "stale timeline dropped");
+        assert!(snap.agents.iter().all(|a| a.tab_id != Some(11)));
+        // Nothing stale now → no change, no push, no seq bump.
+        let seq = read_store(&p).unwrap().seq;
+        assert!(apply_prune_tabs(&p, &[10]).unwrap().is_none());
+        assert_eq!(read_store(&p).unwrap().seq, seq);
+        // Defensive: an EMPTY live set is a degenerate update (closing the last
+        // tab closes the session) — never wipe the whole store on it.
+        assert!(apply_prune_tabs(&p, &[]).unwrap().is_none());
+        assert_eq!(read_store(&p).unwrap().agents["u-live"].tab_id, Some(10));
+    }
+
+    #[test]
+    fn bind_evicts_a_reused_tab_id_from_the_previous_agent() {
+        // zellij reuses tab_ids (get_new_tab_id = max-key+1, screen.rs:1617):
+        // if a dead agent's bind survived a close, a NEW agent binding the
+        // REUSED id must EVICT it — one tab hosts one agent, else the bar's
+        // glyph join (agent_in_tab) decorates the tab with whichever uuid sorts
+        // first (a dead agent's colour). Belt-and-suspenders with prune_tabs.
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            let mut dead = rec("u-dead");
+            dead.tab_id = Some(11); // survived a close, still bound to 11
+            s.agents.insert("u-dead".into(), dead);
+            s.agents.insert("u-new".into(), rec("u-new"));
+        })
+        .unwrap();
+        let snap = apply_bind(&p, "u-new", 11)
+            .unwrap()
+            .expect("bound + evicted");
+        let s = read_store(&p).unwrap();
+        assert_eq!(s.agents["u-new"].tab_id, Some(11), "new agent bound");
+        assert_eq!(
+            s.agents["u-dead"].tab_id, None,
+            "reused id evicted the dead bind"
+        );
+        assert!(snap.agents.iter().filter(|a| a.tab_id == Some(11)).count() == 1);
     }
 
     #[test]
