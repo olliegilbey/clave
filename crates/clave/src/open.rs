@@ -53,7 +53,10 @@ pub fn run_open(uuid: &str) -> Result<()> {
     // sanctioned-commands rule): run_command children inherit the server's
     // env, but never bet on ambient state.
     let session = crate::env::session_name();
-    let output = std::process::Command::new("zellij")
+    // Discovered path (codex P2 on PR #29): open runs via the bar's
+    // run_command, whose env may lack the interactive PATH.
+    let zellij = crate::discover::tool_path(crate::discover::ToolId::Zellij);
+    let output = std::process::Command::new(&zellij)
         .env("ZELLIJ_SESSION_NAME", &session)
         .args(["action", "dump-layout"])
         .output();
@@ -111,7 +114,7 @@ pub fn run_open(uuid: &str) -> Result<()> {
             );
             let tmp = std::env::temp_dir().join(format!("clave-open-{uuid}.kdl"));
             std::fs::write(&tmp, layout)?;
-            let status = std::process::Command::new("zellij")
+            let status = std::process::Command::new(&zellij)
                 .env("ZELLIJ_SESSION_NAME", &session)
                 .args([
                     "action",

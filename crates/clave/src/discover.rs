@@ -133,6 +133,20 @@ pub fn semver_key(s: &str) -> Option<(u64, u64, u64)> {
     Some((maj, min, pat))
 }
 
+/// Discovered-or-bare tool path for exec sites (spec §Discovery). Callers'
+/// preflight has already guaranteed presence where one runs; the bare-name
+/// fallback only preserves old behavior if discovery races an uninstall —
+/// and in hook context (no preflight; fire-and-forget) bare is the correct
+/// last resort. Promoted from add.rs (codex P2 on PR #29, 2026-07-22):
+/// hook::push_snapshot and open::run_open exec'd bare `zellij`, so with an
+/// off-PATH zellij the preflights passed but status pushes and dormant-row
+/// opens silently died after launch.
+pub fn tool_path(tool: ToolId) -> PathBuf {
+    discover(tool)
+        .map(|d| d.path)
+        .unwrap_or_else(|| PathBuf::from(tool.bin_name()))
+}
+
 /// Home-abbreviated display path — doctor prints every resolved path
 /// (spec §Discovery: coexisting installs are a real footgun).
 pub fn tilde(path: &Path, home: &Path) -> String {

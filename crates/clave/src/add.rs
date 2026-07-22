@@ -394,13 +394,9 @@ fn cmd_stdout(cmd: impl AsRef<std::ffi::OsStr>, args: &[&str]) -> Result<String>
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Discovered-or-bare tool path: preflight has already guaranteed presence,
-/// so the fallback only preserves behavior if discovery races an uninstall.
-fn tool_path(tool: crate::discover::ToolId) -> std::path::PathBuf {
-    crate::discover::discover(tool)
-        .map(|d| d.path)
-        .unwrap_or_else(|| std::path::PathBuf::from(tool.bin_name()))
-}
+// tool_path moved to discover::tool_path (codex P2 on PR #29): hook and open
+// need the same discovered-or-bare resolution, so it lives with discovery.
+use crate::discover::tool_path;
 
 /// The Alt+a keybind runs add in a floating pane with close_on_exit=true —
 /// an abort's message would flash and VANISH (spec §Preflight pane-hold).

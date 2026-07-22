@@ -298,10 +298,15 @@ Proceed? [Y/n]
   Without this, an upgraded CLI would run the old bar forever (the drift
   invariant #9 kills). Running-session immunity holds: live sessions keep
   the files baked at their launch.
-- **Release setup bakes `current_exe()`** (review 2026-07-22), not bare
-  `clave`: a single-file `./clave` install must not require itself on PATH
-  for its generated keybinds/hooks to work. Dev builds keep bare `clave`
-  (the sandbox flow deliberately resolves via PATH).
+- **Release setup installs the versioned CLI copy and bakes through
+  `runtime_binary()`** (review 2026-07-22 + codex P2 on PR #29): a
+  single-file `./clave` install copies `current_exe()` to
+  `<data>/bin/clave-vX.Y.Z` — the artifact `runtime_binary()` (used by
+  add/open/the eager launch layout at tab-bake time) keys on — so setup and
+  runtime can never disagree about which binary agent tabs run, and the
+  scp'd file is disposable after setup. Dev builds keep bare `clave` (the
+  sandbox flow deliberately resolves via PATH). Baking only `current_exe`
+  was not enough: launch worked but every agent tab spawned bare `clave`.
 
 ## Distribution: cargo-dist + embedded wasm
 

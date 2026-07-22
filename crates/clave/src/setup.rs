@@ -411,19 +411,24 @@ pub fn extract_embedded(dir: &Path, bytes: &[u8], version: &str) -> Result<PathB
     Ok(dest)
 }
 
-/// Which binary string setup bakes into generated config (review 2026-07-22,
-/// Fix 1). A release build (embedded wasm present) is a self-contained
-/// single-file install that may live OFF PATH (`./clave`) — bake its
-/// canonical absolute path so generated keybinds/hooks never silently require
-/// a `clave` on PATH (which would break the self-contained-install property).
-/// A dev/sandbox build keeps bare `clave` deliberately: PATH resolves to the
-/// freshly cargo-installed dev binary, which is what should run there.
-/// `current_exe = None` (unresolvable) falls back to bare `clave` safely.
-pub fn setup_binary(has_embedded: bool, current_exe: Option<&Path>) -> String {
-    match (has_embedded, current_exe) {
-        (true, Some(exe)) => exe.to_string_lossy().into_owned(),
-        _ => "clave".to_string(),
+/// Install the running exe as the versioned CLI copy `<data>/bin/clave-vX.Y.Z`
+/// (codex P2 on PR #29, 2026-07-22). Baking current_exe into config/hooks was
+/// not enough: `runtime_binary()` — which add/open/the eager launch layout
+/// bake into agent-tab commands — keys on this copy's EXISTENCE and fell back
+/// to bare `clave`, so a `./clave` single-file install launched fine but every
+/// agent tab failed to spawn. Installing the copy converges the single-file
+/// install with `just release`'s model: one versioned artifact, every baked
+/// reference absolute, and the scp'd file becomes disposable after setup.
+/// Write-if-absent for the same reason as the wasm (running-session immunity).
+pub fn install_cli_copy(dir: &Path, exe: &Path, version: &str) -> Result<PathBuf> {
+    let bin_dir = dir.join("bin");
+    std::fs::create_dir_all(&bin_dir)?;
+    let dest = bin_dir.join(crate::release::versioned_cli_name(version));
+    if !dest.exists() {
+        std::fs::copy(exe, &dest)
+            .with_context(|| format!("installing CLI copy to {}", dest.display()))?;
     }
+    Ok(dest)
 }
 
 /// `clave setup` — the DEV/sandbox machine prep: generate against bare
@@ -440,9 +445,26 @@ pub fn run_setup() -> Result<()> {
     // made wasm.exists() true and the release's versioned wasm never landed —
     // config got baked against the stale file. Extracting before resolving
     // both fixes that and removes the old nested branch.
-    if let Some(bytes) = crate::release::embedded_wasm() {
+    let binary = if let Some(bytes) = crate::release::embedded_wasm() {
         extract_embedded(&dir, bytes, env!("CARGO_PKG_VERSION"))?;
-    }
+        // Release single-file install: install the versioned CLI copy, then
+        // bake through runtime_binary() — the SAME resolution add/open/launch
+        // use at tab-bake time, so setup and runtime can never disagree about
+        // which binary agent tabs run (codex P2 on PR #29, 2026-07-22).
+        // current_exe canonicalized so the copy survives a symlinked invoker.
+        match std::env::current_exe().and_then(std::fs::canonicalize).ok() {
+            Some(exe) => {
+                install_cli_copy(&dir, &exe, env!("CARGO_PKG_VERSION"))?;
+                crate::release::runtime_binary()
+            }
+            // Unresolvable current_exe: bare `clave` beats refusing setup.
+            None => "clave".to_string(),
+        }
+    } else {
+        // Dev/sandbox: bare `clave` deliberately — PATH resolves to the
+        // freshly cargo-installed dev binary, which is what should run there.
+        "clave".to_string()
+    };
     let wasm = wasm_path()?; // prefers the versioned artifact just extracted
     anyhow::ensure!(
         wasm.exists(),
@@ -450,11 +472,6 @@ pub fn run_setup() -> Result<()> {
         wasm.display()
     );
     let wasm_str = wasm.to_str().context("wasm path")?;
-    // Fix 1 (review 2026-07-22): release installs bake the running binary's
-    // absolute path (self-contained, PATH-independent); dev/sandbox keeps bare
-    // `clave`. current_exe canonicalized so the baked path survives symlinks.
-    let exe = std::env::current_exe().and_then(std::fs::canonicalize).ok();
-    let binary = setup_binary(crate::release::embedded_wasm().is_some(), exe.as_deref());
     write_generated(&dir, &binary, wasm_str)
 }
 
@@ -1051,18 +1068,21 @@ mod tests {
     }
 
     #[test]
-    fn setup_binary_bakes_abs_path_in_release_bare_clave_in_dev() {
-        // Fix 1 (review 2026-07-22): a release build is a self-contained
-        // single-file install that may run OFF PATH (`./clave`) — bake its
-        // absolute path so generated keybinds/hooks never need `clave` on
-        // PATH. Dev/sandbox keeps bare `clave` so the freshly cargo-installed
-        // dev binary on PATH wins.
-        let exe = Path::new("/opt/clave/clave");
-        assert_eq!(setup_binary(true, Some(exe)), "/opt/clave/clave");
-        // Dev build (no embedded wasm): bare `clave` regardless of exe.
-        assert_eq!(setup_binary(false, Some(exe)), "clave");
-        // Release but current_exe unavailable → safe fallback to bare `clave`.
-        assert_eq!(setup_binary(true, None), "clave");
+    fn install_cli_copy_is_write_if_absent_under_bin() {
+        // Codex P2 (PR #29): the versioned CLI copy is what runtime_binary()
+        // keys on — a single-file install must create it or every agent tab
+        // bakes bare `clave`. Write-if-absent mirrors the wasm extraction
+        // (running-session immunity).
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("clave-download");
+        std::fs::write(&exe, b"binary-v1").unwrap();
+        let dest = install_cli_copy(dir.path(), &exe, "0.1.0").unwrap();
+        assert_eq!(dest, dir.path().join("bin").join("clave-v0.1.0"));
+        assert_eq!(std::fs::read(&dest).unwrap(), b"binary-v1");
+        // Second install with different content must NOT rewrite.
+        std::fs::write(&exe, b"binary-v2").unwrap();
+        install_cli_copy(dir.path(), &exe, "0.1.0").unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"binary-v1");
     }
 
     #[test]
