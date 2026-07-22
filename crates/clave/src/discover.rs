@@ -106,14 +106,19 @@ pub fn candidate_dirs(tool: ToolId, home: &Path, nvm_versions: &[String]) -> Vec
             // The local-install migration puts the real binary here and adds
             // only a shell ALIAS — invisible to every spawned process.
             dirs.push(home.join(".claude/local"));
-            // npm-global under nvm: PATH is set by rc files only. Newest
-            // version by semver — lexical sort would rank v9 above v22.
-            if let Some(newest) = nvm_versions
+            // npm-global under nvm: PATH is set by rc files only. Include
+            // ALL version dirs newest-first by semver — a claude installed
+            // npm-globally under an older pinned node (common with
+            // `nvm alias default`) is missed if only the newest is probed.
+            // Candidate order already encodes priority; is_executable
+            // filtering in discover() keeps it cheap.
+            let mut sorted: Vec<&String> = nvm_versions
                 .iter()
                 .filter(|v| semver_key(v).is_some())
-                .max_by_key(|v| semver_key(v))
-            {
-                dirs.push(home.join(".nvm/versions/node").join(newest).join("bin"));
+                .collect();
+            sorted.sort_by_key(|v| std::cmp::Reverse(semver_key(v)));
+            for ver in sorted {
+                dirs.push(home.join(".nvm/versions/node").join(ver).join("bin"));
             }
             dirs.push(home.join(".volta/bin"));
             dirs.push(home.join(".bun/bin"));
@@ -263,9 +268,33 @@ mod tests {
         assert!(dirs.contains(&home.join(".cargo/bin")));
         // Claude-specific: the local-install migration dir…
         assert!(dirs.contains(&home.join(".claude/local")));
-        // …and NEWEST nvm version by semver, not lexically (v9 < v22).
+        // …and ALL nvm version dirs newest-first by semver, not just the
+        // newest — a claude installed under an older pinned node must be
+        // discoverable (issue #36).
         assert!(dirs.contains(&home.join(".nvm/versions/node/v22.1.0/bin")));
-        assert!(!dirs.iter().any(|d| d.ends_with("v9.0.0/bin")));
+        assert!(dirs.contains(&home.join(".nvm/versions/node/v20.11.0/bin")));
+        assert!(dirs.contains(&home.join(".nvm/versions/node/v9.0.0/bin")));
+        // Newest-first ordering.
+        let nvm_positions: Vec<usize> = dirs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, d)| {
+                d.starts_with(home.join(".nvm/versions/node"))
+                    .then_some(i)
+            })
+            .collect();
+        assert_eq!(
+            &dirs[nvm_positions[0]],
+            &home.join(".nvm/versions/node/v22.1.0/bin")
+        );
+        assert_eq!(
+            &dirs[nvm_positions[1]],
+            &home.join(".nvm/versions/node/v20.11.0/bin")
+        );
+        assert_eq!(
+            &dirs[nvm_positions[2]],
+            &home.join(".nvm/versions/node/v9.0.0/bin")
+        );
         assert!(dirs.contains(&home.join(".volta/bin")));
         assert!(dirs.contains(&home.join(".bun/bin")));
     }
