@@ -18,7 +18,7 @@ not a defect · main `50fa26a`_
 >
 > "Nerd fonts work in the terminal here it seems, I can see the battery icon."
 
-Read RC-G (`2026-07-22-ux-defect-dossier.md:440-499`) and **S5 §2.5, §3.4**
+Read RC-G (`2026-07-22-ux-defect-dossier.md:440-499`) and **S5 §2.7, §3.3**
 (`2026-07-22-S5-per-repo-colour.md:300-395`) first. The render survey, the
 escape-blind clamp, the `Row` shape and the `compose_row` / `render_segments`
 seam are **not** re-derived here — S6 extends that seam, it does not invent one.
@@ -33,7 +33,7 @@ after it. The seam between them is one number, §2.10.
 |---|---|
 | #24 item 4 "context battery per row" | **slot reserved, not filled.** The cell renders blank and is proven not to reflow when populated (§2.3, §4.3 G2). Filling it is **S7** |
 | #24 locked format, marker `𖣂` | **closed** — cell 3 (§2.4), with the font finding in §2.6.3 |
-| #24 item 7 "collapsed-state design: what 4 cols can still distinguish" | **closed** — three signal cells in exactly 4 columns, replacing today's single glyph plus a stray `…` (§2.8) |
+| #24 item 7 "collapsed-state design: what 4 cols can still distinguish" | **answered, and the answer is a maintainer decision** — §2.8 costs four options and recommends one. The shipped default puts three signal cells in exactly 4 columns, replacing today's single glyph plus a stray `…`, but it *drops* item 7's "repo colour" clause. §5 Step 6 is where he rules |
 | #24 item 1 "worktree provenance in the name" | **not closed.** S6 renders a *marker*, not the worktree's name. The marker's signal is also incomplete — §2.4.3 states exactly where, and why S6 does not fix it |
 | #24 items 2, 3, 5, 6 | untouched (2 = S5, 3 = S4, 5 unstarted, 6 = S8) |
 | #40 "Nerd Font dependency" | **partially** — S6 inventories every glyph it renders, measures each one's cell width, and ships the fallback tier plus the doctor advisory (§2.6). It does not audit S7's ramp or a model badge |
@@ -208,8 +208,11 @@ collapsed (4):  [cell0][cell1][cell2][' ']
 ```
 
 where `cellN` is a glyph char or `' '`. S5's `compose_row` push helper skips
-empty text (`S5 §3.4`: `if !text.is_empty()`); a blank cell is a space, not an
-empty string, so it survives that filter by construction. §4.1 pins it.
+empty text (`S5 §3.5`, the `push` closure) — but the gutter never reaches that
+closure: S6 builds it in `gutter_segments` (§3.5) as one `Segment` per cell, and
+a blank cell's text is a space, never `""`. Emptiness cannot arise. §4.1
+(`blank_cells_are_spaces_not_omissions`) pins it anyway, because the failure is
+invisible until a column moves.
 
 **This is what "reserve the slot" means and what S7 inherits:** cell 1 blank on a
 terminal tab, cell 2 blank on every agent row until S7 lands, cell 3 blank on a
@@ -499,15 +502,17 @@ S6 does not resolve it — S7 owns the ramp — but S6 must record two things:
 2. **The MDI battery is one glyph; the eighths are eight.** An eight-level ramp
    carries a magnitude in *shape*, which survives monochrome and survives a
    colour-blind reader; a single battery icon carries magnitude only in colour,
-   which is the thing S5 §2.6 forbids for load-bearing signals. That is an
+   which is the thing S5 §2.9 forbids for load-bearing signals. That is an
    argument S7 should weigh, and it is the reason #40 flagged this glyph choice
    in the first place.
 
-The **terminal mark** has the same open-codepoint status. The maintainer's paste
-is a BMP-PUA character (U+E000–U+F8FF) — determined by exclusion: plane-15 SPUA-A
-survives this document's authoring pipeline intact, as U+F007C and U+168C2 both
-did, and the terminal mark did not. It is therefore from the Nerd Fonts
-`dev` / `fa` / `oct` / `cod` / `seti` ranges, not MDI. S6 ships
+The **terminal mark** has the same open-codepoint status, for a different and
+more mundane reason: **the pasted character could not be recovered with
+certainty** while this spec was written. U+F007C and U+168C2 both round-tripped
+through the authoring pipeline and were read back exactly; the terminal mark did
+not. No inference about its range is drawn from that — it is a property of one
+copy-paste path, not of the codepoint — and a spec should not carry a shaky
+deduction where a two-second probe gives certainty. Hence S6 ships
 `TERMINAL_MARK = '\u{f489}'` (`nf-oct-terminal`) as the placeholder and Step 1's
 probe prints the four plausible codepoints — `\u{e795}` (`nf-dev-terminal`),
 `\u{f120}` (`nf-fa-terminal`), `\u{f489}` (`nf-oct-terminal`),
@@ -573,11 +578,13 @@ their own eyes:
 Environment
   ok  glyph set: full (Nerd Font glyphs required for the battery and terminal marks)
         check your terminal renders them — run:
-            printf 'status  [●] [✖] [○]\n'
-            printf 'worktree[\U000168c2] [] [‡]\n'
-            printf 'battery [\U000f007c] [█] [▁]\n'
-            printf 'terminal[] [] [] []\n'
-        every bracket pair must be 8 characters wide and hold ONE glyph, not a box.
+            printf 'ruler   [x] [x] [x] [x]\n'
+            printf 'status  [\u25CF] [\u2716] [\u25CB]\n'
+            printf 'worktree[\U000168C2] [\uE0A0] [\u2021]\n'
+            printf 'battery [\U000F007C] [\u2588] [\u2581]\n'
+            printf 'terminal[\uF489] [\uE795] [\uEA85] [\uF120]\n'
+        every bracket must hold ONE glyph, not a box, and every line's
+        brackets must sit in the same columns as the ruler line.
         if any is a box or the brackets misalign, switch to the plain set:
             add `glyphs "plain"` inside the plugin block of ~/.config/clave/layout.kdl
 ```
@@ -800,7 +807,7 @@ Concretely, S6 replaces exactly one function and one call site:
 
 1. **`model::gutter_segments`** — S5 ships it as a transitional stand-in that
    reproduces today's 2-cell gutter from `row.glyph`
-   (`S5 §3.3`, *"S6 replaces this function and nothing else"*). S6 replaces its
+   (`S5 §3.5`, *"S6 replaces this function and nothing else"*). S6 replaces its
    body and widens its signature to `gutter_segments(row: &Row, cols: usize,
    collapsed: bool) -> Vec<Segment>`. **The mode stops at this function.**
 2. **The `render()` call site in `main.rs`** — one line, §3.7(b).
@@ -976,7 +983,8 @@ prose figures need correcting. Whoever lands after S6 fixes the prose.
 |---|---|
 | Pack the expanded gutter (`●󰁼𖣂 `, 4 cols) | saves 2 columns but is not the maintainer's format, and adjacent patched-font icons read as one compound mark. Kept as the **collapsed** form (§2.8), where 4 columns is the entire budget |
 | A variable-width gutter (drop trailing blanks) | the whole point is that text starts in the same column on every row. A gutter that shrinks when a cell is empty is a ragged text column — the defect §2.3 exists to prevent |
-| `Row.worktree: bool`, resolve the glyph in `compose_row` | forces `compose_row` to know the `GlyphSet`, which makes the pure geometry function font-aware and makes §2.6.2's width-identity claim something code must enforce rather than something types make impossible |
+| `Row.worktree: bool`, resolve the glyph in `gutter_segments` | forces the gutter builder to reach for `self.glyphs` it does not have (it is a free function taking `&Row`), or forces `GlyphSet` into `Row`. Resolving to `(char, u8)` in `rows()` keeps the tier confined to the one place that already holds `self` |
+| `compose_row(&Row, cols, collapsed: bool)` with the gutter built inside | §2.9.1 — S5's ruling. `collapsed` is UI state and `compose_row` is geometry; passing finished segments keeps state out of it and costs S6 one call-site line |
 | `Agent.worktree: bool` on the wire | #24 item 1 needs the path for `<repo> » <worktree-dir>`; a bool buys nothing and costs a second wire change |
 | Fix the `worktree` field's false negatives in S6 | §2.4.3 — it lands inside the `add.rs` / `hook.rs` blocks S4 is restructuring, it is a store-semantics decision with picker fallout, and it moves no columns |
 | Derive collapsed/expanded from `cols` instead of the mode flag | §2.8 — makes the text budget non-monotone in `cols` at the threshold |
@@ -984,7 +992,7 @@ prose figures need correcting. Whoever lands after S6 fixes the prose.
 | A `clave glyphs <tier>` subcommand | §2.6.5 — CLI-surface taxonomy row for a once-per-machine decision; the right end state, not the right v1 |
 | A real font check in `clave doctor` | §2.6.6 — doctor sees the machine, the font lives in the terminal, which under SSH is a different host. A check that can be wrong is worse than a printed probe |
 | Fill the battery cell in this batch | it needs the hook's tail-scan, a store field, rot-reducer's token estimation and the profile env resolution (#24's battery comment). That is a workstream, and it is **S7** |
-| `zellij-tile`'s `Text` builder for the gutter | RC-G / S5 §2.3 — semantic index-levels only, no arbitrary palette, and it cannot express "SGR 90 on this one cell" |
+| `zellij-tile`'s `Text` builder for the gutter | RC-G / S5 §2.6 — semantic index-levels resolved host-side, no arbitrary palette, and it cannot express "SGR 90 on this one cell" |
 | Emit the gutter inside `Row.name` | RC-G — the clamp counts scalars; this is the exact defect the dossier warns about |
 | Reverse-video the gutter on the active row | today's behaviour opens SGR 7 *after* the gutter (`main.rs:554-556`). Inverting glyph cells would swap a dim marker to a bright one on selection — motion where none is meant — and would destroy the "highlight's left edge = text column" ruler live validation Step 4 depends on |
 
@@ -1084,9 +1092,10 @@ impl GlyphSet {
     /// because a terminal tab is a thing that exists, not a thing that needs
     /// you.
     ///
-    /// PLACEHOLDER CODEPOINT (S6 §2.6.4): the maintainer's paste is BMP-PUA
-    /// but its exact value is settled by live-validation Step 1, which prints
-    /// the four plausible Nerd Font terminal icons. All four are one cell, so
+    /// PLACEHOLDER CODEPOINT (S6 §2.6.4): the character the maintainer pasted
+    /// could not be recovered with certainty, so its exact value is settled by
+    /// live-validation Step 1, which prints the four plausible Nerd Font
+    /// terminal icons for him to identify. All four are one cell, so
     /// correcting this constant cannot move a column.
     pub fn terminal_mark(self) -> (char, u8) {
         match self {
@@ -1134,7 +1143,7 @@ store-only list.
 
 ### 3.3 `crates/clave-bar/src/model.rs` — `Row` becomes three cells
 
-Replace **post-S5** `Row` (S5 §3.3(a)):
+Replace **post-S5** `Row` (S5 §3.4(a)):
 
 ```rust
 pub struct Row {
@@ -1185,7 +1194,7 @@ pub struct Row {
 
 ### 3.4 `crates/clave-bar/src/model.rs` — the gutter constants and builder
 
-New, placed beside S5's `RIGHT_MARGIN_COLS` (S5 §3.3). S5 has no `GUTTER_COLS`
+New, placed beside S5's `RIGHT_MARGIN_COLS` (S5 §3.5). S5 has no `GUTTER_COLS`
 constant — `compose_row` measures the segments — so these are additions, not
 replacements:
 
@@ -1257,7 +1266,7 @@ fn gutter_sequence(row: &Row, collapsed: bool) -> Vec<(char, Option<u8>)> {
 
 ### 3.5 `crates/clave-bar/src/model.rs` — replace `gutter_segments`, and only that
 
-**`compose_row` is not touched.** S5 §3.3 ships `gutter_segments` explicitly as
+**`compose_row` is not touched.** S5 §3.5 ships `gutter_segments` explicitly as
 the transitional stand-in — *"S6 replaces this function and nothing else"* — and
 that is exactly what happens. Replace **post-S5**:
 
@@ -1318,7 +1327,8 @@ whatever gutter it is given, which is now 6 cells instead of 2 — and S5's
 
 ### 3.6 `crates/clave-bar/src/model.rs` — `rows()` resolves the cells
 
-`BarModel` gains one field, beside `pub collapsed` (`model.rs:255-257`):
+`BarModel` gains one field, beside `pub collapsed` (`model.rs:255-257`) and
+S5's `palette` (S5 §3.4(b)):
 
 ```rust
     /// The glyph vocabulary this instance draws (#40, S6 §2.6.5). Set once
@@ -1332,7 +1342,7 @@ whatever gutter it is given, which is now 6 cells instead of 2 — and S5's
 initialised `glyphs: GlyphSet::default()` in the constructor beside
 `collapsed: false` (`model.rs:315`).
 
-**Live-tab branch.** Replace **post-S5** `model.rs:746-765` (S5 §3.3(c)):
+**Live-tab branch.** Replace **post-S5** `model.rs:746-765` (S5 §3.4(c)):
 
 ```rust
         for t in &self.tabs {
@@ -1438,7 +1448,7 @@ with:
 
 with `GlyphSet` added to the `clave_types` import at `main.rs:10-12`.
 
-**(b)** `render()` — replace **post-S5** `main.rs:536-538` (S5 §3.4):
+**(b)** `render()` — replace **post-S5** `main.rs:536-538` (S5 §3.6, the adapter):
 
 ```rust
         for row in self.model.rows() {
@@ -1666,29 +1676,53 @@ recent `clave-bar: loaded vX.Y.Z build=…` line.
 | no `clave-bar: loaded` line from today | the log is stale or the filter is wrong (the file is shared by every session on the machine, `TESTING.md:295-300`) | re-run with `tail -50`; if still nothing, report and stop |
 | `build=` is not `dev` and you did not just hot-reload | you are looking at an instrumented sandbox wasm | note which session you are in and repeat in the intended one |
 
-### Step 1 — do the glyphs render, and which codepoints are the right ones? (no clave involved)
+### Step 1 — **the glyph decision, recorded** — do they render, and which codepoints? (no clave involved)
+
+**This step is the deciding input for two constants the spec deliberately left
+pending** (§2.6.3, §2.6.4): the worktree marker (U+168C2 versus the Powerline
+branch mark) and the terminal mark (four candidates). Both ship as named
+constants with placeholder values precisely so this step's answer is a one-line
+edit. **The report from this step is the record**; nothing else settles them.
+
+Codepoints are written as `printf` escapes rather than pasted characters,
+deliberately: a private-use glyph does not survive every copy-paste path — this
+spec's own authoring pipeline dropped them — so an escape is the only form
+guaranteed to be exactly what was intended.
 
 **(a) Run** in any pane of the terminal you actually use:
 ```bash
-printf 'status   [●] [✖] [○] [◌] [✗] [↻]\n'
-printf 'worktree [\U000168c2] [] [‡]\n'
-printf 'battery  [\U000f007c] [█] [▅] [▁]\n'
-printf 'terminal [] [] [] []\n'
 printf 'ruler    [x] [x] [x] [x] [x] [x]\n'
+printf 'status   [●] [✖] [○] [◌] [✗] [↻]\n'
+printf 'worktree [\U000168C2] [] [‡]\n'
+printf 'battery  [\U000F007C] [█] [▅] [▁]\n'
+printf 'terminal [] [] [] []\n'
 ```
+
+Legend, in the same order:
+
+| line | entries |
+|---|---|
+| `status` | `●` `✖` `○` `◌` `✗` `↻` — today's set plus S3's proposed `○` |
+| `worktree` | 1 · U+168C2 Bamum, **the spec's default and your pick** · 2 · U+E0A0 Powerline branch, the pre-cleared alternate · 3 · `‡` U+2021, the `Plain` tier |
+| `battery` | 1 · U+F007C, the MDI battery **you pasted** · 2–4 · the block eighths `█ ▅ ▁`, which is #24's own earlier ruling (§2.6.4) |
+| `terminal` | 1 · U+E795 `nf-dev-terminal` · 2 · U+F120 `nf-fa-terminal` · 3 · U+F489 `nf-oct-terminal`, the spec's placeholder · 4 · U+EA85 `nf-cod-terminal` |
 
 **(b) Look at:** two things, separately.
 
 1. **Shape** — is anything a box, a blank, or a question mark rather than a
    glyph? Pay particular attention to the *first* entry on the `worktree` line
-   (`𖣂`, U+168C2): it is the only glyph in the whole set that a Nerd Font does
+   (U+168C2): it is the only glyph in the whole set that a Nerd Font does
    **not** provide (§2.6.3).
 2. **Alignment** — every line has its brackets in the same columns as the
    `ruler` line. If any bracket pair is wider, that glyph is two cells, not one.
 
-**(c) Report:** for each line, which entries rendered as real glyphs; whether
-every line's brackets align with `ruler`'s; and — for the `terminal` line —
-**which of the four is the icon you pasted**, by position (1st/2nd/3rd/4th).
+**(c) Report** — this is the record, so all four please:
+
+1. for each line, which entries rendered as real glyphs;
+2. whether every line's brackets align with `ruler`'s;
+3. **which of the four `terminal` entries is the icon you pasted** (1/2/3/4);
+4. **whether you want U+168C2 or the Powerline branch mark** for cell 3 — if
+   U+168C2 rendered, that is a taste question and yours alone.
 
 | Report | Conclusion | Next |
 |---|---|---|
@@ -1874,7 +1908,7 @@ the four columns it cost the text hurt; whether the status dot still reads first
 
 | Report | Conclusion | Next |
 |---|---|---|
-| reads at a glance, status still dominates, the text loss is fine | **ship it**; close #24 item 7 and the locked format's marker clause | merge per the autonomy contract, `needs-live-validation` cleared |
+| reads at a glance, status still dominates, the text loss is fine | **ship it**; #24's locked-format marker clause is closed, and item 7 closes per your Step 6 ruling | merge per the autonomy contract, `needs-live-validation` cleared |
 | the marks pull attention off the status dot | the three cells compete | report; the lever is the marker's SGR (dim → dimmer, or the marker moved to cell 3-only-when-selected). Do not merge on this reading without a decision |
 | the four columns hurt at 30 | **the S8 interaction** (§2.10) | report; the ruling is to land S8's widening before or with S6, which is the recommended order anyway |
 | the battery's blank column looks like a bug | expected while S7 is unbuilt | report; if it bothers you, the interim option is to collapse the gutter to two cells until S7 lands — one constant, and G1 already covers it |
@@ -1887,7 +1921,7 @@ the four columns it cost the text hurt; whether the status dot still reads first
 
 | Workstream | Relationship |
 |---|---|
-| **S5** | **hard dependency, must land first.** S6 extends `compose_row`/`render_segments`/`Ink`/`Segment` (§2.9.1). Building them here would duplicate S5's seam |
+| **S5** | **hard dependency, must land first.** S6 replaces exactly one S5 function — `gutter_segments`, which S5 ships as a transitional stand-in for this purpose — and does not touch `compose_row`, `render_segments`, `Ink`, `Segment` or `clamp_name` except for §2.9.3 (§2.9.1). Building the seam here would duplicate S5's |
 | **S3** | composes cleanly. S3 changes the dormant glyph expression *above* the `Row` literal; S6 adds fields *inside* it. Same block, trivial conflict, no semantic overlap. S6 strengthens S3's argument (§2.5): dim marks now live in columns 2 and 4, never column 0, and never as circles |
 | **S4** | no file overlap in S6's diff. S4 owns `hook.rs`/`add.rs`/`store.rs`'s record; S6 touches `store.rs` only at `snapshot_from`. The one *contract* S6 hands S4 is the text budget, `cols - 7` (§2.10). §2.4.3's optional marker upgrade would sit in S4's `refresh_label` and is deliberately not taken here |
 | **S7** (context battery) | consumes the reserved cell. See below |
@@ -1904,13 +1938,18 @@ the four columns it cost the text hurt; whether the status dot still reads first
    S6 has now introduced elsewhere. Both are one cell; the argument is about
    shape-carries-magnitude versus a single icon, and about #40.
 3. **Rule G/T** (§2.5): the ramp must be **basic SGR**, so it stays inside the
-   theme and cannot collide with S5's indexed text palette.
+   user's theme and cannot collide with S5's truecolor text palette.
 4. **The `GlyphSet` tier** (§2.6.2): whatever ramp S7 picks needs a `Plain`
    sibling, and the block eighths are already the natural one.
 5. **The dormant question S6 did not answer**: S6 leaves cell 2 blank on dormant
    rows. S7 must decide whether a dormant agent shows its last-known battery
    (informative, possibly stale) or stays blank (honest, loses a signal).
-6. **The cadence question from #24**, untouched: clave's hooks fire on
+6. **§2.8's outcome, whatever it is.** Under (a) the collapsed row is three
+   glyph cells, so S7's ramp is one third of the entire collapsed bar and its
+   legibility at that size matters more than it looks. Under (c) there is text
+   beside it. Under (b2) cell 3 is repo-coloured, which constrains how loud the
+   ramp beside it can be.
+7. **The cadence question from #24**, untouched: clave's hooks fire on
    prompt/stop boundaries, so a meter lags mid-turn; a throttled `PostToolUse`
    entry would track live at the cost of a store RMW per tool call.
 
@@ -1920,17 +1959,24 @@ the four columns it cost the text hurt; whether the status dot still reads first
   superseded** (§2.9.3). S5 pinned the `budget == 0` ellipsis as pre-existing
   behaviour; S6 removes it because the collapsed row makes that path normal
   rather than unreachable. Named in the PR, not silently deleted.
-- **S5's `compose_row_at_collapsed_width` is rewritten** (§4.2): a collapsed row
-  no longer has any text to tint, so #24 item 7's answer moves from "glyph + repo
-  colour" to "glyph + battery + worktree".
+- **S5's `compose_row_measures_the_gutter_it_is_given` gains a 6-cell case**
+  (§4.2) — S5 wrote it as the S6 contract test with 2- and 4-cell gutters, and
+  the shipped width is 6.
 - **S5's P3 loses its `cols >= gutter_cols + 2` gate** and becomes unconditional
   (§4.3 G3).
+- **S6's proptests are numbered G1–G7**, not P1–P7, because S5 already owns
+  P1–P8 in the same module (§4.3).
 - **S4's width budget parameter is `cols - 7`** expanded, `cols - 5` collapsed
   (§2.10) — S4's `fit_label(name, budget)` needs the number, not a restructure.
-- **S8 §1's illustrative budgets are wrong by 3** (§2.10.1). It assumed a 3-column
-  packed gutter; the ruling is 6. S8's *structure* is unaffected — it correctly
-  scopes `main.rs:546` out of its own diff — but its "budget 26 / 34" prose should
-  read **23 / 31**. Whoever lands second corrects it.
+- **Both siblings' prose budget figures are stale** (§2.10.1): S8 §1 says 26/34
+  (assumed a 3-column gutter), S5 §7 says 33 @38 (assumed 4). The authoritative
+  figures are **23 @30 and 31 @38**. Neither needs a structural change — S5
+  measures the gutter it is handed and S8 correctly scopes `main.rs:546` out of
+  its own diff — only the prose. Whoever lands after S6 corrects it.
+- **#24 item 7 is *regressed* under §2.8 option (a)**, and that is a decision the
+  maintainer makes at §5 Step 6, not a defect. S5 flags the same thing from its
+  side (`S5 §7`, risk table). Whichever option he picks, say in the PR which one
+  and why.
 
 ### Risks
 
@@ -1943,6 +1989,8 @@ the four columns it cost the text hurt; whether the status dot still reads first
 | The worktree marker is silent for worktrees clave did not create | medium | §2.4.3 states it precisely, Step 5 measures its real incidence, and the three-line upgrade is written out and ready |
 | A hand-edited `glyphs` key is lost to the next `clave setup` | low | §2.6.5 states it; the complete fix is #40's follow-up. Absent = `Full` means the default path is unaffected |
 | The three cells clutter more than they inform | medium | Tier 3 by construction. Step 8 is the maintainer's verdict; the interim lever (collapse to two cells) is one constant |
+| **#24 item 7 regresses**: repo identity vanishes when collapsed (§2.8.1) | medium | Not mitigated — **decided**. §2.8.2 costs four options, §2.8.3 recommends (a) and names the pre-costed upgrades, and §5 Step 6 puts the choice in front of the maintainer with real rows. S5 flags the same risk from its side |
+| §2.8 resolves to (c) after S6 has merged, so `COLLAPSED_TARGET_COLS` moves later | low | The const-assert is an **inequality** (§3.4) and G1/G2 assert against `gutter_cols(...)`, not literals, so the constant can move without touching the gutter or its proofs. The cost is re-baselining S8's seek tests, which S8 already enumerates |
 | Issue #44 corrupts a live reading | high, standing | Step 0 is mandatory and terminal |
 
 ### Out of scope
@@ -1951,9 +1999,10 @@ the four columns it cost the text hurt; whether the status dot still reads first
   nothing more.
 - **The model badge** (#24 item 5) — a *fourth* cell, which would be a fourth
   column and a re-run of §5. Not designed here; note that `gutter_sequence` and
-  `GUTTER_CELLS` generalise, and that `GUTTER_COLS_COLLAPSED` would then exceed
-  `COLLAPSED_TARGET_COLS` and trip §3.4's compile-time assertion — which is the
-  assertion doing its job.
+  `GUTTER_CELLS` generalise, and that a fourth cell makes
+  `GUTTER_COLS_COLLAPSED` = 5 > `COLLAPSED_TARGET_COLS` = 4, tripping §3.4's
+  compile-time assertion — which is the assertion doing its job, and which forces
+  #24 item 5 to resolve §2.8 first.
 - **Worktree provenance in the *name*** (#24 item 1, `<repo> » <worktree-dir>`) —
   S6 renders a marker, not a name. The wire now carries the path it would need.
 - **Fixing `worktree`'s false negatives** (§2.4.3) and **fixing `repo_root` for
@@ -1962,9 +2011,11 @@ the four columns it cost the text hurt; whether the status dot still reads first
 - **Baking the `glyphs` key into the generated layouts** (§2.6.5) — #40.
 - **A real font check in `doctor`** (§2.6.6) — declined on principle, not
   deferred.
-- **Widths** (#24 item 6 / S8): S6 must not change `BAR_TARGET_COLS` or
-  `COLLAPSED_TARGET_COLS` (`model.rs:137,142`); the C6 ledger applies to anyone
-  who tries.
+- **Widths** (#24 item 6 / S8): S6 must not change `BAR_TARGET_COLS`
+  (`model.rs:137`); the C6 ledger applies to anyone who tries. It must not change
+  `COLLAPSED_TARGET_COLS` (`model.rs:142`) **in this batch** either — §2.8 option
+  (c) would, and that is why it is written as a follow-up landing in S8's file
+  rather than as an S6 amendment.
 - **The clamp's scalar-vs-cell bug** for *name* text (§2.2.2 consequence 1). A
   CJK or emoji character in a label still counts as one column when it draws two.
   Pre-existing, unchanged by S6 (whose glyphs are all one cell), and correctly
