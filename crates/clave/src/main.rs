@@ -341,4 +341,17 @@ mod tests {
             }
         }
     }
+
+    /// #6/F3: the plugin shells `clave prune-tabs <id>…` with the full live
+    /// set. Same ledger rule as the collapse test above — every new CLI
+    /// surface gets a parse pin, because clap-derive shape bugs panic debug
+    /// builds at the parse layer and no workspace test reaches it.
+    #[test]
+    fn prune_tabs_cli_parses_variadic_ids() {
+        let cli = Cli::try_parse_from(["clave", "prune-tabs", "3", "1", "7"]).expect("must parse");
+        match cli.command {
+            Some(Command::PruneTabs { tab_ids }) => assert_eq!(tab_ids, vec![3, 1, 7]),
+            _ => panic!("parsed into the wrong command"),
+        }
+    }
 }
