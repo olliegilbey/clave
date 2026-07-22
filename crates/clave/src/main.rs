@@ -196,12 +196,22 @@ fn main() -> Result<()> {
             spawn::register_pane(&uuid);
             std::env::set_current_dir(&physical).context("entering --cwd")?;
             use std::os::unix::process::CommandExt;
+            // Discovered claude (spec §Discovery): the pane env may lack the
+            // interactive PATH (nvm/local-install), so exec the absolute
+            // path — resolved FRESH each spawn (the command is replayed on
+            // resurrection and must survive reinstalls).
+            let claude = clave::discover::discover(clave::discover::ToolId::Claude)
+                .map(|d| d.path)
+                .ok_or_else(|| anyhow::anyhow!(
+                    "claude not found — install it: https://code.claude.com/docs\n\
+                     (or set CLAVE_CLAUDE_BIN to its location)"
+                ))?;
             let err = match mode {
                 // --name only on create: the bar label is clave-owned (§6.1).
-                spawn::SpawnMode::Create => std::process::Command::new("claude")
+                spawn::SpawnMode::Create => std::process::Command::new(&claude)
                     .args(["--session-id", &uuid, "--name", &name])
                     .exec(),
-                spawn::SpawnMode::Resume => std::process::Command::new("claude")
+                spawn::SpawnMode::Resume => std::process::Command::new(&claude)
                     .args(["--resume", &uuid])
                     .exec(),
             };

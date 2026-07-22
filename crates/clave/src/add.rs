@@ -212,7 +212,7 @@ pub fn merge_resume_record(existing: Option<&AgentRecord>, fresh: AgentRecord) -
 /// so this works inside the Alt+a floating pane; stdin carries the menu,
 /// stdout the choice. None = user aborted (Esc) → caller exits quietly.
 fn fzf_pick(lines: &[String], prompt: &str) -> Result<Option<String>> {
-    let mut child = Command::new("fzf")
+    let mut child = Command::new(tool_path(crate::discover::ToolId::Fzf))
         .args(["--prompt", prompt, "--height", "100%"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -231,22 +231,64 @@ fn fzf_pick(lines: &[String], prompt: &str) -> Result<Option<String>> {
     Ok((!picked.is_empty()).then_some(picked))
 }
 
-fn cmd_stdout(cmd: &str, args: &[&str]) -> Result<String> {
+fn cmd_stdout(cmd: impl AsRef<std::ffi::OsStr>, args: &[&str]) -> Result<String> {
+    let cmd = cmd.as_ref();
     let out = Command::new(cmd)
         .args(args)
         .output()
-        .with_context(|| format!("running {cmd}"))?;
-    anyhow::ensure!(out.status.success(), "{cmd} {args:?} failed");
+        .with_context(|| format!("running {}", cmd.to_string_lossy()))?;
+    anyhow::ensure!(
+        out.status.success(),
+        "{} {args:?} failed",
+        cmd.to_string_lossy()
+    );
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Discovered-or-bare tool path: preflight has already guaranteed presence,
+/// so the fallback only preserves behavior if discovery races an uninstall.
+fn tool_path(tool: crate::discover::ToolId) -> std::path::PathBuf {
+    crate::discover::discover(tool)
+        .map(|d| d.path)
+        .unwrap_or_else(|| std::path::PathBuf::from(tool.bin_name()))
+}
+
+/// The Alt+a keybind runs add in a floating pane with close_on_exit=true —
+/// an abort's message would flash and VANISH (spec §Preflight pane-hold).
+/// Block on Enter so the guidance is readable; TTY-gated so scripted
+/// invocations never hang.
+fn hold_open_if_tty() {
+    use std::io::IsTerminal;
+    if std::io::stdin().is_terminal() {
+        eprintln!("\npress Enter to close");
+        let _ = std::io::stdin().read_line(&mut String::new());
+    }
+}
+
 pub fn run_add(worktree: bool) -> Result<()> {
+    // Preflight (spec §Preflight): the fzf weave and git/claude are all
+    // needed before any tab exists — abort BEFORE creating anything.
+    if let Err(e) = crate::doctor::preflight(
+        &[
+            crate::discover::ToolId::Fzf,
+            crate::discover::ToolId::Zoxide,
+            crate::discover::ToolId::Git,
+            crate::discover::ToolId::Claude,
+        ],
+        "clave add needs tools that are missing:",
+    ) {
+        eprintln!("{e}");
+        eprintln!("You can install them from another tab without leaving the session.");
+        hold_open_if_tty();
+        anyhow::bail!("missing dependencies for `clave add`");
+    }
+
     // 1) Pick a directory: fzf over zoxide's ranked list, current dir first
     //    (§6.3 — fzf+zoxide are verified present on the target machine).
     let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
     let mut dirs: Vec<String> = vec![cwd.clone()];
     dirs.extend(
-        cmd_stdout("zoxide", &["query", "-l"])?
+        cmd_stdout(tool_path(crate::discover::ToolId::Zoxide), &["query", "-l"])?
             .lines()
             .map(String::from),
     );
