@@ -20,4 +20,9 @@ targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-
 github-attestations = true
 # Injected into dist's build job BEFORE cargo build: compiles the bar wasm and
 # exports CLAVE_BAR_WASM so build.rs embeds it (spec §Distribution).
-github-build-setup = "build-wasm-setup.yml"
+# Path is relative to .github/workflows/, so `../` keeps the fragment OUTSIDE
+# that dir — GitHub runs every *.yml under .github/workflows/ as a workflow, and
+# this step fragment (no `on:`/`jobs:`) fails at 0s when it lands there. Moving
+# it to .github/ stops the spurious red X on every push while dist still splices
+# it into release.yml (regenerate with `dist generate` after moving).
+github-build-setup = "../build-wasm-setup.yml"
