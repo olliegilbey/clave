@@ -64,4 +64,36 @@ mod tests {
         c.insert(clave_types::CLAVE_BINARY_KEY.to_string(), "clave".to_string());
         assert_eq!(resolve_binary(&c).as_deref(), Some("clave"));
     }
+
+    #[test]
+    fn main_never_shells_out_to_a_bare_clave() {
+        // The seven bar→CLI shellouts are the whole point of #44, but they live
+        // in main.rs, which `test = false` (Cargo.toml) makes unreachable by any
+        // runtime test — the bin can't host-link (see lib.rs). A whole-branch
+        // review proved the gap live: reverting one site to
+        // `run_command(&["clave", …])` kept every gate green. This crude
+        // source-text guard is the ONLY thing that fails on that reversion until
+        // #47's tier-2 real-zellij harness exists.
+        //
+        // Pattern `"clave",` = a bare "clave" as the FIRST argv element followed
+        // by more args — the exact reverted-shellout shape. It cannot match the
+        // legitimate `"clave".to_string()` PATH fallback in load() (`.` not `,`
+        // after the quote), nor any `"clave-*"` pipe name (suffix before the
+        // closing quote). Both properties are asserted below so a future rename
+        // that breaks the discriminator fails loudly instead of silently.
+        let src = include_str!("../src/main.rs");
+        assert!(
+            !src.contains(r#""clave","#),
+            "#44: a bar shellout resolves bare `clave` through PATH again — \
+             bake self.clave_binary instead (see resolve_binary)"
+        );
+        // Guard-integrity: the two shapes the pattern must tolerate DO occur in
+        // main.rs, so if a refactor made either collide with the pattern this
+        // test would start lying. Pin them.
+        assert!(
+            src.contains(r#""clave".to_string()"#),
+            "the PATH fallback moved — re-vet that the guard pattern still \
+             excludes it before trusting this test"
+        );
+    }
 }

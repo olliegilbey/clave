@@ -73,15 +73,9 @@ pub fn baked_binary(versioned_cli: Option<&Path>, installed: bool) -> String {
 /// `clave-v*` copy. That is the #44 divergence: `config.kdl` was written with
 /// one binary and the launch layout is about to bake another, so zellij's
 /// (location, configuration) pipe match misses and every keybind launches a
-/// second bar. Pure over its inputs so it tests without a filesystem.
-///
-/// No `versioned_cli: Option<&Path>` parameter: the brief's sketch carried
-/// one, but the predicate never needs the CANDIDATE path, only whether it
-/// resolved (`installed`) and what is actually sitting in `<data>/bin`
-/// (`siblings`) — a `clave-v0.2.0` copy existing is anomalous evidence
-/// whether or not this binary's own version happened to probe for it.
-/// Keeping an ignored parameter (`let _ = …`) would just ship dead API
-/// surface for callers to puzzle over.
+/// second bar. Pure over its inputs (`installed` = did our own version's copy
+/// resolve; `siblings` = what is actually in `<data>/bin`) so it tests without
+/// a filesystem.
 pub fn binary_resolution_is_anomalous(installed: bool, siblings: &[String]) -> bool {
     // Require a DIGIT right after `clave-v`, not a bare `starts_with` — same
     // discipline as `is_clave_hook_command` (setup.rs), precedent cited there:
@@ -123,14 +117,20 @@ pub fn runtime_binary() -> String {
             })
             .unwrap_or_default();
         if binary_resolution_is_anomalous(installed, &siblings) {
+            // Name the repair inline, NOT "run clave doctor": in the case this
+            // fires (own version behind the newest installed copy) doctor
+            // reports OK and gives no advice (doctor.rs), so deferring to it
+            // dead-ends. Same `cp` CONTRIBUTING/CLAUDE.md carry.
+            let bin = dir
+                .as_ref()
+                .map(|d| d.join("bin").display().to_string())
+                .unwrap_or_else(|| "<data>/bin".into());
             eprintln!(
-                "clave: WARNING resolving bare `clave` on PATH, but {} holds \
+                "clave: WARNING resolving bare `clave` on PATH, but {bin} holds \
                  a versioned copy ({}). config.kdl and the launch layout will \
-                 disagree and each keybind may open a second bar — run \
-                 `clave doctor` (#44).",
-                dir.as_ref()
-                    .map(|d| d.join("bin").display().to_string())
-                    .unwrap_or_else(|| "<data>/bin".into()),
+                 disagree and each keybind may open a second bar (#44). Point \
+                 PATH at the installed copy: `cp {bin}/<clave-vX.Y.Z> \
+                 $(command -v clave)`.",
                 siblings.join(", ")
             );
         }

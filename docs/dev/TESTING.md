@@ -219,11 +219,18 @@ ZELLIJ_SESSION_NAME=clave-test zellij action start-or-reload-plugin \
 > The `-c` is load-bearing, not optional. A plugin's configuration is half of
 > its zellij identity, and `reload_plugin` matches on `(location,
 > configuration)` exactly (`zellij-server/src/plugins/wasm_bridge.rs:686-697`).
-> Without it the command matches nothing, the reload loop body never runs, and
-> the command still **exits 0** — you would be validating stale wasm while
-> believing the reload worked. The sandbox bakes bare `clave` (#44), so
-> `clave_binary=clave` is the value there; a stable session would need its
-> versioned absolute path. `PluginUserConfiguration`'s `FromStr`
+> Without it the lookup misses: `all_plugin_ids_for_plugin_location`
+> (`zellij-server/src/plugins/plugin_map.rs:169-171`) returns
+> `Err(PluginDoesNotExist)` for the filtered-empty case, `reload_plugin`
+> propagates it (`wasm_bridge.rs:692-693`), and the error branch in
+> `zellij-server/src/plugins/mod.rs:446-468` logs `"Plugin {} not found,
+> starting it instead"` and starts a **new** plugin instance. So a
+> configuration miss is not a silent no-op — it spawns a second bar pane,
+> the very symptom of #44. If a reload looks like it did nothing, grep
+> `zellij.log` for that `not found, starting it instead` warning. The
+> sandbox bakes bare `clave` (#44), so `clave_binary=clave` is the value
+> there; a stable session would need its versioned absolute path.
+> `PluginUserConfiguration`'s `FromStr`
 > (`zellij-utils/src/input/layout.rs:563-576`) is comma-separated `key=value`,
 > so a path containing a comma would not survive — none of ours do.
 
@@ -262,6 +269,14 @@ run in a **non-zellij terminal**; the rest an agent may run.
    and prints the launch command.
 4. **Launch (human, non-zellij terminal):** `clave dev launch` — attaches or
    creates the `clave-test` session against the sandbox state and data dirs.
+
+> **After `just dev-install`, re-run step 3 (`clave dev scenario <name>`)
+> before launching.** `clave dev launch` composes `launch.kdl` fresh every
+> time but does NOT regenerate `config.kdl` (only `dev scenario` does —
+> `dev.rs`). Since #44 both files bake `clave_binary`, so a post-#44
+> `launch.kdl` beside a pre-#44 `config.kdl` makes every keybind miss and
+> spawn a second bar — the exact #44 symptom, mistaken for the fix not
+> working. Regenerating both together is the guard.
 
 ### Scenario catalog
 

@@ -122,11 +122,19 @@ and `layout.rs:532-548`, quoted above).
 - **`release::runtime_binary()`, resolving bare `clave` anyway**: the precise
   divergence condition is *resolving bare `clave` while `data_dir()/bin/`
   contains a `clave-v*` copy*. Announce there — one placement covering
-  generation, launch and tab-bake (see "The new invariant"). Also announce
-  `setup.rs:489`'s unresolvable `current_exe`, an unexpected failure worth
-  naming either way. Dev/sandbox bare `clave` with no versioned copy present is
-  correct by design (`baked_binary`'s documented contract) and stays quiet —
-  warning on every sandbox launch would train the reader to ignore it.
+  generation, launch and tab-bake (see "The new invariant"). Dev/sandbox bare
+  `clave` with no versioned copy present is correct by design (`baked_binary`'s
+  documented contract) and stays quiet — warning on every sandbox launch would
+  train the reader to ignore it.
+  - **Known uncovered case** (implementation, not this predicate): `setup.rs`'s
+    unresolvable-`current_exe` branch (divergence case 2 below) also falls back
+    to bare `clave`, but is NOT announced — it is rare (a broken `current_exe`
+    is its own failure) and the `runtime_binary()` warning already covers the
+    likelier divergence. Left uncovered deliberately rather than claimed as
+    covered. A second, related gap is deferred to #48: the predicate is blind
+    when the launcher's OWN version copy exists but is behind the newest
+    installed release (`installed = true`, no warning) — see the whole-branch
+    review.
 
 ### The hot-reload SOP must change with it
 

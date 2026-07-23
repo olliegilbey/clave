@@ -360,12 +360,12 @@ fn keybind_and_layout_plugin_configurations_match() {
     let cfg = setup::config_kdl(BIN_ABS, WASM);
     let kb = keybind_pipe_configs(&cfg, "config.kdl");
 
-    // Non-vacuity FIRST (adversarial review, 2026-07-22): a bare equality
-    // assert is satisfied when BOTH sides are empty. If a future zellij added
-    // `clave_binary` to PluginUserConfiguration::new's strip list
-    // (zellij-utils input/layout.rs:530-546), both sides would silently drop
-    // it, this test would stay green, and the bar would revert to PATH
-    // resolution forever — the precise failure the design exists to prevent.
+    // Non-vacuity FIRST (adversarial review, 2026-07-22): the per-element
+    // presence assert below is what pins the KEY, but the layout-vs-keybind
+    // `assert_eq!` further down is satisfied when both maps are EMPTY. If the
+    // keybind extraction ever silently produced nothing (a refactor, a parser
+    // change), every downstream equality would pass vacuously against an empty
+    // layout side. Assert the keybind set is non-empty before trusting it.
     assert!(
         !kb.is_empty(),
         "config.kdl produced no MessagePlugin keybinds — the extraction is \
@@ -405,13 +405,13 @@ fn keybind_and_layout_plugin_configurations_match() {
     let launch_eager = setup::launch_layout_kdl(BIN_ABS, WASM, Some(&r));
     let launch_empty = setup::launch_layout_kdl(BIN_ABS, WASM, None);
     let one_shot = add::tab_layout(BIN_ABS, WASM, "lbl", "u-1", "/home/o/x");
-    let layout_kdl = setup::layout_kdl(BIN_ABS, WASM);
+    let layout_kdl_text = setup::layout_kdl(BIN_ABS, WASM);
 
     for (what, text) in [
         ("launch.kdl (eager most-recent tab)", &launch_eager),
         ("launch.kdl (empty store, bar-only)", &launch_empty),
         ("add/open one-shot tab layout", &one_shot),
-        ("layout.kdl (generated, not passed to zellij)", &layout_kdl),
+        ("layout.kdl (generated, not passed to zellij)", &layout_kdl_text),
     ] {
         let plugins = layout_plugin_configs(text, what);
         assert!(

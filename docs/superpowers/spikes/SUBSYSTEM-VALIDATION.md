@@ -308,8 +308,13 @@ configuration)` exactly (`zellij-server/src/plugins/wasm_bridge.rs:686-697`);
 round 7 predates #44's config injection, so it ran with none. Today the
 same instances carry `clave_binary=<path>`, so the invocation needs `-c
 clave_binary=clave` (sandbox value; a stable session needs its versioned
-absolute path) or it matches nothing, the reload loop body never runs,
-and the command still **exits 0** — silently validating stale wasm. See
+absolute path). A miss is NOT a silent no-op: the empty-filtered lookup
+returns `Err(PluginDoesNotExist)` (`zellij-server/src/plugins/plugin_map.rs:169-171`),
+`reload_plugin` propagates it (`wasm_bridge.rs:692-693`), and the error
+branch (`zellij-server/src/plugins/mod.rs:446-468`) logs `"Plugin {} not
+found, starting it instead"` and starts a **new** instance — you get a
+second bar pane, the very symptom of #44. If a reload looks like it did
+nothing, grep `zellij.log` for `not found, starting it instead`. See
 `docs/dev/TESTING.md` for the current live SOP.
 
 **Verdict:** **PASS** (2026-07-14, round 7 — TEMP traces removed after)
