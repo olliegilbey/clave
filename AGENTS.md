@@ -54,24 +54,30 @@ a live terminal is the human's — you print the command, you do not run it.
 
 ## Required review before requesting merge
 
-Two lanes, both, every non-trivial change:
+**One lane is required, one is recommended**, every non-trivial change:
 
-1. **The vendored fugu review** — `.claude/commands/fugu-review.md` (blind
-   multi-model dry-run review, consolidated by a verifier). It may not exist on
-   branches cut before that lane landed; if it is absent, say so in the PR and
-   substitute a second independent reviewer.
-2. **At least one independent adversarial reviewer** — a lane that did not write
-   the code. In practice: a fresh agent briefed to attack the change, plus the
-   PR bots (CodeRabbit CLI on the committed branch, Codex).
+1. **REQUIRED — at least one independent adversarial reviewer** — a lane that
+   did not write the code. In practice: a fresh agent briefed to attack the
+   change, plus the PR bots (CodeRabbit CLI on the committed branch, Codex).
+   Subagent-driven development satisfies this with its per-task reviewers plus
+   the whole-branch review, provided those reviewers are genuinely independent
+   of the implementer.
+2. **RECOMMENDED — the vendored fugu review** — `.claude/commands/fugu-review.md`
+   (blind multi-model dry-run review, consolidated by a verifier). Valuable, but
+   token-heavy (four model lanes), so it is a recommendation, not a gate: run it
+   when the change is subtle or the budget allows, and skip it — saying so in the
+   PR — when independent adversarial review has already been thorough. It may not
+   exist on branches cut before that lane landed.
 
 **If you are a cloud or remote agent**, assume the external CLI lanes are
 unavailable: `coderabbit`, `codex` and `gemini` are third-party binaries that a
 container almost never has, and that need interactive auth even when present.
-Do not opt into fugu's `cli_reviewers` there. Run the **model lanes** (they need
-nothing but the repo) and satisfy requirement 2 with an independent adversarial
-reviewer agent. Then say in the PR which lanes actually executed — **a lane that
-did not run is not a lane that passed**, and a dossier listing six lanes of
-which three were silently absent is worse than one honestly listing three.
+Do not opt into fugu's `cli_reviewers` there. If you run fugu at all, run only
+its **model lanes** (they need nothing but the repo); the required adversarial
+reviewer (lane 1) is always available as a fresh in-repo agent. Then say in the
+PR which lanes actually executed — **a lane that did not run is not a lane that
+passed**, and a dossier listing six lanes of which three were silently absent is
+worse than one honestly listing three.
 
 This is not ceremony. On this repo, independent lanes have repeatedly caught
 defects the implementer and a single reviewer both missed:
