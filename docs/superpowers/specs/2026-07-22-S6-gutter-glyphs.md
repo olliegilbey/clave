@@ -1690,6 +1690,7 @@ spec's own authoring pipeline dropped them — so an escape is the only form
 guaranteed to be exactly what was intended.
 
 **(a) Run** in any pane of the terminal you actually use:
+
 ```bash
 printf 'ruler    [x] [x] [x] [x] [x] [x]\n'
 printf 'status   [●] [✖] [○] [◌] [✗] [↻]\n'
@@ -1921,7 +1922,7 @@ the four columns it cost the text hurt; whether the status dot still reads first
 
 | Workstream | Relationship |
 |---|---|
-| **S5** | **hard dependency, must land first.** S6 replaces exactly one S5 function — `gutter_segments`, which S5 ships as a transitional stand-in for this purpose — and does not touch `compose_row`, `render_segments`, `Ink`, `Segment` or `clamp_name` except for §2.9.3 (§2.9.1). Building the seam here would duplicate S5's |
+| **S5** | **hard dependency, must land first.** S6 replaces exactly one S5 function — `gutter_segments`, which S5 ships as a transitional stand-in for this purpose — and does not touch `compose_row`, `render_segments`, `Ink`, `Segment` or `clamp_name` except for §2.9.3 (§2.9.1). Building the render seam here instead would duplicate S5's `compose_row`/`render_segments` work, so S6 lands **second**; if S6 must land first, it introduces the seam and S5 rebases onto it (the same rebase-coupling S4↔S5 has). |
 | **S3** | composes cleanly. S3 changes the dormant glyph expression *above* the `Row` literal; S6 adds fields *inside* it. Same block, trivial conflict, no semantic overlap. S6 strengthens S3's argument (§2.5): dim marks now live in columns 2 and 4, never column 0, and never as circles |
 | **S4** | no file overlap in S6's diff. S4 owns `hook.rs`/`add.rs`/`store.rs`'s record; S6 touches `store.rs` only at `snapshot_from`. The one *contract* S6 hands S4 is the text budget, `cols - 7` (§2.10). §2.4.3's optional marker upgrade would sit in S4's `refresh_label` and is deliberately not taken here |
 | **S7** (context battery) | consumes the reserved cell. See below |

@@ -357,12 +357,21 @@ above shares one `dbg_events` across all three arms, which biases §2.6's
 `CLAVE_DBG_input × 25` extrapolation the moment command/cwd events interleave, and
 lets one noisy signal exhaust the joint 2000-event cap before later probes run —
 invalidating P1–P9. Replace it with **independent per-signal accounting**: three
-counters `dbg_cmd` / `dbg_cwd` / `dbg_input`, each with its own 2000 cap and its
-own `% 25` sample, so `CLAVE_DBG_input=n` is an exact count of `InputReceived`
-and no signal can starve another's budget. The joint total is still bounded (3 ×
-2000 worst case); log each counter separately in the analysis window so §2.6
-reads exact per-signal counts rather than an extrapolation. The arms otherwise
-stay identical — `return false`, no spawn.
+counters `dbg_cmd` / `dbg_cwd` / `dbg_input` for exact per-signal accounting, so
+`CLAVE_DBG_input=n` is an exact count of `InputReceived` and §2.6 reads exact
+counts rather than an extrapolation.
+
+**The hard cap stays global, at 2000 (CodeRabbit, 2026-07-22 — reconciling with
+§2.2).** To keep the per-signal counters from turning §2.2's single 2000-event
+safety envelope into three independent caps (6000 worst case), the **hard stop
+is a global `dbg_total`** — the first arm to push it past 2000 flips every arm
+to a plain `return false` with no logging. The per-signal counters are
+**sub-budgets for accounting only**, not independent safety limits. So the
+envelope §2.2 promises is unchanged (one 2000-event ceiling across all signals),
+and the per-signal counts are still exact up to that ceiling. If the analysis
+needs a full 2000 samples of a *specific* signal, run the spike with the other
+two arms compiled out — stated as the isolation procedure, not a larger cap. The
+arms otherwise stay identical — `return false`, no spawn.
 
 ### 2.4 Build and load into the sandbox
 
@@ -550,22 +559,41 @@ the established pattern (`run_effects`'s `active` gate, `main.rs:88`), **plus**
 a "the pane is in *my* tab" conjunct:
 
 ```text
-touch iff  is_active_instance()
+touch iff  frames_coherent()                         // S0's witness — REQUIRED first
+      AND  is_active_instance()
       AND  model.tab_of_pane(pane_id) == own_tab_id()
 ```
 
-Both conjuncts, not one. Rationale:
+Three conjuncts, and the first is load-bearing. Rationale:
 
+- **`frames_coherent()` gates first (CodeRabbit, 2026-07-22).** `tab_of_pane`
+  and `own_tab_id` are both **positional joins** — the RC-A defect. Under an
+  incoherent frame (a create/close renumbering in flight, or S0 Residual 2's
+  coherent-but-permuted set) both conjuncts below can pass while the pane
+  actually belongs to a *different* tab, so a touch could stamp the wrong tab's
+  ordinal. Requiring S0's `frames_coherent()` witness first removes the
+  renumbering-in-progress window; the residual coherent-but-permuted case is
+  S0 Residual 2's, inherited here — and it is far weaker on this path than on
+  the bind path (below).
 - The active-instance gate alone is the RC-A-indicted gate — a stale
   `plugin_panes` frame lets a non-active instance believe it is active
   (`dossier RC-A`, `SUBSYSTEM-VALIDATION.md:656-659`).
-- Adding "the pane resolves to *my own* tab" makes a mis-election **harmless**:
-  a wrongly-elected instance resolves the pane to a tab that is not the one it
-  thinks it owns, the equality fails, and it emits nothing. Compare `Effect::Bind`,
-  where a mis-election actively **evicts** the rightful tenant
-  (`store.rs:239-245`). This path degrades to silence, not corruption.
+- Adding "the pane resolves to *my own* tab" makes a surviving mis-election
+  **low-harm, not harmless**: worst case is a touch on the wrong tab, which only
+  *reorders* a row and is corrected by the next legitimate touch — because
+  `apply_touch` is an idempotent max-merge that **never evicts**. Compare
+  `Effect::Bind`, where a mis-election actively evicts the rightful tenant
+  (`store.rs:239-245`) and is sticky. This path degrades to a transient,
+  self-correcting reorder, not corruption. (The earlier draft called it
+  "harmless"; with the positional join that overclaimed — it is bounded and
+  transient, which is the honest statement.)
 - The restriction costs nothing real: a user-started command happens in the
-  focused pane, which is in the active tab, by definition.
+  focused pane, which is in the active tab, by definition, and a coherent frame
+  is the steady state the user is typing in.
+
+**Dependency on S0, stated:** this election reuses S0's `frames_coherent()`, so
+S2's terminal-touch path **must land after S0** (or carry a local copy of the
+witness if it lands first, flagged for de-duplication when S0 merges).
 
 ### 4.2 The gate, as a pure model function
 

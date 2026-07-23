@@ -1144,15 +1144,22 @@ pub fn fit_label_str(name: &str, budget: usize) -> String;
 The whole implementation:
 
 ```text
+if budget == 0 { return "" }               // explicit zero branch — see below
 segments = name.split(LABEL_SEP)
 while segments.len() > 2 && join(segments).chars().count() > budget:
     segments.pop()
-tail_truncate(join(segments), budget)      // today's logic, verbatim
+tail_truncate(join(segments), budget)
 ```
 
-`tail_truncate` is the existing `main.rs:547-553` body moved in unchanged:
-`.chars().take(budget - 1)` plus `…`, char-boundary safe, and a `budget` of 0
-yields `""`.
+**The `budget == 0` branch is explicit, not incidental (CodeRabbit 2026-07-22).**
+The old `main.rs:547-553` body is `.chars().take(budget - 1)`; with `budget: usize`
+and `budget == 0`, `budget - 1` **underflows to `usize::MAX`**, so `take` returns
+the *whole* string — the opposite of the `""` the contract requires. The guarded
+form returns `""` for budget 0, and for `budget ≥ 1` uses
+`.chars().take(budget.saturating_sub(1))` + `…` (char-boundary safe), giving
+budget 1 → `"…"` and budget ≥ 2 → `budget-1` content chars + `…`. This is the one
+budget-zero contract; S5's `clamp_name` and S6's collapsed geometry match it
+(S6 §2.8's `const_assert` is `<=` so budget 0 is a valid collapsed outcome).
 
 **Budget-zero rendering contract — one rule, applied by every workstream
 (CodeRabbit 2026-07-22).** To stop S4's `fit_label_str` and S5's `clamp_name` /

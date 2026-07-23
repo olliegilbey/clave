@@ -397,6 +397,23 @@ one-frame focus flicker after closing the lowest-numbered tab is expected; a
 switch that lands on and *stays* on the wrong tab is an S3 failure, not a
 residual. The gate is a mitigation of the class, not a proof it is closed.
 
+**S3 completion gate (CodeRabbit, 2026-07-22).** Because positional switching
+leaves the close→create mis-target reachable, S3 is **not marked complete on the
+positional path alone**. Completion requires *one* of:
+
+1. **`SwitchTabToId` is proven live in step 7's sandbox and adopted** — the
+   preferred outcome; the position field is then deleted and the class is closed
+   outright; **or**
+2. **`SwitchTabToId` proves unavailable** (silent no-op against the unvendored
+   server half), in which case the close→create mis-target is carried as an
+   **explicit, maintainer-signed residual** in both S0's and S3's live stop
+   conditions — not silently shipped.
+
+Positional execution is never a *completed* state by itself; it is the interim
+that one of those two outcomes must resolve. This makes id-addressed switching a
+gate, while honestly acknowledging it cannot be an unconditional one until the
+live spike proves the host call works.
+
 **Rejected alternatives.**
 
 | Option | Failure mode |

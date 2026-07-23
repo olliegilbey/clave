@@ -557,24 +557,34 @@ Split so that two agents in two worktrees do not edit the same seam.
 | **S1** | Prompt→top ordering semantics | RC-C | `model.rs:391-393,728-793`; `store.rs`; `hook.rs` | S0 |
 | **S2** | Terminal-tab interaction signal | RC-D | spike first; then `main.rs` subscribe + `store.rs` | spike |
 | **S3** | Tab-close correctness | RC-E | `model.rs:593-715`; `store.rs:278-298` | S0, S1 |
-| **S4** | Label: Claude rename + live cwd | RC-F | `hook.rs`; `add.rs`; `clave-types` | — |
-| **S5** | Per-repo + per-title colour | RC-G | `main.rs:525-560`; `model.rs` `Row`/`rows()`; `store.rs` (ink allocation) | — (see note) |
-| **S6** | Three-cell gutter (status · battery slot · worktree) | — (row identity) | `model.rs` `compose_row`/`gutter_segments`; `store.rs` snapshot | — |
+| **S2** | Terminal-tab interaction signal | RC-D | spike first; then `main.rs`, `store.rs` | **S0** (impl reuses `frames_coherent`; spike is independent) |
+| **S4** | Label: Claude rename + live cwd | RC-F | `hook.rs`; `add.rs`; `clave-types` | — (rebase-coupled with S5) |
+| **S5** | Per-repo + per-title colour | RC-G | `main.rs:525-560`; `model.rs` `Row`/`rows()`; `store.rs` (ink allocation) | — (rebase-coupled with S4) |
+| **S6** | Three-cell gutter (status · battery slot · worktree) | — (row identity) | `model.rs` `compose_row`/`gutter_segments`; `store.rs` snapshot | **S5** (builds on its render seam) |
 | **S7** | Context battery (deferred, unspecced) | #24 item 4 | fills S6's reserved cell | S6 |
-| **S8** | Sidebar width 30→38 | — (#24 item 6) | `model.rs` seek consts; `clave-types`; `setup.rs` KDL | — |
+| **S8** | Sidebar width 30→38 | — (#24 item 6) | `model.rs` seek consts; `clave-types`; `setup.rs` KDL | — (numerically coupled to S6's gutter width) |
 
 **S0 first, alone.** It fixes the sticky mis-bind behind both the worst
 ordering symptom and the worst close symptom, and S1/S3 build on its seam.
 
-**S2, S4, S5, S6, S8 are parallelisable with each other and with S0** — different
-files. S5 keys colour on `Agent.repo_root` (already in the snapshot, already
-unread), so it does not depend on S4's label composition; both touch row
-identity, so whichever lands second rebases. S6 (gutter) and S8 (width) both
-parameterise the text budget rather than hardcoding it, so they compose with S4/S5
-regardless of landing order.
+**The dependency graph, stated precisely** (CodeRabbit 2026-07-22 — the earlier
+"all parallel with S0" claim was wrong and is corrected here):
 
-**S1 and S3 are not parallel with each other** — both edit `model.rs`
-ordering/`apply_tabs`. Run them in sequence after S0: S0 → S1 → S3.
+- **Hard, sequential:** `S0 → S1 → S3` (all edit `model.rs` ordering/`apply_tabs`);
+  `S5 → S6` (S6 replaces S5's transitional `gutter_segments`, per S6 §6);
+  `S0 → S2`-impl (the terminal-touch election reuses S0's `frames_coherent`
+  witness — S2's *spike* is independent and can run any time, but the
+  implementation lands after S0 or carries a local copy of the witness).
+- **Rebase-coupled, not design-dependent:** `S4 ↔ S5` (both touch row identity;
+  whichever lands second resolves textual conflicts, neither spec changes).
+- **Numerically coupled:** `S8 ↔ S6` (S8's text-budget numbers use S6's 6-column
+  gutter; a code change in one does not force one in the other, but the numbers
+  must agree — budget `= cols − 7`).
+
+**Genuinely parallel from the start (with S0):** the **S2 spike**, **S4**, **S5**,
+and **S8**. **S6 waits for S5.** **S2's implementation waits for S0.** So a
+first wave of worktrees is `{S0, S4, S5, S8, S2-spike}`; S6 opens once S5's seam
+lands; S1 then S3 follow S0; S2-impl follows S0.
 
 ## Rules for every workstream
 
