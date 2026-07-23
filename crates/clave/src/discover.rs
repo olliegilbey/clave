@@ -16,6 +16,7 @@ use serde::Serialize;
 pub enum ToolId {
     Zellij,
     Claude,
+    ClaudeCodex,
     Git,
     Fzf,
     Zoxide,
@@ -26,6 +27,7 @@ impl ToolId {
         match self {
             ToolId::Zellij => "zellij",
             ToolId::Claude => "claude",
+            ToolId::ClaudeCodex => "claude-codex",
             ToolId::Git => "git",
             ToolId::Fzf => "fzf",
             ToolId::Zoxide => "zoxide",
@@ -38,6 +40,7 @@ impl ToolId {
         match self {
             ToolId::Zellij => "CLAVE_ZELLIJ_BIN",
             ToolId::Claude => "CLAVE_CLAUDE_BIN",
+            ToolId::ClaudeCodex => "CLAVE_CLAUDE_CODEX_BIN",
             ToolId::Git => "CLAVE_GIT_BIN",
             ToolId::Fzf => "CLAVE_FZF_BIN",
             ToolId::Zoxide => "CLAVE_ZOXIDE_BIN",
@@ -119,7 +122,7 @@ pub fn candidate_dirs(tool: ToolId, home: &Path, nvm_versions: &[String]) -> Vec
             dirs.push(home.join(".bun/bin"));
         }
         ToolId::Fzf => dirs.push(home.join(".fzf/bin")), // fzf's git-install
-        ToolId::Zellij | ToolId::Git | ToolId::Zoxide => {}
+        ToolId::ClaudeCodex | ToolId::Zellij | ToolId::Git | ToolId::Zoxide => {}
     }
     dirs
 }
@@ -246,6 +249,28 @@ mod tests {
         assert_eq!(ToolId::Fzf.override_var(), "CLAVE_FZF_BIN");
         assert_eq!(ToolId::Zoxide.override_var(), "CLAVE_ZOXIDE_BIN");
         assert_eq!(ToolId::Git.override_var(), "CLAVE_GIT_BIN");
+    }
+
+    #[test]
+    fn claude_codex_discovery_uses_shared_locations_only() {
+        assert_eq!(ToolId::ClaudeCodex.bin_name(), "claude-codex");
+        assert_eq!(ToolId::ClaudeCodex.override_var(), "CLAVE_CLAUDE_CODEX_BIN");
+
+        let home = std::path::Path::new("/home/test");
+        let dirs = candidate_dirs(ToolId::ClaudeCodex, home, &["v22.1.0".into()]);
+        assert_eq!(
+            dirs,
+            vec![
+                home.join(".local/bin"),
+                std::path::PathBuf::from("/opt/homebrew/bin"),
+                std::path::PathBuf::from("/usr/local/bin"),
+                home.join(".cargo/bin"),
+            ]
+        );
+        assert!(!dirs.iter().any(|p| p.starts_with(home.join(".nvm"))));
+        assert!(!dirs.contains(&home.join(".claude/local")));
+        assert!(!dirs.contains(&home.join(".volta/bin")));
+        assert!(!dirs.contains(&home.join(".bun/bin")));
     }
 
     #[test]

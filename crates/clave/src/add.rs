@@ -87,6 +87,40 @@ pub fn sanitize_label(s: &str) -> String {
         .join(" ")
 }
 
+/// Format the immutable `clave spawn` argument snapshot shared by every KDL
+/// shape. `run_add` creates the tab before its locked store write, so the
+/// requested profile must be baked here and copied into the row afterwards;
+/// rediscovery at either side of that add/store race could make resume replay a
+/// different command than the pane already launched.
+fn spawn_args_kdl(uuid: &str, label: &str, cwd: &str, claude_codex: bool) -> String {
+    let mut args = format!(r#"args "spawn" "{uuid}" "--name" "{label}" "--cwd" "{cwd}""#);
+    if claude_codex {
+        args.push_str(r#" "--claude-codex""#);
+    }
+    args
+}
+
+/// Preflight the optional `claude-codex` wrapper before a `--codex` launch,
+/// with the SAME hold-open-on-TTY treatment as run_add's base tool preflight
+/// (add.rs base preflight). `clave add --codex` is a manual CLI flag that a
+/// user may run inside a `close_on_exit` floating pane; a bare `?` there would
+/// flash-and-vanish the missing-wrapper guidance before it can be read (fugu
+/// review, 2026-07-23). Both run_add arms call this so the two paths cannot
+/// drift. The hold-open is a TTY side-effect — tier-3, not unit-covered — and
+/// intentionally mirrors the untested base-preflight idiom above it.
+fn preflight_codex_wrapper() -> Result<()> {
+    if let Err(e) = crate::doctor::preflight(
+        &[crate::discover::ToolId::ClaudeCodex],
+        "clave add --codex can't launch — missing wrapper:",
+    ) {
+        eprintln!("{e}");
+        eprintln!("You can install it from another tab without leaving the session.");
+        hold_open_if_tty();
+        anyhow::bail!("missing claude-codex wrapper for `clave add --codex`");
+    }
+    Ok(())
+}
+
 /// The agent-tab KDL node WITH its own bar pane — for one-shot
 /// `zellij action new-tab --layout` files ONLY, which do NOT pass through
 /// the session's default_tab_template. A layout that HAS the template must
@@ -94,7 +128,17 @@ pub fn sanitize_label(s: &str) -> String {
 /// template too, so a bar-carrying node there renders a DOUBLE bar (live
 /// finding, c8-cold-start 2026-07-18 — the eager tab loaded two plugin
 /// instances in the same second and broke executor election).
-pub fn tab_node(binary: &str, wasm: &str, label: &str, uuid: &str, cwd: &str) -> String {
+///
+/// `claude_codex` is baked into the spawn args via `spawn_args_kdl` — the
+/// launch profile is an immutable KDL snapshot, not re-read from the store.
+pub fn tab_node(
+    binary: &str,
+    wasm: &str,
+    label: &str,
+    uuid: &str,
+    cwd: &str,
+    claude_codex: bool,
+) -> String {
     // split_direction="vertical" is REQUIRED for a LEFT bar: zellij stacks
     // sibling panes horizontally (rows) by default (Task 9 C1 finding; same
     // wrapper as setup::layout_kdl and the S2 spike layout). size="15%" not
@@ -102,6 +146,7 @@ pub fn tab_node(binary: &str, wasm: &str, label: &str, uuid: &str, cwd: &str) ->
     // `command` bakes the environment's clave (§2 binary split): the
     // versioned copy's absolute path in a stable session, bare `clave` in
     // dev/sandbox — so the resurrected pane re-execs the SAME binary.
+    let spawn_args = spawn_args_kdl(uuid, label, cwd, claude_codex);
     format!(
         r#"    tab name="{label}" focus=true {{
         pane split_direction="vertical" {{
@@ -109,7 +154,7 @@ pub fn tab_node(binary: &str, wasm: &str, label: &str, uuid: &str, cwd: &str) ->
                 plugin location="file:{wasm}"
             }}
             pane cwd="{cwd}" command="{binary}" {{
-                args "spawn" "{uuid}" "--name" "{label}" "--cwd" "{cwd}"
+                {spawn_args}
             }}
         }}
     }}
@@ -121,12 +166,22 @@ pub fn tab_node(binary: &str, wasm: &str, label: &str, uuid: &str, cwd: &str) ->
 /// default_tab_template (the §6.8 launch layout): the template supplies
 /// the bar + vertical split, and this node's pane fills its `children`
 /// slot. Same baked idempotent spawn — only the bar pane differs.
-pub fn tab_node_bare(binary: &str, label: &str, uuid: &str, cwd: &str) -> String {
+///
+/// `claude_codex` is baked into the spawn args via `spawn_args_kdl`, exactly
+/// as in `tab_node` — the two builders must agree on the launch profile.
+pub fn tab_node_bare(
+    binary: &str,
+    label: &str,
+    uuid: &str,
+    cwd: &str,
+    claude_codex: bool,
+) -> String {
     // `command` bakes the environment's clave — see tab_node.
+    let spawn_args = spawn_args_kdl(uuid, label, cwd, claude_codex);
     format!(
         r#"    tab name="{label}" focus=true {{
         pane cwd="{cwd}" command="{binary}" {{
-            args "spawn" "{uuid}" "--name" "{label}" "--cwd" "{cwd}"
+            {spawn_args}
         }}
     }}
 "#
@@ -157,10 +212,17 @@ pub fn validate_cwd(cwd: &str) -> Result<()> {
 /// `zellij action new-tab --layout`, then deleted. Baking the command in
 /// makes tab creation IDEMPOTENT — resurrection is clave's job, not
 /// zellij's (§6.8, C8 redesign 2026-07-17).
-pub fn tab_layout(binary: &str, wasm: &str, label: &str, uuid: &str, cwd: &str) -> String {
+pub fn tab_layout(
+    binary: &str,
+    wasm: &str,
+    label: &str,
+    uuid: &str,
+    cwd: &str,
+    claude_codex: bool,
+) -> String {
     format!(
         "layout {{\n{}}}\n",
-        tab_node(binary, wasm, label, uuid, cwd)
+        tab_node(binary, wasm, label, uuid, cwd, claude_codex)
     )
 }
 
@@ -335,14 +397,19 @@ pub fn resume_candidates(
 /// CREATE a fresh session (hard `--session-id` collision risk) instead of
 /// resuming. The row also carries earned state (label/label_source from
 /// hook.rs, last_visited/last_interacted) that a re-add has no business
-/// resetting. Re-adding a resumed agent only means "it is on screen again" —
-/// so status resets to Idle and EVERYTHING else is preserved.
+/// resetting. Re-adding a resumed agent means "it is on screen again under
+/// this requested launch profile" — status/bind reset, the requested profile
+/// follows the already-baked KDL, and every historical field is preserved.
 ///
 /// No existing row (a jsonl-only candidate — discovered on disk, never
 /// tracked): no better info exists, store the fresh record as-is.
 pub fn merge_resume_record(existing: Option<&AgentRecord>, fresh: AgentRecord) -> AgentRecord {
     match existing {
         Some(row) => AgentRecord {
+            // The tab was already created from `fresh` before this locked write;
+            // copy only that requested launch choice so the persisted replay
+            // matches the immutable KDL despite the add/store race.
+            claude_codex: fresh.claude_codex,
             status: clave_types::Status::Idle,
             // The resume opens a brand-new tab: the old bind is stale by
             // definition. The new tab's bar re-binds on join (§6.6 B).
@@ -454,7 +521,7 @@ pub fn record_branch(resumed: bool, cand_branch: Option<&str>, picked_branch: &s
     }
 }
 
-pub fn run_add(worktree: bool) -> Result<()> {
+pub fn run_add(worktree: bool, claude_codex: bool) -> Result<()> {
     // Preflight (spec §Preflight): the fzf weave, git/claude, and zellij
     // itself are all needed before any tab exists — abort BEFORE creating
     // anything. Zellij included (coderabbit CLI, 2026-07-22): run_add execs
@@ -628,6 +695,9 @@ pub fn run_add(worktree: bool) -> Result<()> {
                 .status();
             return Ok(());
         }
+        if claude_codex {
+            preflight_codex_wrapper()?;
+        }
         // Carry the picked candidate's OWN cwd/branch (2026-07-21): a
         // jsonl-only worktree session must resume in its worktree dir, not the
         // picked repo dir, or `claude --resume` fails "No conversation found".
@@ -640,6 +710,9 @@ pub fn run_add(worktree: bool) -> Result<()> {
         let existing = store.agents.get(&uuid).cloned();
         (uuid, None, existing, cand_cwd, cand_branch, Some(main_root))
     } else {
+        if claude_codex {
+            preflight_codex_wrapper()?;
+        }
         let uuid = uuid::Uuid::new_v4().to_string();
         // Worktree opt-in (§6.3): clave shells out itself (never claude -w)
         // so it OWNS the path — needed for the munged jsonl existence check
@@ -716,7 +789,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
     validate_cwd(&agent_cwd)?;
     let wasm = wasm_path()?.to_str().context("wasm path")?.to_string();
     let binary = crate::release::runtime_binary();
-    let layout = tab_layout(&binary, &wasm, &label, &uuid, &agent_cwd);
+    let layout = tab_layout(&binary, &wasm, &label, &uuid, &agent_cwd, claude_codex);
     let tmp = std::env::temp_dir().join(format!("clave-{uuid}.kdl"));
     std::fs::write(&tmp, layout)?;
     let status = Command::new(&zellij) // discovered above (Fix 2)
@@ -749,6 +822,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
             last_visited: 0,
             worktree: worktree_path.clone(),
             label_source: LabelSource::FirstPrompt,
+            claude_codex,
             tab_id: None,
             stale: false,
         };
@@ -781,6 +855,7 @@ mod tests {
             last_visited: 0,
             worktree: None,
             label_source: LabelSource::FirstPrompt,
+            claude_codex: false,
             tab_id: None,
             stale: false,
         }
@@ -850,7 +925,14 @@ mod tests {
 
     #[test]
     fn tab_layout_bakes_the_idempotent_spawn() {
-        let kdl = tab_layout("clave", "/data/clave-bar.wasm", "x · main", "u-1", "/x");
+        let kdl = tab_layout(
+            "clave",
+            "/data/clave-bar.wasm",
+            "x · main",
+            "u-1",
+            "/x",
+            false,
+        );
         // The bar pane, the baked spawn (idempotent resurrection, §6.3/S4),
         // and the cwd all present:
         assert!(kdl.contains("location=\"file:/data/clave-bar.wasm\""));
@@ -862,9 +944,21 @@ mod tests {
         // §2 binary split: the pane command is the passed binary. A stable
         // session bakes the versioned copy's absolute path instead of bare.
         assert!(kdl.contains("command=\"clave\""));
-        let abs = tab_layout("/data/clave/bin/clave-v0.1.0", "/w", "l", "u", "/x");
+        let abs = tab_layout("/data/clave/bin/clave-v0.1.0", "/w", "l", "u", "/x", false);
         assert!(abs.contains("command=\"/data/clave/bin/clave-v0.1.0\""));
         assert!(!abs.contains("command=\"clave\""));
+    }
+
+    #[test]
+    fn tab_layout_codex_diff_is_only_spawn_flag() {
+        // The launch profile is an immutable snapshot baked before the store
+        // write. Keep the KDL delta to one token so Task 3 cannot accidentally
+        // perturb the proven C8 layout while closing the add/store race.
+        let plain = tab_layout("/bin/clave", "/bar.wasm", "label", "u", "/repo", false);
+        let codex = tab_layout("/bin/clave", "/bar.wasm", "label", "u", "/repo", true);
+
+        assert!(codex.contains(r#""--claude-codex""#));
+        assert_eq!(codex.replace(r#" "--claude-codex""#, ""), plain);
     }
 
     #[test]
@@ -889,33 +983,50 @@ mod tests {
     #[test]
     fn merge_resume_preserves_existing_row_and_resets_status() {
         // The resume-clobber defect (plan-review fix): an existing WORKTREE
-        // row must survive a resume untouched except status → Idle. Blindly
-        // storing the fresh record would relocate the agent to the picked
-        // dir, so spawn's munged jsonl check would miss the worktree-keyed
-        // transcript and CREATE a colliding session instead of resuming.
-        let mut row = rec("u-wt");
-        row.cwd = "/repo/.claude-worktrees/abc12345".into();
-        row.worktree = Some("/repo/.claude-worktrees/abc12345".into());
-        row.repo_root = "/repo".into();
-        row.branch = "clave/abc12345".into();
-        row.label = "abc12345 · clave/abc12345 · fix auth".into();
-        row.label_source = LabelSource::Summary;
-        row.status = Status::Working; // stale — the pane is gone
-        row.last_interacted = 77;
-        row.last_visited = 42;
-        row.tab_id = Some(3); // the DEAD tab that hosted it last time
-        let fresh = rec("u-wt"); // what the weave derives from the PICKED dir
-        let merged = merge_resume_record(Some(&row), fresh.clone());
+        // row must survive a resume untouched except status/bind and the newly
+        // requested launch profile. The latter must come from `fresh`: the tab
+        // is created before the locked store write, so preserving the old bit
+        // would make the row disagree with the immutable command already baked.
+        let mut existing = rec("u-wt");
+        existing.cwd = "/repo/.claude-worktrees/abc12345".into();
+        existing.worktree = Some("/repo/.claude-worktrees/abc12345".into());
+        existing.repo_root = "/repo".into();
+        existing.branch = "clave/abc12345".into();
+        existing.label = "abc12345 · clave/abc12345 · fix auth".into();
+        existing.label_source = LabelSource::Summary;
+        existing.status = Status::Working; // stale — the pane is gone
+        existing.last_interacted = 77;
+        existing.last_visited = 42;
+        existing.tab_id = Some(3); // the DEAD tab that hosted it last time
+        existing.stale = true;
+        existing.claude_codex = false;
+        let mut fresh = rec("u-wt"); // what the weave derives from the PICKED dir
+        fresh.claude_codex = true;
+        let merged = merge_resume_record(Some(&existing), fresh.clone());
+        assert!(merged.claude_codex);
         assert_eq!(merged.status, Status::Idle);
         // The resumed agent lands in a brand-new tab: the old bind is stale
         // by definition — reset, the new tab's bar re-binds on join (§6.6 B).
         assert_eq!(merged.tab_id, None);
-        assert_eq!(merged.cwd, row.cwd); // worktree cwd NOT relocated
-        assert_eq!(merged.worktree, row.worktree);
-        assert_eq!(merged.label, row.label); // earned label survives
-        assert_eq!(merged.label_source, LabelSource::Summary);
-        assert_eq!(merged.last_interacted, 77);
-        assert_eq!(merged.last_visited, 42);
+        assert_eq!(merged.label, existing.label);
+        assert_eq!(merged.cwd, existing.cwd); // worktree cwd NOT relocated
+        assert_eq!(merged.repo_root, existing.repo_root);
+        assert_eq!(merged.branch, existing.branch);
+        assert_eq!(merged.worktree, existing.worktree);
+        assert_eq!(merged.last_interacted, existing.last_interacted);
+        assert_eq!(merged.last_visited, existing.last_visited);
+        assert_eq!(merged.label_source, existing.label_source);
+        assert_eq!(merged.stale, existing.stale);
+
+        let mut previous_codex = existing.clone();
+        previous_codex.claude_codex = true;
+        let mut requested_plain = fresh.clone();
+        requested_plain.claude_codex = false;
+        let switched_plain = merge_resume_record(Some(&previous_codex), requested_plain);
+        assert!(!switched_plain.claude_codex);
+        assert_eq!(switched_plain.cwd, previous_codex.cwd);
+        assert_eq!(switched_plain.worktree, previous_codex.worktree);
+
         // No store row (jsonl-only candidate): no better info exists — the
         // fresh record is stored as-is.
         assert_eq!(merge_resume_record(None, fresh.clone()), fresh);
@@ -1119,7 +1230,14 @@ garbage that should be ignored
         }];
         let c = resume_candidates(&Store::default(), "/repo", &dirs, &[]);
         let picked = &c[0];
-        let kdl = tab_layout("clave", "/w.wasm", &picked.label, &picked.uuid, &picked.cwd);
+        let kdl = tab_layout(
+            "clave",
+            "/w.wasm",
+            &picked.label,
+            &picked.uuid,
+            &picked.cwd,
+            false,
+        );
         assert!(kdl.contains("cwd=\"/repo/.claude/worktrees/wt\""));
         assert!(!kdl.contains("cwd=\"/repo\"")); // NOT the picker/root dir
         assert!(kdl.contains("\"--cwd\" \"/repo/.claude/worktrees/wt\""));

@@ -99,6 +99,15 @@ pub fn run_open(uuid: &str) -> Result<()> {
             Ok(())
         }
         OpenDecision::Open => {
+            if row.claude_codex {
+                crate::doctor::preflight(
+                    &[
+                        crate::discover::ToolId::Claude,
+                        crate::discover::ToolId::ClaudeCodex,
+                    ],
+                    "clave open can't launch this Codex-profile agent:",
+                )?;
+            }
             // Guard the stored cwd before baking it into KDL (see
             // add::validate_cwd) — a `"`/control char breaks the layout.
             crate::add::validate_cwd(&row.cwd)?;
@@ -111,6 +120,7 @@ pub fn run_open(uuid: &str) -> Result<()> {
                 &label,
                 uuid,
                 &row.cwd,
+                row.claude_codex,
             );
             let tmp = std::env::temp_dir().join(format!("clave-open-{uuid}.kdl"));
             std::fs::write(&tmp, layout)?;
@@ -153,6 +163,7 @@ mod tests {
             last_visited: 0,
             worktree: None,
             label_source: LabelSource::FirstPrompt,
+            claude_codex: false,
             tab_id: None,
             stale: false,
         }

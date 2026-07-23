@@ -203,6 +203,7 @@ pub fn launch_layout_kdl(
             &crate::add::sanitize_label(&r.label),
             &r.uuid,
             &r.cwd,
+            r.claude_codex,
         ),
         None => "    tab name=\"clave\" focus=true\n".to_string(),
     };
@@ -645,7 +646,19 @@ pub fn launch_session() -> Result<()> {
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default();
     let live = session_is_live(&list, &session);
+    let store = crate::store::read_store(&crate::store::store_paths()?)?;
+    let eager = eager_row(&store).cloned();
+
     if !live {
+        if let Some(row) = eager.as_ref() {
+            crate::add::validate_cwd(&row.cwd)?;
+            if row.claude_codex {
+                crate::doctor::preflight(
+                    &[crate::discover::ToolId::ClaudeCodex],
+                    "clave can't restore the eager Codex-profile agent:",
+                )?;
+            }
+        }
         // §6.6 hygiene: tab_ids are SESSION-scoped — drop the previous
         // session's timeline + binds before a CREATE.
         crate::store::clear_tab_timeline(&crate::store::store_paths()?)?;
@@ -677,20 +690,13 @@ pub fn launch_session() -> Result<()> {
     }
     // Compose the launch layout from the store (eager most-recent, §6.8).
     // Harmless when live (attach ignores --layout for an existing session).
-    let store = crate::store::read_store(&crate::store::store_paths()?)?;
-    let most_recent = eager_row(&store);
-    // Guard the eager row's cwd before it's baked into the launch layout
-    // (add::validate_cwd) — a `"`/control char would emit malformed KDL and
-    // the whole session would fail to create.
-    if let Some(r) = most_recent {
-        crate::add::validate_cwd(&r.cwd)?;
-    }
     let wasm = wasm_path()?;
     // Bake the environment's clave into the eager tab's spawn: the versioned
     // copy's absolute path in a stable session (immune to a newer PATH
     // `clave`), bare `clave` in the dev/sandbox one (§2 binary split).
     let binary = crate::release::runtime_binary();
-    let layout_text = launch_layout_kdl(&binary, wasm.to_str().context("wasm path")?, most_recent);
+    let layout_text =
+        launch_layout_kdl(&binary, wasm.to_str().context("wasm path")?, eager.as_ref());
     // STABLE path in the data dir, not a pid-suffixed temp file: the exec()
     // below never returns, so nothing here can clean up — a unique-per-launch
     // file would leak one KDL forever. Overwrite the one file each launch.
@@ -700,7 +706,7 @@ pub fn launch_session() -> Result<()> {
         "launch",
         &format!(
             "session={session} live={live} eager={:?}",
-            most_recent.map(|r| r.uuid.as_str())
+            eager.as_ref().map(|r| r.uuid.as_str())
         ),
     );
     use std::os::unix::process::CommandExt;
@@ -746,7 +752,7 @@ mod tests {
         for kdl in [
             layout_kdl("/w.wasm"),
             launch_layout_kdl("clave", "/w.wasm", None),
-            crate::add::tab_layout("clave", "/w.wasm", "l", "u", "/c"),
+            crate::add::tab_layout("clave", "/w.wasm", "l", "u", "/c", false),
         ] {
             assert!(
                 kdl.contains("size=\"15%\""),
@@ -800,6 +806,7 @@ mod tests {
             last_visited: 0,
             worktree: Some("/repo/.claude-worktrees/ab".into()),
             label_source: crate::store::LabelSource::FirstPrompt,
+            claude_codex: false,
             tab_id: None,
             stale: false,
         };
@@ -815,6 +822,32 @@ mod tests {
         // BARE.
         assert_eq!(kdl.matches("plugin location").count(), 1);
         r.label = "x".into(); // silence unused-mut if needed
+    }
+
+    #[test]
+    fn launch_layout_eager_derives_claude_codex_from_row() {
+        // Cold resurrection must replay the stored immutable launch choice,
+        // not rediscover or infer it after C8 has selected the eager row.
+        let row = crate::store::AgentRecord {
+            uuid: "u-codex".into(),
+            cwd: "/repo/.claude-worktrees/codex".into(),
+            repo_root: "/repo".into(),
+            branch: "codex".into(),
+            label: "repo · codex".into(),
+            status: clave_types::Status::Idle,
+            last_interacted: 100,
+            last_visited: 0,
+            worktree: Some("/repo/.claude-worktrees/codex".into()),
+            label_source: crate::store::LabelSource::FirstPrompt,
+            claude_codex: true,
+            tab_id: None,
+            stale: false,
+        };
+
+        let layout = launch_layout_kdl("/bin/clave", "/bar.wasm", Some(&row));
+        assert!(layout.contains(r#"args "spawn" "u-codex""#));
+        assert!(layout.contains(r#""--claude-codex""#));
+        assert!(layout.contains(r#"cwd="/repo/.claude-worktrees/codex""#));
     }
 
     #[test]
@@ -836,6 +869,7 @@ mod tests {
             last_visited: 0,
             worktree: None,
             label_source: LabelSource::FirstPrompt,
+            claude_codex: false,
             tab_id: None,
             stale: false,
         };
@@ -997,6 +1031,7 @@ mod tests {
             last_visited: 0,
             worktree: None,
             label_source: crate::store::LabelSource::FirstPrompt,
+            claude_codex: false,
             tab_id: None,
             stale: false,
         };
@@ -1263,6 +1298,7 @@ mod tests {
             last_visited: 0,
             worktree: None,
             label_source: crate::store::LabelSource::FirstPrompt,
+            claude_codex: false,
             tab_id: None,
             stale: false,
         };
