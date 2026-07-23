@@ -46,7 +46,7 @@ spec touches their code it says so and quotes the post-S0/S1 form.
 The prune is a double-forked fire-and-forget subprocess; the store accepts it
 whenever it wins the flock. The dossier's trace (`ux-defect-dossier.md:332-341`):
 
-```
+```text
 t0  close highest-id tab 11 → bar emits PruneTabs{[11]}
 t2  `clave prune-tabs 11` SPAWNED (fire-and-forget)
 t3  before it takes the flock: a new tab is created → gets recycled id 11
@@ -98,7 +98,7 @@ drops the tab"* (`:189`).
 
 Both guards are keyed on the tab **id**, and zellij recycles ids. So:
 
-```
+```text
 tabs 10, 11 (11 is the highest id).  Alt+w closes 11.  Alt+t creates a tab.
 zellij mints id 11 again.  The surviving bar already has 11 in birth_touched.
 needs_birth_touch(11) → insert returns false → NO `clave touch`.
@@ -382,6 +382,21 @@ The risk is asymmetric: the defect is a millisecond-wide mis-target; a
   the model, the tests and the effect payload are unchanged — the decision costs
   one adapter line.
 
+**Positional execution is the interim, not an accepted fallback (CodeRabbit,
+2026-07-22).** The coherence gate closes the *renumbering-in-progress* window
+(frames of different sizes), but it does **not** close the coherent-but-stale
+case S0 Residual 2 documents — close the lowest tab and create one, and both
+frames agree on a position set that no longer means what the emitter thinks. In
+that window `switch_tab_to(position + 1)` still targets the wrong tab. Therefore
+**id-addressed switching is the required end state, and positional is explicitly
+the interim** pending step 7's sandbox decision — it is presented as a fallback
+only because `SwitchTabToId` traverses the unvendored server half and a silent
+no-op is total nav death, so it must be proven live before it can ship. Until it
+does, this spec inherits S0 Residual 2's live stop condition verbatim: a
+one-frame focus flicker after closing the lowest-numbered tab is expected; a
+switch that lands on and *stays* on the wrong tab is an S3 failure, not a
+residual. The gate is a mitigation of the class, not a proof it is closed.
+
 **Rejected alternatives.**
 
 | Option | Failure mode |
@@ -566,6 +581,14 @@ arm gains the debt, and a retry block follows it:
         // until a click (documented trade, model.rs:620-624). The debt
         // survives that mutation; the retries are Confirmed-gated in
         // run_effects, and ANY incoming beacon clears them (visited()).
+        //
+        // CRITICAL (CodeRabbit 2026-07-22): `tries` is NOT incremented here.
+        // A non-confirmed instance also runs apply_tabs, so counting at
+        // enqueue would let every ineligible instance burn the whole budget
+        // before any confirmed instance sends — and if confirmation arrives
+        // late, the debt is already exhausted. The budget is spent only on an
+        // ELIGIBLE (Confirmed-gated) send, which happens in run_effects. Here
+        // we only (re)arm the effect; the counter advances at the send site.
         if let Some((target, tries)) = self.reanchor_owed {
             if !self.tabs.iter().any(|t| t.tab_id == target) {
                 self.reanchor_owed = None; // target died too — a new episode will arm
@@ -574,11 +597,21 @@ arm gains the debt, and a retry block follows it:
                     .iter()
                     .any(|e| matches!(e, Effect::ReanchorVisit { .. }))
             {
-                self.reanchor_owed = Some((target, tries + 1));
+                // Re-arm only. Do NOT bump `tries` — see note above.
                 effects.push(Effect::ReanchorRetry { tab_id: target });
             }
         }
 ```
+
+**The retry counter advances at the send, not the enqueue (CodeRabbit,
+2026-07-22).** `run_effects` increments `reanchor_owed`'s `tries` only when it
+actually sends a `ReanchorRetry` under the `Confirmed` gate — the same place the
+beacon is broadcast. An instance that drops the effect because it is not the
+confirmed executor leaves the budget untouched, so a late-confirming instance
+still has its full `REANCHOR_MAX_RETRIES` to spend. **Required test:** a
+multi-instance case where confirmation arrives after several ineligible
+`apply_tabs` passes, asserting the retry budget is intact at confirmation and the
+beacon is re-broadcast exactly once per remaining slot.
 
 **7. `apply_tabs` — the prune block** (`model.rs:694-712`). Replacing:
 

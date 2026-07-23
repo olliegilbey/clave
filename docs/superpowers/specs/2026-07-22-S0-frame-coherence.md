@@ -208,11 +208,44 @@ own plugin pane resolves at position 0 → tab 11. Correct, and the retry is the
 event that was always going to arrive anyway. The mirror case (manifest first,
 tab set stale) fails the same witness.
 
-**Residual, stated plainly:** a tab *reorder* that preserves the count (zellij's
-`MoveTab`) passes the witness while invalidating the join. Nothing available
-in-process detects it, a counter would not have either, and clave binds no
-move-tab key (`setup.rs:86-124`; #28 unbound the tab-mode entry points). Filed
-as a known residual, not fixed here.
+**Residual 1 — count-preserving reorder.** A tab *reorder* that preserves the
+count (zellij's `MoveTab`) passes the witness while invalidating the join.
+Nothing available in-process detects it, a counter would not have either, and
+clave binds no move-tab key (`setup.rs:86-124`; #28 unbound the tab-mode entry
+points). Filed as a known residual, not fixed here.
+
+**Residual 2 — identity permutation at a preserved position set (CodeRabbit,
+2026-07-22, and the reason position-set equality is necessary but not
+sufficient).** Close the *lowest* tab and create one in the same window: tabs
+`{A@0,B@1,C@2}` → close A → `{B@0,C@1}` → create D → `{B@0,C@1,D@2}`. A stale
+manifest still covering `{0,1,2}` now has the **same position set** as the fresh
+tab list `{0,1,2}`, so `frames_coherent()` returns `true` while every occupant
+has shifted — own pane at position 0 resolves to B, not A. The witness cannot
+catch this: `PaneManifest` carries pane ids but **no `tab_id`** (`data.rs:2277-2282`),
+`TabInfo` carries `tab_id` but no pane identity, and the plugin has no direct
+self-tab route (S0 §"no direct route": `PluginIds` has no tab, `get_tab_info`
+inverts the wrong way). Position is the *only* cross-frame key these two events
+share, so no pure identity/epoch witness is constructible from them — confirming
+the reviewer's "if the data cannot support one, classify it as unresolved."
+
+**Why it is nonetheless not a regression, and is bounded.** Two things contain
+it. (i) The *complete* fix is identity-addressed operation — bind and switch by
+`tab_id`, not position — which S3 §C4 commits to via the `SwitchTabToId`/
+`GoToTabWithId` host import; once that lands, the position join is gone and this
+class dissolves. Until then it is the interim. (ii) Crucially, S0's self-healing
+bind (Direction 3, below) removes the permanent `sent_binds` latch: a wrong bind
+emitted during this window is **re-evaluated on the next coherent frame** and
+corrected, where today it is sticky for the life of the plugin instance. So this
+residual degrades from "permanent mis-bind" (RC-A as reported) to "at most one
+transient mis-bind that self-corrects" — a strict improvement even unfixed.
+
+**Required follow-through** (per the finding): this interleaving is added to the
+model tests as an explicit case (`frames_coherent` returns `true`, and the
+self-healing retry is asserted to correct the resulting bind on the next frame),
+and to the live-validation stop conditions in §5 — the driving agent must call
+out "close the lowest-numbered tab, then immediately open a new one" as a case
+where a one-frame flicker is expected-and-self-correcting, and a *persistent*
+mis-bind after it is a stop-the-line S0 failure, not a residual.
 
 ### Adopted with a caveat: two gate strengths, classified by retry
 

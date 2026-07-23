@@ -2,12 +2,14 @@
 
 _2026-07-22 · research synthesis, main `50fa26a` (v0.1.1 + PR #29) · read-only investigation_
 
-This is the **shared source of truth** for six workstreams (S0–S5). Each has its
+This is the **shared source of truth** for eight workstreams — S0–S6 and S8
+(S7, the context battery, is deferred and unspecced; S6 reserves its gutter
+cell). Each has its
 own spec beside this file. Read this first, then your workstream's spec. Every
 claim below carries a `file:line` — verify before you build on it, but do not
 re-derive from scratch.
 
-Four symptoms were reported from daily driving. They decompose into **six root
+Four symptoms were reported from daily driving. They decompose into **seven root
 causes**, and two of the symptoms share one.
 
 | Symptom (maintainer's words) | Root causes |
@@ -88,7 +90,7 @@ mismatched frames on **both sides** of the join.
 
 Reproduction:
 
-```
+```text
 tabs 10@pos0, 11@pos1, 12@pos2; focus on 12.  Alt+w closes tab 10.
 post-close: 11@pos0 (active), 12@pos1.
 the bar in tab 11 gets the close TabUpdate (fresh last_tabs)
@@ -195,7 +197,7 @@ regardless of who was touched last.
 changes that row's key from `timeline[tab_id]` to `last_interacted` *and* its
 tiebreak from `position` to `usize::MAX - i`. Worked example:
 
-```
+```text
 store: tab_timeline = {10: 1000, 11: 1000};  agent u-A: tab_id=10, last_interacted=1000
 tabs:  10 @ pos 0 (u-A),  11 @ pos 1 (plain terminal tab)
 
@@ -329,7 +331,7 @@ the highest-id tab recycles that id**. Cited in-code at `model.rs:67`,
 `model.rs:660-663`, `store.rs:232-238`, `store.rs:262-263`. The race, accepted as
 residual at `store.rs:274-276`:
 
-```
+```text
 t0  close highest-id tab 11 → bar emits PruneTabs{[11]}
 t2  `clave prune-tabs 11` SPAWNED (fire-and-forget)
 t3  before it takes the flock: a new tab is created → gets recycled id 11
@@ -554,20 +556,25 @@ Split so that two agents in two worktrees do not edit the same seam.
 | **S0** | Frame coherence & executor election | RC-A, RC-B | `clave-bar/src/main.rs:43-71,87-231,434-467`; `model.rs:414-439` | — |
 | **S1** | Prompt→top ordering semantics | RC-C | `model.rs:391-393,728-793`; `store.rs`; `hook.rs` | S0 |
 | **S2** | Terminal-tab interaction signal | RC-D | spike first; then `main.rs` subscribe + `store.rs` | spike |
-| **S3** | Tab-close correctness | RC-E | `model.rs:593-715`; `store.rs:278-298` | S0 |
+| **S3** | Tab-close correctness | RC-E | `model.rs:593-715`; `store.rs:278-298` | S0, S1 |
 | **S4** | Label: Claude rename + live cwd | RC-F | `hook.rs`; `add.rs`; `clave-types` | — |
-| **S5** | Per-repo colour | RC-G | `main.rs:525-560`; `model.rs` `Row`/`rows()` | — (see note) |
+| **S5** | Per-repo + per-title colour | RC-G | `main.rs:525-560`; `model.rs` `Row`/`rows()`; `store.rs` (ink allocation) | — (see note) |
+| **S6** | Three-cell gutter (status · battery slot · worktree) | — (row identity) | `model.rs` `compose_row`/`gutter_segments`; `store.rs` snapshot | — |
+| **S7** | Context battery (deferred, unspecced) | #24 item 4 | fills S6's reserved cell | S6 |
+| **S8** | Sidebar width 30→38 | — (#24 item 6) | `model.rs` seek consts; `clave-types`; `setup.rs` KDL | — |
 
 **S0 first, alone.** It fixes the sticky mis-bind behind both the worst
 ordering symptom and the worst close symptom, and S1/S3 build on its seam.
 
-**S2, S4, S5 are parallelisable with each other and with S0** — different files.
-S5 keys colour on `Agent.repo_root` (already in the snapshot, already unread), so
-it does not depend on S4's label composition; both touch row identity, so
-whichever lands second rebases.
+**S2, S4, S5, S6, S8 are parallelisable with each other and with S0** — different
+files. S5 keys colour on `Agent.repo_root` (already in the snapshot, already
+unread), so it does not depend on S4's label composition; both touch row
+identity, so whichever lands second rebases. S6 (gutter) and S8 (width) both
+parameterise the text budget rather than hardcoding it, so they compose with S4/S5
+regardless of landing order.
 
 **S1 and S3 are not parallel with each other** — both edit `model.rs`
-ordering/`apply_tabs`. Run them in sequence after S0.
+ordering/`apply_tabs`. Run them in sequence after S0: S0 → S1 → S3.
 
 ## Rules for every workstream
 

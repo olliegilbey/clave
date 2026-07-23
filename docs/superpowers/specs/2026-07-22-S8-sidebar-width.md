@@ -17,14 +17,15 @@ constant in the width-seek machinery)."*
 **Problem.** The uncollapsed sidebar is 30 columns
 (`crates/clave-bar/src/model.rs:137`). The render budget is
 `cols.saturating_sub(3)` (`crates/clave-bar/src/main.rs:546`) = **27 cells** of
-text. S4 recomposes the row as `repo · title · branch · summary` and S6 takes the
-gutter from 2 cells to 3, dropping the budget to **26**. At 26 cells the summary —
-the only segment that distinguishes three `nalu · chore/pending-conf…` rows — is
-truncated to nothing. That is #24 item 6, verbatim: *"30 cols truncates
-everything distinctive."*
+text. S4 recomposes the row as `title · repo · summary` and S6 takes the gutter
+from 2 cells to **6 columns** (three spaced glyph cells), dropping the text
+budget to **23** (`30 − 6 − 1` right margin). At 23 cells the summary — the only
+segment that distinguishes three lookalike rows — is truncated to nothing. That
+is #24 item 6, verbatim: *"30 cols truncates everything distinctive."*
 
-**Goal.** Move the expanded target to **38 columns** (text budget 34 with S6's
-3-cell gutter), without disturbing the width-seek machinery that has stranded
+**Goal.** Move the expanded target to **38 columns** (text budget **31** =
+`38 − 6 − 1` with S6's 6-column gutter), without disturbing the width-seek
+machinery that has stranded
 twice — the drift re-arm (#4, PR #27, commit `7644fd8`) and the stale-anchor
 regression (pinned at `model.rs:1773`).
 
@@ -58,10 +59,10 @@ shifts when the target moves, so each is a test-derivation site.
 
 | # | Site | Code | Interaction with the target |
 |---|---|---|---|
-| 4 | `model.rs:1030` | `let step = self.seek_step.max(8) as i64;` | the ±4-col pre-learning slack; acceptance is `2*|cols−target| <= step` (`model.rs:1032`). Band **half-width** is `step.max(8)/2`, i.e. ±4 before learning, ±10 at `MAX_LEARNABLE_STEP` |
+| 4 | `model.rs:1030` | `let step = self.seek_step.max(8) as i64;` | the ±4-col pre-learning slack; acceptance is `2*abs(cols−target) <= step` (`model.rs:1032`). Band **half-width** is `step.max(8)/2`, i.e. ±4 before learning, ±10 at `MAX_LEARNABLE_STEP` |
 | 5 | `model.rs:1032` | `let within_band = 2 * diff.abs() <= step;` | the settle predicate. **This is what silently reclassifies old test values** — see §6.2 |
 | 6 | `model.rs:1123-1132` | the act/converge branch, re-reading `step` | same predicate, post-learning |
-| 7 | `model.rs:1059-1062` | `ours = |own_cols − seek_last_cols| <= step` | gate B's self-inflicted test. Target-independent, but its *outcome* on a given pair of widths changes with the learned step |
+| 7 | `model.rs:1059-1062` | `ours = abs(own_cols − seek_last_cols) <= step` | gate B's self-inflicted test. Target-independent, but its *outcome* on a given pair of widths changes with the learned step |
 | 8 | `model.rs:143-146` | `const SEEK_BUDGET: u32 = 16;` | steps per episode. The expand transition is now 8 cols longer → at most one extra step. 4→38 at a 7-col step = 5 steps ≪ 16 |
 | 9 | `model.rs:147-151` | `const MAX_LEARNABLE_STEP: usize = 20;` | caps the band half-width at 10. New invariant to pin: `BAR_TARGET_COLS − COLLAPSED_TARGET_COLS > MAX_LEARNABLE_STEP` (34 > 20 ✓) so no learned step can make one target's band swallow the other |
 
@@ -87,7 +88,7 @@ finishes the job on the first `render()`.
 
 | # | Site | Code | Change |
 |---|---|---|---|
-| 15 | `crates/clave-bar/src/main.rs:546` | `let budget = cols.saturating_sub(3); // gutter + margin` | **no — not S8's line.** It is a function of the runtime `cols` parameter (`main.rs:525`), never of `BAR_TARGET_COLS`. S5 replaces it with `cols.saturating_sub(GUTTER_COLS + RIGHT_MARGIN_COLS)`; S6 changes `GUTTER_COLS` 2→3. See §8 |
+| 15 | `crates/clave-bar/src/main.rs:546` | `let budget = cols.saturating_sub(3); // gutter + margin` | **no — not S8's line.** It is a function of the runtime `cols` parameter (`main.rs:525`), never of `BAR_TARGET_COLS`. S5 replaces it with `cols.saturating_sub(GUTTER_COLS + RIGHT_MARGIN_COLS)`; S6 sets `GUTTER_COLS` to 6 (three spaced glyph cells). See §8 |
 | 16 | `crates/clave/src/add.rs:80-88` `sanitize_label` | no length cap | **no** |
 | 17 | `crates/clave/src/lsview.rs` | `clave ls` human view — no width logic at all (grep for `width`/`truncat`/`chars().take` returns nothing) | **no** |
 
@@ -144,19 +145,21 @@ supplies the tolerance (±4 cols pre-learning, ±10 at the learnable-step cap), 
 
 Why 38 is the right exact number:
 
-- **Text budget arithmetic.** With S6's 3-cell gutter and S5's
-  `RIGHT_MARGIN_COLS = 1`, `budget = cols − 4`: **34** cells at 38, against
-  **26** at 30. A representative S4-composed label —
-  `clave · main · fix the auth flow` — is 31 chars: whole at 34, cut to
-  `clave · main · fix the a…` at 26. The +8 is exactly the difference between
-  keeping and losing the distinguishing segment.
+- **Text budget arithmetic.** With S6's **6-column gutter** (three spaced glyph
+  cells) and S5's `RIGHT_MARGIN_COLS = 1`, `budget = cols − 7`: **31** cells at
+  38, against **23** at 30. A representative S4-composed label —
+  `F-CLA · clave · fix the auth flow` — is 32 chars: cut to `F-CLA · clave · fix the…`
+  at 31, but to `F-CLA · clave · fi…` at 23. The +8 is the difference between
+  keeping and losing the distinguishing summary segment.
 - **It lands on a clean birth percent.** 38 / 200 = **19 %**. The maintainer's
   common geometry is a ~200-column window, so a newborn bar is essentially
   on-target before the seek acts — the same property `15%` bought for 30
   (§3.4).
-- **The two targets stay provably disjoint.** 38 − 4 = 34 > `MAX_LEARNABLE_STEP`
-  (20), so no learned step can make the expanded band accept a collapsed width or
-  vice versa. At 30 the margin was 26; at 38 it is 34 — strictly safer.
+- **The two targets stay provably disjoint.** `BAR_TARGET_COLS −
+  COLLAPSED_TARGET_COLS` = 38 − 4 = 34 > `MAX_LEARNABLE_STEP` (20), so no learned
+  step can make the expanded band accept a collapsed width or vice versa. At 30
+  the gap was 26; at 38 it is 34 — strictly safer. (This gap is a target
+  separation, not the text budget — do not confuse it with the 23/31 above.)
 - **It is cheap to revisit.** If live judgement (§7 step 8) says 36 or 40, the
   change is one constant, one percent, and the test values in §6.2. That
   cheapness is why §7 puts a judgement gate *after* the mechanical work rather
@@ -264,7 +267,7 @@ future edit cannot erode it silently.
 | **Window-relative target** (e.g. `min(38, cols_total / 4)`) | the plugin has no viewport width. `render(_rows, cols)` (`main.rs:525`) delivers only the plugin's *own* columns, and `PaneMeta` (`model.rs:25-31`) drops `PaneInfo.pane_columns` at the adapter boundary (`main.rs:452-466`). Implementing it means extending `PaneMeta`, summing per tab, and making the target a function of a *stale* frame — the RC-A staleness class, applied to geometry. Out of scope; see §9 for when it becomes worth it |
 | **Make the KDL pane fixed-size at 38** (`size=38`) so no seek is needed | `CantResizeFixedPanes`: zellij refuses **every** resize on a fixed pane, so Alt+c dies session-wide. This is the C8 finding that cost a live round (`SUBSYSTEM-VALIDATION.md:568-583`). The negative assertion at `setup.rs:755-758` exists to prevent exactly this, and §6.6 extends it to the new number |
 | **Two targets (wide/narrow) toggled by a third keybind** | a new CLI surface, a new keybind, a new persisted flag, and a third state in the seek's target selector — for a preference that is set once |
-| **Leave 30 and rely on S4's give-way truncation alone** | S4 §3.4 makes 26 cells *survivable*, not *useful*; the maintainer has read that spec and asked for the columns anyway. #24 item 6 is a separate item from item 3 for this reason |
+| **Leave 30 and rely on S4's give-way truncation alone** | S4 §3.4 makes 23 cells *survivable*, not *useful*; the maintainer has read that spec and asked for the columns anyway. #24 item 6 is a separate item from item 3 for this reason |
 | **Change the target but not the birth percent** | correct but flickery — §3.4 |
 
 ---
@@ -313,7 +316,14 @@ pub const COLLAPSED_TARGET_COLS: usize = 4;
 /// authority and converges any starting width onto `BAR_TARGET_COLS`, so a
 /// stale `clave` binary emitting an older percent (issue #44) is benign — it
 /// costs at most a few resize steps at birth, never a wrong resting width.
-pub const BAR_BIRTH_PERCENT: usize = 19;
+///
+/// DERIVED, not an independent literal (CodeRabbit 2026-07-22): computed from
+/// `BAR_TARGET_COLS` against the reference viewport with round-to-nearest, so a
+/// future target change cannot re-introduce the hand-synchronisation defect this
+/// section removes. `(38 * 100 + 100) / 200 = 19`.
+pub const BAR_BIRTH_REFERENCE_COLS: usize = 200;
+pub const BAR_BIRTH_PERCENT: usize =
+    (BAR_TARGET_COLS * 100 + BAR_BIRTH_REFERENCE_COLS / 2) / BAR_BIRTH_REFERENCE_COLS;
 ```
 
 ### 4.2 `crates/clave-bar/src/model.rs:133-142` — consume, don't redefine
@@ -431,9 +441,22 @@ with a derived positive and **both** historical negatives:
                 kdl.contains(&format!("size=\"{pct}%\"")),
                 "bar pane must carry the derived birth percent:\n{kdl}"
             );
-            for fixed in ["size=30", "size=38", &format!("size={}", clave_types::BAR_TARGET_COLS)] {
+            // The generators emit QUOTED values (`size="19%"`), so a fixed-size
+            // regression is `size="30"` / `size="38"`, NOT the bare `size=30`
+            // the earlier draft searched — that check could pass while the bug
+            // was reintroduced (CodeRabbit 2026-07-22). Forbid the fixed form in
+            // BOTH quoted and bare spellings, for both historical numbers and
+            // the current target; never forbid the `%` form.
+            let target = clave_types::BAR_TARGET_COLS;
+            let mut forbidden = vec![
+                "size=\"30\"".to_string(), "size=30".to_string(),
+                "size=\"38\"".to_string(), "size=38".to_string(),
+                format!("size=\"{target}\""), format!("size={target}"),
+            ];
+            forbidden.dedup();
+            for fixed in &forbidden {
                 assert!(
-                    !kdl.contains(fixed),
+                    !kdl.contains(fixed.as_str()),
                     "fixed size {fixed} resurrects the FIXED! bug:\n{kdl}"
                 );
             }
@@ -622,7 +645,7 @@ assert!(BAR_TARGET_COLS - COLLAPSED_TARGET_COLS > MAX_LEARNABLE_STEP);
 drift re-arm at the target that actually changed. Today `:1752` only covers the
 collapsed target; that is the real coverage gap this change exposes.
 
-```
+```rust
 BarModel::default()                    // expanded, target 38, birth-armed
 width_seek(45)  == [ShrinkSelf]        // 2·7 > 8
 width_seek(37)  == []                  // learns step 8; 2·1 ≤ 8 → settle_at(37)
@@ -636,7 +659,7 @@ width_seek(140) == [ShrinkSelf]        // same width twice → confirmed → re-
 landing is far from the previous *emit*, and the intruding width is within a
 learned step of the **stale** anchor but far from **rest**:
 
-```
+```rust
 BarModel::default()                    // expanded, target 38
 width_seek(80)  == [ShrinkSelf]        // emit @80
 width_seek(62)  == [ShrinkSelf]        // learns step 18; 2·24 > 18; emit @62
@@ -685,7 +708,7 @@ escape hatch either way, and this change is the moment to close part of it.
 
 **New property — `prop_seek_makes_progress_when_it_exhausts`:**
 
-```
+```text
 ∀ start ∈ 0..=500, step ∈ 5..=20, collapsed, latency;  floor = 0, interrupt = None:
     drive to quiescence
     if the run exhausted the budget:
@@ -702,7 +725,7 @@ without progress.
 
 **Pinned regression seeds** — `crates/clave-bar/proptest-regressions/model.txt`:
 
-```
+```text
 cc 547c… # start = 500, step = 1, floor = 0, collapsed = false, …, interrupt = Some((1, Jump(25)))
 cc 7357… # start =  35, step = 10, floor = 0, collapsed = false, …, latency = true, interrupt = None
 cc 4f46… # start = 416, step = 1, floor = 0, collapsed = true,  …, interrupt = Some((5, Jump(88)))

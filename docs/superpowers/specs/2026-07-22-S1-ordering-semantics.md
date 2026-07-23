@@ -44,7 +44,7 @@ regardless of who was actually touched last**.
 
 Worked example — two agents, prompts 300 ms apart inside one wall second:
 
-```
+```text
 store: tab_timeline = {10: 1000, 11: 1000}
 tabs:  10 @ pos 0 (u-A),  11 @ pos 1 (u-B)
 
@@ -74,7 +74,7 @@ equal key every live row therefore outranks every dormant row.
 
 Worked example (the dossier's, with the numbers made explicit):
 
-```
+```text
 store: tab_timeline = {10: 1000, 11: 1000}
        agent u-A: tab_id = 10, last_interacted = 1000
 tabs:  10 @ pos 0 (u-A),  11 @ pos 1 (plain terminal tab)
@@ -244,7 +244,7 @@ The recycled-tab-id hazard does not reach this leg: `is_dormant`
 Re-running the §1.2 example with the fix, `55`/`56` standing for consecutive
 ordinals:
 
-```
+```text
 store: tab_order = {10: 56, 11: 55};  u-A: tab_id = 10, commit_ord = 56
 tabs:  10 @ pos 0 (u-A),  11 @ pos 1 (plain terminal tab)
 
@@ -523,7 +523,7 @@ becomes (shape, not final text):
 /// nothing matches. No push — no bar instance exists yet at launch time.
 pub fn clear_session_order(paths: &StorePaths) -> Result<()> {
     with_store_mut(paths, |s| {
-        let mut changed = !s.tab_order.is_empty() || s.agents.values().any(|r| r.tab_id.is_some());
+        let changed = !s.tab_order.is_empty() || s.agents.values().any(|r| r.tab_id.is_some());
         s.tab_order.clear();
         s.agents.values_mut().for_each(|r| r.tab_id = None);
         // Backfill, oldest first, so the seeded ordinals preserve the old
@@ -535,15 +535,21 @@ pub fn clear_session_order(paths: &StorePaths) -> Result<()> {
             .map(|r| (r.last_interacted, r.uuid.clone()))
             .collect();
         stale.sort();
+        // `mint_ord()` bumps `seq` itself, so track whether it ran. The §5
+        // invariant is "content changed ⇒ seq advanced exactly once"; a mint
+        // already satisfies it, so the trailing bump fires ONLY when we changed
+        // something (cleared binds/order) WITHOUT minting (CodeRabbit
+        // 2026-07-22: the earlier draft bumped unconditionally on `changed`,
+        // double-advancing `seq` whenever the backfill also minted).
+        let minted = !stale.is_empty();
         for (_, uuid) in stale {
             let ord = s.mint_ord();
             if let Some(r) = s.agents.get_mut(&uuid) {
                 r.commit_ord = ord;
             }
-            changed = true;
         }
-        if changed {
-            s.seq += 1; // content changed ⇒ seq changed (§5)
+        if changed && !minted {
+            s.seq += 1; // content changed but nothing minted ⇒ one bump here (§5)
         }
     })
 }
@@ -669,6 +675,18 @@ bound and live, else the agent's own:
 
 `clave ls` shows only store rows, so plain terminal tabs are absent from the
 comparison — say so in the doc comment; the live SOP relies on it (§6).
+
+**`clave ls` is an exact order oracle only for rows with unique, non-zero
+ordinals (CodeRabbit 2026-07-22).** Even with the ordinal-aware `ord` above,
+`clave ls` cannot reproduce the sidebar order in two cases: (i) multiple live
+rows at ordinal `0` — a reachable state — where the bar tie-breaks on **tab
+position** and `clave ls` has no position column, and (ii) transient ordinal
+ties during a burst. The CLI is not given tab positions (adding them is possible
+but out of S1's scope), so the live SOP in §6 must **compare only rows with
+unique non-zero ordinals** and treat any ordinal-0 or tied-ordinal rows as
+"order unspecified between them, not a discrepancy." §6's steps are written to
+that rule; a mismatch there is a real bug only when both rows carry distinct
+non-zero ordinals.
 
 This is the one piece of scope beyond the two defects. It is justified because
 (a) the doc comment is currently false, and (b) §6's live validation needs a

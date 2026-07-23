@@ -16,7 +16,7 @@ _2026-07-22 · workstream **S4**, root cause **RC-F** of
 `repo · title · branch · summary` composition and #24's 2026-07-21
 `● F-CLA · clave · 𖣂 · <summary>` comment:**
 
-```
+```text
 ● 󰁼 𖣂 F-CLA · clave · <summary>
 └──┬──┘ └──────────┬──────────┘
  GUTTER            TEXT LABEL
@@ -346,7 +346,7 @@ ignores.
 
 States are the pair `(words, label_source)`:
 
-```
+```text
                      ┌───────────────────────────────────────┐
                      │  U  ·  UNEARNED                       │
                      │     words        = None               │
@@ -409,7 +409,7 @@ if event == "UserPromptSubmit" && rec.words.is_none() && …
 **Title is a separate, non-terminal sub-machine.** It is not part of
 `LabelSource` because it can change any number of times:
 
-```
+```text
 title = None      ──(tail: non-empty customTitle T, not injected)──► title = Some(T)
 title = Some(A)   ──(tail: non-empty customTitle B ≠ A)───────────► title = Some(B)
 title = Some(A)   ──(tail: empty, absent, or injected)────────────► title = Some(A)   [HELD]
@@ -451,7 +451,7 @@ tail-truncate. No regression, no special case.
 
 **The policy, and why it needs no positional inference.**
 
-```
+```rust
 fit_label_str(name: &str, budget: usize) -> String
 ```
 
@@ -533,6 +533,13 @@ found at runtime.** Purely positional indexing is **ambiguous at two segments**:
 both are common. Making the title always present (an empty leading slot) was
 considered and rejected (§3.8): it burns three cells on every un-renamed row and
 `sanitize_segment` would strip it anyway.
+
+This is also the answer to CodeRabbit's "keep composition and paint-span indexing
+based on identical emitted fields" (2026-07-22): S5 does **not** re-derive or
+re-index the segment sequence — it matches the *emitted, sanitized* repo text by
+value. Composition (`compose_label`) and paint (`InkSpan`) therefore share the
+same post-sanitization string, so they cannot drift apart even if the segment
+count changes under truncation.
 
 **Recommended resolution, which costs S5 nothing:** locate the repo segment **by
 value**, not by index. S5 already resolves the row's `Agent` to read
@@ -761,7 +768,7 @@ replaced hard-stop and prefix rebuild:
 
 The new body, in order:
 
-```
+```rust
 fn refresh_label(rec, event, payload, jsonl_tail) -> bool {
     let before = rec.label.clone();
 
@@ -933,17 +940,28 @@ impl AgentRecord {
     /// THE one composer — add.rs and hook.rs both call it, which is what
     /// retires the byte-for-byte prefix coupling add.rs:703-708 used to demand.
     pub fn compose_label(&self) -> String {
-        let repo = self
-            .repo_root
-            .rsplit('/')
-            .next()
-            .filter(|s| !s.is_empty())
-            .unwrap_or(&self.repo_root);
+        // repo segment: basename(repo_root) → repo_root → cwd basename, each
+        // taken only if non-empty. The UUID fallback below is the final
+        // backstop that makes `compose_label_never_returns_empty` actually
+        // hold (CodeRabbit 2026-07-22: the earlier draft fell back only to
+        // repo_root, so an empty/control-only repo_root produced an empty tab
+        // name — an invalid KDL `tab name=""`).
+        let repo_basename = self.repo_root.rsplit('/').next().unwrap_or("");
+        let repo: &str = [repo_basename, self.repo_root.as_str()]
+            .into_iter()
+            .find(|s| !s.trim().is_empty())
+            .unwrap_or("");
         let mut parts: Vec<String> = Vec::with_capacity(3);
         if let Some(t) = &self.title { parts.push(sanitize_segment(t)); }
         parts.push(sanitize_segment(repo));
         if let Some(w) = &self.words { parts.push(sanitize_segment(w)); }
         parts.retain(|p| !p.is_empty());
+        if parts.is_empty() {
+            // Everything sanitized to empty (control-only inputs, or no repo at
+            // all). Guarantee a non-empty, KDL-safe name from the uuid prefix —
+            // `sanitize_segment` cannot empty a hex prefix.
+            parts.push(sanitize_segment(&self.uuid.chars().take(8).collect::<String>()));
+        }
         parts.join(clave_types::LABEL_SEP)
     }
 }
@@ -973,7 +991,7 @@ sibling namespace in the same direction `hook.rs` does (`crate::add::sanitize_la
 **(d) every `AgentRecord` literal gains the three fields.** `AgentRecord` derives
 no `Default`, so this is mechanical and exhaustive — the compiler enumerates it:
 
-```
+```text
 crates/clave/src/store.rs:372          (test rec)
 crates/clave/src/hook.rs:304           (test rec)
 crates/clave/src/add.rs:741            (run_add's `fresh` — PRODUCTION)
@@ -1125,7 +1143,7 @@ pub fn fit_label_str(name: &str, budget: usize) -> String;
 
 The whole implementation:
 
-```
+```text
 segments = name.split(LABEL_SEP)
 while segments.len() > 2 && join(segments).chars().count() > budget:
     segments.pop()
@@ -1135,6 +1153,16 @@ tail_truncate(join(segments), budget)      // today's logic, verbatim
 `tail_truncate` is the existing `main.rs:547-553` body moved in unchanged:
 `.chars().take(budget - 1)` plus `…`, char-boundary safe, and a `budget` of 0
 yields `""`.
+
+**Budget-zero rendering contract — one rule, applied by every workstream
+(CodeRabbit 2026-07-22).** To stop S4's `fit_label_str` and S5's `clamp_name` /
+collapsed expectations from disagreeing, the single contract is: **budget 0 →
+`""` (empty, no ellipsis); budget 1 → `"…"`; budget ≥ 2 → up to `budget−1`
+content chars plus `…`.** S5's `clamp_name` and S6's collapsed-mode geometry both
+adopt this verbatim (S6 §2.8 already relaxed its `const_assert` from `==` to `<=`
+so a budget of 0 is a valid collapsed outcome, not a build failure). Any span
+paint runs against the *clamped* string, so a zero budget paints nothing rather
+than leaking an escape.
 
 **No positional inference of meaning is required, and none is performed.** That
 is a deliberate simplification over the previous four-segment design, where
@@ -1284,7 +1312,7 @@ S8 may move the pane and S6 may move the gutter without touching this file.
 **Proptest** (`clave-bar` has `proptest` as a dev-dep; the taxonomy demands a new
 property when a new branch becomes reachable):
 
-```
+```rust
 ∀ segments (1..=3 arbitrary strings, none containing U+00B7), ∀ budget ∈ 0..80:
     let joined = segments.join(LABEL_SEP);
     let out    = fit_label_str(&joined, budget);
@@ -1718,10 +1746,16 @@ with a recommended resolution, not a format question.
 
 ### Sequencing
 
-S4 is **parallel with S0, S2, S5, S6 and S8** and depends on none of them. It
-touches `hook.rs`, `add.rs`, `store.rs`, `head.rs` (new), `clave-types` (one
-const) and `model.rs` (one pure function) — none of which any of those
-workstreams edits.
+S4 is **logically independent** — it depends on no other workstream's *design*.
+It touches `hook.rs`, `add.rs`, `store.rs`, `head.rs` (new), `clave-types` (one
+const) and `model.rs` (one pure function). Two of those files — `store.rs` and
+`model.rs` — are also edited by S1 (ordering) and S5 (ink allocation), but at
+disjoint sites (S4 adds record fields and one pure `fit_label_str`; S1 rewrites
+the ordering key; S5 adds allocation state and the `compose_row` seam). So the
+coupling is **file-level rebase, not a design dependency** (CodeRabbit
+2026-07-22): whichever of S4/S1/S5 lands second re-runs `cargo test --workspace`
+and resolves textual merge conflicts, but no spec has to change. This matches the
+dossier's dependency table, which lists S4's design dependency as `—`.
 
 The one shared file is `clave-bar/src/main.rs:539-557`, and three workstreams
 converge on it:

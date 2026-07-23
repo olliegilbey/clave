@@ -223,7 +223,7 @@ among titles *within that repo*").
 refinement.** The title allocator skips the repo's own index. The refinement is
 where each repo's title cursor *starts*:
 
-```
+```text
 title cursor for repo R starts at (repo_index(R) + 1), not at 0
 allocate: idx = cursor % LEN;  if idx == repo_index { cursor += 1; idx = cursor % LEN }
           cursor += 1
@@ -419,7 +419,7 @@ ever catch a regression.
 **The structural answer, unchanged: the plugin gets exactly one escape-emitting
 function, reachable only through a type that cannot hold an escape.**
 
-```
+```rust
 rows()  →  Row { name: String (plain), inks: Vec<(usize, Ink)>, … }
               │
               ▼   model.rs, pure, host-tested
@@ -437,7 +437,7 @@ reserved battery slot, worktree marker). `compose_row` takes them as
 `&[Segment]`, measures them (`text.chars().count()` — exact, because
 `Segment.text` is escape-free by construction), and derives
 
-```
+```rust
 budget = cols - gutter_cols - RIGHT_MARGIN_COLS
 ```
 
@@ -1383,11 +1383,11 @@ plus, per row, the repo tint and title tint you actually see.
 | Report | Conclusion | Next |
 |---|---|---|
 | the two repos differ; every row of one repo shares its repo tint | **the repo axis works** | Step 3 |
-| two rows of the **same** `repo_root` differ | `repo_inks` is not being consulted — report the JSON immediately |
-| two rows with **different** `repo_root` share a tint | check `repo_ink_cursor`: ≥ 12 ⇒ the specified wrap; < 12 ⇒ a bug, report |
+| two rows of the **same** `repo_root` differ | `repo_inks` is not being consulted — report the JSON immediately | **stop; report** |
+| two rows with **different** `repo_root` share a tint | check `repo_ink_cursor`: ≥ 12 ⇒ the specified wrap; < 12 ⇒ a bug, report | **stop; report** |
 | the sandbox (`clave-test`) shows different colours than the real session for the same repo *name* | **expected and by design** — allocation keys on the full `repo_root`, and the sandbox seeds repos under its own root (`dev.rs:232`) | note it and continue |
 | no row is tinted | `inks` empty in the JSON ⇒ allocation never ran; `inks` populated ⇒ the bar is stale, re-check Step 0 | report which |
-| plain terminal tabs are tinted | `inks` leaked to unjoined rows — report |
+| plain terminal tabs are tinted | `inks` leaked to unjoined rows — report | **stop; report** |
 
 ### Step 3 — the title axis: same repo, different agents
 
@@ -1404,8 +1404,8 @@ equals its own row's repo tint.
 | Report | Conclusion | Next |
 |---|---|---|
 | every same-repo agent has a different title tint, and none equals the repo tint | **the title axis works and the skip rule holds** — #24's "three `nalu` lookalikes" complaint closed | Step 4 |
-| a title tint equals its row's repo tint | the skip rule failed — **report immediately** with the `title_inks`/`repo_inks` JSON; `title_inks_are_unique_within_a_repo` should have caught it |
-| two agents in the same repo share a title tint | check that repo's `title_ink_cursors` value: ≥ 12 ⇒ specified wrap; < 12 ⇒ bug, report |
+| a title tint equals its row's repo tint | the skip rule failed — **report immediately** with the `title_inks`/`repo_inks` JSON; `title_inks_are_unique_within_a_repo` should have caught it | **stop; report** |
+| two agents in the same repo share a title tint | check that repo's `title_ink_cursors` value: ≥ 12 ⇒ specified wrap; < 12 ⇒ bug, report | **stop; report** |
 | agents in *different* repos share a title tint | expected — uniqueness is scoped per repo, as asked | continue |
 | an **untitled** agent's tint sits on the wrong words | the segment index is wrong for the no-title case | **report immediately** — `snapshot_ink_segments_match_compose_label_fields` should have caught it |
 
@@ -1438,7 +1438,7 @@ plus the two observed colours and their Step-1 indices.
 | the two new repos took the next two indices in order, and the cursor advanced by exactly 2 | **iteration confirmed** — the maintainer's stated model | Step 5 |
 | the cursor advanced by more than 2 | something allocated a repo you did not open — inspect `repo_inks` keys for an unexpected path | report the keys |
 | the colours are the next two indices but look similar to each other | the palette's adjacency ordering has failed | **report immediately** with both indices — `palette_is_pinned` should have caught a reordering |
-| a new repo reused an existing colour while the cursor is < 12 | allocation is not monotone — report |
+| a new repo reused an existing colour while the cursor is < 12 | allocation is not monotone — report | **stop; report** |
 
 **Cleanup**, your call afterwards:
 `rm -rf "$HOME/code/clave-ink-probe-one" "$HOME/code/clave-ink-probe-two"`.
@@ -1493,8 +1493,8 @@ diff "$TMPDIR/clave-inks-before.json" "$TMPDIR/clave-inks-after.json" && echo ID
 |---|---|---|
 | `IDENTICAL`, and every row kept both tints | **stability confirmed** across process death, plugin reload, store rehydration and `clear_tab_timeline` | Step 7 |
 | the diff shows entries **added** (repos opened since the capture) but none changed | correct — the ledger is append-only | continue |
-| an existing entry **changed or disappeared** | `clear_tab_timeline` or another path is clearing the ledger — **report immediately** with the diff. `clear_tab_timeline_preserves_every_ink` should have caught it |
-| the ledger is unchanged but a row's tint moved | the bar is resolving indices differently — report that row's `inks` from `clave ls --json` |
+| an existing entry **changed or disappeared** | `clear_tab_timeline` or another path is clearing the ledger — **report immediately** with the diff. `clear_tab_timeline_preserves_every_ink` should have caught it | **stop; report** |
+| the ledger is unchanged but a row's tint moved | the bar is resolving indices differently — report that row's `inks` from `clave ls --json` | **stop; report** |
 
 ### Step 7 — manual rename, and the honest limitation
 

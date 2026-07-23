@@ -350,8 +350,19 @@ counter field.
 +            // ==================== end SPIKE ONLY ====================
 ```
 
-All three arms `return false` — **no repaint, no effect, no spawn**. The shared
-`dbg_events` counter means the cap covers all three arms jointly.
+All three arms `return false` — **no repaint, no effect, no spawn**.
+
+**Per-signal counters, not a shared modulo (CodeRabbit, 2026-07-22).** The sketch
+above shares one `dbg_events` across all three arms, which biases §2.6's
+`CLAVE_DBG_input × 25` extrapolation the moment command/cwd events interleave, and
+lets one noisy signal exhaust the joint 2000-event cap before later probes run —
+invalidating P1–P9. Replace it with **independent per-signal accounting**: three
+counters `dbg_cmd` / `dbg_cwd` / `dbg_input`, each with its own 2000 cap and its
+own `% 25` sample, so `CLAVE_DBG_input=n` is an exact count of `InputReceived`
+and no signal can starve another's budget. The joint total is still bounded (3 ×
+2000 worst case); log each counter separately in the analysis window so §2.6
+reads exact per-signal counts rather than an extrapolation. The arms otherwise
+stay identical — `return false`, no spawn.
 
 ### 2.4 Build and load into the sandbox
 
@@ -538,7 +549,7 @@ Why:
 the established pattern (`run_effects`'s `active` gate, `main.rs:88`), **plus**
 a "the pane is in *my* tab" conjunct:
 
-```
+```text
 touch iff  is_active_instance()
       AND  model.tab_of_pane(pane_id) == own_tab_id()
 ```
@@ -621,6 +632,22 @@ fn is_top_of_timeline(&self, tab_id: usize) -> bool {
 }
 ```
 
+**This is a spawn-reduction optimisation, and it must never suppress the
+authoritative write on a stale mirror (CodeRabbit, 2026-07-22).** `self.timeline`
+is a local copy that a lost snapshot push can leave stale — it could say `own_tab`
+is already top while the store has a newer tab, and then this predicate would
+drop the touch and it would *never* reach the store's idempotent max-merge. That
+is fail-**closed**, contradicting §7.3's "fails open." The rule: this suppressor
+may skip a touch **only** when the local mirror is known-fresh — i.e. gate it
+behind the same seq fence S0/S1 use (`self.seq` equal to the last snapshot's
+`seq`, no push observed lost). When freshness is not established, **do not
+suppress — emit the touch** and let `apply_touch`'s max-merge absorb the
+redundant write (it is idempotent and change-gated store-side under S2's decision
+to make `apply_touch` return `Option`). The optimisation's whole value is cutting
+the `make`/`cargo build` burst, and that burst is on a tab the user is actively
+in, where the mirror *is* fresh — so the fence costs nothing in the case it
+matters and preserves correctness in the case it doesn't.
+
 Touching a tab that is already row 0 changes nothing observable. This one
 predicate collapses the worst realistic burst — a foreground `make`/`cargo build`
 you are watching, which spawns a distinct child every tick — from one touch per
@@ -639,7 +666,7 @@ next start re-touches.
 
 Derived, not measured:
 
-```
+```text
 events/sec/pane   ≤ 1                         (1 Hz sampler, pty.rs / background_jobs.rs:114)
 panes that pass conjunct (2) ≤ 1 per client   (focused_client_ids, pty.rs:2143-2150)
 instances that pass (4)      = 1              (own-tab election, §4.1)
@@ -758,7 +785,7 @@ touch_cooling: bool,
 
 **Gate:**
 
-```
+```text
 touch own_tab iff  is_active_instance()                 (S0 — hard dependency)
               AND  own_tab_id().is_some()
               AND  nav_suppress == 0                    (else decrement and drop)
