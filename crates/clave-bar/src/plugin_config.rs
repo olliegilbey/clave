@@ -61,7 +61,10 @@ mod tests {
         // The dev/sandbox value is literally `clave` — present and legitimate,
         // so it must be Some (no warning), NOT conflated with the absent case.
         let mut c = BTreeMap::new();
-        c.insert(clave_types::CLAVE_BINARY_KEY.to_string(), "clave".to_string());
+        c.insert(
+            clave_types::CLAVE_BINARY_KEY.to_string(),
+            "clave".to_string(),
+        );
         assert_eq!(resolve_binary(&c).as_deref(), Some("clave"));
     }
 

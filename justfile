@@ -32,6 +32,16 @@ build-all: build build-bar
 test:
     cargo test --workspace
 
+# Every gate CI enforces, in CI's own order. `fmt --check` FIRST because that
+# is where the lint job starts: #66 went red on three hand-edited files while
+# every *documented* gate was locally green (the docs listed three commands and
+# CI ran four). Run this before you push, not the individual recipes.
+gates:
+    cargo fmt --all --check
+    cargo test --workspace
+    cargo build -p clave-bar --target wasm32-wasip1
+    cargo clippy --workspace --all-targets -- -D warnings
+
 # §2: the working-tree build for the sandbox + contributor shells. Builds the
 # bar wasm (build-tagged with the short SHA so the zellij log says which wasm
 # produced a trace) straight into the SANDBOX data dir, and `cargo install`s

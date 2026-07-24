@@ -167,8 +167,12 @@ that is what [`docs/dev/TESTING.md`](docs/dev/TESTING.md) exists for.
 Lint the same way before you push:
 
 ```bash
-just clippy   # cargo clippy --workspace --all-targets -- -D warnings
+just gates    # fmt --check + test + wasm build + clippy — exactly what CI runs
 ```
+
+`just clippy` alone is **not** the lint gate: CI's `lint` job runs
+`cargo fmt --all --check` first, so hand-written code that clippy accepts can
+still fail the build (it did, on #66). `just gates` runs both in CI's order.
 
 ## Where work is tracked
 

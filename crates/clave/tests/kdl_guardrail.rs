@@ -411,7 +411,10 @@ fn keybind_and_layout_plugin_configurations_match() {
         ("launch.kdl (eager most-recent tab)", &launch_eager),
         ("launch.kdl (empty store, bar-only)", &launch_empty),
         ("add/open one-shot tab layout", &one_shot),
-        ("layout.kdl (generated, not passed to zellij)", &layout_kdl_text),
+        (
+            "layout.kdl (generated, not passed to zellij)",
+            &layout_kdl_text,
+        ),
     ] {
         let plugins = layout_plugin_configs(text, what);
         assert!(

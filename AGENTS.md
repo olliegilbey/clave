@@ -108,13 +108,21 @@ fleet. Before you start, read the risk taxonomy in
 tells you what you must produce, and whether the PR needs the
 `needs-live-validation` label.
 
-The three commands a PR must show green:
+The four commands a PR must show green — or `just gates`, which runs exactly
+these in this order:
 
 ```bash
+cargo fmt --all --check      # CI's lint job runs fmt BEFORE clippy
 cargo test --workspace
 cargo build -p clave-bar --target wasm32-wasip1
 cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+**`cargo fmt --all --check` is a gate, not a nicety.** CI's `lint` job runs it
+first, so hand-written code that clippy accepts still fails the build. This list
+omitted it until 2026-07-25 and #66 duly went red on three hand-edited files
+with every documented gate locally green. If you edit Rust by hand, run
+`cargo fmt --all` before you commit.
 
 ## Handoff duty
 

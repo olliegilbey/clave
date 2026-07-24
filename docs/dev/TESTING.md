@@ -30,9 +30,10 @@ tier an agent completes unattended, and it is the whole of CI today
 | CLI parse pins | `Cli::try_parse_from` tests in `crates/clave/src/main.rs` | that each plugin-invoked subcommand parses the literal arguments the plugin passes. Added after the `ArgAction` escape; required for **every new surface** |
 | Sandboxed subcommand e2e | `CLAVE_STATE_DIR=<scratch> cargo run -p clave -- …` | one real end-to-end run of a new subcommand against a scratch store. Do it in a **debug** build — clap's `debug_assert` only fires there |
 
-The gate:
+The gate (`just gates` runs all four, in CI's order):
 
 ```bash
+cargo fmt --all --check  # CI's lint job runs this BEFORE clippy
 cargo test --workspace   # --workspace is load-bearing: default-members excludes clave-bar
 cargo build -p clave-bar --target wasm32-wasip1
 cargo clippy --workspace --all-targets -- -D warnings
@@ -40,6 +41,15 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 A bare `cargo test` exits 0 while skipping every one of the 63 model tests. Use
 `just test`.
+
+Two ways this list has bitten:
+
+- **`cargo fmt --all --check` was missing from every doc until 2026-07-25**, so
+  an agent could run all the documented gates green and still fail CI — which is
+  exactly what happened to #66 (three hand-edited files, clippy-clean,
+  fmt-dirty). CI's `lint` job is `fmt` **then** `clippy`; both must pass.
+- `--workspace` on **both** `test` and `clippy` — the default-members form
+  silently skips the entire wasm crate.
 
 ### Tier 2 — real-zellij integration (**does not exist yet — #47**)
 

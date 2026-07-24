@@ -365,7 +365,10 @@ mod tests {
         // sharing the `clave-v` TEXT prefix but no digit after it — e.g. a
         // `clave-vault`/`clave-verify` binary someone else put in the same
         // bin dir — must not be treated as our versioned copy.
-        assert!(!binary_resolution_is_anomalous(false, &["clave-vault".into()]));
+        assert!(!binary_resolution_is_anomalous(
+            false,
+            &["clave-vault".into()]
+        ));
         assert!(!binary_resolution_is_anomalous(
             false,
             &["clave-verify".into()]
