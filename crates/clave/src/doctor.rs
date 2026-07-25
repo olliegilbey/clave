@@ -108,7 +108,13 @@ pub struct Finding {
 
 fn tool_group(tool: ToolId) -> Group {
     match tool {
-        ToolId::Zellij | ToolId::Claude | ToolId::Git => Group::RequiredTools,
+        // ClaudeCodex is the OPTIONAL wrapper: it is deliberately NOT in the
+        // doctor facts list (see `diagnose`), so this arm is unreachable from
+        // the ordinary report — it exists only for match exhaustiveness when a
+        // `--codex` preflight constructs a Finding. Do not wire it into the
+        // facts list: RequiredTools would then mis-report it as missing for
+        // every user who never touches `--codex` (design §Preflight).
+        ToolId::Zellij | ToolId::Claude | ToolId::ClaudeCodex | ToolId::Git => Group::RequiredTools,
         ToolId::Fzf | ToolId::Zoxide => Group::AgentPicker,
     }
 }
@@ -126,6 +132,11 @@ pub fn missing_advice(tool: ToolId, mgr: Option<PkgManager>) -> Vec<String> {
         // URL-only: InstallFix ad-poisons copied one-liners and names Claude
         // Code users as a primary target — official docs, nothing else.
         ToolId::Claude => vec!["Install Claude Code: https://code.claude.com/docs".into()],
+        ToolId::ClaudeCodex => vec![
+            "Install `claude-codex` as a real executable and put it on PATH.".into(),
+            "A shell function cannot be launched by clave.".into(),
+            "Or set CLAVE_CLAUDE_CODEX_BIN to its absolute path.".into(),
+        ],
         ToolId::Git | ToolId::Fzf | ToolId::Zoxide => {
             let (pkg, url) = match tool {
                 ToolId::Git => ("git", "https://git-scm.com/downloads"),
@@ -741,6 +752,27 @@ mod tests {
                 .iter()
                 .any(|l| l.contains("github.com/zellij-org/zellij/releases"))
         );
+    }
+
+    #[test]
+    fn claude_codex_remediation_is_actionable() {
+        let text = missing_advice(ToolId::ClaudeCodex, None).join("\n");
+        assert!(text.contains("real executable"));
+        assert!(text.contains("CLAVE_CLAUDE_CODEX_BIN"));
+        assert!(text.contains("absolute path"));
+    }
+
+    #[test]
+    fn claude_codex_preflight_uses_central_remediation() {
+        let finding = Finding {
+            group: Group::RequiredTools,
+            severity: Severity::Problem,
+            label: "claude-codex not found".into(),
+            advice: missing_advice(ToolId::ClaudeCodex, None),
+        };
+        let rendered = render_failures("clave add --codex can't launch:", &[finding]);
+        assert!(rendered.contains("claude-codex not found"));
+        assert!(rendered.contains("CLAVE_CLAUDE_CODEX_BIN"));
     }
 
     #[test]

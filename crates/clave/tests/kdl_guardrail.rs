@@ -68,6 +68,7 @@ fn eager_record() -> AgentRecord {
         last_visited: 0,
         worktree: Some("/home/o/code/clave/.claude-worktrees/ab12cd34".into()),
         label_source: LabelSource::Summary,
+        claude_codex: false,
         tab_id: None,
         stale: false,
     }
@@ -167,10 +168,18 @@ fn launch_layout_kdl_parses_in_both_branches() {
     // Non-empty store → the eager most-recent branch, which composes in
     // `add::tab_node_bare` — a distinct code path (bare tab node, no bar pane)
     // that the empty branch never touches.
-    let r = eager_record();
+    let mut r = eager_record();
     assert_layout_ok(
         &setup::launch_layout_kdl(BIN_ABS, WASM, Some(&r)),
-        "launch.kdl (eager most-recent tab)",
+        "launch.kdl (eager most-recent tab, plain Claude)",
+    );
+    // Task 3: the eager C8 branch uses the distinct bar-less tab builder; parse
+    // the optional profile token here too so validity is not inferred from the
+    // one-shot add/open layout's different nesting.
+    r.claude_codex = true;
+    assert_layout_ok(
+        &setup::launch_layout_kdl(BIN_ABS, WASM, Some(&r)),
+        "launch.kdl (eager most-recent tab, Claude Codex)",
     );
 }
 
@@ -183,8 +192,10 @@ fn add_tab_layout_parses_through_real_zellij_parser() {
     let label = add::sanitize_label("fix \"auth\"\nflow · main");
     let cwd = "/home/o/code/clave/.claude-worktrees/ab12cd34";
     add::validate_cwd(cwd).expect("test cwd must pass validate_cwd");
-    let kdl = add::tab_layout(BIN_ABS, WASM, &label, "u-1", cwd);
-    assert_layout_ok(&kdl, "add/open one-shot tab layout");
+    let plain = add::tab_layout(BIN_ABS, WASM, &label, "u-1", cwd, false);
+    assert_layout_ok(&plain, "add/open one-shot tab layout (plain Claude)");
+    let codex = add::tab_layout(BIN_ABS, WASM, &label, "u-1", cwd, true);
+    assert_layout_ok(&codex, "add/open one-shot tab layout (Claude Codex)");
 }
 
 #[test]
@@ -272,14 +283,21 @@ fn backslash_label_is_guarded_through_real_parser() {
     // introducer — `\d` is not a valid escape, so a raw backslash in a label
     // must FAIL zellij's parser. Tripwire premise first: if a future zellij
     // kdl accepts it, this assert flips and the guard can be reconsidered.
-    let raw = add::tab_layout(BIN_ABS, WASM, r"fix the \d regex", "u-1", "/home/o/x");
+    let raw = add::tab_layout(
+        BIN_ABS,
+        WASM,
+        r"fix the \d regex",
+        "u-1",
+        "/home/o/x",
+        false,
+    );
     assert!(
         Layout::from_str(&raw, "guardrail:raw-backslash".into(), None, None).is_err(),
         "premise broken: zellij's KDL parser now ACCEPTS a raw backslash — re-vet the guard\n---\n{raw}"
     );
     // The guard: the same label THROUGH sanitize_label must parse clean.
     let label = add::sanitize_label(r"fix the \d regex");
-    let kdl = add::tab_layout(BIN_ABS, WASM, &label, "u-1", "/home/o/x");
+    let kdl = add::tab_layout(BIN_ABS, WASM, &label, "u-1", "/home/o/x", false);
     assert_layout_ok(&kdl, "add/open tab layout (backslash-bearing label)");
     // And a backslash-bearing cwd must be REFUSED, not baked.
     assert!(add::validate_cwd(r"/home/o/we\ird").is_err());

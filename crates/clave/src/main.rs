@@ -38,6 +38,9 @@ enum Command {
         /// munged jsonl check and the store record).
         #[arg(long)]
         worktree: bool,
+        /// Launch Claude Code through the external claude-codex wrapper.
+        #[arg(long)]
+        codex: bool,
     },
 
     /// Resume-or-create the Claude session for a pane (idempotent).
@@ -54,6 +57,9 @@ enum Command {
         /// Working directory to start the agent in.
         #[arg(long)]
         cwd: String,
+        /// Internal immutable launch snapshot baked into generated KDL.
+        #[arg(long, hide = true)]
+        claude_codex: bool,
     },
 
     /// Handle a Claude Code hook event (reads the hook JSON payload from stdin).
@@ -214,8 +220,13 @@ fn main() -> Result<()> {
         // Bare `clave` — no subcommand — attaches or creates the session.
         None => setup::launch_session(),
         // Each arm is implemented in its own task — see docs/design.md "v1 scope".
-        Some(Command::Add { worktree }) => add::run_add(worktree),
-        Some(Command::Spawn { uuid, name, cwd }) => {
+        Some(Command::Add { worktree, codex }) => add::run_add(worktree, codex),
+        Some(Command::Spawn {
+            uuid,
+            name,
+            cwd,
+            claude_codex,
+        }) => {
             // S0b: canonicalize BEFORE munging — Claude keys the transcript
             // dir off the PHYSICAL getcwd() path.
             let physical = std::fs::canonicalize(&cwd)
@@ -224,11 +235,6 @@ fn main() -> Result<()> {
             let claude_dir = clave::env::claude_config_dir()?;
             let mode = spawn::spawn_mode(&claude_dir, &physical_str, &uuid);
             clave::evlog::log_event("spawn", &format!("{uuid}: {mode:?}"));
-            // Register uuid→pane BEFORE exec (this process is about to be
-            // replaced; best-effort — see register_pane).
-            spawn::register_pane(&uuid);
-            std::env::set_current_dir(&physical).context("entering --cwd")?;
-            use std::os::unix::process::CommandExt;
             // Discovered claude (spec §Discovery): the pane env may lack the
             // interactive PATH (nvm/local-install), so exec the absolute
             // path — resolved FRESH each spawn (the command is replayed on
@@ -248,17 +254,53 @@ fn main() -> Result<()> {
                          (or set CLAVE_CLAUDE_BIN to its location)"
                     )
                 })?;
-            let err = match mode {
-                // --name only on create: the bar label is clave-owned (§6.1).
-                spawn::SpawnMode::Create => std::process::Command::new(&claude)
-                    .args(["--session-id", &uuid, "--name", &name])
-                    .exec(),
-                spawn::SpawnMode::Resume => std::process::Command::new(&claude)
-                    .args(["--resume", &uuid])
-                    .exec(),
+            let wrapper = if claude_codex {
+                Some(
+                    clave::discover::discover(clave::discover::ToolId::ClaudeCodex)
+                        .map(|d| d.path)
+                        .ok_or_else(|| {
+                            let advice = clave::doctor::missing_advice(
+                                clave::discover::ToolId::ClaudeCodex,
+                                None,
+                            )
+                            .join("\n");
+                            anyhow::anyhow!("claude-codex not found\n{advice}")
+                        })?,
+                )
+            } else {
+                None
             };
+
+            // Register uuid→pane BEFORE exec (this process is about to be
+            // replaced; best-effort — see register_pane).
+            spawn::register_pane(&uuid);
+            std::env::set_current_dir(&physical).context("entering --cwd")?;
+            use std::os::unix::process::CommandExt;
+
+            let executable = wrapper.as_ref().unwrap_or(&claude);
+            let mut command = std::process::Command::new(executable);
+            if claude_codex {
+                command.env("CLAVE_CLAUDE_BIN", &claude);
+            } else {
+                // The override selected this executable for clave; only the
+                // wrapper contract forwards it to the launched process.
+                command.env_remove("CLAVE_CLAUDE_BIN");
+            }
+            match mode {
+                // --name only on create: the bar label is clave-owned (§6.1).
+                spawn::SpawnMode::Create => {
+                    command.args(["--session-id", &uuid, "--name", &name]);
+                }
+                spawn::SpawnMode::Resume => {
+                    command.args(["--resume", &uuid]);
+                }
+            }
+            let err = command.exec();
             // exec only returns on failure — surface it in the pane.
-            Err(anyhow::anyhow!("exec claude failed: {err}"))
+            Err(anyhow::anyhow!(
+                "exec {} failed: {err}",
+                executable.display()
+            ))
         }
         Some(Command::Hook { event }) => {
             // Zero-risk global citizen (§6.5): read stdin, do our best, and
@@ -354,6 +396,84 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_codex_cli_flags_parse_only_on_add_and_spawn() {
+        let plain = Cli::try_parse_from(["clave", "add"]).unwrap();
+        assert!(matches!(
+            plain.command,
+            Some(Command::Add {
+                worktree: false,
+                codex: false
+            })
+        ));
+
+        let codex = Cli::try_parse_from(["clave", "add", "--codex"]).unwrap();
+        assert!(matches!(
+            codex.command,
+            Some(Command::Add {
+                worktree: false,
+                codex: true
+            })
+        ));
+
+        let worktree = Cli::try_parse_from(["clave", "add", "--worktree", "--codex"]).unwrap();
+        assert!(matches!(
+            worktree.command,
+            Some(Command::Add {
+                worktree: true,
+                codex: true
+            })
+        ));
+
+        let spawn = Cli::try_parse_from([
+            "clave",
+            "spawn",
+            "u",
+            "--name",
+            "n",
+            "--cwd",
+            "/x",
+            "--claude-codex",
+        ])
+        .unwrap();
+        assert!(matches!(
+            spawn.command,
+            Some(Command::Spawn {
+                claude_codex: true,
+                ..
+            })
+        ));
+
+        let add_help = match Cli::try_parse_from(["clave", "add", "--help"]) {
+            Err(e) => e,
+            Ok(_) => panic!("help must exit through clap"),
+        };
+        assert!(add_help.to_string().contains("--codex"));
+
+        let spawn_help = match Cli::try_parse_from(["clave", "spawn", "--help"]) {
+            Err(e) => e,
+            Ok(_) => panic!("help must exit through clap"),
+        };
+        assert!(!spawn_help.to_string().contains("--claude-codex"));
+
+        assert!(
+            Cli::try_parse_from([
+                "clave", "spawn", "u", "--name", "n", "--cwd", "/x", "--codex"
+            ])
+            .is_err()
+        );
+        assert!(Cli::try_parse_from(["clave", "add", "--claude-codex"]).is_err());
+
+        for command in [
+            vec!["clave", "open", "u", "--codex"],
+            vec!["clave", "open", "u", "--claude-codex"],
+            vec!["clave", "ls", "--codex"],
+            vec!["clave", "ls", "--claude-codex"],
+        ] {
+            assert!(Cli::try_parse_from(command).is_err());
+        }
+    }
 
     /// Issue #5 (CodeRabbit CLI, PR #13): the plugin shells
     /// `clave collapse true|false` — pin that the positional literally

@@ -241,6 +241,7 @@ pub fn run_scenario(name: &str) -> Result<()> {
                     last_visited: 0,
                     worktree: a.worktree.then(|| cwd_str.clone()),
                     label_source: crate::store::LabelSource::FirstPrompt,
+                    claude_codex: false,
                     tab_id: None,
                     stale: false,
                 },

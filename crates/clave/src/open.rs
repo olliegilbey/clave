@@ -99,6 +99,23 @@ pub fn run_open(uuid: &str) -> Result<()> {
             Ok(())
         }
         OpenDecision::Open => {
+            // Hard-failing HERE is correct, and deliberately unlike the
+            // cold-start path (setup::eager_wrapper_warning), which only
+            // warns. The blast radius is what differs: this aborts opening
+            // ONE dormant row inside a session that is already up, so the
+            // user keeps every other tab and can retry; failing at cold start
+            // would create no session at all and lock them out of the tool
+            // (review finding I1). Do not "fix" the asymmetry by making them
+            // match — it is the point.
+            if row.claude_codex {
+                crate::doctor::preflight(
+                    &[
+                        crate::discover::ToolId::Claude,
+                        crate::discover::ToolId::ClaudeCodex,
+                    ],
+                    "clave open can't launch this Codex-profile agent:",
+                )?;
+            }
             // Guard the stored cwd before baking it into KDL (see
             // add::validate_cwd) — a `"`/control char breaks the layout.
             crate::add::validate_cwd(&row.cwd)?;
@@ -111,6 +128,7 @@ pub fn run_open(uuid: &str) -> Result<()> {
                 &label,
                 uuid,
                 &row.cwd,
+                row.claude_codex,
             );
             let tmp = std::env::temp_dir().join(format!("clave-open-{uuid}.kdl"));
             std::fs::write(&tmp, layout)?;
@@ -153,6 +171,7 @@ mod tests {
             last_visited: 0,
             worktree: None,
             label_source: LabelSource::FirstPrompt,
+            claude_codex: false,
             tab_id: None,
             stale: false,
         }

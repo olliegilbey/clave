@@ -203,6 +203,7 @@ pub fn launch_layout_kdl(
             &crate::add::sanitize_label(&r.label),
             &r.uuid,
             &r.cwd,
+            r.claude_codex,
         ),
         None => "    tab name=\"clave\" focus=true\n".to_string(),
     };
@@ -573,6 +574,36 @@ pub fn needs_version_refresh(
     config_exists && has_embedded && !versioned_wasm_exists
 }
 
+/// The cold-start warning for an eager row whose OPTIONAL launcher does not
+/// resolve, or None when there is nothing to say.
+///
+/// It returns a warning and never an `Err`, and that is the whole point
+/// (review finding I1, 2026-07-23). Bare `clave` IS `launch_session`, and
+/// `clave add` only runs INSIDE a session — so failing here creates no
+/// session, which leaves no tab to reach, which leaves no way to displace the
+/// eager row: one dormant row's optional wrapper would lock the user out of
+/// the entire tool. That is strictly harsher than the plain-`claude` eager
+/// path, which launches the session and fails only inside its own pane. The
+/// plan's "a dead-session preflight failure … creates no Zellij session" was
+/// written as the SAFE outcome; it is the lockout. Degrade instead: launch,
+/// and let the eager pane surface the real error from `clave spawn` — the
+/// same place, and the same retryable shape, a missing plain `claude`
+/// already uses.
+fn eager_wrapper_warning(claude_codex: bool, wrapper_found: bool) -> Option<String> {
+    if !claude_codex || wrapper_found {
+        return None;
+    }
+    // Canonical remediation (one-copy rule): these words and doctor's must not
+    // drift apart.
+    let advice =
+        crate::doctor::missing_advice(crate::discover::ToolId::ClaudeCodex, None).join("\n");
+    Some(format!(
+        "clave: the most-recent agent launches through the claude-codex wrapper, \
+         which is not resolvable — starting the session anyway; that tab will \
+         show the error.\n{advice}"
+    ))
+}
+
 /// Bare `clave`: attach-or-create the dedicated session with OUR config +
 /// a DYNAMIC layout (§6.8 C8: eager most-recent tab; serialization is off,
 /// so a dead session is deleted, never resurrected).
@@ -645,7 +676,29 @@ pub fn launch_session() -> Result<()> {
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default();
     let live = session_is_live(&list, &session);
+    let store = crate::store::read_store(&crate::store::store_paths()?)?;
+    let eager = eager_row(&store).cloned();
+
     if !live {
+        if let Some(row) = eager.as_ref() {
+            // validate_cwd stays a hard failure: a `"`/control char in the cwd
+            // emits malformed KDL, so proceeding would fail session creation
+            // anyway. The OPTIONAL wrapper is different — warn, never gate.
+            crate::add::validate_cwd(&row.cwd)?;
+            if row.claude_codex {
+                // Discovery runs only for a codex eager row, so a plain cold
+                // start pays nothing for this.
+                let found =
+                    crate::discover::discover(crate::discover::ToolId::ClaudeCodex).is_some();
+                if let Some(warning) = eager_wrapper_warning(true, found) {
+                    // The attach below repaints the screen, so stderr here is
+                    // best-effort; the event log is the durable trace and the
+                    // eager pane surfaces the real error from `clave spawn`.
+                    eprintln!("{warning}");
+                    crate::evlog::log_event("launch", &warning);
+                }
+            }
+        }
         // §6.6 hygiene: tab_ids are SESSION-scoped — drop the previous
         // session's timeline + binds before a CREATE.
         crate::store::clear_tab_timeline(&crate::store::store_paths()?)?;
@@ -677,20 +730,13 @@ pub fn launch_session() -> Result<()> {
     }
     // Compose the launch layout from the store (eager most-recent, §6.8).
     // Harmless when live (attach ignores --layout for an existing session).
-    let store = crate::store::read_store(&crate::store::store_paths()?)?;
-    let most_recent = eager_row(&store);
-    // Guard the eager row's cwd before it's baked into the launch layout
-    // (add::validate_cwd) — a `"`/control char would emit malformed KDL and
-    // the whole session would fail to create.
-    if let Some(r) = most_recent {
-        crate::add::validate_cwd(&r.cwd)?;
-    }
     let wasm = wasm_path()?;
     // Bake the environment's clave into the eager tab's spawn: the versioned
     // copy's absolute path in a stable session (immune to a newer PATH
     // `clave`), bare `clave` in the dev/sandbox one (§2 binary split).
     let binary = crate::release::runtime_binary();
-    let layout_text = launch_layout_kdl(&binary, wasm.to_str().context("wasm path")?, most_recent);
+    let layout_text =
+        launch_layout_kdl(&binary, wasm.to_str().context("wasm path")?, eager.as_ref());
     // STABLE path in the data dir, not a pid-suffixed temp file: the exec()
     // below never returns, so nothing here can clean up — a unique-per-launch
     // file would leak one KDL forever. Overwrite the one file each launch.
@@ -700,7 +746,7 @@ pub fn launch_session() -> Result<()> {
         "launch",
         &format!(
             "session={session} live={live} eager={:?}",
-            most_recent.map(|r| r.uuid.as_str())
+            eager.as_ref().map(|r| r.uuid.as_str())
         ),
     );
     use std::os::unix::process::CommandExt;
@@ -746,7 +792,7 @@ mod tests {
         for kdl in [
             layout_kdl("/w.wasm"),
             launch_layout_kdl("clave", "/w.wasm", None),
-            crate::add::tab_layout("clave", "/w.wasm", "l", "u", "/c"),
+            crate::add::tab_layout("clave", "/w.wasm", "l", "u", "/c", false),
         ] {
             assert!(
                 kdl.contains("size=\"15%\""),
@@ -800,6 +846,7 @@ mod tests {
             last_visited: 0,
             worktree: Some("/repo/.claude-worktrees/ab".into()),
             label_source: crate::store::LabelSource::FirstPrompt,
+            claude_codex: false,
             tab_id: None,
             stale: false,
         };
@@ -815,6 +862,54 @@ mod tests {
         // BARE.
         assert_eq!(kdl.matches("plugin location").count(), 1);
         r.label = "x".into(); // silence unused-mut if needed
+    }
+
+    #[test]
+    fn cold_start_warns_but_never_gates_on_a_missing_optional_wrapper() {
+        // I1 (review, 2026-07-23): bare `clave` IS launch_session, and
+        // `clave add` only runs INSIDE a session. So a hard failure here
+        // leaves no way to reach a tab and displace the eager row — the user
+        // is locked out of the whole tool by one dormant row's OPTIONAL
+        // launcher. The plain-`claude` eager path has no such gate: it
+        // launches and fails only inside its own pane. The contract for the
+        // optional wrapper is therefore a WARNING, never an Err.
+        let warning =
+            eager_wrapper_warning(true, false).expect("a missing wrapper must still warn");
+        assert!(warning.contains("claude-codex"));
+        // The remediation must be the canonical copy, not an ad-hoc restating.
+        assert!(warning.contains("CLAVE_CLAUDE_CODEX_BIN"));
+
+        // Nothing to say when the wrapper resolves, or the row is plain — a
+        // warning on every cold start would bury the one that matters.
+        assert_eq!(eager_wrapper_warning(true, true), None);
+        assert_eq!(eager_wrapper_warning(false, false), None);
+        assert_eq!(eager_wrapper_warning(false, true), None);
+    }
+
+    #[test]
+    fn launch_layout_eager_derives_claude_codex_from_row() {
+        // Cold resurrection must replay the stored immutable launch choice,
+        // not rediscover or infer it after C8 has selected the eager row.
+        let row = crate::store::AgentRecord {
+            uuid: "u-codex".into(),
+            cwd: "/repo/.claude-worktrees/codex".into(),
+            repo_root: "/repo".into(),
+            branch: "codex".into(),
+            label: "repo · codex".into(),
+            status: clave_types::Status::Idle,
+            last_interacted: 100,
+            last_visited: 0,
+            worktree: Some("/repo/.claude-worktrees/codex".into()),
+            label_source: crate::store::LabelSource::FirstPrompt,
+            claude_codex: true,
+            tab_id: None,
+            stale: false,
+        };
+
+        let layout = launch_layout_kdl("/bin/clave", "/bar.wasm", Some(&row));
+        assert!(layout.contains(r#"args "spawn" "u-codex""#));
+        assert!(layout.contains(r#""--claude-codex""#));
+        assert!(layout.contains(r#"cwd="/repo/.claude-worktrees/codex""#));
     }
 
     #[test]
@@ -836,6 +931,7 @@ mod tests {
             last_visited: 0,
             worktree: None,
             label_source: LabelSource::FirstPrompt,
+            claude_codex: false,
             tab_id: None,
             stale: false,
         };
@@ -997,6 +1093,7 @@ mod tests {
             last_visited: 0,
             worktree: None,
             label_source: crate::store::LabelSource::FirstPrompt,
+            claude_codex: false,
             tab_id: None,
             stale: false,
         };
@@ -1263,6 +1360,7 @@ mod tests {
             last_visited: 0,
             worktree: None,
             label_source: crate::store::LabelSource::FirstPrompt,
+            claude_codex: false,
             tab_id: None,
             stale: false,
         };

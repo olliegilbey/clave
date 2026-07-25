@@ -34,7 +34,7 @@ pub enum LabelSource {
 
 /// One store row (spec §5's agent record, minus the deleted `archived`).
 /// Mirrors `clave_types::Agent` plus store-only fields (`worktree`,
-/// `label_source`) that the plugin never needs to see.
+/// `label_source`, `claude_codex`) that the plugin never needs to see.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentRecord {
     /// Minted session UUID — the join key (invariant #3).
@@ -54,6 +54,10 @@ pub struct AgentRecord {
     /// Worktree path if `clave add --worktree` created one (§6.3), else None.
     pub worktree: Option<String>,
     pub label_source: LabelSource,
+    /// True when this Claude session should launch through the external
+    /// claude-codex wrapper. Host-only: the bar never needs this choice.
+    #[serde(default)]
+    pub claude_codex: bool,
     /// Zellij tab id hosting this agent (§6.6 Design B), bound by the agent
     /// tab's own bar via `clave bind`. Keys the hook's prompt→timeline stamp
     /// and the bar's glyph join. Session-scoped: None until bound, reset on
@@ -380,8 +384,29 @@ mod tests {
             last_visited: 0,
             worktree: None,
             label_source: LabelSource::FirstPrompt,
+            claude_codex: false,
             tab_id: None,
             stale: false,
+        }
+    }
+
+    #[test]
+    fn agent_record_claude_codex_defaults_false_for_old_json() {
+        let mut value = serde_json::to_value(rec("u1")).unwrap();
+        value.as_object_mut().unwrap().remove("claude_codex");
+
+        let decoded: AgentRecord = serde_json::from_value(value).unwrap();
+        assert!(!decoded.claude_codex);
+    }
+
+    #[test]
+    fn agent_record_claude_codex_roundtrips_both_values() {
+        for expected in [false, true] {
+            let mut row = rec("u1");
+            row.claude_codex = expected;
+            let decoded: AgentRecord =
+                serde_json::from_str(&serde_json::to_string(&row).unwrap()).unwrap();
+            assert_eq!(decoded.claude_codex, expected);
         }
     }
 

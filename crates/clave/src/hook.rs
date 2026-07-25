@@ -312,6 +312,7 @@ mod tests {
             last_visited: 0,
             worktree: None,
             label_source: LabelSource::FirstPrompt,
+            claude_codex: false,
             tab_id: None,
             stale: false,
         }
