@@ -3,11 +3,15 @@
 
     python3 docs/superpowers/specs/bar-preview.py
 
-This is the visual source of truth for the sidebar, ratified 2026-07-25. It is
-deliberately a standalone renderer with no clave dependency, so it runs in any
-checkout and in any terminal without building the wasm plugin. Its companion
-prose spec — every ruling, every number, and WHY each was chosen — is
-`2026-07-25-sidebar-visual-design-lock.md` in this directory.
+An ILLUSTRATION of the sidebar design ratified 2026-07-25 — not its authority.
+`2026-07-25-sidebar-visual-design-lock.md` in this directory is authoritative
+for every ruling, number and rationale; where this script and that document
+disagree, the document wins and this script is the bug.
+
+It is deliberately a standalone renderer with no clave dependency, so it runs in
+any checkout and any terminal without building the wasm plugin, and it asserts
+its own core invariant: every row is exactly COLS display cells, measured in
+cells rather than code points.
 
 FOLLOW-UP (tracked): this preview duplicates geometry that `compose_row` will
 own once S5/S6/S8 land. At that point it should become a Rust example driven by
@@ -23,7 +27,10 @@ the strength of it. Escapes survive every tool in the chain. The same rule
 applies to the Rust source: write '\\u{f062c}', not the glyph.
 """
 
-# ── ANSI ────────────────────────────────────────────────────────────────────
+import re
+import unicodedata
+
+# \u2500\u2500 ANSI \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 R, BOLD = "\x1b[0m", "\x1b[1m"
 
 
@@ -51,15 +58,16 @@ def mix(h, toward, t):
                               round(c + (f_ - c) * t))
 
 
-# ── locked constants ────────────────────────────────────────────────────────
+# \u2500\u2500 locked constants \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 COLS = 44                  # expanded bar width
 FADE = 0.25                # unselected rows, blended toward BASE
 BASE = "#1F1F28"           # kanagawa sumiInk1 — the bar background
 RULE_INK = "#DCD7BA"       # kanagawa fujiWhite — the status rule
 SEL_BG = "#2D4F67"         # kanagawa waveBlue2 — the selected row
 CHIP_INK = "#16161D"       # kanagawa sumiInk0 — text ON a title chip
-LCAP, RCAP = "", ""        # powerline half-circle thick
-RULE = "│"                        # box drawings light vertical
+LCAP, RCAP = "\ue0b6", "\ue0b4"   # powerline half-circle thick (U+E0B6/E0B4)
+ELLIPSIS = "\u2026"
+RULE = "\u2502"                    # box drawings light vertical
 
 TITLE_W, REPO_W = 7, 7
 
@@ -74,9 +82,9 @@ PALETTE = [("#7E9CD8", "crystalBlue"), ("#98BB6C", "springGreen"),
 
 # Cell 1 of the gutter. The COLOUR is the status; the shape never varies
 # except for the two terminal states.
-STATUS = {"working": ("●", "#FF9E3B"), "done": ("●", "#98BB6C"),
-          "unread": ("●", "#E46876"), "idle": ("●", "#54546D"),
-          "dormant": ("◌", "#54546D"), "stale": ("✗", "#E82424")}
+STATUS = {"working": ("\u25cf", "#FF9E3B"), "done": ("\u25cf", "#98BB6C"),
+          "unread": ("\u25cf", "#E46876"), "idle": ("\u25cf", "#54546D"),
+          "dormant": ("\u25cc", "#54546D"), "stale": ("\u2717", "#E82424")}
 
 # Cell 3 of the gutter — the context battery (S7). Colour is the magnitude
 # ramp, green through red. A plain terminal tab shows the console mark here
@@ -95,12 +103,36 @@ PROVENANCE = {"worktree": "\U000168c2",   # bamum tree
               "main": " "}
 
 
+def cells(s):
+    """Terminal CELLS occupied by `s`, not code points.
+
+    `len()` counts scalars: a wide (East-Asian W/F) glyph occupies two columns
+    and a combining mark none, so code-point arithmetic silently misaligns
+    every row to its right. This is the same hazard the dossier records against
+    the renderer's `str::chars()` clamp. Rust must use `unicode-width` — the
+    exact version zellij lays its grid with — not `chars().count()`.
+    """
+    n = 0
+    for ch in s:
+        if unicodedata.combining(ch):
+            continue
+        n += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return n
+
+
 def clamp(s, w):
-    """A fixed-width column: truncate with … when long, pad when short.
-    Padding is what makes fields line up vertically down the bar."""
+    """A fixed-width column, measured in CELLS: truncate when long, pad when
+    short. Padding is what makes fields line up vertically down the bar."""
     if w <= 0:
         return ""
-    return (s[: w - 1] + "…") if len(s) > w else s.ljust(w)
+    if cells(s) <= w:
+        return s + " " * (w - cells(s))
+    out = ""
+    for ch in s:
+        if cells(out) + cells(ch) > w - 1:
+            break
+        out += ch
+    return out + ELLIPSIS + " " * (w - cells(out) - 1)
 
 
 def render(row, selected=False):
@@ -158,7 +190,7 @@ def render(row, selected=False):
     return out
 
 
-# ── a sample fleet ──────────────────────────────────────────────────────────
+# \u2500\u2500 a sample fleet \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 INK = {"clave": PALETTE[0][0], "dotfiles": PALETTE[1][0],
        "api-svc": PALETTE[2][0], "infra": PALETTE[4][0], "webapp": PALETTE[5][0]}
 
@@ -195,16 +227,22 @@ DIMTXT = fg("#717C7C")
 def bar(rows, label):
     ruler = "".join(str((i + 1) % 10) for i in range(COLS))
     print(f"\n  {BOLD}{label}{R}")
-    print(f"  {DIMTXT}{ruler}\n  ┌{'─' * COLS}┐{R}")
+    print(f"  {DIMTXT}{ruler}\n  \u250c{"\u2500" * COLS}\u2510{R}")
     for r in rows:
-        print(f"  {DIMTXT}│{R}{render(r, r.get('selected', False))}"
-              f"{DIMTXT}│{R}")
-    print(f"  {DIMTXT}└{'─' * COLS}┘{R}")
+        line = render(r, r.get("selected", False))
+        # The lock doc CLAIMS every row is exactly COLS cells. Prove it rather
+        # than asserting it in prose: strip the SGR sequences and measure the
+        # remainder in display cells. A miscounted glyph fails the preview
+        # loudly instead of shipping a ragged bar.
+        width = cells(re.sub(r"\x1b\[[0-9;]*m", "", line))
+        assert width == COLS, f"row is {width} cells, expected {COLS}: {r!r}"
+        print(f"  {DIMTXT}\u2502{R}{line}{DIMTXT}\u2502{R}")
+    print(f"  {DIMTXT}\u2514{"\u2500" * COLS}\u2518{R}")
 
 
 if __name__ == "__main__":
-    print(f"\n{BOLD}{'═' * 78}\nclave sidebar — locked visual design "
-          f"(2026-07-25)\n{'═' * 78}{R}")
+    print(f"\n{BOLD}{"\u2550" * 78}\nclave sidebar — locked visual design "
+          f"(2026-07-25)\n{"\u2550" * 78}{R}")
     bar(FLEET, f"expanded — {COLS} columns")
 
     print(f"""
@@ -232,7 +270,7 @@ if __name__ == "__main__":
 
     print(f"\n  {BOLD}palette — 8 kanagawa hues, round-robin{R}\n")
     for i, (h, n) in enumerate(PALETTE):
-        print(f"   {DIMTXT}{i}{R} {fg(h)}████{R}  "
+        print(f"   {DIMTXT}{i}{R} {fg(h)}\u2588\u2588\u2588\u2588{R}  "
               f"{fg(h)}repo-name{R}   {bg(h)}{fg(CHIP_INK)} TITLE {R}   "
               f"{DIMTXT}{h}  {n}{R}")
     print()

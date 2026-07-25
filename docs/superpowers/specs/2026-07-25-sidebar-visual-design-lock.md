@@ -12,9 +12,13 @@ ink, chip, tint, fade, title vs label, live vs dormant row* — is defined in
 [UBIQUITOUS_LANGUAGE.md](../../../UBIQUITOUS_LANGUAGE.md) §3. Read that first if
 any word below is doing more work than you expect.
 
-That script is the visual source of truth. This file is the **why** — every
-number below was chosen against alternatives that were rendered and rejected,
-and the rejected ones are recorded so they are not re-proposed.
+**Source-of-truth hierarchy — one rule, no ambiguity.** *This document is
+authoritative* for every ruling, number and rationale. `bar-preview.py` is an
+**illustration**: it shows what the rulings look like, and it self-checks that
+every row is exactly 44 display cells, but where the two ever disagree **this
+file wins and the script is the bug**. Every number below was chosen against
+alternatives that were rendered and rejected, and the rejected ones are recorded
+so they are not re-proposed.
 
 ---
 

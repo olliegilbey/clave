@@ -28,6 +28,10 @@
 > - The gutter is **position-locked**: one column per cell, a space when the
 >   glyph is absent, cap columns reserved on every row. This needs a test —
 >   `main.rs` is `test = false` and nothing would catch a regression.
+>
+> **Precedence:** where this banner and the body below disagree, **the banner
+> wins**. The body is retained for its reasoning and its citations, which remain
+> accurate; only the conclusions listed above were overturned.
 
 _2026-07-22 · workstream **S6** · builds on **RC-G** of
 [`2026-07-22-ux-defect-dossier.md`](2026-07-22-ux-defect-dossier.md) · feature,

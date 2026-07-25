@@ -34,6 +34,10 @@
 > is store-backed iterate-and-wrap — which keeps S5 on the cross-process/IPC row
 > of the risk taxonomy, owing an ordering/idempotency argument and an
 > adversarial reviewer.
+>
+> **Precedence:** where this banner and the body below disagree, **the banner
+> wins**. The body is retained for its reasoning and its citations, which remain
+> accurate; only the conclusions listed above were overturned.
 
 _2026-07-22 · workstream **S5**, root cause **RC-G** of
 [`2026-07-22-ux-defect-dossier.md`](2026-07-22-ux-defect-dossier.md) · feature,

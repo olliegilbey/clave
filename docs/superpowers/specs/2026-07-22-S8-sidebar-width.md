@@ -23,6 +23,10 @@
 > `30` appears both as *the width target* and as an *arbitrary start width*, and
 > `seek_waits_for_inflight_resizes_and_zellijs_floor` must be left alone. That
 > lesson applies unchanged to 44.
+>
+> **Precedence:** where this banner and the body below disagree, **the banner
+> wins**. The body is retained for its reasoning and its citations, which remain
+> accurate; only the conclusions listed above were overturned.
 
 _2026-07-22 · implementation spec · main `50fa26a` (v0.1.1 + PR #29)_
 

@@ -55,17 +55,21 @@ The process that drives the pane toward a target width is the **width seek**.
 
 ### 3.1 A row
 
-**Row** — one rendered line. Two kinds, and the distinction matters because
-they take their text from different places:
+**Row** — one rendered line. Three kinds:
 
-- **live row** — backed by a real zellij tab. Renders the **tab name**.
-- **dormant row** — a conversation with no tab open. Renders the **label**.
+- **live row** — an agent session with a zellij tab open.
+- **dormant row** — an agent session with no tab open.
+- **terminal tab** — a zellij tab with no agent session bound to it.
 
-A **terminal tab** is a plain zellij tab with no agent session bound to it.
+**Live and dormant rows both take their text from the STORE record** — title,
+repo and summary as separate fields. A live row does *not* render the zellij tab
+name; a tab name has no field structure and cannot fill fixed-width columns.
+Only a terminal tab, which has no store record, renders its tab name. Ruled in
+the design lock §7.1.
 
 ### 3.2 A row's parts
 
-```
+```text
  ●  │  󰁻  𖣂   S6-GUT   clave    picking the gutter set
 └┬┘ └┬┘ └┬┘ └┬┘  └──┬─┘  └──┬─┘  └────────┬─────────┘
 status rule battery │     title    repo         summary

@@ -563,6 +563,18 @@ signature. `clave dev status` is the **wrong tool**: `run_status` calls
 
 Split so that two agents in two worktrees do not edit the same seam.
 
+> **⚠ This graph is stale in two ways, both tracked rather than patched here.**
+> (a) The 2026-07-25 design lock adds real ordering: S5 needs S4's `title` as a
+> first-class field, S6 builds on S5's render seam, and any collapsed-width work
+> needs S8's 44 columns to satisfy the seek-separation invariant — so
+> "rebase-coupled" understates S4→S5→S6 and S8. (b) Two hard seam collisions are
+> *not* resolved by rebasing: S1/S5 both touch `clear_tab_timeline`, and
+> S4's `fit_label_str` vs S5's `clamp_name` differ on budget-zero behaviour.
+> Both are itemised in the pre-fleet audit's repair list on PR #64 and are owed
+> an explicit ownership ruling before the fleet starts. Additionally, **#69
+> (AgentSnapshot v2) is now a blocker for S5 and S6** — design lock §7.1 needs
+> `title` and `summary` as structural wire fields.
+
 | # | Workstream | Root causes | Primary files | Depends on |
 | --- | --- | --- | --- | --- |
 | **S0** | Frame coherence & executor election | RC-A, RC-B | `clave-bar/src/main.rs:43-71,87-231,434-467`; `model.rs:414-439` | — |
