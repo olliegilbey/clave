@@ -150,10 +150,16 @@ ZELLIJ_SESSION_NAME=clave-test zellij action start-or-reload-plugin "file:<wasm>
 targets with the same `(location, configuration)` match, then loops over the
 result. With no `-c`, the command's configuration is empty
 (`cli.rs:1370-1374`); once the sandbox layout carries `clave_binary "clave"`,
-the running plugin's key is `{clave_binary: "clave"}`. **Zero matches, empty
-loop, silent no-op, exit 0** — the agent sees success and validates stale wasm.
-That is the failure class the escape record exists to prevent, and it would
-bite during this PR's own live-validation pass.
+the running plugin's key is `{clave_binary: "clave"}`, so the lookup misses.
+
+**Corrected 2026-07-25** (this paragraph first claimed a silent exit-0 no-op;
+the shipped docs were fixed and this spec was not). A miss is worse than a
+no-op: `all_plugin_ids_for_plugin_location` returns `Err(PluginDoesNotExist)`
+(`plugin_map.rs:169-171`), `reload_plugin` propagates it
+(`wasm_bridge.rs:692-693`), and the error branch logs `"Plugin {} not found,
+starting it instead"` and **starts a new instance**
+(`plugins/mod.rs:446-468`) — a second bar, the very symptom #44 fixes. It
+would bite during this PR's own live-validation pass.
 
 The SOP becomes:
 

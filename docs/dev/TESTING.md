@@ -265,8 +265,26 @@ ZELLIJ_SESSION_NAME=clave-test zellij action dump-layout
 
 ## The sandbox lifecycle
 
-The full reset-to-fresh cycle. Commands marked **(human)** are the human's to
-run in a **non-zellij terminal**; the rest an agent may run.
+**The short version: `just sandbox [scenario]`.** It does steps 2–3 below
+against the current working tree without installing anything to the daily
+surface — the safe replacement for `just dev-install` in sandbox work. It
+builds the tree, drops the wasm in the sandbox data dir, wires a **PATH shim**
+so the bar reaches *this* build, regenerates `config.kdl` **and** `launch.kdl`
+together, self-checks the #44 identity pair, verifies it touched neither
+`~/.cargo/bin/clave` nor `~/.local/share/clave`, and prints the launch command.
+It refuses to run against a live `clave-test` (see the hot-reload note below),
+and it never launches — step 1 and step 4 stay the human's.
+
+The PATH shim is load-bearing, not tidiness: the sandbox data dir holds no
+versioned CLI copy, so generation bakes bare `clave` and the bar resolves it
+through `PATH` at runtime. Without the shim that is the **stable**
+`~/.cargo/bin/clave` — quite possibly built before the change under test, and
+version strings will not give it away (a pre-#44 `0.1.1` and a post-#44 `0.1.1`
+are indistinguishable to `clave --version` and to the `clave-bar: loaded`
+log line).
+
+The full reset-to-fresh cycle, done by hand. Commands marked **(human)** are
+the human's to run in a **non-zellij terminal**; the rest an agent may run.
 
 1. **Kill the running session (human):**
    ```bash
@@ -287,6 +305,17 @@ run in a **non-zellij terminal**; the rest an agent may run.
 > `launch.kdl` beside a pre-#44 `config.kdl` makes every keybind miss and
 > spawn a second bar — the exact #44 symptom, mistaken for the fix not
 > working. Regenerating both together is the guard.
+
+> **And never regenerate against a LIVE session.** Zellij watches the
+> `--config` file of every running session and hot-swaps its keybinds in place
+> (`zellij-server src/lib.rs:2175` → `ConfigWrittenToDisk` `:2298` →
+> `ScreenInstruction::Reconfigure` `screen.rs:717`, ~1s poll), but the running
+> bar keeps the plugin identity it loaded with. So a `dev scenario` (or
+> `just release`) aimed at a live session re-keys its keybinds to an identity
+> the on-screen bar does not have, and the next keypress **starts a second
+> bar**. Kill the session first — step 1 — then regenerate, then launch. The
+> two notes together give the rule: **regenerate both artifacts, always, and
+> only while the session is dead.**
 
 ### Scenario catalog
 

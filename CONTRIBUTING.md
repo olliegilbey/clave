@@ -73,6 +73,28 @@ stable binary before daily driving:
 cp ~/.local/share/clave/bin/clave-vX.Y.Z ~/.cargo/bin/clave
 ```
 
+### The upgrade window: `config.kdl` is live-watched (#44)
+
+Zellij **watches the `--config` file of every running session** and hot-swaps
+the keybinds in place — `report_changes_in_config_file` (`zellij-server
+src/lib.rs:2175`, ~1s poll) → `ServerInstruction::ConfigWrittenToDisk`
+(`:2298`) → `ScreenInstruction::Reconfigure` (`screen.rs:717`). The **running
+bar's identity is not swapped**: it is `initial_userspace_configuration`, fixed
+at plugin load.
+
+Since #44 the keybinds carry `clave_binary`, so regenerating `config.kdl`
+against a live session re-keys its keybinds to a plugin identity that the
+on-screen bar does not have. The next Alt+c / Alt+j / Alt+o misses its
+destination, and zellij's response to a miss is to **start a new plugin** — a
+second sidebar in every tab, dead navigation. Verbatim #43/#44, triggered by
+installing the fix for it.
+
+**So: any `just release`, `clave setup`, or `clave dev scenario` that changes
+`clave_binary` or the wasm path requires restarting every affected session.**
+Kill and relaunch before pressing any clave key. This bites hardest exactly
+once — on the pre-#44 → post-#44 upgrade, where the old bar's configuration is
+empty and the new keybinds' is not.
+
 **Diagnosis is one grep**, because the bar logs its version at every load
 (zellij's log lives under the OS temp dir, e.g.
 `$TMPDIR/zellij-$UID/zellij-log/zellij.log` on macOS):

@@ -72,31 +72,34 @@ mod tests {
     fn main_never_shells_out_to_a_bare_clave() {
         // The seven bar→CLI shellouts are the whole point of #44, but they live
         // in main.rs, which `test = false` (Cargo.toml) makes unreachable by any
-        // runtime test — the bin can't host-link (see lib.rs). A whole-branch
-        // review proved the gap live: reverting one site to
-        // `run_command(&["clave", …])` kept every gate green. This crude
-        // source-text guard is the ONLY thing that fails on that reversion until
-        // #47's tier-2 real-zellij harness exists.
+        // runtime test — the bin can't host-link (see lib.rs). Until #47's
+        // tier-2 real-zellij harness exists, this source-text guard is the only
+        // thing standing between a reverted shellout and a green suite.
         //
-        // Pattern `"clave",` = a bare "clave" as the FIRST argv element followed
-        // by more args — the exact reverted-shellout shape. It cannot match the
-        // legitimate `"clave".to_string()` PATH fallback in load() (`.` not `,`
-        // after the quote), nor any `"clave-*"` pipe name (suffix before the
-        // closing quote). Both properties are asserted below so a future rename
-        // that breaks the discriminator fails loudly instead of silently.
+        // COUNT, not substring-absence. The original form asserted the absence
+        // of `"clave",` and a 2026-07-25 review proved it blind to three live
+        // mutations: a byte-exact revert of the prune-tabs site (whose pre-#44
+        // text was `vec!["clave".into(), …]` — no comma after the quote), any
+        // variable indirection (`let cli = "clave";`), and disabling the feature
+        // wholesale in load(). Counting the bare `"clave"` literal catches all
+        // three: main.rs must contain EXACTLY ONE, the PATH fallback in load().
+        // Pipe names (`"clave-nav"`, `"clave-visited"`, …) never match — the
+        // char after `clave` is `-`, not the closing quote.
         let src = include_str!("../src/main.rs");
-        assert!(
-            !src.contains(r#""clave","#),
-            "#44: a bar shellout resolves bare `clave` through PATH again — \
-             bake self.clave_binary instead (see resolve_binary)"
+        assert_eq!(
+            src.matches(r#""clave""#).count(),
+            1,
+            "#44: main.rs must contain exactly ONE bare \"clave\" literal — the \
+             PATH fallback in load(). Any other is a shellout resolving through \
+             PATH again; bake self.clave_binary instead (see resolve_binary)"
         );
-        // Guard-integrity: the two shapes the pattern must tolerate DO occur in
-        // main.rs, so if a refactor made either collide with the pattern this
-        // test would start lying. Pin them.
+        // The count above cannot see load() being cut off from its configuration
+        // (mutation J: `resolve_binary(&BTreeMap::new())` leaves the literal
+        // count at 1 while disabling the feature entirely).
         assert!(
-            src.contains(r#""clave".to_string()"#),
-            "the PATH fallback moved — re-vet that the guard pattern still \
-             excludes it before trusting this test"
+            src.contains("resolve_binary(&config)"),
+            "#44: load() no longer feeds its zellij plugin configuration to \
+             resolve_binary — the bar is back on PATH for every shellout"
         );
     }
 }
