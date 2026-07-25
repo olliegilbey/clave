@@ -1,5 +1,17 @@
 # UX defect dossier — sidebar ordering, tab close, labels, colour
 
+> ## ⚠ The sidebar's VISUAL design was locked on 2026-07-25
+>
+> The root-cause analysis below (RC-A…RC-G) is unchanged and remains the shared
+> source of truth. But anything here touching **geometry, colour or glyphs** —
+> widths, gutter shape, palette size, collapsed-mode behaviour — was settled
+> from rendered rows in
+> [`2026-07-25-sidebar-visual-design-lock.md`](2026-07-25-sidebar-visual-design-lock.md).
+> Read that before S5, S6 or S8, and run
+> `python3 docs/superpowers/specs/bar-preview.py` to see the result.
+>
+> Vocabulary for all of it: [`UBIQUITOUS_LANGUAGE.md`](../../../UBIQUITOUS_LANGUAGE.md).
+
 _2026-07-22 · research synthesis, main `50fa26a` (v0.1.1 + PR #29) · read-only investigation_
 
 This is the **shared source of truth** for eight workstreams — S0–S6 and S8

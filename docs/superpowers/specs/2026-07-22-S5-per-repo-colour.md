@@ -1,5 +1,40 @@
 # S5 — per-repo and per-title colour, allocated by iteration (RC-G, closes #24 item 2)
 
+> ## ⚠ THE PALETTE AND THE TITLE CHANNEL CHANGED — superseded 2026-07-25
+>
+> The maintainer ratified the sidebar's visual design from rendered rows on
+> 2026-07-25. **Read
+> [`2026-07-25-sidebar-visual-design-lock.md`](2026-07-25-sidebar-visual-design-lock.md)
+> before this file**, and run `python3 docs/superpowers/specs/bar-preview.py`.
+>
+> What changed for S5 specifically:
+> - **The palette is 8 kanagawa hues, not 12** — crystalBlue, springGreen,
+>   carpYellow, waveRed, oniViolet, waveAqua2, surimiOrange, sakuraPink. Twelve
+>   was rendered and rejected: *"they start colliding after the 5th colour."*
+> - **The title is a filled CHIP** — its ink is the *background*, with
+>   `\u{16161d}` (sumiInk0) text — not tinted text. The repo stays tinted text.
+>   Two different renderings, deliberately, because they answer two different
+>   questions: *which project* vs *which of my tabs*.
+> - **Fields are fixed-width columns**: title 7, repo 7, summary 17, padded so
+>   they align vertically. There is **no branch column** — the gutter's
+>   provenance glyph carries that, and 7 characters of a branch name is usually
+>   just the prefix convention.
+> - **The provenance glyph takes the repo ink**, making it the one gutter cell
+>   permitted an arbitrary RGB. That is deliberate: repo identity becomes a
+>   shape in the gutter as well as a colour in the text.
+> - **`InkSpan` IS DELETED.** Lock doc §7.1 rules that a live row renders from
+>   the store record, not the zellij tab name, so nothing parses a composed name
+>   any more. Drop the `InkSpan` type, `segment_span`, the "title is field 0 or
+>   1" arithmetic and `snapshot_ink_segments_match_compose_label_fields`. This
+>   also makes **#69 (AgentSnapshot v2) a blocker** for S5: the wire format has
+>   no `title`/`summary` field yet, only the composed `label`.
+>
+> **Unchanged and still binding:** hashing is overruled (`DefaultHasher` is not
+> toolchain-stable, and the maintainer rejected hashing outright), so allocation
+> is store-backed iterate-and-wrap — which keeps S5 on the cross-process/IPC row
+> of the risk taxonomy, owing an ordering/idempotency argument and an
+> adversarial reviewer.
+
 _2026-07-22 · workstream **S5**, root cause **RC-G** of
 [`2026-07-22-ux-defect-dossier.md`](2026-07-22-ux-defect-dossier.md) · feature,
 not a defect · **revised** after the maintainer overruled the hash_

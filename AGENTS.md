@@ -19,6 +19,7 @@ a `vX.Y.Z` tag plus `just release` is the promotion event.
 
 | Document | What it settles |
 |---|---|
+| [UBIQUITOUS_LANGUAGE.md](UBIQUITOUS_LANGUAGE.md) | the shared vocabulary. **zellij session vs agent session**, **title vs label**, gutter · cell · ink · chip · provenance. Short, and it unlocks every other document — "session" alone is ambiguous three ways in this codebase |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | the two environments (stable vs sandbox), the release model, the PR flow, where work is tracked — **and "The one leak"**, the PATH hazard that broke v0.1.1 in the field (#43, #44) |
 | [docs/dev/TESTING.md](docs/dev/TESTING.md) | the three verification tiers, the risk taxonomy (change class → required verification), the escape record, and the live-validation SOP |
 | [docs/status/](docs/status/) | the newest handoff **is** current state: what shipped, what was declined, what is mid-flight. Handoffs are tracked (#22 ruling). Read the newest before you plan |

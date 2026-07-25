@@ -1,5 +1,29 @@
 # S8 — Sidebar width: 30 → 38 columns
 
+> ## ⚠ THE TARGET IS 44, NOT 38 — superseded 2026-07-25
+>
+> The maintainer ratified the sidebar's visual design from rendered rows on
+> 2026-07-25. **Read
+> [`2026-07-25-sidebar-visual-design-lock.md`](2026-07-25-sidebar-visual-design-lock.md)
+> before this file**, and run `python3 docs/superpowers/specs/bar-preview.py`.
+>
+> What changed for S8 specifically:
+> - **`BAR_TARGET_COLS = 44`**, not 38. Every "38" below is dead. Re-derive the
+>   expected-red test set — do **not** trust the one in §6.2.
+> - **`COLLAPSED_TARGET_COLS = 4` is unreachable** and always was: zellij's
+>   resize floor stops the seek above it (`model.rs`, the doc-comment on the
+>   constant itself), so today's collapsed width is whatever the window's
+>   granularity floor happens to be — 11 on the maintainer's machine. Any
+>   reasoning that assumes the bar is ever 4 columns wide is void.
+> - The collapsed target is **still open** and is S8's to settle. The binding
+>   constraint is `BAR_TARGET_COLS − COLLAPSED_TARGET_COLS > MAX_LEARNABLE_STEP`
+>   (20), so at 44 the collapsed target must be **< 24**.
+>
+> **Still valid, and still the trap:** the mechanical-replace hazard in §6.2.
+> `30` appears both as *the width target* and as an *arbitrary start width*, and
+> `seek_waits_for_inflight_resizes_and_zellijs_floor` must be left alone. That
+> lesson applies unchanged to 44.
+
 _2026-07-22 · implementation spec · main `50fa26a` (v0.1.1 + PR #29)_
 
 Read first: [`2026-07-22-ux-defect-dossier.md`](2026-07-22-ux-defect-dossier.md)

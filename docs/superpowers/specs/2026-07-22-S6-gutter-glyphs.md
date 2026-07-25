@@ -1,5 +1,34 @@
 # S6 — the three-cell gutter: status · context battery · worktree marker (slices #24, opens #40)
 
+> ## ⚠ THE GUTTER IS NOT THREE CELLS — superseded 2026-07-25
+>
+> The maintainer ratified the sidebar's visual design from rendered rows on
+> 2026-07-25. **Read
+> [`2026-07-25-sidebar-visual-design-lock.md`](2026-07-25-sidebar-visual-design-lock.md)
+> before this file**, and run `python3 docs/superpowers/specs/bar-preview.py`.
+>
+> What changed for S6 specifically:
+> - **The gutter is columns 1–9 of a 44-column bar**: cap · status · sp ·
+>   **rule** · sp · battery · sp · provenance · sp. The *rule* (`\u{2502}` in
+>   fujiWhite) is new — a coloured status dot immediately beside a coloured
+>   battery is two competing hue signals, and the eye cannot parse either.
+> - **§2.8 is void in its entirety.** It costed four collapsed-mode options
+>   against a "text budget 0" row at `COLLAPSED_TARGET_COLS = 4`. That width
+>   never occurs — zellij's floor stops the seek above it. See the lock doc §3.
+> - **The glyph set is settled**: worktree `\u{168c2}` (bamum tree), branch
+>   `\u{f062c}` (nf-md-source_branch), **main checkout renders NOTHING**. The
+>   last is a convention finding, not an omission — see lock doc §5.1.
+> - **Drop the `glyphs` config key.** It is unnecessary (every candidate glyph
+>   renders on the target terminal — the round-1 probe that suggested otherwise
+>   was an encoding bug, lock doc §8.2) and it is *dangerous*: zellij hashes
+>   plugin identity over the whole config map, so a key miss **starts a second
+>   plugin** — the v0.1.1 double-sidebar bug. Fold the customisation into #40.
+> - **Glyphs are written as `\u{...}` escapes, never literals.** Load-bearing;
+>   literals were silently lost twice during the design rounds. Lock doc §5.4.
+> - The gutter is **position-locked**: one column per cell, a space when the
+>   glyph is absent, cap columns reserved on every row. This needs a test —
+>   `main.rs` is `test = false` and nothing would catch a regression.
+
 _2026-07-22 · workstream **S6** · builds on **RC-G** of
 [`2026-07-22-ux-defect-dossier.md`](2026-07-22-ux-defect-dossier.md) · feature,
 not a defect · main `50fa26a`_
