@@ -61,7 +61,10 @@ a live terminal is the human's — you print the command, you do not run it.
    change, plus the PR bots (CodeRabbit CLI on the committed branch, Codex).
    Subagent-driven development satisfies this with its per-task reviewers plus
    the whole-branch review, provided those reviewers are genuinely independent
-   of the implementer.
+   of the implementer. **One such lane discharges the requirement.** The PR bots
+   (CodeRabbit, Codex) are additional evidence when they actually run — they are
+   third-party services that may be rate-limited or absent, so they never gate a
+   merge on their own.
 2. **RECOMMENDED — the vendored fugu review** — `.claude/commands/fugu-review.md`
    (blind multi-model dry-run review, consolidated by a verifier). Valuable, but
    token-heavy (four model lanes), so it is a recommendation, not a gate: run it

@@ -21,14 +21,28 @@ it or keybinds miss and **spawn a duplicate bar**. The bar reads the key at
 — read it before starting. It carries the source citations for every claim
 below.
 
+> **Executed 2026-07-22 → 2026-07-25; kept as the record of what was planned.**
+> Three things diverged during execution, deliberately and with the maintainer's
+> agreement — the code, not this plan, is authoritative where they disagree:
+> the per-task "commit directly" steps reflect a **session-scoped** blanket
+> approval on `fix/plugin-binary-path` only (the standing rule remains: the
+> maintainer approves and signs); `binary_resolution_is_anomalous` shipped as
+> `(installed, siblings)` after the unused third argument was dropped in review;
+> and Tasks 1+2 were merged into a single red→green cycle so no failing commit
+> entered history.
+
 ## Global Constraints
 
 - **Test with `cargo test --workspace`.** A bare `cargo test` silently skips the
   entire `clave-bar` crate. `--workspace` is load-bearing.
-- **Three gates must be green before requesting merge:**
-  `cargo test --workspace` · `cargo build -p clave-bar --target wasm32-wasip1` ·
+- **Four gates must be green before requesting merge** — run `just gates`:
+  `cargo fmt --all --check` · `cargo test --workspace` ·
+  `cargo build -p clave-bar --target wasm32-wasip1` ·
   `cargo clippy --workspace --all-targets -- -D warnings` (`--workspace` on
-  clippy too — the default form skips the wasm crate).
+  clippy too — the default form skips the wasm crate). **`fmt --check` was
+  missing from this list as originally written**, and CI's lint job runs it
+  first — which is exactly how this branch went red with every documented gate
+  locally green (corrected 2026-07-25).
 - **TDD, red first.** Write the failing test, run it, watch it fail *for the
   right reason*, then implement.
 - **NEVER commit without the maintainer's explicit approval.** This overrides
@@ -827,10 +841,13 @@ Claude-Session: https://claude.ai/code/session_01JZFxedvD7EtDfLFbNKodZt
 same `(location, configuration)` match and then loops over the result. With no
 `-c`, the command's configuration is empty (`zellij-utils/src/cli.rs:1370-1374`);
 once the sandbox layout carries `clave_binary "clave"`, the running plugin's key
-is `{clave_binary: "clave"}`. Zero matches, empty loop, **silent no-op, exit 0**
-— an agent would validate stale wasm and report success. This is the one live
-mutation an agent is permitted, and it would break inside this very PR's
-live-validation pass.
+is `{clave_binary: "clave"}`, so the lookup misses. **Corrected 2026-07-25:**
+a miss is not a silent no-op — `all_plugin_ids_for_plugin_location` returns
+`Err(PluginDoesNotExist)` (`plugin_map.rs:169-171`), `reload_plugin` propagates
+it (`wasm_bridge.rs:692-693`), and the error branch logs `"Plugin {} not found,
+starting it instead"` and **starts a new instance** (`plugins/mod.rs:446-468`).
+So a botched reload spawns a second bar. This is the one live mutation an agent
+is permitted, and it would break inside this very PR's live-validation pass.
 
 - [ ] **Step 1: Read both current SOP blocks**
 
@@ -895,12 +912,16 @@ Claude-Session: https://claude.ai/code/session_01JZFxedvD7EtDfLFbNKodZt
 - Create: `docs/status/YYYY-MM-DD-HHMM-clave-orchestrator.md`
 - Already present, must ride this PR: `docs/status/2026-07-22-1845-clave-orchestrator.md`, `docs/superpowers/specs/2026-07-22-plugin-binary-path-design.md`, this plan
 
-- [ ] **Step 1: Run the three gates one final time and capture real output**
+- [ ] **Step 1: Run every gate one final time and capture real output**
+
+Use `just gates` — it runs all four in CI's order and its exit status is the
+gates' own. If you must capture output through a pipe, set `set -o pipefail`
+first: `cargo … | tail` otherwise reports **tail's** status, so a failed gate
+records as a pass.
 
 ```bash
-cargo test --workspace 2>&1 | tail -20
-cargo build -p clave-bar --target wasm32-wasip1 2>&1 | tail -5
-cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tail -5
+just gates                       # fmt --check, test, wasm build, clippy
+set -o pipefail; just gates 2>&1 | tail -30   # if you need the tail
 ```
 
 Paste the **actual** output into the PR. Do not paraphrase, and do not claim a gate passed that you did not run.

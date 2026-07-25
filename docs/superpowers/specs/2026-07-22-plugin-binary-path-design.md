@@ -59,9 +59,12 @@ agree per environment:
   it through `release::runtime_binary()`, which returns the versioned copy iff
   it is installed in the current data dir, else bare `clave` (`release.rs:63`).
 
-Both routes yield the versioned absolute path in a stable install and bare
-`clave` in dev/sandbox, so every emitted `clave_binary` in a given environment
-carries the same value.
+On the normal path both routes yield the versioned absolute path in a stable
+install and bare `clave` in dev/sandbox, so every emitted `clave_binary` in a
+given environment carries the same value. This is a normal-path guarantee, not
+an absolute one: "The new invariant" below documents two divergence cases
+(a version-skewed launcher, and an unresolvable `current_exe`) and the
+`runtime_binary()` warning that announces the first of them.
 
 ### Generation (`crates/clave`)
 

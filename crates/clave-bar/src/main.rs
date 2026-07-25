@@ -36,8 +36,14 @@ struct State {
     /// order — FIFO gen matching is exact.
     pending_dwells: std::collections::VecDeque<u64>,
     /// The CLI this bar shells out to, from plugin configuration (#44).
-    /// ALWAYS assigned in `load()` — `Default`'s empty string is never
-    /// observed, because zellij calls `load` before any event.
+    /// Assigned in `load()`, which zellij invokes as its own wasm export
+    /// before delivering any event (`register_plugin!`, zellij-tile-0.44.3
+    /// src/lib.rs:109-127 — `load`, `update`, `pipe` and `render` are separate
+    /// exports, and the host instantiates through `load`). `Default`'s empty
+    /// string is therefore not expected to be observable; the shellout sites
+    /// still degrade to a failed `run_command` rather than misbehaving if a
+    /// future zellij ever reordered that, which is why this is documented
+    /// rather than asserted.
     clave_binary: String,
 }
 
