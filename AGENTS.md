@@ -45,7 +45,7 @@ It **never**:
 | launches or kills a zellij session | the human owns session lifecycle and is the only one who can see the screen; `zellij action` against a dead session **blocks forever without erroring** |
 | runs `just release` | a release is a deliberate, tagged, watched act — the maintainer's, always |
 | runs `cargo install` or `just dev-install` while the maintainer may be daily-driving | this is what broke production — see CONTRIBUTING "The one leak" (#43, #44). #44 stopped the bar resolving through `PATH` and #43b moved the dev binary to `clave-dev`, but a bare `cargo install` still writes `~/.cargo/bin/clave` and `dev-install` still rewrites the sandbox wasm in place. Assume he is driving; use `just sandbox` |
-| writes anything under `~/.local/share/clave/` | that is the stable release surface — the versioned artifacts AND the `bin/clave` launcher (#43a); only `just release` writes it |
+| writes anything under `~/.local/share/clave/` | that is the stable release surface — the versioned artifacts AND the `bin/clave` launcher (#43a). Only an install writes it: `just release`, or `clave setup` run from a release binary. Neither is yours to run |
 | writes anywhere under `~/.claude/` | read-only source of truth: Claude's identity is deliberately **not** sandboxed, so a stray write hits the maintainer's real config and transcripts |
 | commits without explicit approval | he signs the commits. You prepare; he approves |
 

@@ -77,13 +77,15 @@ consumer, and a gap:
 - **#43b** — `just dev-install` installs **`clave-dev`**. It writes no name the
   daily surface uses.
 
-**If your machine predates this, it still has the stale file.** Check and remove
-it once — it shadows the launcher, because `~/.cargo/bin` almost always precedes
-`~/.local/share/clave/bin` on `PATH`:
+**If your machine predates this, it still has the stale file**, and it shadows
+the launcher because `~/.cargo/bin` almost always precedes
+`~/.local/share/clave/bin` on `PATH`. Identify it before you delete it — the
+file could equally be a versioned copy someone put there on purpose:
 
 ```sh
-command -v clave      # want ~/.local/share/clave/bin/clave
-rm ~/.cargo/bin/clave # the pre-#43b dev build, if it is still there
+command -v clave        # want ~/.local/share/clave/bin/clave
+~/.cargo/bin/clave --version   # a dev build reports a short SHA or `dev`
+rm ~/.cargo/bin/clave          # only once you have confirmed that
 ```
 
 The residual rule is narrower but real: `just dev-install` rebuilds the
@@ -188,9 +190,13 @@ A version cut is a deliberate, tagged, reproducible act — never an accident of
 - **Fresh clone?** Run **`just sandbox`**. It builds the working tree, seeds a
   scenario, self-checks the generated pair, and prints the launch command for
   you to run in a non-zellij terminal. It is the path to use because the
-  sandbox's generated config bakes bare `clave` by design (§2 binary split —
-  the sandbox has no versioned copy), and `just sandbox` supplies that name
-  through a `PATH` shim scoped to the printed command. Since #43b
+  sandbox is the **one** surface that still resolves its CLI through `PATH`:
+  `runtime_binary()` bakes bare `clave` there by design (§2 binary split — a
+  sandbox data dir holds no versioned copy, and a working-tree build is exactly
+  what should run), so #44's "the bar calls the binary it belongs to" holds
+  through a `clave` that `just sandbox` supplies from a shim scoped to the
+  printed command. Stable never does this: it bakes an absolute versioned path.
+  Since #43b
   `just dev-install` no longer provides it: it installs `clave-dev`, which is
   what you type for one-off commands, not what the sandbox bar shells out to.
   A *stable* install only exists once a release has been cut on your machine

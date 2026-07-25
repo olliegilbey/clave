@@ -88,18 +88,28 @@ pub fn install_launcher(bin_dir: &Path, src: &Path) -> Result<PathBuf> {
     let tmp = bin_dir.join(format!(".{LAUNCHER_NAME}.{}.tmp", std::process::id()));
     std::fs::copy(src, &tmp)
         .with_context(|| format!("staging launcher {} → {}", src.display(), tmp.display()))?;
+    // Every failure AFTER the staging copy removes it (CodeRabbit CLI,
+    // 2026-07-25): a leftover dotfile in bin/ outlives the failed release and
+    // is scanned by runtime_binary()'s #44 sibling probe. The closure holds
+    // the whole staging window, not just the rename.
+    let staged = |r: std::io::Result<()>| {
+        r.inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })
+    };
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        // Explicit, like the versioned copy: the launcher exists to be typed.
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+        // Explicit, like the versioned copy: the launcher exists to be typed,
+        // and fs::copy's mode carry-over is not worth trusting through a
+        // staging file the umask also touched.
+        staged(std::fs::set_permissions(
+            &tmp,
+            std::fs::Permissions::from_mode(0o755),
+        ))
+        .with_context(|| format!("making launcher executable: {}", tmp.display()))?;
     }
-    // Clean up the staging file on a failed rename — a leftover dotfile in
-    // bin/ is scanned by runtime_binary()'s #44 sibling probe.
-    std::fs::rename(&tmp, &dest)
-        .inspect_err(|_| {
-            let _ = std::fs::remove_file(&tmp);
-        })
+    staged(std::fs::rename(&tmp, &dest))
         .with_context(|| format!("installing launcher → {}", dest.display()))?;
     Ok(dest)
 }
@@ -359,8 +369,17 @@ pub fn run_release(wasm_src: &Path, cli_src: &Path) -> Result<()> {
     // versioned copy is the file this release has already committed to.
     let installed = install_launcher(&bin_dir, &cli_dst)?;
     // The pure kernel and the IO that honours it must name the same file —
-    // #43 WAS a drift between two artifact sets that nothing compared.
-    debug_assert_eq!(installed, launcher);
+    // #43 WAS a drift between two artifact sets that nothing compared. An
+    // `ensure!`, not a `debug_assert!` (CodeRabbit CLI, 2026-07-25): a cut is
+    // built `--release`, which is exactly where a debug assertion is compiled
+    // out, so the check would never run on the only path it guards.
+    anyhow::ensure!(
+        installed == launcher,
+        "launcher installed at {} but the release names {} — the install and \
+         the artifact set disagree (#43)",
+        installed.display(),
+        launcher.display()
+    );
     println!(
         "released v{version}:\n  {}\n  {}\n{}",
         wasm_dst.display(),

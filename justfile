@@ -65,8 +65,10 @@ gates:
 # reviewed path for sandbox validation. If a pre-#43b ~/.cargo/bin/clave is
 # still on this machine it shadows the #43a launcher: delete it.
 #
-# `--locked` is kept from the retired `cargo install` line: the dev binary must
-# build from the committed lockfile like every other artifact. Staged + `mv`
+# `--locked` is kept from the retired `cargo install` line, and extended to the
+# wasm build (CodeRabbit CLI, 2026-07-25): both halves of a dev install must
+# come from the committed lockfile, or the bar and the CLI can be built against
+# different dependency resolutions. Staged + `mv`
 # rather than `cp` over the destination, for the reason install_launcher
 # documents — cp truncates the existing inode, which may be a running process
 # image (ETXTBSY on Linux, a live text segment on macOS); mv within one
@@ -74,7 +76,7 @@ gates:
 # Build the working-tree wasm (into the sandbox) and install `clave-dev` (§2).
 dev-install:
     mkdir -p ~/.local/state/clave-dev/data ~/.cargo/bin
-    CLAVE_BUILD_TAG=$(git rev-parse --short HEAD 2>/dev/null || echo dev) cargo build -p clave-bar --release --target wasm32-wasip1
+    CLAVE_BUILD_TAG=$(git rev-parse --short HEAD 2>/dev/null || echo dev) cargo build -p clave-bar --release --locked --target wasm32-wasip1
     cp target/wasm32-wasip1/release/clave-bar.wasm ~/.local/state/clave-dev/data/
     CLAVE_BUILD_TAG=$(git rev-parse --short HEAD 2>/dev/null || echo dev) cargo build -p clave --release --locked
     cp target/release/clave ~/.cargo/bin/.clave-dev.tmp

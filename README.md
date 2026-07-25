@@ -45,13 +45,15 @@ splitting the screen into panes. Logo: the two-stick percussion instrument.
 [`docs/design.md`](docs/design.md).
 
 **If you build from source**, use `just dev-install` — it installs the
-working-tree CLI as `clave-dev`, which collides with nothing
+working-tree CLI as `clave-dev`, so it never takes over the `clave` command
 ([#43](https://github.com/olliegilbey/clave/issues/43)). A plain
 `cargo install` would put `clave` on your `PATH` under the same name the daily
 surface answers to, and a stale build winning that name is what produced two
 sidebars and dead navigation in v0.1.1. A release cut installs its own
 launcher at `~/.local/share/clave/bin/clave`; put that directory on your
-`PATH`. See
+`PATH`. `dev-install` still rewrites the sandbox bar wasm in place, so for
+sandbox work prefer `just sandbox`, which refuses while a `clave-test` session
+is live. See
 [CONTRIBUTING](CONTRIBUTING.md#the-one-leak-clave-on-path-43-44) for the full
 story and the one-line diagnosis.
 

@@ -32,13 +32,34 @@ CLI="$ROOT/target/release/clave"
 
 cd "$ROOT"
 
-# mtime (or "absent") for a path, on BSD and GNU stat alike — clave must
-# eventually run over SSH onto Linux, so no macOS-only stat flags.
+# File identity (or "absent") for a path, on BSD and GNU stat alike — clave
+# must eventually run over SSH onto Linux, so no macOS-only stat flags.
+#
+# inode + size + mtime, not mtime alone (CodeRabbit CLI, 2026-07-25): mtime is
+# second-resolution, and this script's whole run can fit inside one second — a
+# same-second same-size overwrite would read as "unchanged" and the safety
+# guard would report a clean bill. An install-by-rename (which is how #43a
+# writes the launcher) always changes the inode, so it cannot hide.
 stamp() {
   if [ -e "$1" ]; then
-    stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo unknown
+    stat -f '%i:%z:%m' "$1" 2>/dev/null || stat -c '%i:%s:%Y' "$1" 2>/dev/null || echo unknown
   else
     echo absent
+  fi
+}
+
+# Compare a before/after stamp and FAIL CLOSED. `unknown` means both stat
+# forms failed: that is not evidence of safety, so it must never compare equal
+# to itself and pass (CodeRabbit CLI, 2026-07-25).
+guard() {
+  local label="$1" before="$2" path="$3" after
+  after="$(stamp "$path")"
+  if [ "$before" = unknown ] || [ "$after" = unknown ]; then
+    fail "$label — cannot stat $path, so this script cannot prove it left it alone"
+  elif [ "$after" = "$before" ]; then
+    echo "    ok   $path unchanged"
+  else
+    fail "$label"
   fi
 }
 
@@ -132,23 +153,14 @@ fi
 
 echo
 echo "==> Stable surfaces untouched"
-# if/else, not `A && B || C`: this is a SAFETY guard, and in the `||` form a
-# failing echo would report a bogus breach (shellcheck SC2015).
-if [ "$(stamp "$STABLE_CLI")" = "$before_cli" ]; then
-  echo "    ok   $STABLE_CLI unchanged"
-else
-  fail "$STABLE_CLI CHANGED — this script must never write it"
-fi
-if [ "$(stamp "$STABLE_DIR")" = "$before_dir" ]; then
-  echo "    ok   $STABLE_DIR unchanged"
-else
-  fail "$STABLE_DIR CHANGED — this script must never write it"
-fi
-if [ "$(stamp "$STABLE_LAUNCHER")" = "$before_launcher" ]; then
-  echo "    ok   $STABLE_LAUNCHER unchanged"
-else
-  fail "$STABLE_LAUNCHER CHANGED — only a release cut writes the launcher (#43a)"
-fi
+# `guard` (above) is if/else and fails closed, deliberately: this is a SAFETY
+# check, so an unprovable result must read as a breach, never as an ok.
+guard "$STABLE_CLI CHANGED — this script must never write it" \
+  "$before_cli" "$STABLE_CLI"
+guard "$STABLE_DIR CHANGED — this script must never write it" \
+  "$before_dir" "$STABLE_DIR"
+guard "$STABLE_LAUNCHER CHANGED — only a release cut writes the launcher (#43a)" \
+  "$before_launcher" "$STABLE_LAUNCHER"
 
 [ "$ok" -eq 1 ] || { echo; echo "Setup FAILED — do not launch."; exit 1; }
 
