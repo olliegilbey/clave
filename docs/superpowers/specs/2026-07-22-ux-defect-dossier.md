@@ -484,7 +484,7 @@ bin), so no test asserts on rendered output — the render half is unguarded.
 (`zellij-tile-0.44.3/src/ui_components/text.rs`) with `print_text`,
 `serialize_text`, `color_range`, and semantic index-levels (`DIM_LEVEL`,
 `ERROR_COLOR_LEVEL`, …) resolved host-side from the user's theme. It offers **no
-arbitrary-palette API** — you cannot say "colour #4 of my 10". Raw ANSI is not so
+arbitrary-palette API** — you cannot say "colour #4 of my 12". Raw ANSI is not so
 limited: `\x1b[38;2;R;G;Bm` gives truecolor. Theme access exists if wanted —
 `Event::ModeUpdate(ModeInfo)` carries `Style { colors: Styling }`
 (`zellij-utils-0.44.3/src/data.rs:1375-1379`, `:1724-1728`), and `PaletteColor`
@@ -555,9 +555,8 @@ Split so that two agents in two worktrees do not edit the same seam.
 | --- | --- | --- | --- | --- |
 | **S0** | Frame coherence & executor election | RC-A, RC-B | `clave-bar/src/main.rs:43-71,87-231,434-467`; `model.rs:414-439` | — |
 | **S1** | Prompt→top ordering semantics | RC-C | `model.rs:391-393,728-793`; `store.rs`; `hook.rs` | S0 |
-| **S2** | Terminal-tab interaction signal | RC-D | spike first; then `main.rs` subscribe + `store.rs` | spike |
+| **S2** | Terminal-tab interaction signal | RC-D | spike first; then `main.rs`, `store.rs` | **S0** (impl reuses `frames_coherent`; the spike is independent) |
 | **S3** | Tab-close correctness | RC-E | `model.rs:593-715`; `store.rs:278-298` | S0, S1 |
-| **S2** | Terminal-tab interaction signal | RC-D | spike first; then `main.rs`, `store.rs` | **S0** (impl reuses `frames_coherent`; spike is independent) |
 | **S4** | Label: Claude rename + live cwd | RC-F | `hook.rs`; `add.rs`; `clave-types` | — (rebase-coupled with S5) |
 | **S5** | Per-repo + per-title colour | RC-G | `main.rs:525-560`; `model.rs` `Row`/`rows()`; `store.rs` (ink allocation) | — (rebase-coupled with S4) |
 | **S6** | Three-cell gutter (status · battery slot · worktree) | — (row identity) | `model.rs` `compose_row`/`gutter_segments`; `store.rs` snapshot | **S5** (builds on its render seam) |

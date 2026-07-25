@@ -245,7 +245,10 @@ All well inside `SEEK_BUDGET = 16`.
 
 - It is a **content** measurement, not a fraction of anything: one status glyph,
   one space, and whatever the renderer's truncation leaves (`model.rs:138-141`).
-  S5's `compose_row_at_collapsed_width` test builds directly on that reading.
+  S5's collapsed-width test builds directly on that reading. (Name deliberately
+  not pinned here: it has been renamed twice — `compose_row_at_collapsed_width`
+  → `compose_row_narrow_width_overflow_is_preexisting` → S6's
+  `compose_row_emits_no_ellipsis_at_zero_budget`. S6 §2.9.3 owns the final name.)
 - Deriving it (`BAR_TARGET_COLS / 8`, say) would couple two independent design
   decisions and silently move the collapsed width every time the expanded one
   moved — the opposite of what #24 item 7 wants, which is a *design pass* on what

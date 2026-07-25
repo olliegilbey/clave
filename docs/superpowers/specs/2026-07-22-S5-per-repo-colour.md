@@ -1573,7 +1573,7 @@ differences, and why the version here is the one to build:
    `GUTTER_COLS_COLLAPSED == COLLAPSED_TARGET_COLS` const-assert (`S6:606-612`) is
    unaffected and is the right place for that invariant.
 
-From S8: the text budget at the new width is `38 - 4 - 1 = 33` with S6's gutter,
+From S8: the text budget at the new width is `38 - 6 - 1 = 31` with S6's gutter,
 and `38 - 2 - 1 = 35` before S6 lands. Neither number appears anywhere in S5 —
 `compose_row` derives both — and S8 correctly identifies `main.rs:546` as *not*
 its line (`S8:90`).
