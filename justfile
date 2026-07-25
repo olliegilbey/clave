@@ -45,24 +45,42 @@ gates:
 
 # §2: the working-tree build for the sandbox + contributor shells. Builds the
 # bar wasm (build-tagged with the short SHA so the zellij log says which wasm
-# produced a trace) straight into the SANDBOX data dir, and `cargo install`s
-# the dev CLI onto PATH (~/.cargo/bin/clave). `just install` is RETIRED:
-# working-tree installs straight under the daily environment were the foot-gun
-# this split removes.
+# produced a trace) straight into the SANDBOX data dir, and installs the dev
+# CLI as ~/.cargo/bin/clave-dev. `just install` is RETIRED: working-tree
+# installs straight under the daily environment were the foot-gun this split
+# removes.
 #
-# DANGER (#43/#44, proved in prod 2026-07-22): this does NOT leave a running
-# stable session alone. Stable BAKES the versioned copy for its keybinds, but
-# clave-bar shells out to bare `clave` on PATH for snapshot/open/bind/focus/
-# touch/prune-tabs — so this install hijacks a live fleet, and a version-skewed
-# `clave open` composes tab layouts pointing at the WRONG wasm, loading a second
-# bar and killing navigation. NEVER run this while daily-driving; restore with
-# `cp ~/.local/share/clave/bin/clave-vX.Y.Z ~/.cargo/bin/clave` afterwards.
-# Build + install the working-tree wasm (into the sandbox) and dev CLI (§2).
+# The name is the fix (#43b, prod incident 2026-07-22). This used to run
+# `cargo install --path`, which writes ~/.cargo/bin/`clave` — the SAME name the
+# daily surface answers to. A stale working-tree build therefore won the cold
+# start, wrote a launch.kdl baking ITS version's paths beside a config.kdl at
+# the released version, and zellij loaded two plugin locations: a second
+# sidebar in every tab, dead navigation. `clave-dev` collides with nothing;
+# #43a gives the daily surface its own launcher at
+# ~/.local/share/clave/bin/clave.
+#
+# Still not a free action while daily-driving: it rebuilds the SANDBOX wasm
+# (~/.local/state/clave-dev/data/clave-bar.wasm) in place, so it must not run
+# against a live clave-test session — `just sandbox` refuses for you and is the
+# reviewed path for sandbox validation. If a pre-#43b ~/.cargo/bin/clave is
+# still on this machine it shadows the #43a launcher: delete it.
+#
+# `--locked` is kept from the retired `cargo install` line: the dev binary must
+# build from the committed lockfile like every other artifact. Staged + `mv`
+# rather than `cp` over the destination, for the reason install_launcher
+# documents — cp truncates the existing inode, which may be a running process
+# image (ETXTBSY on Linux, a live text segment on macOS); mv within one
+# filesystem is a rename, so a running clave-dev keeps its own inode.
+# Build the working-tree wasm (into the sandbox) and install `clave-dev` (§2).
 dev-install:
-    mkdir -p ~/.local/state/clave-dev/data
+    mkdir -p ~/.local/state/clave-dev/data ~/.cargo/bin
     CLAVE_BUILD_TAG=$(git rev-parse --short HEAD 2>/dev/null || echo dev) cargo build -p clave-bar --release --target wasm32-wasip1
     cp target/wasm32-wasip1/release/clave-bar.wasm ~/.local/state/clave-dev/data/
-    CLAVE_BUILD_TAG=$(git rev-parse --short HEAD 2>/dev/null || echo dev) cargo install --path crates/clave --locked
+    CLAVE_BUILD_TAG=$(git rev-parse --short HEAD 2>/dev/null || echo dev) cargo build -p clave --release --locked
+    cp target/release/clave ~/.cargo/bin/.clave-dev.tmp
+    chmod 755 ~/.cargo/bin/.clave-dev.tmp
+    mv -f ~/.cargo/bin/.clave-dev.tmp ~/.cargo/bin/clave-dev
+    @echo "installed ~/.cargo/bin/clave-dev — the daily clave launcher is untouched (#43b)"
 
 # Cut a release (§2). `clave release` is the GATE: it refuses unless the tree
 # is clean AND HEAD carries the exact vX.Y.Z tag matching Cargo.toml — so a

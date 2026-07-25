@@ -15,9 +15,10 @@
 # no versioned CLI copy, so `release::runtime_binary()` bakes bare `clave` into
 # the sandbox's generated KDL (by design, §2 binary split). The bar therefore
 # resolves `clave` through PATH at runtime. Without the shim that resolves to
-# the STABLE ~/.cargo/bin/clave — very possibly built BEFORE the change under
-# test — so the bar drives the sandbox with the wrong binary and the run fails
-# for a reason unrelated to the change. On #44 that misfire is especially
+# whatever else owns the name — the STABLE launcher ~/.local/share/clave/bin/clave
+# since #43a, or a pre-#43b ~/.cargo/bin/clave — neither of which is the change
+# under test, so the bar drives the sandbox with the wrong binary and the run
+# fails for a reason unrelated to the change. On #44 that misfire is especially
 # convincing: a pre-#44 `clave open` composes tab layouts with no `clave_binary`,
 # whose empty configuration is a DIFFERENT plugin identity from the template's
 # bar, so tabs sprout a second sidebar — the exact symptom #44 fixes.
@@ -43,8 +44,13 @@ stamp() {
 
 STABLE_CLI="$HOME/.cargo/bin/clave"
 STABLE_DIR="$HOME/.local/share/clave"
+# The #43a launcher needs its OWN stamp: STABLE_DIR's mtime does not change
+# when a file two levels down is replaced, so the dir guard alone would not
+# notice this script clobbering the daily entry point.
+STABLE_LAUNCHER="$STABLE_DIR/bin/clave"
 before_cli="$(stamp "$STABLE_CLI")"
 before_dir="$(stamp "$STABLE_DIR")"
+before_launcher="$(stamp "$STABLE_LAUNCHER")"
 
 echo "==> Building the working tree (release, build-tagged)"
 TAG="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
@@ -137,6 +143,11 @@ if [ "$(stamp "$STABLE_DIR")" = "$before_dir" ]; then
   echo "    ok   $STABLE_DIR unchanged"
 else
   fail "$STABLE_DIR CHANGED — this script must never write it"
+fi
+if [ "$(stamp "$STABLE_LAUNCHER")" = "$before_launcher" ]; then
+  echo "    ok   $STABLE_LAUNCHER unchanged"
+else
+  fail "$STABLE_LAUNCHER CHANGED — only a release cut writes the launcher (#43a)"
 fi
 
 [ "$ok" -eq 1 ] || { echo; echo "Setup FAILED — do not launch."; exit 1; }

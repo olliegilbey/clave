@@ -503,7 +503,21 @@ pub fn run_setup() -> Result<()> {
         // current_exe canonicalized so the copy survives a symlinked invoker.
         match std::env::current_exe().and_then(std::fs::canonicalize).ok() {
             Some(exe) => {
-                install_cli_copy(&dir, &exe, env!("CARGO_PKG_VERSION"))?;
+                let copy = install_cli_copy(&dir, &exe, env!("CARGO_PKG_VERSION"))?;
+                // #43a: the single-file install owns the unversioned entry
+                // point too. install_cli_copy's contract is that "the scp'd
+                // file becomes disposable after setup" — that was only ever
+                // true of BAKED references; without a launcher the operator
+                // still had nothing to type, which is the whole defect. From
+                // the installed copy, not `exe`, so both release paths
+                // produce a launcher that is a copy of the versioned copy.
+                //
+                // Refresh semantics mean an OLDER single-file binary's setup
+                // repoints the launcher backwards. Accepted: running a
+                // specific binary's `setup` is an explicit "install this
+                // one", and #48's doctor is where cross-artifact skew gets
+                // reported.
+                crate::release::install_launcher(&dir.join("bin"), &copy)?;
                 crate::release::runtime_binary()
             }
             // Unresolvable current_exe: bare `clave` beats refusing setup.

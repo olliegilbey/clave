@@ -131,8 +131,11 @@ These three are constantly confused. They are not interchangeable.
 | Term | Means |
 |---|---|
 | **stable** | The released install under `~/.local/share/clave/`. Only `just release` writes it. |
+| **launcher** | The **unversioned** entry point a cut installs at `~/.local/share/clave/bin/clave` — the one name an operator *types*, refreshed on every release (#43a). Never a *baked* reference: generated artifacts always name the **versioned copy**, because an unversioned plugin location is a different plugin identity to zellij. |
+| **versioned copy** | `<data>/bin/clave-vX.Y.Z` — the immutable per-cut CLI that keybinds, layouts and hooks bake. Typed by nobody. |
+| **dev binary** | `~/.cargo/bin/clave-dev` — the working-tree build from `just dev-install` (#43b). It shares a name with neither of the above; that is the point. |
 | **sandbox** | The isolated dev environment and its `clave-test` zellij session. The only place an agent may hot-reload. |
-| **the one leak** | The PATH hazard: the bar shells out to bare `clave`, so a working-tree build silently takes over the running fleet (#43, #44). See CONTRIBUTING. |
+| **the one leak** | The PATH hazard that broke v0.1.1: the bar shelled out to bare `clave` and `dev-install` owned that name, so a working-tree build silently took over the running fleet. Closed by #44 (no PATH resolution), #43a (the launcher) and #43b (the dev binary). See CONTRIBUTING. |
 | **handoff** | The session status document under `docs/status/`. Tracked; the newest is current state. |
 
 ---

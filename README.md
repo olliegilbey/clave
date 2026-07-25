@@ -44,12 +44,16 @@ splitting the screen into panes. Logo: the two-stick percussion instrument.
 🚧 Early days. The full design and rationale live in
 [`docs/design.md`](docs/design.md).
 
-**If you build from source**, note that a working-tree `cargo install` puts
-`clave` on your `PATH` where it can drive an already-running session — the
-plugin still resolves its CLI through `PATH` ([#44](https://github.com/olliegilbey/clave/issues/44)).
-Don't install while a session is live; see
-[CONTRIBUTING](CONTRIBUTING.md#the-one-leak-clave-on-path-43-44) for the rule
-and the one-line diagnosis.
+**If you build from source**, use `just dev-install` — it installs the
+working-tree CLI as `clave-dev`, which collides with nothing
+([#43](https://github.com/olliegilbey/clave/issues/43)). A plain
+`cargo install` would put `clave` on your `PATH` under the same name the daily
+surface answers to, and a stale build winning that name is what produced two
+sidebars and dead navigation in v0.1.1. A release cut installs its own
+launcher at `~/.local/share/clave/bin/clave`; put that directory on your
+`PATH`. See
+[CONTRIBUTING](CONTRIBUTING.md#the-one-leak-clave-on-path-43-44) for the full
+story and the one-line diagnosis.
 
 ## License
 

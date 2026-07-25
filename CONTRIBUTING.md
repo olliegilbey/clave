@@ -52,26 +52,44 @@ nests them.
 
 The table above says the two surfaces use different binaries, and the generated
 `config.kdl` honours that — keybinds bake the *absolute* versioned path. But
-`clave-bar` also shells out to the CLI on its own (`snapshot`, `open`, `bind`,
-`focus`, `touch`, `prune-tabs`, `add`), and today it invokes plain **`clave`**,
-resolved through `PATH`. `just dev-install` puts a working-tree build at
-`~/.cargo/bin/clave` — the same name the daily surface answers to.
+`clave-bar` also shelled out to the CLI on its own (`snapshot`, `open`, `bind`,
+`focus`, `touch`, `prune-tabs`, `add`), invoking plain **`clave`** resolved
+through `PATH` — and `just dev-install` put a working-tree build at
+`~/.cargo/bin/clave`, the same name the daily surface answered to.
 
-So a dev build **can** drive a stable session, and on 2026-07-22 it did: a stale
-`0.1.0` binary on `PATH` served `clave open` inside a `v0.1.1` session and
+So a dev build **could** drive a stable session, and on 2026-07-22 it did: a
+stale `0.1.0` binary on `PATH` served `clave open` inside a `v0.1.1` session and
 composed tab layouts pointing at the *old* wasm. Because zellij keys plugin
 identity on file location, every tab opened that way loaded a **second bar** —
 two populations, no shared beacon state, dead navigation. The release itself was
 correct; only the binary the plugin reached for was wrong.
 
-**Until #44 lands, treat this as a hard rule: never `cargo install` or
-`just dev-install` while a stable session is running** — including from a
-worktree, and including agent-driven builds. When a dev round ends, restore the
-stable binary before daily driving:
+Three changes close it, and all three are needed — the leak had a producer, a
+consumer, and a gap:
+
+- **#44** — the bar no longer resolves through `PATH` at all. `clave_binary` is
+  injected at config-generation time, so a running session can only ever invoke
+  the binary it launched with.
+- **#43a** — a cut installs an unversioned **launcher** at
+  `~/.local/share/clave/bin/clave`, refreshed on every release. That directory
+  is what you put on `PATH`; typing `clave` now means "the version I last
+  released", which previously had no answer at all.
+- **#43b** — `just dev-install` installs **`clave-dev`**. It writes no name the
+  daily surface uses.
+
+**If your machine predates this, it still has the stale file.** Check and remove
+it once — it shadows the launcher, because `~/.cargo/bin` almost always precedes
+`~/.local/share/clave/bin` on `PATH`:
 
 ```sh
-cp ~/.local/share/clave/bin/clave-vX.Y.Z ~/.cargo/bin/clave
+command -v clave      # want ~/.local/share/clave/bin/clave
+rm ~/.cargo/bin/clave # the pre-#43b dev build, if it is still there
 ```
+
+The residual rule is narrower but real: `just dev-install` rebuilds the
+**sandbox** wasm in place, so don't run it against a live `clave-test` session.
+`just sandbox` does the sandbox wiring and refuses when that session is live —
+prefer it.
 
 ### The upgrade window: `config.kdl` is live-watched (#44)
 
@@ -125,20 +143,31 @@ A version cut is a deliberate, tagged, reproducible act — never an accident of
   `config.kdl` / `layout.kdl` and re-merges the Claude hooks so every generated
   reference — plugin location, keybind `Run` commands, hook commands — points at
   the versioned files.
+- **The cut owns the launcher** (#43a). Alongside the versioned copy, a release
+  installs — and on every cut *refreshes* — an unversioned **launcher** at
+  `~/.local/share/clave/bin/clave`. That is the entry point you type, and
+  `~/.local/share/clave/bin` is the directory to put on `PATH`. It is a copy of
+  the versioned copy, installed by rename so a cold start already executing the
+  old one keeps its inode. The launcher is **typed, never baked**: every
+  generated reference stays versioned, because an unversioned plugin location is
+  a different plugin identity to zellij — the #43 duplicate-sidebar shape.
 - **A running session is immune to installs.** A live session only ever
   references the versioned files baked into the config it generated at launch.
   Installing a new release never overwrites a file a live session is loading; the
   upgrade lands atomically at the *next* `clave` launch. This is what makes the
   daily environment safe to develop clave from — see C8 in the validation ledger
   for the parity-desync bug class this design closes.
-- **The binary split.** `~/.cargo/bin/clave` (a plain `cargo install` from the
-  working tree) is the **dev** binary — it is what the sandbox and contributors'
-  shells run. Stable sessions never invoke it: their keybinds, layout, and hooks
-  bake the absolute path of the versioned copy under `~/.local/share/clave/bin/`.
-  One skew edge to know: if the dev binary's version is *ahead* of the latest
-  installed release (Cargo.toml bumped, no cut yet), a stable launch finds no
-  matching versioned copy and falls back to the dev binary — you are running
-  unreleased code, which is exactly what that state means.
+- **The binary split.** `~/.cargo/bin/clave-dev` (`just dev-install` from the
+  working tree) is the **dev** binary — it is what contributors' shells run.
+  Stable sessions never invoke it: their keybinds, layout, and hooks bake the
+  absolute path of the versioned copy under `~/.local/share/clave/bin/`, and the
+  daily launcher lives in that same directory. Since #43b the two surfaces no
+  longer share a *name*, which is the property that failed in v0.1.1. One skew
+  edge to know: if the binary you launch is *ahead* of the latest installed
+  release (Cargo.toml bumped, no cut yet), a stable launch finds no matching
+  versioned copy and falls back to bare `clave` on `PATH` — you are running
+  unreleased code, which is exactly what that state means, and `runtime_binary`
+  says so out loud.
 - **The hook slot is shared.** `~/.claude/settings.json` is one file (Claude's
   identity is never sandboxed) and Claude fires *all* matching hooks, so clave
   keeps exactly **one** hook entry per event — duplicates would double-fire.
@@ -152,14 +181,20 @@ A version cut is a deliberate, tagged, reproducible act — never an accident of
   wasm and CLI straight from an in-progress working tree. Use **`just
   dev-install`** for the dev loop: it builds the wasm (stamped with
   `CLAVE_BUILD_TAG`) into the sandbox data dir `~/.local/state/clave-dev/data/`
-  and `cargo install`s the dev CLI. The sandbox's generated config references
-  those dev artifacts.
+  and installs the dev CLI as `~/.cargo/bin/clave-dev` (#43b). The sandbox's
+  generated config references those dev artifacts.
 - **`clave --version`** prints semver plus build tag, so "what am I actually
   running?" is always answerable in either environment.
-- **Fresh clone?** The sandbox works immediately: `just dev-install`, then
-  `clave dev scenario c8-cold-start`, then `clave dev launch`. A *stable*
-  install only exists once a release has been cut on your machine (`just
-  release` from a clean, tagged tree) — that is deliberate: stable is a
+- **Fresh clone?** Run **`just sandbox`**. It builds the working tree, seeds a
+  scenario, self-checks the generated pair, and prints the launch command for
+  you to run in a non-zellij terminal. It is the path to use because the
+  sandbox's generated config bakes bare `clave` by design (§2 binary split —
+  the sandbox has no versioned copy), and `just sandbox` supplies that name
+  through a `PATH` shim scoped to the printed command. Since #43b
+  `just dev-install` no longer provides it: it installs `clave-dev`, which is
+  what you type for one-off commands, not what the sandbox bar shells out to.
+  A *stable* install only exists once a release has been cut on your machine
+  (`just release` from a clean, tagged tree) — that is deliberate: stable is a
   promotion target, not a build output.
 
 ## Pull-request flow

@@ -35,16 +35,17 @@ knowledge — read them, don't duplicate them here:
   signs the commits. You prepare; they approve and sign.
 - **Never install to the stable release surface from a working session.** That
   means never run `just install` (retired) or `just release` off feature work,
-  and never write the versioned artifacts under `~/.local/share/clave/`.
+  and never write anything under `~/.local/share/clave/` — the versioned
+  artifacts or the `bin/clave` launcher a cut owns (#43a).
 - **`just dev-install` is NOT safe while the maintainer is daily-driving.**
   (Corrected 2026-07-22 — this rule used to call it unconditionally sanctioned,
-  and that is what broke production.) It writes `~/.cargo/bin/clave`, the same
-  name a *live* session's plugin shells out to for `open`/`bind`/`snapshot`
-  (#44), so a working-tree build silently takes over the running fleet and a
-  version-skewed `clave open` loads a second bar. Assume he is driving unless
-  he has said otherwise; if you must, restore afterwards with
-  `cp ~/.local/share/clave/bin/clave-vX.Y.Z ~/.cargo/bin/clave`. See
-  CONTRIBUTING "The one leak".
+  and that is what broke production.) Since #43b it installs `clave-dev`, so it
+  no longer takes over the daily launcher's name — but it still rebuilds the
+  sandbox wasm in place under a possibly-live `clave-test`, and a bare
+  `cargo install` still writes `~/.cargo/bin/clave`, which shadows the #43a
+  launcher on `PATH`. Assume he is driving unless he has said otherwise, and use
+  `just sandbox` — it refuses against a live sandbox session and writes neither
+  surface. See CONTRIBUTING "The one leak".
 - **Zellij session lifecycle belongs to the human.** You never launch or kill a
   session — you print the command for the human to run. `zellij action` against
   a dead session blocks forever, so gate on liveness (`clave dev status`).
