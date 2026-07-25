@@ -42,7 +42,12 @@ fn spawn_executes_selected_launcher_with_exact_argv_cwd_and_environment() {
             codex: false,
             resume: false,
             launcher: "claude",
-            args: &["--session-id", "session-u", "--name", "name ; $(false)"],
+            args: &[
+                "--session-id",
+                "session-u",
+                "--name",
+                "name ; touch shell-canary $(touch subshell-canary)",
+            ],
         },
         Case {
             codex: false,
@@ -54,7 +59,12 @@ fn spawn_executes_selected_launcher_with_exact_argv_cwd_and_environment() {
             codex: true,
             resume: false,
             launcher: "claude-codex",
-            args: &["--session-id", "session-u", "--name", "name ; $(false)"],
+            args: &[
+                "--session-id",
+                "session-u",
+                "--name",
+                "name ; touch shell-canary $(touch subshell-canary)",
+            ],
         },
         Case {
             codex: true,
@@ -99,7 +109,7 @@ fn spawn_executes_selected_launcher_with_exact_argv_cwd_and_environment() {
                 "spawn",
                 "session-u",
                 "--name",
-                "name ; $(false)",
+                "name ; touch shell-canary $(touch subshell-canary)",
                 "--cwd",
                 cwd.to_str().unwrap(),
             ])
@@ -134,6 +144,20 @@ fn spawn_executes_selected_launcher_with_exact_argv_cwd_and_environment() {
             .map(|line| line.strip_prefix("arg=").unwrap())
             .collect();
         assert_eq!(captured_args, case.args.to_vec());
-        assert!(!temp.path().join("false").exists());
+        // The launcher must be exec'd directly, never through a shell (design
+        // §Executable boundary — only the pane-registration double-fork uses
+        // /bin/sh, and that closes the C7 zombie finding). The argv equality
+        // above is the primary guard; these canaries are an independent one.
+        // Both are RELATIVE, so a shell would create them in the launcher's
+        // cwd. The previous check looked for a file named `false` under the
+        // tempdir — `$(false)` creates no file and the cwd is a subdirectory,
+        // so it could never fail and proved nothing.
+        for canary in ["shell-canary", "subshell-canary"] {
+            assert!(
+                !physical_cwd.join(canary).exists(),
+                "case {index}: `{canary}` exists — the launcher argv was \
+                 interpreted by a shell"
+            );
+        }
     }
 }

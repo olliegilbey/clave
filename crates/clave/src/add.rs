@@ -420,6 +420,24 @@ pub fn merge_resume_record(existing: Option<&AgentRecord>, fresh: AgentRecord) -
     }
 }
 
+/// The previous launch profile when a resume CHANGES it, else None.
+///
+/// Resuming overwrites the stored profile with the requested one (design
+/// §CLI and behavior) — deliberate, but invisible at the UI: `Alt a` is bound
+/// to plain `clave add` (setup.rs `config_kdl`) and runs in a `close_on_exit`
+/// floating pane, so a codex agent resumed by the bound key silently becomes
+/// an ordinary-Claude agent and anything printed about it vanishes with the
+/// pane. `clave open` and cold-start resurrection both replay the STORED
+/// profile, so the bound key is the only path that flips it. The event log is
+/// therefore the one durable record — grep it when a session's provider is
+/// not what you expected.
+pub fn resume_profile_flip(existing: Option<&AgentRecord>, requested: bool) -> Option<bool> {
+    match existing {
+        Some(row) if row.claude_codex != requested => Some(row.claude_codex),
+        _ => None,
+    }
+}
+
 // ── interactive weave ───────────────────────────────────────────────────────
 // Every subprocess below is commented with *why*. None of this is unit-tested
 // (it needs fzf + a live zellij + a TTY); Task 9 validates it live.
@@ -810,7 +828,10 @@ pub fn run_add(worktree: bool, claude_codex: bool) -> Result<()> {
     //    keeps everything and resets only status. The authoritative
     //    existing-row lookup happens HERE, inside the lock (the step-4 copy
     //    was lock-free and only derived layout inputs).
-    let snap = with_store_mut(&paths, |s| {
+    let (snap, profile_flip) = with_store_mut(&paths, |s| {
+        // Read the flip under the SAME lock that writes it — a lock-free peek
+        // could observe a row another process is mid-way through replacing.
+        let flip = resume_profile_flip(s.agents.get(&uuid), claude_codex);
         let fresh = AgentRecord {
             uuid: uuid.clone(),
             cwd: agent_cwd.clone(),
@@ -829,9 +850,18 @@ pub fn run_add(worktree: bool, claude_codex: bool) -> Result<()> {
         let merged = merge_resume_record(s.agents.get(&uuid), fresh);
         s.agents.insert(uuid.clone(), merged);
         s.seq += 1;
-        snapshot_from(s)
+        (snapshot_from(s), flip)
     })?;
     push_snapshot(&snap);
+    if let Some(previous) = profile_flip {
+        crate::evlog::log_event(
+            "add",
+            &format!(
+                "{uuid}: launch profile changed on resume: claude_codex {previous} -> \
+                 {claude_codex} (the requested flag wins — see resume_profile_flip)"
+            ),
+        );
+    }
     crate::evlog::log_event("add", &format!("{uuid}: recorded ({choice})"));
     Ok(())
 }
@@ -1030,6 +1060,27 @@ mod tests {
         // No store row (jsonl-only candidate): no better info exists — the
         // fresh record is stored as-is.
         assert_eq!(merge_resume_record(None, fresh.clone()), fresh);
+    }
+
+    #[test]
+    fn resume_profile_flip_reports_only_real_changes() {
+        // The downgrade this exists for: a codex agent resumed through the
+        // `Alt a` bind (always plain) silently becomes ordinary Claude. The
+        // pane is close_on_exit, so the event log is the only durable trace.
+        let mut codex_row = rec("u");
+        codex_row.claude_codex = true;
+        assert_eq!(resume_profile_flip(Some(&codex_row), false), Some(true));
+
+        // The upgrade is equally worth logging: `add --codex` over a plain row.
+        let plain_row = rec("u"); // rec() builds claude_codex: false
+        assert_eq!(resume_profile_flip(Some(&plain_row), true), Some(false));
+
+        // No change, and no row at all (a fresh add), must stay silent — an
+        // event on every add would bury the one that matters.
+        assert_eq!(resume_profile_flip(Some(&codex_row), true), None);
+        assert_eq!(resume_profile_flip(Some(&plain_row), false), None);
+        assert_eq!(resume_profile_flip(None, true), None);
+        assert_eq!(resume_profile_flip(None, false), None);
     }
 
     #[test]

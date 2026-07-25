@@ -574,6 +574,36 @@ pub fn needs_version_refresh(
     config_exists && has_embedded && !versioned_wasm_exists
 }
 
+/// The cold-start warning for an eager row whose OPTIONAL launcher does not
+/// resolve, or None when there is nothing to say.
+///
+/// It returns a warning and never an `Err`, and that is the whole point
+/// (review finding I1, 2026-07-23). Bare `clave` IS `launch_session`, and
+/// `clave add` only runs INSIDE a session — so failing here creates no
+/// session, which leaves no tab to reach, which leaves no way to displace the
+/// eager row: one dormant row's optional wrapper would lock the user out of
+/// the entire tool. That is strictly harsher than the plain-`claude` eager
+/// path, which launches the session and fails only inside its own pane. The
+/// plan's "a dead-session preflight failure … creates no Zellij session" was
+/// written as the SAFE outcome; it is the lockout. Degrade instead: launch,
+/// and let the eager pane surface the real error from `clave spawn` — the
+/// same place, and the same retryable shape, a missing plain `claude`
+/// already uses.
+fn eager_wrapper_warning(claude_codex: bool, wrapper_found: bool) -> Option<String> {
+    if !claude_codex || wrapper_found {
+        return None;
+    }
+    // Canonical remediation (one-copy rule): these words and doctor's must not
+    // drift apart.
+    let advice =
+        crate::doctor::missing_advice(crate::discover::ToolId::ClaudeCodex, None).join("\n");
+    Some(format!(
+        "clave: the most-recent agent launches through the claude-codex wrapper, \
+         which is not resolvable — starting the session anyway; that tab will \
+         show the error.\n{advice}"
+    ))
+}
+
 /// Bare `clave`: attach-or-create the dedicated session with OUR config +
 /// a DYNAMIC layout (§6.8 C8: eager most-recent tab; serialization is off,
 /// so a dead session is deleted, never resurrected).
@@ -651,12 +681,22 @@ pub fn launch_session() -> Result<()> {
 
     if !live {
         if let Some(row) = eager.as_ref() {
+            // validate_cwd stays a hard failure: a `"`/control char in the cwd
+            // emits malformed KDL, so proceeding would fail session creation
+            // anyway. The OPTIONAL wrapper is different — warn, never gate.
             crate::add::validate_cwd(&row.cwd)?;
             if row.claude_codex {
-                crate::doctor::preflight(
-                    &[crate::discover::ToolId::ClaudeCodex],
-                    "clave can't restore the eager Codex-profile agent:",
-                )?;
+                // Discovery runs only for a codex eager row, so a plain cold
+                // start pays nothing for this.
+                let found =
+                    crate::discover::discover(crate::discover::ToolId::ClaudeCodex).is_some();
+                if let Some(warning) = eager_wrapper_warning(true, found) {
+                    // The attach below repaints the screen, so stderr here is
+                    // best-effort; the event log is the durable trace and the
+                    // eager pane surfaces the real error from `clave spawn`.
+                    eprintln!("{warning}");
+                    crate::evlog::log_event("launch", &warning);
+                }
             }
         }
         // §6.6 hygiene: tab_ids are SESSION-scoped — drop the previous
@@ -822,6 +862,28 @@ mod tests {
         // BARE.
         assert_eq!(kdl.matches("plugin location").count(), 1);
         r.label = "x".into(); // silence unused-mut if needed
+    }
+
+    #[test]
+    fn cold_start_warns_but_never_gates_on_a_missing_optional_wrapper() {
+        // I1 (review, 2026-07-23): bare `clave` IS launch_session, and
+        // `clave add` only runs INSIDE a session. So a hard failure here
+        // leaves no way to reach a tab and displace the eager row — the user
+        // is locked out of the whole tool by one dormant row's OPTIONAL
+        // launcher. The plain-`claude` eager path has no such gate: it
+        // launches and fails only inside its own pane. The contract for the
+        // optional wrapper is therefore a WARNING, never an Err.
+        let warning =
+            eager_wrapper_warning(true, false).expect("a missing wrapper must still warn");
+        assert!(warning.contains("claude-codex"));
+        // The remediation must be the canonical copy, not an ad-hoc restating.
+        assert!(warning.contains("CLAVE_CLAUDE_CODEX_BIN"));
+
+        // Nothing to say when the wrapper resolves, or the row is plain — a
+        // warning on every cold start would bury the one that matters.
+        assert_eq!(eager_wrapper_warning(true, true), None);
+        assert_eq!(eager_wrapper_warning(false, false), None);
+        assert_eq!(eager_wrapper_warning(false, true), None);
     }
 
     #[test]

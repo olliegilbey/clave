@@ -99,6 +99,14 @@ pub fn run_open(uuid: &str) -> Result<()> {
             Ok(())
         }
         OpenDecision::Open => {
+            // Hard-failing HERE is correct, and deliberately unlike the
+            // cold-start path (setup::eager_wrapper_warning), which only
+            // warns. The blast radius is what differs: this aborts opening
+            // ONE dormant row inside a session that is already up, so the
+            // user keeps every other tab and can retry; failing at cold start
+            // would create no session at all and lock them out of the tool
+            // (review finding I1). Do not "fix" the asymmetry by making them
+            // match — it is the point.
             if row.claude_codex {
                 crate::doctor::preflight(
                     &[
