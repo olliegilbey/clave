@@ -301,6 +301,22 @@ watch-items: Alt+o barely exercised; one unreproduced "tab 4 not on top"
 sighting in round 6 (store stamps were correct; likely the ~100ms
 touch-push window).
 
+Retroactive note (added with #44, 2026-07-22): the command above no
+longer reloads anything as written. A plugin's configuration is half its
+zellij identity, and `reload_plugin` matches on `(location,
+configuration)` exactly (`zellij-server/src/plugins/wasm_bridge.rs:686-697`);
+round 7 predates #44's config injection, so it ran with none. Today the
+same instances carry `clave_binary=<path>`, so the invocation needs `-c
+clave_binary=clave` (sandbox value; a stable session needs its versioned
+absolute path). A miss is NOT a silent no-op: the empty-filtered lookup
+returns `Err(PluginDoesNotExist)` (`zellij-server/src/plugins/plugin_map.rs:169-171`),
+`reload_plugin` propagates it (`wasm_bridge.rs:692-693`), and the error
+branch (`zellij-server/src/plugins/mod.rs:446-468`) logs `"Plugin {} not
+found, starting it instead"` and starts a **new** instance — you get a
+second bar pane, the very symptom of #44. If a reload looks like it did
+nothing, grep `zellij.log` for `not found, starting it instead`. See
+`docs/dev/TESTING.md` for the current live SOP.
+
 **Verdict:** **PASS** (2026-07-14, round 7 — TEMP traces removed after)
 
 ## C6 — Toggle (`hide_self` reflow)

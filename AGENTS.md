@@ -55,24 +55,33 @@ a live terminal is the human's — you print the command, you do not run it.
 
 ## Required review before requesting merge
 
-Two lanes, both, every non-trivial change:
+**One lane is required, one is recommended**, every non-trivial change:
 
-1. **The vendored fugu review** — `.claude/commands/fugu-review.md` (blind
-   multi-model dry-run review, consolidated by a verifier). It may not exist on
-   branches cut before that lane landed; if it is absent, say so in the PR and
-   substitute a second independent reviewer.
-2. **At least one independent adversarial reviewer** — a lane that did not write
-   the code. In practice: a fresh agent briefed to attack the change, plus the
-   PR bots (CodeRabbit CLI on the committed branch, Codex).
+1. **REQUIRED — at least one independent adversarial reviewer** — a lane that
+   did not write the code. In practice: a fresh agent briefed to attack the
+   change, plus the PR bots (CodeRabbit CLI on the committed branch, Codex).
+   Subagent-driven development satisfies this with its per-task reviewers plus
+   the whole-branch review, provided those reviewers are genuinely independent
+   of the implementer. **One such lane discharges the requirement.** The PR bots
+   (CodeRabbit, Codex) are additional evidence when they actually run — they are
+   third-party services that may be rate-limited or absent, so they never gate a
+   merge on their own.
+2. **RECOMMENDED — the vendored fugu review** — `.claude/commands/fugu-review.md`
+   (blind multi-model dry-run review, consolidated by a verifier). Valuable, but
+   token-heavy (four model lanes), so it is a recommendation, not a gate: run it
+   when the change is subtle or the budget allows, and skip it — saying so in the
+   PR — when independent adversarial review has already been thorough. It may not
+   exist on branches cut before that lane landed.
 
 **If you are a cloud or remote agent**, assume the external CLI lanes are
 unavailable: `coderabbit`, `codex` and `gemini` are third-party binaries that a
 container almost never has, and that need interactive auth even when present.
-Do not opt into fugu's `cli_reviewers` there. Run the **model lanes** (they need
-nothing but the repo) and satisfy requirement 2 with an independent adversarial
-reviewer agent. Then say in the PR which lanes actually executed — **a lane that
-did not run is not a lane that passed**, and a dossier listing six lanes of
-which three were silently absent is worse than one honestly listing three.
+Do not opt into fugu's `cli_reviewers` there. If you run fugu at all, run only
+its **model lanes** (they need nothing but the repo); the required adversarial
+reviewer (lane 1) is always available as a fresh in-repo agent. Then say in the
+PR which lanes actually executed — **a lane that did not run is not a lane that
+passed**, and a dossier listing six lanes of which three were silently absent is
+worse than one honestly listing three.
 
 This is not ceremony. On this repo, independent lanes have repeatedly caught
 defects the implementer and a single reviewer both missed:
@@ -103,13 +112,21 @@ fleet. Before you start, read the risk taxonomy in
 tells you what you must produce, and whether the PR needs the
 `needs-live-validation` label.
 
-The three commands a PR must show green:
+The four commands a PR must show green — or `just gates`, which runs exactly
+these in this order:
 
 ```bash
+cargo fmt --all --check      # CI's lint job runs fmt BEFORE clippy
 cargo test --workspace
 cargo build -p clave-bar --target wasm32-wasip1
 cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+**`cargo fmt --all --check` is a gate, not a nicety.** CI's `lint` job runs it
+first, so hand-written code that clippy accepts still fails the build. This list
+omitted it until 2026-07-25 and #66 duly went red on three hand-edited files
+with every documented gate locally green. If you edit Rust by hand, run
+`cargo fmt --all` before you commit.
 
 ## Handoff duty
 

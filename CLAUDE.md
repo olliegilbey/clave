@@ -24,6 +24,10 @@ knowledge — read them, don't duplicate them here:
 
 - **Test with `cargo test --workspace`, always.** Bare `cargo test` silently
   skips the wasm crate's tests. Use the workspace form or `just test`.
+- **`just gates` before every push.** It runs all four CI gates in CI's order —
+  `fmt --check`, test, wasm build, clippy. `cargo fmt --all --check` is the one
+  that bites: CI's lint job runs it before clippy, so hand-edited Rust can be
+  clippy-clean and still fail the build (#66).
 - **TDD.** Write the failing test first, watch it fail, then implement.
 - **Dense why-comments.** Match the codebase: comments explain *why* and cite
   the spec section or the ledger finding, not *what*.

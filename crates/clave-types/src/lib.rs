@@ -5,6 +5,17 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The zellij plugin-configuration key carrying the absolute `clave` binary
+/// the bar must invoke (#44).
+///
+/// Lives in the shared crate because BOTH sides must agree: `clave` emits it
+/// into config.kdl's MessagePlugin keybinds and into every layout `plugin`
+/// node, and `clave-bar` will read it at `load()`. Zellij matches a pipe's
+/// destination on (location, configuration) EXACTLY
+/// (zellij-server/src/plugins/wasm_bridge.rs:1676-1686), so a typo on one side
+/// silently spawns a second bar instead of erroring.
+pub const CLAVE_BINARY_KEY: &str = "clave_binary";
+
 /// Per-agent status. This is a *latest-wins state machine* (spec §6.5), not a
 /// priority-max: a later event can downgrade an earlier one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

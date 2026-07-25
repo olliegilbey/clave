@@ -32,6 +32,17 @@ build-all: build build-bar
 test:
     cargo test --workspace
 
+# Every gate CI enforces, in CI's own order. `fmt --check` FIRST because that
+# is where the lint job starts: #66 went red on three hand-edited files while
+# every *documented* gate was locally green (the docs listed three commands and
+# CI ran four).
+# Run every CI gate (fmt, test, wasm, clippy) — use this before you push.
+gates:
+    cargo fmt --all --check
+    cargo test --workspace
+    cargo build -p clave-bar --target wasm32-wasip1
+    cargo clippy --workspace --all-targets -- -D warnings
+
 # §2: the working-tree build for the sandbox + contributor shells. Builds the
 # bar wasm (build-tagged with the short SHA so the zellij log says which wasm
 # produced a trace) straight into the SANDBOX data dir, and `cargo install`s
@@ -72,3 +83,12 @@ release: build-bar-release
 
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings
+
+# Wire the SANDBOX to this working tree without touching the daily surface.
+# The safe alternative to `dev-install` for sandbox validation: nothing here
+# writes ~/.cargo/bin/clave (the name a LIVE session's plugin shells out to —
+# the 2026-07-22 outage), and it refuses to run against a live clave-test.
+# Prints the launch command; never launches (session lifecycle is the human's).
+# Sandbox-validate this working tree WITHOUT installing to the daily surface.
+sandbox scenario="c8-cold-start":
+    ./scripts/sandbox-setup.sh {{scenario}}

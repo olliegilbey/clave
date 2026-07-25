@@ -27,8 +27,10 @@ use clave::setup;
 use clave::store::{AgentRecord, LabelSource};
 use clave_types::Status;
 
+use std::collections::BTreeMap;
+use zellij_utils::input::actions::Action;
 use zellij_utils::input::config::Config;
-use zellij_utils::input::layout::Layout;
+use zellij_utils::input::layout::{Layout, Run, TiledPaneLayout};
 
 /// Assert a layout-shaped artifact parses through zellij's REAL layout parser.
 /// The full KDL text and the parser error ride in the panic message — a
@@ -50,6 +52,62 @@ fn assert_config_ok(kdl: &str, what: &str) {
     if let Err(e) = Config::from_kdl(kdl, None) {
         panic!("{what} is not valid zellij config KDL: {e:?}\n---\n{kdl}");
     }
+}
+
+/// Every plugin configuration map in a layout artifact, as zellij's REAL
+/// parser sees it. Walks tabs AND the template (the bar pane lives in
+/// `default_tab_template` for launch.kdl, and in a concrete tab node for the
+/// one-shot add/open layout), recursing through `children`.
+///
+/// This is half of the #44 identity pair: zellij keys a pipe's destination on
+/// `(location, configuration)` exactly
+/// (zellij-server/src/plugins/wasm_bridge.rs:1676-1686), and a MISS spawns a
+/// new plugin rather than no-op'ing (ibid. :1861-1894) — a duplicate bar.
+fn layout_plugin_configs(kdl: &str, what: &str) -> Vec<BTreeMap<String, String>> {
+    let layout = Layout::from_str(kdl, format!("guardrail:{what}"), None, None)
+        .unwrap_or_else(|e| panic!("{what} did not parse: {e:?}\n---\n{kdl}"));
+
+    fn walk(node: &TiledPaneLayout, out: &mut Vec<BTreeMap<String, String>>) {
+        // Run::get_run_plugin (zellij-utils input/layout.rs:404) unwraps both
+        // the RunPlugin and Alias arms; we only ever emit `file:` URLs, so it
+        // is the RunPlugin arm in practice.
+        if let Some(rp) = node.run.as_ref().and_then(Run::get_run_plugin) {
+            out.push(rp.configuration.inner().clone());
+        }
+        for child in &node.children {
+            walk(child, out);
+        }
+    }
+
+    let mut out = Vec::new();
+    for (_name, tiled, _floating) in &layout.tabs {
+        walk(tiled, &mut out);
+    }
+    if let Some((tiled, _floating)) = &layout.template {
+        walk(tiled, &mut out);
+    }
+    out
+}
+
+/// Every `MessagePlugin` keybind's configuration in a config artifact, as
+/// zellij's REAL parser sees it. `KeybindPipe` is what a `MessagePlugin` node
+/// becomes (zellij-utils kdl/mod.rs:2196-2209); `configuration: None` means an
+/// EMPTY map at match time, not a wildcard (input/layout.rs:159-163).
+fn keybind_pipe_configs(kdl: &str, what: &str) -> Vec<BTreeMap<String, String>> {
+    let config = Config::from_kdl(kdl, None)
+        .unwrap_or_else(|e| panic!("{what} did not parse: {e:?}\n---\n{kdl}"));
+    let mut out = Vec::new();
+    // Keybinds.0 is the public HashMap the existing unbind test already walks.
+    for binds in config.keybinds.0.values() {
+        for actions in binds.values() {
+            for action in actions {
+                if let Action::KeybindPipe { configuration, .. } = action {
+                    out.push(configuration.clone().unwrap_or_default());
+                }
+            }
+        }
+    }
+    out
 }
 
 /// A realistic agent row for the launch-layout eager branch and any generator
@@ -154,7 +212,7 @@ fn config_kdl_unbinds_claude_code_keys_in_every_mode() {
 
 #[test]
 fn layout_kdl_parses_through_real_zellij_parser() {
-    assert_layout_ok(&setup::layout_kdl(WASM), "layout.kdl");
+    assert_layout_ok(&setup::layout_kdl(BIN_ABS, WASM), "layout.kdl");
 }
 
 #[test]
@@ -283,4 +341,100 @@ fn backslash_label_is_guarded_through_real_parser() {
     assert_layout_ok(&kdl, "add/open tab layout (backslash-bearing label)");
     // And a backslash-bearing cwd must be REFUSED, not baked.
     assert!(add::validate_cwd(r"/home/o/we\ird").is_err());
+}
+
+#[test]
+fn keybind_and_layout_plugin_configurations_match() {
+    // #44: zellij resolves a pipe's destination by EXACT match on
+    // (location, configuration) — a nested HashMap keyed by
+    // PluginUserConfiguration (zellij-server plugins/wasm_bridge.rs:1676-1686)
+    // — and a miss LAUNCHES A NEW PLUGIN (ibid. :1861-1894). So config.kdl's
+    // keybinds and the layout that actually starts the bar must carry the
+    // SAME configuration, or every Alt+c/Alt+j/Alt+o press spawns a second
+    // sidebar: the exact v0.1.1 field failure this change exists to end.
+    //
+    // Targets are the layouts zellij is actually GIVEN — launch.kdl
+    // (setup.rs:708-711) and the one-shot add/open tab layout (open.rs:122,
+    // add.rs:726). layout.kdl is generated but never passed to zellij, so it
+    // is checked as a bonus, not as the contract.
+    let cfg = setup::config_kdl(BIN_ABS, WASM);
+    let kb = keybind_pipe_configs(&cfg, "config.kdl");
+
+    // Non-vacuity FIRST (adversarial review, 2026-07-22): the per-element
+    // presence assert below is what pins the KEY, but the layout-vs-keybind
+    // `assert_eq!` further down is satisfied when both maps are EMPTY. If the
+    // keybind extraction ever silently produced nothing (a refactor, a parser
+    // change), every downstream equality would pass vacuously against an empty
+    // layout side. Assert the keybind set is non-empty before trusting it.
+    assert!(
+        !kb.is_empty(),
+        "config.kdl produced no MessagePlugin keybinds — the extraction is \
+         vacuous:\n{cfg}"
+    );
+    for c in &kb {
+        assert_eq!(
+            c.get(clave_types::CLAVE_BINARY_KEY).map(String::as_str),
+            Some(BIN_ABS),
+            "a MessagePlugin keybind lacks the {} configuration key; it will \
+             address a DIFFERENT plugin than the running bar (#44):\n{cfg}",
+            clave_types::CLAVE_BINARY_KEY
+        );
+    }
+
+    // `keybinds.0` (walked by keybind_pipe_configs) is a HashMap<InputMode,
+    // …>, so `kb`'s element order is NOT stable across runs — comparing
+    // layouts against an arbitrary `kb[N]` below would only catch a mismatch
+    // when that particular element happens to land there. Proven live: adding
+    // an extra key to only the nav closure's MessagePlugin config and running
+    // a `kb[0]`-only comparison 40 times gave 9 passes / 31 failures. An EXTRA
+    // key breaks plugin identity exactly as fatally as a missing one (#44), so
+    // assert the keybind side is internally coherent FIRST — every entry
+    // equal to every other — before picking any one of them as the agreed
+    // value the layouts are checked against.
+    for c in &kb[1..] {
+        assert_eq!(
+            c, &kb[0],
+            "config.kdl's MessagePlugin keybinds disagree with each other on \
+             their configuration — some keypresses will address a DIFFERENT \
+             plugin than others (#44):\n{cfg}"
+        );
+    }
+    let agreed_keybind_config = kb[0].clone();
+
+    let r = eager_record();
+    let launch_eager = setup::launch_layout_kdl(BIN_ABS, WASM, Some(&r));
+    let launch_empty = setup::launch_layout_kdl(BIN_ABS, WASM, None);
+    let one_shot = add::tab_layout(BIN_ABS, WASM, "lbl", "u-1", "/home/o/x");
+    let layout_kdl_text = setup::layout_kdl(BIN_ABS, WASM);
+
+    for (what, text) in [
+        ("launch.kdl (eager most-recent tab)", &launch_eager),
+        ("launch.kdl (empty store, bar-only)", &launch_empty),
+        ("add/open one-shot tab layout", &one_shot),
+        (
+            "layout.kdl (generated, not passed to zellij)",
+            &layout_kdl_text,
+        ),
+    ] {
+        let plugins = layout_plugin_configs(text, what);
+        assert!(
+            !plugins.is_empty(),
+            "{what} carries no plugin pane — extraction is vacuous:\n{text}"
+        );
+        for p in &plugins {
+            assert_eq!(
+                p.get(clave_types::CLAVE_BINARY_KEY).map(String::as_str),
+                Some(BIN_ABS),
+                "{what}'s plugin node lacks the {} key (#44):\n{text}",
+                clave_types::CLAVE_BINARY_KEY
+            );
+            // The pair must MATCH, not merely both be present.
+            assert_eq!(
+                p, &agreed_keybind_config,
+                "{what}'s plugin configuration differs from config.kdl's \
+                 keybind configuration — every keybind press will launch a \
+                 SECOND bar (#44):\nlayout={p:?}\nkeybind={agreed_keybind_config:?}"
+            );
+        }
+    }
 }
