@@ -1,7 +1,7 @@
 # Status — sidebar visual design locked; three PRs merged; release runway prepared
 
-_2026-07-26 11:28 · repo github.com/olliegilbey/clave · `main` @ `fd13c26` ·
-tag `v0.1.1` · PR #70 open_
+_2026-07-26 · repo github.com/olliegilbey/clave · `main` @ `ea0f009` ·
+tag `v0.1.1` · PRs #70 and #71 open_
 
 Predecessors, read only if you need their slice:
 @docs/status/2026-07-25-1500-pre-fleet-audit.md — the six pre-fleet blockers,
@@ -34,8 +34,10 @@ test — which the maintainer must drive personally and which gates every cut.
   prose doc wins where they disagree.
 - `UBIQUITOUS_LANGUAGE.md` — shared vocabulary. §1 the three-way "session"
   ambiguity · §3.3 title vs label (the trap).
-- `docs/dev/RELEASE-RUNBOOK.md` — **uncommitted, in the working tree.** Part C
-  is the maintainer's live test.
+- `docs/dev/RELEASE-RUNBOOK.md` — on branch `docs/release-runbook` (**PR #71,
+  open, 12 unresolved findings**). Part C is the maintainer's live test. Do not
+  trust it until item 1 of Next Steps is done — six of the findings are real
+  defects in it.
 - `AGENTS.md`, `CONTRIBUTING.md`, `docs/dev/TESTING.md` — unchanged, still binding.
 
 ## Current State
@@ -43,7 +45,10 @@ test — which the maintainer must drive personally and which gates every cut.
 **Merged to `main`, in this order, CI green at each:** `a7c2b7b` (#67, the
 cargo-dist fragment that failed every push) → `643fff4` (#64, the spec corpus +
 the design lock) → `fd13c26` (#66, the #44 fix — the bar now calls the binary
-it belongs to).
+it belongs to) → `ea0f009` (#72, `@AGENTS.md` imported into CLAUDE.md).
+
+**PR #71 open** — `docs/release-runbook`: the runbook + this handoff, one
+commit. **Blocked on 12 CodeRabbit findings** (triaged in a section below).
 
 **PR #70 open** — https://github.com/olliegilbey/clave/pull/70 —
 `fix/release-owns-the-launcher`, labelled `needs-live-validation`. Implements
@@ -51,15 +56,19 @@ it belongs to).
 #43b (`just dev-install` now produces `clave-dev`). `lint`/`test`/`wasm-build`/
 `plan` green. **Not merge-ready:** only the CodeRabbit CLI lane ran.
 
-**Uncommitted in the working tree:**
-- `docs/dev/RELEASE-RUNBOOK.md` — new, complete, unreviewed.
-- `CLAUDE.md` — **not this session's work.** Another agent's. Leave it.
+**Repo hygiene done:** local `main` was five commits stale and is now synced;
+`CLAUDE.md` resolved via #72; five merged worktrees and four merged local
+branches removed. **Three merged REMOTE branches still to prune:**
+`docs/sidebar-ux-specs`, `fix/dist-build-setup-path`, `fix/plugin-binary-path`.
+Remaining worktrees are only the two with live PRs (#70, #65).
 
-**Local branch `docs/release-runbook`** holds the runbook as a commit; it was
-never pushed. Either push that branch or commit the working-tree copy — not both.
+**A trap #72 avoided, worth knowing:** the working-tree `CLAUDE.md` predated #66
+and would have DELETED the `just gates` rule that #66 added. Always diff a
+long-dirty file against `origin/main`, not against your local branch tip.
 
-No source code was written this session. The design lock and the glossary are
-docs; PR #70's code was written by a delegated agent in its own worktree.
+**No source code was written this session, and none of the sidebar UX is
+implemented.** The design lock and the glossary are documents. PR #70's code was
+written by a delegated agent in its own worktree. S0–S8 are all unstarted.
 
 ## What's Working
 
@@ -159,19 +168,29 @@ may have reviewed nothing. That is #68, and it is live.
 
 ## Next Steps
 
-**In priority order. Items 1–4 are the session plan.**
+> **⚠ NOTHING IN THE SIDEBAR UX IS IMPLEMENTED.** This session locked the
+> *design*. **Zero source code changed.** The bar today still renders the old
+> 2-cell gutter at 30 columns with no colour. S0–S8 (#55–#63) are all
+> unstarted. Do not assume any of the locked design exists in code.
 
-1. **Push the two blocked branches.** `git push -u origin docs/release-runbook`
-   and `git push -u origin fix/release-owns-the-launcher`. Both are committed
-   locally but could not be pushed at the time. Decide
-   first whether to push the `docs/release-runbook` branch or commit the
-   working-tree copy of `RELEASE-RUNBOOK.md` — doing both duplicates the file.
+**In priority order. Items 1–5 are the session plan.**
+
+1. **Fix the 12 CodeRabbit findings on PR #71**, then reply to each thread with
+   its disposition and resolve it (never silent-resolve — house rule). Branch
+   `docs/release-runbook` is checked out and clean at `5ec7cc8`. Full triage is
+   in the next section; **six of these are real defects that would break a
+   release**, not nitpicks. Then merge #71.
 2. **PR #70 needs a second review lane before merge.** Only the CodeRabbit CLI
-   ran. AGENTS.md requires two: run the vendored fugu lane (needs a session with
-   the `Workflow` tool) plus an independent adversarial reviewer. State in the
-   PR which lanes actually executed — a lane that did not run is not a lane that
-   passed. Then ask before merging.
-3. **#48 — `clave doctor` version-coherence.** The last hermetic blocker before
+   ran. AGENTS.md wants the vendored fugu lane (needs a session with the
+   `Workflow` tool) **plus** an independent adversarial reviewer — but it also
+   permits saying fugu was absent and substituting a second independent
+   reviewer, so **fugu is not a hard gate**. State in the PR which lanes
+   actually executed — a lane that did not run is not a lane that passed. Then
+   ask before merging.
+3. **Update the issues** — the checklist is a section of its own below. None of
+   it is done, and it is the cheapest way to stop the next agent re-deriving
+   what the design lock settled.
+4. **#48 — `clave doctor` version-coherence.** The last hermetic blocker before
    a cut, and the highest-leverage one: it collapses runbook steps 1, 2 and 5
    into one assertable command with `--json` and a non-zero exit. PR #70's agent
    flags that **doctor currently says nothing about the launcher** — whether one
@@ -179,7 +198,7 @@ may have reviewed nothing. That is #68, and it is live.
    That is now the most valuable part of #48. Note the version-agreement half
    already exists (`generated_artifact_set_is_version_coherent`, PR #52); the
    path-existence half landed in #70; the live five-way check is what remains.
-4. **The interactive live test, then the tag.** Follow
+5. **The interactive live test, then the tag.** Follow
    `docs/dev/RELEASE-RUNBOOK.md`. Parts A and D are agent work; **Part C is the
    maintainer's and cannot be delegated or automated** — Tier 2 does not exist
    (#47), so nothing automated crosses the process/environment seam. `just
@@ -274,6 +293,91 @@ On width, which set 44:
 > because I still have plenty of room to work when the sidebar is full width […]
 > So, a bit more width for the sidebar is better even when collapsed."
 
+---
+
+## PR #71 — the 12 CodeRabbit findings, triaged
+
+Read in full and analysed; **six are real defects that would break a release**,
+not style. The runbook gates every cut, so these matter more than their size
+suggests. Branch `docs/release-runbook`, clean at `5ec7cc8`.
+
+### Fix — ordering and correctness
+
+1. **Part B pushes the tag before anything is validated** (P1). `git push origin
+   vX.Y.Z` immediately triggers `release.yml` and publishes the release — so any
+   defect Part C finds is discovered *after* it is public. Worse, **`just
+   release` never appears in the runbook at all**, so the local launcher and
+   generated KDL are still on the previous version and Step 1 validates the OLD
+   cut. Correct sequence: **tag locally → `just release` → Part C → push the tag
+   only on a go decision.** This is the single most important fix.
+2. **Step 2's regex cannot detect what Step 2 claims to reject** (P1). It matches
+   only `clave-bar-vX.Y.Z.wasm|clave-vX.Y.Z`, so a bare `clave` or an
+   unversioned `clave-bar.wasm` is invisible — and if the same files also hold
+   one correct versioned path, the output is "exactly one version == the tag"
+   and the table advances to Step 3. That is precisely the skew the check
+   exists to stop. Add an explicit search that FAILS on unversioned references.
+3. **`launch.kdl` is stale by design before launch** (P1). `just release`
+   rewrites `config.kdl` and `layout.kdl` only; `launch.kdl` is rewritten by
+   `clave` at cold start (Step 3). The `*.kdl` glob therefore reports two
+   versions and orders a STOP on a perfectly healthy upgrade. Exclude
+   `launch.kdl` from Step 2; assert it in Step 3, after it has been written.
+4. **Rollback does not roll back** (P1). Relaunching the old versioned binary
+   reattaches a live session; and even after the session is killed, `config.kdl`
+   still names the failed version, because the old binary sees its own wasm
+   present and skips the setup refresh (`needs_version_refresh`). Rollback must:
+   human kills the session → regenerate stable config/hooks from the last-good
+   tagged release → relaunch.
+5. **The log filter is scoped to the calendar day, not the launch** (P2). The
+   zellij log is shared by every session on the machine and old entries linger,
+   so a normal release day returns both the previous and the new version and
+   falsely fails a coherent cut; a midnight crossing returns nothing. Capture
+   the log's line count immediately before Step 3 and read only lines appended
+   after it (`tail -n +$((N+1))`).
+6. **A nonzero `clave doctor` exit is never defined as STOP.**
+   `crates/clave/src/doctor.rs` exits 1 on a `Severity::Problem`, but Step 5
+   only asks for the output. Make the exit status the pass/fail condition.
+7. **MD031** — blank lines around fenced blocks (markdownlint). Mechanical.
+
+### Decline, with reason
+
+8. *"Add the promised sidebar design-lock handoff."* It **is** in this PR, as
+   `docs/status/2026-07-26-1128-sidebar-design-lock.md`. CodeRabbit read only
+   `RELEASE-RUNBOOK.md` and concluded it was missing. Reply saying so; do not
+   change scope.
+
+### Amend — already applied above
+
+9. *"Keep the recommended fugu lane optional."* Correct. AGENTS.md says "two
+   lanes, both", but also permits stating fugu was absent and substituting a
+   second independent reviewer — so it is not a hard gate. Next Steps item 2
+   now reflects that.
+
+**Process rule that applies here:** always fix what CodeRabbit returns, reply
+saying how it was addressed, *then* resolve. Never silent-resolve. Expect
+several rounds. And note #68 — a green CodeRabbit check may say "Review rate
+limited" and have reviewed nothing; read the check detail, not just the colour.
+
+---
+
+## Issues to update — none of this is done
+
+Cheap, and it stops the next agent re-deriving what is already settled.
+
+| Issue | What it needs |
+|---|---|
+| **#44** | closed by #66 — verify it auto-closed, close by hand if not |
+| **#43** | #70 implements 43a (release owns an unversioned launcher) and 43b (`dev-install` → `clave-dev`). Comment; close when #70 merges |
+| **#24** | sidebar-distinctiveness epic — the design lock settles items 2, 6 and 7. Comment with a pointer to the lock doc |
+| **#60** (S5) | **supersession note**: palette 12 → 8 kanagawa; title is a filled CHIP not tinted text; fixed-width columns; **`InkSpan`/`segment_span` deleted** |
+| **#61** (S6) | **supersession note**: gutter is not 3 cells; §2.8 void; glyph set settled; **drop the `glyphs` config key** (identity-hash hazard); escape rule |
+| **#63** (S8) | **supersession note**: target is **44**, not 38; re-derive the expected-red test set; collapsed target still open, must be **< 24** |
+| **#69** | now a **BLOCKER for S5 and S6** — `Agent` carries only the composed `label`; the locked design needs `title` and `summary` as structural wire fields |
+| **#40** | absorbs user-facing glyph customisation, since the `glyphs` plugin-config key was rejected |
+| **#35 / #49** | advanced by #71's runbook |
+| **#62** (S7) | the battery cell is reserved in the locked gutter — note the geometry |
+| **#47** | Tier 2 still does not exist; it is why Part C cannot be automated |
+| **#68** | still open — review lane degraded; observed live twice this session |
+
 ## Context to Preserve
 
 - **User prefs (binding):** extremely concise, signal over noise; explain while
@@ -305,8 +409,14 @@ On width, which set 44:
 
 ## Restart Hint
 
-`main` is green and current. Two uncommitted paths: `docs/dev/RELEASE-RUNBOOK.md`
-(this session's, and also present as a commit on the local `docs/release-runbook`
-branch — pick one) and `CLAUDE.md` (another agent's, leave it). Nothing is
-mid-refactor and no source is touched, so it is safe to `/clear` after deciding
-the runbook's route.
+**Start here:** `git checkout docs/release-runbook` (it is the PR #71 branch and
+holds this file), then work Next Steps item 1 — the 12 findings on #71. `main`
+is green at `ea0f009`; no source is touched anywhere and nothing is
+mid-refactor, so the tree is safe.
+
+Read, in this order: this file → `AGENTS.md` (which now imports itself into
+CLAUDE.md) → `UBIQUITOUS_LANGUAGE.md` → the design lock. Run `python3
+docs/superpowers/specs/bar-preview.py` once to see what was ratified — it is
+one screen and it saves reading §2 of the lock doc twice.
+
+**Do not** assume any sidebar UX exists in code. It does not.
