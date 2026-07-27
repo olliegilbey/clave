@@ -1,5 +1,7 @@
 # CLAUDE.md — clave
 
+@AGENTS.md
+
 You are pairing on clave: a Rust CLI (`crates/clave`) plus a Zellij plugin
 compiled to wasm (`crates/clave-bar`). These documents carry the operating
 knowledge — read them, don't duplicate them here:
@@ -14,11 +16,6 @@ knowledge — read them, don't duplicate them here:
   the risk taxonomy (change class → what you must produce), the escape record,
   and the live-validation SOP with its interaction contract, sandbox lifecycle,
   observability map, and Zellij safety boundaries.
-- **[docs/status/](docs/status/)** — session handoffs, TRACKED (ruling
-  2026-07-21): they are the project's thinking-log history. Write yours
-  there at session end and include it in your PR; resume from the newest
-  one. They live in the MAIN checkout — a worktree only sees committed
-  ones (a fresh handoff written elsewhere is invisible until merged).
 
 ## Standing rules
 
@@ -31,8 +28,6 @@ knowledge — read them, don't duplicate them here:
 - **TDD.** Write the failing test first, watch it fail, then implement.
 - **Dense why-comments.** Match the codebase: comments explain *why* and cite
   the spec section or the ledger finding, not *what*.
-- **Never commit without the maintainer's explicit approval.** The maintainer
-  signs the commits. You prepare; they approve and sign.
 - **Never install to the stable release surface from a working session.** That
   means never run `just install` (retired) or `just release` off feature work,
   and never write the versioned artifacts under `~/.local/share/clave/`.
