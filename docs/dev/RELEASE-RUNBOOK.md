@@ -18,7 +18,7 @@ map and the sanctioned-command list are binding here and are not repeated.
 | Who | Does |
 |---|---|
 | **agent** | Part A and Part D. Reads logs, the store, `clave dev status`. **Prints** every zellij command; runs none of them. Never runs `just release`. |
-| **maintainer** | The tag, `just release`, every keypress in Part C, and the go/no-go. |
+| **maintainer** | The tag, `just release`, every keypress in Part C, killing a session, and the go/no-go. **The tag is pushed only after the go** — Part B. |
 
 ---
 
@@ -27,10 +27,12 @@ map and the sanctioned-command list are binding here and are not repeated.
 Nothing here touches a live session. All of it must pass before a tag exists.
 
 1. **`main` is green at the commit you intend to tag.**
+
    ```bash
    just gates          # CI's four commands, in CI's order
    gh run list --branch main --limit 1
    ```
+
 2. **The pre-tag blocker set is closed.** As of 2026-07-25 that is **#43a**
    (the release owns an unversioned launcher), **#44** (landed in #66), **#48**
    (doctor version-coherence), **#43b** (`dev-install` no longer writes the
@@ -39,24 +41,60 @@ Nothing here touches a live session. All of it must pass before a tag exists.
 3. **The version in `Cargo.toml` matches the tag you are about to push.** The
    `clave release` gate enforces this, but finding out here is cheaper.
 4. **Record the *current* state, so Part C has a baseline to compare against:**
+
    ```bash
    clave --version; command -v clave
    ls ~/.local/share/clave/bin/
    clave doctor --json          # once #48 lands; until then, `clave doctor`
    ```
+
    Paste that into the release issue. A live test with no "before" is guesswork.
 
 ---
 
-## Part B — the tag (maintainer, watched)
+## Part B — the cut (maintainer, watched)
 
-```bash
-git tag vX.Y.Z && git push origin vX.Y.Z
-```
+> **The tag stays LOCAL until Part C returns a go.** `git push origin vX.Y.Z`
+> triggers `release.yml` and publishes the GitHub release immediately, so a
+> defect Part C finds after a push is already public. The gate does not need a
+> pushed tag: `clave release` reads `git tag --points-at HEAD` (release.rs
+> `release_gate`), which a local tag satisfies.
 
-Then watch `release.yml`. #35 owns the CI-pipeline checklist — all four targets
-build, attestations verify, checksums publish. **`just release` is the
-maintainer's command, always. An agent never runs it.**
+1. **Tag locally.**
+
+   ```bash
+   git tag vX.Y.Z
+   ```
+
+2. **Cut.** This is the step that actually puts the new version on this
+   machine, and **Part C is meaningless without it** — until `just release`
+   runs, `~/.local/share/clave/` still holds the *previous* version's artifacts
+   and Step 1 would validate the old cut.
+
+   ```bash
+   just release
+   ```
+
+   It builds the wasm and the embedding CLI, then `clave release` installs the
+   versioned artifacts and rewrites `config.kdl` and `layout.kdl` (setup.rs
+   `write_generated`). It does **not** write `launch.kdl` — that is `clave`'s
+   own cold-start job, and Step 3 is where it gets checked.
+   **`just release` is the maintainer's command, always. An agent never runs
+   it.**
+
+3. **Run Part C.** Do not continue past it without a go.
+
+4. **On a go — publish the tag:**
+
+   ```bash
+   git push origin vX.Y.Z
+   ```
+
+   Then watch `release.yml`. #35 owns the CI-pipeline checklist — all four
+   targets build, attestations verify, checksums publish.
+
+   **On a no-go:** `git tag -d vX.Y.Z` and follow Rollback. A tag that was
+   never pushed costs nothing to delete; a published one costs a retraction.
 
 ---
 
@@ -69,6 +107,7 @@ maintainer's command, always. An agent never runs it.**
 ### Step 1 — prove what is on PATH
 
 **You type:**
+
 ```bash
 command -v clave; clave --version
 ls -l ~/.local/share/clave/bin/
@@ -87,27 +126,63 @@ else — a `cargo install` dev build, a shim, a stale copy.
 
 ### Step 2 — the generated artifact set agrees on one version
 
+Two checks, and **both must pass** — (a) counts versions, (b) catches the
+references (a) is structurally blind to. `*.kdl` is *not* used: it would glob in
+`launch.kdl`, which `just release` never rewrites (it is written by `clave` at
+cold start, Step 3), so on any upgrade it still names the PREVIOUS version and
+(a) would report two versions and order a STOP on a healthy cut.
+
 **You type:**
+
 ```bash
+cd ~/.local/share/clave
+# (a) which versions the RELEASE-generated files reference — launch.kdl excluded
 grep -rhoE 'clave-bar-v[0-9]+\.[0-9]+\.[0-9]+\.wasm|clave-v[0-9]+\.[0-9]+\.[0-9]+' \
-  ~/.local/share/clave/*.kdl ~/.config/zellij/config.kdl 2>/dev/null | sort -u
+  config.kdl layout.kdl ~/.config/zellij/config.kdl 2>/dev/null | sort -u
+# (b) any UNVERSIONED reference — must print NOTHING
+grep -nE 'clave_binary "clave"|Run "clave"|file:[^"]*clave-bar\.wasm' \
+  config.kdl layout.kdl ~/.config/zellij/config.kdl 2>/dev/null
 ```
 
-**Look at:** how many distinct versions appear.
+(b) matches the three places a version can go missing — the `clave_binary`
+plugin-config value, the `Run` command in a keybind, and the `file:` plugin
+location (setup.rs `config_kdl`/`layout_kdl`) — rather than searching for a
+bare `clave` anywhere, which would hit every line: the data dir is *itself*
+`~/.local/share/clave/`.
 
-**Report back:** the full sorted list.
+**Look at:** how many distinct versions (a) prints, and whether (b) prints
+anything at all.
+
+**Report back:** (a)'s full sorted list, and (b)'s output or "empty".
 
 | What you see | Conclusion | Next |
 |---|---|---|
-| exactly one version, == the tag | the artifact set is coherent | Step 3 |
-| two or more versions | **STOP — this is the incident.** Two plugin locations = two bar instances | report; do not launch |
-| a bare `clave` or an unversioned `clave-bar.wasm` in a *stable* KDL | **STOP** — an unversioned reference loads a second, independent singleton | report |
+| (a) exactly one version == the tag, **and** (b) empty | the artifact set is coherent | Step 3 |
+| (a) two or more versions | **STOP — this is the incident.** Two plugin locations = two bar instances | report; do not launch |
+| (b) prints any line | **STOP** — an unversioned reference in a *stable* KDL loads a second, independent singleton, and (a) cannot see it: a file holding both a correct versioned path and a bare `clave` still reports exactly one version | report |
 
 ### Step 3 — the cold start, and the double-sidebar check
 
 This is the step the whole runbook exists for.
 
-**You type** (a *new* session — this is the only thing that picks up a release):
+**First, mark the log — BEFORE you launch anything.** The zellij log is shared
+by every session on the machine and old entries linger (TESTING.md,
+observability map), so the only sound filter is *lines appended after this
+launch*. A date filter is not enough: on a normal release day it returns the
+previous version's loads too and fails a coherent cut, and a midnight crossing
+returns nothing at all.
+
+```bash
+ZLOG=$TMPDIR/zellij-$(id -u)/zellij-log/zellij.log
+{ wc -l < "$ZLOG" 2>/dev/null || echo 0; } | tee "$TMPDIR/clave-release-logmark"
+```
+
+(The `|| echo 0` is for a box that has never run zellij — no log file yet, so
+every line is new.)
+
+**Then you type** (a *new* session — this is the only thing that picks up a
+release):
+
 ```bash
 clave
 ```
@@ -116,9 +191,11 @@ clave
 two sidebars in one tab, or a bar that appears twice at different widths.
 
 **Then, in another pane, you type:**
+
 ```bash
-grep "clave-bar: loaded v" $TMPDIR/zellij-$(id -u)/zellij-log/zellij.log \
-  | grep "$(date +%Y-%m-%d)" | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | sort -u
+ZLOG=$TMPDIR/zellij-$(id -u)/zellij-log/zellij.log
+tail -n +$(( $(cat "$TMPDIR/clave-release-logmark") + 1 )) "$ZLOG" \
+  | grep "clave-bar: loaded v" | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | sort -u
 ```
 
 **Report back:** the count of sidebars you can see, and that command's output.
@@ -128,11 +205,17 @@ grep "clave-bar: loaded v" $TMPDIR/zellij-$(id -u)/zellij-log/zellij.log \
 | one sidebar, one version in the log, == the tag | **the cut is coherent** | Step 4 |
 | one sidebar but **two versions** in the log | two instances, one may be zero-width or off-screen. Still a failure | **STOP**, report |
 | two sidebars | the #43/#44 failure mode, live | **STOP**, go to Rollback |
-| log filter returns nothing | the bar never loaded, or you filtered the wrong day | report the unfiltered last 20 lines |
+| no output | the bar never loaded — or the mark was taken after the launch. Report `tail -n 20 "$ZLOG"` | **STOP**, report |
 
-> The log file is shared by every zellij session on the machine and old entries
-> linger — that is why the date filter is not optional (TESTING.md,
-> observability map).
+**Also assert `launch.kdl` now, not in Step 2.** It is written by `clave` during
+the cold start you just did, so this is the first moment it can be right:
+
+```bash
+grep -ohE 'clave-bar-v[0-9.]+\.wasm|clave-v[0-9.]+' \
+  ~/.local/share/clave/launch.kdl | sort -u
+```
+
+One version, == the tag. Anything else is the same STOP as Step 2 (a).
 
 ### Step 4 — navigation and binding actually work
 
@@ -159,11 +242,21 @@ get a status glyph rather than staying blank, does the row order behave.
 ### Step 5 — the doctor agrees
 
 **You type:**
+
 ```bash
-clave doctor
+clave doctor; echo "exit=$?"
 ```
 
-**Report back:** the full output.
+**Look at:** the exit status. `run_doctor` exits **1** if any finding is a
+`Severity::Problem` and 0 otherwise (doctor.rs) — that status, not the prose,
+is the verdict.
+
+**Report back:** the full output *and* the exit line.
+
+| What you see | Conclusion | Next |
+|---|---|---|
+| `exit=0` | doctor agrees the install is sound | Part C returns **go** |
+| `exit=1` | **STOP** — a Problem-severity finding. Report the marked lines and go to Rollback | **STOP** |
 
 Once #48 lands this becomes the cheap version of Steps 1–3: `clave doctor --json`
 exits non-zero on incoherence, so it can be asserted on unattended. **Until then
@@ -174,21 +267,52 @@ incident this runbook is hunting — which is why Steps 1–3 are manual.
 
 ## Rollback
 
-If any step says STOP:
+If any step says STOP.
 
-1. **Do not keep using the session.** Note what you saw first — the evidence is
-   gone once you kill it.
-2. Relaunch from the last known-good versioned binary by absolute path:
+> **Relaunching the old binary is NOT a rollback**, and this is the trap. Two
+> reasons: `clave` attaches to the *live* session rather than cold-starting, so
+> nothing is re-read; and even after that session is dead, `config.kdl` still
+> names the failed version — the old binary sees its own wasm already present,
+> so `needs_version_refresh` returns false (setup.rs) and setup is skipped. The
+> generated files must be regenerated explicitly.
+
+1. **Capture the evidence before touching anything.** It is gone once the
+   session dies.
+
+   ```bash
+   ZLOG=$TMPDIR/zellij-$(id -u)/zellij-log/zellij.log
+   tail -n +$(( $(cat "$TMPDIR/clave-release-logmark") + 1 )) "$ZLOG" | tail -40
+   grep -rhoE 'clave-bar-v[0-9.]+\.wasm|clave-v[0-9.]+' \
+     ~/.local/share/clave/*.kdl | sort -u
+   ```
+
+2. **Kill the failed session** — yours to run, never an agent's (AGENTS.md).
+   Regeneration is pointless while a session holds the old files open, and a
+   live session would just be reattached.
+
+   ```bash
+   zellij kill-session clave
+   ```
+
+3. **Regenerate the stable config from the last-good release.** `clave setup`
+   rewrites `config.kdl`, `layout.kdl` and the hooks against whichever binary
+   runs it, so invoking the last-good versioned copy points the whole generated
+   set back at itself:
+
+   ```bash
+   ~/.local/share/clave/bin/clave-v<LAST-GOOD> setup
+   ```
+
+4. **Relaunch and re-verify** with Step 2 (a) and (b) — they must now print
+   `<LAST-GOOD>` and nothing, respectively. `launch.kdl` is rewritten on this
+   cold start.
+
    ```bash
    ~/.local/share/clave/bin/clave-v<LAST-GOOD>
    ```
-3. Capture, before anything else overwrites it:
-   ```bash
-   grep "clave-bar: loaded v" $TMPDIR/zellij-$(id -u)/zellij-log/zellij.log \
-     | grep "$(date +%Y-%m-%d)" | tail -40
-   ```
-4. File the finding with that output. A tag is cheap; a mis-diagnosed outage is
-   not.
+
+5. **Delete the unpushed tag** (`git tag -d vX.Y.Z`) and file the finding with
+   step 1's output. A tag is cheap; a mis-diagnosed outage is not.
 
 ---
 
