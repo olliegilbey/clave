@@ -818,4 +818,38 @@ mod tests {
         assert!(backfill_summaries(&mut t));
         assert!(!backfill_summaries(&mut t), "second pass is a no-op");
     }
+
+    #[test]
+    fn clear_tab_timeline_backfills_summaries_and_bumps_seq_on_its_own() {
+        // `clear_tab_timeline` is the backfill's ONLY production caller
+        // (#69): the wiring, not the helper, is what a live upgrade runs.
+        // Nothing here is CLEARABLE — empty timeline, no bind — so the seq
+        // bump can only come from the backfill, which is exactly §5's
+        // invariant: content changed ⇒ seq changed, whichever cause fired.
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            let mut r = rec("u1");
+            r.label = "x \u{00b7} main \u{00b7} fix the flaky auth".into();
+            s.agents.insert("u1".into(), r);
+        })
+        .unwrap();
+        let before = read_store(&p).unwrap().seq;
+
+        clear_tab_timeline(&p).unwrap();
+        let s = read_store(&p).unwrap();
+        assert_eq!(
+            s.agents["u1"].summary, "fix the flaky auth",
+            "the backfill must persist through the locked RMW, not just mutate in memory"
+        );
+        assert_eq!(s.seq, before + 1, "backfill alone still bumps seq (§5)");
+
+        // Self-limiting at the call site too: a second launch finds nothing.
+        clear_tab_timeline(&p).unwrap();
+        assert_eq!(
+            read_store(&p).unwrap().seq,
+            before + 1,
+            "§5 forbids no-op pushes"
+        );
+    }
 }
