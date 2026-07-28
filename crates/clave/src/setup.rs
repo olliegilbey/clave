@@ -494,6 +494,9 @@ pub fn run_setup() -> Result<()> {
     // made wasm.exists() true and the release's versioned wasm never landed —
     // config got baked against the stale file. Extracting before resolving
     // both fixes that and removes the old nested branch.
+    // Set only on the release single-file path; consumed after write_generated
+    // so the launcher is the LAST thing this function creates (see below).
+    let mut launcher_src: Option<PathBuf> = None;
     let binary = if let Some(bytes) = crate::release::embedded_wasm() {
         extract_embedded(&dir, bytes, env!("CARGO_PKG_VERSION"))?;
         // Release single-file install: install the versioned CLI copy, then
@@ -508,16 +511,20 @@ pub fn run_setup() -> Result<()> {
                 // point too. install_cli_copy's contract is that "the scp'd
                 // file becomes disposable after setup" — that was only ever
                 // true of BAKED references; without a launcher the operator
-                // still had nothing to type, which is the whole defect. From
-                // the installed copy, not `exe`, so both release paths
-                // produce a launcher that is a copy of the versioned copy.
+                // still had nothing to type, which is the whole defect.
                 //
-                // Refresh semantics mean an OLDER single-file binary's setup
-                // repoints the launcher backwards. Accepted: running a
-                // specific binary's `setup` is an explicit "install this
-                // one", and #48's doctor is where cross-artifact skew gets
-                // reported.
-                crate::release::install_launcher(&dir.join("bin"), &copy)?;
+                // Deferred to AFTER write_generated (adversarial review
+                // 2026-07-27) so this path holds the same invariant
+                // run_release states one function away: "the launcher must
+                // never come to exist for a cut whose generation failed".
+                // Installing it here instead left a failed setup — realistically
+                // a parse error on a hand-edited settings.json, one `?` below —
+                // with bin/clave pointing at the NEW version while config.kdl
+                // still described the OLD one. The operator then types `clave`,
+                // which is the entire point of #43a, and gets a binary whose
+                // launch layout disagrees with its own config: #43 reproduced
+                // by the fix for #43.
+                launcher_src = Some(copy);
                 crate::release::runtime_binary()
             }
             // Unresolvable current_exe: bare `clave` beats refusing setup.
@@ -535,7 +542,22 @@ pub fn run_setup() -> Result<()> {
         wasm.display()
     );
     let wasm_str = wasm.to_str().context("wasm path")?;
-    write_generated(&dir, &binary, wasm_str)
+    write_generated(&dir, &binary, wasm_str)?;
+
+    // #43a, LAST — same ordering as run_release (release.rs). Every prefix of
+    // this function now leaves <data>/bin/clave naming a version whose
+    // config.kdl and versioned copy agree, so a failure anywhere above is
+    // recoverable by re-running setup rather than leaving a launcher that
+    // points somewhere the generated set does not describe.
+    //
+    // Refresh semantics mean an OLDER single-file binary's setup repoints the
+    // launcher backwards. Accepted: running a specific binary's `setup` is an
+    // explicit "install this one", and #48's doctor is where cross-artifact
+    // skew gets reported.
+    if let Some(copy) = launcher_src {
+        crate::release::install_launcher(&dir.join("bin"), &copy)?;
+    }
+    Ok(())
 }
 
 /// Does `zellij list-sessions -n` output show `name` as a LIVE session?

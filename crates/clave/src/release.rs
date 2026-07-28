@@ -226,12 +226,23 @@ pub fn runtime_binary() -> String {
                 .as_ref()
                 .map(|d| d.join("bin").display().to_string())
                 .unwrap_or_else(|| "<data>/bin".into());
+            // The repair advice is PATH ordering, not a copy (adversarial
+            // review 2026-07-27). It used to say `cp <versioned>
+            // $(command -v clave)`, which was right when bare `clave` meant
+            // ~/.cargo/bin/clave — but since #43a the release owns an
+            // unversioned launcher in this very directory, so on a correctly
+            // configured machine that command expands to copying a file over
+            // itself: a no-op that re-fires the warning forever, writes the
+            // stable surface from a non-cut, and does it with `cp` — the
+            // truncate-a-running-binary hazard install_launcher exists to
+            // avoid.
             eprintln!(
                 "clave: WARNING resolving bare `clave` on PATH, but {bin} holds \
                  a versioned copy ({}). config.kdl and the launch layout will \
-                 disagree and each keybind may open a second bar (#44). Point \
-                 PATH at the installed copy: `cp {bin}/<clave-vX.Y.Z> \
-                 $(command -v clave)`.",
+                 disagree and each keybind may open a second bar (#44). Put \
+                 {bin} FIRST on your PATH so `clave` is the release launcher, \
+                 and remove any other `clave` shadowing it (a stale \
+                 ~/.cargo/bin/clave from before #43b is the usual culprit).",
                 siblings.join(", ")
             );
         }

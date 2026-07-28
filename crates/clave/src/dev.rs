@@ -109,9 +109,15 @@ pub fn sandbox_root() -> Result<PathBuf> {
 /// sandbox isolates CLAVE's state only; scenario transcripts land in the
 /// real ~/.claude/projects tagged by the deterministic c85c uuids, and
 /// `dev reset` removes them by that tag.
+///
+/// `clave-dev`, NOT bare `clave` (#43b): `just dev-install` now installs the
+/// working-tree CLI under that name precisely so it stops colliding with the
+/// daily surface — so bare `clave` here would either be `command not found` on
+/// a contributor's box or, worse, silently drive the sandbox with the STABLE
+/// release instead of the working tree under test.
 pub fn launch_command(root: &Path) -> String {
     format!(
-        "CLAVE_SESSION=clave-test CLAVE_STATE_DIR={0}/state CLAVE_DATA_DIR={0}/data clave",
+        "CLAVE_SESSION=clave-test CLAVE_STATE_DIR={0}/state CLAVE_DATA_DIR={0}/data clave-dev",
         root.display()
     )
 }
@@ -253,9 +259,9 @@ pub fn run_scenario(name: &str) -> Result<()> {
     }
     crate::evlog::log_event("dev", &format!("scenario {name} seeded"));
     println!("\nScenario `{name}` ready. Launch (your command, in a NON-zellij terminal):\n");
-    println!("  clave dev launch");
+    println!("  clave-dev dev launch");
     println!("\n(equivalent env form: {})", launch_command(&root));
-    println!("\nWhen done: `clave dev reset` (prints the kill command first).");
+    println!("\nWhen done: `clave-dev dev reset` (prints the kill command first).");
     Ok(())
 }
 
@@ -498,7 +504,9 @@ mod tests {
         assert!(cmd.contains("CLAVE_STATE_DIR=/sb/state"));
         assert!(cmd.contains("CLAVE_DATA_DIR=/sb/data"));
         assert!(!cmd.contains("CLAUDE_CONFIG_DIR"));
-        assert!(cmd.trim_end().ends_with("clave"));
+        // clave-dev, not clave (#43b): dev-install stopped writing the
+        // daily name, so the printed command must name what it installs.
+        assert!(cmd.trim_end().ends_with("clave-dev"));
     }
 
     #[test]

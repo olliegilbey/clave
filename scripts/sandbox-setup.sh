@@ -40,12 +40,24 @@ cd "$ROOT"
 # same-second same-size overwrite would read as "unchanged" and the safety
 # guard would report a clean bill. An install-by-rename (which is how #43a
 # writes the launcher) always changes the inode, so it cannot hide.
+# GNU and BSD stat share a name and almost nothing else, and a `-f … || -c …`
+# chain does NOT fall through cleanly between them (adversarial review
+# 2026-07-27). GNU's `-f` is `--file-system`: it consumes the format string as a
+# FILENAME, prints a filesystem block to stdout anyway, and exits non-zero — so
+# in `$(A || B)` the caller captures that block CONCATENATED with B's real
+# answer. Free-block counts change as the build runs, so every guarded path then
+# mismatched and this script reported the maintainer's stable surface as
+# clobbered when it was untouched. On Linux that made `just sandbox` fail closed
+# on a clean tree — and Linux is a first-class target (clave must work over SSH).
+# Probe once, then branch; never chain the two dialects.
+if stat --version >/dev/null 2>&1; then _STAT_DIALECT=gnu; else _STAT_DIALECT=bsd; fi
+
 stamp() {
-  if [ -e "$1" ]; then
-    stat -f '%i:%z:%m' "$1" 2>/dev/null || stat -c '%i:%s:%Y' "$1" 2>/dev/null || echo unknown
-  else
-    echo absent
-  fi
+  [ -e "$1" ] || { echo absent; return; }
+  case "$_STAT_DIALECT" in
+    gnu) stat -c '%i:%s:%Y' "$1" 2>/dev/null || echo unknown ;;
+    *)   stat -f '%i:%z:%m' "$1" 2>/dev/null || echo unknown ;;
+  esac
 }
 
 # Compare a before/after stamp and FAIL CLOSED. `unknown` means both stat
@@ -123,13 +135,27 @@ ok=1
 fail() { echo "    FAIL $*"; ok=0; }
 
 # Prove the generated pair agrees BEFORE a human spends time in a terminal.
-# This is the #44 invariant: config.kdl's MessagePlugin keybinds and the launch
-# layout's plugin node must carry an IDENTICAL clave_binary, or zellij resolves
-# them as different plugins and every keypress opens another bar.
+# This is the #44 invariant: config.kdl's MessagePlugin keybinds and the layout's
+# plugin node must carry an IDENTICAL clave_binary, or zellij resolves them as
+# different plugins and every keypress opens another bar.
+#
+# The pair checked here is config.kdl <-> layout.kdl, because those are the two
+# write_generated() emits together from one `binary` value. launch.kdl is NOT
+# checked: only a cold start writes it (setup.rs launch_session), so before the
+# launch this script is preparing for, it is either absent or a LEFTOVER from a
+# previous run. Asserting on it here failed closed on a perfectly healthy
+# sandbox — a stale pre-#44 launch.kdl from days earlier reported
+# "carries no clave_binary" and blocked the setup entirely. Same defect the
+# release runbook had against the same file (see RELEASE-RUNBOOK Step 2).
+#
+# The stale copy is deleted rather than ignored: leaving a pre-#44 launch layout
+# on disk is the hazard itself, and the next cold start rewrites it regardless.
+rm -f "$SANDBOX/data/launch.kdl"
+
 echo
 echo "==> Self-check: the #44 identity pair"
 cfg="$SANDBOX/data/config.kdl"
-lay="$SANDBOX/data/launch.kdl"
+lay="$SANDBOX/data/layout.kdl"
 for f in "$cfg" "$lay"; do
   if [ ! -f "$f" ]; then
     fail "missing $f"
@@ -147,7 +173,7 @@ if [ "$ok" -eq 1 ]; then
   else
     fail "identity pair DISAGREES — every keybind would spawn a second bar"
     echo "         config.kdl: $cfgval"
-    echo "         launch.kdl: $layval"
+    echo "         layout.kdl: $layval"
   fi
 fi
 
