@@ -15,9 +15,10 @@
 # no versioned CLI copy, so `release::runtime_binary()` bakes bare `clave` into
 # the sandbox's generated KDL (by design, §2 binary split). The bar therefore
 # resolves `clave` through PATH at runtime. Without the shim that resolves to
-# the STABLE ~/.cargo/bin/clave — very possibly built BEFORE the change under
-# test — so the bar drives the sandbox with the wrong binary and the run fails
-# for a reason unrelated to the change. On #44 that misfire is especially
+# whatever else owns the name — the STABLE launcher ~/.local/share/clave/bin/clave
+# since #43a, or a pre-#43b ~/.cargo/bin/clave — neither of which is the change
+# under test, so the bar drives the sandbox with the wrong binary and the run
+# fails for a reason unrelated to the change. On #44 that misfire is especially
 # convincing: a pre-#44 `clave open` composes tab layouts with no `clave_binary`,
 # whose empty configuration is a DIFFERENT plugin identity from the template's
 # bar, so tabs sprout a second sidebar — the exact symptom #44 fixes.
@@ -31,20 +32,58 @@ CLI="$ROOT/target/release/clave"
 
 cd "$ROOT"
 
-# mtime (or "absent") for a path, on BSD and GNU stat alike — clave must
-# eventually run over SSH onto Linux, so no macOS-only stat flags.
+# File identity (or "absent") for a path, on BSD and GNU stat alike — clave
+# must eventually run over SSH onto Linux, so no macOS-only stat flags.
+#
+# inode + size + mtime, not mtime alone (CodeRabbit CLI, 2026-07-25): mtime is
+# second-resolution, and this script's whole run can fit inside one second — a
+# same-second same-size overwrite would read as "unchanged" and the safety
+# guard would report a clean bill. An install-by-rename (which is how #43a
+# writes the launcher) always changes the inode, so it cannot hide.
+# GNU and BSD stat share a name and almost nothing else, and a `-f … || -c …`
+# chain does NOT fall through cleanly between them (adversarial review
+# 2026-07-27). GNU's `-f` is `--file-system`: it consumes the format string as a
+# FILENAME, prints a filesystem block to stdout anyway, and exits non-zero — so
+# in `$(A || B)` the caller captures that block CONCATENATED with B's real
+# answer. Free-block counts change as the build runs, so every guarded path then
+# mismatched and this script reported the maintainer's stable surface as
+# clobbered when it was untouched. On Linux that made `just sandbox` fail closed
+# on a clean tree — and Linux is a first-class target (clave must work over SSH).
+# Probe once, then branch; never chain the two dialects.
+if stat --version >/dev/null 2>&1; then _STAT_DIALECT=gnu; else _STAT_DIALECT=bsd; fi
+
 stamp() {
-  if [ -e "$1" ]; then
-    stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo unknown
+  [ -e "$1" ] || { echo absent; return; }
+  case "$_STAT_DIALECT" in
+    gnu) stat -c '%i:%s:%Y' "$1" 2>/dev/null || echo unknown ;;
+    *)   stat -f '%i:%z:%m' "$1" 2>/dev/null || echo unknown ;;
+  esac
+}
+
+# Compare a before/after stamp and FAIL CLOSED. `unknown` means both stat
+# forms failed: that is not evidence of safety, so it must never compare equal
+# to itself and pass (CodeRabbit CLI, 2026-07-25).
+guard() {
+  local label="$1" before="$2" path="$3" after
+  after="$(stamp "$path")"
+  if [ "$before" = unknown ] || [ "$after" = unknown ]; then
+    fail "$label — cannot stat $path, so this script cannot prove it left it alone"
+  elif [ "$after" = "$before" ]; then
+    echo "    ok   $path unchanged"
   else
-    echo absent
+    fail "$label"
   fi
 }
 
 STABLE_CLI="$HOME/.cargo/bin/clave"
 STABLE_DIR="$HOME/.local/share/clave"
+# The #43a launcher needs its OWN stamp: STABLE_DIR's mtime does not change
+# when a file two levels down is replaced, so the dir guard alone would not
+# notice this script clobbering the daily entry point.
+STABLE_LAUNCHER="$STABLE_DIR/bin/clave"
 before_cli="$(stamp "$STABLE_CLI")"
 before_dir="$(stamp "$STABLE_DIR")"
+before_launcher="$(stamp "$STABLE_LAUNCHER")"
 
 echo "==> Building the working tree (release, build-tagged)"
 TAG="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
@@ -140,18 +179,14 @@ fi
 
 echo
 echo "==> Stable surfaces untouched"
-# if/else, not `A && B || C`: this is a SAFETY guard, and in the `||` form a
-# failing echo would report a bogus breach (shellcheck SC2015).
-if [ "$(stamp "$STABLE_CLI")" = "$before_cli" ]; then
-  echo "    ok   $STABLE_CLI unchanged"
-else
-  fail "$STABLE_CLI CHANGED — this script must never write it"
-fi
-if [ "$(stamp "$STABLE_DIR")" = "$before_dir" ]; then
-  echo "    ok   $STABLE_DIR unchanged"
-else
-  fail "$STABLE_DIR CHANGED — this script must never write it"
-fi
+# `guard` (above) is if/else and fails closed, deliberately: this is a SAFETY
+# check, so an unprovable result must read as a breach, never as an ok.
+guard "$STABLE_CLI CHANGED — this script must never write it" \
+  "$before_cli" "$STABLE_CLI"
+guard "$STABLE_DIR CHANGED — this script must never write it" \
+  "$before_dir" "$STABLE_DIR"
+guard "$STABLE_LAUNCHER CHANGED — only a release cut writes the launcher (#43a)" \
+  "$before_launcher" "$STABLE_LAUNCHER"
 
 [ "$ok" -eq 1 ] || { echo; echo "Setup FAILED — do not launch."; exit 1; }
 

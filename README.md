@@ -46,9 +46,16 @@ splitting the screen into panes. Logo: the two-stick percussion instrument.
 
 **If you build from source**, use `just sandbox` — it wires an isolated
 `clave-test` session to your working tree and verifies it touched neither your
-installed binary nor your stable artifacts. `just dev-install` overwrites
-`~/.cargo/bin/clave`, so your next launch would run a working-tree build; that
-is sometimes what you want, but rarely by accident.
+installed binary nor your stable artifacts.
+
+`just dev-install` installs the working-tree CLI as **`clave-dev`**, so it never
+takes over the `clave` command ([#43](https://github.com/olliegilbey/clave/issues/43)).
+A plain `cargo install` would put `clave` on your `PATH` under the same name the
+daily surface answers to, and a stale build winning that name is what produced
+two sidebars and dead navigation in v0.1.1.
+
+A release cut installs its own launcher at `~/.local/share/clave/bin/clave` —
+put that directory on your `PATH`.
 
 Either way: **don't install over a session that is currently running.** See
 [CONTRIBUTING](CONTRIBUTING.md#the-rule-that-matters-most).
