@@ -278,10 +278,7 @@ mod tests {
         let nvm_positions: Vec<usize> = dirs
             .iter()
             .enumerate()
-            .filter_map(|(i, d)| {
-                d.starts_with(home.join(".nvm/versions/node"))
-                    .then_some(i)
-            })
+            .filter_map(|(i, d)| d.starts_with(home.join(".nvm/versions/node")).then_some(i))
             .collect();
         assert_eq!(
             &dirs[nvm_positions[0]],
