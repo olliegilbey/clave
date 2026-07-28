@@ -33,8 +33,9 @@ pub enum LabelSource {
 }
 
 /// One store row (spec §5's agent record, minus the deleted `archived`).
-/// Mirrors `clave_types::Agent` plus store-only fields (`worktree`,
-/// `label_source`) that the plugin never needs to see.
+/// Mirrors `clave_types::Agent` plus the store-only `label_source`, which the
+/// plugin never needs to see. `worktree` was store-only until #69 put it on
+/// the wire for S6's provenance glyph (#61).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentRecord {
     /// Minted session UUID — the join key (invariant #3).
@@ -177,7 +178,10 @@ pub fn with_store_mut<T>(paths: &StorePaths, f: impl FnOnce(&mut Store) -> T) ->
     Ok(out)
 }
 
-/// Store → pipe snapshot (§5): drop the store-only fields, keep the order.
+/// Store → pipe snapshot (§5): drop `label_source`, keep the order. The single
+/// producer — design-lock §7.1 rules the bar renders from the store, so every
+/// field it lays a column from arrives here as a value, never as a position
+/// inside `label` (#69).
 pub fn snapshot_from(store: &Store) -> AgentSnapshot {
     AgentSnapshot {
         seq: store.seq,
@@ -197,11 +201,11 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
                 last_visited: r.last_visited,
                 tab_id: r.tab_id,
                 stale: r.stale,
+                title: r.title.clone(),
+                summary: r.summary.clone(),
                 // Projected now — `AgentRecord` has carried this since §6.3
                 // and the wire simply never did (S6 #61 §2.4).
                 worktree: r.worktree.clone(),
-                title: r.title.clone(),
-                summary: r.summary.clone(),
             })
             .collect(),
     }
@@ -834,7 +838,12 @@ mod tests {
             s.agents.insert("u1".into(), r);
         })
         .unwrap();
-        let before = read_store(&p).unwrap().seq;
+        let before = read_store(&p).unwrap();
+        // Assert the precondition rather than only documenting it: if `rec()`
+        // ever gained a `tab_id`, the clearing branch would fire and the seq
+        // assertion below would still pass while testing nothing.
+        assert!(before.tab_timeline.is_empty() && before.agents["u1"].tab_id.is_none());
+        let before = before.seq;
 
         clear_tab_timeline(&p).unwrap();
         let s = read_store(&p).unwrap();

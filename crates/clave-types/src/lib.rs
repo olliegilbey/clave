@@ -141,8 +141,8 @@ pub struct Register {
 /// change, and this branch is inert plumbing). Written as an escape, never a
 /// literal: design-lock §5.4 (load-bearing) records that literal glyphs were
 /// silently lost in transit twice, and the failure mode is tofu in production
-/// from a clean-looking diff. S4 §4.1 and S5 §3.1 each proposed this constant independently —
-/// it lands once, here (#69).
+/// from a clean-looking diff. S4 §4.1 and S5 §3.1 each proposed this constant
+/// independently — it lands once, here (#69).
 pub const LABEL_SEP: &str = " \u{00b7} ";
 
 #[cfg(test)]
