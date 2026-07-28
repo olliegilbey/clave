@@ -314,6 +314,8 @@ mod tests {
             label_source: LabelSource::FirstPrompt,
             tab_id: None,
             stale: false,
+            title: None,
+            summary: String::new(),
         }
     }
 

@@ -250,6 +250,8 @@ pub fn run_scenario(name: &str) -> Result<()> {
                     label_source: crate::store::LabelSource::FirstPrompt,
                     tab_id: None,
                     stale: false,
+                    title: None,
+                    summary: String::new(),
                 },
             );
             s.seq += 1;

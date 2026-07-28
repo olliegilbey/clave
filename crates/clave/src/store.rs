@@ -66,6 +66,20 @@ pub struct AgentRecord {
     /// pre-field payloads parseable.
     #[serde(default)]
     pub stale: bool,
+    /// Claude's session rename, from the transcript's `custom-title` line.
+    /// Store-side home for the wire field of the same name (#69). Written by
+    /// S4 (#59); nothing populates it yet, so it stays None. `default` keeps
+    /// pre-field store files loading — a missing key is a whole-store parse
+    /// failure, not a blank field.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// The words segment, held structurally rather than only inside `label`
+    /// (design-lock §7.1). Seeded once from existing labels by
+    /// `backfill_summaries`; thereafter written by S4 (#59) from `ai-title`,
+    /// the `type:"summary"` tier being extinct (#79). `default` keeps
+    /// pre-field store files loading.
+    #[serde(default)]
+    pub summary: String,
 }
 
 /// The whole store file. `seq` is the monotonic snapshot counter of the §5
@@ -186,11 +200,8 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
                 // Projected now — `AgentRecord` has carried this since §6.3
                 // and the wire simply never did (S6 #61 §2.4).
                 worktree: r.worktree.clone(),
-                // Task 2 replaces these with `r.title` / `r.summary` once the
-                // record carries them. Defaults keep the shape honest in the
-                // meantime: no consumer reads them yet.
-                title: None,
-                summary: String::new(),
+                title: r.title.clone(),
+                summary: r.summary.clone(),
             })
             .collect(),
     }
@@ -390,6 +401,8 @@ mod tests {
             label_source: LabelSource::FirstPrompt,
             tab_id: None,
             stale: false,
+            title: None,
+            summary: String::new(),
         }
     }
 
@@ -673,5 +686,37 @@ mod tests {
         // Idempotent: clearing an empty timeline changes nothing.
         clear_tab_timeline(&p).unwrap();
         assert_eq!(read_store(&p).unwrap().seq, 2);
+    }
+
+    #[test]
+    fn snapshot_projects_title_summary_and_worktree_from_the_record() {
+        // One producer, one consumer (§5): snapshot_from is the only place
+        // a record becomes a wire Agent, so this is the whole contract.
+        let mut s = Store::default();
+        let mut r = rec("u1");
+        r.title = Some("CLA-MAIN".into());
+        r.summary = "fix the flaky auth".into();
+        r.worktree = Some("/x/.claude/worktrees/wt".into());
+        s.agents.insert("u1".into(), r);
+
+        let snap = snapshot_from(&s);
+        let a = &snap.agents[0];
+        assert_eq!(a.title.as_deref(), Some("CLA-MAIN"));
+        assert_eq!(a.summary, "fix the flaky auth");
+        assert_eq!(a.worktree.as_deref(), Some("/x/.claude/worktrees/wt"));
+    }
+
+    #[test]
+    fn agent_record_title_and_summary_default_on_pre_field_store_files() {
+        // The first run of a new binary reads the EXISTING agents.json, which
+        // has neither key. Without #[serde(default)] that is a whole-store
+        // parse failure and every agent vanishes — not a blank field.
+        let json = serde_json::to_value(rec("u1")).unwrap();
+        let mut o = json.as_object().unwrap().clone();
+        o.remove("title");
+        o.remove("summary");
+        let back: AgentRecord = serde_json::from_value(serde_json::Value::Object(o)).unwrap();
+        assert_eq!(back.title, None);
+        assert!(back.summary.is_empty());
     }
 }
