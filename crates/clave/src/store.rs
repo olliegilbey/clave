@@ -352,6 +352,37 @@ pub fn apply_open_result(
     })
 }
 
+/// Seed `summary` for rows written before the field existed, by lifting the
+/// words segment out of the composed label (`dir · branch · words`).
+///
+/// `splitn(3)` so a summary that itself contains the separator survives
+/// whole. Matches only EMPTY summaries, so it is idempotent and self-limiting
+/// — after one pass nothing matches again. Same shape as S1 §3.6's
+/// `commit_ord` backfill.
+///
+/// WHY it is needed at all, given S4 (#59) will keep summaries live:
+/// `refresh_label` returns early forever once `label_source == Summary`
+/// (`hook.rs:155`), and dormant rows receive no hook events by definition —
+/// so without this they render a blank 17-column field indefinitely.
+///
+/// Returns whether anything changed, so the caller can gate its `seq` bump:
+/// §5 forbids no-op pushes.
+pub fn backfill_summaries(s: &mut Store) -> bool {
+    let mut changed = false;
+    for r in s.agents.values_mut() {
+        if !r.summary.is_empty() {
+            continue;
+        }
+        if let Some(words) = r.label.splitn(3, clave_types::LABEL_SEP).nth(2)
+            && !words.is_empty()
+        {
+            r.summary = words.to_string();
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// Session (re)create hygiene: tab_ids are SESSION-scoped, so a fresh
 /// session must inherit neither dead tabs' commitments (reused ids) nor
 /// stale uuid→tab binds. No push — no bar instance exists yet at launch
@@ -359,9 +390,19 @@ pub fn apply_open_result(
 pub fn clear_tab_timeline(paths: &StorePaths) -> Result<()> {
     with_store_mut(paths, |s| {
         let bound = s.agents.values().any(|r| r.tab_id.is_some());
+        let mut changed = false;
         if !s.tab_timeline.is_empty() || bound {
             s.tab_timeline.clear();
             s.agents.values_mut().for_each(|r| r.tab_id = None);
+            changed = true;
+        }
+        // Session create is the one locked pass that runs at every launch,
+        // so it is where the one-shot backfill rides (#69). Accepted cost: a
+        // MID-session upgrade leaves dormant rows blank until the next
+        // launch. The alternative is a migration hook on every store open —
+        // more machinery than a cosmetic gap on unused rows justifies.
+        changed |= backfill_summaries(s);
+        if changed {
             s.seq += 1; // content changed ⇒ seq changed (§5)
         }
     })
@@ -718,5 +759,63 @@ mod tests {
         let back: AgentRecord = serde_json::from_value(serde_json::Value::Object(o)).unwrap();
         assert_eq!(back.title, None);
         assert!(back.summary.is_empty());
+    }
+
+    #[test]
+    fn backfill_lifts_the_words_segment_out_of_an_existing_label() {
+        // Rows written before `summary` existed carry it only inside `label`.
+        // refresh_label returns early forever once label_source == Summary
+        // (hook.rs:155), and dormant rows get no hook events at all — so
+        // without this they would render a blank 17-column field for good.
+        let mut s = Store::default();
+        let mut r = rec("u1");
+        r.label = "clave \u{00b7} main \u{00b7} fix the flaky auth".into();
+        r.summary = String::new();
+        s.agents.insert("u1".into(), r);
+
+        assert!(backfill_summaries(&mut s));
+        assert_eq!(s.agents["u1"].summary, "fix the flaky auth");
+    }
+
+    #[test]
+    fn backfill_keeps_a_separator_inside_the_summary_text() {
+        // splitn(3) — a summary that itself contains the separator survives
+        // whole. A plain split() would truncate it at the first occurrence.
+        let mut s = Store::default();
+        let mut r = rec("u1");
+        r.label = "clave \u{00b7} main \u{00b7} a \u{00b7} b".into();
+        r.summary = String::new();
+        s.agents.insert("u1".into(), r);
+
+        backfill_summaries(&mut s);
+        assert_eq!(s.agents["u1"].summary, "a \u{00b7} b");
+    }
+
+    #[test]
+    fn backfill_is_idempotent_and_skips_labels_without_a_words_segment() {
+        // Self-limiting: it matches only EMPTY summaries, so a second pass
+        // changes nothing. Same shape as S1 §3.6's commit_ord backfill.
+        let mut s = Store::default();
+        let mut earned = rec("u1");
+        earned.label = "clave \u{00b7} main \u{00b7} fix the flaky auth".into();
+        earned.summary = "already set by S4".into();
+        s.agents.insert("u1".into(), earned);
+        let mut bare = rec("u2");
+        bare.label = "clave \u{00b7} main".into(); // never earned any words
+        bare.summary = String::new();
+        s.agents.insert("u2".into(), bare);
+
+        assert!(!backfill_summaries(&mut s), "nothing to do");
+        assert_eq!(s.agents["u1"].summary, "already set by S4");
+        assert!(s.agents["u2"].summary.is_empty());
+
+        // And a real pass must not re-fire on a second run.
+        let mut t = Store::default();
+        let mut r = rec("u3");
+        r.label = "clave \u{00b7} main \u{00b7} words".into();
+        r.summary = String::new();
+        t.agents.insert("u3".into(), r);
+        assert!(backfill_summaries(&mut t));
+        assert!(!backfill_summaries(&mut t), "second pass is a no-op");
     }
 }

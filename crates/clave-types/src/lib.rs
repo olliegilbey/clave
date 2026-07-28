@@ -134,6 +134,15 @@ pub struct Register {
     pub pane_id: u32,
 }
 
+/// The label segment separator: U+0020 U+00B7 U+0020. One constant, two
+/// crates — `add.rs` and `hook.rs` compose with it, `store.rs`'s backfill
+/// splits on it. Written as an escape, never a literal: design-lock §5.4
+/// (load-bearing) records that literal glyphs were silently lost in transit
+/// twice, and the failure mode is tofu in production from a clean-looking
+/// diff. S4 §4.1 and S5 §3.1 each proposed this constant independently —
+/// it lands once, here (#69).
+pub const LABEL_SEP: &str = " \u{00b7} ";
+
 #[cfg(test)]
 mod tests {
     use super::*;
