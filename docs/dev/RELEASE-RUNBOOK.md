@@ -104,16 +104,22 @@ Nothing here touches a live session. All of it must pass before a tag exists.
 > start*, because that is the failure this project has actually shipped. It is
 > not a feature tour.
 
-### Step 0 — paste the checks once
+### Step 0 — write the checks once, to a file
 
 Steps 2 and 3 run the **same two checks against different files**. Defining them
 once is not tidiness: the first draft of this runbook duplicated them, and the
-copy that guarded `launch.kdl` was missing the unversioned probe entirely. Two
+copy that guarding `launch.kdl` was missing the unversioned probe entirely. Two
 copies drift; one cannot.
 
+They go to a **file**, not just your shell, because Step 3 runs its checks from
+a *second pane* — a different shell, which would not inherit them.
+
+**You type:**
+
 ```bash
-STABLE=("$HOME/.local/share/clave/config.kdl" \
-        "$HOME/.local/share/clave/layout.kdl" \
+cat > "$TMPDIR/clave-release-checks.sh" <<'CHECKS'
+STABLE=("$HOME/.local/share/clave/config.kdl"
+        "$HOME/.local/share/clave/layout.kdl"
         "$HOME/.config/zellij/config.kdl")
 LAUNCH=("$HOME/.local/share/clave/launch.kdl")
 
@@ -134,6 +140,14 @@ clave_versions() {
 clave_unversioned() {
   grep -nE 'clave_binary "clave"|Run "clave"|file:[^"]*clave-bar\.wasm' "$@" 2>/dev/null
 }
+CHECKS
+source "$TMPDIR/clave-release-checks.sh"
+```
+
+**In every new shell or pane this runbook sends you to, source it first:**
+
+```bash
+source "$TMPDIR/clave-release-checks.sh"
 ```
 
 ### Step 1 — prove what is on PATH
@@ -180,8 +194,15 @@ nothing, so a silent failure and a clean pass cannot look alike in your report.
 | What you see | Conclusion | Next |
 |---|---|---|
 | one version == the tag, **and** nothing from `clave_unversioned` | the artifact set is coherent | Step 3 |
+| **zero** versions | **STOP.** The generated files are missing, unreadable, or malformed — `just release` did not run, or did not finish. Never read an empty result as a pass | report; do not launch |
+| one version, but **≠ the tag** | **STOP.** The cut did not land; you are about to validate the previous release | re-run `just release` |
 | two or more versions | **STOP — this is the incident.** Two plugin locations = two bar instances | report; do not launch |
 | any output from `clave_unversioned` | **STOP** — an unversioned reference in a *stable* KDL loads a second, independent singleton, and the version count cannot see it: a file holding both a correct versioned path and a bare `clave` still reports exactly one version | report |
+
+> **Empty is never a pass.** Both checks are greps: `clave_unversioned` printing
+> nothing is the *good* outcome, while `clave_versions` printing nothing is a
+> failure. Same-looking output, opposite meanings — which is why the step asks
+> you to report the word "empty" rather than a blank line.
 
 ### Step 3 — the cold start, and the double-sidebar check
 
@@ -232,6 +253,7 @@ two sidebars in one tab, or a bar that appears twice at different widths.
 **Then, in another pane, you type:**
 
 ```bash
+source "$TMPDIR/clave-release-checks.sh"     # new pane, new shell
 ZLOG=$TMPDIR/zellij-$(id -u)/zellij-log/zellij.log
 tail -n +$(( $(cat "$TMPDIR/clave-release-logmark") + 1 )) "$ZLOG" \
   | grep "clave-bar: loaded v" | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | sort -u
@@ -257,7 +279,9 @@ clave_versions "${LAUNCH[@]}"       # expect: exactly one line, == the tag
 clave_unversioned "${LAUNCH[@]}"    # expect: nothing at all
 ```
 
-Same verdicts as Step 2's table. Anything else is a STOP.
+Same verdicts as Step 2's table, **including the zero-versions row** — an empty
+`clave_versions` here means `launch.kdl` was never written or is malformed, not
+that all is well.
 
 ### Step 4 — navigation and binding actually work
 
