@@ -183,6 +183,14 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
                 last_visited: r.last_visited,
                 tab_id: r.tab_id,
                 stale: r.stale,
+                // Projected now — `AgentRecord` has carried this since §6.3
+                // and the wire simply never did (S6 #61 §2.4).
+                worktree: r.worktree.clone(),
+                // Task 2 replaces these with `r.title` / `r.summary` once the
+                // record carries them. Defaults keep the shape honest in the
+                // meantime: no consumer reads them yet.
+                title: None,
+                summary: String::new(),
             })
             .collect(),
     }
