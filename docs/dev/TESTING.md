@@ -30,9 +30,10 @@ tier an agent completes unattended, and it is the whole of CI today
 | CLI parse pins | `Cli::try_parse_from` tests in `crates/clave/src/main.rs` | that each plugin-invoked subcommand parses the literal arguments the plugin passes. Added after the `ArgAction` escape; required for **every new surface** |
 | Sandboxed subcommand e2e | `CLAVE_STATE_DIR=<scratch> cargo run -p clave -- …` | one real end-to-end run of a new subcommand against a scratch store. Do it in a **debug** build — clap's `debug_assert` only fires there |
 
-The gate:
+The gate (`just gates` runs all four, in CI's order):
 
 ```bash
+cargo fmt --all --check  # CI's lint job runs this BEFORE clippy
 cargo test --workspace   # --workspace is load-bearing: default-members excludes clave-bar
 cargo build -p clave-bar --target wasm32-wasip1
 cargo clippy --workspace --all-targets -- -D warnings
@@ -40,6 +41,15 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 A bare `cargo test` exits 0 while skipping every one of the 63 model tests. Use
 `just test`.
+
+Two ways this list has bitten:
+
+- **`cargo fmt --all --check` was missing from every doc until 2026-07-25**, so
+  an agent could run all the documented gates green and still fail CI — which is
+  exactly what happened to #66 (three hand-edited files, clippy-clean,
+  fmt-dirty). CI's `lint` job is `fmt` **then** `clippy`; both must pass.
+- `--workspace` on **both** `test` and `clippy` — the default-members form
+  silently skips the entire wasm crate.
 
 ### Tier 2 — real-zellij integration (**does not exist yet — #47**)
 
@@ -213,8 +223,26 @@ make — see the instrumentation recipe):
 
 ```bash
 ZELLIJ_SESSION_NAME=clave-test zellij action start-or-reload-plugin \
-  "file:$HOME/.local/state/clave-dev/data/clave-bar.wasm"
+  "file:$HOME/.local/state/clave-dev/data/clave-bar.wasm" -c clave_binary=clave
 ```
+
+> The `-c` is load-bearing, not optional. A plugin's configuration is half of
+> its zellij identity, and `reload_plugin` matches on `(location,
+> configuration)` exactly (`zellij-server/src/plugins/wasm_bridge.rs:686-697`).
+> Without it the lookup misses: `all_plugin_ids_for_plugin_location`
+> (`zellij-server/src/plugins/plugin_map.rs:169-171`) returns
+> `Err(PluginDoesNotExist)` for the filtered-empty case, `reload_plugin`
+> propagates it (`wasm_bridge.rs:692-693`), and the error branch in
+> `zellij-server/src/plugins/mod.rs:446-468` logs `"Plugin {} not found,
+> starting it instead"` and starts a **new** plugin instance. So a
+> configuration miss is not a silent no-op — it spawns a second bar pane,
+> the very symptom of #44. If a reload looks like it did nothing, grep
+> `zellij.log` for that `not found, starting it instead` warning. The
+> sandbox bakes bare `clave` (#44), so `clave_binary=clave` is the value
+> there; a stable session would need its versioned absolute path.
+> `PluginUserConfiguration`'s `FromStr`
+> (`zellij-utils/src/input/layout.rs:563-576`) is comma-separated `key=value`,
+> so a path containing a comma would not survive — none of ours do.
 
 **List sessions** (read-only, safe anywhere):
 
@@ -237,8 +265,26 @@ ZELLIJ_SESSION_NAME=clave-test zellij action dump-layout
 
 ## The sandbox lifecycle
 
-The full reset-to-fresh cycle. Commands marked **(human)** are the human's to
-run in a **non-zellij terminal**; the rest an agent may run.
+**The short version: `just sandbox [scenario]`.** It does steps 2–3 below
+against the current working tree without installing anything to the daily
+surface — the safe replacement for `just dev-install` in sandbox work. It
+builds the tree, drops the wasm in the sandbox data dir, wires a **PATH shim**
+so the bar reaches *this* build, regenerates `config.kdl` **and** `launch.kdl`
+together, self-checks the #44 identity pair, verifies it touched neither
+`~/.cargo/bin/clave` nor `~/.local/share/clave`, and prints the launch command.
+It refuses to run against a live `clave-test` (see the hot-reload note below),
+and it never launches — step 1 and step 4 stay the human's.
+
+The PATH shim is load-bearing, not tidiness: the sandbox data dir holds no
+versioned CLI copy, so generation bakes bare `clave` and the bar resolves it
+through `PATH` at runtime. Without the shim that is the **stable**
+`~/.cargo/bin/clave` — quite possibly built before the change under test, and
+version strings will not give it away (a pre-#44 `0.1.1` and a post-#44 `0.1.1`
+are indistinguishable to `clave --version` and to the `clave-bar: loaded`
+log line).
+
+The full reset-to-fresh cycle, done by hand. Commands marked **(human)** are
+the human's to run in a **non-zellij terminal**; the rest an agent may run.
 
 1. **Kill the running session (human):**
    ```bash
@@ -251,6 +297,25 @@ run in a **non-zellij terminal**; the rest an agent may run.
    and prints the launch command.
 4. **Launch (human, non-zellij terminal):** `clave dev launch` — attaches or
    creates the `clave-test` session against the sandbox state and data dirs.
+
+> **After `just dev-install`, re-run step 3 (`clave dev scenario <name>`)
+> before launching.** `clave dev launch` composes `launch.kdl` fresh every
+> time but does NOT regenerate `config.kdl` (only `dev scenario` does —
+> `dev.rs`). Since #44 both files bake `clave_binary`, so a post-#44
+> `launch.kdl` beside a pre-#44 `config.kdl` makes every keybind miss and
+> spawn a second bar — the exact #44 symptom, mistaken for the fix not
+> working. Regenerating both together is the guard.
+
+> **And never regenerate against a LIVE session.** Zellij watches the
+> `--config` file of every running session and hot-swaps its keybinds in place
+> (`zellij-server src/lib.rs:2175` → `ConfigWrittenToDisk` `:2298` →
+> `ScreenInstruction::Reconfigure` `screen.rs:717`, ~1s poll), but the running
+> bar keeps the plugin identity it loaded with. So a `dev scenario` (or
+> `just release`) aimed at a live session re-keys its keybinds to an identity
+> the on-screen bar does not have, and the next keypress **starts a second
+> bar**. Kill the session first — step 1 — then regenerate, then launch. The
+> two notes together give the rule: **regenerate both artifacts, always, and
+> only while the session is dead.**
 
 ### Scenario catalog
 

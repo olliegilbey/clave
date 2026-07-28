@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use clave_bar::model::{
     BarModel, DWELL_SECS, Effect, PEEK_SINK_SECS, PaneMeta, TabMeta, TimerKind, classify_timer,
 };
+use clave_bar::plugin_config::resolve_binary;
 use zellij_tile::prelude::*;
 
 #[derive(Default)]
@@ -34,6 +35,16 @@ struct State {
     /// set_timeout(DWELL_SECS). All share one duration, so they fire in arm
     /// order — FIFO gen matching is exact.
     pending_dwells: std::collections::VecDeque<u64>,
+    /// The CLI this bar shells out to, from plugin configuration (#44).
+    /// Assigned in `load()`, which zellij invokes as its own wasm export
+    /// before delivering any event (`register_plugin!`, zellij-tile-0.44.3
+    /// src/lib.rs:109-127 — `load`, `update`, `pipe` and `render` are separate
+    /// exports, and the host instantiates through `load`). `Default`'s empty
+    /// string is therefore not expected to be observable; the shellout sites
+    /// still degrade to a failed `run_command` rather than misbehaving if a
+    /// future zellij ever reordered that, which is why this is documented
+    /// rather than asserted.
+    clave_binary: String,
 }
 
 register_plugin!(State);
@@ -86,6 +97,9 @@ impl State {
     /// may reach instances in any order).
     fn run_effects(&mut self, effects: Vec<Effect>) {
         let active = self.is_active_instance();
+        // Bound once: several arms below take `&mut self`, so borrowing the
+        // field inline would conflict. One String clone per batch is noise.
+        let bin = self.clave_binary.clone();
         for e in effects {
             match e {
                 Effect::FocusPane { pane_id } => {
@@ -140,14 +154,14 @@ impl State {
                 Effect::MarkRead { uuid } if active => {
                     // Persist the unread clear (§6.5). Fire-and-forget; the
                     // local repaint already happened in the model.
-                    run_command(&["clave", "focus", &uuid], BTreeMap::new());
+                    run_command(&[bin.as_str(), "focus", &uuid], BTreeMap::new());
                 }
                 Effect::Bind { uuid, tab_id } if active => {
                     // Report the uuid→tab join to the store (§6.6 Design B);
                     // `clave bind` RMWs and pushes the snapshot that carries
                     // it to every instance.
                     run_command(
-                        &["clave", "bind", &uuid, &tab_id.to_string()],
+                        &[bin.as_str(), "bind", &uuid, &tab_id.to_string()],
                         BTreeMap::new(),
                     );
                 }
@@ -159,7 +173,7 @@ impl State {
                     // Bind): keeps duplicate prunes to the active bar. The model
                     // gates emission to set-changes, so this fires ~once per
                     // close, not per TabUpdate.
-                    let mut argv: Vec<String> = vec!["clave".into(), "prune-tabs".into()];
+                    let mut argv: Vec<String> = vec![bin.clone(), "prune-tabs".into()];
                     argv.extend(stale_ids.iter().map(usize::to_string));
                     let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
                     run_command(&refs, BTreeMap::new());
@@ -195,7 +209,7 @@ impl State {
                     set_timeout(PEEK_SINK_SECS);
                 }
                 Effect::OpenAgent { uuid } => {
-                    run_command(&["clave", "open", &uuid], BTreeMap::new());
+                    run_command(&[bin.as_str(), "open", &uuid], BTreeMap::new());
                 }
                 Effect::PersistCollapse { collapsed } if active => {
                     // Issue #5: report the ABSOLUTE collapse mode to the
@@ -204,7 +218,7 @@ impl State {
                     // books the pending write; only the active one runs it.
                     run_command(
                         &[
-                            "clave",
+                            bin.as_str(),
                             "collapse",
                             if collapsed { "true" } else { "false" },
                         ],
@@ -339,7 +353,7 @@ impl State {
 }
 
 impl ZellijPlugin for State {
-    fn load(&mut self, _config: BTreeMap<String, String>) {
+    fn load(&mut self, config: BTreeMap<String, String>) {
         // Version marker for the hot-reload workflow (`zellij action
         // start-or-reload-plugin`): stamp the build so the zellij log tells
         // you WHICH wasm produced a trace. Set by the rebuild recipe via
@@ -349,6 +363,23 @@ impl ZellijPlugin for State {
             env!("CARGO_PKG_VERSION"),
             option_env!("CLAVE_BUILD_TAG").unwrap_or("dev")
         );
+        // #44: resolve the CLI from plugin configuration instead of PATH. A
+        // stale `clave` on PATH previously served a live session's `clave
+        // open`, composing tab layouts against the OLD wasm — and because
+        // zellij keys plugin identity on location, every such tab loaded a
+        // SECOND bar (duplicate sidebar, dead nav).
+        self.clave_binary = resolve_binary(&config).unwrap_or_else(|| {
+            // LOUD, not silent: the v0.1.1 incident was invisible for hours
+            // precisely because nothing announced which binary answered.
+            eprintln!(
+                "clave-bar: WARNING no `{}` in plugin configuration \
+                 (pre-#44 layout, or a hand-edited config) — falling back to \
+                 PATH `clave`. A stale binary here is what broke v0.1.1; \
+                 regenerate with `clave setup` or `just release`.",
+                clave_types::CLAVE_BINARY_KEY
+            );
+            "clave".to_string()
+        });
         // §6.6 permission set — EXACTLY these four; grants are all-or-nothing
         // per plugin and the prompt is unanswerable in the bar pane, so
         // `clave setup` pre-seeds permissions.kdl with THIS set (both key
@@ -387,7 +418,7 @@ impl ZellijPlugin for State {
                 // from the store via `clave snapshot` (was spike S5). The
                 // result arrives as RunCommandResult below; the seq gate
                 // makes any race with live pushes benign (§5).
-                run_command(&["clave", "snapshot"], BTreeMap::new());
+                run_command(&[self.clave_binary.as_str(), "snapshot"], BTreeMap::new());
                 false
             }
             Event::RunCommandResult(exit, stdout, stderr, _ctx) => {
@@ -441,7 +472,10 @@ impl ZellijPlugin for State {
                     // `clave touch` stamps host time into the STORE and
                     // pushes the snapshot that carries the new order back
                     // to every instance.
-                    run_command(&["clave", "touch", &active_id.to_string()], BTreeMap::new());
+                    run_command(
+                        &[self.clave_binary.as_str(), "touch", &active_id.to_string()],
+                        BTreeMap::new(),
+                    );
                 }
                 self.run_effects(fx);
                 self.fire_binds(); // fresh tab set → own-tab joins resolvable

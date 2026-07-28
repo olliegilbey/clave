@@ -1,193 +1,213 @@
 # Contributing to clave 🥁
 
-Welcome. This is the map: how clave is built, how a change gets from your
-working tree to a release, and where the work is tracked. If you are a coding
-agent reading this alongside your human, everything here is meant for you to
-follow mechanically — the commands are exact, the paths are absolute, and the
-one rule that matters most is that **you never drive the live terminal
-yourself**. That belongs to the human. The full reasoning lives in
-[`docs/dev/TESTING.md`](docs/dev/TESTING.md); read it before you touch anything
-that renders.
+Thanks for being here. clave is early — which means the good problems are still
+unclaimed, and a small change can matter a lot.
 
-clave is a Rust workspace: a host CLI (`crates/clave`, the `clave` binary) and
-a Zellij plugin compiled to WebAssembly (`crates/clave-bar`, the sidebar). The
-design and rationale live in [`docs/design.md`](docs/design.md); the
-blow-by-blow record of what was tried and why lives in
-[`docs/superpowers/spikes/SUBSYSTEM-VALIDATION.md`](docs/superpowers/spikes/SUBSYSTEM-VALIDATION.md).
+This document gets you from clone to pull request. If anything here is wrong,
+confusing, or out of date, **that is a bug** — open an issue, or fix it in a PR.
+Documentation fixes are real contributions and are reviewed like any other.
+
+New to the project? [README.md](README.md) explains what clave *is*.
+[UBIQUITOUS_LANGUAGE.md](UBIQUITOUS_LANGUAGE.md) is short and worth five
+minutes — "session" alone means three different things in this codebase.
+
+---
+
+## Quick start
+
+You need **Rust** (stable), **[Zellij](https://zellij.dev)**, and
+**[Claude Code](https://claude.com/claude-code)** on your PATH.
+
+```bash
+git clone https://github.com/olliegilbey/clave
+cd clave
+just setup-toolchain     # adds the wasm32-wasip1 target
+just sandbox             # builds, wires an isolated sandbox, verifies it
+```
+
+`just sandbox` prints the exact command to launch it. **Run that yourself, in a
+new terminal, outside zellij** — clave creates its own multiplexer session, so
+launching from inside one nests them.
+
+That gives you a throwaway `clave-test` session with synthetic agents, entirely
+separate from any real clave install. Reset it any time with `clave dev reset`.
+
+> **Use `just sandbox`, not `just dev-install`, unless you know you want the
+> difference.** `dev-install` overwrites `~/.cargo/bin/clave` — the `clave` your
+> shell resolves — so your *next* real launch would run a working-tree build.
+> `just sandbox` touches neither `~/.cargo/bin` nor `~/.local/share/clave`, and
+> verifies that it didn't before it prints anything.
 
 ## Two environments, one code path
 
-clave builds its own daily driver: the maintainer runs terminal work *inside* a
-clave session, and develops clave *from a project session inside that
-environment*. So there are two launch surfaces, and they must never bleed into
-each other. There is exactly **one code path** — the sandbox is the stable
-behavior with three environment variables redirecting state and artifacts, so
-it reproduces production faithfully by construction.
+clave builds its own daily driver, so there are two launch surfaces that must
+never bleed into each other. There is exactly **one code path** — the sandbox is
+the stable behaviour with three environment variables redirecting state and
+artifacts, so it reproduces production by construction.
 
-| | Day-to-day (stable) | Feature/dev (sandbox) |
+| | Day-to-day (stable) | Development (sandbox) |
 |---|---|---|
-| **Launch** | `clave` in a non-zellij terminal | `clave dev launch` in a non-zellij terminal |
+| **Launch** | `clave`, in a non-zellij terminal | the command `just sandbox` prints |
 | **Zellij session** | `clave` | `clave-test` |
 | **State** (store, evlog) | `~/.local/state/clave/` | `~/.local/state/clave-dev/state/` |
-| **Artifacts** (wasm, config, layout) | `~/.local/share/clave/` | `~/.local/state/clave-dev/data/` |
-| **Binary** | versioned release copy (see below) | working tree via `just dev-install` |
-| **Agents** | real work | synthetic — `clave dev scenario <name>` |
+| **Artifacts** (wasm, config) | `~/.local/share/clave/` | `~/.local/state/clave-dev/data/` |
+| **Agents** | your real work | synthetic — `clave dev scenario <name>` |
 | **Teardown** | never | `clave dev reset` |
 
-Two invariants hold everywhere:
+Two invariants:
 
 - **No beta channel.** Promotion is one-way: validate in the sandbox → cut a
   version → it becomes stable. Nothing lives in between.
-- **Claude's identity is never sandboxed** (ruling, 2026-07-18). The sandbox
-  isolates *clave's* state only — store, session, config. `claude` always runs
-  as the real you, with your real auth and your real `~/.claude`. Sandboxing it
-  dragged auth along and broke session seeding; clave is a thin wrapper for
-  terminal control, and your identity is not its business.
+- **Claude's identity is never sandboxed.** The sandbox isolates *clave's*
+  state only. `claude` always runs as the real you, with your real auth and your
+  real `~/.claude`. Sandboxing it dragged auth along and broke session seeding;
+  clave is a thin wrapper for terminal control, and your identity is not its
+  business.
 
-Both surfaces launch from a **plain, non-zellij terminal** — clave creates or
-attaches the multiplexer session itself. Launching from inside a zellij session
-nests them.
+## The rule that matters most
 
-### The one leak: `clave` on `PATH` (#43, #44)
+**Never install over a running clave session, and never kill or launch a session
+on someone else's behalf.**
 
-The table above says the two surfaces use different binaries, and the generated
-`config.kdl` honours that — keybinds bake the *absolute* versioned path. But
-`clave-bar` also shells out to the CLI on its own (`snapshot`, `open`, `bind`,
-`focus`, `touch`, `prune-tabs`, `add`), and today it invokes plain **`clave`**,
-resolved through `PATH`. `just dev-install` puts a working-tree build at
-`~/.cargo/bin/clave` — the same name the daily surface answers to.
+A live session only ever loads the versioned files baked into the config it
+generated at launch, so a normal release lands atomically at the *next* launch
+and cannot disturb a running one. What breaks that safety is writing the
+binary a session will reach for, or regenerating the config a session is
+watching, while it is live. zellij live-watches `config.kdl` and hot-swaps
+keybinds into running sessions — but the running plugin keeps its load-time
+identity, so a regenerated config re-keys the keybinds to a plugin that isn't
+there, and zellij's response to that miss is to **start a second one**.
 
-So a dev build **can** drive a stable session, and on 2026-07-22 it did: a stale
-`0.1.0` binary on `PATH` served `clave open` inside a `v0.1.1` session and
-composed tab layouts pointing at the *old* wasm. Because zellij keys plugin
-identity on file location, every tab opened that way loaded a **second bar** —
-two populations, no shared beacon state, dead navigation. The release itself was
-correct; only the binary the plugin reached for was wrong.
+The symptom is two sidebars and half-working navigation. It shipped once, in
+v0.1.1. [FOOTGUNS.md](FOOTGUNS.md) has the mechanism and the one-line
+diagnosis.
 
-**Until #44 lands, treat this as a hard rule: never `cargo install` or
-`just dev-install` while a stable session is running** — including from a
-worktree, and including agent-driven builds. When a dev round ends, restore the
-stable binary before daily driving:
+So: after any `just release`, `clave setup`, or `clave dev scenario` that
+changes the baked binary or wasm path, **restart the affected session** before
+pressing any clave key.
 
-```sh
-cp ~/.local/share/clave/bin/clave-vX.Y.Z ~/.cargo/bin/clave
-```
+## Making a change
 
-**Diagnosis is one grep**, because the bar logs its version at every load
-(zellij's log lives under the OS temp dir, e.g.
-`$TMPDIR/zellij-$UID/zellij-log/zellij.log` on macOS):
+1. **Find or open an issue.** The backlog is public and is the invitation —
+   start with [`good-first-issue`](https://github.com/olliegilbey/clave/labels/good%20first%20issue).
+   For anything non-trivial, comment on the issue before you build, so you don't
+   duplicate work in flight.
+2. **Branch off `main`.** `main` is always releasable.
+3. **Write the failing test first.** This codebase is test-first, and the model
+   layer (`crates/clave-bar/src/model.rs`) is a pure state machine specifically
+   so behaviour can be tested without a terminal.
+4. **Run the gates before you push:**
 
-```sh
-grep 'clave-bar: loaded' "$TMPDIR"/zellij-*/zellij-log/zellij.log | tail
-```
+   ```bash
+   just gates    # fmt --check + test + wasm build + clippy — exactly what CI runs
+   ```
 
-Every line must report the **same** version. Mixed versions mean mixed plugins:
-the symptom is a duplicate sidebar and half-working navigation. #44 removes the
-leak by passing the binary's absolute path into the plugin at config-generation
-time, so the bar can no longer be pointed at a different clave than the one that
-launched the session.
+**Two gate details that bite people:**
 
-## The release model
+- **`cargo test --workspace` is load-bearing.** `default-members` excludes the
+  wasm-only `clave-bar` crate, so a bare `cargo test` **silently skips 68
+  tests** and exits 0. Use `just test` or the `--workspace` form.
+- **`cargo fmt --all --check` runs before clippy in CI.** Hand-written code
+  that clippy accepts can still fail the build. `just gates` runs both, in CI's
+  order.
 
-A version cut is a deliberate, tagged, reproducible act — never an accident of
-`cargo install`.
-
-- **Cuts are semver git tags on `main`** (`vX.Y.Z`; the first cut is `v0.1.0`).
-  `main` is always releasable. You tag when you want a cut, not on every merge.
-- **`just release`** is the only way to promote to stable. It refuses unless the
-  working tree is clean **and** `HEAD` carries an exact `vX.Y.Z` tag matching
-  the version in `Cargo.toml`. It then builds the workspace and the wasm plugin
-  in release mode and installs *versioned* artifacts:
-  `~/.local/share/clave/clave-bar-vX.Y.Z.wasm` and a versioned CLI copy at
-  `~/.local/share/clave/bin/clave-vX.Y.Z`. It regenerates the stable
-  `config.kdl` / `layout.kdl` and re-merges the Claude hooks so every generated
-  reference — plugin location, keybind `Run` commands, hook commands — points at
-  the versioned files.
-- **A running session is immune to installs.** A live session only ever
-  references the versioned files baked into the config it generated at launch.
-  Installing a new release never overwrites a file a live session is loading; the
-  upgrade lands atomically at the *next* `clave` launch. This is what makes the
-  daily environment safe to develop clave from — see C8 in the validation ledger
-  for the parity-desync bug class this design closes.
-- **The binary split.** `~/.cargo/bin/clave` (a plain `cargo install` from the
-  working tree) is the **dev** binary — it is what the sandbox and contributors'
-  shells run. Stable sessions never invoke it: their keybinds, layout, and hooks
-  bake the absolute path of the versioned copy under `~/.local/share/clave/bin/`.
-  One skew edge to know: if the dev binary's version is *ahead* of the latest
-  installed release (Cargo.toml bumped, no cut yet), a stable launch finds no
-  matching versioned copy and falls back to the dev binary — you are running
-  unreleased code, which is exactly what that state means.
-- **The hook slot is shared.** `~/.claude/settings.json` is one file (Claude's
-  identity is never sandboxed) and Claude fires *all* matching hooks, so clave
-  keeps exactly **one** hook entry per event — duplicates would double-fire.
-  Releases point it at the versioned stable binary; running `clave dev
-  scenario`/`clave setup` from the dev loop temporarily re-points it at the dev
-  binary, and the next `just release` heals it (accepted policy, 2026-07-20).
-  Store routing is unaffected either way — hook processes inherit
-  `CLAVE_STATE_DIR` from their `claude` parent, so events always land in the
-  right store; only the *binary version* servicing them ping-pongs.
-- **`just install` is retired** — it was the foot-gun that clobbered stable
-  wasm and CLI straight from an in-progress working tree. Use **`just
-  dev-install`** for the dev loop: it builds the wasm (stamped with
-  `CLAVE_BUILD_TAG`) into the sandbox data dir `~/.local/state/clave-dev/data/`
-  and `cargo install`s the dev CLI. The sandbox's generated config references
-  those dev artifacts.
-- **`clave --version`** prints semver plus build tag, so "what am I actually
-  running?" is always answerable in either environment.
-- **Fresh clone?** The sandbox works immediately: `just dev-install`, then
-  `clave dev scenario c8-cold-start`, then `clave dev launch`. A *stable*
-  install only exists once a release has been cut on your machine (`just
-  release` from a clean, tagged tree) — that is deliberate: stable is a
-  promotion target, not a build output.
-
-## Pull-request flow
-
-Direct-to-`main` commits ended at the `v0.1.0` cut. From there:
-
-1. **Branch** off `main` for your change.
-2. **Open a PR.** It gets [CodeRabbit](https://coderabbit.ai) review plus this
-   repo's own review flow (the fugu / whole-branch dry-run reviews).
-3. **Merge to `main`** once reviewed. `main` stays releasable at all times.
-4. **Tag** `vX.Y.Z` when you want to cut — the tag, plus `just release`, is what
-   turns reviewed `main` into a release.
-
-## The test gate
-
-```bash
-cargo test --workspace
-```
-
-**The `--workspace` flag is load-bearing.** `default-members` excludes the
-wasm-only `clave-bar` crate, so a bare `cargo test` **silently skips** all of
-`clave-bar`'s model tests — including the divergence-critical ones. It exits 0
-and tells you nothing is wrong. Always run the workspace form; `just test` wraps
-it for you. Live, interactive behavior is *not* covered by any of these tests —
-that is what [`docs/dev/TESTING.md`](docs/dev/TESTING.md) exists for.
-
-Lint the same way before you push:
-
-```bash
-just clippy   # cargo clippy --workspace --all-targets -- -D warnings
-```
-
-## Where work is tracked
-
-Public **GitHub issues** are the single work-tracking surface. The repo is
-public and contributor-facing, and a visible backlog is the invitation — so the
-backlog lives in the open, not in private notes.
-
-- **Labels over ceremony**: `bar`, `cli`, `harness`, `docs`, `upstream-watch`,
-  `good-first-issue`. Start with a `good-first-issue`.
-- **One milestone per version cut.**
-- A project board only appears if issue volume ever demands it.
+Live, interactive behaviour is not covered by any automated test — that is what
+[`docs/dev/TESTING.md`](docs/dev/TESTING.md) exists for.
 
 ## Before you change a subsystem
 
-Read its section in
-[`docs/superpowers/spikes/SUBSYSTEM-VALIDATION.md`](docs/superpowers/spikes/SUBSYSTEM-VALIDATION.md)
-first. It is the ledger of every approach that was tried and *why it failed* —
-`hide_self`, fixed pane sizes, the announce storms, serialization-based
-resurrection. Each forbidden path was expensive to learn. And never trust
-assumed Zellij semantics: read the vendored source before building on a
-behavior. Both disciplines are spelled out in
-[`docs/dev/TESTING.md`](docs/dev/TESTING.md).
+Two documents will save you a wasted afternoon:
+
+- **[FOOTGUNS.md](FOOTGUNS.md)** — traps that already cost someone a round.
+  Grep it the moment something behaves unexpectedly, *before* you start
+  debugging. If you lose time to something new, add it.
+- **[SUBSYSTEM-VALIDATION.md](docs/superpowers/spikes/SUBSYSTEM-VALIDATION.md)**
+  — the ledger of approaches tried and *why they failed*. Every forbidden path
+  in there was expensive to learn.
+
+And never trust an assumed Zellij behaviour. Read the vendored source
+(`~/.cargo/registry/src/*/zellij-tile-0.44.3/`, `…/zellij-utils-0.44.3/`)
+before building on it. `TabUpdate` reaches only the active tab,
+`resize_pane_with_id` silently refuses fixed panes, `show_self` is a focus
+action — each of those cost a round.
+
+## If you are working with an AI agent
+
+Plenty of contributors here will be. The repo is set up for it:
+
+- **[AGENTS.md](AGENTS.md)** is the entry point — deliberately short, and it
+  points at everything else. Most agent harnesses read it automatically.
+- **[FOOTGUNS.md](FOOTGUNS.md)** is written to be *grepped*, with the error
+  string or symbol at the front of each line. Point your agent at it.
+- **[UBIQUITOUS_LANGUAGE.md](UBIQUITOUS_LANGUAGE.md)** stops the ambiguity that
+  causes the most wasted agent turns.
+
+Two things to hold your agent to:
+
+- **It must not launch or kill zellij sessions**, or run anything that writes
+  the stable surface. Have it print the command for you to run. A `zellij
+  action` against a dead session blocks forever without erroring, which is a
+  bad thing to hand an autonomous loop.
+- **Verify what it cites.** Docs go stale. A claim about current behaviour
+  should be checked against current source before it lands in a PR — several
+  entries in FOOTGUNS.md were wrong when first collected, and were caught
+  exactly that way.
+
+Agent-authored contributions are welcome. Say so in the PR — it is useful
+review context, not a mark against the change.
+
+## Opening a pull request
+
+1. **Conventional commits** — `fix(bar): …`, `feat(cli): …`, `docs: …`. The
+   scope is usually the crate or subsystem.
+2. **Explain the *why*.** The commit body and PR description should say what
+   was wrong and how you know the fix works. Cite the issue.
+3. **Push and open the PR.** CI runs `test` and `wasm-build` as required checks,
+   plus `lint`; [CodeRabbit](https://coderabbit.ai) reviews automatically.
+4. **Expect a couple of rounds.** Review here tends to find real things —
+   respond to each comment saying how you addressed it, then resolve the thread.
+   Disagreeing is fine and often right; say why.
+
+Comments must all be resolved and the branch up to date with `main` before a
+merge. Because merging one PR pushes the next one out of date, a second CI round
+is normal, not a problem with your change.
+
+## Style
+
+Match the surrounding code. The one convention worth stating outright: **comments
+explain *why*, not *what*.** They cite the spec section, the issue, or the
+ledger finding that forced the decision. A comment that restates the code is
+noise; a comment that records why an obvious approach was rejected saves the
+next person a day.
+
+## Where work is tracked
+
+Public **GitHub issues**, exclusively — a visible backlog is the invitation, so
+nothing lives in private notes.
+
+- **Labels**: `bar`, `cli`, `harness`, `docs`, `upstream-watch`,
+  `good-first-issue`.
+- One milestone per version cut.
+
+## Releases
+
+Cuts are maintainer-owned: a semver tag on `main` plus `just release`, which
+refuses unless the tree is clean and `HEAD` carries a matching `vX.Y.Z` tag. It
+installs *versioned* artifacts and regenerates every generated reference to
+point at them. Every cut ends with an interactive live test — see
+[`docs/dev/RELEASE-RUNBOOK.md`](docs/dev/RELEASE-RUNBOOK.md).
+
+You do not need to run any of that to contribute. `main` stays releasable; the
+maintainer decides when to cut.
+
+## Being decent
+
+Be kind, assume good faith, and critique the code rather than the person.
+Maintainer time is the scarcest resource here — a clear reproduction, a focused
+diff, and a PR description that explains itself are the most generous things you
+can bring.
+
+## License
+
+By contributing, you agree your contributions are licensed under the
+[MIT License](LICENSE), the same as the rest of the project.

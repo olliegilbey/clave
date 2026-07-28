@@ -67,15 +67,75 @@ pub fn baked_binary(versioned_cli: Option<&Path>, installed: bool) -> String {
     }
 }
 
+/// Is resolving to bare `clave` an ANOMALY rather than the dev/sandbox norm?
+///
+/// True iff we are falling back to PATH while `<data>/bin/` already holds a
+/// `clave-v*` copy. That is the #44 divergence: `config.kdl` was written with
+/// one binary and the launch layout is about to bake another, so zellij's
+/// (location, configuration) pipe match misses and every keybind launches a
+/// second bar. Pure over its inputs (`installed` = did our own version's copy
+/// resolve; `siblings` = what is actually in `<data>/bin`) so it tests without
+/// a filesystem.
+pub fn binary_resolution_is_anomalous(installed: bool, siblings: &[String]) -> bool {
+    // Require a DIGIT right after `clave-v`, not a bare `starts_with` — same
+    // discipline as `is_clave_hook_command` (setup.rs), precedent cited there:
+    // a foreign `clave-vault`/`clave-verify` sibling shares the text prefix
+    // with our versioned copy name but is not one, and a false positive here
+    // trains the reader to ignore the warning (the exact failure mode #44's
+    // announcement exists to prevent).
+    !installed
+        && siblings.iter().any(|n| {
+            n.strip_prefix("clave-v")
+                .is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit()))
+        })
+}
+
 /// IO wrapper over `baked_binary`: resolve the versioned copy under the
 /// current environment's data dir and probe it. Sandbox data dirs
 /// (`$CLAVE_DATA_DIR`) never hold a versioned copy → bare `clave`.
 pub fn runtime_binary() -> String {
-    let versioned = crate::setup::data_dir().ok().map(|d| {
+    let dir = crate::setup::data_dir().ok();
+    let versioned = dir.as_ref().map(|d| {
         d.join("bin")
             .join(versioned_cli_name(env!("CARGO_PKG_VERSION")))
     });
     let installed = versioned.as_deref().is_some_and(Path::exists);
+
+    // #44: announce the divergence, don't just take it. Falling back to PATH
+    // while a versioned copy sits beside us means config.kdl and the launch
+    // layout will disagree about plugin configuration — and zellij treats a
+    // configuration mismatch as a DIFFERENT plugin, so each keybind press
+    // spawns a second bar. Cheap to detect here; invisible in production.
+    if !installed {
+        let siblings: Vec<String> = dir
+            .as_ref()
+            .and_then(|d| std::fs::read_dir(d.join("bin")).ok())
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if binary_resolution_is_anomalous(installed, &siblings) {
+            // Name the repair inline, NOT "run clave doctor": in the case this
+            // fires (own version behind the newest installed copy) doctor
+            // reports OK and gives no advice (doctor.rs), so deferring to it
+            // dead-ends. Same `cp` CONTRIBUTING/CLAUDE.md carry.
+            let bin = dir
+                .as_ref()
+                .map(|d| d.join("bin").display().to_string())
+                .unwrap_or_else(|| "<data>/bin".into());
+            eprintln!(
+                "clave: WARNING resolving bare `clave` on PATH, but {bin} holds \
+                 a versioned copy ({}). config.kdl and the launch layout will \
+                 disagree and each keybind may open a second bar (#44). Point \
+                 PATH at the installed copy: `cp {bin}/<clave-vX.Y.Z> \
+                 $(command -v clave)`.",
+                siblings.join(", ")
+            );
+        }
+    }
+
     baked_binary(versioned.as_deref(), installed)
 }
 
@@ -277,6 +337,42 @@ mod tests {
         let e =
             release_gate("?? docs/status/x.md\n M src/lib.rs\n", "v0.1.0\n", "0.1.0").unwrap_err();
         assert!(e.contains("dirty"));
+    }
+
+    #[test]
+    fn anomalous_only_when_a_versioned_copy_exists_but_is_not_used() {
+        // Dev/sandbox: no versioned copy anywhere. Bare `clave` is CORRECT here
+        // (baked_binary's contract) — warning would fire on every sandbox launch
+        // and train the reader to ignore it.
+        assert!(!binary_resolution_is_anomalous(false, &[]));
+
+        // Stable, healthy: the versioned copy exists and is what we resolved.
+        assert!(!binary_resolution_is_anomalous(
+            true,
+            &["clave-v0.1.1".into()]
+        ));
+
+        // THE ANOMALY (#44): we are about to bake bare `clave` even though a
+        // versioned copy is sitting in the data dir — a version-skewed launcher.
+        // config.kdl and launch.kdl will disagree, and every keybind press will
+        // spawn a second bar.
+        assert!(binary_resolution_is_anomalous(
+            false,
+            &["clave-v0.1.0".into()]
+        ));
+
+        // False-positive guard (review finding on #44): a foreign sibling
+        // sharing the `clave-v` TEXT prefix but no digit after it — e.g. a
+        // `clave-vault`/`clave-verify` binary someone else put in the same
+        // bin dir — must not be treated as our versioned copy.
+        assert!(!binary_resolution_is_anomalous(
+            false,
+            &["clave-vault".into()]
+        ));
+        assert!(!binary_resolution_is_anomalous(
+            false,
+            &["clave-verify".into()]
+        ));
     }
 
     #[test]
