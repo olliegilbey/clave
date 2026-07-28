@@ -121,7 +121,13 @@ because it is the kind of thing a tired human reads wrong at tag time.
    S0, S1, S3 and the design lock's §7.1 ruling are all writers to
    `BarModel::rows` — a known collision zone with four claimants.
 3. **Decide #65's fate** (rebase-through or close-and-recut). See above.
-4. **The collapsed geometry is still not ratified** — a promise made and unkept.
+4. **Colours should eventually track the zellij theme.** Not a feature for this
+   round, but S5 (palette) and S6 (gutter) must not make it impossible: avoid
+   baking absolute RGB as the only representation, and keep the mapping from
+   *role* (repo ink, title chip, status, battery ramp) to *value* in one place
+   rather than scattered through the renderer. A later change should be able to
+   swap the source of those values without touching row layout.
+5. **The collapsed geometry is still not ratified** — a promise made and unkept.
    Every candidate was rendered against the old 6-column gutter, now 9. Binding
    constraint: at 44 the collapsed target must be **< 24**. Also unresolved:
    whether collapsed truncates the whole label or renders field 0 only
@@ -143,8 +149,10 @@ at all, and its release-skew advice is now factually wrong post-#43a.
   run a bare `zellij` command; print it.
 - **He decides from rendered artifacts, not prose.** Build the mockup. Offer
   costed options with a recommendation, and expect to be overruled.
-- **`just sandbox`, never `just dev-install`,** unless you specifically want the
-  daily binary replaced. Post-#70 `dev-install` produces `clave-dev`.
+- **`just sandbox`, not `just dev-install`.** Post-#70 `dev-install` installs
+  `clave-dev` and leaves the daily launcher alone — but it rebuilds the sandbox
+  wasm in place, so it is unsafe against a live `clave-test`. `just sandbox`
+  refuses in that case; that is why it is the reviewed path.
 - **Review rounds find real things.** Rounds 2 and 3 on #71 each found a defect
   introduced by the previous round's fix — one of them mine. Do not treat a
   second round as friction.
