@@ -104,6 +104,38 @@ Nothing here touches a live session. All of it must pass before a tag exists.
 > start*, because that is the failure this project has actually shipped. It is
 > not a feature tour.
 
+### Step 0 — paste the checks once
+
+Steps 2 and 3 run the **same two checks against different files**. Defining them
+once is not tidiness: the first draft of this runbook duplicated them, and the
+copy that guarded `launch.kdl` was missing the unversioned probe entirely. Two
+copies drift; one cannot.
+
+```bash
+STABLE=("$HOME/.local/share/clave/config.kdl" \
+        "$HOME/.local/share/clave/layout.kdl" \
+        "$HOME/.config/zellij/config.kdl")
+LAUNCH=("$HOME/.local/share/clave/launch.kdl")
+
+# Every clave version a generated file references, deduped, one per line.
+# The second grep is load-bearing: without it a coherent set prints BOTH
+# `clave-bar-vX.Y.Z.wasm` and `clave-vX.Y.Z` — two lines for one version —
+# and reads as skew.
+clave_versions() {
+  grep -rhoE 'clave-bar-v[0-9]+\.[0-9]+\.[0-9]+\.wasm|clave-v[0-9]+\.[0-9]+\.[0-9]+' "$@" 2>/dev/null \
+    | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | sort -u
+}
+
+# Every UNVERSIONED clave reference. ANY output is a failure.
+# Targets the three sites a version can go missing — the `clave_binary`
+# plugin-config value, a keybind's `Run`, and the `file:` plugin location
+# (setup.rs config_kdl/layout_kdl) — rather than bare `clave`, which would
+# match every line: the data dir is itself ~/.local/share/clave/.
+clave_unversioned() {
+  grep -nE 'clave_binary "clave"|Run "clave"|file:[^"]*clave-bar\.wasm' "$@" 2>/dev/null
+}
+```
+
 ### Step 1 — prove what is on PATH
 
 **You type:**
@@ -126,40 +158,30 @@ else — a `cargo install` dev build, a shim, a stale copy.
 
 ### Step 2 — the generated artifact set agrees on one version
 
-Two checks, and **both must pass** — (a) counts versions, (b) catches the
-references (a) is structurally blind to. `*.kdl` is *not* used: it would glob in
-`launch.kdl`, which `just release` never rewrites (it is written by `clave` at
-cold start, Step 3), so on any upgrade it still names the PREVIOUS version and
-(a) would report two versions and order a STOP on a healthy cut.
+Both checks must pass. `$STABLE` deliberately omits `launch.kdl`: `just release`
+never rewrites it (`write_generated` writes `config.kdl` and `layout.kdl` only) —
+`clave` does, at cold start — so on any upgrade it still names the PREVIOUS
+version and would report skew on a healthy cut. It gets checked in Step 3, once
+it has been written.
 
 **You type:**
 
 ```bash
-cd ~/.local/share/clave
-# (a) which versions the RELEASE-generated files reference — launch.kdl excluded
-grep -rhoE 'clave-bar-v[0-9]+\.[0-9]+\.[0-9]+\.wasm|clave-v[0-9]+\.[0-9]+\.[0-9]+' \
-  config.kdl layout.kdl ~/.config/zellij/config.kdl 2>/dev/null | sort -u
-# (b) any UNVERSIONED reference — must print NOTHING
-grep -nE 'clave_binary "clave"|Run "clave"|file:[^"]*clave-bar\.wasm' \
-  config.kdl layout.kdl ~/.config/zellij/config.kdl 2>/dev/null
+clave_versions "${STABLE[@]}"       # expect: exactly one line, == the tag
+clave_unversioned "${STABLE[@]}"    # expect: nothing at all
 ```
 
-(b) matches the three places a version can go missing — the `clave_binary`
-plugin-config value, the `Run` command in a keybind, and the `file:` plugin
-location (setup.rs `config_kdl`/`layout_kdl`) — rather than searching for a
-bare `clave` anywhere, which would hit every line: the data dir is *itself*
-`~/.local/share/clave/`.
+**Look at:** how many lines the first prints, and whether the second prints
+anything.
 
-**Look at:** how many distinct versions (a) prints, and whether (b) prints
-anything at all.
-
-**Report back:** (a)'s full sorted list, and (b)'s output or "empty".
+**Report back:** both outputs verbatim — say "empty" if a command printed
+nothing, so a silent failure and a clean pass cannot look alike in your report.
 
 | What you see | Conclusion | Next |
 |---|---|---|
-| (a) exactly one version == the tag, **and** (b) empty | the artifact set is coherent | Step 3 |
-| (a) two or more versions | **STOP — this is the incident.** Two plugin locations = two bar instances | report; do not launch |
-| (b) prints any line | **STOP** — an unversioned reference in a *stable* KDL loads a second, independent singleton, and (a) cannot see it: a file holding both a correct versioned path and a bare `clave` still reports exactly one version | report |
+| one version == the tag, **and** nothing from `clave_unversioned` | the artifact set is coherent | Step 3 |
+| two or more versions | **STOP — this is the incident.** Two plugin locations = two bar instances | report; do not launch |
+| any output from `clave_unversioned` | **STOP** — an unversioned reference in a *stable* KDL loads a second, independent singleton, and the version count cannot see it: a file holding both a correct versioned path and a bare `clave` still reports exactly one version | report |
 
 ### Step 3 — the cold start, and the double-sidebar check
 
@@ -180,8 +202,25 @@ ZLOG=$TMPDIR/zellij-$(id -u)/zellij-log/zellij.log
 (The `|| echo 0` is for a box that has never run zellij — no log file yet, so
 every line is new.)
 
-**Then you type** (a *new* session — this is the only thing that picks up a
-release):
+**Then prove there is no live session to attach to.** A cold start is the only
+thing that picks up a release, and `clave` *attaches* to a live session rather
+than cold-starting — the same mechanism that makes relaunching a failed binary
+useless in Rollback. Attaching would validate the OLD session and append no new
+log lines, which the table below would read as "the bar never loaded".
+
+```bash
+zellij list-sessions -n 2>/dev/null | grep -v EXITED
+```
+
+Expect **no `clave` line**. If one is there, kill it before continuing —
+**yours to run, never an agent's** (TESTING.md, "the human drives all live
+input"):
+
+```bash
+zellij kill-session clave
+```
+
+**Then you type:**
 
 ```bash
 clave
@@ -208,14 +247,17 @@ tail -n +$(( $(cat "$TMPDIR/clave-release-logmark") + 1 )) "$ZLOG" \
 | no output | the bar never loaded — or the mark was taken after the launch. Report `tail -n 20 "$ZLOG"` | **STOP**, report |
 
 **Also assert `launch.kdl` now, not in Step 2.** It is written by `clave` during
-the cold start you just did, so this is the first moment it can be right:
+the cold start you just did, so this is the first moment it can be right — and
+it gets **both** Step 0 checks, not just the version count. An unversioned
+reference here is exactly as fatal as one in `config.kdl`, and the version count
+alone cannot see it:
 
 ```bash
-grep -ohE 'clave-bar-v[0-9.]+\.wasm|clave-v[0-9.]+' \
-  ~/.local/share/clave/launch.kdl | sort -u
+clave_versions "${LAUNCH[@]}"       # expect: exactly one line, == the tag
+clave_unversioned "${LAUNCH[@]}"    # expect: nothing at all
 ```
 
-One version, == the tag. Anything else is the same STOP as Step 2 (a).
+Same verdicts as Step 2's table. Anything else is a STOP.
 
 ### Step 4 — navigation and binding actually work
 
@@ -247,16 +289,20 @@ get a status glyph rather than staying blank, does the row order behave.
 clave doctor; echo "exit=$?"
 ```
 
-**Look at:** the exit status. `run_doctor` exits **1** if any finding is a
-`Severity::Problem` and 0 otherwise (doctor.rs) — that status, not the prose,
-is the verdict.
+**Look at:** the exit status. That status, not the prose, is the verdict.
 
 **Report back:** the full output *and* the exit line.
 
 | What you see | Conclusion | Next |
 |---|---|---|
 | `exit=0` | doctor agrees the install is sound | Part C returns **go** |
-| `exit=1` | **STOP** — a Problem-severity finding. Report the marked lines and go to Rollback | **STOP** |
+| **any nonzero exit** | **STOP** | report and go to Rollback |
+
+`exit=1` specifically means a `Severity::Problem` finding (`run_doctor`,
+doctor.rs). Any *other* nonzero status is the doctor itself failing to run — 127
+for a missing binary, 101 for a panic — and that is a worse signal, not a
+lesser one: the check the release depends on did not execute. The condition is
+`exit != 0`, never `exit == 1`.
 
 Once #48 lands this becomes the cheap version of Steps 1–3: `clave doctor --json`
 exits non-zero on incoherence, so it can be asserted on unattended. **Until then
@@ -282,11 +328,14 @@ If any step says STOP.
    ```bash
    ZLOG=$TMPDIR/zellij-$(id -u)/zellij-log/zellij.log
    tail -n +$(( $(cat "$TMPDIR/clave-release-logmark") + 1 )) "$ZLOG" | tail -40
-   grep -rhoE 'clave-bar-v[0-9.]+\.wasm|clave-v[0-9.]+' \
-     ~/.local/share/clave/*.kdl | sort -u
+   clave_versions "${STABLE[@]}" "${LAUNCH[@]}"     # the skew, as it stands
+   clave_unversioned "${STABLE[@]}" "${LAUNCH[@]}"
    ```
 
-2. **Kill the failed session** — yours to run, never an agent's (AGENTS.md).
+   Here `launch.kdl` is *included* deliberately — Step 2 excludes it because it
+   is expected to lag, but a post-mortem wants the whole picture.
+
+2. **Kill the failed session** — yours to run, never an agent's (TESTING.md).
    Regeneration is pointless while a session holds the old files open, and a
    live session would just be reattached.
 
@@ -303,12 +352,15 @@ If any step says STOP.
    ~/.local/share/clave/bin/clave-v<LAST-GOOD> setup
    ```
 
-4. **Relaunch and re-verify** with Step 2 (a) and (b) — they must now print
-   `<LAST-GOOD>` and nothing, respectively. `launch.kdl` is rewritten on this
-   cold start.
+4. **Relaunch and re-verify.** `launch.kdl` is rewritten on this cold start, so
+   check it too — both checks, both file sets, and they must now print
+   `v<LAST-GOOD>` and nothing.
 
    ```bash
    ~/.local/share/clave/bin/clave-v<LAST-GOOD>
+   # then, in another pane:
+   clave_versions "${STABLE[@]}" "${LAUNCH[@]}"
+   clave_unversioned "${STABLE[@]}" "${LAUNCH[@]}"
    ```
 
 5. **Delete the unpushed tag** (`git tag -d vX.Y.Z`) and file the finding with
@@ -321,7 +373,7 @@ If any step says STOP.
 1. Update the release issue with Part C's reported results — including the
    steps that passed, not only the failures.
 2. Open issues for anything Step 4 surfaced that is not already tracked.
-3. Write the handoff (`docs/status/`), per AGENTS.md.
+3. Write the session handoff into `docs/status/` and include it in the PR.
 
 ---
 
