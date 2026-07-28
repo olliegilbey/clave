@@ -96,13 +96,27 @@ ok=1
 fail() { echo "    FAIL $*"; ok=0; }
 
 # Prove the generated pair agrees BEFORE a human spends time in a terminal.
-# This is the #44 invariant: config.kdl's MessagePlugin keybinds and the launch
-# layout's plugin node must carry an IDENTICAL clave_binary, or zellij resolves
-# them as different plugins and every keypress opens another bar.
+# This is the #44 invariant: config.kdl's MessagePlugin keybinds and the layout's
+# plugin node must carry an IDENTICAL clave_binary, or zellij resolves them as
+# different plugins and every keypress opens another bar.
+#
+# The pair checked here is config.kdl <-> layout.kdl, because those are the two
+# write_generated() emits together from one `binary` value. launch.kdl is NOT
+# checked: only a cold start writes it (setup.rs launch_session), so before the
+# launch this script is preparing for, it is either absent or a LEFTOVER from a
+# previous run. Asserting on it here failed closed on a perfectly healthy
+# sandbox — a stale pre-#44 launch.kdl from days earlier reported
+# "carries no clave_binary" and blocked the setup entirely. Same defect the
+# release runbook had against the same file (see RELEASE-RUNBOOK Step 2).
+#
+# The stale copy is deleted rather than ignored: leaving a pre-#44 launch layout
+# on disk is the hazard itself, and the next cold start rewrites it regardless.
+rm -f "$SANDBOX/data/launch.kdl"
+
 echo
 echo "==> Self-check: the #44 identity pair"
 cfg="$SANDBOX/data/config.kdl"
-lay="$SANDBOX/data/launch.kdl"
+lay="$SANDBOX/data/layout.kdl"
 for f in "$cfg" "$lay"; do
   if [ ! -f "$f" ]; then
     fail "missing $f"
@@ -120,7 +134,7 @@ if [ "$ok" -eq 1 ]; then
   else
     fail "identity pair DISAGREES — every keybind would spawn a second bar"
     echo "         config.kdl: $cfgval"
-    echo "         launch.kdl: $layval"
+    echo "         layout.kdl: $layval"
   fi
 fi
 
