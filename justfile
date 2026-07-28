@@ -63,7 +63,8 @@ gates:
 # (~/.local/state/clave-dev/data/clave-bar.wasm) in place, so it must not run
 # against a live clave-test session — `just sandbox` refuses for you and is the
 # reviewed path for sandbox validation. If a pre-#43b ~/.cargo/bin/clave is
-# still on this machine it shadows the #43a launcher: delete it.
+# still on this machine it shadows the #43a launcher — check what it is
+# (`command -v clave; clave --version`) before removing it.
 #
 # `--locked` is kept from the retired `cargo install` line, and extended to the
 # wasm build (CodeRabbit CLI, 2026-07-25): both halves of a dev install must
@@ -72,16 +73,19 @@ gates:
 # rather than `cp` over the destination, for the reason install_launcher
 # documents — cp truncates the existing inode, which may be a running process
 # image (ETXTBSY on Linux, a live text segment on macOS); mv within one
-# filesystem is a rename, so a running clave-dev keeps its own inode.
+# filesystem is a rename, so a running clave-dev keeps its own inode. The
+# staging name carries $$ (the shell's pid): two concurrent dev-installs — two
+# agents in two worktrees is the normal case here — would otherwise share one
+# temp path and could publish a half-written executable (CodeRabbit, #70).
 # Build the working-tree wasm (into the sandbox) and install `clave-dev` (§2).
 dev-install:
     mkdir -p ~/.local/state/clave-dev/data ~/.cargo/bin
     CLAVE_BUILD_TAG=$(git rev-parse --short HEAD 2>/dev/null || echo dev) cargo build -p clave-bar --release --locked --target wasm32-wasip1
     cp target/wasm32-wasip1/release/clave-bar.wasm ~/.local/state/clave-dev/data/
     CLAVE_BUILD_TAG=$(git rev-parse --short HEAD 2>/dev/null || echo dev) cargo build -p clave --release --locked
-    cp target/release/clave ~/.cargo/bin/.clave-dev.tmp
-    chmod 755 ~/.cargo/bin/.clave-dev.tmp
-    mv -f ~/.cargo/bin/.clave-dev.tmp ~/.cargo/bin/clave-dev
+    cp target/release/clave ~/.cargo/bin/.clave-dev.$$.tmp
+    chmod 755 ~/.cargo/bin/.clave-dev.$$.tmp
+    mv -f ~/.cargo/bin/.clave-dev.$$.tmp ~/.cargo/bin/clave-dev
     @echo "installed ~/.cargo/bin/clave-dev — the daily clave launcher is untouched (#43b)"
 
 # Cut a release (§2). `clave release` is the GATE: it refuses unless the tree

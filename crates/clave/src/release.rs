@@ -240,9 +240,11 @@ pub fn runtime_binary() -> String {
                 "clave: WARNING resolving bare `clave` on PATH, but {bin} holds \
                  a versioned copy ({}). config.kdl and the launch layout will \
                  disagree and each keybind may open a second bar (#44). Put \
-                 {bin} FIRST on your PATH so `clave` is the release launcher, \
-                 and remove any other `clave` shadowing it (a stale \
-                 ~/.cargo/bin/clave from before #43b is the usual culprit).",
+                 {bin} FIRST on your PATH so `clave` is the release launcher. \
+                 If something else still shadows it, check what it is first \
+                 (`command -v clave; clave --version`) — a stale \
+                 ~/.cargo/bin/clave from before #43b is the usual culprit, \
+                 but it may be a deliberate install worth keeping.",
                 siblings.join(", ")
             );
         }

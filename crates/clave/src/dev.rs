@@ -162,7 +162,8 @@ pub fn run_scenario(name: &str) -> Result<()> {
     // their claude parent, so events still land in the SANDBOX store.
     // Sandbox clave config/layout: run the normal setup against the sandbox
     // dirs (env already points there). The unversioned `clave-bar.wasm` is
-    // built straight into the sandbox data dir by `just dev-install` (§2 —
+    // built under target/ and copied into the sandbox data dir by
+    // `just dev-install` (§2 —
     // the stable dir now holds only VERSIONED wasm, so there is nothing to
     // copy from there); run_setup ensures it exists with a pointer to
     // dev-install if not.
