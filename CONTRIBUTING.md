@@ -33,10 +33,11 @@ That gives you a throwaway `clave-test` session with synthetic agents, entirely
 separate from any real clave install. Reset it any time with `clave dev reset`.
 
 > **Use `just sandbox`, not `just dev-install`, unless you know you want the
-> difference.** `dev-install` overwrites `~/.cargo/bin/clave` — the `clave` your
-> shell resolves — so your *next* real launch would run a working-tree build.
-> `just sandbox` touches neither `~/.cargo/bin` nor `~/.local/share/clave`, and
-> verifies that it didn't before it prints anything.
+> difference.** `dev-install` installs the working-tree CLI as `clave-dev`, so it
+> leaves your `clave` command alone — but it *does* rebuild the sandbox bar wasm
+> in place, which is unsafe while a `clave-test` session is running.
+> `just sandbox` refuses while that session is alive, and verifies it touched
+> neither `~/.cargo/bin` nor `~/.local/share/clave` before it prints anything.
 
 ## Two environments, one code path
 
