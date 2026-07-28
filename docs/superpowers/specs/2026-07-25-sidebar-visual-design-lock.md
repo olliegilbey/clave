@@ -285,6 +285,11 @@ pre-fleet audit on the grounds that five specs each add a field to the same
 struct with nobody owning it. This ruling upgrades #69 from hygiene to a
 **blocker for S5 and S6**.
 
+**Landed 2026-07-28 (#69).** `Agent` now carries `title`, `summary` and
+`worktree` structurally — see
+`docs/superpowers/specs/2026-07-28-agentsnapshot-v2-design.md`. The
+prerequisite this section names is met; S5 and S6 are unblocked.
+
 **What this does NOT change.** `Effect::RenameTab` still writes clave's label
 onto the real zellij tab — that is what zellij's own tab bar shows, and it is
 untouched. The rename loop-guard still fires on label *change* only, so a manual
