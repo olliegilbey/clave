@@ -31,6 +31,13 @@ a `vX.Y.Z` tag plus `just release` is the promotion event.
 
 [SUBSYSTEM-VALIDATION.md](docs/superpowers/spikes/SUBSYSTEM-VALIDATION.md) | the C-section for the subsystem you are about to change — the ledger of approaches tried and _why they failed_. Read it first; every forbidden path was expensive to learn
 
+**Never kill or launch a zellij session.** Ollie dog-foods clave daily — the
+Claude you are is running *inside* a live clave session, so `zellij
+kill-session` takes down his working fleet, and a bare `zellij` command targets
+his session, not a sandbox. Print the command; let him run it. Same for `just
+release` and anything writing `~/.local/share/clave/` — that is the stable
+surface he is driving.
+
 Something behaving strangely? Grep FOOTGUNS.md before you start debugging.
 
 Write what you learn where it belongs — trap → FOOTGUNS.md · term →
