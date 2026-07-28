@@ -44,12 +44,14 @@ splitting the screen into panes. Logo: the two-stick percussion instrument.
 🚧 Early days. The full design and rationale live in
 [`docs/design.md`](docs/design.md).
 
-**If you build from source**, note that a working-tree `cargo install` puts
-`clave` on your `PATH` where it can drive an already-running session — the
-plugin still resolves its CLI through `PATH` ([#44](https://github.com/olliegilbey/clave/issues/44)).
-Don't install while a session is live; see
-[CONTRIBUTING](CONTRIBUTING.md#the-one-leak-clave-on-path-43-44) for the rule
-and the one-line diagnosis.
+**If you build from source**, use `just sandbox` — it wires an isolated
+`clave-test` session to your working tree and verifies it touched neither your
+installed binary nor your stable artifacts. `just dev-install` overwrites
+`~/.cargo/bin/clave`, so your next launch would run a working-tree build; that
+is sometimes what you want, but rarely by accident.
+
+Either way: **don't install over a session that is currently running.** See
+[CONTRIBUTING](CONTRIBUTING.md#the-rule-that-matters-most).
 
 ## License
 
