@@ -30,19 +30,52 @@ pub const DESIGN_COLS: usize = 44;
 /// Cols 1–9: cap, status, space, rule, space, battery, space, provenance,
 /// space. Position-locked — every cell is one column and renders a space when
 /// its glyph is absent, so a dropped glyph degrades to a blank cell rather than
-/// a shifted row (lock §2.1).
+/// a shifted row (lock §2.1). Never parameterised: D16 keeps the gutter
+/// IDENTICAL between profiles — that is the whole point of it being a width
+/// profile and not a second layout.
 const GUTTER_W: usize = 9;
-const TITLE_W: usize = 7;
-const REPO_W: usize = 7;
 
-/// Fixed columns everywhere; `summary` is the only flex cell (LEDGER D9).
-/// Everything else — gutter, title, repo, the two separating spaces, the right
-/// margin and both caps — holds its width at any `cols`, so below this floor a
-/// row is wider than the pane rather than misaligned. That is deliberate: the
-/// collapsed layout is NOT ratified (lock §3) and is S8's to design; a row that
-/// silently reflowed its columns to fit would be the one failure mode §2.1
-/// exists to forbid. S6 §2.10's `cols - 7` text budget is superseded.
-pub const MIN_INTACT_COLS: usize = GUTTER_W + TITLE_W + REPO_W + 4;
+/// Collapsed is a WIDTH PROFILE, not a second layout (LEDGER D16, supersedes
+/// D12): one `render_row` body, parameterised by how wide the title and repo
+/// cells are. `summary` is never part of the profile — it is the only flex
+/// cell in EITHER state (D9, D16).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Widths {
+    pub title: usize,
+    pub repo: usize,
+}
+
+impl Widths {
+    /// Design-lock §2, unchanged. At `cols == DESIGN_COLS` this profile's
+    /// output is byte-for-byte the pre-D16 renderer's — that is the regression
+    /// pin (`golden_bar_at_forty_four_columns`, `bar-preview`'s captured
+    /// prefix).
+    pub const EXPANDED: Widths = Widths { title: 7, repo: 7 };
+
+    /// LEDGER D16: the gutter stays identical, each text field shows fewer
+    /// characters, repo drops to three (`cla`, `nal` — collisions are rare and
+    /// the repo ink still disambiguates), title keeps a couple more than repo
+    /// because it matters more. Deliberately the two numbers most likely to
+    /// move — D16 leaves the exact pair open, "to be settled by looking, not
+    /// by arguing" (`examples/bar-preview.rs`'s collapsed candidates), so they
+    /// are named constants and nothing else in this file depends on their
+    /// values being these ones.
+    pub const COLLAPSED: Widths = Widths { title: 5, repo: 3 };
+
+    /// Fixed columns everywhere; `summary` is the only flex cell (LEDGER D9).
+    /// Everything else — gutter, title, repo, the two separating spaces, the
+    /// right margin and both caps — holds its width at any `cols`, so below
+    /// this floor a row is wider than the pane rather than misaligned. `13` is
+    /// the 9-column gutter plus the space after title, the space after repo,
+    /// the right margin and the right cap (D12's arithmetic, generalised by
+    /// D16 to any profile): `27` for `EXPANDED`, `21` for `COLLAPSED`. That is
+    /// deliberate, not a compromise: a row that silently reflowed its columns
+    /// to fit would be the one failure mode §2.1 exists to forbid. S6 §2.10's
+    /// `cols - 7` text budget is superseded.
+    pub fn min_intact_cols(self) -> usize {
+        13 + self.title + self.repo
+    }
+}
 
 // ── colour ──────────────────────────────────────────────────────────────────
 
@@ -300,9 +333,17 @@ fn clamp(s: &str, w: usize) -> String {
     // the every-row-is-`cols`-cells invariant while breaking the row on screen.
     // `render.rs` is what GUARANTEES that invariant, and a guarantee that holds
     // only when someone else sanitises first is not a guarantee — so it is
-    // enforced here, at the point text enters a cell, rather than at the wiring
-    // boundary. `char::is_control()` is exactly Cc: C0, DEL and C1.
-    let s: String = s.chars().filter(|c| !c.is_control()).collect();
+    // enforced here, at the point text enters a cell, rather than at the
+    // wiring boundary. `char::is_control()` is exactly Cc: C0, DEL and C1.
+    //
+    // REPLACED with a space, not dropped (task 1.5 D16 follow-up): a `\n` in a
+    // summary is a wrapped sentence, and `"a\nb"` collapsing to `"ab"` silently
+    // merges two words at the join. A space preserves the word boundary that
+    // dropping destroys, and is neutral to every 44-column golden either way.
+    let s: String = s
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
     let s = s.as_str();
     let n = display_cells(s);
     if n <= w {
@@ -336,10 +377,10 @@ fn clamp(s: &str, w: usize) -> String {
 /// per-row function cannot know that without a parameter that re-states what
 /// the slice already knows. It is also the unit a golden test should assert —
 /// the picture, not a fragment.
-pub fn render_rows(rows: &[Row], cols: usize) -> Vec<String> {
+pub fn render_rows(rows: &[Row], cols: usize, widths: Widths) -> Vec<String> {
     let any_selected = rows.iter().any(|r| r.selected);
     rows.iter()
-        .map(|row| render_row(row, cols, any_selected))
+        .map(|row| render_row(row, cols, widths, any_selected))
         .collect()
 }
 
@@ -348,7 +389,7 @@ fn hue(ink: Option<u8>) -> Rgb {
         .map_or(UNTINTED, |(c, _)| *c)
 }
 
-fn render_row(row: &Row, cols: usize, any_selected: bool) -> String {
+fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> String {
     // Nothing to recede FROM when nothing is selected, so an unfocused bar
     // renders at full strength (lock §6).
     let fade = if row.selected || !any_selected {
@@ -435,18 +476,22 @@ fn render_row(row: &Row, cols: usize, any_selected: bool) -> String {
     out.push_str(&o);
     out.push(' '); // col 9
 
-    // Only `summary` flexes (LEDGER D9). Below `MIN_INTACT_COLS` the fixed
-    // columns cannot all fit, and the row is deliberately WIDER than the pane
-    // rather than reflowed — but EVERY row kind over-runs to the same width, or
-    // the bar goes ragged instead of merely clipped, which is the alignment
-    // loss lock §2.1 exists to forbid. A terminal row used to shrink to `cols`
-    // while an agent row held at 27. The real answer is a separate collapsed
-    // layout (LEDGER D12); this only keeps the interim degradation coherent.
-    let intact = cols.max(MIN_INTACT_COLS);
+    // Only `summary` flexes (LEDGER D9), in EITHER profile (D16). Below
+    // `widths.min_intact_cols()` the fixed columns cannot all fit, and the row
+    // is deliberately WIDER than the pane rather than reflowed — but EVERY row
+    // kind over-runs to the same width, or the bar goes ragged instead of
+    // merely clipped, which is the alignment loss lock §2.1 exists to forbid.
+    // A terminal row used to shrink to `cols` while an agent row held at the
+    // floor. D16 makes this a guard against pathological widths, not the
+    // mechanism a user ever sees: the caller picks the profile by STATE, so
+    // the seek never crosses this floor mid-animation (D16's "consequence
+    // that matters"). D12's "collapsed is a second layout" conclusion is
+    // superseded; this comment's job is the same one D13 gave it.
+    let intact = cols.max(widths.min_intact_cols());
     // `saturating_sub` rather than a floor check: a 0-width budget must render
     // nothing, not panic, if these constants ever move.
     let body = intact.saturating_sub(GUTTER_W + 2); // minus right margin and cap
-    let summary_w = body.saturating_sub(TITLE_W + REPO_W + 2);
+    let summary_w = body.saturating_sub(widths.title + widths.repo + 2);
 
     match &row.content {
         RowContent::Terminal { name } => {
@@ -470,13 +515,13 @@ fn render_row(row: &Row, cols: usize, any_selected: bool) -> String {
                 Some(title) => {
                     out.push_str(&hue(*title_ink).mix(BASE, fade).bg());
                     out.push_str(&CHIP_INK.fg());
-                    out.push_str(&clamp(title, TITLE_W));
+                    out.push_str(&clamp(title, widths.title));
                     out.push_str(RESET);
                     out.push_str(&o);
                 }
                 None => {
                     out.push_str(&o);
-                    out.push_str(&" ".repeat(TITLE_W));
+                    out.push_str(&" ".repeat(widths.title));
                 }
             }
             out.push_str(&o);
@@ -484,7 +529,7 @@ fn render_row(row: &Row, cols: usize, any_selected: bool) -> String {
             // Cols 18–24. Tinted TEXT, keyed by repo root — one repo is one
             // colour everywhere, forever (lock §4).
             out.push_str(&ink(hue(*repo_ink)));
-            out.push_str(&clamp(repo, REPO_W));
+            out.push_str(&clamp(repo, widths.repo));
             out.push_str(&o);
             out.push_str(&o);
             out.push(' '); // col 25
@@ -591,32 +636,72 @@ mod tests {
     /// a row that is not exactly `cols` cells is a ragged bar.
     #[test]
     fn every_row_is_exactly_cols_cells() {
-        for cols in [MIN_INTACT_COLS, 30, DESIGN_COLS, 80, 200] {
-            for line in render_rows(&fleet(), cols) {
+        for cols in [Widths::EXPANDED.min_intact_cols(), 30, DESIGN_COLS, 80, 200] {
+            for line in render_rows(&fleet(), cols, Widths::EXPANDED) {
                 let width = display_cells(&strip_sgr(&line));
                 assert_eq!(width, cols, "at cols={cols}: {line:?}");
             }
         }
     }
 
-    /// Selection must not move a single column (lock §2.2) — the cap columns
-    /// are reserved on every row precisely so the eye scans one edge.
+    /// The same invariant, under `COLLAPSED` (task 1.5 / LEDGER D16): one
+    /// `render_row` body serving two profiles is only actually one layout if
+    /// BOTH profiles hold the width guarantee at the same set of pathological
+    /// `cols`, not just the profile that shipped first. `13`, `21` and `26` are
+    /// `COLLAPSED`'s own floor arithmetic (`13 + 5 + 3`, see
+    /// `min_intact_cols_is_thirteen_plus_title_plus_repo`) and candidate A from
+    /// `bar-preview`'s collapsed section; the rest are shared reference points
+    /// with the `EXPANDED` test above.
     #[test]
-    fn title_starts_at_column_ten_selected_or_not() {
-        let unselected = agent(RowStatus::Working, Provenance::Branch, Some("S6-GUT"), "x");
-        let selected = Row {
-            selected: true,
-            ..unselected.clone()
-        };
-        for row in [unselected, selected] {
-            let bare = strip_sgr(&render_rows(std::slice::from_ref(&row), DESIGN_COLS)[0]);
-            assert_eq!(
-                cell_slice(&bare, GUTTER_W, GUTTER_W + TITLE_W),
-                "S6-GUT ",
-                "selected={}",
-                row.selected
-            );
+    fn every_row_is_exactly_cols_cells_under_collapsed() {
+        for cols in [0, 1, 13, 21, 26, 30, 44] {
+            let expected = cols.max(Widths::COLLAPSED.min_intact_cols());
+            for line in render_rows(&fleet(), cols, Widths::COLLAPSED) {
+                let width = display_cells(&strip_sgr(&line));
+                assert_eq!(width, expected, "at cols={cols}: {line:?}");
+            }
         }
+    }
+
+    /// Selection must not move a single column (lock §2.2) — the cap columns
+    /// are reserved on every row precisely so the eye scans one edge. Checked
+    /// under BOTH width profiles (LEDGER D16): the gutter is identical between
+    /// them, which is the entire point of a width profile rather than a second
+    /// layout, so column 10 cannot move when the profile changes either.
+    #[test]
+    fn title_starts_at_column_ten_under_both_profiles() {
+        for widths in [Widths::EXPANDED, Widths::COLLAPSED] {
+            let unselected = agent(RowStatus::Working, Provenance::Branch, Some("S6-GUT"), "x");
+            let selected = Row {
+                selected: true,
+                ..unselected.clone()
+            };
+            // What the chip cell holds at this profile's title width — narrower
+            // under `COLLAPSED`, but starting at the same column either way.
+            let chip = clamp("S6-GUT", widths.title);
+            for row in [unselected, selected] {
+                let bare =
+                    strip_sgr(&render_rows(std::slice::from_ref(&row), DESIGN_COLS, widths)[0]);
+                assert_eq!(
+                    cell_slice(&bare, GUTTER_W, GUTTER_W + widths.title),
+                    chip,
+                    "selected={} widths={widths:?}",
+                    row.selected
+                );
+            }
+        }
+    }
+
+    /// LEDGER D16's own arithmetic, pinned by equality rather than trusted from
+    /// prose: `13` is the 9-column gutter plus the space after title, the space
+    /// after repo, the right margin and the right cap — everything fixed that
+    /// is not title or repo itself (D12, generalised to a profile by D16).
+    #[test]
+    fn min_intact_cols_is_thirteen_plus_title_plus_repo() {
+        assert_eq!(Widths::EXPANDED.min_intact_cols(), 13 + 7 + 7);
+        assert_eq!(Widths::EXPANDED.min_intact_cols(), 27); // D12, unchanged
+        assert_eq!(Widths::COLLAPSED.min_intact_cols(), 13 + 5 + 3);
+        assert_eq!(Widths::COLLAPSED.min_intact_cols(), 21); // D16
     }
 
     /// A missing glyph renders a blank cell and does not reflow the row (lock
@@ -626,8 +711,8 @@ mod tests {
     fn an_absent_glyph_blanks_its_cell_without_reflowing() {
         let main = agent(RowStatus::Idle, Provenance::Main, Some("TITLE"), "s");
         let worktree = agent(RowStatus::Idle, Provenance::Worktree, Some("TITLE"), "s");
-        let [main, worktree] =
-            [main, worktree].map(|r| strip_sgr(&render_rows(&[r], DESIGN_COLS)[0]));
+        let [main, worktree] = [main, worktree]
+            .map(|r| strip_sgr(&render_rows(&[r], DESIGN_COLS, Widths::EXPANDED)[0]));
 
         // Cell 8, indexed in CELLS — the provenance column is only the eighth
         // `char` while every glyph before it is one cell wide.
@@ -678,7 +763,7 @@ mod tests {
     fn a_selected_rows_background_spans_every_column() {
         let mut row = agent(RowStatus::Working, Provenance::Worktree, Some("T"), "short");
         row.selected = true;
-        let line = &render_rows(&[row], DESIGN_COLS)[0];
+        let line = &render_rows(&[row], DESIGN_COLS, Widths::EXPANDED)[0];
         let bgs = cell_backgrounds(line);
         assert_eq!(bgs.len(), DESIGN_COLS);
 
@@ -693,7 +778,7 @@ mod tests {
         // Everything but the chip (cols 10–16) is the selection colour, and the
         // trailing pad after a 5-cell summary is included.
         for (i, bg) in bgs.iter().enumerate().take(DESIGN_COLS - 1).skip(1) {
-            if (GUTTER_W..GUTTER_W + TITLE_W).contains(&i) {
+            if (GUTTER_W..GUTTER_W + Widths::EXPANDED.title).contains(&i) {
                 continue;
             }
             assert_eq!(bg, &sel, "col {}", i + 1);
@@ -720,10 +805,12 @@ mod tests {
         assert_eq!(out, "\u{4f60}\u{597d}\u{4e16}\u{2026} ");
     }
 
-    /// Degenerate widths must not panic. Below `MIN_INTACT_COLS` the fixed
+    /// Degenerate widths must not panic. Below `min_intact_cols()` the fixed
     /// columns hold and the row is WIDER than the pane (LEDGER D9) — recorded
-    /// here so the behaviour is a decision, not a surprise. Collapsed geometry
-    /// is unratified (lock §3) and is S8's to design.
+    /// here so the behaviour is a decision, not a surprise. This is a guard
+    /// against pathological widths now (LEDGER D16), not the mechanism a user
+    /// ever sees — the collapsed profile is chosen by STATE, so a live seek
+    /// never crosses this floor.
     ///
     /// Pinned to equality, not bounded: the widths are exact, and a future
     /// change that silently reflows a fixed column downward to fit should fail
@@ -732,9 +819,20 @@ mod tests {
     /// kinds, or the visible part of the bar is ragged rather than clipped.
     #[test]
     fn degenerate_widths_do_not_panic() {
-        for cols in [0, 1, 9, 20, MIN_INTACT_COLS, DESIGN_COLS, 200] {
-            let expected = cols.max(MIN_INTACT_COLS);
-            for (i, line) in render_rows(&fleet(), cols).iter().enumerate() {
+        for cols in [
+            0,
+            1,
+            9,
+            20,
+            Widths::EXPANDED.min_intact_cols(),
+            DESIGN_COLS,
+            200,
+        ] {
+            let expected = cols.max(Widths::EXPANDED.min_intact_cols());
+            for (i, line) in render_rows(&fleet(), cols, Widths::EXPANDED)
+                .iter()
+                .enumerate()
+            {
                 let width = display_cells(&strip_sgr(line));
                 assert_eq!(width, expected, "row {i} at cols={cols}");
             }
@@ -793,7 +891,74 @@ mod tests {
             "\u{1b}[38;2;45;79;103m\u{e0b6}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m\u{1b}[38;2;255;158;59m\u{25cf}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;220;215;186m\u{2502}\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;230;195;132m\u{f007c}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;126;156;216m\u{168c2}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;122;168;159m\u{1b}[38;2;22;22;29mS6-GUT \u{1b}[0m\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;126;156;216mclave  \u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m picking the gutt\u{2026}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[0m\u{1b}[38;2;45;79;103m\u{e0b4}\u{1b}[0m",
             "   \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;71;71;92m\u{f018d}   \u{1b}[38;2;92;101;103mTab #16                           \u{1b}[0m ",
         ];
-        assert_eq!(render_rows(&rows, DESIGN_COLS), expected);
+        assert_eq!(render_rows(&rows, DESIGN_COLS, Widths::EXPANDED), expected);
+    }
+
+    /// The same picture, one layout, the other profile (LEDGER D16): same
+    /// three rows as `golden_bar_at_forty_four_columns`, `Widths::COLLAPSED`
+    /// at `cols = 30` — candidate B of `bar-preview`'s collapsed section.
+    ///
+    /// Column arithmetic, derived (not copied from D16's worked example — see
+    /// below): `13 + title + repo` is the fixed floor (`min_intact_cols_is_…`),
+    /// so at `title = 5, repo = 3` that is `21`, and the flex cell is
+    /// `summary_w = cols - 21 = 30 - 21 = 9`. Laid out: `1 cap + 8 gutter (+1
+    /// gutter space = 9) + 5 title + 1 + 3 repo + 1 + 9 summary + 1 margin + 1
+    /// cap = 30`. Title still starts at column 10 — cols 1–9 are the gutter,
+    /// unchanged from `EXPANDED` (D16's whole point).
+    ///
+    /// D16's own inline example ("`collapsed 26 = 1 cap + 8 gutter + 5 title +
+    /// 1 + 3 repo + 1 + 6 summary + 1 margin + 1 cap`") sums its own terms to
+    /// **27, not 26** — `1+8+5+1+3+1+6+1+1 = 27`. Its "Open" note repeats the
+    /// same off-by-one ("26 \u{2192} 6 summary chars", "28 \u{2192} 8 chars");
+    /// the arithmetic that actually closes is `summary = cols - 13 - title -
+    /// repo`, giving `26 \u{2192} 5` and `28 \u{2192} 7`. Flagged for the
+    /// ledger rather than silently fixed there — this test uses the closing
+    /// arithmetic, at `cols = 30` specifically so it does not lean on the
+    /// disputed number at all.
+    #[test]
+    fn golden_bar_collapsed_at_thirty_columns() {
+        let rows = vec![
+            agent(
+                RowStatus::NeedsYou,
+                Provenance::Main,
+                None,
+                "I just passed the spec over",
+            ),
+            Row {
+                selected: true,
+                ..agent(
+                    RowStatus::Working,
+                    Provenance::Worktree,
+                    Some("S6-GUT"),
+                    "picking the gutter set",
+                )
+            },
+            Row {
+                content: RowContent::Terminal {
+                    name: String::from("Tab #16"),
+                },
+                selected: false,
+            },
+        ];
+        let expected = [
+            " \u{1b}[38;2;179;86;98m\u{25cf} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;180;154;109m\u{f007c}         \u{1b}[38;2;102;125;172mcl\u{2026} \u{1b}[38;2;173;169;150mI just p\u{2026} \u{1b}[0m ",
+            "\u{1b}[38;2;45;79;103m\u{e0b6}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m\u{1b}[38;2;255;158;59m\u{25cf}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;220;215;186m\u{2502}\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;230;195;132m\u{f007c}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;126;156;216m\u{168c2}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;122;168;159m\u{1b}[38;2;22;22;29mS6-G\u{2026}\u{1b}[0m\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;126;156;216mcl\u{2026}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m picking \u{2026}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[0m\u{1b}[38;2;45;79;103m\u{e0b4}\u{1b}[0m",
+            "   \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;71;71;92m\u{f018d}   \u{1b}[38;2;92;101;103mTab #16             \u{1b}[0m ",
+        ];
+        assert_eq!(render_rows(&rows, 30, Widths::COLLAPSED), expected);
+        for line in &expected {
+            assert_eq!(display_cells(&strip_sgr(line)), 30);
+        }
+        // Title still starts at column 10 (cell index GUTTER_W = 9) — the
+        // gutter did not move, only the profile narrowed the fields after it.
+        assert_eq!(
+            cell_slice(
+                &strip_sgr(expected[1]),
+                GUTTER_W,
+                GUTTER_W + Widths::COLLAPSED.title
+            ),
+            "S6-G\u{2026}"
+        );
     }
 
     #[test]
@@ -807,10 +972,11 @@ mod tests {
     #[test]
     fn nothing_selected_means_nothing_faded() {
         let row = agent(RowStatus::Done, Provenance::Branch, None, "s");
-        let unfocused = render_rows(std::slice::from_ref(&row), DESIGN_COLS).remove(0);
+        let unfocused =
+            render_rows(std::slice::from_ref(&row), DESIGN_COLS, Widths::EXPANDED).remove(0);
         let mut other = agent(RowStatus::Idle, Provenance::Main, None, "s");
         other.selected = true;
-        let faded = &render_rows(&[row, other], DESIGN_COLS)[0];
+        let faded = &render_rows(&[row, other], DESIGN_COLS, Widths::EXPANDED)[0];
 
         // springGreen at full strength, then faded 25% toward sumiInk3.
         assert!(unfocused.contains("\u{1b}[38;2;152;187;108m"));
@@ -868,7 +1034,7 @@ mod tests {
             assert_eq!(status.mark(), (glyph, colour), "{status:?}");
             // And it reaches the row: col 2 is the status cell (lock §2.1).
             let row = agent(status, Provenance::Main, None, "s");
-            let bare = strip_sgr(&render_rows(&[row], DESIGN_COLS)[0]);
+            let bare = strip_sgr(&render_rows(&[row], DESIGN_COLS, Widths::EXPANDED)[0]);
             assert_eq!(cell_slice(&bare, 1, 2), glyph.to_string(), "{status:?}");
         }
         // The two easy to transpose are genuinely different glyphs.
@@ -887,7 +1053,7 @@ mod tests {
     #[test]
     fn an_unselected_summary_is_fujiwhite_even_when_nothing_is_selected() {
         let row = agent(RowStatus::Done, Provenance::Main, Some("T"), "summary text");
-        let line = &render_rows(std::slice::from_ref(&row), DESIGN_COLS)[0];
+        let line = &render_rows(std::slice::from_ref(&row), DESIGN_COLS, Widths::EXPANDED)[0];
         // Unfaded fujiWhite: nothing is selected, so the fade is 0.
         let (before, after) = line.split_once("summary text").expect("the summary");
         assert!(
@@ -902,7 +1068,7 @@ mod tests {
             selected: true,
             ..row
         };
-        let line = &render_rows(&[selected], DESIGN_COLS)[0];
+        let line = &render_rows(&[selected], DESIGN_COLS, Widths::EXPANDED)[0];
         let (before, _) = line.split_once("summary text").expect("the summary");
         assert!(!before.ends_with(&RULE_INK.fg()));
         assert!(
@@ -919,18 +1085,37 @@ mod tests {
     fn control_characters_cannot_break_a_row() {
         let mut row = agent(RowStatus::Working, Provenance::Main, None, "");
         if let RowContent::Agent { summary, repo, .. } = &mut row.content {
-            *summary = String::from("one\ntwo\r\u{1b}[31mred\u{7f}\u{9b}");
+            *summary = String::from("one\ntwo");
             *repo = String::from("re\u{1b}po");
         }
-        let line = &render_rows(std::slice::from_ref(&row), DESIGN_COLS)[0];
+        let line = &render_rows(std::slice::from_ref(&row), DESIGN_COLS, Widths::EXPANDED)[0];
         let bare = strip_sgr(line);
         assert_eq!(display_cells(&bare), DESIGN_COLS);
         assert!(
             !bare.chars().any(char::is_control),
             "a control character reached the row: {bare:?}"
         );
-        // `strip_sgr` removed the SGR the renderer emitted; the summary's own
-        // `[31m` survives as literal text, which is the point — it is text now.
-        assert!(bare.contains("onetwo[31mred"), "{bare:?}");
+        // Task 1.5's follow-up: a control char becomes a SPACE, not nothing —
+        // dropping `\n` merges "one" and "two" into one word, and a summary
+        // containing `\n` is a wrapped sentence, not two words meant to touch.
+        assert!(bare.contains("one two"), "{bare:?}");
+        assert!(!bare.contains("onetwo"), "{bare:?}");
+    }
+
+    /// A control character elsewhere in a fixed-width cell gets the same
+    /// treatment, and clashing SGR-like text stays literal once stripped —
+    /// `strip_sgr` only removes sequences THIS renderer emitted.
+    #[test]
+    fn a_control_character_mid_fixed_cell_becomes_a_space() {
+        let row = agent(
+            RowStatus::Working,
+            Provenance::Main,
+            None,
+            "\u{1b}[31mred\u{7f}\u{9b}!",
+        );
+        let line = &render_rows(std::slice::from_ref(&row), DESIGN_COLS, Widths::EXPANDED)[0];
+        let bare = strip_sgr(line);
+        assert!(!bare.chars().any(char::is_control), "{bare:?}");
+        assert!(bare.contains(" [31mred  !"), "{bare:?}");
     }
 }

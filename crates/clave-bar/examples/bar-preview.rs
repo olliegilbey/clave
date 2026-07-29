@@ -25,7 +25,7 @@
 //! plane. Escapes survive every tool in the chain.
 
 use clave_bar::render::{
-    CHIP_INK, DESIGN_COLS, PALETTE, Provenance, RESET, Rgb, Row, RowContent, RowStatus,
+    CHIP_INK, DESIGN_COLS, PALETTE, Provenance, RESET, Rgb, Row, RowContent, RowStatus, Widths,
     display_cells, render_rows, strip_sgr,
 };
 
@@ -151,21 +151,26 @@ fn fleet() -> Vec<Row> {
     rows
 }
 
-fn bar(rows: &[Row], label: &str) {
-    let ruler: String = (0..DESIGN_COLS)
+/// `cols`/`widths` are parameters (task 1.5, LEDGER D16) so the same framed
+/// box — ruler, border, per-row width assertion — draws both the ratified
+/// expanded render and every collapsed candidate. Behaviour at the original
+/// call site (`cols = DESIGN_COLS`, `widths = Widths::EXPANDED`) is unchanged;
+/// this is a signature widening, not a rewrite.
+fn bar(rows: &[Row], cols: usize, widths: Widths, label: &str) {
+    let ruler: String = (0..cols)
         .map(|i| char::from_digit(((i + 1) % 10) as u32, 10).unwrap())
         .collect();
     let dim = DIM.fg();
-    let rule = "\u{2500}".repeat(DESIGN_COLS);
+    let rule = "\u{2500}".repeat(cols);
     println!("\n  {BOLD}{label}{RESET}");
     println!("  {dim}{ruler}\n  \u{250c}{rule}\u{2510}{RESET}");
-    for (line, row) in render_rows(rows, DESIGN_COLS).iter().zip(rows) {
-        // The lock CLAIMS every row is exactly DESIGN_COLS cells. Prove it
-        // rather than asserting it in prose: strip the SGR sequences and
-        // measure the remainder in display cells. A miscounted glyph fails the
-        // preview loudly instead of shipping a ragged bar.
+    for (line, row) in render_rows(rows, cols, widths).iter().zip(rows) {
+        // The lock CLAIMS every row is exactly `cols` cells. Prove it rather
+        // than asserting it in prose: strip the SGR sequences and measure the
+        // remainder in display cells. A miscounted glyph fails the preview
+        // loudly instead of shipping a ragged bar.
         let width = display_cells(&strip_sgr(line));
-        assert_eq!(width, DESIGN_COLS, "row is {width} cells: {row:?}");
+        assert_eq!(width, cols, "row is {width} cells: {row:?}");
         println!("  {dim}\u{2502}{RESET}{line}{dim}\u{2502}{RESET}");
     }
     println!("  {dim}\u{2514}{rule}\u{2518}{RESET}");
@@ -180,6 +185,8 @@ fn main() {
     );
     bar(
         &fleet(),
+        DESIGN_COLS,
+        Widths::EXPANDED,
         &format!("expanded \u{2014} {DESIGN_COLS} columns"),
     );
 
@@ -218,4 +225,75 @@ fn main() {
         );
     }
     println!();
+
+    collapsed_candidates();
+}
+
+/// A `Widths` candidate under consideration for D16's open pair, labelled with
+/// the numbers that produced it (task 1.5).
+struct Candidate {
+    label: &'static str,
+    widths: Widths,
+    cols: usize,
+}
+
+/// Task 1.5 / LEDGER D16: collapsed is a WIDTH PROFILE (title, repo), not a
+/// second layout — same `fleet()`, same `bar()`, different numbers. Renders
+/// three candidates so the open pair (title/repo — "to be settled by looking,
+/// not by arguing") gets picked by looking, not derived from prose. B and C
+/// share `cols` on purpose: the comparison is where the characters go, not how
+/// many there are.
+fn collapsed_candidates() {
+    let dim = DIM.fg();
+    let bar_rule = "\u{2550}".repeat(78);
+    println!("\n{BOLD}{bar_rule}\ncollapsed \u{2014} candidates (LEDGER D16)\n{bar_rule}{RESET}");
+
+    let candidates = [
+        Candidate {
+            label: "A \u{2014} tight",
+            widths: Widths { title: 5, repo: 3 },
+            cols: 26,
+        },
+        Candidate {
+            label: "B \u{2014} roomy",
+            widths: Widths { title: 5, repo: 3 },
+            cols: 30,
+        },
+        Candidate {
+            label: "C \u{2014} title holds at 7",
+            widths: Widths { title: 7, repo: 3 },
+            cols: 30,
+        },
+    ];
+
+    for c in &candidates {
+        // Derived, not hard-coded: `summary_w = cols - min_intact_cols()` is
+        // the same arithmetic `render_row` uses internally once `cols` clears
+        // the floor (`13 + title + repo` — LEDGER D12's arithmetic,
+        // generalised to a profile by D16), so this number is guaranteed to
+        // match what the box below actually shows.
+        let summary_w = c.cols.saturating_sub(c.widths.min_intact_cols());
+        bar(
+            &fleet(),
+            c.cols,
+            c.widths,
+            &format!(
+                "{} \u{2014} title {}, repo {}, cols {}, summary {}",
+                c.label, c.widths.title, c.widths.repo, c.cols, summary_w
+            ),
+        );
+    }
+
+    println!(
+        "\n  {dim}separation from {DESIGN_COLS}: {}{RESET}",
+        candidates
+            .iter()
+            .map(|c| format!("{} = {}", c.label, DESIGN_COLS - c.cols))
+            .collect::<Vec<_>>()
+            .join("   ")
+    );
+    println!(
+        "  {dim}LEDGER D15 requires separation > 10 (the widest `width_seek` \
+         acceptance half-band) \u{2014} all three candidates clear it.{RESET}"
+    );
 }
