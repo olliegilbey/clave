@@ -477,6 +477,56 @@ resting-width costs become dead paths:
   ever catch it. Needs a display area around 400 columns; Ollie runs ~280, so it
   is out of reach today. **Not out of reach forever.**
 
+### D29 — The S-specs get SALVAGED and DELETED, not updated (2026-07-29)
+
+> **NOT YET IMPLEMENTED**, by design. Banners land now (see below); the salvage
+> and deletion happen **after the release**, as their own PR.
+
+The operating rule ends *"specs get written from what exists — or deleted."*
+Ruling: **deleted.** Not updated, and not merely warned about in a handoff.
+
+**Why not updated.** All 6,632 lines exist because the visual surface had no test
+access, so prose was the only medium available. That is no longer true — there is
+an executable render, a golden-tested renderer and this ledger. Maintaining a
+second description of what the code now describes better *is* the treadmill, and
+this session proved these documents drift **silently**: a claim was false in the
+field for months and nothing noticed.
+
+**Why not just a handoff directive.** A warning in a status file does not stop a
+`grep`. The next agent searches for "provenance" or "width budget", lands in S4,
+and finds false content with no warning attached. `FOOTGUNS` already names this
+failure: *a trap index that teaches a false test is worse than no entry*, because
+the reader runs it and concludes there is no trap.
+
+**Three documents, three dispositions — this is not uniform:**
+
+- **The design lock STAYS, and stays authoritative.** It is not an implementation
+  plan; it is earned knowledge that cannot live in code — the thirteen-tool survey
+  finding that essentially nothing marks a default branch, why no worktree glyph
+  exists anywhere, why hashing was overruled twice, the glyph rule. Amend §3
+  (collapsed is settled by D16/D17, and its `< 24` by D15). Nothing else.
+- **S4/S5/S6 get salvaged, then deleted.** Rationale moves to the homes that
+  already own it *and are actually read*: traps → `FOOTGUNS.md`, dead ends →
+  `SUBSYSTEM-VALIDATION.md`'s C-sections (which exist for exactly this),
+  vocabulary → `UBIQUITOUS_LANGUAGE.md`, remaining work → the issues already
+  tracking it (#59, #60, #61).
+- **S8 is handled as part of #63**, not in a separate sweep — it is about to be
+  actively worked, so its live content matters there.
+
+**The test for every claim: could this be re-derived from the code or a test in
+under a minute?** Yes → delete. No → it is earned knowledge, and it moves. Nothing
+is "updated in place."
+
+**The risk to guard against is an agent *reconciling* instead of salvaging** —
+that instinct is how 6,632 lines happened. Deletion is reversible (git has it);
+a reconciliation round is not, because it costs a session.
+
+**Banners now, on #86.** Four claims are known false and carry no warning today.
+A banner is a **warning, not a reconciliation** — it marks a document as
+untrustworthy rather than resolving a discovery by editing it, which is precisely
+the line between this fix and the loop. Cheap, surgical, and it does not
+invalidate #86's three review rounds the way a 6,632-line deletion would.
+
 ### D28 — The release sequence, ruled by Ollie (2026-07-29)
 
 Merging #86 **installs nothing** — his fleet runs the stable binary from a
