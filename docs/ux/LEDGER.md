@@ -192,4 +192,4 @@ Catalogued deliberately. If one blocks a task, override it in the brief.
 
 | Task | Status | Commits | Notes |
 |---|---|---|---|
-| 1 — the pure 44-column renderer | not started | — | |
+| 1 — the pure 44-column renderer | done, gates green | `8fb4aca`, `b4dc411` | `render.rs` + 11 tests; `bar-preview` is a Rust example driven by `render_rows`, byte-identical to the Python it deletes. Not wired — `main.rs`/`model.rs` untouched (task 2). |
