@@ -237,12 +237,14 @@ If one blocks a task, override it **in the subagent's brief**.
 - **`bar-preview.py:59` names `#1F1F28` "sumiInk1"**; S5 and the lock say
   "sumiInk3".
 
-**Fuller detail, if you need it:** `.superpowers/sdd/s4-reconcile-report.md`,
-`s5-reconcile-report.md`, `s6-reconcile-report.md` — on disk in this worktree,
-**git-ignored**, so they exist only here and `git clean -fdx` destroys them.
-The same directory holds `progress.md` (the #69 SDD ledger) and the task
-briefs/reports, which are the working examples of subagent prompts that
-performed well.
+**There is no fuller detail to go and find — the list above IS the extraction.**
+The three reconciliation agents wrote reports; their amendments landed in the
+specs (merged, #82), their unfixed-contradiction lists are the bullets above,
+and their design questions are the decisions below. What remained was
+pre-merge line-number citations that were already drifting. The reports were
+deleted with their worktree rather than kept "just in case" — keeping process
+artifacts whose content is already extracted is the same instinct that grew
+6,632 lines of spec. **Do not go looking for them.**
 
 ### Open design decisions — surfaced, deliberately NOT decided
 
