@@ -243,6 +243,25 @@ pub fn display_cells(s: &str) -> usize {
     s.chars().map(|c| c.width().unwrap_or(0)).sum()
 }
 
+/// The substring occupying display cells `[start, end)`. Tests that want "the
+/// title column" mean CELLS; `chars().collect::<Vec<_>>()[9..16]` only agrees
+/// when every preceding glyph happens to be one cell wide, which is exactly the
+/// assumption this module exists to stop relying on. A wide glyph straddling
+/// either boundary is excluded — the caller asked for a cell range, and half a
+/// glyph is not a cell.
+pub fn cell_slice(s: &str, start: usize, end: usize) -> String {
+    let mut at = 0;
+    let mut out = String::new();
+    for ch in s.chars() {
+        let w = ch.width().unwrap_or(0);
+        if at >= start && at + w <= end {
+            out.push(ch);
+        }
+        at += w;
+    }
+    out
+}
+
 /// Drop SGR sequences so what remains can be MEASURED. Shared by the width
 /// invariant in the tests and by the preview's self-check — the lock only
 /// CLAIMS every row is 44 cells, and a claim about a rendered row is worth
@@ -275,6 +294,16 @@ fn clamp(s: &str, w: usize) -> String {
     if w == 0 {
         return String::new();
     }
+    // Summaries are agent-authored: hooks write them, so a `\n`, `\r` or a bare
+    // `\u{1b}` is reachable input, not a hypothetical. Control characters
+    // measure as ZERO cells, so they would sail through this clamp and through
+    // the every-row-is-`cols`-cells invariant while breaking the row on screen.
+    // `render.rs` is what GUARANTEES that invariant, and a guarantee that holds
+    // only when someone else sanitises first is not a guarantee — so it is
+    // enforced here, at the point text enters a cell, rather than at the wiring
+    // boundary. `char::is_control()` is exactly Cc: C0, DEL and C1.
+    let s: String = s.chars().filter(|c| !c.is_control()).collect();
+    let s = s.as_str();
     let n = display_cells(s);
     if n <= w {
         let mut out = String::from(s);
@@ -406,9 +435,17 @@ fn render_row(row: &Row, cols: usize, any_selected: bool) -> String {
     out.push_str(&o);
     out.push(' '); // col 9
 
-    // Only `summary` flexes (LEDGER D9). `saturating_sub` rather than a floor
-    // check: a 0-width budget must render nothing, not panic.
-    let body = cols.saturating_sub(GUTTER_W + 2); // minus right margin and cap
+    // Only `summary` flexes (LEDGER D9). Below `MIN_INTACT_COLS` the fixed
+    // columns cannot all fit, and the row is deliberately WIDER than the pane
+    // rather than reflowed — but EVERY row kind over-runs to the same width, or
+    // the bar goes ragged instead of merely clipped, which is the alignment
+    // loss lock §2.1 exists to forbid. A terminal row used to shrink to `cols`
+    // while an agent row held at 27. The real answer is a separate collapsed
+    // layout (LEDGER D12); this only keeps the interim degradation coherent.
+    let intact = cols.max(MIN_INTACT_COLS);
+    // `saturating_sub` rather than a floor check: a 0-width budget must render
+    // nothing, not panic, if these constants ever move.
+    let body = intact.saturating_sub(GUTTER_W + 2); // minus right margin and cap
     let summary_w = body.saturating_sub(TITLE_W + REPO_W + 2);
 
     match &row.content {
@@ -451,9 +488,14 @@ fn render_row(row: &Row, cols: usize, any_selected: bool) -> String {
             out.push_str(&o);
             out.push_str(&o);
             out.push(' '); // col 25
-            // Cols 26–42. The selected row leaves the summary at the inherited
-            // foreground; every other row is faded fujiWhite.
-            if fade > 0.0 {
+            // Cols 26–42. The selected row leaves the summary at the repo ink
+            // set on the line above — deliberate and ratified, it is visible in
+            // the preview's selected row. Every OTHER row is fujiWhite, faded
+            // or not: gating this on `fade > 0.0` conflated "unselected" with
+            // "faded", and those come apart when nothing is selected (every row
+            // fades by 0), which silently painted every summary its repo colour
+            // until the moment a row was selected.
+            if !row.selected {
                 out.push_str(&ink(RULE_INK));
             }
             out.push_str(&clamp(summary, summary_w));
@@ -568,11 +610,8 @@ mod tests {
         };
         for row in [unselected, selected] {
             let bare = strip_sgr(&render_rows(std::slice::from_ref(&row), DESIGN_COLS)[0]);
-            let cols: Vec<char> = bare.chars().collect();
             assert_eq!(
-                cols[GUTTER_W..GUTTER_W + TITLE_W]
-                    .iter()
-                    .collect::<String>(),
+                cell_slice(&bare, GUTTER_W, GUTTER_W + TITLE_W),
                 "S6-GUT ",
                 "selected={}",
                 row.selected
@@ -590,14 +629,15 @@ mod tests {
         let [main, worktree] =
             [main, worktree].map(|r| strip_sgr(&render_rows(&[r], DESIGN_COLS)[0]));
 
-        let cell = |s: &str, i: usize| s.chars().nth(i).unwrap();
-        assert_eq!(cell(&main, 7), ' ', "col 8 is blank for a main checkout");
-        assert_eq!(cell(&worktree, 7), '\u{168c2}');
+        // Cell 8, indexed in CELLS — the provenance column is only the eighth
+        // `char` while every glyph before it is one cell wide.
+        assert_eq!(cell_slice(&main, 7, 8), " ", "col 8 is blank for a main");
+        assert_eq!(cell_slice(&worktree, 7, 8), "\u{168c2}");
         // Same width, same text origin: the blank cost exactly one column.
         assert_eq!(display_cells(&main), display_cells(&worktree));
         assert_eq!(
-            main.chars().skip(GUTTER_W).collect::<String>(),
-            worktree.chars().skip(GUTTER_W).collect::<String>()
+            cell_slice(&main, GUTTER_W, DESIGN_COLS),
+            cell_slice(&worktree, GUTTER_W, DESIGN_COLS)
         );
     }
 
@@ -684,24 +724,45 @@ mod tests {
     /// columns hold and the row is WIDER than the pane (LEDGER D9) — recorded
     /// here so the behaviour is a decision, not a surprise. Collapsed geometry
     /// is unratified (lock §3) and is S8's to design.
+    ///
+    /// Pinned to equality, not bounded: the widths are exact, and a future
+    /// change that silently reflows a fixed column downward to fit should fail
+    /// here rather than be tolerated by a `<=`. The fleet mixes agent and
+    /// terminal rows on purpose — the over-run has to be UNIFORM across row
+    /// kinds, or the visible part of the bar is ragged rather than clipped.
     #[test]
     fn degenerate_widths_do_not_panic() {
         for cols in [0, 1, 9, 20, MIN_INTACT_COLS, DESIGN_COLS, 200] {
+            let expected = cols.max(MIN_INTACT_COLS);
             for (i, line) in render_rows(&fleet(), cols).iter().enumerate() {
                 let width = display_cells(&strip_sgr(line));
-                if cols >= MIN_INTACT_COLS {
-                    assert_eq!(width, cols);
-                } else {
-                    assert!(width <= MIN_INTACT_COLS, "row {i} at cols={cols}: {width}");
-                }
+                assert_eq!(width, expected, "row {i} at cols={cols}");
             }
         }
         assert_eq!(clamp("anything", 0), "");
     }
 
-    /// The picture, not a fragment. Regenerate by eye against
-    /// `cargo run -p clave-bar --example bar-preview` — a diff here is a
-    /// deliberate design change or a bug, and both want a human looking.
+    /// The picture, not a fragment. A diff here is a deliberate design change
+    /// or a bug, and both want a human looking.
+    ///
+    /// The expected value traces to the LOCK, not to the code that produced it
+    /// — check it against design-lock §2 rather than against `render_rows`:
+    ///
+    /// - Stripped of SGR, each row is
+    ///   `1+1+1+1+1+1+1+1+1 + 7 + 1 + 7 + 1 + 17 + 1 + 1 = 44` cells: the
+    ///   nine-cell gutter (§2.1), title, space, repo, space, summary, right
+    ///   margin, right cap.
+    /// - Row 1 has no title, so cols 10–16 are blank; `clave` is padded to 7 at
+    ///   cols 18–24. Row 3 is a terminal, so its name runs the whole body.
+    /// - The hues are crystalBlue `#7E9CD8`, waveRed `#E46876`, carpYellow
+    ///   `#E6C384` and fujiWhite `#DCD7BA` (§4), each mixed 25% toward sumiInk3
+    ///   `#1F1F28` on the unselected rows (§6) — e.g. waveRed's red is
+    ///   `228 + (31 - 228) * 0.25 = 178.75 -> 179`.
+    /// - The selected row is the only one carrying `48;2;45;79;103`
+    ///   (waveBlue2 `#2D4F67`), its caps (§2.2) and unfaded hues.
+    ///
+    /// Regenerate with `cargo run -p clave-bar --example bar-preview` only
+    /// AFTER confirming the change against the lock.
     #[test]
     fn golden_bar_at_forty_four_columns() {
         let rows = vec![
@@ -767,9 +828,109 @@ mod tests {
 
     /// Ties round to even, as Python's `round()` does — the ratified preview's
     /// captured output depends on it.
+    ///
+    /// waveRed's BLUE is the channel that discriminates, and it is already in
+    /// the golden: `118 + (40 - 118) * 0.25 = 98.5`, which is **98** under
+    /// ties-to-even and **99** under half-away-from-zero. fujiWhite's `149.5`
+    /// is 150 under BOTH modes, so asserting it proves nothing.
     #[test]
     fn mix_rounds_ties_to_even() {
-        // blue: 186 + (40 - 186) * 0.25 = 149.5 -> 150
-        assert_eq!(RULE_INK.mix(BASE, FADE), Rgb(173, 169, 150));
+        let wave_red = PALETTE[3].0;
+        assert_eq!(wave_red, Rgb(0xE4, 0x68, 0x76));
+        assert_eq!(wave_red.mix(BASE, FADE).2, 98);
+        // The whole faded hue, as it appears in `golden_bar_at_forty_four_columns`.
+        assert_eq!(wave_red.mix(BASE, FADE), Rgb(179, 86, 98));
+    }
+
+    /// Every row state's glyph and colour, against the table in LEDGER D10.
+    /// `Failed` and `Opening` are constructed by no fixture and by no preview
+    /// row, so without this their glyphs were asserted by nothing — and the
+    /// U+2716 / U+2717 transposition is the one lock §5 calls out BY NAME.
+    #[test]
+    fn every_row_state_matches_the_ledger_glyph_table() {
+        let wave_red = Rgb(0xE4, 0x68, 0x76);
+        let ronin_yellow = Rgb(0xFF, 0x9E, 0x3B);
+        let spring_green = Rgb(0x98, 0xBB, 0x6C);
+        let sumi_ink4 = Rgb(0x54, 0x54, 0x6D);
+        let samurai_red = Rgb(0xE8, 0x24, 0x24);
+        let carp_yellow = Rgb(0xE6, 0xC3, 0x84);
+        let table = [
+            (RowStatus::NeedsYou, '\u{25cf}', wave_red),
+            (RowStatus::Working, '\u{25cf}', ronin_yellow),
+            (RowStatus::Done, '\u{25cf}', spring_green),
+            (RowStatus::Idle, '\u{25cf}', sumi_ink4),
+            (RowStatus::Failed, '\u{2716}', samurai_red), // HEAVY multiplication x
+            (RowStatus::Dormant, '\u{25cc}', sumi_ink4),
+            (RowStatus::Opening, '\u{21bb}', carp_yellow),
+            (RowStatus::Stale, '\u{2717}', samurai_red), // BALLOT x — a flag, not a Status
+        ];
+        for (status, glyph, colour) in table {
+            assert_eq!(status.mark(), (glyph, colour), "{status:?}");
+            // And it reaches the row: col 2 is the status cell (lock §2.1).
+            let row = agent(status, Provenance::Main, None, "s");
+            let bare = strip_sgr(&render_rows(&[row], DESIGN_COLS)[0]);
+            assert_eq!(cell_slice(&bare, 1, 2), glyph.to_string(), "{status:?}");
+        }
+        // The two easy to transpose are genuinely different glyphs.
+        assert_ne!(
+            RowStatus::Failed.mark().0,
+            RowStatus::Stale.mark().0,
+            "U+2716 and U+2717 must not collapse"
+        );
+    }
+
+    /// Fix to the summary's colour gate: with NOTHING selected every row fades
+    /// by 0, so `fade > 0.0` made every summary inherit its REPO ink — and all
+    /// of them flipped to fujiWhite the instant any row was selected. That
+    /// colour change is undesigned. `nothing_selected_means_nothing_faded` only
+    /// inspects status hues and did not catch it.
+    #[test]
+    fn an_unselected_summary_is_fujiwhite_even_when_nothing_is_selected() {
+        let row = agent(RowStatus::Done, Provenance::Main, Some("T"), "summary text");
+        let line = &render_rows(std::slice::from_ref(&row), DESIGN_COLS)[0];
+        // Unfaded fujiWhite: nothing is selected, so the fade is 0.
+        let (before, after) = line.split_once("summary text").expect("the summary");
+        assert!(
+            before.ends_with(&RULE_INK.fg()),
+            "the summary must be set to fujiWhite, not left on the repo ink: {before:?}"
+        );
+        assert!(!after.is_empty());
+
+        // And the selected row still INHERITS the repo ink — ratified, visible
+        // in the preview's selected row.
+        let selected = Row {
+            selected: true,
+            ..row
+        };
+        let line = &render_rows(&[selected], DESIGN_COLS)[0];
+        let (before, _) = line.split_once("summary text").expect("the summary");
+        assert!(!before.ends_with(&RULE_INK.fg()));
+        assert!(
+            before.contains(&PALETTE[0].0.fg()),
+            "the repo ink carries over"
+        );
+    }
+
+    /// Summaries are agent-authored data written by hooks, so a control
+    /// character is reachable input. They measure as ZERO cells, so an
+    /// unfiltered `\n` or `\u{1b}` would break the row on screen while still
+    /// satisfying `every_row_is_exactly_cols_cells`.
+    #[test]
+    fn control_characters_cannot_break_a_row() {
+        let mut row = agent(RowStatus::Working, Provenance::Main, None, "");
+        if let RowContent::Agent { summary, repo, .. } = &mut row.content {
+            *summary = String::from("one\ntwo\r\u{1b}[31mred\u{7f}\u{9b}");
+            *repo = String::from("re\u{1b}po");
+        }
+        let line = &render_rows(std::slice::from_ref(&row), DESIGN_COLS)[0];
+        let bare = strip_sgr(line);
+        assert_eq!(display_cells(&bare), DESIGN_COLS);
+        assert!(
+            !bare.chars().any(char::is_control),
+            "a control character reached the row: {bare:?}"
+        );
+        // `strip_sgr` removed the SGR the renderer emitted; the summary's own
+        // `[31m` survives as literal text, which is the point — it is text now.
+        assert!(bare.contains("onetwo[31mred"), "{bare:?}");
     }
 }
