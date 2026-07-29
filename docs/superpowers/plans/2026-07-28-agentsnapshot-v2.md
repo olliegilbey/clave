@@ -100,6 +100,7 @@ Add to the `tests` module in `crates/clave-types/src/lib.rs`, immediately after 
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
+set -o pipefail   # else grep/tail supplies the exit status and a cargo failure reads green
 cargo test -p clave-types agent_title_summary_worktree 2>&1 | tail -n 20
 ```
 
@@ -178,6 +179,7 @@ In `crates/clave-bar/src/model.rs`, in `fn agent(…)` (`:1148`) and `fn agent_l
 - [ ] **Step 7: Run the tests**
 
 ```bash
+set -o pipefail   # else grep/tail supplies the exit status and a cargo failure reads green
 cargo test --workspace 2>&1 | grep -E "^(test result|error)" | head -n 20
 ```
 
@@ -255,6 +257,7 @@ Add to the `tests` module in `crates/clave/src/store.rs`:
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
+set -o pipefail   # else grep/tail supplies the exit status and a cargo failure reads green
 cargo test -p clave snapshot_projects_title 2>&1 | tail -n 20
 ```
 
@@ -319,6 +322,7 @@ If the compiler reports a literal not in this list, add the same two lines; the 
 - [ ] **Step 6: Run the tests**
 
 ```bash
+set -o pipefail   # else grep/tail supplies the exit status and a cargo failure reads green
 cargo test --workspace 2>&1 | grep -E "^(test result|error)" | head -n 20
 ```
 
@@ -422,6 +426,7 @@ Add to the `tests` module in `crates/clave/src/store.rs`:
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
+set -o pipefail   # else grep/tail supplies the exit status and a cargo failure reads green
 cargo test -p clave backfill 2>&1 | tail -n 20
 ```
 
@@ -509,6 +514,7 @@ pub fn clear_tab_timeline(paths: &StorePaths) -> Result<()> {
 - [ ] **Step 6: Run the tests**
 
 ```bash
+set -o pipefail   # else grep/tail supplies the exit status and a cargo failure reads green
 cargo test --workspace 2>&1 | grep -E "^(test result|error)" | head -n 20
 ```
 
@@ -563,7 +569,7 @@ do not assume it: its line types changed under us once already.
 Append to the existing `## Process and tooling` section (`:144`):
 
 ```markdown
-- **`~/.claude/projects/` entry names begin with `-`, so bare `ls` parses them as flags.** `ls ~/.claude/projects/*clave*` expands to `-Users-…` and `ls` reads it as options — it fails, or worse, silently returns nothing and reads as "the directory does not exist". `ls` is also aliased to `eza` here, where `-t` means `--time` and errors out demanding a field. Use `/bin/ls --` or `find`. Cost a round during the #69 spike, where it produced a false negative that nearly closed a live investigation early.
+- **`~/.claude/projects/` entry names begin with `-`, so a RELATIVE glob over them parses as flags.** From inside the directory, `ls *clave*` expands to `-Users-…` and `ls` reads it as options: `ls: unrecognized option '--var-folders-…'`, exit 1. **The absolute form is fine** — `ls ~/.claude/projects/*clave*` expands to `/Users/…`, which no `ls` mistakes for a flag (measured: exit 0). Getting this backwards is worse than not knowing it, because the absolute form *succeeds* and reads as "there is no trap here". `ls` is also aliased to `eza`, where `-t` means `--time` and errors demanding a field. Canonical command: `find ~/.claude/projects -maxdepth 1 -name '*clave*'`; `/bin/ls --` also works. Cost a round during the #69 spike. (corrected on #81 — the original entry named the wrong failing form)
 ```
 
 - [ ] **Step 3: Correct the stale claim in design-lock §7.1**
