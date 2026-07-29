@@ -371,6 +371,54 @@ settles it. Do not refactor on it first.**
 Also rejected on source: `OverrideLayout` **closes every tab not named in the
 applied layout** — session-destroying for a fleet orchestrator.
 
+### D23 — `{"type":"summary"}` is EXTINCT. The label's summary tier has never fired (2026-07-29)
+
+Measured, not inferred: **0 of 153 local transcripts** contain the
+`{"type":"summary"}` line that `hook.rs`'s `summary_from_tail` scans for. Claude
+Code writes `{"type":"ai-title"}` instead — present in **74 of 153**.
+
+So §6.4's entire "a summary earns the label" tier is **dead code against real
+data**, and has been. Its tests pass because they use hand-written fixtures
+containing a line shape the field no longer produces. **This is the largest
+instance yet of the failure mode this workstream keeps finding: a green test
+pinning an expectation reality abandoned.** It was invisible for as long as
+nobody measured against real transcripts.
+
+The row fields are retargeted to `ai-title`, with the extinct line kept as a
+fallback. **The LABEL's tier is deliberately left pointing at the extinct
+source** — retargeting it changes every tab name in the field, and that is S4's
+call to make deliberately, not a side effect of this task.
+
+### D24 — `ai-title` does not roll (2026-07-29)
+
+Also measured: up to 85 `ai-title` lines per transcript, and **never more than
+one distinct value per session**. Claude re-stamps the same string.
+
+Every spec in this repo calls it "rolling". **It is not.** The summary column is
+a stable session descriptor, not a narration of progress — closer to a subtitle
+than a status line. The write path is correct either way, but any design that
+assumed the column would tell you what an agent is doing *right now* is wrong,
+and should be rethought rather than quietly disappointed.
+
+### D25 — The bar is non-regressive, so `main` can take it (2026-07-29)
+
+The merge test is not "gates green", it is **"could this be cut as a release"**.
+Before this task it could not: the bar reads `title`/`summary` from the store,
+nothing wrote them, and a real fleet would have shown a blank chip and a blank
+column where the old bar showed `dir \u{b7} branch \u{b7} words`.
+
+Now every row carries at least what the old label carried, via a three-tier
+summary — `ai-title`, else the extinct line, else **the first prompt** — plus
+the repo, the provenance glyph and the status colour the old bar never had. A
+title appears only when the session was genuinely renamed (`custom-title`),
+which is the ratified blank-chip behaviour rather than a gap.
+
+Remaining known hazard, accepted: an **older binary's RMW strips earned
+`title`/`summary`** in a mixed-version window (`FOOTGUNS.md:136`). Both
+re-derive from the transcript on the next hook event, so it self-heals unless
+the tail has also scrolled past the source. Not worth a schema fence — the
+handoff already declined one, and re-derivation is the mechanism it named.
+
 ## Gate 1 — what to look for, and what host tests cannot tell us
 
 Everything green so far is **host-side**. The bar has never rendered at 44
