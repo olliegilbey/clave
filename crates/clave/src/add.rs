@@ -97,8 +97,9 @@ pub fn sanitize_label(s: &str) -> String {
 pub fn tab_node(binary: &str, wasm: &str, label: &str, uuid: &str, cwd: &str) -> String {
     // split_direction="vertical" is REQUIRED for a LEFT bar: zellij stacks
     // sibling panes horizontally (rows) by default (Task 9 C1 finding; same
-    // wrapper as setup::layout_kdl and the S2 spike layout). size="22%" not
-    // size=30: fixed panes refuse resizes — see setup::layout_kdl.
+    // wrapper as setup::layout_kdl and the S2 spike layout). The size is a
+    // PERCENT formatted from `clave_types::BAR_BIRTH_PERCENT`, never `size=30`:
+    // fixed panes refuse resizes — see setup::layout_kdl.
     // `command` bakes the environment's clave (§2 binary split): the
     // versioned copy's absolute path in a stable session, bare `clave` in
     // dev/sandbox — so the resurrected pane re-execs the SAME binary.
@@ -109,7 +110,7 @@ pub fn tab_node(binary: &str, wasm: &str, label: &str, uuid: &str, cwd: &str) ->
     format!(
         r#"    tab name="{label}" focus=true {{
         pane split_direction="vertical" {{
-            pane size="22%" borderless=true {{
+            pane size="{pct}%" borderless=true {{
                 plugin location="file:{wasm}" {{
                     {key} "{binary}"
                 }}
@@ -120,7 +121,8 @@ pub fn tab_node(binary: &str, wasm: &str, label: &str, uuid: &str, cwd: &str) ->
         }}
     }}
 "#,
-        key = clave_types::CLAVE_BINARY_KEY
+        key = clave_types::CLAVE_BINARY_KEY,
+        pct = clave_types::BAR_BIRTH_PERCENT
     )
 }
 

@@ -9,7 +9,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use clave_types::{Agent, AgentSnapshot, Status};
+// The two width targets live in `clave-types` (S8 §3.3): the renderer draws
+// against the same numbers this seek drives the pane to, and `clave`'s KDL
+// generators size the newborn pane from them — one definition, three artifacts.
+use clave_types::{Agent, AgentSnapshot, BAR_TARGET_COLS, COLLAPSED_TARGET_COLS, Status};
 
 use crate::render::{PALETTE, Provenance, Row, RowContent, RowStatus, Widths};
 
@@ -132,20 +135,6 @@ pub fn classify_timer(elapsed: f64, pending_dwells: usize, pending_peeks: u32) -
     }
 }
 
-/// The expanded width the seek converges to (LEDGER D2, design-lock §2): the
-/// ratified 44-column render, `1 cap + 8 gutter + 7 title + 1 + 7 repo + 1 +
-/// 17 summary + 1 margin + 1 cap`. The generated layouts (setup::layout_kdl
-/// and add::tab_layout) size the bar pane in PERCENT — a fixed `size=30` made
-/// zellij refuse every resize (CantResizeFixedPanes) — so births land near
-/// this and the birth-armed seek finishes the job.
-const BAR_TARGET_COLS: usize = 44;
-/// Collapsed width target (Alt+c), LEDGER D17: `Widths::COLLAPSED` at 30 —
-/// `30 - 13 - 7 title - 3 repo` leaves the summary 7. Collapsed is a WIDTH
-/// PROFILE, not a squeezed layout (D16), so the gutter is identical and only
-/// repo and summary narrow; the render path is the same `render_rows`.
-/// Zellij's resize floor may stop the seek above this; wherever cols stop
-/// changing is accepted.
-const COLLAPSED_TARGET_COLS: usize = 30;
 /// Seek steps allowed per toggle (each is a real zellij layout action):
 /// enough for the widest transition at ~5%-of-viewport per step, small
 /// enough that a layout which refuses to converge isn't fought forever.

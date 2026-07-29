@@ -25,7 +25,16 @@ use unicode_width::UnicodeWidthChar;
 /// The ratified expanded width (lock §2). `cols` stays a parameter — zellij
 /// hands the plugin whatever the pane actually is — but every number in the
 /// design was chosen against 44, and at 44 the output IS the lock's table.
-pub const DESIGN_COLS: usize = 44;
+///
+/// **The same number the width seek drives the pane to**, not a parallel copy
+/// of it: nothing tied the two together, so moving the seek's target alone
+/// (LEDGER D19 is about to) left every golden here green while pinning the old
+/// width (S8 §3.3, #86).
+pub const DESIGN_COLS: usize = clave_types::BAR_TARGET_COLS;
+
+/// The collapsed profile's design width (LEDGER D17) — likewise the seek's
+/// collapsed target, linked rather than mirrored.
+pub const COLLAPSED_DESIGN_COLS: usize = clave_types::COLLAPSED_TARGET_COLS;
 
 /// Cols 1–9: cap, status, space, rule, space, battery, space, provenance,
 /// space. Position-locked — every cell is one column and renders a space when
@@ -647,7 +656,13 @@ mod tests {
     /// a row that is not exactly `cols` cells is a ragged bar.
     #[test]
     fn every_row_is_exactly_cols_cells() {
-        for cols in [Widths::EXPANDED.min_intact_cols(), 30, DESIGN_COLS, 80, 200] {
+        for cols in [
+            Widths::EXPANDED.min_intact_cols(),
+            COLLAPSED_DESIGN_COLS,
+            DESIGN_COLS,
+            80,
+            200,
+        ] {
             for line in render_rows(&fleet(), cols, Widths::EXPANDED) {
                 let width = display_cells(&strip_sgr(&line));
                 assert_eq!(width, cols, "at cols={cols}: {line:?}");
@@ -665,7 +680,7 @@ mod tests {
     /// `EXPANDED` test above.
     #[test]
     fn every_row_is_exactly_cols_cells_under_collapsed() {
-        for cols in [0, 1, 13, 23, 30, 44] {
+        for cols in [0, 1, 13, 23, COLLAPSED_DESIGN_COLS, DESIGN_COLS] {
             let expected = cols.max(Widths::COLLAPSED.min_intact_cols());
             for line in render_rows(&fleet(), cols, Widths::COLLAPSED) {
                 let width = display_cells(&strip_sgr(&line));
@@ -972,9 +987,12 @@ mod tests {
             "\u{1b}[38;2;45;79;103m\u{e0b6}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m\u{1b}[38;2;255;158;59m\u{25cf}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;220;215;186m\u{2502}\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;230;195;132m\u{f007c}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;126;156;216m\u{168c2}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;122;168;159m\u{1b}[38;2;22;22;29mS6-GUT \u{1b}[0m\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;126;156;216mcla\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m pickin\u{2026}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[0m\u{1b}[38;2;45;79;103m\u{e0b4}\u{1b}[0m",
             "   \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;71;71;92m\u{f018d}   \u{1b}[38;2;92;101;103mTab #16             \u{1b}[0m ",
         ];
-        assert_eq!(render_rows(&rows, 30, Widths::COLLAPSED), expected);
+        assert_eq!(
+            render_rows(&rows, COLLAPSED_DESIGN_COLS, Widths::COLLAPSED),
+            expected
+        );
         for line in &expected {
-            assert_eq!(display_cells(&strip_sgr(line)), 30);
+            assert_eq!(display_cells(&strip_sgr(line)), COLLAPSED_DESIGN_COLS);
         }
         // Title still starts at column 10 (cell index GUTTER_W = 9) — the
         // gutter did not move, and D17 holds title at 7, so the chip itself

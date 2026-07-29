@@ -25,8 +25,8 @@
 //! plane. Escapes survive every tool in the chain.
 
 use clave_bar::render::{
-    CHIP_INK, DESIGN_COLS, PALETTE, Provenance, RESET, Rgb, Row, RowContent, RowStatus, Widths,
-    display_cells, render_rows, strip_sgr,
+    CHIP_INK, COLLAPSED_DESIGN_COLS, DESIGN_COLS, PALETTE, Provenance, RESET, Rgb, Row, RowContent,
+    RowStatus, Widths, display_cells, render_rows, strip_sgr,
 };
 
 const BOLD: &str = "\u{1b}[1m";
@@ -206,11 +206,6 @@ fn main() {
     collapsed();
 }
 
-/// The collapsed target width (LEDGER D17). `model.rs` owns the real
-/// `COLLAPSED_TARGET_COLS` the width seek converges to; this mirrors it until
-/// the wiring task lands, at which point it should import that constant.
-const COLLAPSED_COLS: usize = 30;
-
 /// Where each field starts and ends, for a profile at a given width — the same
 /// arithmetic `render_row` lays the row out with, so the map below cannot
 /// describe a layout the renderer does not produce.
@@ -236,7 +231,10 @@ fn span(s: (usize, usize)) -> String {
 fn column_map() {
     let dim = DIM.fg();
     let (x, c) = (Widths::EXPANDED, Widths::COLLAPSED);
-    let (xs, cs) = (field_spans(x, DESIGN_COLS), field_spans(c, COLLAPSED_COLS));
+    let (xs, cs) = (
+        field_spans(x, DESIGN_COLS),
+        field_spans(c, COLLAPSED_DESIGN_COLS),
+    );
 
     println!(
         "\n  {dim}COLUMN MAP \u{2014} the 9-cell gutter is IDENTICAL in both states (D16);
@@ -299,13 +297,13 @@ fn column_map() {
         (
             "right margin",
             span((DESIGN_COLS - 1, DESIGN_COLS - 1)),
-            span((COLLAPSED_COLS - 1, COLLAPSED_COLS - 1)),
+            span((COLLAPSED_DESIGN_COLS - 1, COLLAPSED_DESIGN_COLS - 1)),
             "",
         ),
         (
             "right cap",
             span((DESIGN_COLS, DESIGN_COLS)),
-            span((COLLAPSED_COLS, COLLAPSED_COLS)),
+            span((COLLAPSED_DESIGN_COLS, COLLAPSED_DESIGN_COLS)),
             "selected row only",
         ),
     ] {
@@ -331,7 +329,7 @@ fn collapsed() {
     let dim = DIM.fg();
 
     let widths = Widths::COLLAPSED;
-    let cols = COLLAPSED_COLS;
+    let cols = COLLAPSED_DESIGN_COLS;
     // Derived, not hard-coded: the same arithmetic `render_row` uses
     // internally once `cols` clears the floor (`13 + title + repo` — LEDGER
     // D12's arithmetic, generalised to a profile by D16), so this number is
@@ -351,6 +349,7 @@ fn collapsed() {
     println!("\n  {dim}separation from {DESIGN_COLS}: {separation}{RESET}");
     println!(
         "  {dim}LEDGER D15 requires separation > 10 (the widest `width_seek` \
-         acceptance half-band) \u{2014} {separation} clears it.{RESET}"
+         acceptance half-band) \u{2014} {separation} clears it. D21: below the \
+         full band, so `width_seek` refuses the overlap outright.{RESET}"
     );
 }
