@@ -352,11 +352,23 @@ So the provenance sources rank, cheapest and most certain first:
 | 2 | `worktree-state` in the transcript tail | none beyond a tail read the hook already performs | worktree sessions Claude knows it is in, i.e. the §2.4.3 false negatives, and it carries the *name* #24 item 1 wants |
 | 3 | the `.git`-is-a-file `stat` (below) | one `stat` per refresh | the completeness backstop: any cwd that *is* a linked worktree, however it got there |
 
-Tier 2 is S4's to write — it owns the transcript reader, and the wire spec
-already obligates it there (§4, *"Add `worktree-state` … as a zero-cost
-provenance source ahead of `head.rs`"*). S6 consumes whichever tier filled the
-field; the gutter cannot tell them apart, which is the point of keeping the
-signal in one store field.
+**Tier 2 is DEFERRED, and the reason is a circular hand-off that must be broken
+before anyone builds it.** S6 said "tier 2 is S4's to write"; S4 §7 says it
+"stores none of them beyond `branch`. **S6** decides what it wants and where it
+lands." So each spec assigns the write to the other and **nothing fills
+`AgentRecord.worktree` from the transcript** — `snapshot_from` keeps sending
+`None`, and the non-clave-created worktrees this tier exists to cover stay
+uncovered. (Found by review on #82.)
+
+Do not resolve this on paper. **Tier 1 already covers every worktree clave
+made**, which is the common case, and whether tier 2 covers anything real is the
+measurement §5 Step 5 defines and nobody has taken. Take the measurement first;
+if it shows coverage worth having, the write is one line in S4's transcript
+reader into the existing wire-backed field, and whoever takes it owns it
+explicitly.
+
+S6 consumes whichever tier filled the field; the gutter cannot tell them apart,
+which is the point of keeping the signal in one store field.
 
 **Whether tier 3 is still needed is a measurement, not a deduction.** The spike
 reads `worktree-state` as present *"for any session inside a worktree"*, but its

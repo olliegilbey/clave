@@ -675,13 +675,20 @@ deliberately **not** built (§3.8).
 
 ### 3.5 The S5 contract — four obligations, three held verbatim
 
-S5 splits the **rendered string** on ` · ` itself. The earlier
-`fit_label -> Vec<String>` hand-off is **withdrawn**, and S5's reason for
-declining it is correct and worth recording: live rows render the *zellij tab
-name* (`model.rs:757`), not `Agent.label`, so a segmented value computed inside
-`rows()` is unreachable for exactly the rows that matter most.
+**Superseded — S5 does NOT split a rendered string.** This section previously
+handed S5 a `String` to split on ` · `, on the reasoning that live rows render
+the *zellij tab name* (`model.rs:757`) rather than `Agent.label`, so a segmented
+value computed in `rows()` could not reach them. Design-lock §7.1 overturned
+that: a live row renders from the **STORE**, and #69 landed `title`, `summary`
+and `worktree` on `Agent` as values precisely so the bar never parses positions
+out of a composed string. Following the old contract would resurrect the deleted
+span/index mechanism and bypass those fields.
 
-S4 returns `String` only. `fit_label_str` is the single entry point.
+**The obligation is now inverted.** S4 owes S5 *values*, not a splittable
+string: populate `AgentRecord.title` and `AgentRecord.summary`, which
+`snapshot_from` already projects. S5 lays its own fixed-width columns from them
+(design-lock §2). `fit_label_str` survives only for the **zellij tab name**,
+which is genuinely one opaque string.
 
 | # | Obligation | Held? |
 |---|---|---|
@@ -857,7 +864,7 @@ would monopolise the row after §3.4 protects it from being dropped.
 | **Shell out to `git rev-parse --abbrev-ref HEAD`** | a subprocess on Claude's turn path, with no timeout in this codebase, in a hook whose contract is DO NO HARM. The `HEAD`-file read is two `read_to_string`s and is unit-testable without `git` installed |
 | **Recompute the title from the tail every event (no `rec.title`)** | flickers off when the last rename scrolls out of the 64 KiB window, and violates the `/clear` persistence ruling |
 | **Truncate CLI-side, in the composed label** | the CLI knows neither `cols` nor S6's gutter width; the same string is the picker line, the `clave ls` line and the `launch.kdl` tab name |
-| **Render from structured `Row` fields (the #24 "stop rendering the label string" reframe)** | correct destination, unreachable this batch — live rows render the *zellij tab name*, so structured render requires changing what a live row is, not just what `Row` carries |
+| **Render from structured `Row` fields (the #24 "stop rendering the label string" reframe)** | correct destination, and **no longer unreachable** — design-lock §7.1 ruled a live row renders from the STORE, and #69 landed the fields. Still out of scope *for S4*, which owes the values; S5/S6 own the render (§3.5) |
 | **`fit_label -> Vec<String>` handed to S5** | **withdrawn.** S5 declined it correctly: the segmented value never reaches a live row (§3.5). S4 ships `String` only |
 | **Always emit a title slot (empty when unrenamed) so repo is invariably segment 1** | burns three cells on the majority of rows, and `parts.retain(\|p\| !p.is_empty())` / `sanitize_segment` would strip it anyway. §3.5's value-match resolves the ambiguity for free |
 | **Keep branch as a fourth rendered segment** | superseded by the 2026-07-22 ruling. Independently justified: `clave/ab12cd34` was 13 of 27 cells and is the least discriminating string on the row — every sibling worktree of a repo shares its shape |
@@ -1562,8 +1569,8 @@ workstreams can land independently:
 | To | S4 guarantees | S4 assumes |
 |---|---|---|
 | **S6** (gutter) | the composed label is text-only — no glyph, no leading space, no colour | S6 sets `gutter_cells`; S4 never reads or renders a glyph |
-| **S8** (width) | `fit_label_str` is correct at every budget, 0 upward, and tests pin 30 **and** 38 | nothing — no width constant is read |
-| **S5** (colour) | `fit_label_str` returns a plain `String` split on ` · `; repo text is `sanitize_segment(basename(repo_root))` verbatim (or a prefix of it after truncation) | S5 applies colour **after** the fit, on segments — the clamp is not escape-aware (dossier RC-G) |
+| **S8** (width) | `fit_label_str` is correct at every budget, 0 upward | nothing — no width constant is read. (The old "tests pin 30 **and** 38" is dead: the ratified target is **44**, design-lock §2) |
+| **S5** (colour) | `AgentRecord.title` and `.summary` are populated, so `snapshot_from` projects real values; repo text is `sanitize_segment(basename(repo_root))` | S5 lays its own fixed-width columns from those values (design-lock §2, §7.1) and never splits a rendered string — see §3.5 |
 
 This is a two-line edit in the file S5 and S6 also edit (`main.rs:539-557`). The
 rebase is mechanical; S5's colouring wraps the `name` this produces, S6's gutter
@@ -2174,11 +2181,11 @@ with a recommended resolution, not a format question.
 | per-repo colour (#24 item 2) | **S5 / RC-G.** §3.5 states the four obligations and the one caveat |
 | context battery (#24 item 4), model badge (#24 item 5) | the extended tail scan in §4.3(b) is the seam both plug into — **noted as the integration point**, not built |
 | collapsed 4-col design (#24 item 7) | needs both the gutter and the colour channel |
-| `Row` gains structured fields ("stop rendering the label string") | unreachable this batch: live rows render the *zellij tab name*, not `Agent.label` (§3.5) |
+| `Row` gains structured fields ("stop rendering the label string") | out of scope for S4, but **reachable**: design-lock §7.1 plus #69's `title`/`summary`/`worktree` make it S5/S6's work, not a blocked one (§3.5) |
 | ~~`payload.transcript_path` replacing `jsonl_path(claude_dir, &rec.cwd, uuid)`~~ | **NO LONGER OUT OF SCOPE — it is mandatory (§4.3, §3.8).** The deferral rested on "the derived path is proven in production", which #79 falsified: the derived path is wrong from the first relocation onward, silently |
 | fixing `spawn_mode`'s derived transcript path (limitation 5) | resume-vs-create arbitration, not a label change. **The relocation finding exposes it; S4 files it** |
 | a store schema version to close the mixed-version strip (limitation 6) | #69 §2.1 rules it out; S4 ships the re-derivation path instead (§3.6) |
-| **S6's worktree marker, even though `worktree-state` now hands S4 its inputs** | `worktreePath` / `worktreeName` reach `refresh_label` for free (§3.2) and S4 stores none of them beyond `branch`. **S6 decides what it wants and where it lands** — S4's contribution is naming the zero-cost source, not choosing the field |
+| **S6's worktree marker, even though `worktree-state` now hands S4 its inputs** | `worktreePath` / `worktreeName` reach `refresh_label` for free (§3.2) and S4 stores none of them beyond `branch`. **Do NOT read this as "S6 decides"** — S6 read it as "S4 writes", so the obligation fell between the two and nothing filled `AgentRecord.worktree` from the transcript. Broken on #82: the tier is **explicitly deferred** behind S6 §5 Step 5's measurement, and whoever takes it owns the write into the existing wire-backed field |
 | `lsview.rs` printing the repo twice (§4.5e) | cosmetic; named so it is seen to have been considered |
 | dwell-open on dormant rows (#24's last comment) | unrelated nav question |
 | anything in `model.rs` ordering, `apply_tabs`, or the executor election | S0/S1/S3 |

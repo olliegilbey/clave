@@ -1184,6 +1184,8 @@ pub fn compose_row(row: &Row, cols: usize, gutter: &[Segment]) -> Vec<Segment> {
     // Its identity is a placeholder pending design-lock §7.2.
     if let Some(name) = &row.terminal_name {
         push(fit(name, body), None, None);
+        // The reserved tail is part of the ROW, not of `body` — see below.
+        push(" ".repeat(TRAILING_COLS), None, None);
         return out;
     }
 
@@ -1207,6 +1209,13 @@ pub fn compose_row(row: &Row, cols: usize, gutter: &[Segment]) -> Vec<Segment> {
     push(fit(&row.repo, REPO_COLS), row.repo_ink, None);
     push(" ".to_string(), None, None);
     push(fit(&row.summary, summary_w), None, None);
+    // `body` is 33 = 44 - 9 gutter - 2 TRAILING_COLS, so the three fields and
+    // their separators exhaust it. The reserved tail must still be EMITTED or
+    // the row is 42 cells, not 44: `compose_row_lays_the_locked_columns` fails,
+    // and — the reason it is reserved at all — the selected row's background
+    // stops short of the right margin and cap, leaving the ragged selection
+    // design-lock §6 exists to kill.
+    push(" ".repeat(TRAILING_COLS), None, None);
     out
 }
 
