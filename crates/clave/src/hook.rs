@@ -111,18 +111,21 @@ pub fn first_words(text: &str) -> String {
     s
 }
 
-/// Generous bound for `rec.summary`. The bar's summary column is 25 display
-/// cells at the 54-column expanded profile (LEDGER D19) and is expected to
-/// grow, and `render.rs` does its own cell-accurate clamping — so the store
-/// holds PROSE, not a pre-truncated fragment (design-lock §7.1: the row
-/// renders from the store). Measured 2026-07-29 over the local transcript
-/// corpus, `aiTitle` values run 13–60 chars, so 200 is ~3x headroom while
+/// Generous bound for `rec.summary`. The bar's summary column is 17 display
+/// cells at the profile that actually ships today (44 columns), and it is set
+/// to WIDEN — LEDGER D19 takes expanded to 54, which would make it 25 — while
+/// `render.rs` does its own cell-accurate clamping either way, so the store
+/// holds PROSE rather than a pre-truncated fragment (design-lock §7.1: the row
+/// renders from the store). The bound is therefore justified by the CORPUS,
+/// not by any one column width: measured 2026-07-29 over the local
+/// transcripts, `aiTitle` values run 13–60 chars, so 200 is ~3x headroom while
 /// still bounding a field a hook rewrites on every turn.
 const SUMMARY_MAX_CHARS: usize = 200;
 
-/// Bound for `rec.title`. A rename is an identifier for a 7–9 cell chip
-/// (LEDGER D17/D19), never prose; 64 is far beyond any real one and exists
-/// only so a pathological transcript cannot grow the store.
+/// Bound for `rec.title`. A rename is an identifier for a 7-cell chip — D17
+/// holds title at 7 in BOTH shipped profiles, and D19 would take expanded to 9
+/// — never prose; 64 is far beyond any real one and exists only so a
+/// pathological transcript cannot grow the store.
 const TITLE_MAX_CHARS: usize = 64;
 
 /// Single-line, whitespace-collapsed, char-boundary-clamped field text.
@@ -778,9 +781,10 @@ mod tests {
     #[test]
     fn stored_summary_outruns_the_label_truncation_and_is_still_bounded() {
         // The label uses first_words (4 words / 32 chars) because a tab name
-        // is short. The bar's summary column is 25 cells at the expanded
-        // profile and growing, and `render.rs` clamps cell-accurately — so the
-        // store must hold MORE than the label does, bounded but generous.
+        // is short. The bar's summary column is 17 cells at the profile that
+        // ships today and is set to widen (LEDGER D19), and `render.rs` clamps
+        // cell-accurately — so the store must hold MORE than the label does,
+        // bounded but generous.
         let long =
             "alpha bravo charlie delta echo foxtrot golf hotel india juliett kilo lima ".repeat(8);
         let mut r = rec("u1");

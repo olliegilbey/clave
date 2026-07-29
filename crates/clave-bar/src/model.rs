@@ -2037,8 +2037,12 @@ mod tests {
             acted += 1;
             assert!(acted < 20, "did not converge");
         }
-        // Within half a learned step of the collapsed target — and STAYS done
-        // (later geometry is the user's business until the next toggle).
+        // Within half a learned step of the collapsed target, and dormant: the
+        // FIRST render at a wildly different width only OBSERVES it (a drift
+        // candidate — it could be a transient mid-relayout value). It does not
+        // "stay done" — a SECOND render at 140 confirms the drift and re-arms
+        // the seek (issue #4); `idle_seek_re_arms_when_a_relayout_drifts_it_off_target`
+        // is where that half is proven.
         assert!((cols - 30).abs() <= 4, "ended at {cols} cols");
         assert_eq!(m.width_seek(140), Vec::<Effect>::new());
     }
