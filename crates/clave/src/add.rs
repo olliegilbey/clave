@@ -97,7 +97,7 @@ pub fn sanitize_label(s: &str) -> String {
 pub fn tab_node(binary: &str, wasm: &str, label: &str, uuid: &str, cwd: &str) -> String {
     // split_direction="vertical" is REQUIRED for a LEFT bar: zellij stacks
     // sibling panes horizontally (rows) by default (Task 9 C1 finding; same
-    // wrapper as setup::layout_kdl and the S2 spike layout). size="15%" not
+    // wrapper as setup::layout_kdl and the S2 spike layout). size="22%" not
     // size=30: fixed panes refuse resizes — see setup::layout_kdl.
     // `command` bakes the environment's clave (§2 binary split): the
     // versioned copy's absolute path in a stable session, bare `clave` in
@@ -109,7 +109,7 @@ pub fn tab_node(binary: &str, wasm: &str, label: &str, uuid: &str, cwd: &str) ->
     format!(
         r#"    tab name="{label}" focus=true {{
         pane split_direction="vertical" {{
-            pane size="15%" borderless=true {{
+            pane size="22%" borderless=true {{
                 plugin location="file:{wasm}" {{
                     {key} "{binary}"
                 }}
