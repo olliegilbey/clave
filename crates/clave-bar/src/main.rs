@@ -11,6 +11,7 @@ use clave_bar::model::{
     BarModel, DWELL_SECS, Effect, PEEK_SINK_SECS, PaneMeta, TabMeta, TimerKind, classify_timer,
 };
 use clave_bar::plugin_config::resolve_binary;
+use clave_bar::render::{Row, render_rows};
 use zellij_tile::prelude::*;
 
 #[derive(Default)]
@@ -567,29 +568,15 @@ impl ZellijPlugin for State {
         // every instance is always visible and drives only its own pane.
         let fx = self.model.width_seek(cols);
         self.run_effects(fx);
-        // One line per tab, display-ordered. Active row inverted (SGR 7);
-        // agent rows get their state glyph; plain tabs a 2-space gutter so
-        // names align. Truncate to the pane width (raw ANSI is S1-proven).
-        for row in self.model.rows() {
-            let gutter = match row.glyph {
-                Some((glyph, colour)) => format!("\u{1b}[{colour}m{glyph}\u{1b}[0m "),
-                None => "  ".to_string(),
-            };
-            // Clamp the NAME to what's left after the 2-cell gutter, with a
-            // trailing … (char-boundary safe; labels can be multibyte).
-            let budget = cols.saturating_sub(3); // gutter + margin
-            let name: String = if row.name.chars().count() > budget {
-                let mut n: String = row.name.chars().take(budget.saturating_sub(1)).collect();
-                n.push('…');
-                n
-            } else {
-                row.name.clone()
-            };
-            if row.active {
-                println!("{gutter}\u{1b}[7m{name}\u{1b}[0m");
-            } else {
-                println!("{gutter}{name}");
-            }
+        // One line per row, display-ordered. Everything visual — the column
+        // arithmetic, the palette, the fade, the truncation — lives in
+        // `render_rows` (design-lock; LEDGER D4/D5). This file stays zellij
+        // plumbing: the profile comes from the model so it cannot drift from
+        // the width the seek above is chasing (D16), and `cols` is whatever
+        // zellij actually gave us rather than the target.
+        let rows: Vec<Row> = self.model.rows().into_iter().map(|(_, row)| row).collect();
+        for line in render_rows(&rows, cols, self.model.widths()) {
+            println!("{line}");
         }
     }
 }

@@ -29,19 +29,20 @@ mod tests {
 
     #[test]
     fn munges_leading_slash_path() {
-        assert_eq!(
-            munge_cwd("/Users/olliegilbey/code/clave"),
-            "-Users-olliegilbey-code-clave"
-        );
+        // Generic paths on purpose: this repo is public, and a fixture only
+        // needs the SHAPE — a leading slash and interior separators.
+        assert_eq!(munge_cwd("/Users/o/code/clave"), "-Users-o-code-clave");
     }
 
     #[test]
     fn munges_dots_and_worktree_double_dash() {
-        // Verified-on-disk example (spec §4). Note the `--`: adjacent `/` and `.`
-        // in `/.claude-worktrees` each become a dash.
+        // The on-disk shape (spec §4), with the names genericized. What is
+        // load-bearing is the `--`: adjacent `/` and `.` in
+        // `/.claude-worktrees` each become a dash, which is why a worktree cwd
+        // must be munged rather than pattern-matched.
         assert_eq!(
-            munge_cwd("/Users/olliegilbey/code/resumate/.claude-worktrees/nalu-cta"),
-            "-Users-olliegilbey-code-resumate--claude-worktrees-nalu-cta"
+            munge_cwd("/Users/o/code/proj/.claude-worktrees/wt-one"),
+            "-Users-o-code-proj--claude-worktrees-wt-one"
         );
     }
 

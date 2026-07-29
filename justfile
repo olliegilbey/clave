@@ -108,6 +108,45 @@ release: build-bar-release
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings
 
+# Mutation-test the lines this branch changed, relative to `main` (or any base
+# you pass). DELIBERATELY NOT in `just gates`: gates run on every PR and must
+# stay fast, and a full mutation run over model.rs alone is enormous — a gate
+# nobody can afford to run is a gate nobody runs. Which change classes owe a
+# run, and what to do with a survivor, are in docs/dev/TESTING.md.
+#
+# --in-diff scopes generation to lines the diff touches, so the cost tracks the
+# size of the change rather than the size of the crate. Config (including the
+# load-bearing `test_workspace = true`) is .cargo/mutants.toml.
+#
+# `--workspace` is the SAME footgun again and there is no config key for it:
+# cargo-mutants GENERATES mutants only for the default packages, and
+# default-members excludes clave-bar — so without it a change to model.rs or
+# render.rs silently produces zero mutants and reports success.
+# Mutation-test the lines changed vs `main` — a finding tool, not a gate.
+mutants base="main" *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v cargo-mutants >/dev/null || {
+        echo "cargo-mutants not installed: cargo install cargo-mutants --locked" >&2
+        exit 127
+    }
+    diff=$(mktemp)
+    trap 'rm -f "$diff"' EXIT
+    # --merge-base so a stale local `main` does not report every commit since
+    # the fork point as changed.
+    git diff --merge-base {{ base }} -- '*.rs' >"$diff"
+    if [ ! -s "$diff" ]; then
+        echo "no changed Rust lines vs {{ base }} — nothing to mutate"
+        exit 0
+    fi
+    cargo mutants --workspace --in-diff "$diff" {{ args }}
+
+# One module, whole. The deliberate deep run: use it when a file is new or has
+# been rewritten, where --in-diff would mutate everything anyway.
+# Mutation-test one file in full (e.g. crates/clave-bar/src/render.rs).
+mutants-file file *args:
+    cargo mutants --workspace --file {{ file }} {{ args }}
+
 # Wire the SANDBOX to this working tree without touching the daily surface.
 # The safe alternative to `dev-install` for sandbox validation: nothing here
 # writes ~/.cargo/bin/clave (the name a LIVE session's plugin shells out to —

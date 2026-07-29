@@ -1,0 +1,25 @@
+# cargo-mutants configuration. Run it with `just mutants` (the lines this
+# branch changed vs `main`) or `just mutants-file <path>` for one module.
+# NOT part of `just gates` — see docs/dev/TESTING.md, "Six shapes of
+# green-and-worthless test", for what a surviving mutant means and which
+# change classes owe a run.
+#
+# `.cargo/mutants.toml` is the path cargo-mutants reads by default (v27).
+
+# LOAD-BEARING, and exactly the trap `just test` documents: the workspace's
+# `default-members` excludes the wasm-only `clave-bar`, so the `cargo test` a
+# mutant run defaults to would skip every model.rs and render.rs test — and
+# every clave-bar mutant would then "survive" for a reason that has nothing to
+# do with the code.
+test_workspace = true
+
+# Files where a surviving mutant carries no information.
+exclude_globs = [
+    # `[[bin]] test = false` (crates/clave-bar/Cargo.toml): nothing here is
+    # reachable by ANY test, by construction, so 100% of its mutants survive.
+    # The fix for that is the lib/bin split, not a mutation report.
+    "crates/clave-bar/src/main.rs",
+    # Examples are demonstration surfaces, not shipped behaviour. `bar-preview`
+    # is driven by `render_rows`, which IS mutated.
+    "crates/*/examples/**",
+]

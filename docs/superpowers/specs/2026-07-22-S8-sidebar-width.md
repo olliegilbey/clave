@@ -5,7 +5,7 @@
 > The maintainer ratified the sidebar's visual design from rendered rows on
 > 2026-07-25. **Read
 > [`2026-07-25-sidebar-visual-design-lock.md`](2026-07-25-sidebar-visual-design-lock.md)
-> before this file**, and run `python3 docs/superpowers/specs/bar-preview.py`.
+> before this file**, and run `cargo run -p clave-bar --example bar-preview`.
 >
 > What changed for S8 specifically:
 > - **`BAR_TARGET_COLS = 44`**, not 38. Every "38" below is dead. Re-derive the
@@ -18,6 +18,8 @@
 > - The collapsed target is **still open** and is S8's to settle. The binding
 >   constraint is `BAR_TARGET_COLS − COLLAPSED_TARGET_COLS > MAX_LEARNABLE_STEP`
 >   (20), so at 44 the collapsed target must be **< 24**.
+>   **⚠ This bullet is FALSIFIED — LEDGER D15. The bound is `> 10`, so collapsed
+>   is `< 34`; it is settled at 30. See the ⚠ FALSIFIED section below.**
 >
 > **Still valid, and still the trap:** the mechanical-replace hazard in §6.2.
 > `30` appears both as *the width target* and as an *arbitrary start width*, and
@@ -27,6 +29,41 @@
 > **Precedence:** where this banner and the body below disagree, **the banner
 > wins**. The body is retained for its reasoning and its citations, which remain
 > accurate; only the conclusions listed above were overturned.
+>
+> ---
+>
+> ### ⚠ FALSIFIED — 2026-07-29. Historical, and partly false, banner included.
+>
+> The sidebar was rewritten on the `ux` branch and two of this document's claims
+> — one of them in the banner above — were falsified against the vendored zellij
+> source and the shipped code. The authority is
+> **[`docs/ux/LEDGER.md`](../../ux/LEDGER.md)**; where it and this file disagree,
+> the ledger wins, silently, with no amendment round.
+>
+> - **§3.6 row 1: "the plugin has no viewport width" is FALSE — LEDGER D20.**
+>   `TabInfo` carries `display_area_columns`, `get_tab_info(tab_id)` is a
+>   *synchronous* host call, and every `PaneInfo` in the manifest clave already
+>   receives carries `pane_columns` — the adapter merely **drops** it. So the
+>   resize step is computable (`display_area_columns * 5 / 100`), not learnable,
+>   and the whole learning apparatus — `seek_step`, `MAX_LEARNABLE_STEP`, the
+>   learn arm, the round-17 poisoning class — exists to rediscover a number
+>   already in hand. §9's "when it becomes worth it" is answered: now.
+> - **The separation invariant is `> 10`, not `> 20` — LEDGER D15.** The `< 24`
+>   bullet in the banner above is a **restatement, not a bound.** `width_seek`
+>   accepts when `2 * |cols − target| <= step`, so the widest acceptance
+>   half-band is **10** — a number *this document derives itself* (see the "caps
+>   the band half-width at 10" passages in §2 and §6) before asserting double it.
+>   The 20 was a margin that happened to be free at 38 and was inherited as
+>   though it were physics. Collapsed may be anything under 34; it is 30.
+>
+> **Do not build on this document, and do not amend it.** Specs are an output,
+> not an input — that rule is what ended four sessions of circling. If a task
+> needs S8 reconciled or deleted, propose the disposition to the coordinator and
+> get a ruling; do not fix the prose here.
+>
+> **The whole document is suspect, not only the two claims above.** Those are the
+> ones that were found by reading the source and the code together. Nothing has
+> audited the rest, and the banner above proves the banners are not exempt.
 
 _2026-07-22 · implementation spec · main `50fa26a` (v0.1.1 + PR #29)_
 
@@ -292,6 +329,10 @@ The **one** interaction is band disjointness, and it improves: the gap grows
 future edit cannot erode it silently.
 
 ### 3.6 Rejected alternatives
+
+> **⚠ Row 1 is FALSIFIED — LEDGER D20.** "The plugin has no viewport width" is
+> false at the API level; the rejection below rests on it. Left in place so the
+> belief is visible. Do not amend it here.
 
 | Alternative | Why not |
 |---|---|
@@ -1185,7 +1226,7 @@ Files S8 shares with another workstream, and the collision surface:
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| **38 columns is too wide on a narrow window.** At 80 cols the bar is 47 % of the screen. The seek has no viewport awareness — `render(_rows, cols)` gives only own cols, and `PaneMeta` (`model.rs:25-31`) drops `PaneInfo.pane_columns` at `main.rs:452-466` | medium if the maintainer ever drives a laptop under ~100 cols | out of scope by decision (§3.6). The fix, if it becomes real, is a clamp `min(BAR_TARGET_COLS, total/4)` requiring `PaneMeta` to carry columns and a per-tab sum — which makes the target a function of a possibly-stale frame (the RC-A class, applied to geometry). File it if step 7 or 8 surfaces it |
+| **38 columns is too wide on a narrow window.** At 80 cols the bar is 47 % of the screen. The seek has no viewport awareness — `render(_rows, cols)` gives only own cols, and `PaneMeta` (`model.rs:25-31`) drops `PaneInfo.pane_columns` at `main.rs:452-466` | medium if the maintainer ever drives a laptop under ~100 cols | out of scope by decision (§3.6). The fix, if it becomes real, is a clamp `min(BAR_TARGET_COLS, total/4)` requiring `PaneMeta` to carry columns and a per-tab sum — which makes the target a function of a possibly-stale frame (the RC-A class, applied to geometry). File it if step 7 or 8 surfaces it. **⚠ The "no viewport awareness" premise is FALSE — LEDGER D20** |
 | **A missed width site.** The failure mode of this whole change | high | §2 is the inventory; §6.2 states the failure set to expect red-first; §6.6 pins the artifacts. The specific trap (30 as start width vs 30 as target) is proved out in §6.2 |
 | **A pinned proptest seed goes red at 38** | high if it happens | §6.5: it is a finding, never a fixture refresh. Reduce to a unit test, red-first, before proceeding |
 | **Property 1 weakens** — more cases terminate via the `exhausted` escape hatch (`model.rs:2870-2875`) | low | the new `prop_seek_makes_progress_when_it_exhausts` (§6.5) closes the "budget spent going nowhere" half of it |

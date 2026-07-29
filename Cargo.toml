@@ -37,6 +37,14 @@ tempfile = "3"
 # loudly if this and the vendored kdl/zellij-utils lines ever drift apart;
 # bump all of them together, deliberately, after re-validating live.
 zellij-tile = "=0.44.3"
+# Display-CELL measurement for the bar's fixed columns (design lock §2).
+# `str::chars()` counts scalars, so one East-Asian glyph misaligns every column
+# to its right (FOOTGUNS "Text, glyphs, rendering"). Held at 0.1 deliberately:
+# that is the line zellij-utils 0.44.3 resolves for its OWN grid, and the bar
+# must measure a row the same way zellij lays it out. `default-features = false`
+# drops the `cjk` table (we never call `width_cjk`), matching zellij's own
+# declaration.
+unicode-width = { version = "0.1", default-features = false }
 
 # The profile that 'dist' will build with
 [profile.dist]

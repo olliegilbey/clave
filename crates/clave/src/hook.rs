@@ -111,22 +111,91 @@ pub fn first_words(text: &str) -> String {
     s
 }
 
+/// Generous bound for `rec.summary`. The bar's summary column is 17 display
+/// cells at the profile that actually ships today (44 columns), and it is set
+/// to WIDEN — LEDGER D19 takes expanded to 54, which would make it 25 — while
+/// `render.rs` does its own cell-accurate clamping either way, so the store
+/// holds PROSE rather than a pre-truncated fragment (design-lock §7.1: the row
+/// renders from the store). The bound is therefore justified by the CORPUS,
+/// not by any one column width: measured 2026-07-29 over the local
+/// transcripts, `aiTitle` values run 13–60 chars, so 200 is ~3x headroom while
+/// still bounding a field a hook rewrites on every turn.
+const SUMMARY_MAX_CHARS: usize = 200;
+
+/// Bound for `rec.title`. A rename is an identifier for a 7-cell chip — D17
+/// holds title at 7 in BOTH shipped profiles, and D19 would take expanded to 9
+/// — never prose; 64 is far beyond any real one and exists only so a
+/// pathological transcript cannot grow the store.
+const TITLE_MAX_CHARS: usize = 64;
+
+/// Single-line, whitespace-collapsed, char-boundary-clamped field text.
+///
+/// NOT `sanitize_label`, deliberately. `sanitize_label` additionally DROPS
+/// `"` and `\` because the label is baked into `launch.kdl` (`setup.rs`'s
+/// eager row → `add::tab_node_bare`), where either character is a parse error
+/// that bricks cold-start launch. Neither `title` nor `summary` is ever baked
+/// into KDL — nothing outside `snapshot_from` reads them — so silently
+/// deleting characters out of displayed prose would be lossy for no gain.
+///
+/// What IS shared is the single-line property: a raw `\n` or `\u{1b}` measures
+/// 0 cells in `unicode-width`, which is exactly the input LEDGER D14 records as
+/// reachable-not-hypothetical. `render.rs` defends itself against it too; that
+/// is defence in depth, not a reason for the store to hold multi-line junk.
+pub fn clamp_field(text: &str, max_chars: usize) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(max_chars)
+        .collect()
+}
+
+/// The LAST line in `tail` of `{"type":<kind>, <field>:<non-empty string>}`.
+///
+/// One line-wise `serde_json::Value` walk shared by every tail extractor — no
+/// regex, no full-file model of Claude's schema, and no per-tier parser to
+/// keep in sync. An EMPTY or whitespace-only value is skipped rather than
+/// returned, so scanning continues further back: `/clear` appends an empty
+/// `custom-title` and the maintainer's ruling (#24) is that clave holds the
+/// last real rename across it.
+fn last_tail_field(tail: &str, kind: &str, field: &str) -> Option<String> {
+    tail.lines().rev().find_map(|l| {
+        let v: serde_json::Value = serde_json::from_str(l).ok()?;
+        if v.get("type")?.as_str()? != kind {
+            return None;
+        }
+        let s = v.get(field)?.as_str()?.trim();
+        (!s.is_empty()).then(|| s.to_string())
+    })
+}
+
+/// Claude's rolling auto-description — `{"type":"ai-title","aiTitle":…}`.
+/// THE source for `rec.summary` (#79): it is what Claude Code writes where it
+/// once wrote `type:"summary"`, present in 74 of 153 local transcripts as of
+/// 2026-07-29 while `type:"summary"` appears in 0 of them.
+pub fn ai_title_from_tail(tail: &str) -> Option<String> {
+    last_tail_field(tail, "ai-title", "aiTitle")
+}
+
+/// The user's own session rename — `{"type":"custom-title","customTitle":…}`,
+/// re-appended latest-wins. The source for `rec.title` (design-lock §5/§7.1:
+/// the filled chip). Verified against a live sandbox transcript 2026-07-29:
+/// the line carries exactly `type`, `customTitle`, `sessionId`.
+pub fn custom_title_from_tail(tail: &str) -> Option<String> {
+    last_tail_field(tail, "custom-title", "customTitle")
+}
+
 /// Scan a jsonl TAIL for the LAST `{"type":"summary","summary":…}` line.
-/// Line-wise serde parse — no regex, no full-file model of Claude's schema.
+///
+/// EXTINCT tier (#79) — Claude Code no longer emits it, so this has never
+/// once fired in production. Kept as the LABEL's source (the §6.4 freeze this
+/// task must not disturb) and as `rec.summary`'s legacy fallback behind
+/// `ai_title_from_tail`; retargeting the *label* is S4's call, not this one.
 pub fn summary_from_tail(tail: &str) -> Option<String> {
-    #[derive(Deserialize)]
-    struct Line {
-        #[serde(rename = "type")]
-        kind: String,
-        #[serde(default)]
-        summary: Option<String>,
-    }
-    tail.lines()
-        .rev()
-        .find_map(|l| match serde_json::from_str::<Line>(l) {
-            Ok(line) if line.kind == "summary" => line.summary,
-            _ => None,
-        })
+    last_tail_field(tail, "summary", "summary")
 }
 
 /// Last ≤`max_bytes` of `path` (lossy UTF-8; we only pattern-match). The
@@ -142,18 +211,33 @@ pub fn read_tail(path: &Path, max_bytes: u64) -> Option<String> {
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
-/// §6.4 label refresh. Returns whether the label changed. The `dir · branch`
-/// prefix is rebuilt from the record so the rule stays in one place:
-/// label = `<last-path-component of cwd> · <branch> [· <words>]`.
+/// Refresh the row's derived text: `rec.title` and `rec.summary` (design-lock
+/// §7.1) plus the §6.4 `label`. Returns whether ANY of the three changed —
+/// `apply_hook_event` turns that into the single `seq` bump.
+///
+/// The two halves are DECOUPLED on purpose. §6.4's freeze — once a summary has
+/// named the session the label stops re-deriving — is a rule about the LABEL,
+/// which is a zellij tab name and only meaningfully changes once. `title` and
+/// `summary` are row FIELDS the bar renders directly from the store, and the
+/// summary column is a rolling one-liner of what the agent is doing now;
+/// freezing it at the first value forever defeats the column. So the row
+/// fields refresh on every event carrying a tail, and the label keeps its
+/// freeze exactly.
+///
+/// The `dir · branch` prefix is rebuilt from the record so the rule stays in
+/// one place: label = `<last-path-component of cwd> · <branch> [· <words>]`.
 pub fn refresh_label(
     rec: &mut AgentRecord,
     event: &str,
     payload: &HookPayload,
     jsonl_tail: Option<&str>,
 ) -> bool {
-    // Once a summary named the session, it stays (§6.4: stop re-scanning).
+    let changed = refresh_row_fields(rec, event, payload, jsonl_tail);
+    // Once a summary named the LABEL, it stays (§6.4: stop re-scanning). Note
+    // this returns `changed`, not `false`: the row fields above are outside
+    // the freeze and a frozen-label row must still push their updates.
     if rec.label_source == LabelSource::Summary {
-        return false;
+        return changed;
     }
     let dir = rec
         .cwd
@@ -195,7 +279,59 @@ pub fn refresh_label(
         rec.label = crate::add::sanitize_label(&format!("{prefix} · {}", first_words(p)));
         return true;
     }
-    false
+    changed
+}
+
+/// The row fields the bar renders from the store (design-lock §7.1), refreshed
+/// on every event that carries a tail — OUTSIDE §6.4's label freeze (see
+/// `refresh_label`). Returns whether either changed, so a no-op event still
+/// costs no `seq` bump (§5 forbids no-op pushes).
+///
+/// Tiers, highest authority first, each held last-non-empty so a `/clear` or a
+/// tail that has scrolled past the signal never BLANKS an earned value:
+///
+/// - `title`   ← `custom-title` — the user's own rename, and nothing else. A
+///   wrong title is worse than the blank chip the design already renders.
+/// - `summary` ← `ai-title` (Claude's auto-description), falling back to the
+///   extinct `type:"summary"` line, and finally — only while `summary` is
+///   still EMPTY — to the current prompt, so a live row is never blank before
+///   Claude has written its first `ai-title`. Fill-only-when-empty on that
+///   last tier: an earned `ai-title` must never regress to prompt text.
+fn refresh_row_fields(
+    rec: &mut AgentRecord,
+    event: &str,
+    payload: &HookPayload,
+    jsonl_tail: Option<&str>,
+) -> bool {
+    let mut changed = false;
+    // is_harness_injected on both (#17): the "never earn from injected text"
+    // rule is about the SOURCE, not about which field it lands in.
+    if let Some(t) = jsonl_tail
+        .and_then(custom_title_from_tail)
+        .filter(|s| !is_harness_injected(s))
+    {
+        let t = clamp_field(&t, TITLE_MAX_CHARS);
+        if !t.is_empty() && rec.title.as_deref() != Some(t.as_str()) {
+            rec.title = Some(t);
+            changed = true;
+        }
+    }
+    let from_tail = jsonl_tail
+        .and_then(|t| ai_title_from_tail(t).or_else(|| summary_from_tail(t)))
+        .filter(|s| !is_harness_injected(s));
+    let seed = (event == "UserPromptSubmit" && rec.summary.is_empty())
+        .then_some(payload.prompt.as_deref())
+        .flatten()
+        .filter(|p| !p.trim().is_empty() && !is_harness_injected(p))
+        .map(str::to_owned);
+    if let Some(s) = from_tail.or(seed) {
+        let s = clamp_field(&s, SUMMARY_MAX_CHARS);
+        if !s.is_empty() && rec.summary != s {
+            rec.summary = s;
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// Fire-and-forget snapshot push (§5). Spawn WITHOUT waiting: `zellij pipe`
@@ -274,16 +410,17 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
     // reaches the same jsonl tree real claude processes write to.
     let claude_dir = crate::env::claude_config_dir().unwrap_or_default();
     let snap = with_store_mut(&paths, |s| {
-        // Label refresh only re-reads the jsonl while it's still cheap to
-        // matter (§6.4): source==FirstPrompt and a label-bearing event.
+        // The tail read is gated on the EVENT only — no longer on
+        // `label_source`. `title` and `summary` roll for the whole life of a
+        // row (design-lock §7.1), so gating the read on "the label has not
+        // been earned yet" would freeze the bar's two live columns the moment
+        // the label froze — the regression this exists to remove. Cost is one
+        // 64 KiB tail read on the two label-bearing events, well inside the
+        // §6.5 hook budget; the other events still read nothing.
         let tail = s.agents.get(&uuid).and_then(|rec| {
-            if rec.label_source == LabelSource::FirstPrompt
-                && matches!(event, "Stop" | "UserPromptSubmit")
-            {
-                read_tail(&jsonl_path(&claude_dir, &rec.cwd, &uuid), 64 * 1024)
-            } else {
-                None
-            }
+            matches!(event, "Stop" | "UserPromptSubmit")
+                .then(|| read_tail(&jsonl_path(&claude_dir, &rec.cwd, &uuid), 64 * 1024))
+                .flatten()
         });
         apply_hook_event(s, &uuid, event, &payload, tail.as_deref(), now_unix())
             .then(|| snapshot_from(s))
@@ -316,6 +453,7 @@ mod tests {
             stale: false,
             title: None,
             summary: String::new(),
+            default_branch: None,
         }
     }
 
@@ -551,6 +689,228 @@ mod tests {
             assert_eq!(r.label, "x · main");
             assert_eq!(r.label_source, LabelSource::FirstPrompt);
         }
+    }
+
+    /// One `ai-title` jsonl line, JSON-escaped so a fixture with quotes or
+    /// backslashes stays a valid tail.
+    fn ai_title_line(v: &str) -> String {
+        format!(
+            "{{\"type\":\"ai-title\",\"aiTitle\":{},\"sessionId\":\"u1\"}}\n",
+            serde_json::to_string(v).unwrap()
+        )
+    }
+
+    /// One `custom-title` jsonl line — the exact three-key shape verified
+    /// against a live transcript 2026-07-29.
+    fn custom_title_line(v: &str) -> String {
+        format!(
+            "{{\"type\":\"custom-title\",\"customTitle\":{},\"sessionId\":\"u1\"}}\n",
+            serde_json::to_string(v).unwrap()
+        )
+    }
+
+    #[test]
+    fn summary_is_written_structurally_not_only_into_the_label() {
+        // Design-lock §7.1: the bar lays its own fixed-width columns and reads
+        // `Agent.summary` — a summary that exists only as the label's third
+        // \u{00b7}-segment renders a BLANK column. That was the regression.
+        let mut r = rec("u1");
+        let p = HookPayload::default();
+        let tail = ai_title_line("Wire the summary column to the store");
+        assert!(refresh_label(&mut r, "Stop", &p, Some(&tail)));
+        assert_eq!(r.summary, "Wire the summary column to the store");
+    }
+
+    #[test]
+    fn summary_keeps_rolling_after_the_label_has_frozen() {
+        // The §6.4 freeze is a rule about the LABEL (a zellij tab name, which
+        // meaningfully changes once). The summary column is a rolling
+        // one-liner of what the agent is doing NOW, so it is decoupled: the
+        // label stays pinned to the first summary, `rec.summary` keeps moving.
+        let mut r = rec("u1");
+        let p = HookPayload::default();
+        // Freeze the label through its OWN (legacy) tier — the label's source
+        // is deliberately not retargeted here, so an ai-title alone never
+        // flips `label_source`. That asymmetry is the point of this test.
+        let freeze = "{\"type\":\"summary\",\"summary\":\"Read the transcript tail\"}\n";
+        assert!(refresh_label(&mut r, "Stop", &p, Some(freeze)));
+        assert_eq!(r.label_source, LabelSource::Summary);
+        let frozen = r.label.clone();
+        assert_eq!(r.summary, "Read the transcript tail");
+
+        // Two more turns, each with a NEW ai-title: summary follows, label does not.
+        for next in ["Write the row fields", "Run the four gates"] {
+            assert!(
+                refresh_label(&mut r, "Stop", &p, Some(&ai_title_line(next))),
+                "a fresh summary after the freeze must still count as a change"
+            );
+            assert_eq!(r.summary, next);
+            assert_eq!(r.label, frozen, "the label must stay frozen (\u{00a7}6.4)");
+        }
+        // An UNCHANGED tail is a no-op — \u{00a7}5 forbids no-op pushes.
+        assert!(!refresh_label(
+            &mut r,
+            "Stop",
+            &p,
+            Some(&ai_title_line("Run the four gates"))
+        ));
+    }
+
+    #[test]
+    fn harness_injected_summary_writes_neither_field() {
+        // #17's rule is about the SOURCE, not about which field it lands in:
+        // an injected tag must never earn the label, the summary, or the title.
+        for prefix in HARNESS_INJECTED_PREFIXES {
+            let injected = format!("  \n\t{prefix}> payload we must never earn");
+            let mut r = rec("u1");
+            let p = HookPayload::default();
+            let tail = format!(
+                "{}{}",
+                ai_title_line(&injected),
+                custom_title_line(&injected)
+            );
+            assert!(
+                !refresh_label(&mut r, "Stop", &p, Some(&tail)),
+                "injected text leaked into a row field for prefix {prefix}"
+            );
+            assert!(r.summary.is_empty());
+            assert_eq!(r.title, None);
+            assert_eq!(r.label, "x \u{00b7} main");
+        }
+    }
+
+    #[test]
+    fn stored_summary_outruns_the_label_truncation_and_is_still_bounded() {
+        // The label uses first_words (4 words / 32 chars) because a tab name
+        // is short. The bar's summary column is 17 cells at the profile that
+        // ships today and is set to widen (LEDGER D19), and `render.rs` clamps
+        // cell-accurately — so the store must hold MORE than the label does,
+        // bounded but generous.
+        let long =
+            "alpha bravo charlie delta echo foxtrot golf hotel india juliett kilo lima ".repeat(8);
+        let mut r = rec("u1");
+        let p = HookPayload::default();
+        assert!(refresh_label(
+            &mut r,
+            "Stop",
+            &p,
+            Some(&ai_title_line(&long))
+        ));
+        assert!(
+            r.summary.chars().count() > first_words(&long).chars().count(),
+            "stored summary must outrun the label's first_words truncation"
+        );
+        assert_eq!(r.summary.chars().count(), SUMMARY_MAX_CHARS);
+        assert!(r.summary.starts_with("alpha bravo charlie delta echo"));
+    }
+
+    #[test]
+    fn ai_title_beats_the_extinct_summary_line_and_the_prompt_seed() {
+        // #79: `type:"summary"` appears in 0 of 153 local transcripts; it is
+        // kept only as a legacy fallback BEHIND ai-title. And the prompt seed
+        // is the lowest tier of all — it exists so a live row is never blank
+        // before Claude has written its first ai-title.
+        let p = HookPayload {
+            session_id: Some("u1".into()),
+            prompt: Some("a prompt that must not win".into()),
+            message: None,
+        };
+        let mut r = rec("u1");
+        let tail = format!(
+            "{{\"type\":\"summary\",\"summary\":\"legacy\"}}\n{}",
+            ai_title_line("live")
+        );
+        assert!(refresh_label(&mut r, "UserPromptSubmit", &p, Some(&tail)));
+        assert_eq!(r.summary, "live");
+
+        // Legacy alone still works — the pinned freeze test depends on it.
+        let mut r = rec("u1");
+        let legacy = "{\"type\":\"summary\",\"summary\":\"legacy\"}\n";
+        assert!(refresh_label(&mut r, "UserPromptSubmit", &p, Some(legacy)));
+        assert_eq!(r.summary, "legacy");
+
+        // No tail at all: the prompt seeds the column, ONCE. A later prompt
+        // must not overwrite it — only an ai-title may.
+        let mut r = rec("u1");
+        assert!(refresh_label(&mut r, "UserPromptSubmit", &p, None));
+        assert_eq!(r.summary, "a prompt that must not win");
+        let p2 = HookPayload {
+            session_id: Some("u1".into()),
+            prompt: Some("a later prompt".into()),
+            message: None,
+        };
+        refresh_label(&mut r, "UserPromptSubmit", &p2, None);
+        assert_eq!(r.summary, "a prompt that must not win");
+        assert!(refresh_label(
+            &mut r,
+            "UserPromptSubmit",
+            &p2,
+            Some(&ai_title_line("earned"))
+        ));
+        assert_eq!(r.summary, "earned");
+    }
+
+    #[test]
+    fn title_comes_from_custom_title_and_is_held_last_non_empty() {
+        // Design-lock §5/§7.1: `title` is Claude's session rename and nothing
+        // else. Verified live 2026-07-29 — `/rename` writes
+        // {"type":"custom-title","customTitle":…,"sessionId":…} to the jsonl,
+        // re-appended latest-wins.
+        let mut r = rec("u1");
+        let p = HookPayload::default();
+        assert_eq!(r.title, None); // never renamed = blank chip, by design
+        assert!(refresh_label(
+            &mut r,
+            "Stop",
+            &p,
+            Some(&custom_title_line("NAL-MAIN"))
+        ));
+        assert_eq!(r.title.as_deref(), Some("NAL-MAIN"));
+
+        // A later rename wins; an identical one is a no-op.
+        assert!(refresh_label(
+            &mut r,
+            "Stop",
+            &p,
+            Some(&custom_title_line("NAL-WT"))
+        ));
+        assert_eq!(r.title.as_deref(), Some("NAL-WT"));
+        assert!(!refresh_label(
+            &mut r,
+            "Stop",
+            &p,
+            Some(&custom_title_line("NAL-WT"))
+        ));
+
+        // `/clear` appends an EMPTY custom-title; #24's ruling is that the
+        // last real rename is held across it, never blanked.
+        let cleared = format!("{}{}", custom_title_line("NAL-WT"), custom_title_line(""));
+        assert!(!refresh_label(&mut r, "Stop", &p, Some(&cleared)));
+        assert_eq!(r.title.as_deref(), Some("NAL-WT"));
+        // A tail that has scrolled past the rename entirely does not blank it.
+        assert!(!refresh_label(
+            &mut r,
+            "Stop",
+            &p,
+            Some("{\"type\":\"user\"}\n")
+        ));
+        assert_eq!(r.title.as_deref(), Some("NAL-WT"));
+    }
+
+    #[test]
+    fn clamp_field_is_single_line_and_char_bounded() {
+        // LEDGER D14: `unicode-width` reports 0 cells for C0/C1 controls, so a
+        // stored `\n` or `\u{1b}` breaks a row that still passes the
+        // every-row-is-cols-cells test. Collapse them at the write site too.
+        assert_eq!(clamp_field("a\nb\tc  d", 64), "a b c d");
+        assert_eq!(clamp_field("  padded \u{1b}[0m ", 64), "padded [0m");
+        // Multibyte input clamps on a CHAR boundary, never mid-codepoint.
+        let wide = "\u{3042}".repeat(50);
+        assert_eq!(clamp_field(&wide, 10).chars().count(), 10);
+        // Unlike sanitize_label it does NOT delete quotes/backslashes: neither
+        // title nor summary is ever baked into launch.kdl, and dropping
+        // characters out of displayed prose would be lossy for no gain.
+        assert_eq!(clamp_field(r#"the \d "regex""#, 64), r#"the \d "regex""#);
     }
 
     #[test]

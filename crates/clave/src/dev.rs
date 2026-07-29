@@ -22,6 +22,46 @@ pub struct ScenarioAgent {
     /// c8-stale: delete the agent's cwd AFTER seeding its jsonl, so the
     /// row's dwell-open hits the §6.3 staleness branch.
     pub delete_cwd_after: bool,
+    /// Explicit short repo directory name (e.g. `"clave"`), shared by every
+    /// agent that names it — one shared dir under `repos/` is what lets
+    /// several agents render the SAME repo ink (render.rs lock §4). `None`
+    /// keeps the original per-agent `{scenario}-{slug}` naming the three c8
+    /// scenarios were reviewed with, where every agent is its own repo.
+    pub repo: Option<&'static str>,
+    /// Non-worktree branch override, for `Provenance::Branch` (render.rs
+    /// lock §5.1's third state) without a real `git worktree add` — the
+    /// store's branch field is metadata only (see the `-b main` comment
+    /// below); nothing checks it against cwd's real git state. `None` keeps
+    /// the original hardcoded `"main"`. Ignored when `worktree` is true: a
+    /// worktree's branch is always the generated `clave/{uuid8}`.
+    pub branch: Option<&'static str>,
+    /// Claude's session rename (§6.4) — the render's title chip. `None`
+    /// renders a blank chip, which is itself worth seeding: `ux-gate1` wants
+    /// at least one row proving a missing title doesn't shift the row.
+    pub title: Option<&'static str>,
+    /// A hook-shaped one-liner (design-lock §7.1). Empty string is the
+    /// original default and renders a blank summary cell.
+    pub summary: &'static str,
+    pub status: clave_types::Status,
+}
+
+impl ScenarioAgent {
+    /// Base for the c8 scenarios' struct-update literals — every field the
+    /// visual-design scenario needed and the c8 ones never touched, defaulted
+    /// to exactly what the inline construction used to hardcode (`title:
+    /// None`, `summary: ""`, `status: Idle`, per-agent repo, hardcoded
+    /// branch), so ..DEFAULT changes zero observed behaviour.
+    const DEFAULT: ScenarioAgent = ScenarioAgent {
+        slug: "",
+        ago_secs: 0,
+        worktree: false,
+        delete_cwd_after: false,
+        repo: None,
+        branch: None,
+        title: None,
+        summary: "",
+        status: clave_types::Status::Idle,
+    };
 }
 
 pub struct Scenario {
@@ -36,20 +76,17 @@ pub const SCENARIOS: &[Scenario] = &[
             ScenarioAgent {
                 slug: "recent",
                 ago_secs: 60,
-                worktree: false,
-                delete_cwd_after: false,
+                ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
                 slug: "mid",
                 ago_secs: 3_600,
-                worktree: false,
-                delete_cwd_after: false,
+                ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
                 slug: "old",
                 ago_secs: 86_400,
-                worktree: false,
-                delete_cwd_after: false,
+                ..ScenarioAgent::DEFAULT
             },
         ],
     },
@@ -59,14 +96,13 @@ pub const SCENARIOS: &[Scenario] = &[
             ScenarioAgent {
                 slug: "main",
                 ago_secs: 60,
-                worktree: false,
-                delete_cwd_after: false,
+                ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
                 slug: "wt",
                 ago_secs: 3_600,
                 worktree: true,
-                delete_cwd_after: false,
+                ..ScenarioAgent::DEFAULT
             },
         ],
     },
@@ -76,14 +112,103 @@ pub const SCENARIOS: &[Scenario] = &[
             ScenarioAgent {
                 slug: "alive",
                 ago_secs: 60,
-                worktree: false,
-                delete_cwd_after: false,
+                ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
                 slug: "gone",
                 ago_secs: 3_600,
-                worktree: false,
                 delete_cwd_after: true,
+                ..ScenarioAgent::DEFAULT
+            },
+        ],
+    },
+    // The visual-design decision fixture (#85 follow-up): every status, every
+    // provenance, a missing title, and repos SHORT and DISTINCT enough (first
+    // three characters differ) to read cleanly in the 3-column collapsed repo
+    // field. c8-* stays a checklist of ONE mechanism each; this one is a fleet.
+    Scenario {
+        name: "ux-gate1",
+        agents: &[
+            // Main checkout, Idle, no title — proves the blank title chip
+            // doesn't shift the row, and Provenance::Main renders nothing.
+            ScenarioAgent {
+                slug: "cold",
+                ago_secs: 180,
+                repo: Some("clave"),
+                summary: "ready for the next prompt",
+                status: clave_types::Status::Idle,
+                ..ScenarioAgent::DEFAULT
+            },
+            // Same repo, a worktree this time — same ink as `cold` above,
+            // proving one repo is one colour across provenances.
+            ScenarioAgent {
+                slug: "gate",
+                ago_secs: 90,
+                worktree: true,
+                repo: Some("clave"),
+                title: Some("UX-GATE"),
+                summary: "wiring the new status column into render_rows before the review",
+                status: clave_types::Status::Working,
+                ..ScenarioAgent::DEFAULT
+            },
+            // A plain branch checkout (no worktree) — the third provenance.
+            ScenarioAgent {
+                slug: "sync",
+                ago_secs: 45,
+                repo: Some("nalu"),
+                branch: Some("feature/sync-timer"),
+                title: Some("SYNC-T9"),
+                summary: "two tests disagree about the debounce window, need a read",
+                status: clave_types::Status::NeedsYou,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "dns",
+                ago_secs: 600,
+                repo: Some("infra"),
+                branch: Some("hotfix/dns-ttl"),
+                title: Some("DNS-TTL"),
+                summary: "the staging rollout keeps timing out against the new zone",
+                status: clave_types::Status::Failed,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "cart",
+                ago_secs: 30,
+                repo: Some("webapp"),
+                title: Some("CART-99"),
+                summary: "cart totals now round the same way on server and client",
+                status: clave_types::Status::Done,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "readme",
+                ago_secs: 7_200,
+                repo: Some("docs"),
+                title: Some("README"),
+                summary: "trimmed the quickstart down to five commands",
+                status: clave_types::Status::Idle,
+                ..ScenarioAgent::DEFAULT
+            },
+            // The §6.3 staleness fixture, same mechanism as c8-stale's `gone`,
+            // dropped into the fleet so the decision review sees it alongside
+            // everything else rather than in isolation. WORKTREE, not a plain
+            // checkout: `repo` is shared with `cold`/`gate` above, and
+            // `delete_cwd_after` removes exactly `cwd` — a plain checkout's
+            // `cwd` IS the shared repo dir, which would delete `cold` and
+            // `gate`'s worktree out from under them too. A worktree's `cwd`
+            // is its own `.claude-worktrees/<uuid8>` subdir, so only this
+            // row's directory goes.
+            ScenarioAgent {
+                slug: "vanished",
+                ago_secs: 3_600,
+                worktree: true,
+                repo: Some("clave"),
+                title: Some("KDL-GRD"),
+                summary: "validating every generated KDL artifact against the real zellij parser",
+                status: clave_types::Status::Working,
+                delete_cwd_after: true,
+                ..ScenarioAgent::DEFAULT
             },
         ],
     },
@@ -144,6 +269,74 @@ pub fn run_launch() -> Result<()> {
     crate::setup::launch_session()
 }
 
+/// The per-agent tag for a worktree's branch/dir name — the LAST 8 hex
+/// digits, not the first (contrast `add.rs`'s real-uuid `&uuid[..8]`, which
+/// is fine there because a real v4 uuid's first 8 chars ARE effectively
+/// unique). `scenario_uuid` mints deterministic uuids of the shape
+/// `00000000-0000-4000-8000-c85c{n:08}` — every one of them starts with the
+/// literal `00000000`, so slicing the FRONT 8 chars gives the same tag to
+/// every scenario agent. Live finding: `ux-gate1` is the first scenario with
+/// two worktree agents in one repo, and `git worktree add -b clave/00000000`
+/// twice failed closed with "a branch named 'clave/00000000' already
+/// exists" — the collision c8-worktree's single worktree agent could never
+/// surface. `{n:08}` sits at the string's tail, so the tail 8 chars vary.
+fn uuid_tag(uuid: &str) -> &str {
+    &uuid[uuid.len() - 8..]
+}
+
+/// The `repos/` dir name for one scenario agent. `Some(r)` is a SHARED name —
+/// every agent in the scenario naming the same `r` lands in the same repo
+/// dir, which is how `ux-gate1` gets one repo-ink across main/branch/worktree
+/// rows. `None` reproduces the original `{scenario}-{slug}` naming, where
+/// every agent was its own repo (still exactly what the three c8 scenarios
+/// get, since none of them set `repo`).
+fn repo_dir_name(scenario_name: &str, a: &ScenarioAgent) -> String {
+    match a.repo {
+        Some(r) => r.to_string(),
+        None => format!("{scenario_name}-{}", a.slug),
+    }
+}
+
+/// The store row for one scenario agent — pure (no filesystem or process
+/// work), so it is the SAME function `run_scenario` seeds with and a render
+/// test can call directly against synthetic paths. Keeping it one function is
+/// what guarantees a render test proves what seeding will actually produce.
+fn agent_record(
+    scenario_name: &str,
+    a: &ScenarioAgent,
+    uuid: &str,
+    cwd_str: &str,
+    repo_root: &str,
+    now: u64,
+) -> crate::store::AgentRecord {
+    let branch = if a.worktree {
+        format!("clave/{}", uuid_tag(uuid))
+    } else {
+        a.branch.unwrap_or("main").to_string()
+    };
+    crate::store::AgentRecord {
+        uuid: uuid.to_string(),
+        cwd: cwd_str.to_string(),
+        repo_root: repo_root.to_string(),
+        branch,
+        label: format!("{scenario_name}-{} · seeded", a.slug),
+        status: a.status,
+        last_interacted: now.saturating_sub(a.ago_secs),
+        last_visited: 0,
+        worktree: a.worktree.then(|| cwd_str.to_string()),
+        label_source: crate::store::LabelSource::FirstPrompt,
+        tab_id: None,
+        stale: false,
+        title: a.title.map(String::from),
+        summary: a.summary.to_string(),
+        // `run_scenario` pins every seeded repo with `git init -q -b main`
+        // (see the comment there), so this is the repo's REAL default, not a
+        // guess — which is what makes `cold`'s blank provenance travel the
+        // #86 known-default path rather than the `main`/`master` fallback.
+        default_branch: Some("main".to_string()),
+    }
+}
+
 pub fn run_scenario(name: &str) -> Result<()> {
     let sc = SCENARIOS.iter().find(|s| s.name == name).with_context(|| {
         let names: Vec<_> = SCENARIOS.iter().map(|s| s.name).collect();
@@ -176,7 +369,7 @@ pub fn run_scenario(name: &str) -> Result<()> {
     // SCENARIO_STATE_DIRS — the build artifact in data/ survives).
     for (i, a) in sc.agents.iter().enumerate() {
         let uuid = scenario_uuid(i as u32 + 1);
-        let repo = root.join("repos").join(format!("{name}-{}", a.slug));
+        let repo = root.join("repos").join(repo_dir_name(name, a));
         std::fs::create_dir_all(&repo)?;
         // -b main: pin the branch — else init.defaultBranch (maybe `master`)
         // would disagree with the store row's hardcoded `branch: "main"`.
@@ -187,19 +380,8 @@ pub fn run_scenario(name: &str) -> Result<()> {
             &["commit", "--allow-empty", "-q", "-m", "seed"],
         )?;
         let cwd = if a.worktree {
-            let wt = repo.join(".claude-worktrees").join(&uuid[..8]);
-            run_in(
-                &repo,
-                "git",
-                &[
-                    "worktree",
-                    "add",
-                    "-q",
-                    "-b",
-                    &format!("clave/{}", &uuid[..8]),
-                    wt.to_str().context("wt")?,
-                ],
-            )?;
+            let wt = repo.join(".claude-worktrees").join(uuid_tag(&uuid));
+            ensure_worktree(&repo, &wt, &format!("clave/{}", uuid_tag(&uuid)))?;
             wt
         } else {
             repo.clone()
@@ -233,26 +415,7 @@ pub fn run_scenario(name: &str) -> Result<()> {
         crate::store::with_store_mut(&paths, |s| {
             s.agents.insert(
                 uuid.clone(),
-                crate::store::AgentRecord {
-                    uuid: uuid.clone(),
-                    cwd: cwd_str.clone(),
-                    repo_root: repo.to_string_lossy().into_owned(),
-                    branch: if a.worktree {
-                        format!("clave/{}", &uuid[..8])
-                    } else {
-                        "main".into()
-                    },
-                    label: format!("{}-{} · seeded", name, a.slug),
-                    status: clave_types::Status::Idle,
-                    last_interacted: now.saturating_sub(a.ago_secs),
-                    last_visited: 0,
-                    worktree: a.worktree.then(|| cwd_str.clone()),
-                    label_source: crate::store::LabelSource::FirstPrompt,
-                    tab_id: None,
-                    stale: false,
-                    title: None,
-                    summary: String::new(),
-                },
+                agent_record(name, a, &uuid, &cwd_str, &repo.to_string_lossy(), now),
             );
             s.seq += 1;
         })?;
@@ -380,6 +543,56 @@ pub fn run_reset() -> Result<()> {
     Ok(())
 }
 
+/// `git worktree add`, made RE-RUNNABLE. `run_scenario` is deliberately
+/// re-runnable without a `dev reset` — its `seed_needed` branch prints "already
+/// seeded — reusing its transcript" — and until #86 that held for worktree
+/// agents only by accident: a stale fixture used to be a plain checkout, so
+/// `delete_cwd_after`'s `remove_dir_all(&cwd)` took the WHOLE `repos/<dir>` tree
+/// with it and the next run rebuilt from nothing.
+///
+/// `ux-gate1` is the first scenario that breaks that. Its `vanished` agent
+/// SHARES `repo: Some("clave")` with `cold`/`gate`, so deleting its cwd removes
+/// only `.claude-worktrees/<tag>` while `repos/clave/.git` survives — including
+/// the branch AND the now-dangling worktree registration. A second
+/// `clave dev ux-gate1` then died at `git worktree add -b clave/<tag>` with "a
+/// branch named … already exists"; `gate`, whose worktree dir is simply still
+/// there, failed the same way one line earlier.
+///
+/// Idempotent in three steps: prune the registrations whose directory is gone,
+/// leave an existing worktree dir alone, and CHECK OUT a surviving branch
+/// instead of asking git to create it again.
+fn ensure_worktree(repo: &Path, wt: &Path, branch: &str) -> Result<()> {
+    // Drops the registration `remove_dir_all` orphaned; a no-op otherwise.
+    run_in(repo, "git", &["worktree", "prune"])?;
+    if wt.exists() {
+        return Ok(()); // registered and on disk — already the goal state
+    }
+    let wt_str = wt.to_str().context("worktree path is not UTF-8")?;
+    // `.output()`, not `.status()`: --quiet silences the ERROR, not the sha
+    // this prints on success, and the seeding console is read by a human.
+    let exists = Command::new("git")
+        .current_dir(repo)
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ])
+        .output()
+        .with_context(|| format!("git rev-parse in {}", repo.display()))?
+        .status
+        .success();
+    if exists {
+        run_in(repo, "git", &["worktree", "add", "-q", wt_str, branch])
+    } else {
+        run_in(
+            repo,
+            "git",
+            &["worktree", "add", "-q", "-b", branch, wt_str],
+        )
+    }
+}
+
 fn run_in(dir: &Path, cmd: &str, args: &[&str]) -> Result<()> {
     let st = Command::new(cmd)
         .current_dir(dir)
@@ -474,9 +687,15 @@ mod tests {
 
     #[test]
     fn scenario_table_covers_the_c8_checklist() {
-        // Names map 1:1 to SUBSYSTEM-VALIDATION.md C8 steps.
+        // Names map 1:1 to SUBSYSTEM-VALIDATION.md C8 steps, plus ux-gate1
+        // (the visual-design decision fixture, #85 follow-up). Exact list on
+        // purpose (task instruction): a `contains` would let a scenario go
+        // missing silently.
         let names: Vec<&str> = SCENARIOS.iter().map(|s| s.name).collect();
-        assert_eq!(names, vec!["c8-cold-start", "c8-worktree", "c8-stale"]);
+        assert_eq!(
+            names,
+            vec!["c8-cold-start", "c8-worktree", "c8-stale", "ux-gate1"]
+        );
         // cold-start: 3 agents, staggered recency, none worktree.
         let cs = &SCENARIOS[0];
         assert_eq!(cs.agents.len(), 3);
@@ -485,6 +704,246 @@ mod tests {
         assert!(SCENARIOS[1].agents.iter().any(|a| a.worktree));
         // stale: exactly one agent whose cwd the scenario deletes.
         assert!(SCENARIOS[2].agents.iter().any(|a| a.delete_cwd_after));
+        // c8-* agents are untouched by the new ScenarioAgent fields — the
+        // ..DEFAULT struct-update must reproduce exactly the old inline
+        // hardcoding (title None, summary "", status Idle, no repo/branch
+        // override), or the three reviewed validation paths silently change.
+        for sc in &SCENARIOS[..3] {
+            for a in sc.agents {
+                assert_eq!(a.title, None);
+                assert_eq!(a.summary, "");
+                assert_eq!(a.status, clave_types::Status::Idle);
+                assert_eq!(a.repo, None);
+                assert_eq!(a.branch, None);
+            }
+        }
+    }
+
+    #[test]
+    fn ux_gate1_exercises_the_whole_visual_design() {
+        // Every field the render test below turns into pixels, checked
+        // structurally first so a future edit that breaks one property fails
+        // with a clear name instead of a mysterious render assertion.
+        let sc = SCENARIOS.iter().find(|s| s.name == "ux-gate1").unwrap();
+        assert!(
+            (6..=8).contains(&sc.agents.len()),
+            "want 6-8 agents, got {}",
+            sc.agents.len()
+        );
+
+        // Every Status variant appears at least once.
+        use clave_types::Status;
+        for want in [
+            Status::NeedsYou,
+            Status::Working,
+            Status::Done,
+            Status::Idle,
+            Status::Failed,
+        ] {
+            assert!(
+                sc.agents.iter().any(|a| a.status == want),
+                "missing status {want:?}"
+            );
+        }
+
+        // All three provenances: at least one worktree, one plain branch
+        // override, and one plain main (no worktree, no branch override).
+        assert!(sc.agents.iter().any(|a| a.worktree));
+        assert!(sc.agents.iter().any(|a| !a.worktree && a.branch.is_some()));
+        assert!(sc.agents.iter().any(|a| !a.worktree && a.branch.is_none()));
+
+        // At least one title, at least one blank chip, most have a title.
+        let titled = sc.agents.iter().filter(|a| a.title.is_some()).count();
+        assert!(titled >= 1 && titled < sc.agents.len());
+
+        // Every summary is non-empty prose, not the old blank default.
+        assert!(sc.agents.iter().all(|a| !a.summary.is_empty()));
+
+        // Repos are SHORT and mutually distinguishable by their first three
+        // characters — the collapsed profile's whole repo column (D17).
+        let repos: std::collections::BTreeSet<&str> = sc
+            .agents
+            .iter()
+            .map(|a| a.repo.expect("ux-gate1 names every agent's repo"))
+            .collect();
+        assert!(
+            (4..=6).contains(&repos.len()),
+            "want 4-6 distinct repos, got {repos:?}"
+        );
+        let prefixes: std::collections::BTreeSet<&str> =
+            repos.iter().map(|r| &r[..r.len().min(3)]).collect();
+        assert_eq!(
+            prefixes.len(),
+            repos.len(),
+            "two repos share a 3-char prefix: {repos:?}"
+        );
+
+        // At least one stale fixture, and (per the run_scenario safety note
+        // above) it must not be a plain checkout sharing a repo with a live
+        // agent's cwd — it has to be its own worktree.
+        let stale: Vec<&ScenarioAgent> = sc.agents.iter().filter(|a| a.delete_cwd_after).collect();
+        assert!(!stale.is_empty());
+        assert!(stale.iter().all(|a| a.worktree));
+    }
+
+    #[test]
+    fn ux_gate1_renders_the_locked_visual_design() {
+        // The real pipeline, not a reimplementation: store::snapshot_from →
+        // BarModel::apply_snapshot → BarModel::rows() → render::render_rows —
+        // the SAME functions the plugin renders with (render.rs's own header
+        // comment says as much of render_rows + bar-preview). Every agent
+        // gets a synthetic tab_id and a matching TabMeta so `agent_content`
+        // reads its TRUE Status rather than demoting every row to
+        // `RowStatus::Dormant` (model.rs's `is_dormant` is keyed on tab
+        // liveness) — a freshly seeded, nobody's-opened-it-yet row rendering
+        // grey is correct sandbox behaviour, but this test's job is to prove
+        // the FIELDS the scenario writes render well once opened, which is
+        // the state the maintainer's fleet is in for the actual review.
+        use clave_bar::model::{BarModel, TabMeta};
+        use clave_bar::render::{
+            COLLAPSED_DESIGN_COLS, DESIGN_COLS, Provenance, RowContent, RowStatus, Widths,
+            display_cells, render_rows, strip_sgr,
+        };
+
+        let sc = SCENARIOS.iter().find(|s| s.name == "ux-gate1").unwrap();
+        let now = 2_000_000_000u64;
+        let mut store = crate::store::Store::default();
+        for (i, a) in sc.agents.iter().enumerate() {
+            let uuid = scenario_uuid(i as u32 + 1);
+            let repo_root = format!("/sandbox/repos/{}", repo_dir_name("ux-gate1", a));
+            let cwd = if a.worktree {
+                format!("{repo_root}/.claude-worktrees/{}", uuid_tag(&uuid))
+            } else {
+                repo_root.clone()
+            };
+            let mut record = agent_record("ux-gate1", a, &uuid, &cwd, &repo_root, now);
+            record.tab_id = Some(i); // simulate: every row open in a live tab
+            store.agents.insert(uuid, record);
+        }
+        store.seq = 1;
+
+        let snapshot = crate::store::snapshot_from(&store);
+        let mut model = BarModel::default();
+        model.apply_snapshot(snapshot);
+        // ONE tab is focused. A fleet with nothing selected renders no
+        // selected-row caps, no waveBlue2 background and — because recession is
+        // RELATIVE (lock §6) — no 25% fade on anybody: three quarters of the
+        // design would go unexercised against real scenario data, which is the
+        // half of the review this test exists to stand in for.
+        model.apply_tabs(
+            (0..sc.agents.len())
+                .map(|i| TabMeta {
+                    tab_id: i,
+                    position: i,
+                    name: format!("tab-{i}"),
+                    active: i == 0,
+                })
+                .collect(),
+        );
+
+        let rows: Vec<_> = model.rows().into_iter().map(|(_, row)| row).collect();
+        assert_eq!(rows.len(), sc.agents.len());
+        assert_eq!(
+            rows.iter().filter(|r| r.selected).count(),
+            1,
+            "exactly one row must carry the selection"
+        );
+
+        // The same rows with nothing selected — the control for the fade check
+        // below, hoisted because both width profiles reuse it.
+        let unfaded: Vec<_> = rows
+            .iter()
+            .cloned()
+            .map(|mut r| {
+                r.selected = false;
+                r
+            })
+            .collect();
+
+        // BOTH profiles, each against ITS OWN target width (review #86). This
+        // used to render `Widths::EXPANDED` at `DESIGN_COLS` only, which left
+        // the collapsed half of the design unexercised — and collapsed is where
+        // this scenario's short, 3-character-distinct repo names are actually
+        // load-bearing (D17's 3-cell repo column, D18's suppressed ellipsis). A
+        // repo field truncating below 3 cells, or a row missing the narrower
+        // target, would have passed.
+        for (widths, cols) in [
+            (Widths::EXPANDED, DESIGN_COLS),
+            (Widths::COLLAPSED, COLLAPSED_DESIGN_COLS),
+        ] {
+            // Design-lock invariant, proven rather than asserted in prose:
+            // every row is exactly the profile's target in display cells
+            // (bar-preview.rs does the same measurement) — INCLUDING the
+            // selected row, whose caps and full-width background are the
+            // easiest thing to render one cell wide.
+            let lines = render_rows(&rows, cols, widths);
+            for (line, row) in lines.iter().zip(&rows) {
+                let width = display_cells(&strip_sgr(line));
+                assert_eq!(width, cols, "row is {width} cells at {cols}: {row:?}");
+            }
+            // The selected row is the only one with the waveBlue2 background,
+            // and every other row is faded 25% toward it (lock §6) — the two
+            // halves of recession, checked against scenario data rather than a
+            // fixture.
+            let (sel, rest): (Vec<_>, Vec<_>) =
+                lines.iter().zip(&rows).partition(|(_, r)| r.selected);
+            assert!(
+                sel[0].0.contains("48;2;45;79;103"),
+                "no selected background at {cols}"
+            );
+            for (line, _) in &rest {
+                assert!(
+                    !line.contains("48;2;45;79;103"),
+                    "an unselected row carries the selection background at {cols}"
+                );
+            }
+            // And the fade is real, not just claimed: the unselected control
+            // renders at full strength, so every line must differ from its
+            // faded self. `mix` rounds ties to even (a ported Python detail) —
+            // a fade that silently stopped applying would leave these
+            // byte-identical.
+            for (faded, plain) in lines.iter().zip(render_rows(&unfaded, cols, widths)) {
+                assert_ne!(*faded, plain, "recession did not change this row at {cols}");
+            }
+        }
+
+        let agent_field = |row: &clave_bar::render::Row| match &row.content {
+            RowContent::Agent {
+                status,
+                provenance,
+                title,
+                ..
+            } => (*status, *provenance, title.clone()),
+            RowContent::Terminal { .. } => unreachable!("ux-gate1 seeds only agents"),
+        };
+        let fields: Vec<_> = rows.iter().map(agent_field).collect();
+
+        // Every status is represented, and the render disagrees on colour —
+        // proof this scenario is not "all one glyph" (the whole point).
+        for want in [
+            RowStatus::NeedsYou,
+            RowStatus::Working,
+            RowStatus::Done,
+            RowStatus::Idle,
+            RowStatus::Failed,
+        ] {
+            assert!(
+                fields.iter().any(|(s, ..)| *s == want),
+                "missing rendered status {want:?}"
+            );
+        }
+
+        // Every provenance is represented, including the blank main mark.
+        for want in [Provenance::Main, Provenance::Branch, Provenance::Worktree] {
+            assert!(
+                fields.iter().any(|(_, p, _)| *p == want),
+                "missing rendered provenance {want:?}"
+            );
+        }
+
+        // At least one blank title chip and at least one filled one.
+        assert!(fields.iter().any(|(_, _, t)| t.is_none()));
+        assert!(fields.iter().any(|(_, _, t)| t.is_some()));
     }
 
     #[test]
@@ -495,6 +954,108 @@ mod tests {
         assert_eq!(u, "00000000-0000-4000-8000-c85c00000001");
         assert!(uuid::Uuid::parse_str(&u).is_ok());
         assert_ne!(scenario_uuid(2), u);
+    }
+
+    #[test]
+    fn uuid_tag_differs_across_scenario_uuids() {
+        // Live finding: scenario uuids ALL start "00000000" (scenario_uuid's
+        // deterministic shape), so slicing the FRONT 8 chars (the pattern
+        // `add.rs` uses on real, effectively-random uuids) gives every
+        // scenario agent the identical tag — `git worktree add -b
+        // clave/00000000` collided the moment ux-gate1 put a second worktree
+        // agent in one repo. The tag must vary per agent, or a repo with 2+
+        // worktree agents can never seed.
+        assert_ne!(uuid_tag(&scenario_uuid(1)), uuid_tag(&scenario_uuid(2)));
+        assert_eq!(uuid_tag(&scenario_uuid(1)), "00000001");
+        assert_eq!(uuid_tag(&scenario_uuid(2)), "00000002");
+    }
+
+    #[test]
+    fn ensure_worktree_is_re_runnable_over_a_shared_repo() {
+        // Review finding #86, reproduced against real git. `run_scenario` is
+        // designed to be re-run WITHOUT a `dev reset` — its `seed_needed`
+        // branch says so in as many words — and `ux-gate1` is the first
+        // scenario for which that was false: two worktree agents share one
+        // repo, so the stale fixture's `remove_dir_all(&cwd)` takes only
+        // `.claude-worktrees/<tag>` and leaves `.git` — branch, worktree
+        // registration and all. Both of the shapes below made a bare
+        // `git worktree add -b` fail closed with "a branch named … already
+        // exists"; this test runs the whole thing THREE times.
+        //
+        // Shells out to real git deliberately: the bug lives entirely in git's
+        // semantics, so a mocked one would have agreed with the broken code.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repos").join("clave");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_in(&repo, "git", &["init", "-q", "-b", "main"]).unwrap();
+        // HERMETIC, not decorative: this passed locally and failed in CI on
+        // exactly this line. A developer machine supplies user.name/user.email
+        // from ~/.gitconfig and a runner does not, so the test was reading its
+        // environment rather than its fixture. `commit.gpgsign=false` is here
+        // for the same reason in reverse — the maintainer signs every commit
+        // globally, and a runner has no key to sign with.
+        for (k, v) in [
+            ("user.email", "test@example.invalid"),
+            ("user.name", "clave test"),
+            ("commit.gpgsign", "false"),
+        ] {
+            run_in(&repo, "git", &["config", k, v]).unwrap();
+        }
+        run_in(
+            &repo,
+            "git",
+            &["commit", "--allow-empty", "-q", "-m", "seed"],
+        )
+        .unwrap();
+        // Two worktree agents in ONE repo, exactly `gate` and `vanished`.
+        let gate = repo.join(".claude-worktrees").join("00000002");
+        let vanished = repo.join(".claude-worktrees").join("00000007");
+        for run in 1..=3 {
+            ensure_worktree(&repo, &gate, "clave/00000002")
+                .unwrap_or_else(|e| panic!("run {run}: gate: {e:#}"));
+            ensure_worktree(&repo, &vanished, "clave/00000007")
+                .unwrap_or_else(|e| panic!("run {run}: vanished: {e:#}"));
+            assert!(gate.is_dir(), "run {run}: gate's worktree is missing");
+            assert!(
+                vanished.is_dir(),
+                "run {run}: vanished's worktree is missing"
+            );
+            // The §6.3 staleness fixture, applied to the SAME repo the live
+            // agents share — the whole reason the branch outlives its dir.
+            std::fs::remove_dir_all(&vanished).unwrap();
+        }
+    }
+
+    #[test]
+    fn ux_gate1_worktree_agents_get_distinct_branch_tags() {
+        // The regression this scenario itself hit: two worktree agents
+        // (`gate`, `vanished`) share `repo: Some("clave")`. Prove their
+        // MINTED store branches (the same field `git worktree add -b`
+        // consumes) never collide, for every repo any scenario shares.
+        for sc in SCENARIOS {
+            let mut by_repo: std::collections::BTreeMap<&str, Vec<String>> =
+                std::collections::BTreeMap::new();
+            for (i, a) in sc.agents.iter().enumerate() {
+                if !a.worktree {
+                    continue;
+                }
+                let uuid = scenario_uuid(i as u32 + 1);
+                let branch = format!("clave/{}", uuid_tag(&uuid));
+                by_repo
+                    .entry(a.repo.unwrap_or(a.slug))
+                    .or_default()
+                    .push(branch);
+            }
+            for (repo, branches) in by_repo {
+                let unique: std::collections::BTreeSet<&String> = branches.iter().collect();
+                assert_eq!(
+                    unique.len(),
+                    branches.len(),
+                    "{}: repo {repo} has colliding worktree branches: {branches:?}",
+                    sc.name
+                );
+            }
+        }
     }
 
     #[test]

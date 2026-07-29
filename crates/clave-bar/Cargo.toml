@@ -34,6 +34,7 @@ dist = false
 zellij-tile = { workspace = true }
 clave-types = { path = "../clave-types" }
 serde_json = { workspace = true }
+unicode-width = { workspace = true }
 
 # Host-side property tests for the pure model (src/model.rs #[cfg(test)],
 # issue #10 item 3). A dev-dependency compiles ONLY for `cargo test` on the

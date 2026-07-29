@@ -415,8 +415,8 @@ is green at `ea0f009`; no source is touched anywhere and nothing is
 mid-refactor, so the tree is safe.
 
 Read, in this order: this file → `AGENTS.md` (which now imports itself into
-CLAUDE.md) → `UBIQUITOUS_LANGUAGE.md` → the design lock. Run `python3
-docs/superpowers/specs/bar-preview.py` once to see what was ratified — it is
+CLAUDE.md) → `UBIQUITOUS_LANGUAGE.md` → the design lock. Run `cargo run -p
+clave-bar --example bar-preview` once to see what was ratified — it is
 one screen and it saves reading §2 of the lock doc twice.
 
 **Do not** assume any sidebar UX exists in code. It does not.

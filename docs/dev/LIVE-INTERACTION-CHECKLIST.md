@@ -1,0 +1,536 @@
+# Live interaction checklist — the sidebar at 44 columns
+
+The D28 gate-2 run: **Gate 1 validated the design by looking at it; this validates
+the behaviour by driving it.** Nothing below is covered by any automated tier, and
+nothing below has ever run live — no interaction path has been exercised at 44/30
+columns on a real display. It belongs to [`TESTING.md`](TESTING.md)'s
+live-validation SOP: the interaction contract there governs (**the human drives
+every keypress and every session launch; the agent reads observability and never
+puppets the session**), and the sanctioned-command list there is the whole of what
+an agent may run.
+
+Read the SOP first if you have not. Then this.
+
+## Why this is not a formality, and the rule that makes it real
+
+Every item below states three things, and the third is the one that keeps this
+honest:
+
+- **Do** — the exact keys or commands.
+- **Correct** — what the screen must show.
+- **Vacuous if** — the conditions under which the observation *means nothing*,
+  so a clean run is not mistaken for evidence.
+
+That third field exists because this project has already shipped a vacuous live
+plan: a previous session wrote steps to observe a state its own scenario could not
+produce. That is one of `TESTING.md`'s six shapes wearing a terminal instead of a
+test runner — an observation satisfied by the behaviour *and* by its opposite
+(shape 1), or one that has quietly stopped exercising what it names (shape 2).
+**Before you record a PASS, check that the scenario could have produced a FAIL.**
+
+Two vacuity conditions are global. If either holds, stop and fix it — every
+observation below is void:
+
+- **Two bars in one tab.** The #44 symptom invalidates everything: executor
+  election scrambles, nav half-dies, and Alt+c looks dead for a reason that has
+  nothing to do with the seek. Checked in setup step S5.
+- **The wrong binary answering.** The PATH shim is load-bearing, not tidiness
+  (setup step S3). Without it the bar drives the sandbox with the *stable*
+  release, and a version string will not give it away.
+
+## Reading the numbers
+
+Several items ask for a **column count**, not a yes/no. Three ways to get one,
+cheapest first:
+
+1. **Count the summary cell.** Only `summary` flexes (D9/D16), so for any row
+   whose summary text is *longer* than its cell, the rendered summary occupies
+   exactly the cell: `cols = 13 + title_w + repo_w + summary_cells` — i.e.
+   `27 + summary_cells` expanded `(7, 7)` and `23 + summary_cells` collapsed
+   `(7, 3)`. `ux-gate1`'s summaries are all long enough. No rebuild, no reload.
+2. **Percent × display, from the layout dump** (agent-side, liveness-gated,
+   ±2 columns because the serialized constraint is an integer percent):
+   `ZELLIJ_SESSION_NAME=clave-test zellij action dump-layout`. The bar pane is
+   percent-constrained, so the dump reports `size="N%"`, never a column count.
+3. **Instrument it** — exact, and the documented loop: `TESTING.md`'s
+   instrumentation recipe, a temporary `eprintln!("CLAVE_DBG_cols …")` in
+   `clave-bar`'s `render`, rebuilt with a fresh `CLAVE_BUILD_TAG`, copied into the
+   **sandbox** data dir only, hot-reloaded with the `-c clave_binary=clave` form.
+   Strip it before committing. Use this if item 1 or 6 produces a surprise worth
+   pinning to a number.
+
+Also record the **window width** once, in columns, because every expected number
+below is derived from it. Zellij resizes in ≈5%-of-display-area steps (D20), so
+`step ≈ W × 5 / 100`, and the step is what decides where the seek comes to rest.
+At W = 280 (the maintainer's usual), `step = 14`.
+
+## Setup
+
+Commands marked **(human)** are the human's, in a terminal **outside** zellij.
+The rest an agent may run.
+
+**S1 — kill any live sandbox session (human).** `just sandbox` refuses while a
+`clave-test` session lives, and it is right to: regenerating `config.kdl` under a
+live session re-keys its keybinds to an identity the running bar does not have,
+and the next keypress starts a second bar.
+
+```bash
+zellij kill-session clave-test && zellij delete-session --force clave-test
+```
+
+**S2 — seed the fleet.** From the repo root:
+
+```bash
+just sandbox ux-gate1
+```
+
+What it does, and the parts that matter: it builds the working tree, drops the
+wasm in the sandbox data dir, wires the PATH shim, runs **`dev reset`** (which
+wipes the sandbox store and removes the `c85c`-tagged scenario transcripts), then
+`dev scenario ux-gate1`, which regenerates `config.kdl` **and** `layout.kdl`
+together and re-seeds seven agents with seven real `claude -p` calls. It
+self-checks the #44 identity pair, proves it touched neither `~/.cargo/bin/clave`
+nor `~/.local/share/clave`, and **prints the launch command rather than running
+it**.
+
+Two consequences worth knowing before you run it:
+
+- **It writes `~/.claude/settings.json`.** `dev scenario` calls `clave setup`,
+  which merges the hook registrations keyed on the *sandbox's* binary — bare
+  `clave`. So a sandbox setup rewrites the daily fleet's hook commands from the
+  versioned absolute path to bare `clave`, resolved through `PATH` at hook time.
+  It is replace-in-place and idempotent, and the next `just release` writes the
+  versioned path back. Nothing else outside the sandbox is touched.
+- **Every run is a cold seed.** Because `dev reset` runs first, running
+  `just sandbox` twice proves nothing about re-runnability; `dev scenario` twice
+  is that test, and it is not this one.
+
+**S3 — launch (human, non-zellij terminal).** Use the command the script printed,
+verbatim, **including the PATH shim** — the sandbox bakes bare `clave`, so without
+the shim the bar shells out to the stable launcher and the run tests the wrong
+binary.
+
+**S4 — first paint, and the fleet you should be looking at.** The launch layout
+eagerly opens the single most-recent row and leaves the rest dormant, so expect
+**one live tab and seven rows**, recency-ordered:
+
+| # | row | expect |
+|---|---|---|
+| 1 | `CART-99` / webapp | live and selected; its store status is `Done`, so a green dot at first paint that clears to untinted once the §6.5 unread clear fires on focus |
+| 2 | `SYNC-T9` / nalu | dormant, branch mark |
+| 3 | `UX-GATE` / clave | dormant, worktree mark |
+| 4 | *(blank chip)* / clave | dormant, **no** provenance mark |
+| 5 | `DNS-TTL` / infra | dormant, branch mark |
+| 6 | `KDL-GRD` / clave | dormant, worktree mark — this is the one whose cwd was deleted |
+| 7 | `README` / docs | dormant |
+
+Every dormant row shows the dormant mark **U+25CC** whatever its stored status:
+dormancy outranks `Status` in the row-state order, so the seeded `NeedsYou`,
+`Failed` and `Working` values are not visible until those rows are opened.
+
+The blank chip on row 4 and the blank battery cell on every row are **ratified**
+(D19), not gaps. Rows 3, 4 and 6 share one repo and must therefore share one repo
+ink and one gutter-mark colour.
+
+**S5 — one bar per tab (the master vacuity check).** Agent-side:
+
+```bash
+grep 'clave-bar: loaded' "$TMPDIR"/zellij-*/zellij-log/zellij.log | tail -5
+```
+
+Every line from this run must report the **same version and the same `build=`
+tag** — the tag is what distinguishes two builds of one version. And grep for
+`not found, starting it instead`: a hit means a plugin-identity miss spawned a
+second bar. Visually: each tab has exactly one sidebar.
+
+**Teardown.** From the repo root, after the run:
+
+```bash
+./target/release/clave dev reset      # prints the kill-session line, then wipes
+```
+
+(`clave-dev dev reset` is the same thing if `clave-dev` is installed.) Reset
+removes the sandbox store, the seeded repos and the `c85c`-tagged transcripts.
+It does **not** remove a transcript for any agent you create by hand in item 3 or
+4 — those are real sessions in real project dirs and are not scenario-tagged — and
+it does not restore `~/.claude/settings.json`'s hook path.
+
+---
+
+## 1. Collapse and expand — the highest-value item
+
+This is where a real bug lived (D21) and was fixed (D26), and the fix has never
+run live. The bug was that `Alt+c` emitted **zero** resizes on a wide display and
+the pane silently did not move.
+
+**Do.** Press `Alt+c`. Wait until the bar stops moving. Press it again. Repeat for
+**at least six consecutive toggles**, one at a time, and count.
+
+**Correct.**
+
+- **The pane moves on every single toggle.** Six presses, six visible width
+  changes. This is the D26 property, and it is the whole point of the item.
+- It comes to rest somewhere and stays there — no pacing, no oscillation, no
+  crawl. Each toggle should be **one** resize step on a 280-column display.
+- The rows render the collapsed profile the whole way: title still 7 wide (D17 —
+  the chip must **not** reflow), repo 3 characters with **no ellipsis** (D18), and
+  the summary simply shorter. Nothing over-runs the pane at any point in the
+  animation.
+- **Record the two rest widths.** At W = 280 the derivation predicts **47
+  expanded and 33 collapsed** (`step = 14`; from 47 a shrink lands 33, which is
+  within half a step of 30 and not of 44, so it settles there) — i.e. summary
+  cells of **20 and 10** against designed 17 and 7. So:
+  - **Collapsed resting wider than 30 is correct**, and Gate-1 prediction 1
+    called it. The visible difference between the two states will be smaller than
+    the constants suggest. The lever, if it bothers the eye, is
+    `COLLAPSED_TARGET_COLS` — not the profile.
+  - Collapsed resting at or below **23** puts it inside `Widths::COLLAPSED`'s own
+    clipping regime (D26's third reservation, sharpest at 14). If you see rows
+    wider than the pane while collapsed, that is this, and it is a finding. A
+    collapsed rest between 24 and 27 is milder and still worth recording: the
+    first frame of the *expand* renders the `EXPANDED` profile at a width below
+    its 27-cell floor, so expect exactly one over-run frame on the way out.
+
+**Vacuous if.**
+
+- You toggled again before the previous seek settled. Every toggle re-arms the
+  machine, so a burst measures nothing — the rest width you record is an
+  intermediate. One press, wait, look, then press.
+- You navigated during the test. A nav onto a dormant row arms a **peek**, which
+  renders and seeks the *expanded* profile for 0.9 s even while collapsed. Keep
+  hands off the arrow keys for this item.
+- Your window is around 400 columns wide. Above `MAX_LEARNABLE_STEP = 20`
+  (display ≈ 400) the seek enters a regime the proptest generator never reaches
+  and D26's census does not cover. Absence of a finding there proves nothing —
+  see *What this cannot test*.
+- You watched a bar in a **non-focused** tab. Every instance drives its own pane,
+  but only the tab you are looking at is being exercised.
+
+## 2. A new tab's first paint
+
+The birth percent is derived against a **fictional 200-column reference viewport**
+(`BAR_BIRTH_PERCENT = 44 × 100 / 200 = 22%`), so a newborn bar is born at
+≈ `0.22 × W` columns and the seek corrects it. On a wide window that means born
+too wide and visibly healing — which the maintainer already saw and called janky
+(D20). This item pins the sequence and the *other* end of it.
+
+**Do (a), wide window.** `Alt+t`. Watch the new tab's own bar on its first paints.
+
+**Correct (a).** At W = 280: born ≈ **61** columns, exactly **one** visible shrink,
+rest ≈ **47**. Two paints of jank, no more. If it takes more than two steps or
+lands off 47, record the numbers.
+
+**Do (b), narrow window.** Resize the terminal to **≈ 115 columns** (anything
+under ~123), then `Alt+t`.
+
+**Correct (b).** `0.22 × 115 ≈ 25`, which is **below `Widths::EXPANDED`'s 27-cell
+floor**, so the newborn's rows are deliberately **wider than the pane** — clipped,
+uniformly, every row kind at the same width (D13) — until the seek grows it to
+44 (three grows at `step ≈ 6`). Correct behaviour is: clipped-but-aligned, then
+healed. **Ragged** clipping — agent rows and terminal rows disagreeing on width —
+is a finding.
+
+**Vacuous if.**
+
+- Your window is ≈ 200 columns wide. At W = 200 the reference fiction is *true*,
+  the newborn is born within a column of 44, and there is nothing to observe.
+  This is the single most important vacuity condition in the document: the defect
+  is invisible on exactly one window size. **Record W.**
+- You watched the *old* tab's bar. `Alt+t` focuses the new tab; the newborn is the
+  bar in it.
+- The bar was collapsed. Then the newborn seeks 30, not 44, and the arithmetic
+  above does not apply.
+
+## 3. The hook writing `title` and `summary` — the newest, least-tested path
+
+Before this branch **nothing wrote `title` or `summary`**. This is the youngest
+code in the change and the only path whose input comes from outside the repository.
+
+**`ux-gate1`'s rows have seeded `title`/`summary` and prove nothing about the
+hook.** They were written straight into the store by the seeder, and **every one
+of the seven has a non-empty `summary`** — so the prompt-seed tier, which fills
+only while `summary` is empty, cannot fire on any of them. This item therefore
+requires a **genuinely new agent**; a resumed seeded row can corroborate the
+rename half at best.
+
+**Do.**
+
+1. Create a new agent: `Alt+a` → pick a directory → `new`. It runs a real `claude`
+   in a real dir, and the row lands in the **sandbox** store with an empty
+   `summary` and no `title`. (`Alt+a`'s picker is fzf over zoxide's list plus the
+   pane's cwd, so `zoxide add <dir>` first if the dir you want is not in it.)
+2. Send it a prompt. Watch the summary column.
+3. Let the turn finish. Watch it again.
+4. Rename the session (`/rename LIVE-1` — the command that appends a
+   `custom-title` line). Then **send another prompt**.
+5. Optional, cheap, and worth it: `/clear`, then prompt again.
+
+**Correct.**
+
+- **After step 2** the summary shows your prompt text. That is tier 3, and it is
+  fill-only-while-empty — a seeded or earned summary is never regressed to prompt
+  text.
+- **After step 3** the summary is replaced by Claude's `ai-title` (tier 1), if
+  Claude wrote one this session. Measured today, 2026-07-29: **75 of 153** local
+  transcripts carry an `ai-title` line, **76 of 153** carry a `custom-title`, and
+  `{"type":"summary"}` — tier 2, the extinct one — appears in **0**. So tier 2
+  will not fire, ever, and its silence is not a defect (D23).
+- **After step 4** the title chip fills with `LIVE-1`, dark text on a palette
+  background, clamped to 7 cells. **The chip does not appear at the moment you
+  rename** — the tail is read only on `Stop` and `UserPromptSubmit`, so the rename
+  lands on the next of those. A blank chip immediately after `/rename` is correct;
+  a blank chip after the next prompt is a finding.
+- **After step 5** the chip still reads `LIVE-1`. `/clear` appends an *empty*
+  `custom-title`, and the empty-value skip is what holds the last real rename
+  across it (#24). A chip that blanks here is a regression in that skip.
+- **`ai-title` does not roll (D24).** Up to 85 lines per transcript and never
+  more than one distinct value. A summary column that never changes again for the
+  life of the session is **correct**, not stuck. Do not file it.
+- The chip's colour is provisional and positional: every repo's *first* title gets
+  palette index 0, which is why most chips are blue. S5 fixes it. Not a finding.
+
+**Vacuous if.**
+
+- You read a seeded row's chip or summary. Those values came from the seeder.
+  The proof is that the value you observe is one **only the hook could have
+  written** — your typed rename, your prompt text, Claude's own title.
+- You never sent a prompt after the rename. Nothing reads the tail otherwise.
+- The agent's transcript moved. A session whose cwd changes gets its `.jsonl`
+  **relocated** into a new project dir, and a stale path silently stops returning
+  anything (#87). Confirm the file is where the hook looks:
+  `find ~/.claude/projects -name '<uuid>.jsonl'` — one hit, under the current cwd.
+- The row you are watching is dormant. Dormant rows have no live hook.
+
+Agent-side corroboration, so a screen reading is not the only evidence:
+
+```bash
+./target/release/clave dev status | jq '.store.agents[] | {label, title, summary, default_branch}'
+```
+
+## 4. Provenance — all three states, and the one that needs a new row
+
+Three states, not two (lock §5.1): a **main** checkout renders **nothing**, a
+branch renders U+F062C, a worktree renders U+168C2, and the mark takes the repo's
+ink so repo identity is a shape in the gutter as well as a colour in the text.
+
+**Do (a), the states the fleet can already show.** Read rows 2–6 from S4: `cold`
+blank (main), `sync` and `dns` marked branch, `gate` and `vanished` marked
+worktree. Confirm the two marked shapes differ and the three `clave` rows share
+one colour.
+
+**Do (b), the behaviour this branch actually added.** `default_branch` is
+`None` for **every row created before this branch**, and `merge_resume_record`
+preserves it wholesale, so a pre-existing row can never demonstrate the new path —
+it falls back to the `main`/`master` name test, which is exactly what shipped
+before. What demonstrates it is a **new row in a repo whose default branch is
+neither `main` nor `master`**:
+
+```bash
+mkdir -p "$TMPDIR/trunk-repo" && cd "$TMPDIR/trunk-repo"
+git init -q -b trunk && git commit -q --allow-empty -m init
+git config init.defaultBranch trunk        # makes the default DISCOVERABLE
+zoxide add "$PWD"                          # so Alt+a's picker can reach it
+```
+
+Then, in the sandbox session: `Alt+a` → that dir → `new`. Expect **a blank
+provenance cell** — the old heuristic would have marked `trunk` as a branch. Then
+`git switch -c wip` in that repo and add a second agent: **marked branch**. Same
+repo, two rows, opposite answers.
+
+**Correct.** Blank for the default branch whatever it is called; marked for
+anything else; worktree beats both.
+
+**Vacuous if.**
+
+- `default_branch` came back `None`. `resolve_default_branch` asks
+  `origin/HEAD` first, then `init.defaultBranch` **and verifies the ref exists** —
+  a bare `git init -b trunk` with a global default of `main` resolves to `None`,
+  falls back to the name test, and marks `trunk` as a branch. That is *correct*
+  behaviour for an undiscoverable default and tells you nothing about the new
+  path. Check the field before interpreting the glyph:
+  `./target/release/clave dev status | jq '.store.agents[] | {branch, default_branch}'`.
+- The glyph is missing rather than absent. **U+168C2 is BAMUM LETTER PHASE-C
+  MBERAE and is not a Nerd Font glyph** — in practice only Noto Sans Bamum has it,
+  so a working battery glyph says nothing about its coverage. A blank where a
+  worktree mark belongs may be font fallback, not logic. Distinguish by checking a
+  row you know is a worktree against `dev status`.
+- You read the marks on the row you are hovering. The 25% fade dims unselected
+  rows; a dim mark is still a mark.
+
+## 5. Navigation and selection
+
+**Do, and check each.**
+
+- `Alt+Down` / `Alt+j` — next display row. `Alt+Up` / `Alt+k` — previous. Both
+  wrap.
+- `Alt+1` … `Alt+9` — jump to display row N (1-based). On a **dormant** row this
+  is an explicit pick: it opens **immediately**, with no dwell.
+- **Dwell-to-open.** Walk onto a dormant row with `Alt+Down` and **stop**. After
+  0.4 s the row flips to the opening mark (U+21BB, carpYellow), a tab appears, the
+  row goes live and the selection reverts to the focused tab.
+- **Walk-through must not open.** Press `Alt+Down` three times quickly across
+  dormant rows. Exactly **one** tab opens — the row you came to rest on. Every
+  landing invalidates the previous dwell arm.
+- **The dead row.** Dwell the `KDL-GRD` row (its cwd was deleted). Expect the
+  opening mark, then the stale mark **U+2717** in red, **no tab**, and the session
+  otherwise unaffected. U+2717 is the stale flag; U+2716 is `Failed`. They render
+  the same red, so shape is the only discriminator — do not transpose them.
+- **The virtual cursor.** While the cursor sits on a dormant row, **every live row
+  loses its highlight** and the dormant row carries it — background waveBlue2 plus
+  both powerline caps. Exactly one row is highlighted at all times.
+- **The fade.** Unselected rows sit 25% toward the bar background. Compare a
+  chip's colour on the selected row against the same chip unselected.
+- **Peek while collapsed.** `Alt+c`, then navigate — onto a dormant row, or to
+  another live tab (that path arrives as the `clave-visited` pipe). The bar
+  expands to the template width while you walk and sinks back ~0.9 s after the
+  **last** press, so a burst of presses is one expand and one sink, not a
+  flicker per key. An explicit `Alt+c` mid-peek outranks it and stays where you
+  put it.
+- **Nav after a close.** `Alt+w` on a tab, then `Alt+Up`/`Alt+Down`. Nav must keep
+  working — this stranded until a mouse click before `Effect::ReanchorVisit`
+  (#23), and only a live session can show it.
+- **Mouse.** Click a live row → switches to that tab. Click a dormant row → opens
+  it immediately (a click is an explicit pick). Click reaches only the visible
+  bar.
+
+**Vacuous if.**
+
+- You navigated in a bar that is not in the focused tab. Row-walk and row-jump are
+  **executor-gated**: only the instance whose own tab is the current tab computes
+  the step. Watching the wrong bar looks like dead nav.
+- You held the key down. Key repeat is a burst of landings; each one invalidates
+  the previous dwell, so nothing opens and that is correct.
+- Your terminal is not delivering mouse events to zellij. Verify by clicking a
+  live row first — if a switch happens, the mouse path is alive.
+- You dwelt a row that is already live. `dwell_expired` opens only a row that is
+  still dormant.
+
+## 6. Window resize — drift re-arm
+
+Percent geometry moves under a window resize, so a resized window leaves the bar
+off-target and the seek must **re-arm** (#4) — under bounds that stop it fighting
+a mid-drag flicker or a thrashing layout.
+
+**Do.** With the bar settled and expanded, resize the terminal window **by a
+lot** — halve its width, from ≈280 to ≈140 — then leave it alone and watch.
+
+**Correct.** The bar's cols fall proportionally (≈47 → ≈23, which is under the
+27-cell floor, so expect a transient uniform over-run), the same off-target width
+is observed twice, the seek re-arms, and the bar grows back to ≈44 and stops. Then
+widen the window again and watch it come back down. No thrashing, no parking
+off-target, no fight with the layout.
+
+**Vacuous if.**
+
+- You resized by a little. Gate B settles in place when the new width is within
+  one learned step of where the seek last acted — deliberately, because re-arming
+  there would chase its own in-flight resize forever. A small resize *should*
+  produce no movement; observing none proves nothing about drift.
+- The new width happens to fall inside the acceptance band. Same outcome, same
+  non-observation.
+- You were still dragging. Drift requires the **same** width twice; a mid-drag
+  flicker never confirms, by design. Let go, then watch.
+- **Watch for this one, it is a real open question:** re-arm needs a *second*
+  render at the stable new width, and renders are event-driven. If the bar sits
+  off-target after the resize, generate an event — `Alt+o`, or switch tabs — and
+  see whether it heals then. **If it heals only on the next event, the drift
+  confirmation is waiting for a render a quiet session may never deliver.** That
+  is a finding worth an issue, and nothing in the hermetic tiers can see it.
+
+## 7. Terminal tabs
+
+A terminal tab has no store row, so it renders differently on purpose (lock §5,
+§7.1): the console mark in the battery cell, and its zellij **name** across the
+whole body.
+
+**Do.** `Alt+t`, then read the new tab's row in the bar.
+
+**Correct.** Blank status cell (a terminal has no turn), the rule, the console
+mark **U+F018D** where a battery would be, a blank provenance cell, and the zellij
+tab name (`Tab #N`) in muted grey across the body, clamped to the body width with
+an ellipsis when it does not fit. The name is the **only** place a zellij tab name
+reaches the bar; an agent row must never show one.
+
+**Watch item, already recorded as a trap:** the row's sort key is the store's tab
+timeline, stamped once at birth, and **zellij recycles tab ids** — `get_new_tab_id`
+is `keys().last() + 1`. So: `Alt+t`, `Alt+w` on that newest tab, `Alt+t` again. The
+recycled id was already birth-touched by the previous instance, `birth_touched`
+never re-arms, and the new tab can end up permanently unstamped — which sorts it
+**below every dormant row**. If a fresh terminal tab appears at the bottom of the
+list, that is this, and it is deterministic rather than racy.
+
+**Vacuous if.** You renamed the tab, or your zellij config names tabs differently
+— then you are reading a different string than the default and the clamp behaviour
+you are checking is not the one the golden pins.
+
+## What this checklist CANNOT test
+
+So that absence of a finding is not read as absence of a problem:
+
+- **Steps above `MAX_LEARNABLE_STEP`.** Real resize steps over 20 livelock the
+  seek in a re-arm/resize storm — 111,788 configurations on this branch, 50,576 on
+  `main`. It needs a display area around **400 columns**; a ~280-column window
+  cannot produce one. The proptest generator stops at 20, so nothing automated
+  will ever catch it either. Out of reach today, **not out of reach forever** —
+  a wider monitor or a projector re-opens it.
+- **The two surviving `Rgb::hex` mutants.** `hex()`'s only caller is
+  `bar-preview.rs`, an excluded example, so it is unreachable from the plugin. No
+  live observation can exercise it; the honest options remain a test or a
+  deletion.
+- **Ink stability across looks.** Allocation is provisional, in-memory and
+  positional over the sorted repo set, so adding a repo that sorts early
+  renumbers every repo after it. **Colours shifting between two runs is not a
+  renderer bug** (Gate-1 prediction 3); it is what S5's store-backed allocator
+  exists to fix.
+- **A mixed-version store.** An older `clave` binary's read-modify-write strips
+  `title`/`summary`. `summary` self-heals on the next turn because `ai-title` is
+  re-stamped; `title` heals only while a `custom-title` line is still inside the
+  64 KiB tail, so on a long-running session a stripped title is lost until the
+  next `/rename`. Reproducing this needs two binaries and is not part of this run.
+- **Everything Tier 2 will own (#47).** One bar per tab, nav after a close, pipe
+  delivery, bind/prune round-trips: this checklist observes them, but a human
+  observing once is not a regression guard.
+- **Glyph and font coverage** is `host-untestable` by definition. What you can do
+  is record *which* glyph was missing, on which font, so the design question is
+  separable from the logic question.
+
+## What to do with a finding
+
+- **A prediction turning out wrong is a finding, not a disappointment.** D26's
+  four reservations and the Gate 1 list were written down *in order to be
+  falsified* here. "Collapsed rested at 33, not 30" and "the newborn healed in one
+  step, not three" are both results. Record the number either way.
+- **A ruling or a design answer → `docs/ux/LEDGER.md`**, as the next numbered
+  decision, dated, with its reasoning. A decision that is not yet in the code
+  carries the `NOT YET IMPLEMENTED` banner.
+- **A trap the next agent would also lose time to → `FOOTGUNS.md`**, in the
+  section it belongs to, with the mechanism and the diagnosis command.
+- **Work → an issue**, and note in it which tier should have caught it. If the
+  answer is "a tier that exists", `docs/dev/TESTING.md`'s taxonomy or escape
+  record wants a row.
+- **Noise that is not a finding:** `CliPipe did not complete within 1s`, empty
+  payload deliveries, and `1000 consecutive unknown messages` in the zellij log
+  are benign and pre-existing since v0.1.0 (#45). They buried the real evidence
+  once already. `not found, starting it instead` in the same log is the opposite —
+  that one is always a finding.
+
+## Observation log
+
+Fill it in as you go; the numbers are the deliverable, not the ticks.
+
+| | observed |
+|---|---|
+| Window width (columns), and derived step | |
+| Expanded rest width / summary cells | |
+| Collapsed rest width / summary cells | |
+| Toggles driven, toggles that moved the pane | |
+| Newborn birth width, steps to rest (wide window) | |
+| Newborn birth width, over-run seen? (narrow window) | |
+| Chip filled after `/rename` + one prompt? | |
+| Summary tier observed at each step | |
+| Provenance: blank / branch / worktree all correct? | |
+| New row with a non-`main` discoverable default → blank? | |
+| Dwell opened; walk-through did not; dead row showed the stale mark | |
+| Resize healed unaided / healed on next event / parked | |
+| Terminal row: console mark, name, sort position | |
+| One bar per tab, one build tag | |

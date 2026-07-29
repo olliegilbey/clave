@@ -153,6 +153,12 @@ Two consequences:
 
 ### 3.2 FINDING — what Claude actually writes
 
+> **⚠ One word in the table below is FALSIFIED — LEDGER D24** (`docs/ux/LEDGER.md`,
+> the authority): `ai-title` is **not** "rolling". Its 373 occurrences are
+> re-stamps — up to 85 lines per transcript, never more than one distinct value
+> per session. The count is right; the inference from it was wrong. Left in place
+> so the belief is visible — **do not amend it here**.
+
 Line types across the 40 newest transcripts:
 
 | type | count | content |

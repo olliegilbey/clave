@@ -9,7 +9,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use clave_types::{Agent, AgentSnapshot, Status};
+// The two width targets live in `clave-types` (S8 §3.3): the renderer draws
+// against the same numbers this seek drives the pane to, and `clave`'s KDL
+// generators size the newborn pane from them — one definition, three artifacts.
+use clave_types::{Agent, AgentSnapshot, BAR_TARGET_COLS, COLLAPSED_TARGET_COLS, Status};
+
+use crate::render::{PALETTE, Provenance, Row, RowContent, RowStatus, Widths};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TabMeta {
@@ -130,16 +135,6 @@ pub fn classify_timer(elapsed: f64, pending_dwells: usize, pending_peeks: u32) -
     }
 }
 
-/// The expanded width the seek converges to. The generated layouts
-/// (setup::layout_kdl and add::tab_layout) size the bar pane in PERCENT —
-/// a fixed `size=30` made zellij refuse every resize (CantResizeFixedPanes)
-/// — so births land near this and the birth-armed seek finishes the job.
-const BAR_TARGET_COLS: usize = 30;
-/// Collapsed width target (Alt+c): a glyph gutter — the state glyph plus a
-/// couple of name chars survive the renderer's own truncation, so "mini
-/// mode" needs no special render path. Zellij's resize floor may stop the
-/// seek above this; wherever cols stop changing is accepted.
-const COLLAPSED_TARGET_COLS: usize = 4;
 /// Seek steps allowed per toggle (each is a real zellij layout action):
 /// enough for the widest transition at ~5%-of-viewport per step, small
 /// enough that a layout which refuses to converge isn't fought forever.
@@ -149,6 +144,52 @@ const SEEK_BUDGET: u32 = 16;
 /// learning one poisons the acceptance band (step=60 seen live, round 17:
 /// it accepted a 13-col bar as "close enough" to 26).
 const MAX_LEARNABLE_STEP: usize = 20;
+/// The step assumed before a resize's effect has taught us zellij's real
+/// increment: ±4 cols of slack, so a bar born near the target is accepted
+/// rather than nudged into an overshoot dance.
+const PRE_LEARNING_STEP: usize = 8;
+
+/// Is `cols` converged on `target`, given the current `step` and the OTHER
+/// target? Both halves are load-bearing.
+///
+/// 1. **Within half a step.** Zellij resizes in ~5%-of-display-area increments,
+///    so an exact column count is simply not on the lattice (LEDGER D20) — a
+///    band is what lets the seek terminate at all, and `GrowSelf` recovers an
+///    overshoot from the far side.
+/// 2. **Not equally converged on the other target.** The band spans `step`
+///    columns, so the two targets' bands overlap as soon as
+///    `step >= separation` — 14 at 44/30, i.e. a display area of roughly 280
+///    columns, which the maintainer runs. A width in the overlap is converged
+///    for BOTH targets, and `toggle()` deliberately KEEPS the learned step, so
+///    Alt+c emits zero resize effects and the pane silently does not move
+///    (LEDGER D21; reported live as "some blips" at Gate 1). Before this
+///    branch the targets were 30/4 — 26 apart, wider than any learnable step —
+///    so disjointness held by luck of the constants rather than by
+///    construction, and 44/30 lost it with nothing turning red.
+///
+/// Derived from the targets themselves, deliberately **not** from a margin
+/// chosen against today's numbers: whatever the two targets become (D19 moves
+/// the expanded one to 54, where the overlap cannot arise at all), no width is
+/// ever accepted for both. Pinned by `no_width_is_accepted_for_both_targets`.
+///
+/// The cost of condition 2 is paid only inside the overlap, and only on
+/// displays coarse enough to have one: a width the lattice cannot improve on
+/// is refused, so the seek takes one more step and the bracket rule in gate
+/// (D) stops it there. That resting width is **not** guaranteed to be outside
+/// the overlap — a census over the whole learnable space found 84 distinct
+/// `(mode, step, width)` rests that this function itself would refuse, e.g.
+/// 37 resting for both seeks in different runs. What IS guaranteed, and is
+/// what the bug was about, is that **Alt+c always moves**: every target flip
+/// routes through `arm_seek`, which clears `seek_rest`/`seek_last_cols`/
+/// `seek_drift`, so gates (A) and (B) cannot short-circuit it and the first
+/// post-flip render always re-evaluates this function against the new target.
+/// Verified exhaustively: 9,640 rest states x 6 consecutive toggles, zero
+/// failures to move. A visibly-collapsed bar a few columns off target beats a
+/// perfectly-parked one that never moved.
+fn converged(cols: usize, target: usize, other: usize, step: i64) -> bool {
+    let near = |t: usize| 2 * (cols as i64 - t as i64).abs() <= step;
+    near(target) && !near(other)
+}
 
 /// Row identity (§6.6 C8): a live zellij tab, or a dormant store row
 /// (conversation with no tab yet — claude.ai-style list).
@@ -158,14 +199,73 @@ pub enum RowKey {
     Dormant(String),
 }
 
-/// One rendered row, already in display order.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Row {
-    pub key: RowKey,
-    pub name: String,
-    pub active: bool,
-    /// (glyph, ANSI colour) for agent rows; None for plain terminal tabs.
-    pub glyph: Option<(char, u8)>,
+/// PROVISIONAL — delete when S5 lands. Design-lock §4 requires ink allocation
+/// to be **store-backed, round-robin, iterate-and-wrap**: one repo is one
+/// colour forever, and a title chip is unique within its repo. That is
+/// cross-process state with an ordering/idempotency argument to make, and it is
+/// S5's job, not this module's. Hashing is overruled twice over — `DefaultHasher`
+/// is not stable across toolchains, and the maintainer rejected collisions
+/// outright.
+///
+/// This stand-in exists for exactly one reason: a colourless bar tells the
+/// maintainer nothing at the design checkpoint this wiring exists to reach. It
+/// is recomputed from every snapshot, persists nothing, and is one field and one
+/// function to delete. **Determinism is the part that matters** — a `HashMap`
+/// here would reshuffle every colour between processes (and Rust's default
+/// hasher is randomly seeded per process, so even one process's two renders
+/// could disagree). `BTreeSet`/`BTreeMap` give a stable sort order, so the same
+/// snapshot always yields the same palette assignment.
+#[derive(Debug, Default)]
+struct ProvisionalInks {
+    /// repo_root → palette index.
+    repo: BTreeMap<String, u8>,
+    /// (repo_root, title) → palette index, allocated WITHIN the repo so two
+    /// tabs of one repo never share a chip (lock §4).
+    title: BTreeMap<(String, String), u8>,
+}
+
+impl ProvisionalInks {
+    /// PROVISIONAL (see `ProvisionalInks`): sorted distinct keys, index
+    /// round-robin by position, wrapping at the palette length.
+    fn allocate(agents: &[Agent]) -> Self {
+        let mut repos: BTreeSet<&str> = BTreeSet::new();
+        let mut titles: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        for a in agents {
+            // An agent outside a repo has no repo identity to colour; D7 says
+            // that is `None`, never `unwrap_or(0)` (0 is crystalBlue, a real
+            // hue — a bare `u8` has no unset value).
+            if a.repo_root.is_empty() {
+                continue;
+            }
+            repos.insert(a.repo_root.as_str());
+            if let Some(t) = a.title.as_deref().filter(|t| !t.is_empty()) {
+                titles.entry(a.repo_root.as_str()).or_default().insert(t);
+            }
+        }
+        let wrap = |i: usize| (i % PALETTE.len()) as u8;
+        Self {
+            repo: repos
+                .into_iter()
+                .enumerate()
+                .map(|(i, r)| (r.to_string(), wrap(i)))
+                .collect(),
+            title: titles
+                .into_iter()
+                .flat_map(|(repo, ts)| {
+                    ts.into_iter()
+                        .enumerate()
+                        .map(move |(i, t)| ((repo.to_string(), t.to_string()), wrap(i)))
+                })
+                .collect(),
+        }
+    }
+}
+
+/// The last non-empty path component of a repo root — lock §2's repo column is
+/// a NAME, not a path, and at 7 cells (3 collapsed) a path renders as ellipsis.
+/// Trailing slashes are tolerated because a store value is hook-written.
+fn basename(path: &str) -> &str {
+    path.rsplit('/').find(|s| !s.is_empty()).unwrap_or("")
 }
 
 pub struct BarModel {
@@ -719,14 +819,118 @@ impl BarModel {
         self.prune_opening();
     }
 
+    /// The row content for a live-or-dormant agent (lock §2). `dormant` is the
+    /// caller's own classification rather than a re-derivation, because the two
+    /// loops below already know which list they are walking.
+    fn agent_content(&self, a: &Agent, dormant: bool, inks: &ProvisionalInks) -> RowContent {
+        // Ordered, and the order is the behaviour: `stale` and `opening` are
+        // model states that OUTRANK the store's `Status` (a stale row's status
+        // is whatever it was when the cwd vanished), and the local unread
+        // override is the last thing between `Done` and the palette. Carried
+        // over unchanged from the (char, u8) glyph logic this replaces.
+        let status = if a.stale {
+            RowStatus::Stale
+        } else if self.opening.contains(&a.uuid) {
+            RowStatus::Opening
+        } else if dormant {
+            RowStatus::Dormant
+        } else if a.status == Status::Done && self.read_locally.contains(&a.uuid) {
+            // Local unread override: a Done agent already seen renders Idle
+            // until `clave focus` persists the transition (§6.5).
+            RowStatus::Idle
+        } else {
+            match a.status {
+                Status::Idle => RowStatus::Idle,
+                Status::Working => RowStatus::Working,
+                Status::NeedsYou => RowStatus::NeedsYou,
+                Status::Done => RowStatus::Done,
+                Status::Failed => RowStatus::Failed,
+            }
+        };
+        // Three-state (lock §5.1), and a main checkout renders NOTHING — that
+        // is the researched choice, and it is what makes the two marked states
+        // mean something. NO branch is the case the design did not name: an
+        // agent outside a repo has none, and painting the branch glyph for it
+        // would assert a provenance nobody has — so it takes the blank.
+        //
+        // `"-"` is the value that matters, NOT the empty string: the host
+        // writes `"-"` when `git rev-parse --abbrev-ref HEAD` fails
+        // (`add::run_add`'s fallback) and `record_branch` returns `"-"` for a
+        // detached-worktree resume. Nothing in the host ever writes an empty
+        // branch — every `branch: String::new()` in the tree is a test builder,
+        // so the empty clause is kept only to keep those honest. Verified
+        // against the writer, not against a fixture.
+        //
+        // WHICH branch is the default is the repo's answer, never ours (#86).
+        // This used to test `main`/`master` as if they were exhaustive, so a
+        // `trunk`-, `develop`- or `dev`-default repository had its ORDINARY
+        // checkout marked as a branch — the one row §5.1 requires to be blank,
+        // mislabelled on naming convention alone. `default_branch` is resolved
+        // by the host (`add::resolve_default_branch`) and rides the snapshot.
+        // The name test survives only as the fallback for `None`, which is what
+        // an old store row and an undiscoverable default both deserialize to:
+        // no snapshot gets a WORSE answer than it got before the field existed.
+        let provenance = if a.worktree.is_some() {
+            Provenance::Worktree
+        } else if a.branch.is_empty() || a.branch == "-" {
+            Provenance::Main
+        } else if let Some(default) = a.default_branch.as_deref() {
+            if a.branch == default {
+                Provenance::Main
+            } else {
+                Provenance::Branch
+            }
+        } else if a.branch == "main" || a.branch == "master" {
+            Provenance::Main
+        } else {
+            Provenance::Branch
+        };
+        let title = a.title.clone();
+        RowContent::Agent {
+            status,
+            // S7 has not landed. `None` renders a blank battery cell, which
+            // lock §2.1 requires it to do cleanly — inventing a level would be
+            // a lie in the one cell whose whole job is a measurement.
+            battery: None,
+            provenance,
+            title_ink: title
+                .as_ref()
+                .and_then(|t| inks.title.get(&(a.repo_root.clone(), t.clone())).copied()),
+            title,
+            repo: basename(&a.repo_root).to_string(),
+            repo_ink: inks.repo.get(&a.repo_root).copied(),
+            summary: a.summary.clone(),
+        }
+    }
+
+    /// The width profile this bar renders at. Chosen by STATE, never by the
+    /// current `cols` (LEDGER D16): a peeking bar is still `collapsed`, but the
+    /// peek is showing the template, so it renders EXPANDED — the same rule
+    /// `width_seek` picks its target with, deliberately expressed once so the
+    /// profile and the target it is seeking cannot drift apart mid-animation.
+    pub fn widths(&self) -> Widths {
+        if self.showing_collapsed() {
+            Widths::COLLAPSED
+        } else {
+            Widths::EXPANDED
+        }
+    }
+
+    /// The one collapse predicate. A peeking bar seeks (and renders) the
+    /// template width even though it is collapsed — the collapse resumes when
+    /// the peek expires.
+    fn showing_collapsed(&self) -> bool {
+        self.collapsed && !self.peeking
+    }
+
     /// Rows in display order (§6.6 C8): ONE unified recency-desc list — live
     /// tabs keyed by the store tab_timeline, dormant store rows keyed by
     /// last_interacted. Tiebreak: tab position for live rows (fresh
     /// same-second tabs sit in tab order); for same-second dormant rows,
     /// stable and deterministic in uuid-DESCENDING order (uuid-ascending
     /// sort under a `usize::MAX - i` key inverts to descending).
-    pub fn rows(&self) -> Vec<Row> {
-        // §6.6 C8 virtual cursor: `Row.active` means "visually SELECTED".
+    pub fn rows(&self) -> Vec<(RowKey, Row)> {
+        // §6.6 C8 virtual cursor: `Row.selected` means "visually SELECTED".
         // While nav sits on a dormant row, the selection follows the walk
         // (claude.ai-style) — that dormant row reads active and EVERY live
         // row drops its highlight, so the stale previous-tab highlight can't
@@ -742,50 +946,48 @@ impl BarModel {
         // (sort_ts desc, tiebreak asc) — tiebreak: live rows by position,
         // dormant by a large offset + stable index so they never interleave
         // nondeterministically with same-second live rows.
-        let mut entries: Vec<(u64, usize, Row)> = Vec::new();
+        let inks = ProvisionalInks::allocate(&self.agents);
+        let mut entries: Vec<(u64, usize, (RowKey, Row))> = Vec::new();
         for t in &self.tabs {
-            let glyph = self.agent_in_tab(t.tab_id).map(|a| {
-                // Local unread override: render Done as Idle once seen.
-                if a.status == Status::Done && self.read_locally.contains(&a.uuid) {
-                    Status::Idle.glyph()
-                } else {
-                    a.status.glyph()
-                }
-            });
+            // Lock §7.1: the zellij tab name is used ONLY for a terminal tab.
+            // An agent row's identity is its title chip and repo, both from the
+            // store — the tab name is clave's own rename echo and would be a
+            // second, drifting copy of the label.
+            let content = match self.agent_in_tab(t.tab_id) {
+                Some(a) => self.agent_content(a, false, &inks),
+                None => RowContent::Terminal {
+                    name: t.name.clone(),
+                },
+            };
             entries.push((
                 self.sort_key(t),
                 t.position,
-                Row {
-                    key: RowKey::Tab(t.tab_id),
-                    name: t.name.clone(),
-                    // A dormant selection steals the highlight from every tab.
-                    active: selected_dormant.is_none() && t.active,
-                    glyph,
-                },
+                (
+                    RowKey::Tab(t.tab_id),
+                    Row {
+                        content,
+                        // A dormant selection steals the highlight from every tab.
+                        selected: selected_dormant.is_none() && t.active,
+                    },
+                ),
             ));
         }
         let mut dormant: Vec<&Agent> = self.agents.iter().filter(|a| self.is_dormant(a)).collect();
         dormant.sort_by(|a, b| a.uuid.cmp(&b.uuid)); // stable tiebreak input
         for (i, a) in dormant.into_iter().enumerate() {
-            let glyph = if a.stale {
-                ('✗', 31) // open found the cwd missing (§5 stale)
-            } else if self.opening.contains(&a.uuid) {
-                ('↻', 33) // open in flight
-            } else {
-                ('◌', 90) // dormant conversation
-            };
             entries.push((
                 a.last_interacted,
                 // After any same-second live row; among same-second dormant
                 // rows this renders uuid-DESCENDING (uuid-asc sort, key
                 // inverted) — stable and deterministic, which is all we need.
                 usize::MAX - i,
-                Row {
-                    key: RowKey::Dormant(a.uuid.clone()),
-                    name: a.label.clone(),
-                    active: selected_dormant == Some(a.uuid.as_str()),
-                    glyph: Some(glyph),
-                },
+                (
+                    RowKey::Dormant(a.uuid.clone()),
+                    Row {
+                        content: self.agent_content(a, true, &inks),
+                        selected: selected_dormant == Some(a.uuid.as_str()),
+                    },
+                ),
             ));
         }
         entries.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
@@ -798,10 +1000,10 @@ impl BarModel {
     /// Focus is not a commitment — clicks never reorder. A click on a dormant
     /// row opens it immediately (§6.6 — no dwell for explicit picks).
     pub fn click(&mut self, line: usize) -> Vec<Effect> {
-        let Some(row) = self.rows().get(line).cloned() else {
+        let Some((key, _)) = self.rows().get(line).cloned() else {
             return Vec::new();
         };
-        match row.key {
+        match key {
             RowKey::Tab(tab_id) => {
                 let Some(position) = self
                     .tabs
@@ -867,9 +1069,9 @@ impl BarModel {
                 .as_ref()
                 .and_then(|u| {
                     rows.iter()
-                        .position(|r| r.key == RowKey::Dormant(u.clone()))
+                        .position(|(k, _)| *k == RowKey::Dormant(u.clone()))
                 })
-                .or_else(|| rows.iter().position(|r| r.key == RowKey::Tab(own)))
+                .or_else(|| rows.iter().position(|(k, _)| *k == RowKey::Tab(own)))
                 .unwrap_or(0);
             match dir {
                 "next" => Some((cur + 1) % rows.len()),
@@ -880,11 +1082,11 @@ impl BarModel {
             None
         };
         let is_dir_walk = v.get("dir").is_some();
-        let Some(row) = line.and_then(|l| rows.get(l).cloned()) else {
+        let Some((key, _)) = line.and_then(|l| rows.get(l).cloned()) else {
             return Vec::new();
         };
         self.cursor_gen += 1; // every landing invalidates prior dwell arms
-        match row.key {
+        match key {
             RowKey::Tab(tab_id) => {
                 self.cursor = None; // live landing: focus truth takes over
                 let Some(position) = self
@@ -999,7 +1201,9 @@ impl BarModel {
     /// coarser than the targets — a naive "shrink while too wide"
     /// overshoots straight through them (27 → 13, round 9). So the step is
     /// LEARNED from each resize's observed effect, acceptance is "within
-    /// half a step", and GrowSelf recovers an overshoot. Budget-capped so a
+    /// half a step **and not equally close to the other target**"
+    /// (`converged` — LEDGER D21, the overlap that made Alt+c a no-op on a
+    /// wide display), and GrowSelf recovers an overshoot. Budget-capped so a
     /// layout that refuses to converge isn't fought forever.
     ///
     /// Issue #4 (F1, C8 drift-on-window-resize backlog): the old design went
@@ -1017,19 +1221,21 @@ impl BarModel {
     ///      zellij simply refuses to leave (the granularity floor, C8) is
     ///      accepted in place rather than hammered.
     pub fn width_seek(&mut self, own_cols: usize) -> Vec<Effect> {
-        // A peeking bar seeks the template width even though collapsed —
-        // the collapse resumes when the peek expires.
-        let target = if self.collapsed && !self.peeking {
-            COLLAPSED_TARGET_COLS
+        // ONE collapse rule, shared with `widths()` — the profile the rows are
+        // drawn at and the width being sought must not drift apart (D16). The
+        // OTHER target comes along because acceptance is defined against both
+        // (see `converged`), never against ours alone.
+        let (target, other) = if self.showing_collapsed() {
+            (COLLAPSED_TARGET_COLS, BAR_TARGET_COLS)
         } else {
-            BAR_TARGET_COLS
+            (BAR_TARGET_COLS, COLLAPSED_TARGET_COLS)
         };
         // Pre-learning slack of 8 (±4 cols): a bar already within a few
         // cols of the target must be accepted, not nudged into an
         // overshoot dance.
-        let step = self.seek_step.max(8) as i64;
+        let step = self.seek_step.max(PRE_LEARNING_STEP) as i64;
         let diff = own_cols as i64 - target as i64;
-        let within_band = 2 * diff.abs() <= step;
+        let within_band = converged(own_cols, target, other, step);
 
         // (A) We already settled at exactly this width — a no-op render. Only a
         // DIFFERENT width can wake the seek, so a converged or floored bar
@@ -1120,15 +1326,43 @@ impl BarModel {
         self.seek_stalled = false;
 
         // (D) Act. Re-read the step in case (C) just learned it.
-        let step = self.seek_step.max(8) as i64;
-        let action = if 2 * diff > step {
-            Effect::ShrinkSelf
-        } else if -2 * diff > step {
-            Effect::GrowSelf
-        } else {
+        let step = self.seek_step.max(PRE_LEARNING_STEP) as i64;
+        if converged(own_cols, target, other, step) {
             // Converged: settle and stay done at exactly this width.
             self.settle_at(own_cols);
             return Vec::new();
+        }
+        // The lattice can be COARSER than the gap between the two targets, and
+        // then NO reachable width is acceptable: the step that leaves the
+        // overlap zone crosses the target, and the one back crosses it again —
+        // an oscillation the budget would spend 16 real resizes on. When ONE OF
+        // OUR OWN steps just carried us across the target FROM a width that is
+        // no better, we have bracketed it as tightly as zellij's increment
+        // allows: settle rather than pace.
+        //
+        // All three conditions earn their place:
+        //   - the crossing itself, or this would settle mid-travel;
+        //   - a plausible single step, the same bound the learn arm uses — an
+        //     EXTERNAL jump (round 17's 75 → 15) also crosses the target, and
+        //     settling on one would park the bar wherever a window resize
+        //     dropped it;
+        //   - and the width we came FROM being unacceptable too. Otherwise the
+        //     honest move is to go BACK: that is the ordinary overshoot (the
+        //     pre-learning step of 8 acts on a width a learned step of 11 would
+        //     have accepted), and `GrowSelf` recovering it is round 9's lesson,
+        //     not something to short-circuit.
+        if let Some(prev) = self.seek_last_cols
+            && (prev as i64 - target as i64) * diff < 0
+            && prev.abs_diff(own_cols) <= MAX_LEARNABLE_STEP
+            && !converged(prev, target, other, step)
+        {
+            self.settle_at(own_cols);
+            return Vec::new();
+        }
+        let action = if diff > 0 {
+            Effect::ShrinkSelf
+        } else {
+            Effect::GrowSelf
         };
         self.seek_budget -= 1;
         self.seek_last_cols = Some(own_cols);
@@ -1159,6 +1393,7 @@ mod tests {
             title: None,
             summary: String::new(),
             worktree: None,
+            default_branch: None,
         }
     }
 
@@ -1178,6 +1413,7 @@ mod tests {
             title: None,
             summary: String::new(),
             worktree: None,
+            default_branch: None,
         }
     }
 
@@ -1218,6 +1454,42 @@ mod tests {
         }
     }
 
+    // --- row projections ---------------------------------------------------
+    // `rows()` yields `(RowKey, render::Row)`: model identity plus the whole
+    // presentation (LEDGER D6 — one row type). Most assertions here are about
+    // ONE of those, so these pull out the field under test rather than
+    // spelling out a `RowContent` at every site.
+
+    fn keys(m: &BarModel) -> Vec<RowKey> {
+        m.rows().into_iter().map(|(k, _)| k).collect()
+    }
+
+    fn selected(m: &BarModel) -> Vec<bool> {
+        m.rows().into_iter().map(|(_, r)| r.selected).collect()
+    }
+
+    /// Terminal-tab names in display order. Lock §7.1: the zellij tab name is
+    /// used ONLY for a terminal tab, so an agent row has none — tests that mix
+    /// the two assert on `keys` instead.
+    fn names(m: &BarModel) -> Vec<String> {
+        m.rows()
+            .into_iter()
+            .map(|(k, r)| match r.content {
+                RowContent::Terminal { name } => name,
+                RowContent::Agent { .. } => panic!("{k:?} is an agent row, not a terminal"),
+            })
+            .collect()
+    }
+
+    /// The status cell of row `i`; `None` for a terminal row, which has no
+    /// turn to be in.
+    fn status_at(m: &BarModel, i: usize) -> Option<RowStatus> {
+        match &m.rows()[i].1.content {
+            RowContent::Agent { status, .. } => Some(*status),
+            RowContent::Terminal { .. } => None,
+        }
+    }
+
     // --- tests -------------------------------------------------------------
 
     #[test]
@@ -1232,15 +1504,13 @@ mod tests {
             tab(12, 2, "c", false),
         ]);
         // Nothing committed yet → tab-position order, active flag irrelevant.
-        let names: Vec<String> = m.rows().into_iter().map(|r| r.name).collect();
-        assert_eq!(names, vec!["a", "b", "c"]);
+        assert_eq!(names(&m), vec!["a", "b", "c"]);
         // Commitments arrive via snapshot and order by wall clock…
         m.apply_snapshot(snap_t(1, &[(10, 1000), (11, 2000), (12, 1500)]));
-        let names: Vec<String> = m.rows().into_iter().map(|r| r.name).collect();
-        assert_eq!(names, vec!["b", "c", "a"]);
+        assert_eq!(names(&m), vec!["b", "c", "a"]);
         // …and focus (beacon) does not reorder.
         m.beacon(10);
-        assert_eq!(m.rows()[0].name, "b");
+        assert_eq!(names(&m)[0], "b");
         // Agent prompts reorder ONLY through the store timeline (the hook
         // stamps tab_timeline via the bind, §6.6 Design B) — an agent's
         // last_interacted alone must NOT sort: render-time joins diverge
@@ -1249,10 +1519,12 @@ mod tests {
         s.agents[0].last_interacted = 9999;
         s.tab_timeline = [(10, 1000), (11, 2000), (12, 1500)].into();
         m.apply_snapshot(s);
-        assert_eq!(m.rows()[0].name, "b"); // li ignored, timeline rules
+        // By KEY from here: tab 12 now hosts an agent, and an agent row does
+        // not carry the zellij tab name (lock §7.1).
+        assert_eq!(keys(&m)[0], RowKey::Tab(11)); // "b" — li ignored, timeline rules
         // The prompt's stamp arrives IN the timeline → c fronts everywhere.
         m.apply_snapshot(snap_t(3, &[(10, 1000), (11, 2000), (12, 3000)]));
-        assert_eq!(m.rows()[0].name, "c");
+        assert_eq!(keys(&m)[0], RowKey::Tab(12)); // "c"
     }
 
     #[test]
@@ -1264,15 +1536,14 @@ mod tests {
         let mut m = BarModel::default();
         m.apply_tabs(vec![tab(10, 0, "a", false), tab(11, 1, "b", false)]);
         m.apply_snapshot(snap_t(1, &[(10, 2000)]));
-        assert_eq!(m.rows()[0].key, RowKey::Tab(10));
+        assert_eq!(keys(&m)[0], RowKey::Tab(10));
         // New snapshot: b now leads, and a's old entry is GONE (replace
         // semantics — a merge would have kept a at 2000 and diverged).
         m.apply_snapshot(snap_t(2, &[(11, 1000)]));
-        let rows = m.rows();
-        assert_eq!(rows[0].key, RowKey::Tab(11));
+        assert_eq!(keys(&m)[0], RowKey::Tab(11));
         // A stale seq must not replace anything (§5 gate).
         m.apply_snapshot(snap_t(1, &[(10, 9000)]));
-        assert_eq!(m.rows()[0].key, RowKey::Tab(11));
+        assert_eq!(keys(&m)[0], RowKey::Tab(11));
     }
 
     #[test]
@@ -1308,15 +1579,28 @@ mod tests {
         ]);
         m.apply_snapshot(snap(1, vec![agent("u1", Status::Working, Some(10))]));
         let rows = m.rows();
-        let a = rows.iter().find(|r| r.name == "agent-tab").unwrap();
-        let p = rows.iter().find(|r| r.name == "plain").unwrap();
-        assert_eq!(a.glyph, Some(('●', 33))); // Working = amber
-        assert_eq!(p.glyph, None); // plain terminal: name only
+        let a = rows.iter().find(|(k, _)| *k == RowKey::Tab(10)).unwrap();
+        let p = rows.iter().find(|(k, _)| *k == RowKey::Tab(11)).unwrap();
+        assert!(matches!(
+            a.1.content,
+            RowContent::Agent {
+                status: RowStatus::Working,
+                ..
+            }
+        ));
+        // The bound tab renders as an AGENT, so the zellij tab name is gone
+        // (lock §7.1); the unbound one is still a terminal and keeps it.
+        assert_eq!(
+            p.1.content,
+            RowContent::Terminal {
+                name: "plain".into()
+            }
+        );
         // An UNBOUND agent (bind not landed yet) decorates nothing.
         let mut m2 = BarModel::default();
         m2.apply_tabs(vec![tab(10, 0, "agent-tab", false)]);
         m2.apply_snapshot(snap(1, vec![agent("u1", Status::Working, None)]));
-        assert_eq!(m2.rows()[0].glyph, None);
+        assert_eq!(status_at(&m2, 0), None); // still a terminal row
     }
 
     #[test]
@@ -1325,7 +1609,7 @@ mod tests {
         m.apply_snapshot(snap(2, vec![agent("u1", Status::Working, Some(10))]));
         m.apply_snapshot(snap(1, vec![agent("u1", Status::Failed, Some(10))])); // stale
         m.apply_tabs(vec![tab(10, 0, "t", false)]);
-        assert_eq!(m.rows()[0].glyph, Some(('●', 33))); // still Working
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Working)); // still Working
     }
 
     #[test]
@@ -1363,16 +1647,17 @@ mod tests {
         let mut m = BarModel::default();
         m.apply_tabs(vec![tab(10, 0, "t", false)]);
         m.apply_snapshot(snap(1, vec![agent("u1", Status::Done, Some(10))]));
-        assert_eq!(m.rows()[0].glyph, Some(('●', 32))); // green, unread
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Done)); // green, unread
         // Tab gains focus → local clear + MarkRead effect, exactly once.
         let fx = m.apply_tabs(vec![tab(10, 0, "t", true)]);
         assert!(fx.contains(&Effect::MarkRead { uuid: "u1".into() }));
-        assert_eq!(m.rows()[0].glyph, Some(('●', 90))); // rendered dim NOW
+        // The local unread override: a READ Done renders Idle (§6.5).
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Idle)); // rendered dim NOW
         let fx = m.apply_tabs(vec![tab(10, 0, "t", true)]);
         assert!(fx.iter().all(|e| !matches!(e, Effect::MarkRead { .. })));
         // A later snapshot showing Working clears the local override.
         m.apply_snapshot(snap(2, vec![agent("u1", Status::Working, Some(10))]));
-        assert_eq!(m.rows()[0].glyph, Some(('●', 33)));
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Working));
     }
 
     #[test]
@@ -1388,7 +1673,7 @@ mod tests {
         // User returns: the update still says "own tab active" — must clear.
         let fx = m.apply_tabs(vec![tab(10, 0, "t", true)]);
         assert!(fx.contains(&Effect::MarkRead { uuid: "u1".into() }));
-        assert_eq!(m.rows()[0].glyph, Some(('●', 90))); // dim immediately
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Idle)); // dim immediately
     }
 
     #[test]
@@ -1463,7 +1748,7 @@ mod tests {
             ]
         );
         // Walking must not reorder: c is still row 1 after both walks.
-        assert_eq!(m.rows()[0].key, RowKey::Tab(12));
+        assert_eq!(keys(&m)[0], RowKey::Tab(12));
         // Clicks land on ONE instance (the visible bar): same effect shape.
         assert_eq!(
             m.click(1),
@@ -1665,6 +1950,81 @@ mod tests {
         m
     }
 
+    /// LEDGER D15 — the separation invariant, derived rather than restated.
+    ///
+    /// Design-lock §3 gives it as `BAR_TARGET_COLS − COLLAPSED_TARGET_COLS >
+    /// MAX_LEARNABLE_STEP (20)`, and at `44 − 30 = 14` that form fails. The
+    /// `20` is a restatement of somebody else's derivation, not a physical
+    /// bound: `width_seek` accepts when `2 * |cols − target| <= step`, so the
+    /// acceptance HALF-band is `step / 2`, and `step` is capped at
+    /// `MAX_LEARNABLE_STEP`. The widest half-band is therefore **10**, and the
+    /// real requirement is that neither target's value fall inside the other's
+    /// band — separation `> 10`. S8 derives exactly this itself and then
+    /// asserts `> 20` anyway, because `38 − 4 = 34` cleared it for free.
+    ///
+    /// Pinned here so a future move of either constant fails loudly at the
+    /// bound that is actually load-bearing.
+    ///
+    /// **What this proves, exactly:** neither TARGET's own value falls inside
+    /// the other's band. It says nothing about the WIDTHS between them — a
+    /// `w` within half a step of both is accepted for both, which is a
+    /// different (and live) property. That one is
+    /// `no_width_is_accepted_for_both_targets`, below; the two assertions here
+    /// are algebraically the same statement (`2*sep > 20` ⟺ `sep > 10`), so
+    /// only one of them is kept.
+    #[test]
+    fn the_two_targets_are_separated_by_more_than_the_widest_acceptance_band() {
+        let half_band = MAX_LEARNABLE_STEP / 2;
+        assert_eq!(half_band, 10);
+        assert!(
+            BAR_TARGET_COLS.abs_diff(COLLAPSED_TARGET_COLS) > half_band,
+            "targets {BAR_TARGET_COLS}/{COLLAPSED_TARGET_COLS} are within one \
+             acceptance band of each other: a collapse would be accepted as \
+             an expand"
+        );
+    }
+
+    /// LEDGER D21 — the property the test above only LOOKS like it proves, and
+    /// the one Alt+c actually depends on: **no width is accepted for both
+    /// targets.**
+    ///
+    /// `width_seek` settles when `2 * |cols − target| <= step`, a band spanning
+    /// `step` columns, so the two bands overlap the moment `step >= separation`
+    /// (14 at 44/30 — a display area of roughly 280 columns, which the
+    /// maintainer runs). Any width in the overlap is "converged" for BOTH
+    /// targets, and since `toggle()` deliberately keeps the learned step, Alt+c
+    /// then emits ZERO resizes: the pane does not move. On `main` the targets
+    /// were 26 apart and no learnable step could reach that, so this held by
+    /// luck of the constants; 44/30 lost it silently.
+    ///
+    /// Driven through `width_seek` rather than re-derived here: a test that
+    /// restates the predicate can drift from the predicate. A model with a
+    /// fresh budget and no `seek_last_cols` reaches gate (D) directly, so an
+    /// empty effect list IS "this width is accepted for this target".
+    ///
+    /// **This is the test that fails if someone widens the band again.**
+    #[test]
+    fn no_width_is_accepted_for_both_targets() {
+        let quiet_at = |collapsed: bool, step: usize, cols: usize| {
+            let mut m = BarModel {
+                collapsed,
+                seek_step: step,
+                ..BarModel::default()
+            };
+            m.width_seek(cols).is_empty()
+        };
+        for step in 0..=MAX_LEARNABLE_STEP {
+            for cols in 0..=200 {
+                assert!(
+                    !(quiet_at(false, step, cols) && quiet_at(true, step, cols)),
+                    "at a learned step of {step}, {cols} cols is converged for \
+                     BOTH {BAR_TARGET_COLS} and {COLLAPSED_TARGET_COLS}: Alt+c \
+                     emits no resize and the pane does not move"
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_newborn_model_seeks_the_template_width() {
         // The generated layouts size the bar pane in PERCENT — fixed sizes
@@ -1672,8 +2032,12 @@ mod tests {
         // Alt+c-dead live finding, c8-cold-start 2026-07-18) — so a newborn
         // bar's cols depend on the window. The seek must be armed at birth
         // to converge on the exact template width from either side.
+        // Both start widths are outside the pre-learning ±4 band around
+        // BAR_TARGET_COLS (44) — 45 used to be a shrink toward 30 and is now
+        // one column off target, which is exactly the "the number moved, the
+        // test's meaning did not" trap (#63).
         let mut m = BarModel::default();
-        assert_eq!(m.width_seek(45), vec![Effect::ShrinkSelf]);
+        assert_eq!(m.width_seek(60), vec![Effect::ShrinkSelf]);
         let mut m = BarModel::default();
         assert_eq!(m.width_seek(18), vec![Effect::GrowSelf]);
     }
@@ -1681,16 +2045,20 @@ mod tests {
     #[test]
     fn seek_collapses_to_the_gutter_despite_coarse_steps() {
         // Round 20 (collapse-in-place): Alt+c drives OWN width between the
-        // template (30) and the glyph gutter (4) — the pane is never
-        // suppressed. Zellij resizes in ~5%-of-viewport steps (7–14 cols),
-        // far coarser than either target: the step is LEARNED from each
-        // resize's observed effect and acceptance is within half a step
-        // (round-9 lesson: naive loops overshoot straight through).
+        // template (44, LEDGER D2) and the collapsed profile (30, D17) — the
+        // pane is never suppressed. Zellij resizes in ~5%-of-viewport steps
+        // (7–14 cols), far coarser than the 14-column separation between the
+        // two targets: the step is LEARNED from each resize's observed effect
+        // and acceptance is within half a step (round-9 lesson: naive loops
+        // overshoot straight through).
         let mut m = BarModel::default();
-        // Never toggled: geometry is the user's business.
-        assert_eq!(m.width_seek(30), Vec::<Effect>::new());
+        // Already AT the expanded target: nothing to do.
+        assert_eq!(m.width_seek(44), Vec::<Effect>::new());
         let mut m = collapsed_model();
-        let mut cols = 30i64;
+        // 72, not 30: 30 IS the collapsed target now, so the old start width
+        // would have converged in zero steps and asserted nothing (#63 —
+        // `30` was both the target and an arbitrary start width).
+        let mut cols = 72i64;
         let mut acted = 0;
         loop {
             match m.width_seek(cols as usize).as_slice() {
@@ -1702,16 +2070,20 @@ mod tests {
             acted += 1;
             assert!(acted < 20, "did not converge");
         }
-        // Within half a learned step of the 4-col gutter — and STAYS done
-        // (later geometry is the user's business until the next toggle).
-        assert!((cols - 4).abs() <= 4, "ended at {cols} cols");
+        // Within half a learned step of the collapsed target, and dormant: the
+        // FIRST render at a wildly different width only OBSERVES it (a drift
+        // candidate — it could be a transient mid-relayout value). It does not
+        // "stay done" — a SECOND render at 140 confirms the drift and re-arms
+        // the seek (issue #4); `idle_seek_re_arms_when_a_relayout_drifts_it_off_target`
+        // is where that half is proven.
+        assert!((cols - 30).abs() <= 4, "ended at {cols} cols");
         assert_eq!(m.width_seek(140), Vec::<Effect>::new());
     }
 
     #[test]
     fn seek_expands_back_to_template_width() {
         let mut m = collapsed_model();
-        m.toggle(); // expanded again → seek re-armed toward 30
+        m.toggle(); // expanded again → seek re-armed toward 44
         let mut cols = 5i64;
         let mut acted = 0;
         loop {
@@ -1724,10 +2096,12 @@ mod tests {
             acted += 1;
             assert!(acted < 20, "did not converge");
         }
-        // Simulated step 9 (not 7): from 5 the 7-ladder lands ON 26, which
-        // the ±4 slack band accepts for either template width — 9 makes the
-        // end position actually distinguish 30 from the old 26.
-        assert!((cols - 30).abs() <= 4, "ended at {cols} cols");
+        // Simulated step 9 (not 7): the ladder from 5 must land on a width
+        // that DISTINGUISHES the expanded target from the collapsed one, or
+        // the assertion passes for the wrong target. 5+9k gives 41 (|41−44| =
+        // 3, accepted) where the collapsed target 30 would have stopped at 32
+        // — 14 columns apart, exactly the D15/D17 separation.
+        assert!((cols - 44).abs() <= 4, "ended at {cols} cols");
     }
 
     #[test]
@@ -1738,20 +2112,28 @@ mod tests {
         // old guard could not tell the two apart, so it WAITED FOREVER — the
         // very stall that left a drifted bar parked (F1). Now: grace exactly
         // one render, then re-drive; the budget bounds a clobber we cannot win.
-        let mut m = collapsed_model(); // target 4
-        assert_eq!(m.width_seek(30), vec![Effect::ShrinkSelf]);
-        // FAR off target and still 30: one render of grace, no double-fire.
-        assert_eq!(m.width_seek(30), Vec::<Effect>::new());
-        // Still 30 after the grace → the resize was clobbered; re-drive (#4).
-        assert_eq!(m.width_seek(30), vec![Effect::ShrinkSelf]);
-        // Landed (30 → 16): learned step 14, keep shrinking toward 4.
-        assert_eq!(m.width_seek(16), vec![Effect::ShrinkSelf]);
-        // Floor: |16 − 4| is within a learned step, so zellij's refusal to
-        // shrink further is a NEAR-target wall — accepted in place (round 20:
-        // "wherever cols stop changing is accepted") and silent forever, with
-        // no burst of refused resizes. This keeps the collapsed floor benign.
+        // FOOTGUNS names this test by name: `30` was BOTH the old collapsed
+        // target's arbitrary start width and, now, the target itself. The
+        // widths below are re-derived from the new targets, not substituted:
+        // start 60 (far above the collapsed target 30), land 44 (delta 16 —
+        // a LEARNABLE step, ≤ MAX_LEARNABLE_STEP) leaving |44 − 30| = 14
+        // inside that learned step, which is what makes the last stanza a
+        // near-target wall rather than a clobber.
+        let mut m = collapsed_model(); // target 30
+        assert_eq!(m.width_seek(60), vec![Effect::ShrinkSelf]);
+        // FAR off target and still 60: one render of grace, no double-fire.
+        assert_eq!(m.width_seek(60), Vec::<Effect>::new());
+        // Still 60 after the grace → the resize was clobbered; re-drive (#4).
+        assert_eq!(m.width_seek(60), vec![Effect::ShrinkSelf]);
+        // Landed (60 → 44): learned step 16, keep shrinking toward 30.
+        assert_eq!(m.width_seek(44), vec![Effect::ShrinkSelf]);
+        // Floor: |44 − 30| = 14 is within the learned step of 16, so zellij's
+        // refusal to shrink further is a NEAR-target wall — accepted in place
+        // (round 20: "wherever cols stop changing is accepted") and silent
+        // forever, with no burst of refused resizes. This keeps the collapsed
+        // floor benign.
         for _ in 0..10 {
-            assert_eq!(m.width_seek(16), Vec::<Effect>::new());
+            assert_eq!(m.width_seek(44), Vec::<Effect>::new());
         }
     }
 
@@ -1762,10 +2144,12 @@ mod tests {
         // until the next toggle/peek. It must now re-seek — but only after the
         // drift is CONFIRMED stable (same width twice), so a mid-drag flicker
         // or a thrashing layout never provokes a perpetual re-seek.
-        let mut m = collapsed_model(); // target 4
-        // Converge to the gutter and go dormant.
-        assert_eq!(m.width_seek(30), vec![Effect::ShrinkSelf]);
-        assert_eq!(m.width_seek(6), Vec::<Effect>::new()); // within band → done
+        let mut m = collapsed_model(); // target 30
+        // Converge to the collapsed target and go dormant. 60 → 44 learns a
+        // step of 16; 44 → 28 lands 2 columns under target, inside the band.
+        assert_eq!(m.width_seek(60), vec![Effect::ShrinkSelf]);
+        assert_eq!(m.width_seek(44), vec![Effect::ShrinkSelf]);
+        assert_eq!(m.width_seek(28), Vec::<Effect>::new()); // within band → done
         assert_eq!(m.seek_budget, 0, "seek should be dormant after converging");
         // A relayout slams the pane wide (6 → 140). The FIRST render only
         // observes it (could be a transient mid-relayout value); no action yet.
@@ -1783,20 +2167,21 @@ mod tests {
         // emit. Otherwise a later EXTERNAL relayout that lands within a step of
         // the STALE emit anchor (but far from rest) is misread as self-inflicted
         // and accepted as rest — the F1 off-target park, reborn in a corner.
-        let mut m = collapsed_model(); // target 4
-        // Converge in coarse steps so the FINAL landing (→ 6) is many cols from
-        // the previous emit position (16): 30 → 16 → 6.
-        assert_eq!(m.width_seek(30), vec![Effect::ShrinkSelf]); // emit @30
-        assert_eq!(m.width_seek(16), vec![Effect::ShrinkSelf]); // learn 14, emit @16
-        assert_eq!(m.width_seek(6), Vec::<Effect>::new()); // learn 10, within band → REST @6
+        let mut m = collapsed_model(); // target 30
+        // Converge in coarse steps so the FINAL landing (→ 32) is many cols
+        // from the previous emit position (52): 72 → 52 → 32, learning a step
+        // of 20 (MAX_LEARNABLE_STEP, the widest anchor window there is).
+        assert_eq!(m.width_seek(72), vec![Effect::ShrinkSelf]); // emit @72
+        assert_eq!(m.width_seek(52), vec![Effect::ShrinkSelf]); // learn 20, emit @52
+        assert_eq!(m.width_seek(32), Vec::<Effect>::new()); // within band → REST @32
         assert_eq!(m.seek_budget, 0, "must be dormant after converging");
-        // A stable external relayout parks the bar at 26 — FAR from the rest
-        // width 6 (|26−6| = 20), but within a learned step of the stale emit
-        // anchor 16 (|26−16| = 10 ≤ ~10). A genuine drift: confirm it (twice)
-        // and re-seek the gutter, NOT settle at 26.
-        assert_eq!(m.width_seek(26), Vec::<Effect>::new()); // observe
+        // A stable external relayout parks the bar at 62 — FAR from the rest
+        // width 32 (|62−32| = 30 > 20), but within a learned step of the stale
+        // emit anchor 52 (|62−52| = 10 ≤ 20). A genuine drift: confirm it
+        // (twice) and re-seek the collapsed target, NOT settle at 62.
+        assert_eq!(m.width_seek(62), Vec::<Effect>::new()); // observe
         assert_eq!(
-            m.width_seek(26),
+            m.width_seek(62),
             vec![Effect::ShrinkSelf],
             "a far-from-rest drift must re-arm, not be classified as self-inflicted"
         );
@@ -1805,17 +2190,19 @@ mod tests {
     #[test]
     fn idle_seek_ignores_an_oscillating_layout_and_a_resting_width() {
         // The two bounds that keep the drift re-arm from fighting forever.
-        let mut m = collapsed_model(); // target 4
-        assert_eq!(m.width_seek(30), vec![Effect::ShrinkSelf]);
-        assert_eq!(m.width_seek(6), Vec::<Effect>::new()); // settled at ~gutter
+        let mut m = collapsed_model(); // target 30
+        assert_eq!(m.width_seek(60), vec![Effect::ShrinkSelf]);
+        // 60 → 32 is a 28-column delta: NOT learnable (> MAX_LEARNABLE_STEP),
+        // so the pre-learning ±4 slack band accepts |32 − 30| = 2 and settles.
+        assert_eq!(m.width_seek(32), Vec::<Effect>::new()); // settled at ~target
         // (1) A render at the exact settled width is a no-op, however often it
         // repeats — a converged bar never wakes itself.
         for _ in 0..8 {
-            assert_eq!(m.width_seek(6), Vec::<Effect>::new());
+            assert_eq!(m.width_seek(32), Vec::<Effect>::new());
         }
         // (2) A layout that never holds still (alternating off-target widths)
         // is never CONFIRMED, so it never re-arms — no perpetual re-seek
-        // (round 20). Both widths are far from the gutter target.
+        // (round 20). Both widths are far from the collapsed target.
         for cols in [200, 100, 200, 100, 200, 100] {
             assert_eq!(
                 m.width_seek(cols),
@@ -1833,10 +2220,10 @@ mod tests {
         // reappearance would spuriously "confirm" (round 20: never fight a
         // layout that will not hold still). A real reflow, by contrast, moves
         // cols ONCE to a new stable value and never revisits rest in between.
-        let mut m = collapsed_model(); // target 4
-        assert_eq!(m.width_seek(30), vec![Effect::ShrinkSelf]);
-        assert_eq!(m.width_seek(6), Vec::<Effect>::new()); // settled at ~gutter
-        for cols in [200, 6, 200, 6, 200, 6] {
+        let mut m = collapsed_model(); // target 30
+        assert_eq!(m.width_seek(60), vec![Effect::ShrinkSelf]);
+        assert_eq!(m.width_seek(32), Vec::<Effect>::new()); // settled at ~target
+        for cols in [200, 32, 200, 32, 200, 32] {
             assert_eq!(
                 m.width_seek(cols),
                 Vec::<Effect>::new(),
@@ -1850,12 +2237,11 @@ mod tests {
         // The round-9 live defect, seek edition: an overshoot past the
         // target is recovered by growing, and the half-step band accepts.
         let mut m = collapsed_model();
-        m.toggle(); // expanded → target 30
-        assert_eq!(m.width_seek(13), vec![Effect::GrowSelf]);
-        // Landed (+14 → 27): learned step 14, |27−30| within half a step →
-        // accept and retire.
-        assert_eq!(m.width_seek(27), Vec::<Effect>::new());
-        assert_eq!(m.width_seek(13), Vec::<Effect>::new()); // retired
+        m.toggle(); // expanded → target 44
+        assert_eq!(m.width_seek(30), vec![Effect::GrowSelf]);
+        // Landed (+14 → 44): learned step 14, on target → accept and retire.
+        assert_eq!(m.width_seek(44), Vec::<Effect>::new());
+        assert_eq!(m.width_seek(30), Vec::<Effect>::new()); // retired
     }
 
     #[test]
@@ -1864,12 +2250,16 @@ mod tests {
         // than one resize step; learning that delta poisons the acceptance
         // band (step=60 accepted a 13-col bar as "close enough" to 26).
         let mut m = collapsed_model();
-        m.toggle(); // expanded → target 30
+        m.toggle(); // expanded → target 44
         assert_eq!(m.width_seek(75), vec![Effect::ShrinkSelf]);
         // External jump 75 → 15 (delta 60): recover, but don't learn 60.
         assert_eq!(m.width_seek(15), vec![Effect::GrowSelf]);
-        // 40 is far off-template; a step of 60 would fake-accept it.
-        assert_eq!(m.width_seek(40), vec![Effect::ShrinkSelf]);
+        // 60 is 16 off-template: outside the unlearned ±4 band, but well
+        // inside the ±30 band a learned step of 60 would have opened — so a
+        // poisoned step fake-accepts it and this assertion catches it. (The
+        // old `40` was chosen against target 30 and is only 4 off 44, i.e.
+        // legitimately accepted now — the numbers are re-derived, not moved.)
+        assert_eq!(m.width_seek(60), vec![Effect::ShrinkSelf]);
     }
 
     #[test]
@@ -1891,16 +2281,18 @@ mod tests {
         // clave-visited pipe) briefly expands the bar; ~1s after the last
         // nav it sinks back to the gutter.
         let mut m = collapsed_model();
-        assert_eq!(m.width_seek(4), Vec::<Effect>::new()); // settled at gutter
+        assert_eq!(m.width_seek(30), Vec::<Effect>::new()); // settled, collapsed
         assert!(m.visited(7), "collapsed bar must arm a peek");
         assert_eq!(m.current_tab(), Some(7)); // still a beacon
-        // Peek re-armed the seek toward the TEMPLATE despite collapsed.
-        assert_eq!(m.width_seek(4), vec![Effect::GrowSelf]);
+        // Peek re-armed the seek toward the TEMPLATE despite collapsed: the
+        // 14-column separation (D15/D17) exceeds the ±4 pre-learning band, so
+        // the same width that was AT rest collapsed is now a grow.
+        assert_eq!(m.width_seek(30), vec![Effect::GrowSelf]);
         // A second nav during the peek re-arms (main.rs counts its timers).
         assert!(m.visited(8));
-        // Expiry: sink back toward the gutter.
+        // Expiry: sink back toward the collapsed target.
         assert!(m.peek_expired());
-        assert_eq!(m.width_seek(30), vec![Effect::ShrinkSelf]);
+        assert_eq!(m.width_seek(44), vec![Effect::ShrinkSelf]);
     }
 
     #[test]
@@ -1908,14 +2300,19 @@ mod tests {
         let mut m = BarModel::default();
         assert!(!m.visited(7), "expanded bar must not arm a peek");
         assert_eq!(m.current_tab(), Some(7)); // beacon still lands
-        // No seek was armed — geometry stays the user's business.
-        assert_eq!(m.width_seek(30), Vec::<Effect>::new());
+        // NOT "no seek was armed": a default model IS birth-armed, which
+        // `a_newborn_model_seeks_the_template_width` proves. What this shows
+        // is that the beacon left the collapse state alone — the bar is at the
+        // EXPANDED target, so an armed seek has nothing to say. Kept (rather
+        // than deleted) because it does fail if `visited` ever corrupted
+        // `collapsed`: the target would drop to 30 and 44 would emit a shrink.
+        assert_eq!(m.width_seek(BAR_TARGET_COLS), Vec::<Effect>::new());
     }
 
     #[test]
     fn toggle_cancels_a_peek_and_a_late_expiry_is_a_noop() {
         let mut m = collapsed_model();
-        assert_eq!(m.width_seek(4), Vec::<Effect>::new());
+        assert_eq!(m.width_seek(30), Vec::<Effect>::new());
         assert!(m.visited(7));
         // Alt+c mid-peek: now genuinely expanded; the peek flag must not
         // survive to fight the user's explicit toggle.
@@ -1936,9 +2333,9 @@ mod tests {
         s.collapsed = true;
         m.apply_snapshot(s);
         assert!(m.collapsed, "snapshot-carried flag did not hydrate");
-        // Born at template width among gutter bars → must shrink, exactly
-        // as if it had heard the toggle itself.
-        assert_eq!(m.width_seek(30), vec![Effect::ShrinkSelf]);
+        // Born at template width (44) among collapsed bars → must shrink,
+        // exactly as if it had heard the toggle itself.
+        assert_eq!(m.width_seek(44), vec![Effect::ShrinkSelf]);
     }
 
     /// Issue #5 path (c), missed pipe: an instance that missed the toggle
@@ -1951,16 +2348,16 @@ mod tests {
         // Desynced: expanded while the store says collapsed.
         let mut missed = BarModel::default();
         missed.apply_snapshot(snap(1, vec![])); // hydrated expanded, seq 1
-        let converged = missed.width_seek(30); // within band → seek done
+        let converged = missed.width_seek(44); // within band → seek done
         assert_eq!(converged, Vec::<Effect>::new());
         let mut heal = snap(2, vec![]);
         heal.collapsed = true;
         missed.apply_snapshot(heal);
         assert!(missed.collapsed, "missed-pipe instance did not heal");
         assert_eq!(
-            missed.width_seek(30),
+            missed.width_seek(44),
             vec![Effect::ShrinkSelf],
-            "healing must re-arm the seek toward the gutter"
+            "healing must re-arm the seek toward the collapsed target"
         );
 
         // Synced: toggled locally (broadcast heard), then the store's own
@@ -1968,8 +2365,8 @@ mod tests {
         let mut synced = BarModel::default();
         synced.apply_snapshot(snap(1, vec![]));
         synced.toggle(); // collapsed, seek armed
-        // Drain the seek to quiescence at the gutter floor.
-        assert_eq!(synced.width_seek(4), Vec::<Effect>::new());
+        // Drain the seek to quiescence at the collapsed target.
+        assert_eq!(synced.width_seek(30), Vec::<Effect>::new());
         let budget_before = synced.seek_budget;
         let mut same = snap(2, vec![]);
         same.collapsed = true;
@@ -2077,25 +2474,379 @@ mod tests {
         );
         s.tab_timeline = [(10, 100), (11, 900), (12, 500)].into();
         m.apply_snapshot(s);
-        let rows = m.rows();
         assert_eq!(
-            rows.iter().map(|r| r.key.clone()).collect::<Vec<_>>(),
+            keys(&m),
             vec![RowKey::Tab(11), RowKey::Tab(12), RowKey::Tab(10)]
         );
-        assert_eq!(rows[0].glyph, Some(('●', 33))); // ag-a working
-        assert_eq!(rows[1].glyph, Some(('●', 32))); // ag-b done
-        assert_eq!(rows[2].glyph, None);
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Working)); // ag-a
+        assert_eq!(status_at(&m, 1), Some(RowStatus::Done)); // ag-b
+        assert_eq!(status_at(&m, 2), None); // the plain terminal tab
+    }
+
+    // --- projecting a Row from an Agent (LEDGER D6, design-lock §2) --------
+
+    /// An agent placed in repo `root` on `branch`, with a title and summary.
+    fn dressed(
+        uuid: &str,
+        root: &str,
+        branch: &str,
+        title: Option<&str>,
+        tab: Option<usize>,
+    ) -> Agent {
+        let mut a = agent(uuid, Status::Working, tab);
+        a.repo_root = root.into();
+        a.branch = branch.into();
+        a.title = title.map(String::from);
+        a.summary = format!("{uuid} is working");
+        a
+    }
+
+    fn content_at(m: &BarModel, i: usize) -> RowContent {
+        m.rows()[i].1.content.clone()
+    }
+
+    #[test]
+    fn a_row_projects_title_summary_and_the_repo_basename() {
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "whatever", false)]);
+        m.apply_snapshot(snap(
+            1,
+            vec![dressed(
+                "u1",
+                "/Users/o/code/clave",
+                "main",
+                Some("S6-GUT"),
+                Some(10),
+            )],
+        ));
+        let RowContent::Agent {
+            title,
+            repo,
+            summary,
+            battery,
+            ..
+        } = content_at(&m, 0)
+        else {
+            panic!("a bound tab renders as an agent row");
+        };
+        assert_eq!(title.as_deref(), Some("S6-GUT"));
+        // BASENAME, not the path: the repo column is 7 cells (3 collapsed), so
+        // a path would render as ellipsis and identify nothing.
+        assert_eq!(repo, "clave");
+        assert_eq!(summary, "u1 is working");
+        // S7 has not landed: a blank cell, never an invented level.
+        assert_eq!(battery, None);
+    }
+
+    #[test]
+    fn provenance_is_three_state_worktree_branch_and_blank_main() {
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![
+            tab(10, 0, "a", false),
+            tab(11, 1, "b", false),
+            tab(12, 2, "c", false),
+            tab(13, 3, "d", false),
+        ]);
+        let mut wt = dressed("u-wt", "/r/one", "feature/x", None, Some(10));
+        wt.worktree = Some("/r/one-wt".into());
+        m.apply_snapshot(snap(
+            1,
+            vec![
+                wt,
+                dressed("u-br", "/r/one", "feature/x", None, Some(11)),
+                dressed("u-main", "/r/one", "main", None, Some(12)),
+                dressed("u-master", "/r/one", "master", None, Some(13)),
+            ],
+        ));
+        let provenance = |i: usize| match content_at(&m, i) {
+            RowContent::Agent { provenance, .. } => provenance,
+            RowContent::Terminal { .. } => panic!("row {i} is not an agent"),
+        };
+        // A worktree outranks its branch: the worktree IS the provenance.
+        assert_eq!(provenance(0), Provenance::Worktree);
+        assert_eq!(provenance(1), Provenance::Branch);
+        // Both default-branch names render NOTHING (lock §5.1) — blanking the
+        // most common row is what makes the two marked states mean something.
+        //
+        // `dressed` leaves `default_branch` at None, so this is now specifically
+        // the #86 FALLBACK path: an old store row, or a repo whose default git
+        // could not name, still gets exactly the answer it got before the field
+        // existed. That is the guarantee — never a worse answer, only a better
+        // one when the repo supplies it (see the test below).
+        assert_eq!(provenance(2), Provenance::Main);
+        assert_eq!(provenance(3), Provenance::Main);
+    }
+
+    #[test]
+    fn provenance_prefers_the_repos_own_default_branch_over_the_name_heuristic() {
+        // #86: `main`/`master` are not exhaustive. A repository whose default is
+        // `trunk` (or `develop`, or `dev`) had its ORDINARY checkout marked as a
+        // branch — the one row design-lock §5.1 requires to be blank — purely on
+        // naming convention. The host resolves the real default
+        // (`add::resolve_default_branch`) and it rides the snapshot; when it is
+        // present it OUTRANKS the name test in both directions.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![
+            tab(10, 0, "a", false),
+            tab(11, 1, "b", false),
+            tab(12, 2, "c", false),
+            tab(13, 3, "d", false),
+        ]);
+        let with_default = |uuid: &str, branch: &str, tab: usize| {
+            let mut a = dressed(uuid, "/r/trunkrepo", branch, None, Some(tab));
+            a.default_branch = Some("trunk".into());
+            a
+        };
+        let mut wt = with_default("u-wt", "trunk", 10);
+        wt.worktree = Some("/r/trunkrepo-wt".into());
+        m.apply_snapshot(snap(
+            1,
+            vec![
+                wt,
+                with_default("u-default", "trunk", 11),
+                with_default("u-feature", "feature/x", 12),
+                // `main` is NOT special here: in a trunk-default repository it
+                // is an ordinary side branch and must be marked as one. This is
+                // the assertion the old hardcoded list could never make.
+                with_default("u-main", "main", 13),
+            ],
+        ));
+        let provenance = |i: usize| match content_at(&m, i) {
+            RowContent::Agent { provenance, .. } => provenance,
+            RowContent::Terminal { .. } => panic!("row {i} is not an agent"),
+        };
+        // A worktree still outranks everything — the worktree IS the provenance.
+        assert_eq!(provenance(0), Provenance::Worktree);
+        assert_eq!(provenance(1), Provenance::Main, "the repo's real default");
+        assert_eq!(provenance(2), Provenance::Branch);
+        assert_eq!(
+            provenance(3),
+            Provenance::Branch,
+            "`main` in a trunk-default repo is a side branch"
+        );
+    }
+
+    #[test]
+    fn an_agent_outside_a_repo_takes_the_blank_provenance() {
+        // Not in the design, and decided here: an agent outside a repo has no
+        // branch, and painting the branch glyph for it would assert a
+        // provenance nobody has. The blank cell is the honest one.
+        //
+        // `"-"` is the value that matters: it is what the HOST actually writes
+        // (`clave/src/add.rs:517`, the `git rev-parse --abbrev-ref HEAD`
+        // fallback, and `record_branch` for a detached-worktree resume). The
+        // empty string is only ever produced by test builders — asserted
+        // second, and kept, so those builders stay honest.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "a", false), tab(11, 1, "b", false)]);
+        m.apply_snapshot(snap(
+            1,
+            vec![
+                dressed("u-dash", "/r/one", "-", None, Some(10)),
+                dressed("u-empty", "/r/one", "", None, Some(11)),
+            ],
+        ));
+        let provenance = |i: usize| match content_at(&m, i) {
+            RowContent::Agent { provenance, .. } => provenance,
+            RowContent::Terminal { .. } => panic!("row {i} is not an agent"),
+        };
+        assert_eq!(provenance(0), Provenance::Main, "the host's non-repo value");
+        assert_eq!(provenance(1), Provenance::Main, "a test builder's default");
+    }
+
+    #[test]
+    fn a_tab_with_no_agent_is_a_terminal_row_carrying_the_zellij_name() {
+        // Lock §7.1: the zellij tab name is used ONLY for a terminal tab.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "Tab #16", false)]);
+        assert_eq!(
+            content_at(&m, 0),
+            RowContent::Terminal {
+                name: "Tab #16".into()
+            }
+        );
+    }
+
+    #[test]
+    fn the_local_unread_override_still_turns_a_read_done_into_idle() {
+        // §6.5, carried over from the (char, u8) glyph logic: a Done agent
+        // already seen renders Idle until `clave focus` persists it. The
+        // status mapping is otherwise one-to-one, so this is the single rule
+        // that a mechanical Status → RowStatus port would have dropped.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "t", false)]);
+        m.apply_snapshot(snap(1, vec![agent("u1", Status::Done, Some(10))]));
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Done));
+        m.apply_tabs(vec![tab(10, 0, "t", true)]); // focus marks it read
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Idle));
+    }
+
+    #[test]
+    fn model_states_outrank_the_stores_status() {
+        // Stale and Opening are not `Status` variants at all (LEDGER D10) and
+        // must win over whatever the store last said.
+        let mut m = BarModel::default();
+        let mut a = agent("u1", Status::Working, None);
+        a.stale = true;
+        m.apply_snapshot(snap(1, vec![a]));
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Stale));
+
+        let mut m = BarModel::default();
+        m.apply_snapshot(snap(1, vec![agent("u1", Status::Working, None)]));
+        m.opening.insert("u1".into());
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Opening));
+        // …and with neither flag, a dormant row is Dormant regardless of the
+        // status the store carries.
+        m.opening.clear();
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Dormant));
+
+        // The half that is NEW. Every case above is a dormant row, where the
+        // old (char, u8) logic already answered the same way — it only reached
+        // stale/opening off the dormant path. The unified projection applies
+        // the precedence to a LIVE row too, so bind the agent to a tab and
+        // assert the model state still outranks the store's `Status`.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "t", false)]);
+        let mut a = agent("u1", Status::Working, Some(10));
+        a.stale = true;
+        m.apply_snapshot(snap(1, vec![a]));
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Stale), "live and stale");
+
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "t", false)]);
+        m.apply_snapshot(snap(1, vec![agent("u1", Status::Working, Some(10))]));
+        // Sanity: without a flag the live row does show the store's status,
+        // so the two assertions below are a genuine override, not a constant.
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Working));
+        m.opening.insert("u1".into());
+        assert_eq!(
+            status_at(&m, 0),
+            Some(RowStatus::Opening),
+            "live and opening"
+        );
+    }
+
+    #[test]
+    fn the_width_profile_follows_state_not_current_width() {
+        // LEDGER D16: the profile is chosen by STATE, which is what stops the
+        // seek from over-running mid-animation. Same rule width_seek picks its
+        // target with — a peeking bar is collapsed but showing the template.
+        let mut m = BarModel::default();
+        assert_eq!(m.widths(), Widths::EXPANDED);
+        m.toggle();
+        assert_eq!(m.widths(), Widths::COLLAPSED);
+        assert!(m.visited(7), "a collapsed bar peeks on nav");
+        assert_eq!(m.widths(), Widths::EXPANDED, "a peek shows the template");
+        assert!(m.peek_expired());
+        assert_eq!(m.widths(), Widths::COLLAPSED);
+    }
+
+    // --- PROVISIONAL ink allocation (delete with `ProvisionalInks`) --------
+
+    #[test]
+    fn provisional_inks_are_stable_across_two_identical_snapshots() {
+        // The property a `HashMap` would break: Rust's default hasher is
+        // randomly seeded, so iteration order varies per process AND the
+        // colours would reshuffle between renders. Sorted keys make the same
+        // snapshot always yield the same palette assignment.
+        let agents = || {
+            vec![
+                dressed("u1", "/r/zebra", "main", Some("ZZ"), None),
+                dressed("u2", "/r/alpha", "main", Some("AA"), None),
+                dressed("u3", "/r/alpha", "main", Some("BB"), None),
+            ]
+        };
+        let inks_of = |seq: u64| {
+            let mut m = BarModel::default();
+            m.apply_snapshot(snap(seq, agents()));
+            m.rows()
+                .into_iter()
+                .map(|(k, r)| match r.content {
+                    RowContent::Agent {
+                        repo_ink,
+                        title_ink,
+                        ..
+                    } => (k, repo_ink, title_ink),
+                    RowContent::Terminal { .. } => panic!("no terminals here"),
+                })
+                .collect::<Vec<_>>()
+        };
+        // Two INDEPENDENT models over the same snapshot, which is where a
+        // per-process hash seed would show up.
+        let a = inks_of(1);
+        let b = inks_of(1);
+        assert_eq!(a, b);
+        // Sorted order: /r/alpha is index 0, /r/zebra index 1. Within alpha,
+        // AA is 0 and BB is 1 — a title chip is unique within its repo (lock
+        // §4), so the two alpha rows do not collide.
+        let repo_ink = |uuid: &str| {
+            a.iter()
+                .find(|(k, _, _)| *k == RowKey::Dormant(uuid.into()))
+                .map(|(_, r, _)| *r)
+                .unwrap()
+        };
+        let title_ink = |uuid: &str| {
+            a.iter()
+                .find(|(k, _, _)| *k == RowKey::Dormant(uuid.into()))
+                .map(|(_, _, t)| *t)
+                .unwrap()
+        };
+        assert_eq!(repo_ink("u2"), Some(0));
+        assert_eq!(repo_ink("u3"), Some(0), "one repo is one colour");
+        assert_eq!(repo_ink("u1"), Some(1));
+        assert_eq!(title_ink("u2"), Some(0));
+        assert_eq!(title_ink("u3"), Some(1), "chips differ within a repo");
+    }
+
+    #[test]
+    fn provisional_inks_wrap_at_the_palette_length() {
+        let agents: Vec<Agent> = (0..11)
+            .map(|i| {
+                dressed(
+                    &format!("u{i:02}"),
+                    &format!("/r/{i:02}"),
+                    "main",
+                    None,
+                    None,
+                )
+            })
+            .collect();
+        let inks = ProvisionalInks::allocate(&agents);
+        assert_eq!(inks.repo.len(), 11);
+        assert_eq!(inks.repo["/r/00"], 0);
+        assert_eq!(inks.repo["/r/07"], 7);
+        assert_eq!(inks.repo["/r/08"], 0, "round-robin wraps at 8");
+        assert_eq!(inks.repo["/r/10"], 2);
+    }
+
+    #[test]
+    fn an_agent_outside_a_repo_gets_no_ink_never_index_zero() {
+        // LEDGER D7: `0` is crystalBlue, a real hue, so `unwrap_or(0)` paints
+        // every untinted row one colour while reading as "untinted".
+        let inks = ProvisionalInks::allocate(&[agent("u1", Status::Idle, None)]);
+        assert!(inks.repo.is_empty());
+        assert!(inks.title.is_empty());
+    }
+
+    #[test]
+    fn basename_takes_the_last_non_empty_component() {
+        assert_eq!(basename("/Users/o/code/clave"), "clave");
+        assert_eq!(basename("/Users/o/code/clave/"), "clave");
+        assert_eq!(basename("clave"), "clave");
+        assert_eq!(basename(""), "");
+        assert_eq!(basename("/"), "");
     }
 
     #[test]
     fn store_rows_without_live_tabs_render_dormant() {
         // §6.6 C8: row set = TabUpdate ∪ dormant store rows. An agent whose
-        // bind points at no current tab and whose registered pane is gone
-        // renders ◌ dim, labeled from the store, recency = last_interacted.
+        // bind points at no current tab and whose registered pane is gone gets
+        // a row of its own, marked Dormant, recency = last_interacted. It is
+        // NOT labeled from the store any more — the projection renders title,
+        // repo and summary (lock §2), so `label` is dead to this row.
         let mut m = BarModel::default();
         m.apply_tabs(vec![tab(1, 0, "shell", true)]); // one plain live tab
         let mut a = agent("u-dormant", Status::Idle, None);
-        a.label = "repo · main · fix".into();
         a.last_interacted = 500;
         m.apply_snapshot(AgentSnapshot {
             collapsed: false,
@@ -2107,11 +2858,19 @@ mod tests {
         assert_eq!(rows.len(), 2);
         let d = rows
             .iter()
-            .find(|r| r.key == RowKey::Dormant("u-dormant".into()))
+            .find(|(k, _)| *k == RowKey::Dormant("u-dormant".into()))
             .expect("dormant row rendered");
-        assert_eq!(d.name, "repo · main · fix");
-        assert!(!d.active);
-        assert_eq!(d.glyph, Some(('◌', 90)));
+        assert!(!d.1.selected);
+        // The label is NOT the row any more: an agent row renders its title
+        // chip, repo and summary from the store (lock §2), so the dormant
+        // marker is what identifies the state here.
+        assert!(matches!(
+            d.1.content,
+            RowContent::Agent {
+                status: RowStatus::Dormant,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2130,9 +2889,8 @@ mod tests {
             agents: vec![old, new],
             tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64)]),
         });
-        let keys: Vec<_> = m.rows().into_iter().map(|r| r.key).collect();
         assert_eq!(
-            keys,
+            keys(&m),
             vec![
                 RowKey::Dormant("u-new".into()), // 900
                 RowKey::Tab(1),                  // 500
@@ -2154,11 +2912,7 @@ mod tests {
             agents: vec![agent("u1", Status::Working, Some(7))], // bound → live
             tab_timeline: Default::default(),
         });
-        assert!(
-            !m.rows()
-                .iter()
-                .any(|r| r.key == RowKey::Dormant("u1".into()))
-        );
+        assert!(!keys(&m).contains(&RowKey::Dormant("u1".into())));
         // Bind gone (fresh session) but the pane join exists → still not dormant.
         let mut m = BarModel::default();
         m.apply_tabs(vec![tab(7, 0, "agent-tab", true)]);
@@ -2170,11 +2924,7 @@ mod tests {
             agents: vec![agent("u2", Status::Working, None)],
             tab_timeline: Default::default(),
         });
-        assert!(
-            !m.rows()
-                .iter()
-                .any(|r| r.key == RowKey::Dormant("u2".into()))
-        );
+        assert!(!keys(&m).contains(&RowKey::Dormant("u2".into())));
     }
 
     #[test]
@@ -2311,8 +3061,7 @@ mod tests {
             agents: vec![a],
             tab_timeline: Default::default(),
         });
-        let rows = m.rows();
-        assert_eq!(rows[0].glyph, Some(('✗', 31)));
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Stale));
         assert!(m.opening.is_empty(), "stale snapshot clears in-flight");
         // In-flight (no stale): ↻.
         let mut m = BarModel::default();
@@ -2323,7 +3072,7 @@ mod tests {
             tab_timeline: Default::default(),
         });
         m.opening.insert("u2".into());
-        assert_eq!(m.rows()[0].glyph, Some(('↻', 33)));
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Opening));
     }
 
     #[test]
@@ -2344,15 +3093,19 @@ mod tests {
         m.beacon(1);
         // (a) walk onto the dormant row → it is active, the live tab is not.
         m.nav("{\"dir\":\"next\"}", Some(1)); // live row 1 → wrap → dormant row 0
-        let rows = m.rows();
-        assert_eq!(rows[0].key, RowKey::Dormant("u-d".into()));
-        assert!(rows[0].active, "dormant selection highlighted");
-        assert!(!rows[1].active, "live tab drops its highlight");
+        assert_eq!(keys(&m)[0], RowKey::Dormant("u-d".into()));
+        assert_eq!(
+            selected(&m),
+            vec![true, false],
+            "dormant selection holds it"
+        );
         // (b) a live landing clears the cursor → the tab highlights again.
         m.nav("{\"dir\":\"next\"}", Some(1)); // dormant → wrap → live tab
-        let rows = m.rows();
-        assert!(!rows[0].active, "dormant no longer selected");
-        assert!(rows[1].active, "focused tab reclaims the highlight");
+        assert_eq!(
+            selected(&m),
+            vec![false, true],
+            "focused tab reclaims the highlight"
+        );
     }
 
     #[test]
@@ -2372,7 +3125,7 @@ mod tests {
         });
         m.beacon(1);
         m.nav("{\"dir\":\"next\"}", Some(1)); // cursor now on the dormant row
-        assert!(m.rows()[0].active); // dormant selected
+        assert!(selected(&m)[0]); // dormant selected
         // The row goes LIVE: u-d binds to a new tab (2). Cursor still names
         // "u-d" but it no longer renders dormant.
         m.apply_tabs(vec![tab(1, 0, "live", false), tab(2, 1, "u-d", true)]);
@@ -2383,11 +3136,11 @@ mod tests {
             tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64), (2usize, 600u64)]),
         });
         let rows = m.rows();
-        assert!(rows.iter().all(|r| r.key != RowKey::Dormant("u-d".into())));
+        assert!(!keys(&m).contains(&RowKey::Dormant("u-d".into())));
         let active: Vec<_> = rows
             .iter()
-            .filter(|r| r.active)
-            .map(|r| r.key.clone())
+            .filter(|(_, r)| r.selected)
+            .map(|(k, _)| k.clone())
             .collect();
         assert_eq!(
             active,
@@ -2435,18 +3188,15 @@ mod tests {
         let Effect::ArmDwell { r#gen } = fx[0] else {
             panic!()
         };
-        assert!(
-            m.rows()[0].active,
-            "dormant selected before the native switch"
-        );
+        assert!(selected(&m)[0], "dormant selected before the native switch");
         // Native switch to tab 2 arrives as a visited-pipe beacon (no nav).
         m.beacon(2);
         let rows = m.rows();
-        assert!(!rows[0].active, "dormant row releases the highlight");
+        assert!(!rows[0].1.selected, "dormant row releases the highlight");
         let active: Vec<_> = rows
             .iter()
-            .filter(|r| r.active)
-            .map(|r| r.key.clone())
+            .filter(|(_, r)| r.selected)
+            .map(|(k, _)| k.clone())
             .collect();
         assert_eq!(active, vec![RowKey::Tab(2)], "focused tab reclaims it");
         // The now-orphaned dwell must no-op (cursor cleared).
@@ -2698,9 +3448,20 @@ mod tests {
     fn harness_newborn_converges_on_the_template_from_above() {
         // A percent-sized birth lands window-dependent and the birth-armed seek
         // (C8 2026-07-18) must finish the job onto BAR_TARGET_COLS.
+        //
+        // The START WIDTH is chosen to force MORE THAN ONE resize, and that is
+        // the point of the test — one step would only prove the pre-learning
+        // ±4 slack. With step 12: 66 → 54 (diff 10 > the learned band half 6,
+        // so it acts again) → 42 (diff 2, accepted). The old start of 60 drove
+        // two steps against the old target of 30 but only ONE against 44 — a
+        // test that stayed green and quietly covered less (#63 shape).
         let mut m = BarModel::default();
-        let mut sim = SimZellij::new(60, 12, 0, 200, false);
-        drive(&mut m, &mut sim, None);
+        let mut sim = SimZellij::new(66, 12, 0, 200, false);
+        let steps = drive(&mut m, &mut sim, None);
+        assert!(
+            steps >= 2,
+            "start width must drive at least two resizes, drove {steps}"
+        );
         assert!(
             sim.cols.abs_diff(BAR_TARGET_COLS) <= band_half(sim.step),
             "newborn ended at {} (target {BAR_TARGET_COLS})",
@@ -2716,7 +3477,9 @@ mod tests {
     fn harness_collapse_converges_on_the_gutter() {
         let mut m = BarModel::default();
         m.toggle(); // collapsed → target COLLAPSED_TARGET_COLS
-        let mut sim = SimZellij::new(30, 9, 0, 200, false);
+        // Start at 72, not 30: 30 IS the collapsed target now, and a harness
+        // that starts on its target proves nothing (#63).
+        let mut sim = SimZellij::new(72, 9, 0, 200, false);
         drive(&mut m, &mut sim, None);
         assert!(
             sim.cols.abs_diff(COLLAPSED_TARGET_COLS) <= band_half(sim.step),
@@ -2728,13 +3491,16 @@ mod tests {
     #[test]
     fn harness_floor_above_target_rests_benignly() {
         // Round 20 ruling: "wherever cols stop changing is accepted." When the
-        // resize floor sits ABOVE the gutter target, the seek rests at the
+        // resize floor sits ABOVE the collapsed target, the seek rests at the
         // floor and the in-flight guard keeps it silent — no thrash.
         let mut m = BarModel::default();
         m.toggle();
-        let mut sim = SimZellij::new(30, 8, 12, 200, false); // floor 12 > target 4
+        // Floor 38 > COLLAPSED_TARGET_COLS (30), and far enough above it that
+        // the ±4 slack band cannot mistake the floor for convergence. The old
+        // pair (start 30, floor 12) was derived against a target of 4.
+        let mut sim = SimZellij::new(72, 8, 38, 200, false);
         drive(&mut m, &mut sim, None);
-        assert_eq!(sim.cols, 12, "did not rest at the floor");
+        assert_eq!(sim.cols, 38, "did not rest at the floor");
         for _ in 0..8 {
             assert_eq!(m.width_seek(sim.cols), Vec::<Effect>::new());
         }
@@ -2761,8 +3527,10 @@ mod tests {
         // peeking, then sinks to the gutter when the peek expires.
         let mut m = BarModel::default();
         m.toggle(); // collapsed
-        let mut sim = SimZellij::new(30, 8, 0, 200, false);
-        drive(&mut m, &mut sim, None); // settle at the gutter
+        // 60, not 30: starting on COLLAPSED_TARGET_COLS would make the first
+        // leg a no-op and the assertion below vacuous (#63).
+        let mut sim = SimZellij::new(60, 8, 0, 200, false);
+        drive(&mut m, &mut sim, None); // settle at the collapsed target
         assert!(sim.cols.abs_diff(COLLAPSED_TARGET_COLS) <= band_half(sim.step));
         // A nav arms a peek (collapsed → template) and re-arms the seek.
         assert!(m.visited(7));
@@ -2785,8 +3553,9 @@ mod tests {
     #[test]
     fn harness_toggle_mid_seek_re_aims_at_the_new_target() {
         // Alt+c mid-flight: the in-progress expand is abandoned and the seek
-        // re-aims at the gutter, still converging within one fresh budget.
-        let mut m = BarModel::default(); // expanded, target 30
+        // re-aims at the collapsed target, still converging within one fresh
+        // budget.
+        let mut m = BarModel::default(); // expanded, target 44
         let mut sim = SimZellij::new(5, 7, 0, 200, false);
         let max_seg = drive(&mut m, &mut sim, Some((2, Interrupt::Toggle)));
         assert!(
@@ -2866,12 +3635,30 @@ mod tests {
                 // effective step of the active target, OR rested at the floor,
                 // OR the budget was spent mid-travel (round 20 admits all three
                 // as terminal states — (c) already proved the rest is quiet).
-                let target = if m.collapsed && !m.peeking {
+                // `showing_collapsed()`, never a restatement of it: it is the
+                // single source of the peek-aware collapse rule, and a copy
+                // here is the one site that could drift from the seek.
+                let target = if m.showing_collapsed() {
                     COLLAPSED_TARGET_COLS
                 } else {
                     BAR_TARGET_COLS
                 };
-                let within = sim.cols.abs_diff(target) <= step.max(8) / 2;
+                // The band is HALF a step — except where the lattice is coarse
+                // enough for the two targets' bands to overlap (an effective
+                // step at or above the 14-column separation, LEDGER D21).
+                // There, `converged` refuses the overlap outright and the
+                // disambiguating step can land up to a FULL step out: a
+                // visibly-collapsed bar a few columns off target, rather than a
+                // perfectly-parked one that never moved. Below that separation
+                // the tight half-band still holds, so this does not blanket the
+                // whole space — it names exactly the steps that pay for D21.
+                let effective = step.max(PRE_LEARNING_STEP);
+                let bound = if effective >= BAR_TARGET_COLS.abs_diff(COLLAPSED_TARGET_COLS) {
+                    effective
+                } else {
+                    effective / 2
+                };
+                let within = sim.cols.abs_diff(target) <= bound;
                 let at_floor = sim.cols == floor;
                 let exhausted = max_seg == SEEK_BUDGET;
                 prop_assert!(
@@ -2907,11 +3694,11 @@ mod tests {
                     m
                 };
                 let baseline: Vec<RowKey> =
-                    build(0).rows().into_iter().map(|r| r.key).collect();
+                    build(0).rows().into_iter().map(|(k, _)| k).collect();
                 for (active, &id) in ids.iter().enumerate() {
                     let mut m = build(active);
                     m.beacon(id); // live-focus truth on a different tab
-                    let order: Vec<RowKey> = m.rows().into_iter().map(|r| r.key).collect();
+                    let order: Vec<RowKey> = m.rows().into_iter().map(|(k, _)| k).collect();
                     prop_assert_eq!(&order, &baseline, "focus reordered rows");
                 }
             }
@@ -2967,17 +3754,17 @@ mod tests {
                 // Unified recency: each row's sort ts (timeline for live, li for
                 // dormant) is non-increasing down the list.
                 let rows = m.rows();
-                let ts_of = |r: &Row| -> u64 {
-                    match &r.key {
+                let ts_of = |k: &RowKey| -> u64 {
+                    match k {
                         RowKey::Tab(id) => timeline.get(id).copied().unwrap_or(0),
                         RowKey::Dormant(u) => li_by_uuid.get(u).copied().unwrap_or(0),
                     }
                 };
                 for w in rows.windows(2) {
                     prop_assert!(
-                        ts_of(&w[0]) >= ts_of(&w[1]),
+                        ts_of(&w[0].0) >= ts_of(&w[1].0),
                         "recency inverted between {:?} and {:?}",
-                        w[0].key, w[1].key
+                        w[0].0, w[1].0
                     );
                 }
             }
@@ -3150,7 +3937,7 @@ mod tests {
                     if let Some(u) = m.cursor.clone() {
                         let rows = m.rows();
                         prop_assert!(
-                            rows.iter().any(|r| r.key == RowKey::Dormant(u.clone())),
+                            rows.iter().any(|(k, _)| *k == RowKey::Dormant(u.clone())),
                             "cursor on a row that is not displayed: {}",
                             u
                         );

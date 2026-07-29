@@ -112,6 +112,19 @@ pressing any clave key.
   that clippy accepts can still fail the build. `just gates` runs both, in CI's
   order.
 
+5. **On a pure-logic change, run the mutation check too:**
+
+   ```bash
+   just mutants  # cargo-mutants over the lines this branch changed vs `main`
+   ```
+
+   Deliberately **not** in `just gates` — gates run on every PR and must stay
+   fast. A surviving mutant is a *finding*: a line you can change while every
+   test keeps passing. Triage it in the PR dossier; never weaken a test to make
+   one go away. Which change classes owe a run, and the six shapes of
+   green-and-worthless test the habit exists for, are in
+   [`docs/dev/TESTING.md`](docs/dev/TESTING.md).
+
 Live, interactive behaviour is not covered by any automated test — that is what
 [`docs/dev/TESTING.md`](docs/dev/TESTING.md) exists for.
 

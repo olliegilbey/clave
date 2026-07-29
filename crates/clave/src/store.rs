@@ -69,18 +69,28 @@ pub struct AgentRecord {
     pub stale: bool,
     /// Claude's session rename, from the transcript's `custom-title` line.
     /// Store-side home for the wire field of the same name (#69). Written by
-    /// S4 (#59); nothing populates it yet, so it stays None. `default` keeps
-    /// pre-field store files loading — a missing key is a whole-store parse
-    /// failure, not a blank field.
+    /// `hook::refresh_row_fields`, held last-non-empty — `None` means the
+    /// session was never renamed, which is most rows, and the design renders
+    /// that as a blank chip. `default` keeps pre-field store files loading —
+    /// a missing key is a whole-store parse failure, not a blank field.
     #[serde(default)]
     pub title: Option<String>,
     /// The words segment, held structurally rather than only inside `label`
     /// (design-lock §7.1). Seeded once from existing labels by
-    /// `backfill_summaries`; thereafter written by S4 (#59) from `ai-title`,
-    /// the `type:"summary"` tier being extinct (#79). `default` keeps
-    /// pre-field store files loading.
+    /// `backfill_summaries`; thereafter written by `hook::refresh_row_fields`
+    /// from `ai-title`, the `type:"summary"` tier being extinct (#79).
+    /// `default` keeps pre-field store files loading.
     #[serde(default)]
     pub summary: String,
+    /// The REPOSITORY's default branch (the branch a plain checkout sits on),
+    /// resolved once at `add` time by `add::resolve_default_branch`. Wire twin
+    /// of `clave_types::Agent::default_branch`, which carries the full rationale
+    /// (#86): the bar must not decide "default checkout" from a hardcoded
+    /// `main`/`master` list. `None` = not discoverable (no remote), which the
+    /// bar handles by falling back to that heuristic. `default` keeps pre-field
+    /// store files loading — a missing key is a whole-store parse failure.
+    #[serde(default)]
+    pub default_branch: Option<String>,
 }
 
 /// The whole store file. `seq` is the monotonic snapshot counter of the §5
@@ -206,6 +216,9 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
                 // Projected now — `AgentRecord` has carried this since §6.3
                 // and the wire simply never did (S6 #61 §2.4).
                 worktree: r.worktree.clone(),
+                // The other half of provenance (#86): without it the bar can
+                // only guess the default branch by name.
+                default_branch: r.default_branch.clone(),
             })
             .collect(),
     }
@@ -364,10 +377,11 @@ pub fn apply_open_result(
 /// — after one pass nothing matches again. Same shape as S1 §3.6's
 /// `commit_ord` backfill.
 ///
-/// WHY it is needed at all, given S4 (#59) will keep summaries live:
-/// `refresh_label` returns early forever once `label_source == Summary`
-/// (`hook.rs:155`), and dormant rows receive no hook events by definition —
-/// so without this they render a blank 17-column field indefinitely.
+/// WHY it is needed at all, now that `refresh_row_fields` keeps summaries live
+/// (`hook.rs`): DORMANT rows receive no hook events by definition — no claude
+/// process, no transcript being written — so without this they render a blank
+/// summary field indefinitely. (The other half of the original rationale, the
+/// §6.4 freeze, no longer applies: the summary write is decoupled from it.)
 ///
 /// Returns whether anything changed, so the caller can gate its `seq` bump:
 /// §5 forbids no-op pushes.
@@ -448,6 +462,7 @@ mod tests {
             stale: false,
             title: None,
             summary: String::new(),
+            default_branch: None,
         }
     }
 
@@ -742,6 +757,7 @@ mod tests {
         r.title = Some("CLA-MAIN".into());
         r.summary = "fix the flaky auth".into();
         r.worktree = Some("/x/.claude/worktrees/wt".into());
+        r.default_branch = Some("trunk".into());
         s.agents.insert("u1".into(), r);
 
         let snap = snapshot_from(&s);
@@ -749,6 +765,10 @@ mod tests {
         assert_eq!(a.title.as_deref(), Some("CLA-MAIN"));
         assert_eq!(a.summary, "fix the flaky auth");
         assert_eq!(a.worktree.as_deref(), Some("/x/.claude/worktrees/wt"));
+        // #86: the bar cannot decide provenance from the branch NAME, so the
+        // repo's real default has to cross this seam too — a record that knows
+        // it and a wire Agent that does not is the whole bug.
+        assert_eq!(a.default_branch.as_deref(), Some("trunk"));
     }
 
     #[test]
@@ -760,9 +780,13 @@ mod tests {
         let mut o = json.as_object().unwrap().clone();
         o.remove("title");
         o.remove("summary");
+        // #86's field joins the same set, and it is the one Ollie's REAL store
+        // is about to be missing: every row written before this branch.
+        o.remove("default_branch");
         let back: AgentRecord = serde_json::from_value(serde_json::Value::Object(o)).unwrap();
         assert_eq!(back.title, None);
         assert!(back.summary.is_empty());
+        assert_eq!(back.default_branch, None);
     }
 
     #[test]

@@ -1,4 +1,8 @@
 /target
+# cargo-mutants scratch output (`just mutants`); the findings go in the PR
+# dossier, never in the tree.
+/mutants.out
+/mutants.out.old
 .DS_Store
 *.swp
 .claude/settings.local.json

@@ -99,6 +99,22 @@ pub struct Agent {
     /// `default` keeps pre-field payloads parseable.
     #[serde(default)]
     pub worktree: Option<String>,
+    /// The REPOSITORY's default branch — the branch a plain checkout of it sits
+    /// on. The second input to S6's provenance glyph (#61): design-lock §5.1
+    /// says the default checkout renders NOTHING, and §5's whole argument is
+    /// that blanking the most common row is what makes the two marked states
+    /// mean something. The bar used to decide that by name, treating `main` and
+    /// `master` as exhaustive — so an ordinary default checkout of a repo whose
+    /// default is `trunk`, `develop` or `dev` got the branch glyph, mislabelled
+    /// on naming convention alone (#86). Resolved by the host, where git can
+    /// actually be asked (`clave/src/add.rs::resolve_default_branch`).
+    ///
+    /// `None` is a real answer, not a failure: a repo with no remote may have no
+    /// discoverable default, and the bar falls back to its `main`/`master`
+    /// heuristic there so behaviour is never WORSE than before this field
+    /// existed. `default` keeps pre-field payloads parseable.
+    #[serde(default)]
+    pub default_branch: Option<String>,
 }
 
 /// The full-replace snapshot `clave` pushes to `clave-bar` on every change
@@ -145,9 +161,96 @@ pub struct Register {
 /// independently — it lands once, here (#69).
 pub const LABEL_SEP: &str = " \u{00b7} ";
 
+// ── sidebar geometry ────────────────────────────────────────────────────────
+//
+// S8 §3.3, deferred there and taken here (#86): ONE definition per number.
+// Three artifacts have to agree about how wide the bar is — `clave-bar`'s width
+// seek drives the pane to it, `clave-bar`'s renderer lays every column out
+// against it, and `clave`'s three KDL generators size the newborn pane as a
+// PERCENT of it — and until now each held its own copy with nothing linking
+// them. The very next task moves the expanded target (LEDGER D19), and moving
+// `BAR_TARGET_COLS` alone used to leave every golden, the preview and the
+// scenario render test green while pinning the OLD width.
+//
+// Here rather than in either crate because `clave-types` is already a
+// dependency of both and already compiles to wasm; a compile-time constant
+// rather than configuration because there is no code path in which a running
+// instance's target changes (S8 §3.2 rejects all three config channels — each
+// is the #43/#44 mixed-artifact shape).
+
+/// The expanded width the bar is drawn at and the width seek converges to
+/// (LEDGER D2, design-lock §2): `1 cap + 8 gutter + 7 title + 1 + 7 repo + 1 +
+/// 17 summary + 1 margin + 1 cap`. The renderer takes `cols` as a parameter —
+/// zellij hands the plugin whatever the pane actually is — but every number in
+/// the ratified design was chosen against this one.
+pub const BAR_TARGET_COLS: usize = 44;
+
+/// The collapsed width (Alt+c), LEDGER D17: `30 - 13 - 7 title - 3 repo`
+/// leaves the summary 7. Collapsed is a width PROFILE, not a squeezed layout
+/// (D16) — the gutter is identical and only repo and summary narrow, through
+/// the same `render_rows`.
+///
+/// Its distance from `BAR_TARGET_COLS` is load-bearing beyond the two renders:
+/// the seek's acceptance bands must not overlap, or a collapse is accepted as
+/// an expand (LEDGER D21, `clave-bar`'s `converged`).
+pub const COLLAPSED_TARGET_COLS: usize = 30;
+const _: () = assert!(
+    COLLAPSED_TARGET_COLS < BAR_TARGET_COLS,
+    "collapsed must be the NARROWER profile: the seek, the width profiles and \
+     Alt+c's direction all read it that way"
+);
+
+/// The reference viewport the birth percent is derived against (S8 §3.4). A
+/// documented fiction: real windows vary, and the birth-armed seek corrects the
+/// difference. It exists so the percent is a DERIVATION rather than a number
+/// somebody chose.
+pub const REFERENCE_VIEWPORT_COLS: usize = 200;
+
+/// The `size="N%"` every generated bar pane is born at.
+///
+/// It MUST be a percent: a fixed `size=30` makes zellij refuse every resize on
+/// the pane (`CantResizeFixedPanes`), which left Alt+c dead in any freshly
+/// launched session (c8-cold-start 2026-07-18). So this is a birth HINT and the
+/// seek is the authority — a stale `clave` on `PATH` (#44) emitting last
+/// version's percent costs a visible flicker at birth, not a wrong bar, and
+/// that one-way geometry contract is why the seam cannot desync.
+///
+/// Computed, not hand-derived: the literal used to live in three format
+/// strings, and round 21 had to remember to touch each one by hand.
+pub const BAR_BIRTH_PERCENT: usize = BAR_TARGET_COLS * 100 / REFERENCE_VIEWPORT_COLS;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one place the birth percent's VALUE is checked. Every other site
+    /// (three KDL generators and the test that reads them back) formats this
+    /// constant, so a target move carries the percent with it — the skew S8
+    /// §3.3 was written to remove, and the one round 21 had to fix by hand.
+    #[test]
+    fn birth_percent_is_derived_from_the_bar_target() {
+        assert_eq!(BAR_BIRTH_PERCENT, 22);
+        assert_eq!(
+            BAR_BIRTH_PERCENT,
+            BAR_TARGET_COLS * 100 / REFERENCE_VIEWPORT_COLS
+        );
+        // Percent sizing is not a style choice: a fixed `size=N` makes zellij
+        // refuse every resize on the pane, so the newborn width must be
+        // expressible as a whole percent of a real viewport.
+        assert!((1..=100).contains(&BAR_BIRTH_PERCENT));
+    }
+
+    /// The seek's two targets, and the property that is not local to either:
+    /// their separation. `clave-bar`'s `converged` refuses any width both
+    /// bands would accept, so the geometry cannot silently make Alt+c a no-op
+    /// again (LEDGER D21) — but a separation at or below the widest learnable
+    /// step (20) means every toggle on a wide display pays a disambiguating
+    /// step, which is a design decision, not an accident. Fail here if it
+    /// changes.
+    #[test]
+    fn the_collapsed_target_is_narrower_and_separated_from_the_expanded_one() {
+        assert_eq!(BAR_TARGET_COLS.abs_diff(COLLAPSED_TARGET_COLS), 14);
+    }
 
     #[test]
     fn status_serializes_as_spec_snake_case() {
@@ -216,6 +319,7 @@ mod tests {
             title: None,
             summary: String::new(),
             worktree: None,
+            default_branch: None,
         };
         assert!(!serde_json::to_string(&a).unwrap().contains("archived"));
     }
@@ -240,6 +344,7 @@ mod tests {
                 title: None,
                 summary: String::new(),
                 worktree: None,
+                default_branch: None,
             }],
         };
         let json = serde_json::to_string(&snap).unwrap();
@@ -267,6 +372,7 @@ mod tests {
             title: None,
             summary: String::new(),
             worktree: None,
+            default_branch: None,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert_eq!(back.tab_id, Some(4));
@@ -296,6 +402,7 @@ mod tests {
             title: None,
             summary: String::new(),
             worktree: None,
+            default_branch: None,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert!(back.stale);
@@ -327,6 +434,7 @@ mod tests {
             title: Some("CLA-MAIN".into()),
             summary: "fix the flaky auth".into(),
             worktree: Some("/x/.claude/worktrees/wt".into()),
+            default_branch: None,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert_eq!(back.title.as_deref(), Some("CLA-MAIN"));
@@ -348,6 +456,43 @@ mod tests {
         assert_eq!(old.title, None);
         assert!(old.summary.is_empty());
         assert_eq!(old.worktree, None);
+    }
+
+    #[test]
+    fn agent_default_branch_roundtrips_and_defaults_none() {
+        // #86: provenance may not decide "this is the default checkout" from a
+        // hardcoded `main`/`master` list — a `trunk`-default repo's ordinary
+        // checkout would take the branch glyph. The host resolves the repo's
+        // real default and it rides the wire; `None` means "not discoverable",
+        // which is a legitimate answer for a repo with no remote and is exactly
+        // what an OLD payload deserializes to.
+        let mut a = Agent {
+            uuid: "u1".into(),
+            cwd: "/x".into(),
+            repo_root: "/x".into(),
+            branch: "trunk".into(),
+            label: "x \u{00b7} trunk".into(),
+            status: Status::Idle,
+            last_interacted: 0,
+            last_visited: 0,
+            tab_id: None,
+            stale: false,
+            title: None,
+            summary: String::new(),
+            worktree: None,
+            default_branch: Some("trunk".into()),
+        };
+        let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
+        assert_eq!(back.default_branch.as_deref(), Some("trunk"));
+
+        // The v2 payload (#69's shape) has no such key and MUST still parse —
+        // the CLI and the wasm bar upgrade at different moments, so a new bar
+        // reading an old push is a live state, not a migration.
+        a.default_branch = None;
+        let mut v: serde_json::Value = serde_json::to_value(&a).unwrap();
+        v.as_object_mut().unwrap().remove("default_branch");
+        let old: Agent = serde_json::from_value(v).unwrap();
+        assert_eq!(old.default_branch, None);
     }
 
     #[test]

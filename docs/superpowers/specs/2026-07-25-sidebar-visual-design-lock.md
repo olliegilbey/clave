@@ -5,7 +5,7 @@ prose. Supersedes the geometry in `2026-07-22-S6-gutter-glyphs.md` and
 `2026-07-22-S8-sidebar-width.md`; both must be revised against this file before
 their worktrees start._
 
-Run the design: `python3 docs/superpowers/specs/bar-preview.py`
+Run the design: `cargo run -p clave-bar --example bar-preview`
 
 **Vocabulary:** every term used here — *gutter, cell, rule, cap, provenance,
 ink, chip, tint, fade, title vs label, live vs dormant row* — is defined in
@@ -13,12 +13,39 @@ ink, chip, tint, fade, title vs label, live vs dormant row* — is defined in
 any word below is doing more work than you expect.
 
 **Source-of-truth hierarchy — one rule, no ambiguity.** *This document is
-authoritative* for every ruling, number and rationale. `bar-preview.py` is an
+authoritative* for every ruling, number and rationale. The `bar-preview` example
+(`crates/clave-bar/examples/bar-preview.rs`, formerly `bar-preview.py` in this
+directory) is an
 **illustration**: it shows what the rulings look like, and it self-checks that
 every row is exactly 44 display cells, but where the two ever disagree **this
 file wins and the script is the bug**. Every number below was chosen against
 alternatives that were rendered and rejected, and the rejected ones are recorded
 so they are not re-proposed.
+
+> [!NOTE]
+> **This document STAYS authoritative for anything visual — 2026-07-29.** The
+> sidebar was rewritten on the `ux` branch; unlike the S-specs, this file was
+> *built from* rendered rows and its earned knowledge stands (the thirteen-tool
+> glyph survey, why no worktree glyph exists, the `\u{...}`-escape rule, the two
+> colour channels). Where it and an S-spec disagree, this file still wins.
+>
+> Two items in **§3 (collapsed geometry)** are superseded — that section was
+> always banded `NOT YET RATIFIED`, and collapsed has since been decided:
+>
+> - **§3 constraint 2's `< 24` is superseded by LEDGER D15.** The
+>   `> MAX_LEARNABLE_STEP (20)` separation was a *restatement* of a margin S8
+>   chose while it was free, not a bound. The acceptance half-band is 10, so the
+>   requirement is separation `> 10` and collapsed may be anything under **34**.
+> - **§3's other open question is settled by LEDGER D16/D17** — truncate the whole
+>   label vs render field 0 only is **moot**. Collapsed is a *width profile*, not a
+>   second layout: all three fields survive, narrower — `(title 7, repo 3)` at
+>   **30 columns**, chosen from rendered candidates. §9 item 2's "the `< 24`
+>   invariant is S8's" goes with it.
+>
+> Everything else here reads as ratified because it is. The authority for what is
+> *true now* — including anything §3 touches — is
+> **[`docs/ux/LEDGER.md`](../../ux/LEDGER.md)**. **Do not amend this file** to
+> reconcile it; propose the disposition to the coordinator.
 
 ---
 
@@ -120,9 +147,14 @@ Two hard constraints already established:
    MAX_LEARNABLE_STEP (20)` (S8 §2.2 item 9) must hold so no learned step lets one
    target's acceptance band swallow the other. At 44 this means the collapsed
    target must be **< 24**.
+   **⚠ Superseded — LEDGER D15: this is a restatement, not a bound. The
+   separation requirement is `> 10`, so the bound is `< 34`. Collapsed is 30.**
 
 Also unresolved: whether collapsed truncates the whole label or renders
-**field 0 only** (title, falling back to repo). Field-0-only was rendered and
+**field 0 only** (title, falling back to repo).
+**⚠ Settled — LEDGER D16/D17: moot. Collapsed is a width profile that keeps all
+three fields, `(title 7, repo 3)` at 30 columns.**
+Field-0-only was rendered and
 read better — at 8 text cells, truncating the whole label spends a column on an
 ellipsis carrying no information (`dotfile…`), where field-0-only gives eight
 real characters (`dotfiles`).

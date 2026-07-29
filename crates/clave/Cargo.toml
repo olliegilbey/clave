@@ -47,3 +47,10 @@ clave-types = { path = "../clave-types" }
 # resolver setting ever changes, re-verify the wasm build's dep tree.
 zellij-utils = "=0.44.3"
 kdl = "=4.7.1"
+# Proves the ux-gate1 dev scenario renders the locked visual design (#85
+# follow-up): the SAME render_rows the plugin uses, fed the scenario's own
+# AgentRecords. One-directional dep only — clave-bar never depends back on
+# clave — so this adds no cycle, and being a dev-dep it never reaches the
+# wasm32-wasip1 plugin build (resolver = "3" isolates dev-deps per target,
+# same note as zellij-utils/kdl above).
+clave-bar = { path = "../clave-bar" }
