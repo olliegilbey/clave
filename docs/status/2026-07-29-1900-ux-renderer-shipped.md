@@ -47,13 +47,78 @@ store, with the preview (`examples/bar-preview.rs`) driven by the same function 
 so a code change that moves a column moves the picture. The hook persists
 `title` and `summary`. Widths live once, in `clave-types`.
 
+## The S-specs are now ACTIVELY WRONG. Do not trust them.
+
+This is the most important thing on this page. The operating rule says specs are
+an output — the corollary nobody wrote down is that **the inputs have gone stale
+in ways that will mislead you**, and three of them were falsified *by
+measurement* this session:
+
+| Spec claim | Reality |
+|---|---|
+| S4/§6.4's summary tier earns the label from `{"type":"summary"}` | **Extinct.** 0 of 153 real transcripts. `ai-title` (74/153) is what Claude writes. (D23) |
+| Every spec calls `ai-title` "rolling" | **It is not.** Up to 85 lines per transcript, never more than one distinct value. (D24) |
+| S8 §3.6: "the plugin has no viewport width" | **False.** `TabInfo.display_area_columns`, `get_tab_info()`, and `PaneInfo.pane_columns` — already in the manifest. (D20) |
+| Design-lock §3: collapsed must be `< 24` | **A restatement, not a bound.** The real one is `< 34`. (D15) |
+
+Plus the whole "known-stale spec content" list in the ledger.
+
+**Queued decision, and it is Ollie's:** the operating rule ends *"when the UX is
+real, specs get written from what exists — or deleted."* The UX is now real.
+Someone has to decide, per spec, reconcile-or-delete. **Do not start that by
+amending them** — that is the treadmill this workstream escaped. Propose the
+disposition, get a ruling, then execute.
+
+## Open decisions for Ollie
+
+1. **Does this ship to his daily driver, and when?** Merging #86 does not install
+   anything — his fleet runs the stable binary from a previous cut, and only
+   `just release` (his command, never yours) promotes. The bar changes
+   completely, so this is a real decision, not a formality. It was never asked.
+2. **Reconcile-or-delete, per S-spec** (above).
+3. **The two open PR threads** — 54 columns and #87 — resolve at merge or stay
+   open as visible follow-ups? Recommendation: leave open.
+
+## Known-unverified — do not assume these are fine
+
+- **`just mutants` (the `--in-diff` path) has never run end-to-end here.** The
+  branch diff is ~3,940 changed Rust lines and would run for hours. The diff
+  plumbing was verified in isolation; the combination was not.
+- **Steps above `MAX_LEARNABLE_STEP` livelock** in a re-arm/resize storm — 50,576
+  configurations on `main`, 111,788 on `ux`. Needs a display around 400 columns;
+  Ollie runs ~280, so out of reach today, **not forever**. The proptest generator
+  stops at 20, so nothing would ever catch it.
+- **Collapse may rest wider than 30**, and can rest as low as 14 — inside its own
+  clipping regime. Only a live look settles it. (D26, Gate 1 list.)
+- **Two live mutants survive in `Rgb::hex`** — its only caller is the excluded
+  preview example.
+
+**The session's scratchpad reports, briefs and review packages are gone.** Their
+content was extracted into the ledger and `docs/dev/TESTING.md` deliberately —
+keeping process artifacts whose content is already extracted is the same instinct
+that grew 6,632 lines of spec. **Do not go looking for them.**
+
 ## Next, in order
 
-1. **Expanded 44 → 54** (D19, banded `NOT YET IMPLEMENTED`). Title 7 → 9, the
-   rest to summary. **It inherits D26's four reservations** — read D26 before
-   starting; at 54/30 three of them become dead paths, but **the widened
-   property-test clause must be re-tightened**, and the threshold should be
-   `> separation`, not `>=`.
+1. **Expanded 44 → 54** (D19, banded `NOT YET IMPLEMENTED`). The arithmetic,
+   spelled out because the coordinator got it wrong once and a subagent caught it
+   by deriving instead of trusting the brief:
+
+   ```
+   fixed overhead = 13   (1 cap + 8 gutter + 2 separators + 1 margin + 1 cap)
+   summary        = cols - 13 - title - repo
+   expanded  54 = 13 + 9 title + 7 repo + 25 summary
+   collapsed 30 = 13 + 7 title + 3 repo +  7 summary   (unchanged)
+   ```
+
+   **Derive every number; do not restate one.** Then the birth percent needs
+   re-deriving too — 22% was for 44.
+
+   **It inherits D26's four reservations** — read D26 before starting. At 54/30
+   the separation is 24, above the 20-column maximum step, so three become dead
+   paths — but **the widened property-test clause must be re-tightened**, and the
+   threshold should be `> separation`, not `>=` (the tight half-band still holds
+   at exactly 14).
 2. **The width simplifications** (D20). The seek *learns* a step it can already
    read: `TabInfo.display_area_columns` exists, `get_tab_info()` is synchronous,
    and `PaneInfo.pane_columns` is already in the manifest `main.rs` **drops**.
