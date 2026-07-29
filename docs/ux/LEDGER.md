@@ -31,6 +31,17 @@ Runnable target render: `cargo run -p clave-bar --example bar-preview`.
 
 Numbered, dated, and durable. A decision here overrides any spec that disagrees.
 
+> **A decision is a RULING, not a claim about the code.** Most are implemented;
+> some are decided and not yet built, and those carry a **`NOT YET
+> IMPLEMENTED`** banner naming what still reads differently. The task table at
+> the bottom is the only statement of what has shipped.
+>
+> This distinction is load-bearing. The dominant defect class in this project's
+> documentation has been *describing unlanded work as delivered* — a spec review
+> once found fourteen instances in one pass, and a reviewer caught this file
+> doing it again with D19. **When you add a decision that is not yet in the
+> code, band it.**
+
 ### D1 — `oniViolet`'s 4.67 contrast is accepted (2026-07-29)
 
 S5 states a ≥5.0 band; `oniViolet` measures 4.67. **Accepted as-is.** Zellij
@@ -284,6 +295,14 @@ and expensive to argue in prose. **Look at it then; do not litigate it now.**
 
 ### D19 — Gate 1 verdict: KEEP. Expanded goes to 54 (2026-07-29)
 
+> **NOT YET IMPLEMENTED.** The verdict is real; the width is not. The tree still
+> ships **44** with `Widths::EXPANDED = { title: 7, repo: 7 }` and a 17-cell
+> summary, and D2 describes that shipped state correctly. 54 lands in its own
+> task, together with the birth percent and D26's four inherited reservations,
+> because moving the target alone would leave every golden green while pinning
+> the wrong width. Codex flagged the gap between this entry and the code, and
+> was right to.
+
 Ollie ran the `ux-gate1` fleet live and ruled **keep** — not refactor, not
 re-engineer. *"It's looking very good indeed… The expansion and collapse do seem
 overall better than my daily driver."* The blank title chip reads as deliberate.
@@ -458,13 +477,16 @@ resting-width costs become dead paths:
   ever catch it. Needs a display area around 400 columns; Ollie runs ~280, so it
   is out of reach today. **Not out of reach forever.**
 
-## Gate 1 — what to look for, and what host tests cannot tell us
+## Gate 1 — DONE, and what it did and did not settle
 
-Everything green so far is **host-side**. The bar has never rendered at 44
-columns inside a real zellij session, and the seek-versus-profile interaction
-under real resize latency is unexercised. Three predictions from the task-2
-review, each of which only a live look settles. **Check these specifically** —
-if one is wrong, that is a finding, not a disappointment.
+**Gate 1 happened on 2026-07-29 and the verdict is D19: keep.** Ollie ran the
+`ux-gate1` fleet live, expanded and collapsed, and reported the blank title chip
+and blank battery cell both read correctly.
+
+What follows were the three predictions written *before* that look, kept because
+**two of them are still open** — a live look answers a question, it does not
+retire the class. Prediction 1 is confirmed in a stronger form than written: the
+overlap it describes is now understood exactly (D21) and fixed (D26).
 
 1. **Collapse will probably rest wider than 30.** On a ~200-column window
    zellij's resize step is ~10 columns, so 44 → 30 is about 1.4 steps: the first
@@ -550,4 +572,10 @@ Catalogued deliberately. If one blocks a task, override it in the brief.
 | 1 — the pure 44-column renderer | **complete** | `8fb4aca`..`ca884d1` | `render.rs` + 17 tests; `bar-preview` is a Rust example driven by `render_rows`, byte-identical to the Python it deletes. Reviewed; one fix round (2 Important + 7 Minor), each fix mutation-checked. 236 tests. Not wired — `main.rs`/`model.rs` untouched. |
 | 1.5 — the collapsed width profile (D16) | **complete** | `84e3348`..`d7b2783` | `Widths` profile, D17 chosen from rendered candidates, D18's ellipsis rule, column map derived from the profiles. 241 tests. |
 | 2 — wire `model.rs` and `main.rs` to `render_rows` | **complete** | `c48f0b4`..`65496b4` | `Row` unified, projection from `&Agent`, provisional inks, targets 30→44 and 4→30, birth percent 15%→22%. Reviewed; one fix round (4 Important + 6 Minor). 255 tests. |
-| 3 — the `ux-gate1` sandbox scenario | in progress | — | The existing scenarios seed `title: None`, `summary: ""`, all-`Idle`, and repos sharing a 7-char prefix — they cannot show the design. **Gate 1 needs this first.** |
+| 3 — the `ux-gate1` sandbox scenario | **complete** | `0ff1e05` | 7 agents, 5 distinct repos, every status, all three provenances. The existing scenarios seed `title: None`, `summary: ""` and all-`Idle` — they could not have shown the design. |
+| 4 — the hook persists `title` and `summary` | **complete** | `0ccf04d` | Found `{"type":"summary"}` extinct (D23) and retargeted to `ai-title`. Three-tier summary makes the bar non-regressive (D25). |
+| **Gate 1 — live look** | **DONE 2026-07-29** | — | Verdict **keep** (D19). |
+| 5 — pre-merge review round | **complete** | `3da3235`..`94daccb` | Whole-branch review + a focused review of the seek change. D21's bug fixed and verified by exhaustive census (D26). |
+| 6 — expanded 44 → 54 (D19) | next | — | Carries the birth percent, and D26's four inherited reservations. |
+| 7 — the width simplifications (D20) | not started | — | Compute the step from `display_area_columns`; birth from the real terminal width. |
+| 8 — S5, store-backed ink allocation | not started | — | Ollie's colour-stability requirement. The provisional allocator is positional and renumbers. |
