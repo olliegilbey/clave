@@ -282,6 +282,95 @@ every truncated identifier. It is a change to the ratified render, and it is
 exactly the kind of judgement that is cheap to make while looking at a real bar
 and expensive to argue in prose. **Look at it then; do not litigate it now.**
 
+### D19 — Gate 1 verdict: KEEP. Expanded goes to 54 (2026-07-29)
+
+Ollie ran the `ux-gate1` fleet live and ruled **keep** — not refactor, not
+re-engineer. *"It's looking very good indeed… The expansion and collapse do seem
+overall better than my daily driver."* The blank title chip reads as deliberate.
+The blank battery cell is accepted.
+
+Expanded moves **44 → 54**, his call, *"by a fair amount"*. The split, his
+words: *"mostly for the summary, but could do another two chars for the title."*
+So `Widths::EXPANDED = { title: 9, repo: 7 }` and summary `54 − 13 − 9 − 7` =
+**25** (from 17). Collapsed is unchanged at 30 with `(7, 3)`; separation becomes
+24, comfortably over D15's bound of 10.
+
+### D20 — The width seek stops learning what it can already read (2026-07-29)
+
+Ollie challenged the seek's complexity: *"could this not be much more
+straightforward, which should help us not have to go through the healing process
+as rigorously?"* Investigated against the vendored zellij 0.44.3 source. **He is
+right about two of the five moving parts, and wrong about the other three — and
+the two he is right about are the two he can see.**
+
+Forced by zellij, and staying: render-driven feedback (zellij emits no event for
+a plugin's own resize); a bounded budget; an acceptance band (resizes move in
+5%-of-display-area steps, so an exact column count is simply *not on the
+lattice*); drift re-arm (percent geometry moves under window resize).
+
+**Not forced, and going:**
+
+1. **The step is computable, not learnable.** `TabInfo` carries
+   `display_area_columns` and `get_tab_info(tab_id)` is a synchronous host call
+   — and every `PaneInfo` in the manifest clave *already receives* carries
+   `pane_columns`, which `main.rs` currently **drops** when building `PaneMeta`.
+   The step is `display_area_columns * 5 / 100`, knowable before the first
+   resize. **S8 §3.6's claim that "the plugin has no viewport width" is false**
+   at the API level. The whole learning apparatus — `seek_step`,
+   `MAX_LEARNABLE_STEP`, the learn arm, the round-17 poisoning class — exists to
+   rediscover a number already in hand.
+2. **The birth jank is a birth bug, not a seek bug.** The birth percent is
+   hand-derived against a *fictional 200-column reference viewport*, so on a wide
+   window the bar is born far too wide and visibly shrinks. Emit the percent
+   computed from the **real** terminal width and birth lands within a column of
+   target, with zero seek steps, on every window. Ollie saw exactly this:
+   *"First paint of new tab did go very wide and then healed, it looked janky."*
+
+Suppressing the first paints was considered and **rejected**: the pane is still
+physically wide, so the neighbouring TUI reflows either way — it trades a wide
+bar for a wide blank strip.
+
+### D21 — A latent toggle bug on wide windows, predicted from source (2026-07-29)
+
+`width_seek` accepts when `2*|cols − target| <= step`. The existing guard proves
+neither *target* lies in the other's band. It does **not** prove no *width* lies
+in both — any `w` within half a step of both satisfies both, which becomes
+possible as soon as `step >= 14`, i.e. a display area of roughly 280 columns or
+more. On such a window a bar settling near 37 is "converged" for **both**
+targets and **Alt+c becomes a visual no-op**.
+
+Ollie's window is that wide, and he reported *"some blips on the healing"*.
+Unconfirmed as the cause, but it is the first hypothesis to test. D20's computed
+step does not fix this by itself — the band must also be bounded so the two
+targets' bands cannot overlap.
+
+### D22 — Swap layouts are a SPIKE, not a plan; and FOOTGUNS overreaches (2026-07-29)
+
+There is a genuine fundamental alternative: declare two named
+`swap_tiled_layout`s with the bar at `Fixed(54)` / `Fixed(30)` and toggle with
+`zellij action next-swap-layout --tab-id N`. That deletes resizing altogether —
+exact widths, one relayout per toggle, fixed dimensions surviving window resize,
+and the entire drift machinery with it.
+
+**`SUBSYSTEM-VALIDATION` round 19 records swap layouts as "dead on arrival", and
+that record is right about a different mechanism.** Round 19 relied on zellij
+*implicitly* relayouting after an unsuppress, which `set_is_tiled_damaged()`
+blocks. The **explicit** path is not damage-gated — the damage flag is consulted
+only in the selector, where a damaged tab re-applies its current layout instead
+of advancing. Clave also no longer suppresses anything (round 20). So the
+blocker does not apply. **`FOOTGUNS.md:39` must be scoped to the implicit path**;
+as written it reads as a blanket prohibition and would stop the next agent.
+
+It is real in the API and traced end to end, but it has **never run live**, and
+this subsystem has a twenty-round history of paths that read correctly and
+behaved otherwise. Two known costs: a fixed-width bar makes its neighbour
+horizontally user-unresizable (zellij refuses resizes touching a fixed pane *or
+its neighbours*), and peek-on-nav becomes a layout switch too. **One sandbox tab
+settles it. Do not refactor on it first.**
+
+Also rejected on source: `OverrideLayout` **closes every tab not named in the
+applied layout** — session-destroying for a fleet orchestrator.
+
 ## Gate 1 — what to look for, and what host tests cannot tell us
 
 Everything green so far is **host-side**. The bar has never rendered at 44
