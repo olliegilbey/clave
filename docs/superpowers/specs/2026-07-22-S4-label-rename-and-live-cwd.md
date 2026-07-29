@@ -39,6 +39,40 @@ them._
 > This banner exists because review (#82) found the document describing all
 > three as delivered. When S4 is implemented, land the runtime and this banner
 > together — do not delete it while the gap remains.
+>
+> ---
+>
+> ### ⚠ FALSIFIED BY MEASUREMENT — 2026-07-29. Historical, and partly false.
+>
+> The sidebar was rewritten on the `ux` branch and two of this document's claims
+> were **measured false against 153 real transcripts**. The authority is
+> **[`docs/ux/LEDGER.md`](../../ux/LEDGER.md)**; where it and this file disagree,
+> the ledger wins, silently, with no amendment round.
+>
+> - **`ai-title` does not roll — LEDGER D24.** §1.3, §3.1's tier table, §3.3,
+>   §4.4's doc-comments and the §5 test plan all describe a *rolling* description
+>   that "keeps upgrading", ≈9 per session. Measured: up to 85 `ai-title` lines
+>   per transcript and **never more than one distinct value per session** —
+>   Claude re-stamps the same string. The summary is a stable session descriptor,
+>   closer to a subtitle than a status line. Any reasoning here that depends on a
+>   *second, different* `ai-title` arriving — including the rewritten test in §5's
+>   table — is designing against something that does not happen.
+> - **`{"type":"summary"}` is extinct — LEDGER D23.** 0 of 153 transcripts;
+>   `ai-title` appears in 74. This document knows the tier is dead, but the
+>   shipped bar has moved past it: the row's `summary` field is retargeted to
+>   `ai-title` with the extinct line kept only as a fallback, while **the label's
+>   tier is deliberately left pointing at the extinct source**, because
+>   retargeting it renames every tab in the field and is S4's call to make
+>   deliberately rather than as a side effect.
+>
+> **Do not build on this document, and do not amend it.** Specs are an output,
+> not an input — that rule is what ended four sessions of circling. If a task
+> needs S4 reconciled or deleted, propose the disposition to the coordinator and
+> get a ruling; do not fix the prose here.
+>
+> **The whole document is suspect, not only the two claims above.** Those are the
+> ones measurement happened to find. Nothing has audited the rest — and every
+> `file.rs:line` citation in it is pre-#69 and has drifted.
 
 **The requirement, verbatim from the maintainer:**
 

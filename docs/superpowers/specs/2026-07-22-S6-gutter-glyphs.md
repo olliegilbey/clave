@@ -32,6 +32,37 @@
 > **Precedence:** where this banner and the body below disagree, **the banner
 > wins**. The body is retained for its reasoning and its citations, which remain
 > accurate; only the conclusions listed above were overturned.
+>
+> ---
+>
+> ### ⚠ FALSIFIED — 2026-07-29. Historical, and partly false.
+>
+> The sidebar was rewritten on the `ux` branch and the renderer it shipped
+> (`crates/clave-bar/src/render.rs`) replaced S6's geometry outright. The
+> authority is **[`docs/ux/LEDGER.md`](../../ux/LEDGER.md)**; where it and this
+> file disagree, the ledger wins, silently, with no amendment round. Dead here:
+>
+> - **§2.10 / §2.10.1's `cols - 7` text budget (and the `cols - 5` collapsed
+>   form) — superseded by LEDGER D9.** Every cell is fixed-width and `summary` is
+>   the only flex cell, so there is no single text budget to hand S4. `cols - 7`
+>   **is not to be adopted**, and neither is the `text_budget_is_cols_minus_seven`
+>   test in §4.1.
+> - **The `glyphs` plugin-config key and the two-tier `GlyphSet`** (§2.6.5,
+>   §3.1(b), §3.7 and four §4.1 tests) are dead, not merely discouraged: zellij
+>   hashes plugin identity over the whole config map, so a `glyphs` key
+>   reproduces the v0.1.1 double-sidebar. Glyphs are compiled in (lock §5.3).
+> - **The terminal mark is the lock's nf-md-console `\u{f018d}`**, not S6's
+>   `\u{f489}`.
+> - **Cell 3 is three-state provenance** (main / branch / worktree), not S6's
+>   two-state "worktree marker". That is a `Row` design change, not an amendment.
+>
+> **Do not build on this document, and do not amend it.** Specs are an output,
+> not an input — that rule is what ended four sessions of circling. If a task
+> needs S6 reconciled or deleted, propose the disposition to the coordinator and
+> get a ruling; do not fix the prose here.
+>
+> **The whole document is suspect, not only the items above.** Those are the ones
+> the rewrite happened to collide with. Nothing has audited the rest.
 
 _2026-07-22 · workstream **S6** · builds on **RC-G** of
 [`2026-07-22-ux-defect-dossier.md`](2026-07-22-ux-defect-dossier.md) · feature,

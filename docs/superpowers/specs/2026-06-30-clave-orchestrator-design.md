@@ -423,6 +423,14 @@ self-hydrates on load via `RunCommands` — §6.6).
   silent gap).
 
 ### 6.4 Naming
+
+> **⚠ This section's summary tier is FALSIFIED — LEDGER D23** (`docs/ux/LEDGER.md`,
+> the authority). The `{"type":"summary"}` line the `label_source == summary`
+> upgrade waits for appears in **0 of 153** real transcripts; `ai-title` is what
+> Claude Code writes, and it **does not roll** (D24). The grammar and the width
+> below are also superseded by S4 and the design lock. Left in place so the belief
+> is visible — **do not amend it here**; propose a disposition to the coordinator.
+
 **Goal:** a glanceable, self-updating label.
 **Decided:**
 - Label = **`cwd · branch · <first words of first user message>`** (cwd first),
