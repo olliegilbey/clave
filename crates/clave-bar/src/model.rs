@@ -11,6 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use clave_types::{Agent, AgentSnapshot, Status};
 
+use crate::render::{PALETTE, Provenance, Row, RowContent, RowStatus, Widths};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TabMeta {
     /// Zellij's STABLE tab id (survives reorders) — the recency/rename key.
@@ -162,14 +164,73 @@ pub enum RowKey {
     Dormant(String),
 }
 
-/// One rendered row, already in display order.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Row {
-    pub key: RowKey,
-    pub name: String,
-    pub active: bool,
-    /// (glyph, ANSI colour) for agent rows; None for plain terminal tabs.
-    pub glyph: Option<(char, u8)>,
+/// PROVISIONAL — delete when S5 lands. Design-lock §4 requires ink allocation
+/// to be **store-backed, round-robin, iterate-and-wrap**: one repo is one
+/// colour forever, and a title chip is unique within its repo. That is
+/// cross-process state with an ordering/idempotency argument to make, and it is
+/// S5's job, not this module's. Hashing is overruled twice over — `DefaultHasher`
+/// is not stable across toolchains, and the maintainer rejected collisions
+/// outright.
+///
+/// This stand-in exists for exactly one reason: a colourless bar tells the
+/// maintainer nothing at the design checkpoint this wiring exists to reach. It
+/// is recomputed from every snapshot, persists nothing, and is one field and one
+/// function to delete. **Determinism is the part that matters** — a `HashMap`
+/// here would reshuffle every colour between processes (and Rust's default
+/// hasher is randomly seeded per process, so even one process's two renders
+/// could disagree). `BTreeSet`/`BTreeMap` give a stable sort order, so the same
+/// snapshot always yields the same palette assignment.
+#[derive(Debug, Default)]
+struct ProvisionalInks {
+    /// repo_root → palette index.
+    repo: BTreeMap<String, u8>,
+    /// (repo_root, title) → palette index, allocated WITHIN the repo so two
+    /// tabs of one repo never share a chip (lock §4).
+    title: BTreeMap<(String, String), u8>,
+}
+
+impl ProvisionalInks {
+    /// PROVISIONAL (see `ProvisionalInks`): sorted distinct keys, index
+    /// round-robin by position, wrapping at the palette length.
+    fn allocate(agents: &[Agent]) -> Self {
+        let mut repos: BTreeSet<&str> = BTreeSet::new();
+        let mut titles: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        for a in agents {
+            // An agent outside a repo has no repo identity to colour; D7 says
+            // that is `None`, never `unwrap_or(0)` (0 is crystalBlue, a real
+            // hue — a bare `u8` has no unset value).
+            if a.repo_root.is_empty() {
+                continue;
+            }
+            repos.insert(a.repo_root.as_str());
+            if let Some(t) = a.title.as_deref().filter(|t| !t.is_empty()) {
+                titles.entry(a.repo_root.as_str()).or_default().insert(t);
+            }
+        }
+        let wrap = |i: usize| (i % PALETTE.len()) as u8;
+        Self {
+            repo: repos
+                .into_iter()
+                .enumerate()
+                .map(|(i, r)| (r.to_string(), wrap(i)))
+                .collect(),
+            title: titles
+                .into_iter()
+                .flat_map(|(repo, ts)| {
+                    ts.into_iter()
+                        .enumerate()
+                        .map(move |(i, t)| ((repo.to_string(), t.to_string()), wrap(i)))
+                })
+                .collect(),
+        }
+    }
+}
+
+/// The last non-empty path component of a repo root — lock §2's repo column is
+/// a NAME, not a path, and at 7 cells (3 collapsed) a path renders as ellipsis.
+/// Trailing slashes are tolerated because a store value is hook-written.
+fn basename(path: &str) -> &str {
+    path.rsplit('/').find(|s| !s.is_empty()).unwrap_or("")
 }
 
 pub struct BarModel {
@@ -729,7 +790,85 @@ impl BarModel {
     /// same-second tabs sit in tab order); for same-second dormant rows,
     /// stable and deterministic in uuid-DESCENDING order (uuid-ascending
     /// sort under a `usize::MAX - i` key inverts to descending).
-    pub fn rows(&self) -> Vec<Row> {
+    /// The row content for a live-or-dormant agent (lock §2). `dormant` is the
+    /// caller's own classification rather than a re-derivation, because the two
+    /// loops below already know which list they are walking.
+    fn agent_content(&self, a: &Agent, dormant: bool, inks: &ProvisionalInks) -> RowContent {
+        // Ordered, and the order is the behaviour: `stale` and `opening` are
+        // model states that OUTRANK the store's `Status` (a stale row's status
+        // is whatever it was when the cwd vanished), and the local unread
+        // override is the last thing between `Done` and the palette. Carried
+        // over unchanged from the (char, u8) glyph logic this replaces.
+        let status = if a.stale {
+            RowStatus::Stale
+        } else if self.opening.contains(&a.uuid) {
+            RowStatus::Opening
+        } else if dormant {
+            RowStatus::Dormant
+        } else if a.status == Status::Done && self.read_locally.contains(&a.uuid) {
+            // Local unread override: a Done agent already seen renders Idle
+            // until `clave focus` persists the transition (§6.5).
+            RowStatus::Idle
+        } else {
+            match a.status {
+                Status::Idle => RowStatus::Idle,
+                Status::Working => RowStatus::Working,
+                Status::NeedsYou => RowStatus::NeedsYou,
+                Status::Done => RowStatus::Done,
+                Status::Failed => RowStatus::Failed,
+            }
+        };
+        // Three-state (lock §5.1), and a main checkout renders NOTHING — that
+        // is the researched choice, and it is what makes the two marked states
+        // mean something. An EMPTY branch is the case the design did not name:
+        // an agent outside a repo has no branch, and painting the branch glyph
+        // for it would assert a provenance nobody has — so it takes the blank.
+        let provenance = if a.worktree.is_some() {
+            Provenance::Worktree
+        } else if a.branch.is_empty() || a.branch == "main" || a.branch == "master" {
+            Provenance::Main
+        } else {
+            Provenance::Branch
+        };
+        let title = a.title.clone();
+        RowContent::Agent {
+            status,
+            // S7 has not landed. `None` renders a blank battery cell, which
+            // lock §2.1 requires it to do cleanly — inventing a level would be
+            // a lie in the one cell whose whole job is a measurement.
+            battery: None,
+            provenance,
+            title_ink: title
+                .as_ref()
+                .and_then(|t| inks.title.get(&(a.repo_root.clone(), t.clone())).copied()),
+            title,
+            repo: basename(&a.repo_root).to_string(),
+            repo_ink: inks.repo.get(&a.repo_root).copied(),
+            summary: a.summary.clone(),
+        }
+    }
+
+    /// The width profile this bar renders at. Chosen by STATE, never by the
+    /// current `cols` (LEDGER D16): a peeking bar is still `collapsed`, but the
+    /// peek is showing the template, so it renders EXPANDED — the same rule
+    /// `width_seek` picks its target with, deliberately expressed once so the
+    /// profile and the target it is seeking cannot drift apart mid-animation.
+    pub fn widths(&self) -> Widths {
+        if self.showing_collapsed() {
+            Widths::COLLAPSED
+        } else {
+            Widths::EXPANDED
+        }
+    }
+
+    /// The one collapse predicate. A peeking bar seeks (and renders) the
+    /// template width even though it is collapsed — the collapse resumes when
+    /// the peek expires.
+    fn showing_collapsed(&self) -> bool {
+        self.collapsed && !self.peeking
+    }
+
+    pub fn rows(&self) -> Vec<(RowKey, Row)> {
         // §6.6 C8 virtual cursor: `Row.active` means "visually SELECTED".
         // While nav sits on a dormant row, the selection follows the walk
         // (claude.ai-style) — that dormant row reads active and EVERY live
@@ -746,50 +885,48 @@ impl BarModel {
         // (sort_ts desc, tiebreak asc) — tiebreak: live rows by position,
         // dormant by a large offset + stable index so they never interleave
         // nondeterministically with same-second live rows.
-        let mut entries: Vec<(u64, usize, Row)> = Vec::new();
+        let inks = ProvisionalInks::allocate(&self.agents);
+        let mut entries: Vec<(u64, usize, (RowKey, Row))> = Vec::new();
         for t in &self.tabs {
-            let glyph = self.agent_in_tab(t.tab_id).map(|a| {
-                // Local unread override: render Done as Idle once seen.
-                if a.status == Status::Done && self.read_locally.contains(&a.uuid) {
-                    Status::Idle.glyph()
-                } else {
-                    a.status.glyph()
-                }
-            });
+            // Lock §7.1: the zellij tab name is used ONLY for a terminal tab.
+            // An agent row's identity is its title chip and repo, both from the
+            // store — the tab name is clave's own rename echo and would be a
+            // second, drifting copy of the label.
+            let content = match self.agent_in_tab(t.tab_id) {
+                Some(a) => self.agent_content(a, false, &inks),
+                None => RowContent::Terminal {
+                    name: t.name.clone(),
+                },
+            };
             entries.push((
                 self.sort_key(t),
                 t.position,
-                Row {
-                    key: RowKey::Tab(t.tab_id),
-                    name: t.name.clone(),
-                    // A dormant selection steals the highlight from every tab.
-                    active: selected_dormant.is_none() && t.active,
-                    glyph,
-                },
+                (
+                    RowKey::Tab(t.tab_id),
+                    Row {
+                        content,
+                        // A dormant selection steals the highlight from every tab.
+                        selected: selected_dormant.is_none() && t.active,
+                    },
+                ),
             ));
         }
         let mut dormant: Vec<&Agent> = self.agents.iter().filter(|a| self.is_dormant(a)).collect();
         dormant.sort_by(|a, b| a.uuid.cmp(&b.uuid)); // stable tiebreak input
         for (i, a) in dormant.into_iter().enumerate() {
-            let glyph = if a.stale {
-                ('✗', 31) // open found the cwd missing (§5 stale)
-            } else if self.opening.contains(&a.uuid) {
-                ('↻', 33) // open in flight
-            } else {
-                ('◌', 90) // dormant conversation
-            };
             entries.push((
                 a.last_interacted,
                 // After any same-second live row; among same-second dormant
                 // rows this renders uuid-DESCENDING (uuid-asc sort, key
                 // inverted) — stable and deterministic, which is all we need.
                 usize::MAX - i,
-                Row {
-                    key: RowKey::Dormant(a.uuid.clone()),
-                    name: a.label.clone(),
-                    active: selected_dormant == Some(a.uuid.as_str()),
-                    glyph: Some(glyph),
-                },
+                (
+                    RowKey::Dormant(a.uuid.clone()),
+                    Row {
+                        content: self.agent_content(a, true, &inks),
+                        selected: selected_dormant == Some(a.uuid.as_str()),
+                    },
+                ),
             ));
         }
         entries.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
@@ -802,10 +939,10 @@ impl BarModel {
     /// Focus is not a commitment — clicks never reorder. A click on a dormant
     /// row opens it immediately (§6.6 — no dwell for explicit picks).
     pub fn click(&mut self, line: usize) -> Vec<Effect> {
-        let Some(row) = self.rows().get(line).cloned() else {
+        let Some((key, _)) = self.rows().get(line).cloned() else {
             return Vec::new();
         };
-        match row.key {
+        match key {
             RowKey::Tab(tab_id) => {
                 let Some(position) = self
                     .tabs
@@ -871,9 +1008,9 @@ impl BarModel {
                 .as_ref()
                 .and_then(|u| {
                     rows.iter()
-                        .position(|r| r.key == RowKey::Dormant(u.clone()))
+                        .position(|(k, _)| *k == RowKey::Dormant(u.clone()))
                 })
-                .or_else(|| rows.iter().position(|r| r.key == RowKey::Tab(own)))
+                .or_else(|| rows.iter().position(|(k, _)| *k == RowKey::Tab(own)))
                 .unwrap_or(0);
             match dir {
                 "next" => Some((cur + 1) % rows.len()),
@@ -884,11 +1021,11 @@ impl BarModel {
             None
         };
         let is_dir_walk = v.get("dir").is_some();
-        let Some(row) = line.and_then(|l| rows.get(l).cloned()) else {
+        let Some((key, _)) = line.and_then(|l| rows.get(l).cloned()) else {
             return Vec::new();
         };
         self.cursor_gen += 1; // every landing invalidates prior dwell arms
-        match row.key {
+        match key {
             RowKey::Tab(tab_id) => {
                 self.cursor = None; // live landing: focus truth takes over
                 let Some(position) = self
@@ -1021,9 +1158,9 @@ impl BarModel {
     ///      zellij simply refuses to leave (the granularity floor, C8) is
     ///      accepted in place rather than hammered.
     pub fn width_seek(&mut self, own_cols: usize) -> Vec<Effect> {
-        // A peeking bar seeks the template width even though collapsed —
-        // the collapse resumes when the peek expires.
-        let target = if self.collapsed && !self.peeking {
+        // ONE collapse rule, shared with `widths()` — the profile the rows are
+        // drawn at and the width being sought must not drift apart (D16).
+        let target = if self.showing_collapsed() {
             COLLAPSED_TARGET_COLS
         } else {
             BAR_TARGET_COLS
@@ -1222,6 +1359,42 @@ mod tests {
         }
     }
 
+    // --- row projections ---------------------------------------------------
+    // `rows()` yields `(RowKey, render::Row)`: model identity plus the whole
+    // presentation (LEDGER D6 — one row type). Most assertions here are about
+    // ONE of those, so these pull out the field under test rather than
+    // spelling out a `RowContent` at every site.
+
+    fn keys(m: &BarModel) -> Vec<RowKey> {
+        m.rows().into_iter().map(|(k, _)| k).collect()
+    }
+
+    fn selected(m: &BarModel) -> Vec<bool> {
+        m.rows().into_iter().map(|(_, r)| r.selected).collect()
+    }
+
+    /// Terminal-tab names in display order. Lock §7.1: the zellij tab name is
+    /// used ONLY for a terminal tab, so an agent row has none — tests that mix
+    /// the two assert on `keys` instead.
+    fn names(m: &BarModel) -> Vec<String> {
+        m.rows()
+            .into_iter()
+            .map(|(k, r)| match r.content {
+                RowContent::Terminal { name } => name,
+                RowContent::Agent { .. } => panic!("{k:?} is an agent row, not a terminal"),
+            })
+            .collect()
+    }
+
+    /// The status cell of row `i`; `None` for a terminal row, which has no
+    /// turn to be in.
+    fn status_at(m: &BarModel, i: usize) -> Option<RowStatus> {
+        match &m.rows()[i].1.content {
+            RowContent::Agent { status, .. } => Some(*status),
+            RowContent::Terminal { .. } => None,
+        }
+    }
+
     // --- tests -------------------------------------------------------------
 
     #[test]
@@ -1236,15 +1409,13 @@ mod tests {
             tab(12, 2, "c", false),
         ]);
         // Nothing committed yet → tab-position order, active flag irrelevant.
-        let names: Vec<String> = m.rows().into_iter().map(|r| r.name).collect();
-        assert_eq!(names, vec!["a", "b", "c"]);
+        assert_eq!(names(&m), vec!["a", "b", "c"]);
         // Commitments arrive via snapshot and order by wall clock…
         m.apply_snapshot(snap_t(1, &[(10, 1000), (11, 2000), (12, 1500)]));
-        let names: Vec<String> = m.rows().into_iter().map(|r| r.name).collect();
-        assert_eq!(names, vec!["b", "c", "a"]);
+        assert_eq!(names(&m), vec!["b", "c", "a"]);
         // …and focus (beacon) does not reorder.
         m.beacon(10);
-        assert_eq!(m.rows()[0].name, "b");
+        assert_eq!(names(&m)[0], "b");
         // Agent prompts reorder ONLY through the store timeline (the hook
         // stamps tab_timeline via the bind, §6.6 Design B) — an agent's
         // last_interacted alone must NOT sort: render-time joins diverge
@@ -1253,10 +1424,12 @@ mod tests {
         s.agents[0].last_interacted = 9999;
         s.tab_timeline = [(10, 1000), (11, 2000), (12, 1500)].into();
         m.apply_snapshot(s);
-        assert_eq!(m.rows()[0].name, "b"); // li ignored, timeline rules
+        // By KEY from here: tab 12 now hosts an agent, and an agent row does
+        // not carry the zellij tab name (lock §7.1).
+        assert_eq!(keys(&m)[0], RowKey::Tab(11)); // "b" — li ignored, timeline rules
         // The prompt's stamp arrives IN the timeline → c fronts everywhere.
         m.apply_snapshot(snap_t(3, &[(10, 1000), (11, 2000), (12, 3000)]));
-        assert_eq!(m.rows()[0].name, "c");
+        assert_eq!(keys(&m)[0], RowKey::Tab(12)); // "c"
     }
 
     #[test]
@@ -1268,15 +1441,14 @@ mod tests {
         let mut m = BarModel::default();
         m.apply_tabs(vec![tab(10, 0, "a", false), tab(11, 1, "b", false)]);
         m.apply_snapshot(snap_t(1, &[(10, 2000)]));
-        assert_eq!(m.rows()[0].key, RowKey::Tab(10));
+        assert_eq!(keys(&m)[0], RowKey::Tab(10));
         // New snapshot: b now leads, and a's old entry is GONE (replace
         // semantics — a merge would have kept a at 2000 and diverged).
         m.apply_snapshot(snap_t(2, &[(11, 1000)]));
-        let rows = m.rows();
-        assert_eq!(rows[0].key, RowKey::Tab(11));
+        assert_eq!(keys(&m)[0], RowKey::Tab(11));
         // A stale seq must not replace anything (§5 gate).
         m.apply_snapshot(snap_t(1, &[(10, 9000)]));
-        assert_eq!(m.rows()[0].key, RowKey::Tab(11));
+        assert_eq!(keys(&m)[0], RowKey::Tab(11));
     }
 
     #[test]
@@ -1312,15 +1484,28 @@ mod tests {
         ]);
         m.apply_snapshot(snap(1, vec![agent("u1", Status::Working, Some(10))]));
         let rows = m.rows();
-        let a = rows.iter().find(|r| r.name == "agent-tab").unwrap();
-        let p = rows.iter().find(|r| r.name == "plain").unwrap();
-        assert_eq!(a.glyph, Some(('●', 33))); // Working = amber
-        assert_eq!(p.glyph, None); // plain terminal: name only
+        let a = rows.iter().find(|(k, _)| *k == RowKey::Tab(10)).unwrap();
+        let p = rows.iter().find(|(k, _)| *k == RowKey::Tab(11)).unwrap();
+        assert!(matches!(
+            a.1.content,
+            RowContent::Agent {
+                status: RowStatus::Working,
+                ..
+            }
+        ));
+        // The bound tab renders as an AGENT, so the zellij tab name is gone
+        // (lock §7.1); the unbound one is still a terminal and keeps it.
+        assert_eq!(
+            p.1.content,
+            RowContent::Terminal {
+                name: "plain".into()
+            }
+        );
         // An UNBOUND agent (bind not landed yet) decorates nothing.
         let mut m2 = BarModel::default();
         m2.apply_tabs(vec![tab(10, 0, "agent-tab", false)]);
         m2.apply_snapshot(snap(1, vec![agent("u1", Status::Working, None)]));
-        assert_eq!(m2.rows()[0].glyph, None);
+        assert_eq!(status_at(&m2, 0), None); // still a terminal row
     }
 
     #[test]
@@ -1329,7 +1514,7 @@ mod tests {
         m.apply_snapshot(snap(2, vec![agent("u1", Status::Working, Some(10))]));
         m.apply_snapshot(snap(1, vec![agent("u1", Status::Failed, Some(10))])); // stale
         m.apply_tabs(vec![tab(10, 0, "t", false)]);
-        assert_eq!(m.rows()[0].glyph, Some(('●', 33))); // still Working
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Working)); // still Working
     }
 
     #[test]
@@ -1367,16 +1552,17 @@ mod tests {
         let mut m = BarModel::default();
         m.apply_tabs(vec![tab(10, 0, "t", false)]);
         m.apply_snapshot(snap(1, vec![agent("u1", Status::Done, Some(10))]));
-        assert_eq!(m.rows()[0].glyph, Some(('●', 32))); // green, unread
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Done)); // green, unread
         // Tab gains focus → local clear + MarkRead effect, exactly once.
         let fx = m.apply_tabs(vec![tab(10, 0, "t", true)]);
         assert!(fx.contains(&Effect::MarkRead { uuid: "u1".into() }));
-        assert_eq!(m.rows()[0].glyph, Some(('●', 90))); // rendered dim NOW
+        // The local unread override: a READ Done renders Idle (§6.5).
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Idle)); // rendered dim NOW
         let fx = m.apply_tabs(vec![tab(10, 0, "t", true)]);
         assert!(fx.iter().all(|e| !matches!(e, Effect::MarkRead { .. })));
         // A later snapshot showing Working clears the local override.
         m.apply_snapshot(snap(2, vec![agent("u1", Status::Working, Some(10))]));
-        assert_eq!(m.rows()[0].glyph, Some(('●', 33)));
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Working));
     }
 
     #[test]
@@ -1392,7 +1578,7 @@ mod tests {
         // User returns: the update still says "own tab active" — must clear.
         let fx = m.apply_tabs(vec![tab(10, 0, "t", true)]);
         assert!(fx.contains(&Effect::MarkRead { uuid: "u1".into() }));
-        assert_eq!(m.rows()[0].glyph, Some(('●', 90))); // dim immediately
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Idle)); // dim immediately
     }
 
     #[test]
@@ -1467,7 +1653,7 @@ mod tests {
             ]
         );
         // Walking must not reorder: c is still row 1 after both walks.
-        assert_eq!(m.rows()[0].key, RowKey::Tab(12));
+        assert_eq!(keys(&m)[0], RowKey::Tab(12));
         // Clicks land on ONE instance (the visible bar): same effect shape.
         assert_eq!(
             m.click(1),
@@ -2138,14 +2324,278 @@ mod tests {
         );
         s.tab_timeline = [(10, 100), (11, 900), (12, 500)].into();
         m.apply_snapshot(s);
-        let rows = m.rows();
         assert_eq!(
-            rows.iter().map(|r| r.key.clone()).collect::<Vec<_>>(),
+            keys(&m),
             vec![RowKey::Tab(11), RowKey::Tab(12), RowKey::Tab(10)]
         );
-        assert_eq!(rows[0].glyph, Some(('●', 33))); // ag-a working
-        assert_eq!(rows[1].glyph, Some(('●', 32))); // ag-b done
-        assert_eq!(rows[2].glyph, None);
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Working)); // ag-a
+        assert_eq!(status_at(&m, 1), Some(RowStatus::Done)); // ag-b
+        assert_eq!(status_at(&m, 2), None); // the plain terminal tab
+    }
+
+    // --- projecting a Row from an Agent (LEDGER D6, design-lock §2) --------
+
+    /// An agent placed in repo `root` on `branch`, with a title and summary.
+    fn dressed(
+        uuid: &str,
+        root: &str,
+        branch: &str,
+        title: Option<&str>,
+        tab: Option<usize>,
+    ) -> Agent {
+        let mut a = agent(uuid, Status::Working, tab);
+        a.repo_root = root.into();
+        a.branch = branch.into();
+        a.title = title.map(String::from);
+        a.summary = format!("{uuid} is working");
+        a
+    }
+
+    fn content_at(m: &BarModel, i: usize) -> RowContent {
+        m.rows()[i].1.content.clone()
+    }
+
+    #[test]
+    fn a_row_projects_title_summary_and_the_repo_basename() {
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "whatever", false)]);
+        m.apply_snapshot(snap(
+            1,
+            vec![dressed(
+                "u1",
+                "/Users/o/code/clave",
+                "main",
+                Some("S6-GUT"),
+                Some(10),
+            )],
+        ));
+        let RowContent::Agent {
+            title,
+            repo,
+            summary,
+            battery,
+            ..
+        } = content_at(&m, 0)
+        else {
+            panic!("a bound tab renders as an agent row");
+        };
+        assert_eq!(title.as_deref(), Some("S6-GUT"));
+        // BASENAME, not the path: the repo column is 7 cells (3 collapsed), so
+        // a path would render as ellipsis and identify nothing.
+        assert_eq!(repo, "clave");
+        assert_eq!(summary, "u1 is working");
+        // S7 has not landed: a blank cell, never an invented level.
+        assert_eq!(battery, None);
+    }
+
+    #[test]
+    fn provenance_is_three_state_worktree_branch_and_blank_main() {
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![
+            tab(10, 0, "a", false),
+            tab(11, 1, "b", false),
+            tab(12, 2, "c", false),
+            tab(13, 3, "d", false),
+        ]);
+        let mut wt = dressed("u-wt", "/r/one", "feature/x", None, Some(10));
+        wt.worktree = Some("/r/one-wt".into());
+        m.apply_snapshot(snap(
+            1,
+            vec![
+                wt,
+                dressed("u-br", "/r/one", "feature/x", None, Some(11)),
+                dressed("u-main", "/r/one", "main", None, Some(12)),
+                dressed("u-master", "/r/one", "master", None, Some(13)),
+            ],
+        ));
+        let provenance = |i: usize| match content_at(&m, i) {
+            RowContent::Agent { provenance, .. } => provenance,
+            RowContent::Terminal { .. } => panic!("row {i} is not an agent"),
+        };
+        // A worktree outranks its branch: the worktree IS the provenance.
+        assert_eq!(provenance(0), Provenance::Worktree);
+        assert_eq!(provenance(1), Provenance::Branch);
+        // Both default-branch names render NOTHING (lock §5.1) — blanking the
+        // most common row is what makes the two marked states mean something.
+        assert_eq!(provenance(2), Provenance::Main);
+        assert_eq!(provenance(3), Provenance::Main);
+    }
+
+    #[test]
+    fn an_agent_with_no_branch_takes_the_blank_provenance() {
+        // Not in the design, and decided here: an agent outside a repo has an
+        // empty branch, and painting the branch glyph for it would assert a
+        // provenance nobody has. The blank cell is the honest one.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "a", false)]);
+        m.apply_snapshot(snap(1, vec![agent("u1", Status::Working, Some(10))]));
+        assert!(matches!(
+            content_at(&m, 0),
+            RowContent::Agent {
+                provenance: Provenance::Main,
+                repo_ink: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_tab_with_no_agent_is_a_terminal_row_carrying_the_zellij_name() {
+        // Lock §7.1: the zellij tab name is used ONLY for a terminal tab.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "Tab #16", false)]);
+        assert_eq!(
+            content_at(&m, 0),
+            RowContent::Terminal {
+                name: "Tab #16".into()
+            }
+        );
+    }
+
+    #[test]
+    fn the_local_unread_override_still_turns_a_read_done_into_idle() {
+        // §6.5, carried over from the (char, u8) glyph logic: a Done agent
+        // already seen renders Idle until `clave focus` persists it. The
+        // status mapping is otherwise one-to-one, so this is the single rule
+        // that a mechanical Status → RowStatus port would have dropped.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "t", false)]);
+        m.apply_snapshot(snap(1, vec![agent("u1", Status::Done, Some(10))]));
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Done));
+        m.apply_tabs(vec![tab(10, 0, "t", true)]); // focus marks it read
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Idle));
+    }
+
+    #[test]
+    fn model_states_outrank_the_stores_status() {
+        // Stale and Opening are not `Status` variants at all (LEDGER D10) and
+        // must win over whatever the store last said.
+        let mut m = BarModel::default();
+        let mut a = agent("u1", Status::Working, None);
+        a.stale = true;
+        m.apply_snapshot(snap(1, vec![a]));
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Stale));
+
+        let mut m = BarModel::default();
+        m.apply_snapshot(snap(1, vec![agent("u1", Status::Working, None)]));
+        m.opening.insert("u1".into());
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Opening));
+        // …and with neither flag, a dormant row is Dormant regardless of the
+        // status the store carries.
+        m.opening.clear();
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Dormant));
+    }
+
+    #[test]
+    fn the_width_profile_follows_state_not_current_width() {
+        // LEDGER D16: the profile is chosen by STATE, which is what stops the
+        // seek from over-running mid-animation. Same rule width_seek picks its
+        // target with — a peeking bar is collapsed but showing the template.
+        let mut m = BarModel::default();
+        assert_eq!(m.widths(), Widths::EXPANDED);
+        m.toggle();
+        assert_eq!(m.widths(), Widths::COLLAPSED);
+        assert!(m.visited(7), "a collapsed bar peeks on nav");
+        assert_eq!(m.widths(), Widths::EXPANDED, "a peek shows the template");
+        assert!(m.peek_expired());
+        assert_eq!(m.widths(), Widths::COLLAPSED);
+    }
+
+    // --- PROVISIONAL ink allocation (delete with `ProvisionalInks`) --------
+
+    #[test]
+    fn provisional_inks_are_stable_across_two_identical_snapshots() {
+        // The property a `HashMap` would break: Rust's default hasher is
+        // randomly seeded, so iteration order varies per process AND the
+        // colours would reshuffle between renders. Sorted keys make the same
+        // snapshot always yield the same palette assignment.
+        let agents = || {
+            vec![
+                dressed("u1", "/r/zebra", "main", Some("ZZ"), None),
+                dressed("u2", "/r/alpha", "main", Some("AA"), None),
+                dressed("u3", "/r/alpha", "main", Some("BB"), None),
+            ]
+        };
+        let inks_of = |seq: u64| {
+            let mut m = BarModel::default();
+            m.apply_snapshot(snap(seq, agents()));
+            m.rows()
+                .into_iter()
+                .map(|(k, r)| match r.content {
+                    RowContent::Agent {
+                        repo_ink,
+                        title_ink,
+                        ..
+                    } => (k, repo_ink, title_ink),
+                    RowContent::Terminal { .. } => panic!("no terminals here"),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(inks_of(1), inks_of(1));
+        // And across model instances, which is where a per-process hash seed
+        // would show up.
+        let a = inks_of(1);
+        let b = inks_of(1);
+        assert_eq!(a, b);
+        // Sorted order: /r/alpha is index 0, /r/zebra index 1. Within alpha,
+        // AA is 0 and BB is 1 — a title chip is unique within its repo (lock
+        // §4), so the two alpha rows do not collide.
+        let repo_ink = |uuid: &str| {
+            a.iter()
+                .find(|(k, _, _)| *k == RowKey::Dormant(uuid.into()))
+                .map(|(_, r, _)| *r)
+                .unwrap()
+        };
+        let title_ink = |uuid: &str| {
+            a.iter()
+                .find(|(k, _, _)| *k == RowKey::Dormant(uuid.into()))
+                .map(|(_, _, t)| *t)
+                .unwrap()
+        };
+        assert_eq!(repo_ink("u2"), Some(0));
+        assert_eq!(repo_ink("u3"), Some(0), "one repo is one colour");
+        assert_eq!(repo_ink("u1"), Some(1));
+        assert_eq!(title_ink("u2"), Some(0));
+        assert_eq!(title_ink("u3"), Some(1), "chips differ within a repo");
+    }
+
+    #[test]
+    fn provisional_inks_wrap_at_the_palette_length() {
+        let agents: Vec<Agent> = (0..11)
+            .map(|i| {
+                dressed(
+                    &format!("u{i:02}"),
+                    &format!("/r/{i:02}"),
+                    "main",
+                    None,
+                    None,
+                )
+            })
+            .collect();
+        let inks = ProvisionalInks::allocate(&agents);
+        assert_eq!(inks.repo.len(), 11);
+        assert_eq!(inks.repo["/r/00"], 0);
+        assert_eq!(inks.repo["/r/07"], 7);
+        assert_eq!(inks.repo["/r/08"], 0, "round-robin wraps at 8");
+        assert_eq!(inks.repo["/r/10"], 2);
+    }
+
+    #[test]
+    fn an_agent_outside_a_repo_gets_no_ink_never_index_zero() {
+        // LEDGER D7: `0` is crystalBlue, a real hue, so `unwrap_or(0)` paints
+        // every untinted row one colour while reading as "untinted".
+        let inks = ProvisionalInks::allocate(&[agent("u1", Status::Idle, None)]);
+        assert!(inks.repo.is_empty());
+        assert!(inks.title.is_empty());
+    }
+
+    #[test]
+    fn basename_takes_the_last_non_empty_component() {
+        assert_eq!(basename("/Users/o/code/clave"), "clave");
+        assert_eq!(basename("/Users/o/code/clave/"), "clave");
+        assert_eq!(basename("clave"), "clave");
+        assert_eq!(basename(""), "");
+        assert_eq!(basename("/"), "");
     }
 
     #[test]
@@ -2168,11 +2618,19 @@ mod tests {
         assert_eq!(rows.len(), 2);
         let d = rows
             .iter()
-            .find(|r| r.key == RowKey::Dormant("u-dormant".into()))
+            .find(|(k, _)| *k == RowKey::Dormant("u-dormant".into()))
             .expect("dormant row rendered");
-        assert_eq!(d.name, "repo · main · fix");
-        assert!(!d.active);
-        assert_eq!(d.glyph, Some(('◌', 90)));
+        assert!(!d.1.selected);
+        // The label is NOT the row any more: an agent row renders its title
+        // chip, repo and summary from the store (lock §2), so the dormant
+        // marker is what identifies the state here.
+        assert!(matches!(
+            d.1.content,
+            RowContent::Agent {
+                status: RowStatus::Dormant,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2191,9 +2649,8 @@ mod tests {
             agents: vec![old, new],
             tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64)]),
         });
-        let keys: Vec<_> = m.rows().into_iter().map(|r| r.key).collect();
         assert_eq!(
-            keys,
+            keys(&m),
             vec![
                 RowKey::Dormant("u-new".into()), // 900
                 RowKey::Tab(1),                  // 500
@@ -2215,11 +2672,7 @@ mod tests {
             agents: vec![agent("u1", Status::Working, Some(7))], // bound → live
             tab_timeline: Default::default(),
         });
-        assert!(
-            !m.rows()
-                .iter()
-                .any(|r| r.key == RowKey::Dormant("u1".into()))
-        );
+        assert!(!keys(&m).contains(&RowKey::Dormant("u1".into())));
         // Bind gone (fresh session) but the pane join exists → still not dormant.
         let mut m = BarModel::default();
         m.apply_tabs(vec![tab(7, 0, "agent-tab", true)]);
@@ -2231,11 +2684,7 @@ mod tests {
             agents: vec![agent("u2", Status::Working, None)],
             tab_timeline: Default::default(),
         });
-        assert!(
-            !m.rows()
-                .iter()
-                .any(|r| r.key == RowKey::Dormant("u2".into()))
-        );
+        assert!(!keys(&m).contains(&RowKey::Dormant("u2".into())));
     }
 
     #[test]
@@ -2372,8 +2821,7 @@ mod tests {
             agents: vec![a],
             tab_timeline: Default::default(),
         });
-        let rows = m.rows();
-        assert_eq!(rows[0].glyph, Some(('✗', 31)));
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Stale));
         assert!(m.opening.is_empty(), "stale snapshot clears in-flight");
         // In-flight (no stale): ↻.
         let mut m = BarModel::default();
@@ -2384,7 +2832,7 @@ mod tests {
             tab_timeline: Default::default(),
         });
         m.opening.insert("u2".into());
-        assert_eq!(m.rows()[0].glyph, Some(('↻', 33)));
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Opening));
     }
 
     #[test]
@@ -2405,15 +2853,19 @@ mod tests {
         m.beacon(1);
         // (a) walk onto the dormant row → it is active, the live tab is not.
         m.nav("{\"dir\":\"next\"}", Some(1)); // live row 1 → wrap → dormant row 0
-        let rows = m.rows();
-        assert_eq!(rows[0].key, RowKey::Dormant("u-d".into()));
-        assert!(rows[0].active, "dormant selection highlighted");
-        assert!(!rows[1].active, "live tab drops its highlight");
+        assert_eq!(keys(&m)[0], RowKey::Dormant("u-d".into()));
+        assert_eq!(
+            selected(&m),
+            vec![true, false],
+            "dormant selection holds it"
+        );
         // (b) a live landing clears the cursor → the tab highlights again.
         m.nav("{\"dir\":\"next\"}", Some(1)); // dormant → wrap → live tab
-        let rows = m.rows();
-        assert!(!rows[0].active, "dormant no longer selected");
-        assert!(rows[1].active, "focused tab reclaims the highlight");
+        assert_eq!(
+            selected(&m),
+            vec![false, true],
+            "focused tab reclaims the highlight"
+        );
     }
 
     #[test]
@@ -2433,7 +2885,7 @@ mod tests {
         });
         m.beacon(1);
         m.nav("{\"dir\":\"next\"}", Some(1)); // cursor now on the dormant row
-        assert!(m.rows()[0].active); // dormant selected
+        assert!(selected(&m)[0]); // dormant selected
         // The row goes LIVE: u-d binds to a new tab (2). Cursor still names
         // "u-d" but it no longer renders dormant.
         m.apply_tabs(vec![tab(1, 0, "live", false), tab(2, 1, "u-d", true)]);
@@ -2444,11 +2896,11 @@ mod tests {
             tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64), (2usize, 600u64)]),
         });
         let rows = m.rows();
-        assert!(rows.iter().all(|r| r.key != RowKey::Dormant("u-d".into())));
+        assert!(!keys(&m).contains(&RowKey::Dormant("u-d".into())));
         let active: Vec<_> = rows
             .iter()
-            .filter(|r| r.active)
-            .map(|r| r.key.clone())
+            .filter(|(_, r)| r.selected)
+            .map(|(k, _)| k.clone())
             .collect();
         assert_eq!(
             active,
@@ -2496,18 +2948,15 @@ mod tests {
         let Effect::ArmDwell { r#gen } = fx[0] else {
             panic!()
         };
-        assert!(
-            m.rows()[0].active,
-            "dormant selected before the native switch"
-        );
+        assert!(selected(&m)[0], "dormant selected before the native switch");
         // Native switch to tab 2 arrives as a visited-pipe beacon (no nav).
         m.beacon(2);
         let rows = m.rows();
-        assert!(!rows[0].active, "dormant row releases the highlight");
+        assert!(!rows[0].1.selected, "dormant row releases the highlight");
         let active: Vec<_> = rows
             .iter()
-            .filter(|r| r.active)
-            .map(|r| r.key.clone())
+            .filter(|(_, r)| r.selected)
+            .map(|(k, _)| k.clone())
             .collect();
         assert_eq!(active, vec![RowKey::Tab(2)], "focused tab reclaims it");
         // The now-orphaned dwell must no-op (cursor cleared).
@@ -2976,11 +3425,11 @@ mod tests {
                     m
                 };
                 let baseline: Vec<RowKey> =
-                    build(0).rows().into_iter().map(|r| r.key).collect();
+                    build(0).rows().into_iter().map(|(k, _)| k).collect();
                 for (active, &id) in ids.iter().enumerate() {
                     let mut m = build(active);
                     m.beacon(id); // live-focus truth on a different tab
-                    let order: Vec<RowKey> = m.rows().into_iter().map(|r| r.key).collect();
+                    let order: Vec<RowKey> = m.rows().into_iter().map(|(k, _)| k).collect();
                     prop_assert_eq!(&order, &baseline, "focus reordered rows");
                 }
             }
@@ -3036,17 +3485,17 @@ mod tests {
                 // Unified recency: each row's sort ts (timeline for live, li for
                 // dormant) is non-increasing down the list.
                 let rows = m.rows();
-                let ts_of = |r: &Row| -> u64 {
-                    match &r.key {
+                let ts_of = |k: &RowKey| -> u64 {
+                    match k {
                         RowKey::Tab(id) => timeline.get(id).copied().unwrap_or(0),
                         RowKey::Dormant(u) => li_by_uuid.get(u).copied().unwrap_or(0),
                     }
                 };
                 for w in rows.windows(2) {
                     prop_assert!(
-                        ts_of(&w[0]) >= ts_of(&w[1]),
+                        ts_of(&w[0].0) >= ts_of(&w[1].0),
                         "recency inverted between {:?} and {:?}",
-                        w[0].key, w[1].key
+                        w[0].0, w[1].0
                     );
                 }
             }
@@ -3219,7 +3668,7 @@ mod tests {
                     if let Some(u) = m.cursor.clone() {
                         let rows = m.rows();
                         prop_assert!(
-                            rows.iter().any(|r| r.key == RowKey::Dormant(u.clone())),
+                            rows.iter().any(|(k, _)| *k == RowKey::Dormant(u.clone())),
                             "cursor on a row that is not displayed: {}",
                             u
                         );
