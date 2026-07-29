@@ -477,6 +477,47 @@ resting-width costs become dead paths:
   ever catch it. Needs a display area around 400 columns; Ollie runs ~280, so it
   is out of reach today. **Not out of reach forever.**
 
+### D27 — Five shapes of bad test, all found in one session (2026-07-29)
+
+**Queued work, agreed with Ollie: write this into `docs/dev/TESTING.md` and add
+`cargo-mutants` as a gate on changed files — both AFTER the merge of #86.**
+Recorded here first so the evidence is not lost to a compaction.
+
+This session found five *distinct* ways a test can be green and worthless. That
+is a pattern, not luck, and the pattern has one root: **the test asserts against
+the implementation instead of against an independently derived expectation.**
+
+| # | Shape | Instance |
+|---|---|---|
+| 1 | Passes under **both** branches of the thing it names | `mix_rounds_ties_to_even` asserted 149.5 → 150, identical under ties-to-even and half-away-from-zero |
+| 2 | Goes **green-and-vacuous** when a constant moves | two seek tests whose simulator now started already on its target |
+| 3 | Stays green and silently **covers less** | a harness test that drove two resizes against 30 and one against 44 |
+| 4 | Name and comment claim a property it **never proves** | the band-disjointness assertion was algebraically identical to the line above it — and sat exactly where the next agent would look to rule the bug out |
+| 5 | Tests a fixture shape **reality abandoned** | `{"type":"summary"}` — 0 of 153 real transcripts; the whole tier was dead in the field |
+
+Shapes 1–4 are "test and code agree because the test came from the code".
+Shape 5 is "test and code agree because both were written from the same wrong
+belief". **None is caught by coverage, and none by CI.** Shape 3 is not even
+caught by red/green — the suite goes green *before and after* the coverage
+shrinks.
+
+What the fixes should be, in leverage order:
+
+1. **`cargo-mutants` on changed files.** The only mechanical catcher of 1–4. It
+   was used by hand three times this session and found something every time,
+   including proving that one test was the *sole* guard against a reversion.
+2. **Fixtures captured from reality, with a liveness assertion** — a test that
+   fails when the shape we parse appears in **zero** real transcripts would have
+   caught shape 5 the day it went extinct, rather than months later by accident.
+3. **A golden must carry its derivation in its doc-comment**, so a reviewer can
+   check the literal against the *design* rather than against the code that
+   emitted it. Started on the collapsed golden; make it the rule.
+
+What is genuinely good and should not be disturbed: the **lib/bin split** is why
+any of this is testable at all, and `SimZellij` is strong enough that a reviewer
+ran **404,880 exhaustive runs** through the real state machine to settle a
+question that would otherwise have been argued in prose.
+
 ## Gate 1 — DONE, and what it did and did not settle
 
 **Gate 1 happened on 2026-07-29 and the verdict is D19: keep.** Ollie ran the
