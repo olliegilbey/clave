@@ -282,6 +282,34 @@ every truncated identifier. It is a change to the ratified render, and it is
 exactly the kind of judgement that is cheap to make while looking at a real bar
 and expensive to argue in prose. **Look at it then; do not litigate it now.**
 
+## Gate 1 — what to look for, and what host tests cannot tell us
+
+Everything green so far is **host-side**. The bar has never rendered at 44
+columns inside a real zellij session, and the seek-versus-profile interaction
+under real resize latency is unexercised. Three predictions from the task-2
+review, each of which only a live look settles. **Check these specifically** —
+if one is wrong, that is a finding, not a disappointment.
+
+1. **Collapse will probably rest wider than 30.** On a ~200-column window
+   zellij's resize step is ~10 columns, so 44 → 30 is about 1.4 steps: the first
+   shrink lands near 34, acceptance is `2*|diff| <= step` → `2*4 <= 10` accepts,
+   and the bar settles at ~34 while rendering the `COLLAPSED` profile. That
+   gives roughly an 11-character summary instead of the designed 7. This is
+   *correct* behaviour — the seek's contract is "wherever cols stop changing is
+   accepted" — but the visible expanded/collapsed difference will be smaller
+   than the constants suggest. If it bothers the eye, the lever is
+   `COLLAPSED_TARGET_COLS`, not the profile.
+2. **A newborn bar on a narrow window will over-run at birth.** The layout sizes
+   the pane at 22% (D-derived for 44), so on a window under ~125 columns the
+   newborn bar is below `EXPANDED`'s 27-cell floor and rows over-run until the
+   seek grows it. Same class as D12/D13, but **newly reachable at birth rather
+   than only mid-collapse**. Watch the first paint of a fresh tab.
+3. **Provisional inks renumber when the repo set changes.** Allocation is
+   positional over the sorted repo set, so adding a repo that sorts early shifts
+   every repo after it. Lock §4's store-backed allocator exists precisely to
+   prevent this and it is the one property the stand-in cannot fake. **If
+   colours shift between looks, that is why — it is not a renderer bug.**
+
 ## Known-stale spec content — recognise, do not fix
 
 Catalogued deliberately. If one blocks a task, override it in the brief.
@@ -344,5 +372,6 @@ Catalogued deliberately. If one blocks a task, override it in the brief.
 | Task | Status | Commits | Notes |
 |---|---|---|---|
 | 1 — the pure 44-column renderer | **complete** | `8fb4aca`..`ca884d1` | `render.rs` + 17 tests; `bar-preview` is a Rust example driven by `render_rows`, byte-identical to the Python it deletes. Reviewed; one fix round (2 Important + 7 Minor), each fix mutation-checked. 236 tests. Not wired — `main.rs`/`model.rs` untouched. |
-| 1.5 — the collapsed width profile (D16) | next | — | Render candidates for Ollie to choose the two open numbers by looking. |
-| 2 — wire `model.rs` and `main.rs` to `render_rows` | not started | — | `BAR_TARGET_COLS` 30 → 44 lands here, and `rows()` starts projecting `title`/`summary`/`worktree` from `&Agent`. **Gate 1** follows. |
+| 1.5 — the collapsed width profile (D16) | **complete** | `84e3348`..`d7b2783` | `Widths` profile, D17 chosen from rendered candidates, D18's ellipsis rule, column map derived from the profiles. 241 tests. |
+| 2 — wire `model.rs` and `main.rs` to `render_rows` | **complete** | `c48f0b4`..`65496b4` | `Row` unified, projection from `&Agent`, provisional inks, targets 30→44 and 4→30, birth percent 15%→22%. Reviewed; one fix round (4 Important + 6 Minor). 255 tests. |
+| 3 — the `ux-gate1` sandbox scenario | in progress | — | The existing scenarios seed `title: None`, `summary: ""`, all-`Idle`, and repos sharing a 7-char prefix — they cannot show the design. **Gate 1 needs this first.** |
