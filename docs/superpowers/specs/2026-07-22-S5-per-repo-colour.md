@@ -220,8 +220,13 @@ sight" and harmless: either order is equally correct.
 caller has already built its snapshot, so bumping there would either desync that
 payload or manufacture a no-op push — and "no no-op pushes" is an explicit §5 rule
 enforced at `store.rs:316`. The consequence is bounded
-and named: an agent coloured only by the backstop renders untinted until the next
-real push. In practice that is `dev.rs`-seeded rows and legacy store files, both
+and named: an agent coloured only by the backstop **renders in `crystalBlue`,
+palette index 0 — NOT untinted.** `u8` has no "unset": `unwrap_or(0)` is not a
+blank, it is a real hue, which is exactly why the ink fields were kept off the
+#69 wire until this ledger exists (v2 spec §2.2). Any assertion here must expect
+crystalBlue, not absence. (Corrected on #82 — the earlier wording said
+"untinted" and would have produced a test asserting the wrong thing.) The row
+holds that colour until the next real push. In practice that is `dev.rs`-seeded rows and legacy store files, both
 healed by `clear_tab_timeline` at launch (`setup.rs:708`) before any bar
 instance exists.
 
@@ -287,10 +292,13 @@ Two properties fall out, both free:
 
 1. **`idx == repo_index` is impossible.** One skip always suffices because
    `PALETTE_LEN >= 2` (asserted, §5.1).
-2. **The first agent of every repo is maximally distinct from its own repo tint.**
-   The palette is ordered so consecutive entries are as far apart as possible
-   (§2.4) — minimum adjacent ΔE 55.2 — so starting at `repo_index + 1` puts the
-   commonest case (one agent in a repo) at the largest available distance. It also
+2. **The first agent of every repo is distinct from its own repo tint.**
+   Starting at `repo_index + 1` puts the commonest case (one agent in a repo) at
+   the largest distance the *ratified* order offers — **minimum adjacent ΔE
+   30.7**, not the 55.2 quoted here before #82's review. **55.2 belonged to the
+   rejected 12-entry palette**; the ratified 8-hue order was not
+   adjacency-optimised (§2.4), so this mechanism buys separation but no longer a
+   strong visual-spacing guarantee. Do not build anything on 55.2. It also
    staggers different repos' title cycles, so two repos' *first* agents get
    different title colours rather than both getting entry 0.
 
@@ -1124,7 +1132,14 @@ fn fit(value: &str, w: usize) -> String {
     if w == 0 {
         return String::new();
     }
-    let clean: String = value.chars().filter(|c| !c.is_control()).collect();
+    // NOT `filter(|c| !c.is_control())` — that drops the `\x1b` and leaves the
+    // PAYLOAD: `\x1b[31mfoo` becomes a visible `[31mfoo`, which is both wrong
+    // on screen and four cells wider than the caller budgeted, breaking the
+    // locked column arithmetic. Strip the whole CSI sequence — `\x1b`, the
+    // `[`, the parameter/intermediate bytes, and the final byte in `@`..`~` —
+    // then drop any remaining control chars. Pin it with a test asserting no
+    // residual `[31m` survives. (#82 review.)
+    let clean: String = strip_ansi(value);
     let n = clean.chars().count();
     if n <= w {
         return clean + &" ".repeat(w - n);
@@ -1474,7 +1489,7 @@ escape-injecting strategy, with `title` also `None` half the time; `cols in
 |---|---|
 | **P1 — no escape is ever truncated, every sequence is reset** | scan `render_segments(&compose_row(&row, cols, &gutter))`: every `\x1b` begins a complete `\x1b[` … `m`, the parameter body matches `[0-9;]*`, and the count of non-`0` introducers equals the count of `\x1b[0m`. The line never ends inside a sequence. *Kept verbatim from the previous revision — this is the property the dossier's warning is about, and the chip's `48;2;…` background now rides the same guarantee* |
 | **P2 — visible text is colour-independent** | concatenating `Segment.text` yields the same string whatever the two inks contain. §2.9, mechanised. *Kept verbatim* |
-| **P3 — width is respected** | for `cols >= gutter_cols + TRAILING_COLS`, the escape-stripped line is at most `cols` characters. The gate is the degenerate-width band §2.7 leaves to S8 |
+| **P3 — width is respected** | for `cols >= gutter_cols + TRAILING_COLS + TITLE_COLS + REPO_COLS + 2` (i.e. `body >= 16`), the escape-stripped line is at most `cols` characters. **The old gate `cols >= gutter_cols + TRAILING_COLS` was FALSE** (#82 review): `compose_row` emits the fixed 7-column title and repo plus their two separators unconditionally, so at a 9-cell gutter and `cols = 11` it already writes 16 cells into a 0-cell body. `summary_w` saturates at 0 and absorbs nothing. Below that threshold the row is the **undefined narrow band** — §2.7 leaves collapsed geometry to S8 and design-lock §3 has not ratified it, so the only contract there remains "never panic, never emit a partial escape". Do not assert width in that band until the collapsed layout exists |
 | **P4 — segment text is control-free** | for arbitrary values *including* injected `\x1b[31m` and `\n`, no `Segment.text` contains a control char |
 | **P5 — columns hold their positions** | *replaces the old span property, which described a mechanism that no longer exists.* Whenever `body >= TITLE_COLS + REPO_COLS + SUMMARY_COLS + 2`, the repo column starts at the same offset for every generated row, and so does the summary — whatever the values' lengths. This is the invariant the whole fixed-width design exists to provide (design-lock §2.1/§2.3) |
 | **P6 — the gutter passes through verbatim** | the first `gutter.len()` output segments equal `gutter`, byte for byte. S6's contract |

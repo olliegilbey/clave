@@ -17,6 +17,29 @@ binary's read-modify-write **silently strips** earned fields — S4 owns the
 fix). §3.1 and §3.6 also stop proposing `title` / `summary` and start consuming
 them._
 
+> [!IMPORTANT]
+> **S4 IS UNLANDED. Every code block in this document is PROPOSED, not
+> delivered.** Read `hook.rs` before believing any behaviour described here.
+>
+> As of `main` @ `b00edd3`, the shipped runtime does **not** match this spec in
+> at least three ways that matter, each of which this document otherwise reads
+> as if already true:
+>
+> - **`payload.transcript_path` does not exist.** `run_hook` still derives the
+>   transcript path from `rec.cwd`, so the relocation-safe tail read described
+>   in §4.3 cannot work yet. §4.3 says "mandatory" — that is the **target**, and
+>   the payload plumbing has to land with it.
+> - **`refresh_label` still returns early forever once `label_source == Summary`,
+>   and still scans the extinct `summary_from_tail` tier.** So the rolling
+>   `ai-title` updates, the self-heal, and the fallback chain in §3.1/§4.4 are
+>   design, not behaviour.
+> - **Nothing writes `AgentRecord.title` or `.summary`.** #69 landed the fields
+>   and `snapshot_from` projects them; filling them is S4's job and is not done.
+>
+> This banner exists because review (#82) found the document describing all
+> three as delivered. When S4 is implemented, land the runtime and this banner
+> together — do not delete it while the gap remains.
+
 **The requirement, verbatim from the maintainer:**
 
 > "the tab name inside the clave sidebar is `issue-10-kdl-guardrail …` — the old
@@ -1180,8 +1203,28 @@ becomes an event-only gate **over the reported path**:
         let tail = matches!(event, "Stop" | "UserPromptSubmit")
             .then(|| payload.transcript_path.as_deref())
             .flatten()
-            .and_then(|p| read_tail(Path::new(p), 64 * 1024));
+            .and_then(|p| trusted_transcript(p, &uuid))   // see below — NOT optional
+            .and_then(|p| read_tail(&p, 64 * 1024));
 ```
+
+> [!WARNING]
+> **`transcript_path` arrives on hook STDIN, so it is untrusted input, and
+> `read_tail` writes what it parses into the store.** `Path::new(p)` accepts
+> anything readable — so a malicious or malformed payload can point the tail
+> read at an *unrelated* JSONL and have its extracted values become this
+> agent's label. That is a write primitive, not merely a bad read, and it does
+> **not** fail closed.
+>
+> `trusted_transcript(p, uuid)` is therefore mandatory, not a hardening
+> nice-to-have. It must **canonicalize** the path and then accept it only if it
+> is inside Claude's projects root **and** its file name is the expected
+> `<uuid>.jsonl`. Anything else returns `None` and the tail read is skipped —
+> a stale label is an acceptable failure, a forged one is not.
+>
+> Found by review on #82. Note this constraint survives §3.2's correction:
+> switching from the derived path to the handed one is right *because*
+> transcripts relocate, but it moves the value from something we computed to
+> something we were told, and that changes its trust class.
 
 Two consequences worth naming:
 
@@ -1284,7 +1327,13 @@ impl AgentRecord {
         // repo_root, so an empty/control-only repo_root produced an empty tab
         // name — an invalid KDL `tab name=""`).
         let repo_basename = self.repo_root.rsplit('/').next().unwrap_or("");
-        let repo: &str = [repo_basename, self.repo_root.as_str()]
+        // The cwd basename is the THIRD step, and it was missing here while the
+        // comment above and the §3.1 grammar both promised it (#82 review): a
+        // record with an empty repo_root fell straight through to the UUID
+        // prefix, rendering `a1b2c3d4` where the grammar says the directory
+        // name. Non-repo records are exactly the ones that reach this arm.
+        let cwd_basename = self.cwd.rsplit('/').next().unwrap_or("");
+        let repo: &str = [repo_basename, self.repo_root.as_str(), cwd_basename]
             .into_iter()
             .find(|s| !s.trim().is_empty())
             .unwrap_or("");
@@ -1659,10 +1708,17 @@ one seam S4 crosses is *reading a file Claude writes*, addressed in §5.4.
 
 **`crates/clave-bar/src/model.rs`**:
 
-Every case is asserted at **both** widths S8 brackets. The suite defines
-`const NARROW_BUDGET` / `const WIDE_BUDGET` derived from 30 and 38 minus a
-nominal gutter, with a comment saying they are *fixture* values, not contract —
+Every case is asserted at **two** widths. The suite defines
+`const NARROW_BUDGET` / `const WIDE_BUDGET` as *fixture* values, not contract —
 S8 may move the pane and S6 may move the gutter without touching this file.
+
+**Derive `WIDE_BUDGET` from 44, the ratified target** (design-lock §2), minus
+the gutter — **not** from 38. 30 and 38 are legacy widths: 30 is the pre-S8
+pane and 38 was S8's original proposal, superseded on 2026-07-25. Keeping a
+fixture at 38 makes the suite look like it validates the final geometry when it
+does not. Keep one narrow fixture for the truncation paths — its job is to
+exercise the drop rule, and any small number does that — but say in the comment
+that it is a *stress* width, not a target. (Review finding, #82.)
 
 | Test | Pins |
 |---|---|

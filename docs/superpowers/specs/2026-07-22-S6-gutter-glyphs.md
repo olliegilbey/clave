@@ -1877,17 +1877,28 @@ clave ls --json | jq -r '.agents[] | "\(.worktree // "-")\t\(.cwd)"'
 `.claude-worktrees/…` or similar path) but whose `worktree` column is `-`.
 
 **(c) Also settle §2.4.3's open question** — whether tier 2 alone is enough.
-For one such row, check whether its transcript carries the free provenance:
+
+**Measure the window S4 actually reads, over EVERY such row.** `read_tail` scans
+the last **64 KiB**, not the whole file, so a whole-file `grep -c` can report a
+hit S4 will never see: `worktree-state` is written when Claude *enters* the
+worktree, which on a long session is far outside the tail. And one row proves
+nothing either way — this is a coverage rate, not an existence check. (Both
+corrections from #82's review; the earlier procedure did a single whole-file
+`grep -c` and would have over-reported tier 2's coverage.)
 
 ```bash
-grep -c '"type":"worktree-state"' ~/.claude/projects/<munged-cwd>/<uuid>.jsonl
+# For each candidate row: does the LAST 64 KiB carry the line?
+for f in <the transcripts of the rows from (b)>; do
+  tail -c 65536 "$f" | grep -qc '"type":"worktree-state"' && echo "HIT  $f" || echo "MISS $f"
+done
 ```
 
-A non-zero count on a session you **launched** inside a worktree (rather than one
-Claude relocated into) means `worktree-state` covers the false negatives on its
-own and tier 3 is never needed. A zero means the `.git` `stat` is still the
-backstop. Project directories begin with `-`, which bare `ls` parses as flags —
-use `find` or `/bin/ls --`.
+Judge on the **aggregate**: if the tail carries it for essentially all of them,
+tier 2 covers the false negatives and tier 3 is never needed. If it misses a
+meaningful share — expected for long sessions, and for sessions **launched**
+inside a worktree rather than relocated into one — the `.git` `stat` is still
+the backstop. Project directory names begin with `-`; a *relative* glob over
+them parses as flags, so use `find ~/.claude/projects -maxdepth 1 -name '…'`.
 
 **(d) Report:** how many of your live rows are worktrees clave did not create,
 and the count above.
@@ -1983,7 +1994,7 @@ the four columns it cost the text hurt; whether the status dot still reads first
 |---|---|
 | **S5** | **hard dependency, must land first.** S6 replaces exactly one S5 function — `gutter_segments`, which S5 ships as a transitional stand-in for this purpose — and does not touch `compose_row`, `render_segments`, `Ink`, `Segment` or `clamp_name` except for §2.9.3 (§2.9.1). Building the render seam here instead would duplicate S5's `compose_row`/`render_segments` work, so S6 lands **second**; if S6 must land first, it introduces the seam and S5 rebases onto it (the same rebase-coupling S4↔S5 has). |
 | **S3** | composes cleanly. S3 changes the dormant glyph expression *above* the `Row` literal; S6 adds fields *inside* it. Same block, trivial conflict, no semantic overlap. S6 strengthens S3's argument (§2.5): dim marks now live in columns 2 and 4, never column 0, and never as circles |
-| **S4** | **no file overlap at all** now that #69 has landed `snapshot_from`'s projection (§3.2): S4 owns `hook.rs`/`add.rs`/`store.rs`'s record, and S6 touches `store.rs` nowhere. The one *contract* S6 hands S4 is the text budget, `cols - 7` (§2.10). Both marker-accuracy upgrades — `worktree-state` (tier 2) and the `.git` `stat` (tier 3) — sit in S4's `refresh_label` and are deliberately not taken here (§2.4.3) |
+| **S4** | **no file overlap at all** now that #69 has landed `snapshot_from`'s projection (§3.2): S4 owns `hook.rs`/`add.rs`/`store.rs`'s record, and S6 touches `store.rs` nowhere. The one *contract* S6 hands S4 is the text budget, and it is **mode-dependent**: `cols - 7` expanded, **`cols - 5` collapsed** (§2.10, and see the §7 summary line). Quoting only the expanded form — as this row did before #82's review — makes S4 truncate collapsed labels against a budget two columns too generous. Both marker-accuracy upgrades — `worktree-state` (tier 2) and the `.git` `stat` (tier 3) — sit in S4's `refresh_label` and are deliberately not taken here (§2.4.3) |
 | **S7** (context battery) | consumes the reserved cell. See below |
 | **S8** (widths, #24 item 6) | independent but **recommended first** — S6 costs 4 text columns at 30 (§2.10) |
 
