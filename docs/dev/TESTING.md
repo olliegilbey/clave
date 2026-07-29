@@ -115,6 +115,12 @@ Two labels carry this into the process:
 - **`host-untestable`** — human judgement only, permanently. Nothing automated
   will ever cover it.
 
+The standing pass for the sidebar's interaction paths is
+[`LIVE-INTERACTION-CHECKLIST.md`](LIVE-INTERACTION-CHECKLIST.md) — the D28 gate-2
+run, written against the SOP below. Every item there states what would make its
+own observation meaningless, which is the habit the rest of this document argues
+for, applied to a terminal instead of a test runner.
+
 `main` is guaranteed green, reviewed and hermetically verified; it is **not**
 guaranteed live-validated. The **tag** is the promotion event, and #49 batches
 every `needs-live-validation` PR merged since the previous tag into one focused
