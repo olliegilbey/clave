@@ -150,9 +150,9 @@ Why each row is what it is:
   coverage but *unreached* coverage: the stale width-seek anchor was pure logic
   living behind an interrupt shape the generator never produced (#4). A new
   branch without a new property is a new blind spot. This is also the row that
-  owes a **mutation run**: the four mechanical shapes of green-and-worthless test
-  (below) all lived here, in the tier with the strongest coverage in the repo,
-  and `just mutants` is the only instrument that reports them.
+  owes a **mutation run**: shapes 1–4 of green-and-worthless test (below) all
+  lived here, in the tier with the strongest coverage in the repo, and for
+  shapes 2–4 `just mutants` is the only instrument that reports them.
 - **Generated artifacts** owe a mutation run only when the change introduces a
   branch. The parser guardrail proves the artifact is valid; nothing proves the
   generator took the right branch to produce it, and a dropped condition is
@@ -406,9 +406,12 @@ test reads it and did not set it, the test is not hermetic.
 
 ### 1 — Mutation testing (`just mutants`)
 
-The only mechanical catcher of shapes 1–4. It removes or alters a piece of the
-code and re-runs the suite; a mutant that **survives** is a line you can change
-while every test keeps passing. It was used by hand three times in the D27
+The only mechanical catcher of shapes 2–4 — and of shape 1 only where the rival
+implementation happens to fall inside its operator set, which the stdlib
+rounding-mode swap does not ("Where it does not reach", below). Shapes 1 and 5
+are the two that stay manual. It removes or alters a piece of the code and
+re-runs the suite; a mutant that **survives** is a line you can change while
+every test keeps passing. It was used by hand three times in the D27
 session and found something every time — including proving that
 `no_width_is_accepted_for_both_targets` is the *sole* test standing between the
 codebase and a band-widening reversion, which is exactly the kind of fact no
@@ -547,8 +550,37 @@ Three parts, all present in
 1. **The arithmetic, in prose.** `golden_bar_collapsed_at_thirty_columns`
    (`render.rs:996`) derives its column map from D16's formula rather than
    pasting what the code emits: `summary = cols - 13 - title - repo`, so at
-   `title = 7, repo = 3` (D17) that is `30 - 13 - 7 - 3 = 7`, laid out as `1 cap
-   + 9 gutter + 7 title + 1 + 3 repo + 1 + 7 summary + 1 margin + 1 cap = 30`.
+   `title = 7, repo = 3` (D17) that is `30 - 13 - 7 - 3 = 7`.
+
+   The `13` is every fixed cell that is neither title nor repo, and it is worth
+   spelling out because it is where this arithmetic goes wrong: the **left cap
+   lives inside the gutter**. `GUTTER_W = 9` spans cols 1–9 as *cap, status,
+   space, rule, space, battery, space, provenance, space* — so `13` is `9`
+   gutter `+ 1` space after title `+ 1` space after repo `+ 1` right margin
+   `+ 1` right cap, and `Widths::min_intact_cols()` is that `13 + title + repo`
+   (`23` collapsed, `27` expanded). Adding a cap **on top of** the 9 counts it
+   twice and totals 31.
+
+   The full collapsed row at `cols = 30`, checkable a line at a time against
+   `render_row`:
+
+   ```text
+   cols  1–9   gutter, left cap included    9
+   cols 10–16   title                       7   (D17: holds at 7 in BOTH profiles)
+   col     17   space                       1
+   cols 18–20   repo                        3   (D17; D18 drops the ellipsis)
+   col     21   space                       1
+   cols 22–28   summary                     7   = 30 - 13 - 7 - 3, the only flex cell (D9)
+   col     29   right margin                1
+   col     30   right cap                   1
+                                           --
+                                            30
+   ```
+
+   The same map at `EXPANDED`/44 is `9 + 7 + 1 + 7 + 1 + 17 + 1 + 1 = 44`: only
+   `repo` and `summary` moved, which is what makes collapsed a width profile and
+   not a second layout (D16).
+
 2. **The citation.** Every choice names the lock section or LEDGER decision it
    comes from — D17 for holding `title` at 7 across both profiles, D18 for why a
    3-cell repo drops the ellipsis and truncates `"clave"` to `"cla"`.
