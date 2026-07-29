@@ -226,74 +226,38 @@ fn main() {
     }
     println!();
 
-    collapsed_candidates();
+    collapsed();
 }
 
-/// A `Widths` candidate under consideration for D16's open pair, labelled with
-/// the numbers that produced it (task 1.5).
-struct Candidate {
-    label: &'static str,
-    widths: Widths,
-    cols: usize,
-}
-
-/// Task 1.5 / LEDGER D16: collapsed is a WIDTH PROFILE (title, repo), not a
-/// second layout — same `fleet()`, same `bar()`, different numbers. Renders
-/// three candidates so the open pair (title/repo — "to be settled by looking,
-/// not by arguing") gets picked by looking, not derived from prose. B and C
-/// share `cols` on purpose: the comparison is where the characters go, not how
-/// many there are.
-fn collapsed_candidates() {
+/// The chosen collapsed profile (task 1.5 / LEDGER D17), rendered the same
+/// way as the expanded section above it: `bar()` draws the ruler, the framed
+/// box and the per-row width assertion for either profile identically — the
+/// candidates comparison this replaces has served its purpose, Ollie picked
+/// `(title 7, repo 3)` at 30 columns by looking at it.
+fn collapsed() {
     let dim = DIM.fg();
-    let bar_rule = "\u{2550}".repeat(78);
-    println!("\n{BOLD}{bar_rule}\ncollapsed \u{2014} candidates (LEDGER D16)\n{bar_rule}{RESET}");
 
-    let candidates = [
-        Candidate {
-            label: "A \u{2014} tight",
-            widths: Widths { title: 5, repo: 3 },
-            cols: 26,
-        },
-        Candidate {
-            label: "B \u{2014} roomy",
-            widths: Widths { title: 5, repo: 3 },
-            cols: 30,
-        },
-        Candidate {
-            label: "C \u{2014} title holds at 7",
-            widths: Widths { title: 7, repo: 3 },
-            cols: 30,
-        },
-    ];
-
-    for c in &candidates {
-        // Derived, not hard-coded: `summary_w = cols - min_intact_cols()` is
-        // the same arithmetic `render_row` uses internally once `cols` clears
-        // the floor (`13 + title + repo` — LEDGER D12's arithmetic,
-        // generalised to a profile by D16), so this number is guaranteed to
-        // match what the box below actually shows.
-        let summary_w = c.cols.saturating_sub(c.widths.min_intact_cols());
-        bar(
-            &fleet(),
-            c.cols,
-            c.widths,
-            &format!(
-                "{} \u{2014} title {}, repo {}, cols {}, summary {}",
-                c.label, c.widths.title, c.widths.repo, c.cols, summary_w
-            ),
-        );
-    }
-
-    println!(
-        "\n  {dim}separation from {DESIGN_COLS}: {}{RESET}",
-        candidates
-            .iter()
-            .map(|c| format!("{} = {}", c.label, DESIGN_COLS - c.cols))
-            .collect::<Vec<_>>()
-            .join("   ")
+    let widths = Widths::COLLAPSED;
+    let cols: usize = 30;
+    // Derived, not hard-coded: the same arithmetic `render_row` uses
+    // internally once `cols` clears the floor (`13 + title + repo` — LEDGER
+    // D12's arithmetic, generalised to a profile by D16), so this number is
+    // guaranteed to match what the box below actually shows.
+    let summary_w = cols.saturating_sub(widths.min_intact_cols());
+    bar(
+        &fleet(),
+        cols,
+        widths,
+        &format!(
+            "collapsed \u{2014} {cols} columns \u{2014} title {}, repo {}, summary {}",
+            widths.title, widths.repo, summary_w
+        ),
     );
+
+    let separation = DESIGN_COLS - cols;
+    println!("\n  {dim}separation from {DESIGN_COLS}: {separation}{RESET}");
     println!(
         "  {dim}LEDGER D15 requires separation > 10 (the widest `width_seek` \
-         acceptance half-band) \u{2014} all three candidates clear it.{RESET}"
+         acceptance half-band) \u{2014} {separation} clears it.{RESET}"
     );
 }

@@ -52,15 +52,15 @@ impl Widths {
     /// prefix).
     pub const EXPANDED: Widths = Widths { title: 7, repo: 7 };
 
-    /// LEDGER D16: the gutter stays identical, each text field shows fewer
-    /// characters, repo drops to three (`cla`, `nal` — collisions are rare and
-    /// the repo ink still disambiguates), title keeps a couple more than repo
-    /// because it matters more. Deliberately the two numbers most likely to
-    /// move — D16 leaves the exact pair open, "to be settled by looking, not
-    /// by arguing" (`examples/bar-preview.rs`'s collapsed candidates), so they
-    /// are named constants and nothing else in this file depends on their
-    /// values being these ones.
-    pub const COLLAPSED: Widths = Widths { title: 5, repo: 3 };
+    /// LEDGER D17: chosen by Ollie from three rendered candidates. Repo drops
+    /// to three (`cla`, `nal` — collisions are rare and the repo ink still
+    /// disambiguates); title HOLDS at 7, identical to `EXPANDED` — the
+    /// rejected 5-column variant bought two summary characters by truncating
+    /// the chip itself (`API-GW`/`API-V2` both to `API-`, `KDL-GRD` to
+    /// `KDL-G`), and the chip is the thing a tab is identified BY. Holding it
+    /// also means the chip does not reflow when the profile toggles, so the
+    /// eye keeps its anchor across the transition.
+    pub const COLLAPSED: Widths = Widths { title: 7, repo: 3 };
 
     /// Fixed columns everywhere; `summary` is the only flex cell (LEDGER D9).
     /// Everything else — gutter, title, repo, the two separating spaces, the
@@ -68,7 +68,7 @@ impl Widths {
     /// this floor a row is wider than the pane rather than misaligned. `13` is
     /// the 9-column gutter plus the space after title, the space after repo,
     /// the right margin and the right cap (D12's arithmetic, generalised by
-    /// D16 to any profile): `27` for `EXPANDED`, `21` for `COLLAPSED`. That is
+    /// D16 to any profile): `27` for `EXPANDED`, `23` for `COLLAPSED` (D17). That is
     /// deliberate, not a compromise: a row that silently reflowed its columns
     /// to fit would be the one failure mode §2.1 exists to forbid. S6 §2.10's
     /// `cols - 7` text budget is superseded.
@@ -351,20 +351,31 @@ fn clamp(s: &str, w: usize) -> String {
         out.push_str(&" ".repeat(w - n));
         return out;
     }
+    // LEDGER D18: at 4 cells or fewer the ellipsis eats 25%+ of the field and,
+    // in a fixed-column layout, tells the reader nothing they cannot already
+    // see — so it is dropped and the field truncates hard. Above 4 it stays.
+    // This is what turns `repo = 3`'s `cl\u{2026}` back into the three real
+    // characters D17 chose 3 for (`cla`, `nal`), and it is neutral at
+    // `EXPANDED`'s `repo = 7`, well above the threshold.
+    let ellipsis = w > 4;
+    let budget = if ellipsis { w - 1 } else { w };
     let mut out = String::new();
     let mut used = 0;
     for ch in s.chars() {
         let cw = ch.width().unwrap_or(0);
-        // Reserve the ellipsis' own cell. A wide glyph that would straddle the
-        // boundary is dropped whole, so the column never over-runs by one.
-        if used + cw > w - 1 {
+        // Wide glyph would straddle the boundary — dropped whole, so the
+        // column never over-runs by one.
+        if used + cw > budget {
             break;
         }
         out.push(ch);
         used += cw;
     }
-    out.push(ELLIPSIS);
-    out.push_str(&" ".repeat(w - used - 1));
+    if ellipsis {
+        out.push(ELLIPSIS);
+        used += 1;
+    }
+    out.push_str(&" ".repeat(w - used));
     out
 }
 
@@ -644,17 +655,17 @@ mod tests {
         }
     }
 
-    /// The same invariant, under `COLLAPSED` (task 1.5 / LEDGER D16): one
+    /// The same invariant, under `COLLAPSED` (task 1.5 / LEDGER D16, D17): one
     /// `render_row` body serving two profiles is only actually one layout if
     /// BOTH profiles hold the width guarantee at the same set of pathological
-    /// `cols`, not just the profile that shipped first. `13`, `21` and `26` are
-    /// `COLLAPSED`'s own floor arithmetic (`13 + 5 + 3`, see
-    /// `min_intact_cols_is_thirteen_plus_title_plus_repo`) and candidate A from
-    /// `bar-preview`'s collapsed section; the rest are shared reference points
-    /// with the `EXPANDED` test above.
+    /// `cols`, not just the profile that shipped first. `13` and `23` are
+    /// `COLLAPSED`'s own floor arithmetic (`13 + 7 + 3`, see
+    /// `min_intact_cols_is_thirteen_plus_title_plus_repo`) and `30` is D17's
+    /// chosen target; the rest are shared reference points with the
+    /// `EXPANDED` test above.
     #[test]
     fn every_row_is_exactly_cols_cells_under_collapsed() {
-        for cols in [0, 1, 13, 21, 26, 30, 44] {
+        for cols in [0, 1, 13, 23, 30, 44] {
             let expected = cols.max(Widths::COLLAPSED.min_intact_cols());
             for line in render_rows(&fleet(), cols, Widths::COLLAPSED) {
                 let width = display_cells(&strip_sgr(&line));
@@ -676,8 +687,10 @@ mod tests {
                 selected: true,
                 ..unselected.clone()
             };
-            // What the chip cell holds at this profile's title width — narrower
-            // under `COLLAPSED`, but starting at the same column either way.
+            // What the chip cell holds at this profile's title width —
+            // IDENTICAL under `COLLAPSED`: D17 holds title at 7, matching
+            // `EXPANDED` (the chip is what a tab is identified by), starting
+            // at the same column either way.
             let chip = clamp("S6-GUT", widths.title);
             for row in [unselected, selected] {
                 let bare =
@@ -700,8 +713,8 @@ mod tests {
     fn min_intact_cols_is_thirteen_plus_title_plus_repo() {
         assert_eq!(Widths::EXPANDED.min_intact_cols(), 13 + 7 + 7);
         assert_eq!(Widths::EXPANDED.min_intact_cols(), 27); // D12, unchanged
-        assert_eq!(Widths::COLLAPSED.min_intact_cols(), 13 + 5 + 3);
-        assert_eq!(Widths::COLLAPSED.min_intact_cols(), 21); // D16
+        assert_eq!(Widths::COLLAPSED.min_intact_cols(), 13 + 7 + 3);
+        assert_eq!(Widths::COLLAPSED.min_intact_cols(), 23); // D17
     }
 
     /// A missing glyph renders a blank cell and does not reflow the row (lock
@@ -805,6 +818,20 @@ mod tests {
         assert_eq!(out, "\u{4f60}\u{597d}\u{4e16}\u{2026} ");
     }
 
+    /// LEDGER D18: the ellipsis is suppressed at 4 cells or fewer, and kept
+    /// above that — both sides of the boundary pinned, not just the collapsed
+    /// `repo = 3` case D17 needed it for. At `w = 4` an ellipsis would spend a
+    /// quarter of the field on a glyph that tells the reader nothing they
+    /// cannot already see; at `w = 5` it still earns its cell.
+    #[test]
+    fn clamp_suppresses_the_ellipsis_at_four_cells_or_fewer() {
+        // 5 characters into 4 cells: hard truncate, no ellipsis.
+        assert_eq!(clamp("clave", 4), "clav");
+        // 6 characters into 5 cells: one cell over the boundary, and the
+        // ellipsis returns.
+        assert_eq!(clamp("clavex", 5), "clav\u{2026}");
+    }
+
     /// Degenerate widths must not panic. Below `min_intact_cols()` the fixed
     /// columns hold and the row is WIDER than the pane (LEDGER D9) — recorded
     /// here so the behaviour is a decision, not a surprise. This is a guard
@@ -894,27 +921,26 @@ mod tests {
         assert_eq!(render_rows(&rows, DESIGN_COLS, Widths::EXPANDED), expected);
     }
 
-    /// The same picture, one layout, the other profile (LEDGER D16): same
-    /// three rows as `golden_bar_at_forty_four_columns`, `Widths::COLLAPSED`
-    /// at `cols = 30` — candidate B of `bar-preview`'s collapsed section.
+    /// The same picture, one layout, the other profile (LEDGER D16, D17):
+    /// same three rows as `golden_bar_at_forty_four_columns`,
+    /// `Widths::COLLAPSED` at `cols = 30` — Ollie's chosen collapsed profile.
     ///
-    /// Column arithmetic, derived (not copied from D16's worked example — see
-    /// below): `13 + title + repo` is the fixed floor (`min_intact_cols_is_…`),
-    /// so at `title = 5, repo = 3` that is `21`, and the flex cell is
-    /// `summary_w = cols - 21 = 30 - 21 = 9`. Laid out: `1 cap + 8 gutter (+1
-    /// gutter space = 9) + 5 title + 1 + 3 repo + 1 + 9 summary + 1 margin + 1
-    /// cap = 30`. Title still starts at column 10 — cols 1–9 are the gutter,
-    /// unchanged from `EXPANDED` (D16's whole point).
+    /// Column arithmetic, derived from D16's formula (`summary = cols - 13 -
+    /// title - repo`), not pasted from whatever the code emits: at `title =
+    /// 7, repo = 3` (D17) that is `summary_w = 30 - 13 - 7 - 3 = 7`. Laid out:
+    /// `1 cap + 8 gutter (+1 gutter space = 9) + 7 title + 1 + 3 repo + 1 + 7
+    /// summary + 1 margin + 1 cap = 30`. Title still starts at column 10 —
+    /// cols 1–9 are the gutter, unchanged from `EXPANDED` (D16's whole
+    /// point), and title HOLDS at 7 rather than shrinking (D17), so the chip
+    /// itself is byte-identical to the `EXPANDED` golden's `S6-GUT ` before
+    /// hitting the repo column.
     ///
-    /// D16's own inline example ("`collapsed 26 = 1 cap + 8 gutter + 5 title +
-    /// 1 + 3 repo + 1 + 6 summary + 1 margin + 1 cap`") sums its own terms to
-    /// **27, not 26** — `1+8+5+1+3+1+6+1+1 = 27`. Its "Open" note repeats the
-    /// same off-by-one ("26 \u{2192} 6 summary chars", "28 \u{2192} 8 chars");
-    /// the arithmetic that actually closes is `summary = cols - 13 - title -
-    /// repo`, giving `26 \u{2192} 5` and `28 \u{2192} 7`. Flagged for the
-    /// ledger rather than silently fixed there — this test uses the closing
-    /// arithmetic, at `cols = 30` specifically so it does not lean on the
-    /// disputed number at all.
+    /// `repo = 3` is the case D18 exists for: `clamp` at 4 cells or fewer
+    /// drops the ellipsis, so `"clave"` truncates to `"cla"`, not `"cl\u{2026}"` —
+    /// spending one of three cells on a glyph that tells the reader nothing
+    /// would have defeated the entire reason 3 was chosen. `summary = 7` is
+    /// above the D18 threshold, so it keeps its ellipsis exactly as `title`
+    /// and `repo` do at `EXPANDED`'s wider columns.
     #[test]
     fn golden_bar_collapsed_at_thirty_columns() {
         let rows = vec![
@@ -941,8 +967,8 @@ mod tests {
             },
         ];
         let expected = [
-            " \u{1b}[38;2;179;86;98m\u{25cf} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;180;154;109m\u{f007c}         \u{1b}[38;2;102;125;172mcl\u{2026} \u{1b}[38;2;173;169;150mI just p\u{2026} \u{1b}[0m ",
-            "\u{1b}[38;2;45;79;103m\u{e0b6}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m\u{1b}[38;2;255;158;59m\u{25cf}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;220;215;186m\u{2502}\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;230;195;132m\u{f007c}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;126;156;216m\u{168c2}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;122;168;159m\u{1b}[38;2;22;22;29mS6-G\u{2026}\u{1b}[0m\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;126;156;216mcl\u{2026}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m picking \u{2026}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[0m\u{1b}[38;2;45;79;103m\u{e0b4}\u{1b}[0m",
+            " \u{1b}[38;2;179;86;98m\u{25cf} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;180;154;109m\u{f007c}           \u{1b}[38;2;102;125;172mcla \u{1b}[38;2;173;169;150mI just\u{2026} \u{1b}[0m ",
+            "\u{1b}[38;2;45;79;103m\u{e0b6}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m\u{1b}[38;2;255;158;59m\u{25cf}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;220;215;186m\u{2502}\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;230;195;132m\u{f007c}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;126;156;216m\u{168c2}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;122;168;159m\u{1b}[38;2;22;22;29mS6-GUT \u{1b}[0m\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;126;156;216mcla\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m pickin\u{2026}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[0m\u{1b}[38;2;45;79;103m\u{e0b4}\u{1b}[0m",
             "   \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;71;71;92m\u{f018d}   \u{1b}[38;2;92;101;103mTab #16             \u{1b}[0m ",
         ];
         assert_eq!(render_rows(&rows, 30, Widths::COLLAPSED), expected);
@@ -950,14 +976,15 @@ mod tests {
             assert_eq!(display_cells(&strip_sgr(line)), 30);
         }
         // Title still starts at column 10 (cell index GUTTER_W = 9) — the
-        // gutter did not move, only the profile narrowed the fields after it.
+        // gutter did not move, and D17 holds title at 7, so the chip itself
+        // is untouched by the profile; only repo and summary narrowed.
         assert_eq!(
             cell_slice(
                 &strip_sgr(expected[1]),
                 GUTTER_W,
                 GUTTER_W + Widths::COLLAPSED.title
             ),
-            "S6-G\u{2026}"
+            "S6-GUT "
         );
     }
 
