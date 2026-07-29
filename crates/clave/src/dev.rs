@@ -376,18 +376,7 @@ pub fn run_scenario(name: &str) -> Result<()> {
         )?;
         let cwd = if a.worktree {
             let wt = repo.join(".claude-worktrees").join(uuid_tag(&uuid));
-            run_in(
-                &repo,
-                "git",
-                &[
-                    "worktree",
-                    "add",
-                    "-q",
-                    "-b",
-                    &format!("clave/{}", uuid_tag(&uuid)),
-                    wt.to_str().context("wt")?,
-                ],
-            )?;
+            ensure_worktree(&repo, &wt, &format!("clave/{}", uuid_tag(&uuid)))?;
             wt
         } else {
             repo.clone()
@@ -547,6 +536,56 @@ pub fn run_reset() -> Result<()> {
         projects.display()
     );
     Ok(())
+}
+
+/// `git worktree add`, made RE-RUNNABLE. `run_scenario` is deliberately
+/// re-runnable without a `dev reset` — its `seed_needed` branch prints "already
+/// seeded — reusing its transcript" — and until #86 that held for worktree
+/// agents only by accident: a stale fixture used to be a plain checkout, so
+/// `delete_cwd_after`'s `remove_dir_all(&cwd)` took the WHOLE `repos/<dir>` tree
+/// with it and the next run rebuilt from nothing.
+///
+/// `ux-gate1` is the first scenario that breaks that. Its `vanished` agent
+/// SHARES `repo: Some("clave")` with `cold`/`gate`, so deleting its cwd removes
+/// only `.claude-worktrees/<tag>` while `repos/clave/.git` survives — including
+/// the branch AND the now-dangling worktree registration. A second
+/// `clave dev ux-gate1` then died at `git worktree add -b clave/<tag>` with "a
+/// branch named … already exists"; `gate`, whose worktree dir is simply still
+/// there, failed the same way one line earlier.
+///
+/// Idempotent in three steps: prune the registrations whose directory is gone,
+/// leave an existing worktree dir alone, and CHECK OUT a surviving branch
+/// instead of asking git to create it again.
+fn ensure_worktree(repo: &Path, wt: &Path, branch: &str) -> Result<()> {
+    // Drops the registration `remove_dir_all` orphaned; a no-op otherwise.
+    run_in(repo, "git", &["worktree", "prune"])?;
+    if wt.exists() {
+        return Ok(()); // registered and on disk — already the goal state
+    }
+    let wt_str = wt.to_str().context("worktree path is not UTF-8")?;
+    // `.output()`, not `.status()`: --quiet silences the ERROR, not the sha
+    // this prints on success, and the seeding console is read by a human.
+    let exists = Command::new("git")
+        .current_dir(repo)
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ])
+        .output()
+        .with_context(|| format!("git rev-parse in {}", repo.display()))?
+        .status
+        .success();
+    if exists {
+        run_in(repo, "git", &["worktree", "add", "-q", wt_str, branch])
+    } else {
+        run_in(
+            repo,
+            "git",
+            &["worktree", "add", "-q", "-b", branch, wt_str],
+        )
+    }
 }
 
 fn run_in(dir: &Path, cmd: &str, args: &[&str]) -> Result<()> {
@@ -909,6 +948,49 @@ mod tests {
         assert_ne!(uuid_tag(&scenario_uuid(1)), uuid_tag(&scenario_uuid(2)));
         assert_eq!(uuid_tag(&scenario_uuid(1)), "00000001");
         assert_eq!(uuid_tag(&scenario_uuid(2)), "00000002");
+    }
+
+    #[test]
+    fn ensure_worktree_is_re_runnable_over_a_shared_repo() {
+        // Review finding #86, reproduced against real git. `run_scenario` is
+        // designed to be re-run WITHOUT a `dev reset` — its `seed_needed`
+        // branch says so in as many words — and `ux-gate1` is the first
+        // scenario for which that was false: two worktree agents share one
+        // repo, so the stale fixture's `remove_dir_all(&cwd)` takes only
+        // `.claude-worktrees/<tag>` and leaves `.git` — branch, worktree
+        // registration and all. Both of the shapes below made a bare
+        // `git worktree add -b` fail closed with "a branch named … already
+        // exists"; this test runs the whole thing THREE times.
+        //
+        // Shells out to real git deliberately: the bug lives entirely in git's
+        // semantics, so a mocked one would have agreed with the broken code.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repos").join("clave");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_in(&repo, "git", &["init", "-q", "-b", "main"]).unwrap();
+        run_in(
+            &repo,
+            "git",
+            &["commit", "--allow-empty", "-q", "-m", "seed"],
+        )
+        .unwrap();
+        // Two worktree agents in ONE repo, exactly `gate` and `vanished`.
+        let gate = repo.join(".claude-worktrees").join("00000002");
+        let vanished = repo.join(".claude-worktrees").join("00000007");
+        for run in 1..=3 {
+            ensure_worktree(&repo, &gate, "clave/00000002")
+                .unwrap_or_else(|e| panic!("run {run}: gate: {e:#}"));
+            ensure_worktree(&repo, &vanished, "clave/00000007")
+                .unwrap_or_else(|e| panic!("run {run}: vanished: {e:#}"));
+            assert!(gate.is_dir(), "run {run}: gate's worktree is missing");
+            assert!(
+                vanished.is_dir(),
+                "run {run}: vanished's worktree is missing"
+            );
+            // The §6.3 staleness fixture, applied to the SAME repo the live
+            // agents share — the whole reason the branch outlives its dir.
+            std::fs::remove_dir_all(&vanished).unwrap();
+        }
     }
 
     #[test]
