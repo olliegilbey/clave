@@ -131,6 +131,120 @@ this workstream exists to stop. `cargo run -p clave-bar --example bar-preview`
 replaces it, and the Python's captured output is the byte-exact acceptance test
 for the port.
 
+### D12 — Collapsed is a different LAYOUT, not a narrower `cols` (2026-07-29)
+
+Discovered by task 1, and it settles half of lock §3's open question with
+arithmetic instead of taste.
+
+An agent row's fixed cells sum to **27** before the summary gets a single
+column: `9 gutter + 7 title + 1 + 7 repo + 1 + 1 margin + 1 cap`. So D9's fixed
+columns cannot render an agent row below 27 cells — `MIN_INTACT_COLS`. But the
+separation invariant `BAR_TARGET_COLS − COLLAPSED_TARGET_COLS > MAX_LEARNABLE_STEP (20)`
+puts the collapsed target **below 24** once expanded is 44. Both cannot hold.
+
+Therefore collapsed cannot be this layout squeezed; it is **a second layout**,
+and lock §3's "field 0 only (title, falling back to repo)" is the shape it
+wants. Terminal rows already diverge here — they shrink freely, down to 11 cells
+at `cols == 0`, because they have one flexible text field and no fixed columns.
+
+**Consequence for S8 (#63), and it is not cosmetic.** The width seek moves
+through intermediate widths on its way down, so every collapse transits the
+band below 27. Without a collapsed layout, agent rows over-run the pane for the
+duration of the animation on every single toggle. The collapsed layout is
+therefore a *correctness* requirement of the seek, not deferred polish — which
+is the opposite of how §3 currently reads.
+
+Review sharpened this further: below the floor the failure was not a uniform
+over-run but a **ragged one** — agent rows sat at 27 cells while terminal rows
+sat at exactly `cols`, so the two kinds disagreed with *each other*. That is the
+alignment loss §2.1 exists to forbid, arriving by the back door. D13 makes the
+transient coherent; it does not remove the need for the collapsed layout.
+
+### D13 — Below the floor, every row kind reports the same width (2026-07-29)
+
+A terminal row has one flexible text field and no fixed columns, so it can
+shrink to 11 cells while an agent row cannot go below 27. Left alone, the band
+`11 <= cols < 27` renders a bar whose rows are different widths.
+
+Uniform over-run is strictly better than ragged: consistent clipping keeps the
+columns that *are* visible aligned, which is what §2.1 is protecting. So a
+terminal row floors at `MIN_INTACT_COLS` too. This is a stopgap that makes a
+transient state coherent — **not** a substitute for D12's collapsed layout.
+
+### D14 — The renderer sanitises control characters itself (2026-07-29)
+
+`unicode-width` reports 0 cells for C0/C1 controls, so a `summary` containing
+`\n` or `\u{1b}` would break the row while still satisfying the every-row-is-
+`cols`-cells test. Summaries are **agent-authored data arriving through hooks**,
+so this is reachable input, not a hypothetical.
+
+The obvious home is the wiring boundary. It goes in `render.rs` instead, on the
+principle that **`render.rs` is what guarantees the width invariant, and a
+guarantee that holds only if someone else sanitises first is not a guarantee.**
+Deliberately minimal — this defends one stated invariant, it is not general
+input sanitisation.
+
+### D15 — The separation invariant is `> 10`, not `> 20`. The lock overstates it (2026-07-29)
+
+**This is the finding that unblocks collapsed, and it was hiding in a
+restatement.**
+
+Design-lock §3 gives the constraint as
+`BAR_TARGET_COLS − COLLAPSED_TARGET_COLS > MAX_LEARNABLE_STEP (20)`, and
+concludes that at 44 the collapsed target must be `< 24`. At 24 the gutter (9)
+plus structure (4) leaves 11 columns for title, repo *and* summary — which is
+why collapsed looked impossible.
+
+Read the code and S8 together and the 20 evaporates. `width_seek`
+(`model.rs:1032`) accepts when `2 * |cols − target| <= step`, and `seek_step` is
+capped at `MAX_LEARNABLE_STEP`, so **the widest acceptance half-band is 10**.
+S8 derives exactly this itself (`…-S8-sidebar-width.md:95`, `:667-672`:
+*"caps the band half-width at 10"*) and then asserts `> 20` anyway — a free 2×
+safety margin at the time, because `38 − 4 = 34` cleared it effortlessly.
+
+So `> 20` is a **chosen margin that was free, not a physical bound.** The real
+requirement is that neither target's *value* fall inside the other's band:
+separation `> 10`. At 44 the margin stopped being free, and it was inherited as
+though it were the constraint.
+
+**Ruling: the bound is `> 10`.** Collapsed may be anything under 34. When S8 is
+implemented the assertion gets relaxed with this derivation in a comment; until
+then, do not design against 24.
+
+**Generalise this.** It is the same class as the circular S4/S6 hand-off: a
+document restated another document's derived number as a requirement, both were
+locally reasonable, and only reading the code and both specs at once shows the
+gap. Trust a derivation over a restatement — and check which one you are holding.
+
+### D16 — Collapsed is a WIDTH PROFILE, not a second layout (2026-07-29)
+
+Supersedes D12's conclusion, keeps its arithmetic. Ollie's directive: the gutter
+stays identical, each text section shows fewer characters, repo drops to three
+(`cla`, `nal` — collisions are rare, and the repo *ink* still disambiguates),
+title keeps a few more than repo because it matters more, and **summary runs to
+the cutoff in both states**.
+
+That is one layout parameterised by `(title_w, repo_w)`, with summary flexing:
+
+```
+expanded  44 = 1 cap + 8 gutter + 7 title + 1 + 7 repo + 1 + 17 summary + 1 margin + 1 cap
+collapsed 26 = 1 cap + 8 gutter + 5 title + 1 + 3 repo + 1 +  6 summary + 1 margin + 1 cap
+```
+
+Not a separate code path — the same `render_rows` with a different profile.
+
+**The consequence that matters, and it was not the goal:** the profile is chosen
+by **state**, not by current width. So while the seek animates 44 → 26 the rows
+are *already* on the collapsed profile and the summary simply grows shorter.
+**Nothing ever over-runs**, and the mid-collapse raggedness D12 and D13 were
+built to contain cannot arise. D13 survives only as a guard against pathological
+widths, not as something a user would ever see.
+
+Open: the exact collapsed target (26 → 6 summary chars, separation 18; 28 → 8
+chars, separation 16 — both clear D15's bound of 10 comfortably) and whether
+title shrinks to 5 or holds at 7 so the chip never reflows between states.
+**To be settled by looking, not by arguing.**
+
 ## Known-stale spec content — recognise, do not fix
 
 Catalogued deliberately. If one blocks a task, override it in the brief.
@@ -149,11 +263,11 @@ Catalogued deliberately. If one blocks a task, override it in the brief.
 
 ## Open items
 
-- **Collapsed geometry is NOT ratified** (lock §3). Constraint: with 44
-  expanded, the collapsed target must be **< 24** for the separation invariant
-  `BAR_TARGET_COLS − COLLAPSED_TARGET_COLS > MAX_LEARNABLE_STEP (20)`. Also
-  unresolved: truncate the whole label vs render field 0 only (title, falling
-  back to repo) — field-0-only read better. **Deferred until expanded is real.**
+- **Collapsed geometry** — no longer blocked. Lock §3's `< 24` rested on a
+  restatement that D15 refutes; the bound is `< 34`. The shape is D16's width
+  profile. What remains is picking two numbers by looking at them. Lock §3's
+  other open question — truncate the whole label vs render field 0 only — is
+  **moot**: the profile keeps all three fields, just narrower.
 - ~~**`spawn_mode` orphans relocated sessions**~~ — **investigated 2026-07-29,
   closed without filing. Do not re-investigate.** The handoff carried this as a
   probable silent-data-loss bug. It is mostly not one, and the correction is
@@ -192,4 +306,6 @@ Catalogued deliberately. If one blocks a task, override it in the brief.
 
 | Task | Status | Commits | Notes |
 |---|---|---|---|
-| 1 — the pure 44-column renderer | done, gates green | `8fb4aca`, `b4dc411` | `render.rs` + 11 tests; `bar-preview` is a Rust example driven by `render_rows`, byte-identical to the Python it deletes. Not wired — `main.rs`/`model.rs` untouched (task 2). |
+| 1 — the pure 44-column renderer | **complete** | `8fb4aca`..`ca884d1` | `render.rs` + 17 tests; `bar-preview` is a Rust example driven by `render_rows`, byte-identical to the Python it deletes. Reviewed; one fix round (2 Important + 7 Minor), each fix mutation-checked. 236 tests. Not wired — `main.rs`/`model.rs` untouched. |
+| 1.5 — the collapsed width profile (D16) | next | — | Render candidates for Ollie to choose the two open numbers by looking. |
+| 2 — wire `model.rs` and `main.rs` to `render_rows` | not started | — | `BAR_TARGET_COLS` 30 → 44 lands here, and `rows()` starts projecting `title`/`summary`/`worktree` from `&Agent`. **Gate 1** follows. |
