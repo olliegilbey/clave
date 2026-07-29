@@ -781,27 +781,71 @@ mod tests {
         let snapshot = crate::store::snapshot_from(&store);
         let mut model = BarModel::default();
         model.apply_snapshot(snapshot);
+        // ONE tab is focused. A fleet with nothing selected renders no
+        // selected-row caps, no waveBlue2 background and — because recession is
+        // RELATIVE (lock §6) — no 25% fade on anybody: three quarters of the
+        // design would go unexercised against real scenario data, which is the
+        // half of the review this test exists to stand in for.
         model.apply_tabs(
             (0..sc.agents.len())
                 .map(|i| TabMeta {
                     tab_id: i,
                     position: i,
                     name: format!("tab-{i}"),
-                    active: false,
+                    active: i == 0,
                 })
                 .collect(),
         );
 
         let rows: Vec<_> = model.rows().into_iter().map(|(_, row)| row).collect();
         assert_eq!(rows.len(), sc.agents.len());
+        assert_eq!(
+            rows.iter().filter(|r| r.selected).count(),
+            1,
+            "exactly one row must carry the selection"
+        );
 
         // Design-lock invariant, proven rather than asserted in prose: every
         // row is exactly DESIGN_COLS display cells (bar-preview.rs does the
-        // same measurement).
+        // same measurement) — INCLUDING the selected row, whose caps and
+        // full-width background are the easiest thing to render one cell wide.
         let lines = render_rows(&rows, DESIGN_COLS, Widths::EXPANDED);
         for (line, row) in lines.iter().zip(&rows) {
             let width = display_cells(&strip_sgr(line));
             assert_eq!(width, DESIGN_COLS, "row is {width} cells: {row:?}");
+        }
+        // The selected row is the only one with the waveBlue2 background, and
+        // every other row is faded 25% toward it (lock §6) — the two halves of
+        // recession, checked against scenario data rather than a fixture.
+        let (sel, rest): (Vec<_>, Vec<_>) = lines.iter().zip(&rows).partition(|(_, r)| r.selected);
+        assert!(
+            sel[0].0.contains("48;2;45;79;103"),
+            "no selected background"
+        );
+        for (line, _) in &rest {
+            assert!(
+                !line.contains("48;2;45;79;103"),
+                "an unselected row carries the selection background"
+            );
+        }
+        // And the fade is real, not just claimed: the same rows with nothing
+        // selected render at full strength, so every unselected line must
+        // differ from its faded self. `mix` rounds ties to even (a ported
+        // Python detail) — a fade that silently stopped applying would leave
+        // these byte-identical.
+        let unfaded: Vec<_> = rows
+            .iter()
+            .cloned()
+            .map(|mut r| {
+                r.selected = false;
+                r
+            })
+            .collect();
+        for (faded, plain) in lines
+            .iter()
+            .zip(render_rows(&unfaded, DESIGN_COLS, Widths::EXPANDED))
+        {
+            assert_ne!(*faded, plain, "recession did not change this row");
         }
 
         let agent_field = |row: &clave_bar::render::Row| match &row.content {

@@ -935,6 +935,42 @@ mod tests {
             "   \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;71;71;92m\u{f018d}   \u{1b}[38;2;92;101;103mTab #16                           \u{1b}[0m ",
         ];
         assert_eq!(render_rows(&rows, DESIGN_COLS, Widths::EXPANDED), expected);
+        // The same derived self-checks the COLLAPSED golden carries. A golden
+        // is only as good as its regeneration ritual, and this is the more
+        // load-bearing of the two — everything in the design was chosen at 44.
+        // These re-derive the column map from `Widths::EXPANDED` rather than
+        // reading it off the string above, so a golden regenerated from a
+        // renderer that moved a column fails HERE, in arithmetic traceable to
+        // lock §2, instead of being accepted as the new picture.
+        for line in &expected {
+            assert_eq!(display_cells(&strip_sgr(line)), DESIGN_COLS);
+        }
+        let w = Widths::EXPANDED;
+        let title = |line: &str| cell_slice(&strip_sgr(line), GUTTER_W, GUTTER_W + w.title);
+        let repo = |line: &str| {
+            cell_slice(
+                &strip_sgr(line),
+                GUTTER_W + w.title + 1,
+                GUTTER_W + w.title + 1 + w.repo,
+            )
+        };
+        // Row 1 has no title: seven blank cells, and the repo still starts
+        // exactly one space later (an absent chip must not pull the row left).
+        assert_eq!(title(expected[0]), " ".repeat(w.title));
+        assert_eq!(repo(expected[0]), "clave  ");
+        // Row 2's chip is byte-identical to the COLLAPSED golden's — D17 holds
+        // title at 7 in both profiles, so the eye keeps its anchor across a
+        // toggle — and its repo is the full 7-cell `EXPANDED` field.
+        assert_eq!(title(expected[1]), "S6-GUT ");
+        assert_eq!(repo(expected[1]), "clave  ");
+        // Summary runs from after the repo to the right margin: `cols - 13 -
+        // title - repo` = 17 cells (D16's formula), ellipsis included.
+        let summary_start = GUTTER_W + w.title + 1 + w.repo + 1;
+        assert_eq!(
+            cell_slice(&strip_sgr(expected[0]), summary_start, DESIGN_COLS - 2),
+            "I just passed th\u{2026}"
+        );
+        assert_eq!(DESIGN_COLS - 2 - summary_start, 17);
     }
 
     /// The same picture, one layout, the other profile (LEDGER D16, D17):
