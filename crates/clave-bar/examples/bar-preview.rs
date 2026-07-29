@@ -190,30 +190,7 @@ fn main() {
         &format!("expanded \u{2014} {DESIGN_COLS} columns"),
     );
 
-    println!(
-        "
-  {dim}COLUMN MAP
-     1      left cap   \u{2014} powerline half-circle, selected row only
-     2      status     \u{2014} colour IS the state
-     3      space
-     4      rule       \u{2014} U+2502 in fujiWhite, separates status from battery
-     5      space
-     6      battery    \u{2014} context level (S7); console mark on a terminal tab
-     7      space
-     8      provenance \u{2014} tinted with the repo ink; BLANK for a main checkout
-     9      space
-    10-16   title      \u{2014} filled chip, dark text; blank when never renamed
-    17      space
-    18-24   repo       \u{2014} tinted text, one colour per repo forever
-    25      space
-    26-42   summary
-    43      right margin
-    44      right cap  \u{2014} selected row only
-
-  Cap columns are reserved on EVERY row so the selected row does not shift
-  one column right of its neighbours. Verified: title starts at column 10
-  whether or not the row is selected.{RESET}"
-    );
+    column_map();
 
     println!("\n  {BOLD}palette \u{2014} 8 kanagawa hues, round-robin{RESET}\n");
     for (i, (hue, name)) in PALETTE.iter().enumerate() {
@@ -229,6 +206,122 @@ fn main() {
     collapsed();
 }
 
+/// The collapsed target width (LEDGER D17). `model.rs` owns the real
+/// `COLLAPSED_TARGET_COLS` the width seek converges to; this mirrors it until
+/// the wiring task lands, at which point it should import that constant.
+const COLLAPSED_COLS: usize = 30;
+
+/// Where each field starts and ends, for a profile at a given width — the same
+/// arithmetic `render_row` lays the row out with, so the map below cannot
+/// describe a layout the renderer does not produce.
+fn field_spans(w: Widths, cols: usize) -> [(usize, usize); 3] {
+    let title = (10, 9 + w.title);
+    let repo = (title.1 + 2, title.1 + 1 + w.repo);
+    let summary = (repo.1 + 2, cols - 2);
+    [title, repo, summary]
+}
+
+fn span(s: (usize, usize)) -> String {
+    if s.0 == s.1 {
+        format!("{}", s.0)
+    } else {
+        format!("{}-{}", s.0, s.1)
+    }
+}
+
+/// The column map, DERIVED from the `Widths` profiles rather than restated in
+/// prose. Review finding 8 flagged the old hard-coded table as the one part of
+/// this preview that could still silently diverge from the renderer — and it is
+/// the part a reader trusts most. Moving a column now moves these numbers too.
+fn column_map() {
+    let dim = DIM.fg();
+    let (x, c) = (Widths::EXPANDED, Widths::COLLAPSED);
+    let (xs, cs) = (field_spans(x, DESIGN_COLS), field_spans(c, COLLAPSED_COLS));
+
+    println!(
+        "\n  {dim}COLUMN MAP \u{2014} the 9-cell gutter is IDENTICAL in both states (D16);
+  only title, repo and summary move. summary = cols \u{2212} 13 \u{2212} title \u{2212} repo,
+  and it is the ONLY flexible column (D9). Odd cells 3, 5, 7 and 9 are spaces."
+    );
+    println!(
+        "\n  {:<13}{:<11}{:<12}what it carries",
+        "field", "expanded", "collapsed"
+    );
+    for (field, xa, ca, note) in [
+        (
+            "left cap",
+            span((1, 1)),
+            span((1, 1)),
+            "powerline half-circle, selected row only",
+        ),
+        (
+            "status",
+            span((2, 2)),
+            span((2, 2)),
+            "the COLOUR is the state",
+        ),
+        (
+            "rule",
+            span((4, 4)),
+            span((4, 4)),
+            "U+2502 in fujiWhite, splits status from battery",
+        ),
+        (
+            "battery",
+            span((6, 6)),
+            span((6, 6)),
+            "context level (S7); console mark on a terminal tab",
+        ),
+        (
+            "provenance",
+            span((8, 8)),
+            span((8, 8)),
+            "the repo ink; BLANK for a main checkout",
+        ),
+        (
+            "title",
+            span(xs[0]),
+            span(cs[0]),
+            "filled chip, dark text; blank when never renamed",
+        ),
+        (
+            "repo",
+            span(xs[1]),
+            span(cs[1]),
+            "tinted text, one colour per repo forever",
+        ),
+        (
+            "summary",
+            span(xs[2]),
+            span(cs[2]),
+            "flexes; no ellipsis at \u{2264}4 cells (D18)",
+        ),
+        (
+            "right margin",
+            span((DESIGN_COLS - 1, DESIGN_COLS - 1)),
+            span((COLLAPSED_COLS - 1, COLLAPSED_COLS - 1)),
+            "",
+        ),
+        (
+            "right cap",
+            span((DESIGN_COLS, DESIGN_COLS)),
+            span((COLLAPSED_COLS, COLLAPSED_COLS)),
+            "selected row only",
+        ),
+    ] {
+        println!(
+            "{}",
+            format!("  {field:<13}{xa:<11}{ca:<12}{note}").trim_end()
+        );
+    }
+    println!(
+        "
+  Cap columns are reserved on EVERY row so the selected row does not shift one
+  column right of its neighbours. Verified: title starts at column 10 whether
+  or not the row is selected, and in either state.{RESET}"
+    );
+}
+
 /// The chosen collapsed profile (task 1.5 / LEDGER D17), rendered the same
 /// way as the expanded section above it: `bar()` draws the ruler, the framed
 /// box and the per-row width assertion for either profile identically — the
@@ -238,7 +331,7 @@ fn collapsed() {
     let dim = DIM.fg();
 
     let widths = Widths::COLLAPSED;
-    let cols: usize = 30;
+    let cols = COLLAPSED_COLS;
     // Derived, not hard-coded: the same arithmetic `render_row` uses
     // internally once `cols` clears the floor (`13 + title + repo` — LEDGER
     // D12's arithmetic, generalised to a profile by D16), so this number is
