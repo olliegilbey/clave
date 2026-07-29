@@ -155,6 +155,43 @@ const SEEK_BUDGET: u32 = 16;
 /// learning one poisons the acceptance band (step=60 seen live, round 17:
 /// it accepted a 13-col bar as "close enough" to 26).
 const MAX_LEARNABLE_STEP: usize = 20;
+/// The step assumed before a resize's effect has taught us zellij's real
+/// increment: ±4 cols of slack, so a bar born near the target is accepted
+/// rather than nudged into an overshoot dance.
+const PRE_LEARNING_STEP: usize = 8;
+
+/// Is `cols` converged on `target`, given the current `step` and the OTHER
+/// target? Both halves are load-bearing.
+///
+/// 1. **Within half a step.** Zellij resizes in ~5%-of-display-area increments,
+///    so an exact column count is simply not on the lattice (LEDGER D20) — a
+///    band is what lets the seek terminate at all, and `GrowSelf` recovers an
+///    overshoot from the far side.
+/// 2. **Not equally converged on the other target.** The band spans `step`
+///    columns, so the two targets' bands overlap as soon as
+///    `step >= separation` — 14 at 44/30, i.e. a display area of roughly 280
+///    columns, which the maintainer runs. A width in the overlap is converged
+///    for BOTH targets, and `toggle()` deliberately KEEPS the learned step, so
+///    Alt+c emits zero resize effects and the pane silently does not move
+///    (LEDGER D21; reported live as "some blips" at Gate 1). Before this
+///    branch the targets were 30/4 — 26 apart, wider than any learnable step —
+///    so disjointness held by luck of the constants rather than by
+///    construction, and 44/30 lost it with nothing turning red.
+///
+/// Derived from the targets themselves, deliberately **not** from a margin
+/// chosen against today's numbers: whatever the two targets become (D19 moves
+/// the expanded one to 54, where the overlap cannot arise at all), no width is
+/// ever accepted for both. Pinned by `no_width_is_accepted_for_both_targets`.
+///
+/// The cost of condition 2 is paid only inside the overlap, and only on
+/// displays coarse enough to have one: a width the lattice cannot improve on
+/// is refused, so the seek takes one more step, lands outside the overlap and
+/// stops there (the bracket rule in gate (D)). A visibly-collapsed bar a few
+/// columns off target beats a perfectly-parked one that never moved.
+fn converged(cols: usize, target: usize, other: usize, step: i64) -> bool {
+    let near = |t: usize| 2 * (cols as i64 - t as i64).abs() <= step;
+    near(target) && !near(other)
+}
 
 /// Row identity (§6.6 C8): a live zellij tab, or a dormant store row
 /// (conversation with no tab yet — claude.ai-style list).
@@ -1171,18 +1208,20 @@ impl BarModel {
     ///      accepted in place rather than hammered.
     pub fn width_seek(&mut self, own_cols: usize) -> Vec<Effect> {
         // ONE collapse rule, shared with `widths()` — the profile the rows are
-        // drawn at and the width being sought must not drift apart (D16).
-        let target = if self.showing_collapsed() {
-            COLLAPSED_TARGET_COLS
+        // drawn at and the width being sought must not drift apart (D16). The
+        // OTHER target comes along because acceptance is defined against both
+        // (see `converged`), never against ours alone.
+        let (target, other) = if self.showing_collapsed() {
+            (COLLAPSED_TARGET_COLS, BAR_TARGET_COLS)
         } else {
-            BAR_TARGET_COLS
+            (BAR_TARGET_COLS, COLLAPSED_TARGET_COLS)
         };
         // Pre-learning slack of 8 (±4 cols): a bar already within a few
         // cols of the target must be accepted, not nudged into an
         // overshoot dance.
-        let step = self.seek_step.max(8) as i64;
+        let step = self.seek_step.max(PRE_LEARNING_STEP) as i64;
         let diff = own_cols as i64 - target as i64;
-        let within_band = 2 * diff.abs() <= step;
+        let within_band = converged(own_cols, target, other, step);
 
         // (A) We already settled at exactly this width — a no-op render. Only a
         // DIFFERENT width can wake the seek, so a converged or floored bar
@@ -1273,15 +1312,37 @@ impl BarModel {
         self.seek_stalled = false;
 
         // (D) Act. Re-read the step in case (C) just learned it.
-        let step = self.seek_step.max(8) as i64;
-        let action = if 2 * diff > step {
-            Effect::ShrinkSelf
-        } else if -2 * diff > step {
-            Effect::GrowSelf
-        } else {
+        let step = self.seek_step.max(PRE_LEARNING_STEP) as i64;
+        if converged(own_cols, target, other, step) {
             // Converged: settle and stay done at exactly this width.
             self.settle_at(own_cols);
             return Vec::new();
+        }
+        // The lattice can be COARSER than the gap between the two targets, and
+        // then NO reachable width lies in the (disambiguated) band: the step
+        // that leaves the overlap zone necessarily crosses the target, and the
+        // one back crosses it again — an oscillation the budget would spend 16
+        // real resizes on. If ONE OF OUR OWN steps just carried us from the
+        // other side of the target, we have bracketed it as tightly as zellij's
+        // increment allows, so settle here rather than pace. Unreachable while a
+        // step is narrower than the separation (crossing then implies
+        // `2*|diff| < step`, which `converged` above already accepted), so this
+        // fires ONLY in the coarse-lattice corner it exists for.
+        //
+        // The delta bound is the same one the learn arm uses: an EXTERNAL jump
+        // (round 17's 75 → 15) also crosses the target, and settling on one
+        // would park the bar wherever a window resize dropped it.
+        if let Some(prev) = self.seek_last_cols
+            && (prev as i64 - target as i64) * diff < 0
+            && prev.abs_diff(own_cols) <= MAX_LEARNABLE_STEP
+        {
+            self.settle_at(own_cols);
+            return Vec::new();
+        }
+        let action = if diff > 0 {
+            Effect::ShrinkSelf
+        } else {
+            Effect::GrowSelf
         };
         self.seek_budget -= 1;
         self.seek_last_cols = Some(own_cols);
@@ -1881,6 +1942,14 @@ mod tests {
     ///
     /// Pinned here so a future move of either constant fails loudly at the
     /// bound that is actually load-bearing.
+    ///
+    /// **What this proves, exactly:** neither TARGET's own value falls inside
+    /// the other's band. It says nothing about the WIDTHS between them — a
+    /// `w` within half a step of both is accepted for both, which is a
+    /// different (and live) property. That one is
+    /// `no_width_is_accepted_for_both_targets`, below; the two assertions here
+    /// are algebraically the same statement (`2*sep > 20` ⟺ `sep > 10`), so
+    /// only one of them is kept.
     #[test]
     fn the_two_targets_are_separated_by_more_than_the_widest_acceptance_band() {
         let half_band = MAX_LEARNABLE_STEP / 2;
@@ -1891,9 +1960,47 @@ mod tests {
              acceptance band of each other: a collapse would be accepted as \
              an expand"
         );
-        // The bands are also disjoint AT the widest learnable step: neither
-        // target is acceptable while seeking the other.
-        assert!(2 * BAR_TARGET_COLS.abs_diff(COLLAPSED_TARGET_COLS) > MAX_LEARNABLE_STEP);
+    }
+
+    /// LEDGER D21 — the property the test above only LOOKS like it proves, and
+    /// the one Alt+c actually depends on: **no width is accepted for both
+    /// targets.**
+    ///
+    /// `width_seek` settles when `2 * |cols − target| <= step`, a band spanning
+    /// `step` columns, so the two bands overlap the moment `step >= separation`
+    /// (14 at 44/30 — a display area of roughly 280 columns, which the
+    /// maintainer runs). Any width in the overlap is "converged" for BOTH
+    /// targets, and since `toggle()` deliberately keeps the learned step, Alt+c
+    /// then emits ZERO resizes: the pane does not move. On `main` the targets
+    /// were 26 apart and no learnable step could reach that, so this held by
+    /// luck of the constants; 44/30 lost it silently.
+    ///
+    /// Driven through `width_seek` rather than re-derived here: a test that
+    /// restates the predicate can drift from the predicate. A model with a
+    /// fresh budget and no `seek_last_cols` reaches gate (D) directly, so an
+    /// empty effect list IS "this width is accepted for this target".
+    ///
+    /// **This is the test that fails if someone widens the band again.**
+    #[test]
+    fn no_width_is_accepted_for_both_targets() {
+        let quiet_at = |collapsed: bool, step: usize, cols: usize| {
+            let mut m = BarModel {
+                collapsed,
+                seek_step: step,
+                ..BarModel::default()
+            };
+            m.width_seek(cols).is_empty()
+        };
+        for step in 0..=MAX_LEARNABLE_STEP {
+            for cols in 0..=200 {
+                assert!(
+                    !(quiet_at(false, step, cols) && quiet_at(true, step, cols)),
+                    "at a learned step of {step}, {cols} cols is converged for \
+                     BOTH {BAR_TARGET_COLS} and {COLLAPSED_TARGET_COLS}: Alt+c \
+                     emits no resize and the pane does not move"
+                );
+            }
+        }
     }
 
     #[test]
@@ -3455,7 +3562,22 @@ mod tests {
                 } else {
                     BAR_TARGET_COLS
                 };
-                let within = sim.cols.abs_diff(target) <= step.max(8) / 2;
+                // The band is HALF a step — except where the lattice is coarse
+                // enough for the two targets' bands to overlap (an effective
+                // step at or above the 14-column separation, LEDGER D21).
+                // There, `converged` refuses the overlap outright and the
+                // disambiguating step can land up to a FULL step out: a
+                // visibly-collapsed bar a few columns off target, rather than a
+                // perfectly-parked one that never moved. Below that separation
+                // the tight half-band still holds, so this does not blanket the
+                // whole space — it names exactly the steps that pay for D21.
+                let effective = step.max(PRE_LEARNING_STEP);
+                let bound = if effective >= BAR_TARGET_COLS.abs_diff(COLLAPSED_TARGET_COLS) {
+                    effective
+                } else {
+                    effective / 2
+                };
+                let within = sim.cols.abs_diff(target) <= bound;
                 let at_floor = sim.cols == floor;
                 let exhausted = max_seg == SEEK_BUDGET;
                 prop_assert!(
