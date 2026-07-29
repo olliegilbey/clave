@@ -477,6 +477,42 @@ resting-width costs become dead paths:
   ever catch it. Needs a display area around 400 columns; Ollie runs ~280, so it
   is out of reach today. **Not out of reach forever.**
 
+### D30 — `just sandbox` DOES write `~/.claude/settings.json`. Two documents say it does not (2026-07-29)
+
+**Found by the agent writing the live-interaction checklist, which refused to run
+`just sandbox` because its brief forbade writing under `~/.claude/` — and it was
+right to refuse.** The coordinator ran `just sandbox` repeatedly this session on
+the documented belief that it was safe.
+
+`dev scenario` → `run_setup` → `merge_hooks(settings, "clave")`
+(`setup.rs:426-450`) rewrites the **daily fleet's** hook commands in the real
+`~/.claude/settings.json`. Measured after this session's runs: all four hooks now
+read bare `clave` rather than a versioned absolute path.
+
+**Why this is more than untidy.** A bare command is PATH-resolved, and PATH
+resolution in a hook is *"the one leak"* — the hazard `CONTRIBUTING.md` records
+as breaking v0.1.1 in the field (#43/#44). On this machine bare `clave` resolves
+to `~/.cargo/bin/clave` (v0.1.1), and `~/.local/share/clave/bin/clave` — the #43a
+launcher — **does not exist**, so the pre-#43b path is what answers. Nothing is
+visibly broken; the *mechanism* is the one the release model exists to remove.
+
+**Two documents assert the opposite** and both must be corrected:
+`scripts/sandbox-setup.sh`'s header and `docs/dev/TESTING.md`'s lifecycle
+section. The script's own self-check greps `~/.cargo/bin/clave`,
+`~/.local/share/clave` and the launcher — and passes — because
+`~/.claude/settings.json` **is not among the surfaces it guards.** A safety check
+that omits a surface reads as proof that surface is safe.
+
+**Do not fix this by hand.** `just release` regenerates hooks with versioned
+paths, and a release is imminent (D28). But it must be **verified after the
+cut**, not assumed: `jq` the hook commands and confirm they are absolute.
+
+**And the standing instruction was right all along** — `~/.claude` is
+Claude's, not ours. That rule existed; the tooling violated it and the docs
+covered for it. **Ollie should decide whether `just sandbox` should touch it at
+all**, or whether the sandbox needs its own `CLAUDE_CONFIG_DIR` for hooks the way
+it already has one for state and data.
+
 ### D29 — The S-specs get SALVAGED and DELETED, not updated (2026-07-29)
 
 > **NOT YET IMPLEMENTED**, by design. Banners land now (see below); the salvage
@@ -582,6 +618,16 @@ What the fixes should be, in leverage order:
 1. **`cargo-mutants` on changed files.** The only mechanical catcher of 1–4. It
    was used by hand three times this session and found something every time,
    including proving that one test was the *sole* guard against a reversion.
+
+   **Landed as `just mutants` / `just mutants-file`, and DELIBERATELY NOT in
+   `just gates`.** This entry originally said "as a gate", which CodeRabbit
+   correctly flagged as prescribing a workflow the implementation then rejected.
+   The reasoning for rejecting it is better than the original wording: gates run
+   on every PR and must stay fast, a full run over `model.rs` is enormous, and
+   **a gate nobody can afford to run is a gate nobody runs.** Which change
+   classes owe a run lives in `docs/dev/TESTING.md`'s risk taxonomy instead —
+   deliberate act, not a checkbox. First real run: 81 mutants on `render.rs`,
+   two survivors in `Rgb::hex`.
 2. **Fixtures captured from reality, with a liveness assertion** — a test that
    fails when the shape we parse appears in **zero** real transcripts would have
    caught shape 5 the day it went extinct, rather than months later by accident.
