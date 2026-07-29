@@ -69,16 +69,17 @@ pub struct AgentRecord {
     pub stale: bool,
     /// Claude's session rename, from the transcript's `custom-title` line.
     /// Store-side home for the wire field of the same name (#69). Written by
-    /// S4 (#59); nothing populates it yet, so it stays None. `default` keeps
-    /// pre-field store files loading — a missing key is a whole-store parse
-    /// failure, not a blank field.
+    /// `hook::refresh_row_fields`, held last-non-empty — `None` means the
+    /// session was never renamed, which is most rows, and the design renders
+    /// that as a blank chip. `default` keeps pre-field store files loading —
+    /// a missing key is a whole-store parse failure, not a blank field.
     #[serde(default)]
     pub title: Option<String>,
     /// The words segment, held structurally rather than only inside `label`
     /// (design-lock §7.1). Seeded once from existing labels by
-    /// `backfill_summaries`; thereafter written by S4 (#59) from `ai-title`,
-    /// the `type:"summary"` tier being extinct (#79). `default` keeps
-    /// pre-field store files loading.
+    /// `backfill_summaries`; thereafter written by `hook::refresh_row_fields`
+    /// from `ai-title`, the `type:"summary"` tier being extinct (#79).
+    /// `default` keeps pre-field store files loading.
     #[serde(default)]
     pub summary: String,
 }
@@ -364,10 +365,11 @@ pub fn apply_open_result(
 /// — after one pass nothing matches again. Same shape as S1 §3.6's
 /// `commit_ord` backfill.
 ///
-/// WHY it is needed at all, given S4 (#59) will keep summaries live:
-/// `refresh_label` returns early forever once `label_source == Summary`
-/// (`hook.rs:155`), and dormant rows receive no hook events by definition —
-/// so without this they render a blank 17-column field indefinitely.
+/// WHY it is needed at all, now that `refresh_row_fields` keeps summaries live
+/// (`hook.rs`): DORMANT rows receive no hook events by definition — no claude
+/// process, no transcript being written — so without this they render a blank
+/// summary field indefinitely. (The other half of the original rationale, the
+/// §6.4 freeze, no longer applies: the summary write is decoupled from it.)
 ///
 /// Returns whether anything changed, so the caller can gate its `seq` bump:
 /// §5 forbids no-op pushes.
