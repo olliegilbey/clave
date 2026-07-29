@@ -19,7 +19,7 @@ Governing document for anything visual:
 `docs/superpowers/specs/2026-07-25-sidebar-visual-design-lock.md`. Where it and
 an S-spec disagree, the lock wins, silently, with no amendment round.
 
-Runnable target render: `python3 docs/superpowers/specs/bar-preview.py`.
+Runnable target render: `cargo run -p clave-bar --example bar-preview`.
 
 ## State
 
@@ -99,6 +99,38 @@ layout is exactly lock §2. Away from 44, cells 1–25 and the caps hold their
 widths and `summary` absorbs the difference, floored at 0. S6 §2.10's `cols - 7`
 text budget is superseded and is not to be adopted.
 
+### D10 — The bar owns its status palette; `Status::glyph()` is untouched (2026-07-29)
+
+`clave-types`' `Status::glyph()` returns `(char, u8)` with ANSI colours and is
+consumed by the host CLI. The bar needs 24-bit hues (D8) and needs three row
+states that are not `Status` variants at all — `Dormant`, `Opening` and the
+`stale` flag, which the renderer already distinguishes today. So the mapping
+lives in `render.rs`, and `Status::glyph()` keeps its current contract.
+
+| row state | glyph | colour |
+|---|---|---|
+| `NeedsYou` | `\u{25cf}` | `#E46876` waveRed |
+| `Working` | `\u{25cf}` | `#FF9E3B` roninYellow |
+| `Done` | `\u{25cf}` | `#98BB6C` springGreen |
+| `Idle` | `\u{25cf}` | `#54546D` sumiInk4 |
+| `Failed` | `\u{2716}` | `#E82424` samuraiRed |
+| `Dormant` | `\u{25cc}` | `#54546D` sumiInk4 |
+| `Opening` | `\u{21bb}` | `#E6C384` carpYellow |
+| `Stale` | `\u{2717}` | `#E82424` samuraiRed |
+
+`Failed` is U+2716 **heavy** multiplication x; the `stale` flag is U+2717. They
+are different glyphs for different things (lock §5) and are easy to transpose.
+
+### D11 — `bar-preview.py` becomes a Rust example and is deleted (2026-07-29)
+
+The Python's own header already asked for this: it *"duplicates geometry that
+`compose_row` will own … it should become a Rust example driven by the real
+constants, so a code change that moves a column breaks the preview instead of
+silently diverging from it."* Two renders of the same design is the divergence
+this workstream exists to stop. `cargo run -p clave-bar --example bar-preview`
+replaces it, and the Python's captured output is the byte-exact acceptance test
+for the port.
+
 ## Known-stale spec content — recognise, do not fix
 
 Catalogued deliberately. If one blocks a task, override it in the brief.
@@ -122,10 +154,35 @@ Catalogued deliberately. If one blocks a task, override it in the brief.
   `BAR_TARGET_COLS − COLLAPSED_TARGET_COLS > MAX_LEARNABLE_STEP (20)`. Also
   unresolved: truncate the whole label vs render field 0 only (title, falling
   back to repo) — field-0-only read better. **Deferred until expanded is real.**
-- **`spawn_mode` orphans relocated sessions** — it derives the transcript path
-  from the frozen `rec.cwd`, so a relocated session resumes as a *new* one and
-  silently loses history. Needs filing as an issue.
-- **Issue #63 says "30 → 38 columns"** against D2's 44. Needs amending.
+- ~~**`spawn_mode` orphans relocated sessions**~~ — **investigated 2026-07-29,
+  closed without filing. Do not re-investigate.** The handoff carried this as a
+  probable silent-data-loss bug. It is mostly not one, and the correction is
+  worth more than the original claim.
+
+  The common case is **already handled and loud**: `open.rs:88` and
+  `setup.rs:577` both pre-filter on `Path::is_dir()`, so a moved or deleted cwd
+  yields `OpenDecision::Stale` and a `\u{2717}` row rather than reaching
+  `clave spawn`; if it does reach it, `canonicalize` at `main.rs:221` fails and
+  the pane errors visibly. That is issue **#15**, which calls it correct.
+
+  What is genuinely real is narrower: `spawn_mode` checks the frozen cwd for
+  **existence, never for identity**. Delete the directory at the frozen path and
+  replace it with a *symlink to a different target at the same path*, and every
+  guard passes — `is_dir()` follows symlinks — while `canonicalize` now resolves
+  elsewhere, so the jsonl lookup misses and the session silently starts fresh.
+  Contrived enough that it is not worth an issue on its own; recorded here so it
+  is recognised if a future change widens the trigger.
+
+  Two things learned that outlive the bug: `munge_cwd` (`munge.rs:20-24`) is
+  **not injective** (`/a/b/c` and `/a-b-c` both give `-a-b-c`), which is
+  harmless only because the uuid filename disambiguates — and it is not ours to
+  fix anyway, since it must mirror Claude Code's own munging. And the general
+  invariant worth holding: **clave verifies a cwd exists, never that it is the
+  same place.** Cheap to violate more seriously than this.
+- ~~**Issue #63 says "30 → 38 columns"**~~ — amended 2026-07-29 to 44, with a
+  superseded banner. Its three findings were *measured at 38*; they are kept for
+  their reasoning and explicitly flagged as needing re-measurement, because the
+  expected-red-set finding is arithmetic in the target and does not transfer.
 - **Repo/title ink allocation** is store-backed iterate-and-wrap, not hashed
   (lock §4). That is cross-process state and owes an ordering/idempotency
   argument. Not yet built — the renderer takes inks as input.

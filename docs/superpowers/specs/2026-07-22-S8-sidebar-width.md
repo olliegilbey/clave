@@ -5,7 +5,7 @@
 > The maintainer ratified the sidebar's visual design from rendered rows on
 > 2026-07-25. **Read
 > [`2026-07-25-sidebar-visual-design-lock.md`](2026-07-25-sidebar-visual-design-lock.md)
-> before this file**, and run `python3 docs/superpowers/specs/bar-preview.py`.
+> before this file**, and run `cargo run -p clave-bar --example bar-preview`.
 >
 > What changed for S8 specifically:
 > - **`BAR_TARGET_COLS = 44`**, not 38. Every "38" below is dead. Re-derive the

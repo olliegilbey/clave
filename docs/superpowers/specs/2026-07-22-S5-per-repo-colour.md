@@ -7,7 +7,7 @@
 > to reconcile. Read
 > [`2026-07-25-sidebar-visual-design-lock.md`](2026-07-25-sidebar-visual-design-lock.md)
 > first anyway — it owns the geometry this spec paints into — and run
-> `python3 docs/superpowers/specs/bar-preview.py`.
+> `cargo run -p clave-bar --example bar-preview`.
 >
 > 1. **Design lock (2026-07-25), §4 · §2 · §7.1 · §9 item 3.** The palette is
 >    **8 kanagawa hues, not 12**; the title channel is a **filled chip**, not
@@ -1572,7 +1572,7 @@ The design lock's own preview is the better first look — it renders the whole
 44-column design, chips included:
 
 ```bash
-python3 docs/superpowers/specs/bar-preview.py
+cargo run -p clave-bar --example bar-preview
 ```
 
 This step then isolates the palette from the layout, and adds the question the

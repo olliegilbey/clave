@@ -5,7 +5,7 @@ prose. Supersedes the geometry in `2026-07-22-S6-gutter-glyphs.md` and
 `2026-07-22-S8-sidebar-width.md`; both must be revised against this file before
 their worktrees start._
 
-Run the design: `python3 docs/superpowers/specs/bar-preview.py`
+Run the design: `cargo run -p clave-bar --example bar-preview`
 
 **Vocabulary:** every term used here — *gutter, cell, rule, cap, provenance,
 ink, chip, tint, fade, title vs label, live vs dormant row* — is defined in
@@ -13,7 +13,9 @@ ink, chip, tint, fade, title vs label, live vs dormant row* — is defined in
 any word below is doing more work than you expect.
 
 **Source-of-truth hierarchy — one rule, no ambiguity.** *This document is
-authoritative* for every ruling, number and rationale. `bar-preview.py` is an
+authoritative* for every ruling, number and rationale. The `bar-preview` example
+(`crates/clave-bar/examples/bar-preview.rs`, formerly `bar-preview.py` in this
+directory) is an
 **illustration**: it shows what the rulings look like, and it self-checks that
 every row is exactly 44 display cells, but where the two ever disagree **this
 file wins and the script is the bug**. Every number below was chosen against

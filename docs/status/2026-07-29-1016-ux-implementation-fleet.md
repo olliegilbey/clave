@@ -69,15 +69,20 @@ Concretely:
   `44 = 1 cap + 8 gutter + 7 title + 1 + 7 repo + 1 + 17 summary + 1 margin + 1 cap`.
   Also **§5.4** (glyph escape rule, load-bearing) and **§7.1** (renders from the
   STORE, not the tab name).
-- **`docs/superpowers/specs/bar-preview.py` — RUN THIS FIRST. It is a live
+- **`crates/clave-bar/examples/bar-preview.rs` — RUN THIS FIRST. It is a live
   render of the target.**
 
   ```bash
-  python3 docs/superpowers/specs/bar-preview.py
+  cargo run -p clave-bar --example bar-preview
   ```
 
-  Standalone: no clave dependency, no wasm build, runs in any checkout and any
-  terminal. It prints the locked design — the 44-column ruler, the filled title
+  *(Was `docs/superpowers/specs/bar-preview.py` when this handoff was written;
+  task 1 ported it to Rust and deleted the Python, so the preview is now driven
+  by the same `render_rows` the plugin renders with and cannot diverge from it.
+  Byte-identical output.)*
+
+  No wasm build and no zellij — it runs in any checkout and any terminal, and
+  the width invariant is asserted from the same code. It prints the locked design — the 44-column ruler, the filled title
   chips against tinted repo text, the selected row's full-bleed band, the dimmed
   terminal-tab row — and **asserts its own invariant** that every row is exactly
   44 display cells, measured in cells rather than code points.

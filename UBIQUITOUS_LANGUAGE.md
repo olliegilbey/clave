@@ -46,7 +46,7 @@ here in the same change.**
 
 > The terms in this section describe a design that is **locked and rendered**:
 > [`docs/superpowers/specs/2026-07-25-sidebar-visual-design-lock.md`](docs/superpowers/specs/2026-07-25-sidebar-visual-design-lock.md)
-> is the ruling and the reasoning; `python3 docs/superpowers/specs/bar-preview.py`
+> is the ruling and the reasoning; `cargo run -p clave-bar --example bar-preview`
 > draws it. If a word here is unclear, run the preview — it is one screen.
 
 The vertical bar itself is the **sidebar** (or **the bar**). Its two width

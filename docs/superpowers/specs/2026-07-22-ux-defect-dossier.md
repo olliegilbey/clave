@@ -8,7 +8,7 @@
 > from rendered rows in
 > [`2026-07-25-sidebar-visual-design-lock.md`](2026-07-25-sidebar-visual-design-lock.md).
 > Read that before S5, S6 or S8, and run
-> `python3 docs/superpowers/specs/bar-preview.py` to see the result.
+> `cargo run -p clave-bar --example bar-preview` to see the result.
 >
 > Vocabulary for all of it: [`UBIQUITOUS_LANGUAGE.md`](../../../UBIQUITOUS_LANGUAGE.md).
 
