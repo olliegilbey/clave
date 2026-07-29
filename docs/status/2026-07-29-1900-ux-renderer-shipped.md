@@ -1,14 +1,17 @@
 # Status — the sidebar renderer is built, reviewed, and waiting on a merge
 
-_2026-07-29 · branch `ux` @ `ed3d56d`, 35 commits ahead of `main`, gates green,
-271 tests · **PR #86 is open, MERGEABLE, and blocked only on Ollie's approval**_
+_2026-07-29 · branch `ux`, gates green, 271 tests, every commit Ollie-signed ·
+**PR #86 is open, MERGEABLE, all threads resolved, all checks green — blocked
+only on Ollie's approval.** Run `git log --oneline main..ux` for the real count;
+a number written here goes stale the next commit._
 
 ## Read this first
 
 **`docs/ux/LEDGER.md` is the authority, not this file.** It carries 27 numbered
 decisions with their reasoning and overrides any spec. This handoff is the
 orientation; the ledger is the record. Read the ledger's **operating rule**, then
-its **task table** (the only statement of what has shipped), then D19–D27.
+**D28** (the release sequence you are inside), then its **task table** (the only
+statement of what has shipped), then D19–D27.
 
 Runnable target render — **look at this before designing anything**:
 
@@ -34,9 +37,12 @@ Opus for subagent work.
 - `main` @ `48d21aa`. `ux` is 35 commits ahead. **`main` is protected and you
   cannot merge — Ollie does.**
 - Gate 1 happened: Ollie ran the fleet live and ruled **keep**.
-- Two PR threads are **deliberately unresolved**: 54 columns, and
-  `transcript_path` (filed as **#87**). Resolving them would imply done rather
-  than sequenced.
+- **All PR threads are resolved**, each with a reply naming where the work went
+  rather than a silent close — 54 columns is **#63**, `transcript_path` is **#87**.
+- **You are inside D28's release sequence.** Next gate is a live **interaction**
+  test (checklist with `docs/dev/TESTING.md`'s live-validation SOP), then
+  confidence in the testing, then Ollie releases and switches his daily driver.
+  **#63 and S5 come after that release, not before it.**
 - **`CodeRabbit` reports `pass` while rate-limited** (FOOTGUNS, #68). It did
   exactly this on #86. **Read the check detail, not the colour.**
 
