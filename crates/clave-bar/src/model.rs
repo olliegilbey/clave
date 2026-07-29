@@ -1308,22 +1308,28 @@ impl BarModel {
             return Vec::new();
         }
         // The lattice can be COARSER than the gap between the two targets, and
-        // then NO reachable width lies in the (disambiguated) band: the step
-        // that leaves the overlap zone necessarily crosses the target, and the
-        // one back crosses it again — an oscillation the budget would spend 16
-        // real resizes on. If ONE OF OUR OWN steps just carried us from the
-        // other side of the target, we have bracketed it as tightly as zellij's
-        // increment allows, so settle here rather than pace. Unreachable while a
-        // step is narrower than the separation (crossing then implies
-        // `2*|diff| < step`, which `converged` above already accepted), so this
-        // fires ONLY in the coarse-lattice corner it exists for.
+        // then NO reachable width is acceptable: the step that leaves the
+        // overlap zone crosses the target, and the one back crosses it again —
+        // an oscillation the budget would spend 16 real resizes on. When ONE OF
+        // OUR OWN steps just carried us across the target FROM a width that is
+        // no better, we have bracketed it as tightly as zellij's increment
+        // allows: settle rather than pace.
         //
-        // The delta bound is the same one the learn arm uses: an EXTERNAL jump
-        // (round 17's 75 → 15) also crosses the target, and settling on one
-        // would park the bar wherever a window resize dropped it.
+        // All three conditions earn their place:
+        //   - the crossing itself, or this would settle mid-travel;
+        //   - a plausible single step, the same bound the learn arm uses — an
+        //     EXTERNAL jump (round 17's 75 → 15) also crosses the target, and
+        //     settling on one would park the bar wherever a window resize
+        //     dropped it;
+        //   - and the width we came FROM being unacceptable too. Otherwise the
+        //     honest move is to go BACK: that is the ordinary overshoot (the
+        //     pre-learning step of 8 acts on a width a learned step of 11 would
+        //     have accepted), and `GrowSelf` recovering it is round 9's lesson,
+        //     not something to short-circuit.
         if let Some(prev) = self.seek_last_cols
             && (prev as i64 - target as i64) * diff < 0
             && prev.abs_diff(own_cols) <= MAX_LEARNABLE_STEP
+            && !converged(prev, target, other, step)
         {
             self.settle_at(own_cols);
             return Vec::new();

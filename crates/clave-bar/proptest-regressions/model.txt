@@ -8,3 +8,5 @@ cc 547c31c889659961e08de9e795d53ab947182f785266ea506bb1b6f55f37d7aa # shrinks to
 cc 73578a1f323e1ce87673cf3769f87111c03d762497c0e74ec665d3efdff9a1f7 # shrinks to start = 35, step = 10, floor = 0, collapsed = false, peeking = false, latency = true, interrupt = None
 cc 4f4615535bcad9f93118330b0f91c9a5a08b9dac9273b3164a63c78fec4ca740 # shrinks to start = 416, step = 1, floor = 0, collapsed = true, peeking = false, latency = true, interrupt = Some((5, Jump(88)))
 cc 27bdec7750424b7921cccbea5ce60fb9ae8600510357ec1b136e22f7cc1e78ea # shrinks to start = 37, step = 15, floor = 0, collapsed = false, peeking = false, latency = false, interrupt = None
+cc d8a61a23001f52812f56307c22ff592d45a043d5542946f44a1a7f5cddf6781a # shrinks to start = 35, step = 11, floor = 0, collapsed = true, peeking = false, latency = false, interrupt = None
+cc 206dcf240889362fcbf640d03a9b1c4176898534577d69ceeb2d354d91ef77d2 # shrinks to start = 149, step = 19, floor = 0, collapsed = false, peeking = false, latency = false, interrupt = Some((1, Toggle))
