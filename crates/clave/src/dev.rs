@@ -988,6 +988,19 @@ mod tests {
         let repo = dir.path().join("repos").join("clave");
         std::fs::create_dir_all(&repo).unwrap();
         run_in(&repo, "git", &["init", "-q", "-b", "main"]).unwrap();
+        // HERMETIC, not decorative: this passed locally and failed in CI on
+        // exactly this line. A developer machine supplies user.name/user.email
+        // from ~/.gitconfig and a runner does not, so the test was reading its
+        // environment rather than its fixture. `commit.gpgsign=false` is here
+        // for the same reason in reverse — the maintainer signs every commit
+        // globally, and a runner has no key to sign with.
+        for (k, v) in [
+            ("user.email", "test@example.invalid"),
+            ("user.name", "clave test"),
+            ("commit.gpgsign", "false"),
+        ] {
+            run_in(&repo, "git", &["config", k, v]).unwrap();
+        }
         run_in(
             &repo,
             "git",
