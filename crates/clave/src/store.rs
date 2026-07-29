@@ -82,6 +82,15 @@ pub struct AgentRecord {
     /// `default` keeps pre-field store files loading.
     #[serde(default)]
     pub summary: String,
+    /// The REPOSITORY's default branch (the branch a plain checkout sits on),
+    /// resolved once at `add` time by `add::resolve_default_branch`. Wire twin
+    /// of `clave_types::Agent::default_branch`, which carries the full rationale
+    /// (#86): the bar must not decide "default checkout" from a hardcoded
+    /// `main`/`master` list. `None` = not discoverable (no remote), which the
+    /// bar handles by falling back to that heuristic. `default` keeps pre-field
+    /// store files loading — a missing key is a whole-store parse failure.
+    #[serde(default)]
+    pub default_branch: Option<String>,
 }
 
 /// The whole store file. `seq` is the monotonic snapshot counter of the §5
@@ -207,6 +216,9 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
                 // Projected now — `AgentRecord` has carried this since §6.3
                 // and the wire simply never did (S6 #61 §2.4).
                 worktree: r.worktree.clone(),
+                // The other half of provenance (#86): without it the bar can
+                // only guess the default branch by name.
+                default_branch: r.default_branch.clone(),
             })
             .collect(),
     }
@@ -450,6 +462,7 @@ mod tests {
             stale: false,
             title: None,
             summary: String::new(),
+            default_branch: None,
         }
     }
 
@@ -744,6 +757,7 @@ mod tests {
         r.title = Some("CLA-MAIN".into());
         r.summary = "fix the flaky auth".into();
         r.worktree = Some("/x/.claude/worktrees/wt".into());
+        r.default_branch = Some("trunk".into());
         s.agents.insert("u1".into(), r);
 
         let snap = snapshot_from(&s);
@@ -751,6 +765,10 @@ mod tests {
         assert_eq!(a.title.as_deref(), Some("CLA-MAIN"));
         assert_eq!(a.summary, "fix the flaky auth");
         assert_eq!(a.worktree.as_deref(), Some("/x/.claude/worktrees/wt"));
+        // #86: the bar cannot decide provenance from the branch NAME, so the
+        // repo's real default has to cross this seam too — a record that knows
+        // it and a wire Agent that does not is the whole bug.
+        assert_eq!(a.default_branch.as_deref(), Some("trunk"));
     }
 
     #[test]
@@ -762,9 +780,13 @@ mod tests {
         let mut o = json.as_object().unwrap().clone();
         o.remove("title");
         o.remove("summary");
+        // #86's field joins the same set, and it is the one Ollie's REAL store
+        // is about to be missing: every row written before this branch.
+        o.remove("default_branch");
         let back: AgentRecord = serde_json::from_value(serde_json::Value::Object(o)).unwrap();
         assert_eq!(back.title, None);
         assert!(back.summary.is_empty());
+        assert_eq!(back.default_branch, None);
     }
 
     #[test]

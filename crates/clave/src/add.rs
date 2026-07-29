@@ -463,6 +463,82 @@ pub fn record_branch(resumed: bool, cand_branch: Option<&str>, picked_branch: &s
     }
 }
 
+/// The REPOSITORY's default branch — the branch a plain checkout of it sits on,
+/// and the only branch design-lock §5.1 lets the bar render with NO provenance
+/// mark. Review finding 2026-07-29 (#86): the bar decided this by NAME, treating
+/// `main` and `master` as exhaustive, so an ordinary default checkout of a repo
+/// whose default is `trunk`, `develop` or `dev` took the branch glyph —
+/// mislabelling a valid repository on naming convention alone. Resolved HERE,
+/// where git can actually be asked, and carried on the record.
+///
+/// Two sources, most authoritative first, and both strictly LOCAL — `add` runs
+/// interactively in front of the user, so nothing here may touch the network:
+///
+/// 1. `symbolic-ref --short refs/remotes/origin/HEAD` — what the remote itself
+///    declared at clone time. Missing on a repo with no remote, and on old
+///    clones made before git wrote the ref.
+/// 2. `init.defaultBranch`, accepted ONLY when `refs/heads/<it>` exists in this
+///    repo. A local-only repo has no canonical default to read; the branch the
+///    user's own git would have created is the best answer available, and the
+///    existence gate stops a config left over from another project from
+///    inventing a branch this repo does not have.
+///
+/// `None` is a real answer, not a failure — the bar falls back to its
+/// `main`/`master` heuristic for it, so behaviour is never WORSE than before
+/// this field existed.
+fn resolve_default_branch(git: &Path, repo_root: &str) -> Option<String> {
+    let head = cmd_stdout(
+        git,
+        &[
+            "-C",
+            repo_root,
+            "symbolic-ref",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+    )
+    .ok()
+    .and_then(|s| strip_origin_prefix(&s));
+    if head.is_some() {
+        return head;
+    }
+    let configured = cmd_stdout(
+        git,
+        &["-C", repo_root, "config", "--get", "init.defaultBranch"],
+    )
+    .ok()?
+    .trim()
+    .to_string();
+    if configured.is_empty() {
+        return None;
+    }
+    // cmd_stdout errors on a non-zero exit, which is exactly what
+    // `rev-parse --verify` returns for a ref that is not there.
+    cmd_stdout(
+        git,
+        &[
+            "-C",
+            repo_root,
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{configured}"),
+        ],
+    )
+    .is_ok()
+    .then_some(configured)
+}
+
+/// `symbolic-ref --short refs/remotes/origin/HEAD` prints `origin/<branch>`.
+/// The remote has to come off: the record's `branch` is a plain branch name, and
+/// provenance compares the two for equality. Split ONCE so a slashed default
+/// (`release/v1`) survives intact.
+fn strip_origin_prefix(out: &str) -> Option<String> {
+    let s = out.trim();
+    let b = s.strip_prefix("origin/").unwrap_or(s);
+    (!b.is_empty()).then(|| b.to_string())
+}
+
 pub fn run_add(worktree: bool) -> Result<()> {
     // Preflight (spec §Preflight): the fzf weave, git/claude, and zellij
     // itself are all needed before any tab exists — abort BEFORE creating
@@ -517,6 +593,10 @@ pub fn run_add(worktree: bool) -> Result<()> {
     )
     .map(|s| s.trim().to_string())
     .unwrap_or_else(|_| "-".to_string());
+    // Resolved against the picked dir's toplevel, which is correct even inside
+    // a linked worktree: `refs/remotes` and `config` are SHARED across a repo's
+    // worktrees, so every one of them answers with the same default (#86).
+    let default_branch = resolve_default_branch(&git, &repo_root);
 
     // 3) Liveness input (§6.3 revised 2026-07-14: MANY agents per repo, so
     //    no auto-jump here — live agents surface as jump entries in the
@@ -762,7 +842,14 @@ pub fn run_add(worktree: bool) -> Result<()> {
             stale: false,
             title: None,
             summary: String::new(),
+            default_branch: default_branch.clone(),
         };
+        // Note `merge_resume_record` PRESERVES an existing row's
+        // `default_branch` along with everything else, so a row written before
+        // #86 keeps `None` and the bar keeps its heuristic for it. Deliberate:
+        // the merge's whole contract is that a re-add means "it is on screen
+        // again" and resets nothing but status, and the fallback already makes
+        // that row no worse than it was.
         let merged = merge_resume_record(s.agents.get(&uuid), fresh);
         s.agents.insert(uuid.clone(), merged);
         s.seq += 1;
@@ -796,6 +883,7 @@ mod tests {
             stale: false,
             title: None,
             summary: String::new(),
+            default_branch: None,
         }
     }
 
@@ -1041,6 +1129,34 @@ garbage that should be ignored
         assert_eq!(record_branch(true, Some("feat/x"), "main"), "feat/x");
         // A `new` agent (no candidate) inherits the picked dir's branch.
         assert_eq!(record_branch(false, None, "main"), "main");
+    }
+
+    #[test]
+    fn origin_head_yields_a_bare_branch_name() {
+        // #86: `symbolic-ref --short refs/remotes/origin/HEAD` prints
+        // `origin/<branch>`, and provenance compares the result against the
+        // record's `branch`, which is bare — leaving the remote on would make
+        // EVERY default checkout look like a side branch, the exact bug the
+        // field exists to fix.
+        assert_eq!(
+            strip_origin_prefix("origin/trunk\n").as_deref(),
+            Some("trunk")
+        );
+        assert_eq!(
+            strip_origin_prefix("origin/main\n").as_deref(),
+            Some("main")
+        );
+        // Split ONCE: a slashed default survives whole.
+        assert_eq!(
+            strip_origin_prefix("origin/release/v1\n").as_deref(),
+            Some("release/v1")
+        );
+        // Nothing to read is None, never `Some("")` — an empty default_branch
+        // would compare unequal to every real branch and mark the default
+        // checkout as a branch.
+        assert_eq!(strip_origin_prefix(""), None);
+        assert_eq!(strip_origin_prefix("  \n"), None);
+        assert_eq!(strip_origin_prefix("origin/"), None);
     }
 
     #[test]

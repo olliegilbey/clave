@@ -329,6 +329,11 @@ fn agent_record(
         stale: false,
         title: a.title.map(String::from),
         summary: a.summary.to_string(),
+        // `run_scenario` pins every seeded repo with `git init -q -b main`
+        // (see the comment there), so this is the repo's REAL default, not a
+        // guess — which is what makes `cold`'s blank provenance travel the
+        // #86 known-default path rather than the `main`/`master` fallback.
+        default_branch: Some("main".to_string()),
     }
 }
 

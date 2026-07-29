@@ -47,6 +47,7 @@ mod tests {
             stale: false,
             title: None,
             summary: String::new(),
+            default_branch: None,
         }
     }
 

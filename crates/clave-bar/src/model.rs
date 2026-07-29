@@ -855,18 +855,32 @@ impl BarModel {
         //
         // `"-"` is the value that matters, NOT the empty string: the host
         // writes `"-"` when `git rev-parse --abbrev-ref HEAD` fails
-        // (`clave/src/add.rs:517`) and `record_branch` returns `"-"` for a
-        // detached-worktree resume (`add.rs:459`). Nothing in the host ever
-        // writes an empty branch — every `branch: String::new()` in the tree
-        // is a test builder, so the empty clause is kept only to keep those
-        // honest. Verified against the writer, not against a fixture.
+        // (`add::run_add`'s fallback) and `record_branch` returns `"-"` for a
+        // detached-worktree resume. Nothing in the host ever writes an empty
+        // branch — every `branch: String::new()` in the tree is a test builder,
+        // so the empty clause is kept only to keep those honest. Verified
+        // against the writer, not against a fixture.
+        //
+        // WHICH branch is the default is the repo's answer, never ours (#86).
+        // This used to test `main`/`master` as if they were exhaustive, so a
+        // `trunk`-, `develop`- or `dev`-default repository had its ORDINARY
+        // checkout marked as a branch — the one row §5.1 requires to be blank,
+        // mislabelled on naming convention alone. `default_branch` is resolved
+        // by the host (`add::resolve_default_branch`) and rides the snapshot.
+        // The name test survives only as the fallback for `None`, which is what
+        // an old store row and an undiscoverable default both deserialize to:
+        // no snapshot gets a WORSE answer than it got before the field existed.
         let provenance = if a.worktree.is_some() {
             Provenance::Worktree
-        } else if a.branch.is_empty()
-            || a.branch == "-"
-            || a.branch == "main"
-            || a.branch == "master"
-        {
+        } else if a.branch.is_empty() || a.branch == "-" {
+            Provenance::Main
+        } else if let Some(default) = a.default_branch.as_deref() {
+            if a.branch == default {
+                Provenance::Main
+            } else {
+                Provenance::Branch
+            }
+        } else if a.branch == "main" || a.branch == "master" {
             Provenance::Main
         } else {
             Provenance::Branch
@@ -1379,6 +1393,7 @@ mod tests {
             title: None,
             summary: String::new(),
             worktree: None,
+            default_branch: None,
         }
     }
 
@@ -1398,6 +1413,7 @@ mod tests {
             title: None,
             summary: String::new(),
             worktree: None,
+            default_branch: None,
         }
     }
 
@@ -2551,8 +2567,63 @@ mod tests {
         assert_eq!(provenance(1), Provenance::Branch);
         // Both default-branch names render NOTHING (lock §5.1) — blanking the
         // most common row is what makes the two marked states mean something.
+        //
+        // `dressed` leaves `default_branch` at None, so this is now specifically
+        // the #86 FALLBACK path: an old store row, or a repo whose default git
+        // could not name, still gets exactly the answer it got before the field
+        // existed. That is the guarantee — never a worse answer, only a better
+        // one when the repo supplies it (see the test below).
         assert_eq!(provenance(2), Provenance::Main);
         assert_eq!(provenance(3), Provenance::Main);
+    }
+
+    #[test]
+    fn provenance_prefers_the_repos_own_default_branch_over_the_name_heuristic() {
+        // #86: `main`/`master` are not exhaustive. A repository whose default is
+        // `trunk` (or `develop`, or `dev`) had its ORDINARY checkout marked as a
+        // branch — the one row design-lock §5.1 requires to be blank — purely on
+        // naming convention. The host resolves the real default
+        // (`add::resolve_default_branch`) and it rides the snapshot; when it is
+        // present it OUTRANKS the name test in both directions.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![
+            tab(10, 0, "a", false),
+            tab(11, 1, "b", false),
+            tab(12, 2, "c", false),
+            tab(13, 3, "d", false),
+        ]);
+        let with_default = |uuid: &str, branch: &str, tab: usize| {
+            let mut a = dressed(uuid, "/r/trunkrepo", branch, None, Some(tab));
+            a.default_branch = Some("trunk".into());
+            a
+        };
+        let mut wt = with_default("u-wt", "trunk", 10);
+        wt.worktree = Some("/r/trunkrepo-wt".into());
+        m.apply_snapshot(snap(
+            1,
+            vec![
+                wt,
+                with_default("u-default", "trunk", 11),
+                with_default("u-feature", "feature/x", 12),
+                // `main` is NOT special here: in a trunk-default repository it
+                // is an ordinary side branch and must be marked as one. This is
+                // the assertion the old hardcoded list could never make.
+                with_default("u-main", "main", 13),
+            ],
+        ));
+        let provenance = |i: usize| match content_at(&m, i) {
+            RowContent::Agent { provenance, .. } => provenance,
+            RowContent::Terminal { .. } => panic!("row {i} is not an agent"),
+        };
+        // A worktree still outranks everything — the worktree IS the provenance.
+        assert_eq!(provenance(0), Provenance::Worktree);
+        assert_eq!(provenance(1), Provenance::Main, "the repo's real default");
+        assert_eq!(provenance(2), Provenance::Branch);
+        assert_eq!(
+            provenance(3),
+            Provenance::Branch,
+            "`main` in a trunk-default repo is a side branch"
+        );
     }
 
     #[test]

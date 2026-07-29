@@ -99,6 +99,22 @@ pub struct Agent {
     /// `default` keeps pre-field payloads parseable.
     #[serde(default)]
     pub worktree: Option<String>,
+    /// The REPOSITORY's default branch — the branch a plain checkout of it sits
+    /// on. The second input to S6's provenance glyph (#61): design-lock §5.1
+    /// says the default checkout renders NOTHING, and §5's whole argument is
+    /// that blanking the most common row is what makes the two marked states
+    /// mean something. The bar used to decide that by name, treating `main` and
+    /// `master` as exhaustive — so an ordinary default checkout of a repo whose
+    /// default is `trunk`, `develop` or `dev` got the branch glyph, mislabelled
+    /// on naming convention alone (#86). Resolved by the host, where git can
+    /// actually be asked (`clave/src/add.rs::resolve_default_branch`).
+    ///
+    /// `None` is a real answer, not a failure: a repo with no remote may have no
+    /// discoverable default, and the bar falls back to its `main`/`master`
+    /// heuristic there so behaviour is never WORSE than before this field
+    /// existed. `default` keeps pre-field payloads parseable.
+    #[serde(default)]
+    pub default_branch: Option<String>,
 }
 
 /// The full-replace snapshot `clave` pushes to `clave-bar` on every change
@@ -303,6 +319,7 @@ mod tests {
             title: None,
             summary: String::new(),
             worktree: None,
+            default_branch: None,
         };
         assert!(!serde_json::to_string(&a).unwrap().contains("archived"));
     }
@@ -327,6 +344,7 @@ mod tests {
                 title: None,
                 summary: String::new(),
                 worktree: None,
+                default_branch: None,
             }],
         };
         let json = serde_json::to_string(&snap).unwrap();
@@ -354,6 +372,7 @@ mod tests {
             title: None,
             summary: String::new(),
             worktree: None,
+            default_branch: None,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert_eq!(back.tab_id, Some(4));
@@ -383,6 +402,7 @@ mod tests {
             title: None,
             summary: String::new(),
             worktree: None,
+            default_branch: None,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert!(back.stale);
@@ -414,6 +434,7 @@ mod tests {
             title: Some("CLA-MAIN".into()),
             summary: "fix the flaky auth".into(),
             worktree: Some("/x/.claude/worktrees/wt".into()),
+            default_branch: None,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert_eq!(back.title.as_deref(), Some("CLA-MAIN"));
@@ -435,6 +456,43 @@ mod tests {
         assert_eq!(old.title, None);
         assert!(old.summary.is_empty());
         assert_eq!(old.worktree, None);
+    }
+
+    #[test]
+    fn agent_default_branch_roundtrips_and_defaults_none() {
+        // #86: provenance may not decide "this is the default checkout" from a
+        // hardcoded `main`/`master` list — a `trunk`-default repo's ordinary
+        // checkout would take the branch glyph. The host resolves the repo's
+        // real default and it rides the wire; `None` means "not discoverable",
+        // which is a legitimate answer for a repo with no remote and is exactly
+        // what an OLD payload deserializes to.
+        let mut a = Agent {
+            uuid: "u1".into(),
+            cwd: "/x".into(),
+            repo_root: "/x".into(),
+            branch: "trunk".into(),
+            label: "x \u{00b7} trunk".into(),
+            status: Status::Idle,
+            last_interacted: 0,
+            last_visited: 0,
+            tab_id: None,
+            stale: false,
+            title: None,
+            summary: String::new(),
+            worktree: None,
+            default_branch: Some("trunk".into()),
+        };
+        let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
+        assert_eq!(back.default_branch.as_deref(), Some("trunk"));
+
+        // The v2 payload (#69's shape) has no such key and MUST still parse —
+        // the CLI and the wasm bar upgrade at different moments, so a new bar
+        // reading an old push is a live state, not a migration.
+        a.default_branch = None;
+        let mut v: serde_json::Value = serde_json::to_value(&a).unwrap();
+        v.as_object_mut().unwrap().remove("default_branch");
+        let old: Agent = serde_json::from_value(v).unwrap();
+        assert_eq!(old.default_branch, None);
     }
 
     #[test]
