@@ -1178,7 +1178,9 @@ impl BarModel {
     /// coarser than the targets — a naive "shrink while too wide"
     /// overshoots straight through them (27 → 13, round 9). So the step is
     /// LEARNED from each resize's observed effect, acceptance is "within
-    /// half a step", and GrowSelf recovers an overshoot. Budget-capped so a
+    /// half a step **and not equally close to the other target**"
+    /// (`converged` — LEDGER D21, the overlap that made Alt+c a no-op on a
+    /// wide display), and GrowSelf recovers an overshoot. Budget-capped so a
     /// layout that refuses to converge isn't fought forever.
     ///
     /// Issue #4 (F1, C8 drift-on-window-resize backlog): the old design went
