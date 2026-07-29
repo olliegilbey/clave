@@ -1156,6 +1156,9 @@ mod tests {
             last_visited: 0,
             tab_id,
             stale: false,
+            title: None,
+            summary: String::new(),
+            worktree: None,
         }
     }
 
@@ -1172,6 +1175,9 @@ mod tests {
             last_visited: 0,
             tab_id,
             stale: false,
+            title: None,
+            summary: String::new(),
+            worktree: None,
         }
     }
 

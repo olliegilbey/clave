@@ -128,6 +128,8 @@ fn eager_record() -> AgentRecord {
         label_source: LabelSource::Summary,
         tab_id: None,
         stale: false,
+        title: None,
+        summary: String::new(),
     }
 }
 

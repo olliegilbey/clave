@@ -758,6 +758,8 @@ pub fn run_add(worktree: bool) -> Result<()> {
             label_source: LabelSource::FirstPrompt,
             tab_id: None,
             stale: false,
+            title: None,
+            summary: String::new(),
         };
         let merged = merge_resume_record(s.agents.get(&uuid), fresh);
         s.agents.insert(uuid.clone(), merged);
@@ -790,6 +792,8 @@ mod tests {
             label_source: LabelSource::FirstPrompt,
             tab_id: None,
             stale: false,
+            title: None,
+            summary: String::new(),
         }
     }
 

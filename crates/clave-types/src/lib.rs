@@ -76,6 +76,29 @@ pub struct Agent {
     /// pre-field payloads parseable.
     #[serde(default)]
     pub stale: bool,
+    /// Claude's session rename (`custom-title` in the transcript) — the
+    /// filled chip in design-lock §2's 7-column title field. `None` = never
+    /// renamed, which is the majority of rows. Structural rather than parsed
+    /// out of `label`: §7.1 rules the bar lays its own fixed-width columns
+    /// and needs the VALUE, not a position inside a composed string.
+    /// Populated by S4 (#59); `default` keeps pre-field payloads parseable.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// The words segment — design-lock §2's 17-column field, the widest on
+    /// the row and the one actually read. Reachable today only by splitting
+    /// `label`, which §7.1 forbids the bar from doing. Populated by S4 (#59),
+    /// whose source tier is retargeted to `ai-title` because the
+    /// `type:"summary"` tier is extinct (#79). `default` keeps pre-field
+    /// payloads parseable.
+    #[serde(default)]
+    pub summary: String,
+    /// Worktree path if `clave add --worktree` created one, else None — the
+    /// input to S6's provenance glyph (#61). Held on `AgentRecord` since
+    /// §6.3 and simply never projected until now. `Option<String>` not
+    /// `bool`: #24 wants the worktree DIRECTORY NAME, which needs the path.
+    /// `default` keeps pre-field payloads parseable.
+    #[serde(default)]
+    pub worktree: Option<String>,
 }
 
 /// The full-replace snapshot `clave` pushes to `clave-bar` on every change
@@ -110,6 +133,17 @@ pub struct Register {
     pub uuid: String,
     pub pane_id: u32,
 }
+
+/// The label segment separator: U+0020 U+00B7 U+0020. Only `store.rs`'s
+/// backfill splits on it so far; the five composition sites in `add.rs` and
+/// `hook.rs` still spell the separator literally, and converting them is
+/// deliberately out of scope for #69 (a label-composition change is a render
+/// change, and this branch is inert plumbing). Written as an escape, never a
+/// literal: design-lock §5.4 (load-bearing) records that literal glyphs were
+/// silently lost in transit twice, and the failure mode is tofu in production
+/// from a clean-looking diff. S4 §4.1 and S5 §3.1 each proposed this constant
+/// independently — it lands once, here (#69).
+pub const LABEL_SEP: &str = " \u{00b7} ";
 
 #[cfg(test)]
 mod tests {
@@ -179,6 +213,9 @@ mod tests {
             last_visited: 0,
             tab_id: None,
             stale: false,
+            title: None,
+            summary: String::new(),
+            worktree: None,
         };
         assert!(!serde_json::to_string(&a).unwrap().contains("archived"));
     }
@@ -200,6 +237,9 @@ mod tests {
                 last_visited: 0,
                 tab_id: None,
                 stale: false,
+                title: None,
+                summary: String::new(),
+                worktree: None,
             }],
         };
         let json = serde_json::to_string(&snap).unwrap();
@@ -224,6 +264,9 @@ mod tests {
             last_visited: 0,
             tab_id: Some(4),
             stale: false,
+            title: None,
+            summary: String::new(),
+            worktree: None,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert_eq!(back.tab_id, Some(4));
@@ -250,6 +293,9 @@ mod tests {
             last_visited: 0,
             tab_id: None,
             stale: true,
+            title: None,
+            summary: String::new(),
+            worktree: None,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert!(back.stale);
@@ -259,6 +305,49 @@ mod tests {
         v.as_object_mut().unwrap().remove("stale");
         let old: Agent = serde_json::from_value(v).unwrap();
         assert!(!old.stale);
+    }
+
+    #[test]
+    fn agent_title_summary_worktree_roundtrip_and_default() {
+        // Design-lock §7.1: a live row renders from the STORE, so the bar
+        // needs the VALUES for its fixed-width title/repo/summary columns —
+        // not positions inside the composed `label`. That ruling deleted
+        // InkSpan and made these three structural (#69).
+        let mut a = Agent {
+            uuid: "u1".into(),
+            cwd: "/x".into(),
+            repo_root: "/x".into(),
+            branch: "main".into(),
+            label: "x \u{00b7} main".into(),
+            status: Status::Idle,
+            last_interacted: 0,
+            last_visited: 0,
+            tab_id: None,
+            stale: false,
+            title: Some("CLA-MAIN".into()),
+            summary: "fix the flaky auth".into(),
+            worktree: Some("/x/.claude/worktrees/wt".into()),
+        };
+        let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
+        assert_eq!(back.title.as_deref(), Some("CLA-MAIN"));
+        assert_eq!(back.summary, "fix the flaky auth");
+        assert_eq!(back.worktree.as_deref(), Some("/x/.claude/worktrees/wt"));
+
+        // A v1 payload carries none of the three keys and MUST still parse —
+        // the CLI and the wasm bar upgrade at different moments (a running
+        // session keeps the bar it loaded), so this is a live state.
+        a.title = None;
+        a.summary = String::new();
+        a.worktree = None;
+        let mut v: serde_json::Value = serde_json::to_value(&a).unwrap();
+        let o = v.as_object_mut().unwrap();
+        o.remove("title");
+        o.remove("summary");
+        o.remove("worktree");
+        let old: Agent = serde_json::from_value(v).unwrap();
+        assert_eq!(old.title, None);
+        assert!(old.summary.is_empty());
+        assert_eq!(old.worktree, None);
     }
 
     #[test]
