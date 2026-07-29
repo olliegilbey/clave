@@ -1,6 +1,6 @@
 # Status — you are the standing coordinator for the UX implementation fleet
 
-_2026-07-29 · worktree `agentsnapshot-v2` · `main` @ `b00edd3`, branch `spec-reconciliation` @ `f1ad519` (PR #82) · gates green, 222 tests_
+_2026-07-29 · `main` @ `e046549`, clean, gates green, 222 tests · everything from this session is MERGED_
 
 **Your role changed.** You are not executing a plan. You are the **standing
 coordinator and principal engineer for the entire UX workstream** — S5 (#60),
@@ -69,6 +69,24 @@ Concretely:
   `44 = 1 cap + 8 gutter + 7 title + 1 + 7 repo + 1 + 17 summary + 1 margin + 1 cap`.
   Also **§5.4** (glyph escape rule, load-bearing) and **§7.1** (renders from the
   STORE, not the tab name).
+- **`docs/superpowers/specs/bar-preview.py` — RUN THIS FIRST. It is a live
+  render of the target.**
+
+  ```bash
+  python3 docs/superpowers/specs/bar-preview.py
+  ```
+
+  Standalone: no clave dependency, no wasm build, runs in any checkout and any
+  terminal. It prints the locked design — the 44-column ruler, the filled title
+  chips against tinted repo text, the selected row's full-bleed band, the dimmed
+  terminal-tab row — and **asserts its own invariant** that every row is exactly
+  44 display cells, measured in cells rather than code points.
+
+  This is the most useful artifact in the repo for this workstream, and it is
+  why no screenshot needs storing: a PNG cannot be re-run and goes stale in
+  silence. **Look at this before designing anything.** Note its own header:
+  it is an *illustration*, and the design lock wins wherever they disagree.
+
 - `FOOTGUNS.md` — **grep it the moment something behaves unexpectedly**, before
   debugging. It is now accurate; three entries were corrected this session.
 - S4/S5/S6 specs — **frozen after #82 merges.** Historical rationale. Subagents
@@ -78,19 +96,26 @@ Concretely:
 
 ## Current State
 
-**Working tree:** both status files (this one and the prior session's) are
-committed to #82. Tree should be clean.
+**Everything is merged and the repo is clean.** `main` @ `e046549`, working
+tree clean, `just gates` exit 0. The `agentsnapshot-v2` worktree and its
+branches are gone; the only other worktree is `claude-codex-profile`, which is
+**iced with uncommitted work — do not touch or remove it.**
 
-**You are on branch `spec-reconciliation`**, which is #82. Once it merges, move
-to a fresh `ux` branch off `main` — do not build the UX on this one.
-
-| PR | Branch | State |
+| PR | Landed as | What |
 |---|---|---|
-| **#81** | `worktree-agentsnapshot-v2` | ✅ **MERGED** as `b00edd3` on `main`. |
-| **#82** | `spec-reconciliation` @ `f1ad519` | Rebased onto `main`, `MERGEABLE`, 3 commits. **14 review findings** (3 Codex + 11 CodeRabbit) all fixed, answered and resolved — **0 open threads.** CI green. **Awaiting Ollie's merge.** |
+| **#81** | `b00edd3` | the AgentSnapshot v2 wire shape (#69) |
+| **#82** | `c7e0516` | S4/S5/S6 reconciled — **the last spec amendment**. 14 review findings fixed |
+| **#84** | `e046549` | handoff reference fix |
 
-**You cannot merge — the merge command is blocked by the permission classifier.
-Ask Ollie.**
+**Start by cutting a `ux` branch off `main`.** You are in the primary checkout
+at `/Users/olliegilbey/code/clave`; work here rather than a new worktree —
+worktrees cost real time this session (a `just sandbox` run from the wrong
+checkout silently built and validated `main` instead of the branch, and looked
+entirely successful).
+
+**Note: `main` is a PROTECTED branch.** Direct pushes are rejected; everything
+goes through a PR. And **you cannot merge** — the merge command is blocked by
+the permission classifier. Ask Ollie.
 
 **Known-good fallback commit: `b00edd3`** (`main`, post-#81). Gates green,
 222 tests, sandbox-validated live. Ollie decided against a release cut, and the
@@ -99,9 +124,7 @@ reasoning is sound: his daily driver runs the already-installed
 touches. The SHA is for *source* rollback; the *fleet* is protected by the
 stable/sandbox split, not by the SHA.
 
-**If #82 is still open when you resume:** it is finished work. Check CI, ask
-Ollie to merge, do not reopen its content. If it has merged, the specs are
-frozen from that moment.
+**The specs are frozen as of `c7e0516`.** Do not amend them.
 
 **What #81 landed** (inert plumbing, nothing renders differently):
 `Agent` gains `title: Option<String>`, `summary: String`, `worktree: Option<String>`;
@@ -312,9 +335,8 @@ key and `GlyphSet` two-tier system; `bar-preview.py:59` names `#1F1F28`
 
 ## Next Steps
 
-1. **#81 is merged.** If **#82** is still open, check its CI and ask Ollie to
-   merge it — you cannot (permission classifier). Its content is finished; do not
-   reopen it.
+1. **Nothing is pending.** #81, #82 and #84 are all merged; the repo is clean.
+   Start work directly.
 2. **Open the ledger** (see operating model above) and record: the known-good SHA
    `41a6af9`, the four open decisions, and the freeze rule.
 3. **Create the `ux` integration branch** off `main` once #81/#82 land.
@@ -325,6 +347,20 @@ key and `GlyphSet` two-tier system; `bar-preview.py:59` names `#1F1F28`
    plumbing that genuinely cannot link on the host. **Do not change any visual
    output in this task** — it is a pure extraction, and that is what makes it
    safe and reviewable. Then add one golden test asserting a 44-column row.
+
+   **Then the real success criterion, which the repo already articulated before
+   I did.** `bar-preview.py`'s own header carries this FOLLOW-UP, verbatim:
+
+   > this preview duplicates geometry that `compose_row` will own once S5/S6/S8
+   > land. At that point it should become a Rust example driven by the real
+   > constants, **so a code change that moves a column breaks the preview
+   > instead of silently diverging from it.**
+
+   So task 1 finishes when **`bar-preview` is driven by the real `render_row`**,
+   not when a golden test exists. At that point the target picture and the
+   shipped code cannot disagree — which is the entire failure mode this
+   workstream has been fighting, expressed as a build error instead of an
+   argument.
 
    **This is the unlock: verify it pays off within one task, not one
    workstream.** If it does not, say so and drop it — the operating-model change
