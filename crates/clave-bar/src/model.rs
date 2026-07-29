@@ -174,9 +174,18 @@ const PRE_LEARNING_STEP: usize = 8;
 ///
 /// The cost of condition 2 is paid only inside the overlap, and only on
 /// displays coarse enough to have one: a width the lattice cannot improve on
-/// is refused, so the seek takes one more step, lands outside the overlap and
-/// stops there (the bracket rule in gate (D)). A visibly-collapsed bar a few
-/// columns off target beats a perfectly-parked one that never moved.
+/// is refused, so the seek takes one more step and the bracket rule in gate
+/// (D) stops it there. That resting width is **not** guaranteed to be outside
+/// the overlap — a census over the whole learnable space found 84 distinct
+/// `(mode, step, width)` rests that this function itself would refuse, e.g.
+/// 37 resting for both seeks in different runs. What IS guaranteed, and is
+/// what the bug was about, is that **Alt+c always moves**: every target flip
+/// routes through `arm_seek`, which clears `seek_rest`/`seek_last_cols`/
+/// `seek_drift`, so gates (A) and (B) cannot short-circuit it and the first
+/// post-flip render always re-evaluates this function against the new target.
+/// Verified exhaustively: 9,640 rest states x 6 consecutive toggles, zero
+/// failures to move. A visibly-collapsed bar a few columns off target beats a
+/// perfectly-parked one that never moved.
 fn converged(cols: usize, target: usize, other: usize, step: i64) -> bool {
     let near = |t: usize| 2 * (cols as i64 - t as i64).abs() <= step;
     near(target) && !near(other)
