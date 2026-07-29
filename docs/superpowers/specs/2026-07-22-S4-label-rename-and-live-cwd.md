@@ -3,6 +3,20 @@
 _2026-07-22 · workstream **S4**, root cause **RC-F** of
 [`2026-07-22-ux-defect-dossier.md`](2026-07-22-ux-defect-dossier.md) · main `50fa26a`_
 
+_**Amended 2026-07-28** against
+[`2026-07-28-agentsnapshot-v2-design.md`](2026-07-28-agentsnapshot-v2-design.md)
+§3–§4 (#79), the AgentSnapshot v2 wire shape (#69, PR #81) and S4's own issue
+(#59). This is a living document: the amendments are folded **in place**, and
+where a superseded claim was load-bearing it is quoted and corrected rather than
+deleted, because the old reasoning is unsafe to rebuild on. Four things changed
+substantively — §1.3 / §3.3 (the summary tier's source was **extinct**), §3.2
+(the "the transcript never moves" invariant was **false**, and the freeze built
+on it caused the staleness it existed to prevent), §4.3
+(`payload.transcript_path` is **mandatory**, not deferred), and §3.6 (an older
+binary's read-modify-write **silently strips** earned fields — S4 owns the
+fix). §3.1 and §3.6 also stop proposing `title` / `summary` and start consuming
+them._
+
 **The requirement, verbatim from the maintainer:**
 
 > "the tab name inside the clave sidebar is `issue-10-kdl-guardrail …` — the old
@@ -131,7 +145,28 @@ bar discards at `clave-bar/src/main.rs:458-463`.
 `custom-title` tier is one more line-wise `serde_json::from_str` over a buffer
 already in memory.
 
-### 1.3 The structural obstacle: `Summary` freezes the label forever
+### 1.3 Two obstacles: the tier freezes the label, and its source is extinct
+
+**Amended 2026-07-28 (#79, spike §3.1/§3.2).** This section originally named one
+obstacle — the freeze. A live spike over the maintainer's own tree found a
+second, underneath it, and the second is the one that has actually been hurting:
+
+> `summary_from_tail` (`hook.rs:116`) scans for `{"type":"summary", …}`. That
+> line type appears in **0 of 919 transcripts** under `~/.claude/projects/`, and
+> all 14 rows of the live store read `label_source: first_prompt`.
+
+**No agent has ever reached `LabelSource::Summary`.** Every label in the live
+sidebar is a truncated prompt fragment — exactly the labelling the summary tier
+was written to replace. Claude Code writes `ai-title` (373 occurrences across the
+40 newest transcripts) where it once wrote `summary`; clave listens for a line
+type that is no longer emitted. The tier's **source** is the primary defect, and
+it is a live bug independent of this workstream. §3.3 retargets it.
+
+The freeze below is therefore real in code but has **never executed in
+production**. It still has to go — a retargeted tier that fires would hit it on
+its first event — but it is downstream of a state nothing reaches, and no
+reasoning in this spec may treat "we observed the freeze" as evidence of
+anything.
 
 `hook.rs:154-157`:
 
@@ -158,7 +193,13 @@ let tail = s.agents.get(&uuid).and_then(|rec| {
 
 Titles change repeatedly and branches change on every `git switch`. Both gates
 must move: the *whole-function* stop becomes a *summary-branch-only* stop, and
-the tail read stops being conditioned on `label_source` at all.
+the tail read stops being conditioned on `label_source` at all. **And the
+extractor those gates feed must be retargeted from `type:"summary"` to
+`ai-title`** — moving a gate in front of an extinct tier changes nothing
+observable.
+
+A third thing must move with them, for a reason nobody suspected when this
+section was written: the file `read_tail` opens. §3.2 records the correction.
 
 ### 1.4 At 30 columns, the width eats exactly the distinctive part
 
@@ -202,7 +243,7 @@ Slice of **#24** (sidebar distinctiveness epic).
 |---|---|
 | 1. worktree provenance in the name, from `repo_root` | **intent closed, by relocation.** The *name* half lands here: the row names the **repo** (`basename(repo_root)`), never the worktree directory — which is the whole of the reported defect. The *provenance* half moves out of the name entirely and becomes S6's `𖣂` gutter marker. The `<repo> » <worktree-dir>` rendering the item originally proposed is **not** built and is now superseded: at 30–38 columns a worktree directory name is exactly the string that was crowding out everything distinctive |
 | 2. per-repo colour coding | **not S4** — S5 / RC-G. S4 guarantees the contract S5 needs (§3.5) |
-| 3. pull in Claude's own session summaries; revisit what the label shows at each width | **closed** — the summary tier is verified to keep upgrading (§3.3), a higher `custom-title` tier is added, and §3.4 gives a width policy that is correct at any budget |
+| 3. pull in Claude's own session summaries; revisit what the label shows at each width | **closed, and wider than first scoped** — the summary tier is *retargeted* to `ai-title` (§3.3), because the `type:"summary"` source it was built on is extinct and the tier has never once fired (§1.3, #79); a higher `custom-title` tier is added; and §3.4 gives a width policy that is correct at any budget. The earlier claim here — "the summary tier is verified to keep upgrading" — was **false**, and is corrected rather than deleted because it was load-bearing for §3.3's state machine |
 | 4. context battery per row | **not S4** — two seams are opened for it and neither is built: the extended tail scan (§4.3b) is where the token estimate is computed, and S6 reserves its gutter cell |
 | 5. model badge | **not S4** — same tail-scan seam, same note |
 | 6. uncollapsed width (30 → ~38) | **not S4 — S8.** §3.4 is correct at any budget and hardcodes none; the C6 width-seek machinery is untouched here |
@@ -222,10 +263,26 @@ One rule, one function, both writers. Segments are joined by
 
 | # | Segment | Source | When it refreshes | When absent |
 |---|---|---|---|---|
-| 0 | **title** | latest **non-empty** `{"type":"custom-title","customTitle":…}` in the jsonl tail, held in `rec.title` | every `Stop` / `UserPromptSubmit` — the tail is re-scanned and `rec.title` updated on any new non-empty value | omitted entirely (no separator), and **repo shifts to index 0** — see the positional caveat in §3.5. This is the *common* case: most sessions are never renamed |
+| 0 | **title** | latest **non-empty** `{"type":"custom-title","customTitle":…}` in the jsonl tail, held in `rec.title` — the **user's own rename**, the highest-authority signal on the row | every `Stop` / `UserPromptSubmit` — the tail is re-scanned and `rec.title` updated on any new non-empty value | omitted entirely (no separator), and **repo shifts to index 0** — see the positional caveat in §3.5. This is the *common* case: most sessions are never renamed |
 | 1 | **repo** | `basename(rec.repo_root)`; falls back to `rec.repo_root` whole if it has no `/`, then to `rec.cwd`'s basename if `repo_root` is empty | never — `repo_root` is immutable after creation (§3.6) | **never absent.** A non-repo dir gets its own basename (`add.rs:502-504` falls back to the picked dir) |
-| 2 | **words** | `rec.words`: session summary if one exists, else the first 4 words of the first real user prompt | summary can replace first-prompt words once; then frozen (§3.3) | omitted entirely. A brand-new agent has none until its first prompt |
+| 2 | **summary** | `rec.summary`: Claude's rolling `{"type":"ai-title","aiTitle":…}` if the tail carries one, else the first 4 words of the first real user prompt | `ai-title` re-reads on every `Stop` / `UserPromptSubmit` and **keeps upgrading** — it is a rolling description, ~9 per transcript (§3.3, §5.3) | `""`. A brand-new agent has none until its first prompt |
 | — | ~~branch~~ | `rec.branch`, re-derived from the **live** cwd's `HEAD` (§3.2). Stored, on the wire (`Agent.branch`), used by the picker and `clave ls` | every `Stop` / `UserPromptSubmit` | **never rendered.** Zero width budget. A detached or unreadable `HEAD` still stores `-` (`add.rs:305,510`) |
+
+**The two earned fields are not S4's to declare.** `title: Option<String>` and
+`summary: String` land **structurally** with the AgentSnapshot v2 wire shape
+(#69, PR #81) — on `clave_types::Agent` *and* `store::AgentRecord`, both
+`#[serde(default)]`, both projected by `snapshot_from`
+([`2026-07-28-agentsnapshot-v2-design.md`](2026-07-28-agentsnapshot-v2-design.md)
+§2). S4 **consumes** them; it does not re-propose them. Two consequences that
+propagate through this spec:
+
+- the earlier draft's field name `words` is retired in favour of the landed
+  `summary`, and
+- `summary` is a **`String`, not an `Option`** — "not earned yet" is `""`, not
+  `None`. Every guard written as `words.is_none()` becomes `summary.is_empty()`.
+
+`live_cwd` (§3.2) remains S4's own field, and is the only record field this spec
+still adds.
 
 Composition is a method on the record so `add.rs` and `hook.rs` cannot drift:
 
@@ -245,7 +302,7 @@ is not part of the string S4 composes):
 |---|---|---|
 | fresh `clave add --worktree`, no prompt yet | `clave` | `● 󰁼 𖣂 clave` |
 | after the first prompt | `clave · fix the flaky auth` | `● 󰁼 𖣂 clave · fix the flaky auth` |
-| after Claude's summary | `clave · Fix auth flow` | `● 󰁼 𖣂 clave · Fix auth flow` |
+| after Claude's first `ai-title` | `clave · Fix auth flow` | `● 󰁼 𖣂 clave · Fix auth flow` |
 | after the maintainer renames the session `F-CLA` | `F-CLA · clave · Fix auth flow` | `● 󰁼 𖣂 F-CLA · clave · Fix auth flow` |
 | after `cd` back to the main checkout | `F-CLA · clave · Fix auth flow` | **unchanged** — branch does not render (§1.1); the store changes, the screen does not |
 
@@ -253,31 +310,66 @@ Note the first row: an un-prompted, un-renamed agent composes to a **single
 segment**. That is intended — the gutter already carries status and provenance,
 and there is genuinely nothing else known about it yet.
 
-### 3.2 Live cwd, and what gets re-derived from it
+### 3.2 Live cwd, the transcript path, and what gets re-derived
 
-**`rec.cwd` is not mutated. This is a hard invariant, and it is why a new field
-exists instead.** `rec.cwd` is the transcript **join key**:
+> **CORRECTION, 2026-07-28 (#79, spike §3.3).** This section previously asserted,
+> as a hard invariant, that *"Claude keys the transcript directory on the cwd the
+> session was **created** in and never moves it"*, and built the whole
+> freeze-`rec.cwd` argument on it. **That invariant is false, and it was
+> load-bearing — the reasoning below is rewritten, not footnoted.** Measured:
+> a session created in `…/code/clave` and then moved into a worktree has its
+> **entire `.jsonl` relocated** by Claude into a project directory keyed on the
+> **new** cwd, carrying its full history (33 lines stamped with the old cwd, 169
+> with the new), and logs a `{"type":"relocated","relocatedCwd":…}` line.
+> `find ~/.claude/projects -name '<uuid>.jsonl'` returns exactly one hit, under
+> the **new** path. The old directory holds nothing.
+>
+> **The failure mode was therefore inverted.** Freezing `rec.cwd` *to protect the
+> tail read* means that after any relocation the tail read opens an abandoned
+> directory and silently finds nothing — **the freeze caused the exact staleness
+> it existed to prevent**, and it would have been invisible: no error, just a
+> label that stops upgrading. Any future reasoning of the form "the transcript
+> lives where the session was born" is unsafe. See
+> [`2026-07-28-agentsnapshot-v2-design.md`](2026-07-28-agentsnapshot-v2-design.md)
+> §3.3 for the evidence and the reproduction.
 
-- `jsonl_path(claude_dir, &rec.cwd, &uuid)` (`spawn.rs:28-33`) → `munge_cwd`
-  (`munge.rs:20-25`) → `~/.claude/projects/<munged-physical-cwd>/<uuid>.jsonl`.
-  Claude keys the transcript directory on the cwd the session was **created** in
-  and never moves it. Repointing `rec.cwd` would make the hook tail-read a file
-  that does not exist — killing the summary tier and the new title tier at the
-  same stroke.
-- `spawn_mode` (`spawn.rs:35-41`) tests that same path to choose
-  resume-vs-create. A wrong path means `claude --session-id` on an in-use id.
-- `claude --resume` is **project-dir-scoped** (`add.rs:242-244`), so the resume
-  tab must open in `rec.cwd`.
+**The tail read stops deriving a path and starts being told one.**
+`payload.transcript_path` is **mandatory** in this spec (§4.3), not the deferred
+optimisation §3.8 once listed it as. Claude reports the transcript's location on
+**every hook event**; deriving it from a cwd is guessing at something we are
+told, and relocation is precisely where the guess is wrong. Consuming the
+reported path dissolves relocation for the label pipeline entirely — there is no
+cwd→munge derivation left on the hot path to be stale.
 
-That is also exactly why `merge_resume_record` (`add.rs:343-354`) preserves cwd,
-pinned by `merge_resume_preserves_existing_row_and_resets_status`
-(`add.rs:889-922`). **That test and that behaviour are unchanged by this spec** —
-no stated intentional decision is needed, because nothing here touches `rec.cwd`.
+**`rec.cwd` is still not mutated** — but for two reasons now, not three. The
+transcript-join-key reason is dead:
 
-Instead, `AgentRecord` gains `live_cwd: Option<String>`: the cwd Claude last
-reported, purely an *observation*. It has exactly two jobs — feed the branch
-derivation, and be visible in the raw store so the maintainer can diagnose a
-divergence (`live_cwd != cwd` ⇒ the agent has moved).
+| Reason | Still holds? |
+|---|---|
+| ~~`jsonl_path(claude_dir, &rec.cwd, &uuid)` (`spawn.rs:28-33`) → `munge_cwd` (`munge.rs:20-25`) locates the transcript~~ | **no.** The path moves; the label pipeline no longer derives it (§4.3d) |
+| `spawn_mode` (`spawn.rs:35-41`) tests that path to choose resume-vs-create. A wrong path means `claude --session-id` on an in-use id | yes — and see the hazard below |
+| `claude --resume` is **project-dir-scoped** (`add.rs:242-244`), so the resume tab must open in `rec.cwd` | yes |
+
+**A hazard this correction exposes, which S4 does not fix.** `spawn_mode` still
+probes `jsonl_path(claude_dir, &rec.cwd, uuid)`. After a relocation that probe
+misses, `spawn_mode` chooses *create*, and `clave spawn` mints a fresh session
+rather than resuming — the history is orphaned, silently. That is a **spawn/resume
+defect, pre-existing and independent of the label**, newly *visible* because the
+relocation is now known. It is filed as a follow-up (§7, limitation 5) rather than
+fixed here: `live_cwd` gives it a second path to probe, but changing
+resume-vs-create arbitration is not a label change and must not ride this diff.
+
+`merge_resume_record` (`add.rs:343-354`) still preserves cwd, pinned by
+`merge_resume_preserves_existing_row_and_resets_status` (`add.rs:889-922`).
+**That test and that behaviour are unchanged by this spec** — nothing here
+touches `rec.cwd`.
+
+`AgentRecord` gains `live_cwd: Option<String>`: the cwd Claude last reported,
+purely an *observation*. It has exactly two jobs — feed the branch derivation,
+and be visible in the raw store so the maintainer can diagnose a divergence
+(`live_cwd != cwd` ⇒ the agent has moved, and — now — its transcript has moved
+with it). It has explicitly **lost** the job it never had: it is not, and must
+not become, an input to the transcript path. That input is `transcript_path`.
 
 **Branch is re-derived; nothing else is. It is derived but never rendered.**
 Rationale, decision by decision:
@@ -298,10 +390,31 @@ Rationale, decision by decision:
   (§4.4c), so it cannot crowd out the title, the repo or the summary. This is
   the single largest width win in the change: `clave/ab12cd34` was 13 of 27
   cells.
+- **`worktree-state` first, the filesystem second (added 2026-07-28, #79, spike
+  §3.4).** For any session Claude has placed in a worktree, the transcript
+  already carries `{"type":"worktree-state","worktreePath":…,"worktreeName":…,
+  "worktreeBranch":…,"originalCwd":…}` — 384 occurrences across the 40 newest
+  transcripts. That is the branch, the worktree path **and** S6's entire
+  provenance input, **for zero additional cost**: the tail is already in memory
+  for the title and `ai-title` tiers, so this is one more line-wise
+  `from_str` over a buffer we have already read, with **no filesystem walk and no
+  git subprocess at all**. The tier order is therefore:
+
+  1. `worktree-state` in the tail → `worktreeBranch` (and `worktreePath` /
+     `worktreeName` for §7's S6 hand-off);
+  2. failing that, `head::head_branch` over `live_cwd` (below);
+  3. failing that, `rec.branch` unchanged.
+
+  **`head.rs` is not made redundant and is not dropped.** The line is emitted
+  only for sessions Claude itself put in a worktree; a plain checkout — and a
+  worktree created by `clave add --worktree` rather than by Claude — never
+  carries it. `head.rs` remains the universal fallback and keeps its full test
+  matrix (§5.1). What changes is that the common worktree case stops touching
+  the filesystem.
 - **No `git` subprocess.** The hook is a global Claude Code hook whose prime
   directive is DO NO HARM (`hook.rs:1-5`). A subprocess on the turn path can
-  block Claude, and `Command` has no timeout in this codebase. Branch is read
-  **from the filesystem**:
+  block Claude, and `Command` has no timeout in this codebase. Where the
+  `worktree-state` tier does not apply, branch is read **from the filesystem**:
 
   ```
   walk up from live_cwd for a `.git` entry
@@ -329,11 +442,36 @@ Rationale, decision by decision:
   is also the repo it is bound to for resume. Recorded as a known limitation
   (§7) with a follow-up.
 
-### 3.3 The `LabelSource` state machine
+### 3.3 The `LabelSource` state machine — and the tier it points at
 
 `LabelSource` currently means *"which tier produced the whole label, and has it
-frozen"*. It is re-scoped to mean **"which tier produced the `words` segment"**,
-and nothing else. Segments 1–3 are outside it and always live.
+frozen"*. It is re-scoped to mean **"which tier produced the `summary`
+segment"**, and nothing else. Segments 0 and 1 are outside it and always live.
+
+**The tier is retargeted (2026-07-28, #79, spike §3.1/§3.2).** `LabelSource::Summary`
+no longer means "a `{"type":"summary"}` line was found" — that line type is
+extinct, **0 of 919 transcripts**, and the state has never been entered by any
+agent in production (§1.3). It now means **"an `ai-title` was found"**:
+
+| Transcript line | Count, 40 newest transcripts | Feeds |
+|---|---|---|
+| `custom-title` — `{"customTitle":"CLA-MAIN"}` | 1057 | `rec.title`, segment 0. **The user's own rename: a distinct and higher-authority signal**, and never conflated with the tiers below |
+| **`ai-title`** — `{"aiTitle":"Get approval to proceed"}` | **373** | **`rec.summary`, segment 2 — the retargeted tier.** Claude's rolling auto-description |
+| `last-prompt` — `{"lastPrompt":…}`, maintained live | 1340 | the **fallback** for segment 2, when no `ai-title` exists yet |
+| `summary` | **0** | nothing. Extinct |
+
+`ai-title` is what the maintainer independently predicted the tier should read
+("claude often computes a recap … that recap might be a good field to hold onto,
+and it might actually be better to use in the text of the summary when it
+exists"). It exists, it is automatic, and it was already in the transcript the
+whole time.
+
+**The variant name `Summary` is kept, deliberately.** Renaming it to `AiTitle`
+changes the serialized string `"summary"` → `"ai_title"`, which is the *same*
+whole-store parse failure on an older binary that the rejected third variant
+would cause (below). The wire value is a stable token; the tier it names is an
+implementation fact. §4.4(a)'s doc comment carries the mapping so the next reader
+does not have to infer it.
 
 **The two wire values are unchanged.** `LabelSource` keeps exactly
 `FirstPrompt | Summary` (`store.rs:28-33`, `#[serde(rename_all = "snake_case")]`).
@@ -341,37 +479,47 @@ Adding a third variant (`None`) was rejected: an older `clave` binary reading a
 store containing `"label_source":"none"` fails `serde_json::from_slice` in
 `read_store` (`store.rs:123-129`) — a **whole-store parse failure**, in exactly
 the mixed-binary window #43/#44 makes routine. "Not earned yet" is instead
-expressed as `words == None`, on a `#[serde(default)]` field an old binary
-ignores.
+expressed as `summary.is_empty()`, on a `#[serde(default)]` field (#69) an old
+binary ignores.
 
-States are the pair `(words, label_source)`:
+**State S stops being terminal for the segment.** The old design froze the text
+the first time a summary landed, on the premise that "the label only meaningfully
+changes once". `ai-title` falsifies the premise: it is a *rolling* description,
+re-emitted roughly nine times per transcript, and freezing it on first sight
+throws away the whole reason for consuming it. S self-loops **with updates**, and
+§5.3 re-does the churn arithmetic for it.
+
+States are the pair `(summary, label_source)`:
 
 ```text
                      ┌───────────────────────────────────────┐
                      │  U  ·  UNEARNED                       │
-                     │     words        = None               │
+                     │     summary      = ""                 │
                      │     label_source = FirstPrompt        │
                      └───┬───────────────────────────┬───────┘
-   UserPromptSubmit      │                           │  tail yields a summary
+   UserPromptSubmit      │                           │  tail yields an ai-title
    ∧ prompt non-empty    │                           │  ∧ not harness-injected
    ∧ not harness-injected│                           │
                          ▼                           │
         ┌────────────────────────────────┐           │
         │  P  ·  PROMPT-EARNED           │           │
-        │     words        = Some(first  │           │
-        │                    4 words)    │           │
+        │     summary      = first 4     │           │
+        │                    words       │           │
         │     label_source = FirstPrompt │           │
+        │  self-loop: a LATER prompt does │          │
+        │  NOT overwrite (earn-once)      │          │
         └────────────────┬───────────────┘           │
-                         │  tail yields a summary    │
+                         │  tail yields an ai-title  │
                          │  ∧ not harness-injected   │
                          ▼                           ▼
         ┌──────────────────────────────────────────────────┐
-        │  S  ·  SUMMARY-EARNED    (terminal for `words`)   │
-        │     words        = Some(summary first 4 words)    │
+        │  A  ·  AI-TITLE-EARNED   (label_source = Summary) │
+        │     summary      = clamp(latest aiTitle)          │
         │     label_source = Summary                        │
-        │   self-loop: summary branch is SKIPPED, but the   │
-        │   TITLE segment keeps refreshing — so the label   │
-        │   can still change after this state is reached    │
+        │   self-loop WITH UPDATES: a NEW ai-title replaces  │
+        │   the old one (it is a rolling description); the   │
+        │   prompt tier never writes again; the TITLE        │
+        │   segment keeps refreshing independently           │
         └──────────────────────────────────────────────────┘
 ```
 
@@ -379,10 +527,25 @@ States are the pair `(words, label_source)`:
 |---|---|---|---|---|
 | U | `UserPromptSubmit` | prompt non-empty ∧ `!is_harness_injected` | P | `true` (label changed) |
 | U | `UserPromptSubmit` | prompt injected, or empty/absent | U | whatever the title/repo segments decide |
-| U, P | `Stop` \| `UserPromptSubmit` | tail has a `summary` ∧ `!is_harness_injected` | S | `true` |
-| P | `UserPromptSubmit` | any later prompt | P | words unchanged; a new title may still change the label |
-| S | any | — | S | **words never change again**; the title segment still can |
+| U | `Stop` \| `UserPromptSubmit` | no `ai-title`, but the tail has a `last-prompt` ∧ `!is_harness_injected` | P | `true` — the fallback tier (below) |
+| U, P | `Stop` \| `UserPromptSubmit` | tail has an `ai-title` ∧ `!is_harness_injected` | A | `true` |
+| P | `UserPromptSubmit` | any later prompt | P | segment unchanged — **earn-once**; a new title may still change the label |
+| A | `Stop` \| `UserPromptSubmit` | tail has a **different** `ai-title` | A | `true`, and the segment is replaced |
+| A | `Stop` \| `UserPromptSubmit` | same `ai-title`, or none in the tail | A | `false` — the held-last-value rule, exactly as for the title (below) |
 | any | `Notification` \| `SessionEnd` | — | unchanged | no tail read at all |
+
+**The `last-prompt` fallback, and why it is earn-once.** `payload.prompt` reaches
+`refresh_label` only on `UserPromptSubmit`; an agent clave began tracking
+mid-life, or one whose first tracked event is a `Stop`, has no prompt to earn
+from and sits at the bare repo segment indefinitely. `last-prompt` is the same
+text, in the tail we are already reading, available on every event — so it is the
+natural source for the **U → P** transition when the payload cannot supply one.
+It is deliberately **not** allowed to overwrite an earned segment: `lastPrompt` is
+maintained *live* (1340 occurrences), so a tier that re-read it every turn would
+rewrite the label on every single prompt and fire a tab rename with it. The guard
+is the same `summary.is_empty()` that gates the payload path, and #17's
+`is_harness_injected` check applies to it identically — a `last-prompt` holding a
+`<task-notification>` is the same leak from a different door.
 
 The transition **U → P** is where #17's guard lives, and its gate changes. Today
 it is a byte-for-byte string comparison — `hook.rs:190-197`:
@@ -400,7 +563,7 @@ segment that can appear between two events, and a branch that can change, the
 reconstruction can no longer be relied upon. It becomes an explicit state test:
 
 ```rust
-if event == "UserPromptSubmit" && rec.words.is_none() && …
+if event == "UserPromptSubmit" && rec.summary.is_empty() && …
 ```
 
 **This deletes the byte-for-byte coupling entirely** — `add.rs`'s comment at
@@ -562,31 +725,87 @@ The collision surface between the two workstreams stays small by construction:
 
 ### 3.6 Compatibility and migration
 
-Three new `AgentRecord` fields, all `Option`/`#[serde(default)]`, all
-**store-only** — `snapshot_from` (`store.rs:167-189`) is **not** extended:
+**Amended 2026-07-28.** S4 now adds **one** `AgentRecord` field, not three.
+`title` and `summary` land with the v2 wire shape (#69, PR #81) on both `Agent`
+and `AgentRecord`, and `snapshot_from` (`store.rs:185`) already projects them —
+design-lock §7.1 rules that the bar renders from the store, so every field it
+lays a column from arrives as a value rather than as a position inside `label`.
+The earlier claim here that these were **store-only and deliberately off the
+wire** is superseded; do not restore it.
 
-| Field | Type | Why not on the wire |
-|---|---|---|
-| `title` | `Option<String>` | the bar renders the *composed* `label`; it has no use for the parts |
-| `words` | `Option<String>` | same |
-| `live_cwd` | `Option<String>` | a diagnostic, not a render input |
+| Field | Type | Owner | On the wire? |
+|---|---|---|---|
+| `title` | `Option<String>` | **#69** — consumed, not proposed | yes, `Agent.title` |
+| `summary` | `String` (`""` = unearned) | **#69** — consumed, not proposed | yes, `Agent.summary` |
+| `worktree` | `Option<String>` | **#69** — already stored, now projected | yes, `Agent.worktree` |
+| `live_cwd` | `Option<String>` | **S4** | **no** — a diagnostic, not a render input |
 
-Consequences, all good:
+Consequences:
 
-- **`clave_types` gains only `LABEL_SEP`** — a `pub const`, no schema change,
-  so no `AgentSnapshot`/`Agent` wire-compat risk, no new roundtrip obligations.
-- **Old store → new binary**: missing fields default to `None`. `words == None`
-  puts a long-lived agent back in state **U**, so its next real prompt re-earns
-  the words segment. A previously-`Summary` row keeps `label_source = Summary`
-  with `words == None` — the summary branch is *skipped* by state S, so its
-  words would never come back. **Backfill on read** instead: when
-  `words.is_none() && label_source == Summary`, reset `label_source` to
-  `FirstPrompt` so the next `Stop` re-derives from the tail. One line, in
-  `refresh_label`, and testable.
-- **New store → old binary** (the #43/#44 mixed-binary window): `AgentRecord` has
-  no `deny_unknown_fields`, so an old `clave` parses the store and ignores the
-  three fields. It will recompose the label under the old rule and overwrite
-  `label`; the new binary recomposes on its next event. Degrades, does not break.
+- **`clave_types` gains only `LABEL_SEP` from S4** — a `pub const`, no schema
+  change. The struct changes are #69's and carry #69's roundtrip obligations.
+- **Old store → new binary**: `#[serde(default)]` covers it. `summary == ""` puts
+  a long-lived agent back in state **U**, so its next `ai-title` — or its next
+  real prompt — re-earns the segment. A previously-`Summary` row that arrives
+  with an empty `summary` would otherwise be stuck, because the prompt tier is
+  gated on state U: **re-derive on read** — when
+  `summary.is_empty() && label_source == Summary`, reset `label_source` to
+  `FirstPrompt` so the next event re-earns from the tail. One line, in
+  `refresh_label`, and testable. It is also the self-heal for the hazard below,
+  which is why it is not optional.
+
+#### The mixed-version write hazard — S4's to fix
+
+**This is not the same "degrades gracefully" story the earlier draft told, and
+the difference is the whole point.** From `FOOTGUNS.md` ("Rust and codebase
+specifics", #69 whole-branch review / #59):
+
+> **An OLDER `clave` binary writing the store SILENTLY STRIPS fields it does not
+> know.** `with_store_mut` is read-modify-**write**: serde drops unknown keys on
+> deserialize, so the whole row is re-serialized without them. Harmless for
+> `title`/`summary` today — the #69 backfill re-seeds them from `label` at the
+> next session create — but the moment S4 (#59) writes an *earned* summary from
+> `ai-title`, a single old-binary write in a mixed-version window destroys it
+> with no self-heal and no error. Any field holding earned state needs either a
+> version guard or a re-derivation path.
+
+Restated as it applies here. `AgentRecord` has no `deny_unknown_fields`, so an
+old binary *parses* a new store — but it does not merely ignore the new fields,
+it **drops them on the next write**. Today that is benign, because nothing
+populates `title`/`summary` except #69's backfill, which re-seeds from `label` at
+the next session create. **S4 is exactly the change that makes it malign**: once
+`rec.summary` holds an earned `ai-title` and `rec.title` holds the user's rename,
+one hook event from a stale binary erases both, silently, with no error and — for
+`title` — no source to re-seed from, because `label` no longer encodes it
+unambiguously.
+
+**The fix S4 adopts: a re-derivation path, keyed on `label_source`.** Not a
+version guard — #69 §2.1 rules out a version field explicitly ("no version field,
+no migration framework"), and a guard that refuses to write is worse than a write
+that heals. The mechanism:
+
+1. `label_source` is a **pre-existing** field, known to every binary since #17,
+   so an old binary preserves it through a read-modify-write. `Summary` is a
+   value **only a post-S4 binary ever writes** (the `type:"summary"` tier it used
+   to mean is extinct — §3.3). It therefore survives as a reliable marker of
+   *"this row had earned an `ai-title` summary"* even when the value itself has
+   been stripped.
+2. The §3.6 re-derivation above reads exactly that signal —
+   `summary.is_empty() && label_source == Summary` — and puts the row back in
+   state U, so the next `Stop` re-earns from the transcript tail.
+3. `title` needs no marker: the held-last-non-empty rule (§3.3) already rewrites
+   it from the tail on the next label-bearing event.
+
+**The residual, stated rather than hidden.** Both recoveries read the 64 KiB
+tail. If the last `custom-title` / `ai-title` line has scrolled out of that window
+before the stale write happens, the value is gone until Claude emits a fresh one —
+which, for `ai-title`, is a matter of turns, and for `custom-title` may be never.
+That is a genuinely lossy corner. It is **bounded to the mixed-version window**
+(#43/#44), it produces a stale label rather than a wrong one, and closing it
+properly means a store schema version, which is #69's ruled-out territory. Filed
+as a follow-up (§7, limitation 6), pinned by
+`stale_binary_strip_is_re_derived_from_the_tail` (§5.1), and named in the
+adversarial reviewer brief (§5.4).
 
 ### 3.7 Sanitization — `sanitize_label` covers a title, with one gap
 
@@ -623,7 +842,7 @@ longer a rendered segment. It keeps its existing treatment wherever it is
 displayed today (`resume_candidates` sanitizes the composed picker line at
 `add.rs:303,306`).
 
-Title also gets the same length clamp the words tier has — `first_words`'
+Title also gets the same length clamp the summary tier has — `first_words`'
 char-boundary-safe 32-char cap (`hook.rs:107-110`) — factored into
 `clamp_chars(s, 32)` and reused. A user-chosen title is otherwise unbounded and
 would monopolise the row after §3.4 protects it from being dropped.
@@ -632,7 +851,7 @@ would monopolise the row after §3.4 protects it from being dropped.
 
 | Rejected | Why |
 |---|---|
-| **Mutate `rec.cwd` from the payload** | it is the transcript join key (§3.2): breaks the tail read, `spawn_mode`, and project-dir-scoped resume. This is also why `merge_resume_record` is left alone |
+| **Mutate `rec.cwd` from the payload** | it still scopes `spawn_mode` and project-dir-scoped resume (§3.2). **The "it is the transcript join key" half of this rationale is dead** — the transcript relocates and the label pipeline no longer derives its path (#79, spike §3.3) — but the surviving half is sufficient, and it is also why `merge_resume_record` is left alone |
 | **Mutate `rec.repo_root` when the live cwd's repo changes** | drops the row out of `resume_candidates`' `repo_root ==` filter (`add.rs:275`) for the only repo it can be resumed into |
 | **Add `LabelSource::None`** | a new wire string breaks `read_store` on any older binary — a *whole-store* parse failure, in exactly the window #43/#44 makes routine |
 | **Shell out to `git rev-parse --abbrev-ref HEAD`** | a subprocess on Claude's turn path, with no timeout in this codebase, in a hook whose contract is DO NO HARM. The `HEAD`-file read is two `read_to_string`s and is unit-testable without `git` installed |
@@ -643,7 +862,12 @@ would monopolise the row after §3.4 protects it from being dropped.
 | **Always emit a title slot (empty when unrenamed) so repo is invariably segment 1** | burns three cells on the majority of rows, and `parts.retain(\|p\| !p.is_empty())` / `sanitize_segment` would strip it anyway. §3.5's value-match resolves the ambiguity for free |
 | **Keep branch as a fourth rendered segment** | superseded by the 2026-07-22 ruling. Independently justified: `clave/ab12cd34` was 13 of 27 cells and is the least discriminating string on the row — every sibling worktree of a repo shares its shape |
 | **Per-segment shrinking (abbreviate a repo, elide a summary's middle)** | gold-plating. The drop rule already fits both 30 and 38 cols; abbreviation rules are a design question for #24's brainstorm, not a defect fix |
-| **Use `payload.transcript_path` instead of `jsonl_path(claude_dir, &rec.cwd, uuid)`** | strictly better (it removes the cwd→munge derivation from the hot path) but it is a fourth change. Deferred to §7 with a follow-up; the derived path is proven in production today |
+| ~~**Use `payload.transcript_path` instead of `jsonl_path(claude_dir, &rec.cwd, uuid)`**~~ | **WITHDRAWN — this is now MANDATORY (§4.3a/d), not an alternative.** The deferral read *"strictly better … but it is a fourth change; the derived path is proven in production today"*. Both halves were wrong: it is a **correctness** requirement, not an optimisation, and the derived path is proven **broken** the moment a session relocates (#79, spike §3.3). Recorded rather than deleted because "the derived path is proven in production" is exactly the kind of claim a later reader would re-adopt |
+| **Track the transcript by `live_cwd` instead of by `transcript_path`** | it re-derives what we are told, one relocation later. The payload names the file; munging a cwd only guesses at it, and §3.2's correction is the price of the guess. `live_cwd` feeds branch derivation and diagnosis, nothing else |
+| **Rename `LabelSource::Summary` to `AiTitle` now the tier is retargeted** | the serialized string changes `"summary"` → `"ai_title"`, which is the same whole-store `read_store` failure on an older binary as the rejected `None` variant. The wire token stays; §4.4(a)'s doc comment carries the mapping (§3.3) |
+| **Let `last-prompt` overwrite an already-earned summary** | `lastPrompt` is maintained live (1340 occurrences across 40 transcripts), so the label would change on **every** prompt and fire a tab rename with it — reintroducing exactly the churn §5.3 exists to bound. Earn-once, same guard as the payload path (§3.3) |
+| **Drop `head.rs` now that `worktree-state` carries the branch** | the line is emitted only for sessions **Claude** placed in a worktree. A plain checkout, and a worktree created by `clave add --worktree`, never carry it. `worktree-state` is a fast path in front of `head.rs`, not a replacement for it (§3.2, spike §3.4) |
+| **A store schema version to guard the mixed-version strip (§3.6)** | #69 §2.1 rules out a version field and a migration framework outright, and a guard that refuses to write is worse than a write that heals. S4 takes the re-derivation path instead, and states its residual (§3.6) |
 | **Read the title from `PaneInfo.title`** | the bar discards pane titles (`clave-bar/src/main.rs:458-463`), the value is Claude's TUI chrome not a record, and nothing would reach a *dormant* row |
 
 ---
@@ -710,7 +934,7 @@ displays it.
 
 ### 4.3 `crates/clave/src/hook.rs` — the payload, the tiers, the gates
 
-**(a) `HookPayload` gains `cwd`** — replacing `hook.rs:23-34`:
+**(a) `HookPayload` gains `cwd` and `transcript_path`** — replacing `hook.rs:23-34`:
 
 ```rust
 #[derive(Debug, Default, Deserialize)]
@@ -729,10 +953,27 @@ pub struct HookPayload {
     /// payload without it degrades to "branch unchanged".
     #[serde(default)]
     pub cwd: Option<String>,
+    /// The transcript Claude is writing RIGHT NOW. MANDATORY input, not an
+    /// optimisation (#79): Claude RELOCATES a session's .jsonl into a project
+    /// directory keyed on the new cwd when the session changes directory, so
+    /// `jsonl_path(claude_dir, &rec.cwd, uuid)` reads an abandoned directory
+    /// from that moment on — silently, forever (S4 §3.2). Deriving the path
+    /// guesses at something every hook event tells us. Absent → no tail read
+    /// this event; the held title/summary values stand.
+    #[serde(default)]
+    pub transcript_path: Option<String>,
 }
 ```
 
-**(b) new tail extractor**, beside `summary_from_tail` (`hook.rs:116-130`):
+`transcript_path` is a Claude Code payload field, deserialized like every other:
+optional, and a `None` degrades to "no update this event" rather than to a wrong
+value.
+
+**(b) four tail extractors**, replacing and joining `summary_from_tail`
+(`hook.rs:116-130`). All four share one shape — `.lines().rev().find_map(…)` over
+a local `#[derive(Deserialize)] struct Line` matching on `type` and filtering
+`!s.trim().is_empty()` — so they are one generic helper plus four thin callers,
+not four parsers:
 
 ```rust
 /// Scan a jsonl TAIL for the LAST NON-EMPTY
@@ -742,12 +983,43 @@ pub struct HookPayload {
 /// maintainer's ruling (#24, 2026-07-21) is that clave holds the last real
 /// rename across it.
 pub fn custom_title_from_tail(tail: &str) -> Option<String>;
+
+/// The LAST NON-EMPTY `{"type":"ai-title","aiTitle":…}` — Claude's rolling
+/// auto-description, and the summary tier's real source (#79). REPLACES
+/// `summary_from_tail`, whose `{"type":"summary"}` line type appears in 0 of
+/// 919 transcripts and has never once fired in production (S4 §1.3).
+pub fn ai_title_from_tail(tail: &str) -> Option<String>;
+
+/// The LAST NON-EMPTY `{"type":"last-prompt","lastPrompt":…}` — the fallback
+/// source for the summary segment when no `ai-title` exists yet and the event
+/// carried no `payload.prompt` (S4 §3.3). EARN-ONCE at the call site: this
+/// value is maintained live and would otherwise rewrite the label every turn.
+pub fn last_prompt_from_tail(tail: &str) -> Option<String>;
+
+/// The LAST `{"type":"worktree-state", …}` — `worktreePath`, `worktreeName`,
+/// `worktreeBranch`, `originalCwd`. Present for any session CLAUDE placed in a
+/// worktree (384 occurrences across the 40 newest transcripts), absent for a
+/// plain checkout and for a `clave add --worktree` tree. Zero-cost provenance:
+/// the tail is already in memory (#79, spike §3.4). Feeds branch derivation
+/// ahead of `head::head_branch`, and hands S6 its marker inputs.
+pub fn worktree_state_from_tail(tail: &str) -> Option<WorktreeState>;
+
+pub struct WorktreeState {
+    pub path: Option<String>,
+    pub name: Option<String>,
+    pub branch: Option<String>,
+}
 ```
 
-Same shape as `summary_from_tail`: `.lines().rev().find_map(…)` with a local
-`#[derive(Deserialize)] struct Line { #[serde(rename = "type")] kind: String,
-#[serde(rename = "customTitle")] custom_title: Option<String> }`, matching
-`kind == "custom-title"` and filtering `!s.trim().is_empty()`.
+`summary_from_tail` is **deleted, not kept as a third tier.** Keeping a scanner
+for a line type that provably does not exist is dead code that reads as a working
+feature — it is what made §1.3's defect survive this long. Its test
+(`summary_from_tail_takes_last_summary_line`, `hook.rs:454-464`) is re-pointed at
+`ai_title_from_tail`, not deleted (§5.2): it asserts *last-non-empty-wins over a
+tail*, which is still the contract; only the line type it feeds changed. Every
+`Summary`-tier assertion in the suite is in the same position — hand-written
+fixtures of a shape Claude no longer writes, so they were green against fiction.
+**Re-point them; do not delete them.**
 
 **(c) `refresh_label` is rewritten.** Replacing `hook.rs:148-199` in full. The
 replaced hard-stop and prefix rebuild:
@@ -772,8 +1044,11 @@ The new body, in order:
 fn refresh_label(rec, event, payload, jsonl_tail) -> bool {
     let before = rec.label.clone();
 
-    // §3.6 backfill: a pre-S4 row that reached Summary has no `words`.
-    if rec.words.is_none() && rec.label_source == LabelSource::Summary {
+    // §3.6 re-derivation: a row whose `summary` is empty while label_source
+    // says Summary either predates the field or was stripped by an OLDER
+    // BINARY's read-modify-write (FOOTGUNS, #69/#59). Put it back in state U
+    // so the next tail re-earns it. This is the self-heal, not a nicety.
+    if rec.summary.is_empty() && rec.label_source == LabelSource::Summary {
         rec.label_source = LabelSource::FirstPrompt;
     }
 
@@ -783,10 +1058,18 @@ fn refresh_label(rec, event, payload, jsonl_tail) -> bool {
         if let Some(cwd) = payload.cwd.as_deref() {
             rec.live_cwd = Some(cwd.to_string());
         }
-        let probe = rec.live_cwd.as_deref().unwrap_or(&rec.cwd);
-        if let Some(b) = crate::head::head_branch(Path::new(probe)) {
+        // Tier 1: the transcript already states it, for free (§3.2, #79).
+        let wt = jsonl_tail.and_then(worktree_state_from_tail);
+        if let Some(b) = wt.as_ref().and_then(|w| w.branch.clone()) {
             rec.branch = b;
+        // Tier 2: two file reads, no subprocess. Plain checkouts land here.
+        } else {
+            let probe = rec.live_cwd.as_deref().unwrap_or(&rec.cwd);
+            if let Some(b) = crate::head::head_branch(Path::new(probe)) {
+                rec.branch = b;
+            }
         }
+        // Tier 3 is doing nothing: `rec.branch` is left as it was.
     }
 
     // segment 0 — title. Held on absent/empty/injected (§3.3).
@@ -797,27 +1080,49 @@ fn refresh_label(rec, event, payload, jsonl_tail) -> bool {
         rec.title = Some(clamp_chars(&t, 32));
     }
 
-    // segment 2 — words. The §3.3 state machine.
-    if rec.label_source != LabelSource::Summary
-        && let Some(summary) = jsonl_tail
-            .and_then(summary_from_tail)
-            .filter(|s| !is_harness_injected(s))
+    // segment 2 — summary. The §3.3 state machine, retargeted to `ai-title`.
+    // NOT gated on label_source: ai-title ROLLS, and freezing it on first
+    // sight discards the only reason to read it.
+    if let Some(ai) = jsonl_tail
+        .and_then(ai_title_from_tail)
+        .filter(|s| !is_harness_injected(s))
     {
-        rec.words = Some(first_words(&summary));
+        rec.summary = first_words(&ai);
         rec.label_source = LabelSource::Summary;
-    } else if event == "UserPromptSubmit"
-        && rec.words.is_none()
-        && let Some(p) = payload.prompt.as_deref().filter(|p| !p.trim().is_empty())
-        && !is_harness_injected(p)
-    {
-        rec.words = Some(first_words(p));
-        // label_source stays FirstPrompt
+    } else if rec.summary.is_empty() {
+        // EARN-ONCE fallbacks, in payload-then-tail order. label_source stays
+        // FirstPrompt for both — neither is an ai-title.
+        let candidate = payload
+            .prompt
+            .as_deref()
+            .filter(|p| !p.trim().is_empty())
+            .map(str::to_owned)
+            .filter(|_| event == "UserPromptSubmit")
+            .or_else(|| jsonl_tail.and_then(last_prompt_from_tail));
+        if let Some(p) = candidate.filter(|p| !is_harness_injected(p)) {
+            rec.summary = first_words(&p);
+        }
     }
 
     rec.label = rec.compose_label();
     rec.label != before          // ← the churn firewall (§5.3)
 }
 ```
+
+**Three things to hold onto in that body**, because each replaces a claim an
+earlier draft made:
+
+1. **The `ai-title` branch is unconditional on `label_source`.** State A
+   self-loops with updates (§3.3). `label_source` is written as a *marker* — it
+   is what §3.6's re-derivation reads after a stale-binary strip — not as a
+   freeze.
+2. **`is_harness_injected` guards all three earn paths**, not two. The title
+   tier, the `ai-title` tier and the prompt/`last-prompt` fallback each pass a
+   Claude-authored or harness-authored string, and #17's leak is that *any*
+   unguarded path bakes a tag in forever (`FOOTGUNS.md`: "Earned labels stick,
+   with no self-heal").
+3. **`worktree-state` is read before `head_branch`, and its absence costs
+   nothing** — the tail is already in memory for the two tiers above it.
 
 **The return value is `rec.label != before`, not "did any input get re-read".**
 That single line is what keeps §5.3's rename-churn bounded: re-deriving an
@@ -849,7 +1154,7 @@ asserts both halves: the record mutated, and the return was `false`.
         });
 ```
 
-becomes an event-only gate:
+becomes an event-only gate **over the reported path**:
 
 ```rust
         // S4: the TITLE tier is live for the session's whole life, so the tail
@@ -857,14 +1162,28 @@ becomes an event-only gate:
         // the old `== FirstPrompt` gate froze renames the moment a summary
         // landed. Cost: one 64 KiB read on Stop/UserPromptSubmit for TRACKED
         // agents only (the untracked fast path at hook.rs:270-272 already
-        // returned). `jsonl_path` still keys off rec.cwd, which S4 does NOT
-        // rewrite (§3.2) — the transcript never moves.
-        let tail = s.agents.get(&uuid).and_then(|rec| {
-            matches!(event, "Stop" | "UserPromptSubmit")
-                .then(|| read_tail(&jsonl_path(&claude_dir, &rec.cwd, &uuid), 64 * 1024))
-                .flatten()
-        });
+        // returned).
+        //
+        // The path comes from the PAYLOAD, not from rec.cwd (#79). Claude
+        // RELOCATES a transcript when the session changes directory — the
+        // whole .jsonl moves into a project dir keyed on the NEW cwd, history
+        // and all — so the munged rec.cwd derivation reads an abandoned
+        // directory from that moment on, silently and forever. Deriving a path
+        // we are handed on every event was never worth the failure mode.
+        let tail = matches!(event, "Stop" | "UserPromptSubmit")
+            .then(|| payload.transcript_path.as_deref())
+            .flatten()
+            .and_then(|p| read_tail(Path::new(p), 64 * 1024));
 ```
+
+Two consequences worth naming:
+
+- **The gate no longer consults the store at all.** The `s.agents.get(&uuid)`
+  lookup existed only to reach `rec.cwd`; the untracked fast path at
+  `hook.rs:270-272` has already returned by this point, so nothing is lost.
+- **`jsonl_path` / `munge_cwd` leave the label pipeline entirely.** They remain in
+  `spawn.rs` for resume-vs-create arbitration, which is where §3.2's newly
+  exposed relocation hazard now lives — not here.
 
 **(e) `clamp_chars`** — extract the tail of `first_words` (`hook.rs:107-110`) so
 the title tier reuses it:
@@ -889,36 +1208,47 @@ why `first_words_clamps` (`hook.rs:444-452`) still passes unmodified.
 becomes:
 
 ```rust
-/// Which tier produced the label's **words segment** (§6.4, re-scoped by S4).
+/// Which tier produced the label's **summary segment** (§6.4, re-scoped by S4).
 /// It says NOTHING about the repo/title/branch segments, which are recomposed
-/// on every label-bearing hook event and are never frozen. `words == None`
-/// means "not earned yet" — deliberately expressed on a defaulted Option
+/// on every label-bearing hook event and are never frozen. `summary == ""`
+/// means "not earned yet" — deliberately expressed on the defaulted #69 field
 /// rather than a third variant here, because a new wire string would fail
 /// `read_store` on any older binary (#43/#44 mixed-binary window).
-/// `FirstPrompt`: words came from the first real user prompt, and the tail is
-/// still scanned for a summary that would replace them.
-/// `Summary`: words came from a session summary — terminal for the WORDS
-/// segment only; the tail is still read every event for the title tier.
+///
+/// `FirstPrompt`: the segment came from the first real user prompt (payload) or
+/// the transcript's `last-prompt`, and the tail is still scanned for an
+/// `ai-title` that would replace it.
+/// `Summary`: the segment came from Claude's `ai-title`. NOT terminal — an
+/// ai-title is a ROLLING description and a newer one replaces the held value.
+///
+/// NAMING, deliberate (#79): the variant is still spelled `Summary` and still
+/// serializes as `"summary"`, but the `{"type":"summary"}` transcript line it
+/// was named after is EXTINCT — 0 of 919 transcripts, and no agent ever
+/// reached this state before S4. Renaming it would change the serialized token
+/// and fail `read_store` on an older binary, which is the same defect the
+/// third variant was rejected for. Read it as "the Claude-authored tier".
+///
+/// It also serves as a MARKER: `Summary` is a value only a post-S4 binary
+/// writes, so `summary.is_empty() && label_source == Summary` is the reliable
+/// signal that an older binary's read-modify-write stripped an earned value
+/// (S4 §3.6) — and the trigger for re-deriving it from the tail.
 ```
 
-**(b) `AgentRecord` gains three fields** (after `label_source`, `store.rs:56`):
+**(b) `AgentRecord` gains ONE field** (after `summary`, `store.rs:83`). `title`
+and `summary` are already there — #69 landed them (`store.rs:70-83`) along with
+their `Agent` counterparts and the `snapshot_from` projection. S4 **fills** them;
+it does not declare them. Their doc comments already point here ("written by S4
+(#59) from `ai-title`, the `type:"summary"` tier being extinct (#79)"), so S4's
+only obligation to those two is to make the comments true.
 
 ```rust
-    /// Claude's session rename — the latest NON-EMPTY `custom-title` record
-    /// in the transcript (#24 ruling 2026-07-21: held across `/clear`, and
-    /// held when the last rename scrolls out of the 64 KiB tail window).
-    /// Label segment 2. `default` keeps pre-S4 store files loading.
-    #[serde(default)]
-    pub title: Option<String>,
-    /// Label segment 2: the session summary, else the first real prompt's
-    /// first four words. `None` = not earned yet (see LabelSource).
-    #[serde(default)]
-    pub words: Option<String>,
-    /// The cwd Claude LAST REPORTED in a hook payload. An OBSERVATION, not
-    /// the join key: `cwd` above is munged into the transcript path
-    /// (spawn.rs:28) and scopes `claude --resume`, so it is never rewritten
-    /// from this. Feeds the branch re-derivation, and makes a mid-session
-    /// `cd` visible in the raw store for diagnosis (S4 §3.2).
+    /// The cwd Claude LAST REPORTED in a hook payload. An OBSERVATION, and
+    /// deliberately NOT a path source: `cwd` above scopes `spawn_mode` and
+    /// `claude --resume`, and the TRANSCRIPT path comes from the payload's
+    /// `transcript_path` because Claude relocates transcripts on a cwd change
+    /// (#79). This field feeds the branch re-derivation where `worktree-state`
+    /// is absent, and makes a mid-session `cd` — and therefore a relocation —
+    /// visible in the raw store for diagnosis (S4 §3.2).
     #[serde(default)]
     pub live_cwd: Option<String>,
 ```
@@ -927,7 +1257,7 @@ becomes:
 
 ```rust
 impl AgentRecord {
-    /// The §6.4 / S4 label grammar, ruled 2026-07-22: `title · repo · words`.
+    /// The §6.4 / S4 label grammar, ruled 2026-07-22: `title · repo · summary`.
     /// Absent segments contribute no separator. TEXT ONLY — the status /
     /// battery / worktree glyphs are the GUTTER's (S6) and never appear here,
     /// because this string is also the zellij TAB NAME and the launch.kdl tab
@@ -954,7 +1284,7 @@ impl AgentRecord {
         let mut parts: Vec<String> = Vec::with_capacity(3);
         if let Some(t) = &self.title { parts.push(sanitize_segment(t)); }
         parts.push(sanitize_segment(repo));
-        if let Some(w) = &self.words { parts.push(sanitize_segment(w)); }
+        if !self.summary.is_empty() { parts.push(sanitize_segment(&self.summary)); }
         parts.retain(|p| !p.is_empty());
         if parts.is_empty() {
             // Everything sanitized to empty (control-only inputs, or no repo at
@@ -988,8 +1318,10 @@ because `AgentRecord` lives here and both callers are outside; the alternative
 (a fourth new module) buys nothing. `store.rs` already reaches into `add.rs`'s
 sibling namespace in the same direction `hook.rs` does (`crate::add::sanitize_label`).
 
-**(d) every `AgentRecord` literal gains the three fields.** `AgentRecord` derives
-no `Default`, so this is mechanical and exhaustive — the compiler enumerates it:
+**(d) every `AgentRecord` literal gains `live_cwd`.** `title` and `summary` were
+added to every literal by #69; only S4's one new field remains. `AgentRecord`
+derives no `Default`, so this is mechanical and exhaustive — the compiler
+enumerates it (line numbers are pre-#69 and will have moved):
 
 ```text
 crates/clave/src/store.rs:372          (test rec)
@@ -1003,13 +1335,14 @@ crates/clave/src/setup.rs:792,828,989,1255   (tests)
 crates/clave/tests/kdl_guardrail.rs:60 (eager_record)
 ```
 
-All test literals take `title: None, words: None, live_cwd: None`.
-`add.rs:741` and `dev.rs:229` are covered in §4.5 / §4.6.
+All test literals take `live_cwd: None` (on top of #69's `title: None,
+summary: String::new()`). `add.rs:741` and `dev.rs:229` are covered in §4.5 /
+§4.6.
 
-`merge_resume_record` (`add.rs:343-354`) uses `..row.clone()`, so the three new
-fields are preserved on resume **for free** and with the same rationale as
-cwd/label — the earned title and words are state a re-add has no business
-resetting. `merge_resume_preserves_existing_row_and_resets_status`
+`merge_resume_record` (`add.rs:343-354`) uses `..row.clone()`, so `title`,
+`summary` and `live_cwd` are preserved on resume **for free** and with the same
+rationale as cwd/label — the earned title and summary are state a re-add has no
+business resetting. `merge_resume_preserves_existing_row_and_resets_status`
 (`add.rs:889-922`) is extended to assert it (§5.2), not changed in intent.
 
 ### 4.5 `crates/clave/src/add.rs` — one composer, coupling deleted
@@ -1039,7 +1372,8 @@ The record is still **inserted** inside the lock — only its construction moves
 and `merge_resume_record`'s authoritative in-lock `existing` lookup
 (`add.rs:738-739`) is untouched.
 
-New `fresh` fields: `title: None, words: None, live_cwd: None`. A `--worktree`
+New `fresh` fields: `live_cwd: None` (alongside #69's `title: None`,
+`summary: String::new()`, already present). A `--worktree`
 agent is now born `clave` (one segment) instead of `ab12cd34 · clave/ab12cd34` —
 **that is the reported fix**, visible at creation and not only after the first
 hook event.
@@ -1065,7 +1399,7 @@ regression, caught by the format change.** `add.rs:301-310` reads:
 ```
 
 and its rationale at `add.rs:296-300` is explicit: *"an EARNED store label
-already encodes its branch (hook.rs writes `dir · branch · words`), so it is NOT
+already encodes its branch (hook.rs writes `dir · branch · summary`), so it is NOT
 re-appended — only the `(wt)` marker is."* **That premise is now false.** With
 branch out of the grammar, an earned label encodes no branch, so every worktree
 candidate in the fzf picker would read `clave (wt)`, `clave (wt)`, `clave (wt)` —
@@ -1100,7 +1434,8 @@ here so a reviewer sees it was considered rather than missed.
 
 ### 4.6 `crates/clave/src/dev.rs` — scenario records
 
-`dev.rs:229-243` seeds scenario rows. Add the three fields as `None`. The
+`dev.rs:229-243` seeds scenario rows. Add `live_cwd: None` (#69 already added
+`title` / `summary`). The
 scenario labels are currently literal strings; leave them — the first hook event
 in a `clave dev launch` recomposes them, and that recomposition is itself worth
 watching during sandbox validation.
@@ -1173,7 +1508,7 @@ than leaking an escape.
 
 **No positional inference of meaning is required, and none is performed.** That
 is a deliberate simplification over the previous four-segment design, where
-`repo · title · branch` and `repo · branch · words` were indistinguishable at
+`repo · title · branch` and `repo · branch · summary` were indistinguishable at
 three segments. The new grammar has no such collision, because the only optional
 *trailing* segment is the summary. `title` being optional creates an ambiguity
 only for a **consumer that needs to identify** the repo — which is S5, and §3.5
@@ -1240,7 +1575,14 @@ precedes it.
   label rule changes shape. Amend in place with a dated note, matching how §6.5
   and §6.6 carry their revisions.
 - `docs/superpowers/spikes/SUBSYSTEM-VALIDATION.md` — per AGENTS.md, record the
-  `custom-title` / `.git/HEAD` findings in the ledger **in the same commit**.
+  `custom-title` / `ai-title` / `worktree-state` / `.git/HEAD` findings in the
+  ledger **in the same commit**, and the dead end explicitly: *a tier scanning
+  `{"type":"summary"}` cannot fire; verify a transcript line type exists before
+  building a state on it* (#79).
+- `FOOTGUNS.md` already carries the three entries this spec depends on — the
+  extinct `summary` tier, transcript relocation on a cwd change, and the
+  older-binary read-modify-write strip. S4 does not re-document them; it links
+  them (§3.2, §3.6).
 - `docs/status/YYYY-MM-DD-HHMM-clave-orchestrator.md` — handoff duty.
 
 ---
@@ -1273,30 +1615,40 @@ one seam S4 crosses is *reading a file Claude writes*, addressed in §5.4.
 | Test | Pins |
 |---|---|
 | `custom_title_from_tail_takes_last_non_empty` | three `custom-title` lines, the last empty → the **middle** value wins. The `/clear` ruling, directly |
-| `custom_title_from_tail_ignores_other_record_types` | `summary` / `agent-name` / `user` lines are not titles |
+| `custom_title_from_tail_ignores_other_record_types` | `ai-title` / `agent-name` / `user` lines are not titles. **`custom-title` is the user's rename and outranks them** (§3.3) |
+| `ai_title_from_tail_takes_last_non_empty` | the retargeted tier's extractor, over a realistic tail. Re-pointed from `summary_from_tail_takes_last_summary_line` (§5.2) |
+| `ai_title_tier_keeps_upgrading` | two `ai-title` values in sequence → the segment tracks the **second**. State A self-loops with updates (§3.3); the old design froze here |
+| `last_prompt_earns_only_when_unearned` | a tail with a `last-prompt` and an already-earned `summary` → **unchanged**. The churn guard on the live-maintained fallback (§3.3) |
+| `last_prompt_earns_on_a_stop_with_no_payload_prompt` | state U + `Stop` + a tail `last-prompt` → state P. The gap the fallback exists for |
+| `ai_title_outranks_last_prompt_in_the_same_tail` | both present → `ai-title` wins and `label_source` becomes `Summary` |
 | `title_survives_a_tail_without_one` | `rec.title = Some("F-CLA")`, a tail with **no** `custom-title` → still `Some("F-CLA")`. The 64 KiB-window flicker guard (§3.3) |
-| `title_tier_stays_live_after_summary` | drive to state **S**, then feed a tail with a new title → the label changes. **The §1.3 obstacle, red-first** |
-| `branch_refreshes_from_the_payload_cwd` | `payload.cwd` in a temp worktree → `rec.branch` and `rec.live_cwd` update, `rec.cwd` **unchanged** |
+| `title_tier_stays_live_after_summary` | drive to state **A**, then feed a tail with a new title → the label changes. **The §1.3 obstacle, red-first** |
+| `branch_refreshes_from_the_payload_cwd` | `payload.cwd` in a temp worktree, tail with **no** `worktree-state` → `rec.branch` and `rec.live_cwd` update via `head.rs`, `rec.cwd` **unchanged** |
+| `worktree_state_branch_wins_over_head_walk` | a tail carrying `worktreeBranch` **and** a `live_cwd` whose `.git/HEAD` says something else → the transcript value wins, and `head_branch` is not consulted. The zero-cost tier (§3.2, spike §3.4) |
+| `worktree_state_absent_falls_back_to_head` | plain-checkout tail → tier 2. **Pins that `head.rs` is not dead** |
 | `branch_refresh_is_skipped_on_non_label_events` | `Notification` / `SessionEnd` → no `live_cwd` write, no branch read |
 | `refresh_label_returns_false_when_nothing_changed` | same event twice → second returns `false`. **The churn firewall (§5.3)** — without it `seq` bumps and a snapshot pushes on every turn |
-| `pre_s4_summary_row_backfills_words` | `words: None, label_source: Summary` → source resets to `FirstPrompt`, next tail re-earns (§3.6) |
+| `stale_binary_strip_is_re_derived_from_the_tail` | `summary: "", label_source: Summary` — the shape an older binary's read-modify-write leaves behind (§3.6) — → source resets to `FirstPrompt` and the next tail re-earns it. **The self-heal, and the only thing standing between an earned summary and silent loss in a mixed-version window** |
 | `label_is_repo_not_cwd_basename` | `cwd = /r/.claude-worktrees/issue-10-kdl-guardrail`, `repo_root = /r` → the label names `r`. **The reported symptom, as a unit test** |
-| `branch_change_alone_does_not_change_the_label` | change the branch via a temp worktree, keep title/words fixed → `rec.branch` updates, `refresh_label` returns **`false`**. Branch is derived and stored but not rendered (§3.1) — and this is also the churn firewall's tightest case |
+| `branch_change_alone_does_not_change_the_label` | change the branch via a temp worktree, keep title/summary fixed → `rec.branch` updates, `refresh_label` returns **`false`**. Branch is derived and stored but not rendered (§3.1) — and this is also the churn firewall's tightest case |
 | `injected_custom_title_does_not_earn` | `customTitle = "<system-reminder …>"` → `rec.title` stays `None` |
+| `injected_ai_title_does_not_earn` | same, through the retargeted tier — the earn path that did not exist when #17 was written |
+| `tail_is_read_from_the_payload_transcript_path` | `payload.transcript_path` points at a file under a **different** munged project dir than `rec.cwd` would derive → the tail is read and the label upgrades. **Transcript relocation, as a unit test (§3.2)** |
+| `absent_transcript_path_is_a_no_op` | no `transcript_path` in the payload → no tail read, held values stand, `refresh_label` returns `false` |
 
 **`crates/clave/src/store.rs`**:
 
 | Test | Pins |
 |---|---|
-| `compose_label_omits_absent_segments_without_double_separators` | all four presence combinations of (title, words) |
-| `compose_label_orders_title_repo_words` | the **binding** order, asserted literally: `F-CLA · clave · fix auth` |
+| `compose_label_omits_absent_segments_without_double_separators` | all four presence combinations of (`title`, `summary`) — with `summary == ""` as the absent case, not `None` (§3.1) |
+| `compose_label_orders_title_repo_summary` | the **binding** order, asserted literally: `F-CLA · clave · fix auth` |
 | `compose_label_never_renders_the_branch` | a record with `branch = "clave/ab12cd34"` produces a label containing neither `clave/` nor `ab12cd34`. **This is the ruling, as a test** |
 | `compose_label_puts_repo_first_when_there_is_no_title` | the majority shape — `clave · fix auth`. The §3.5 obligation-2 caveat, pinned so S5 cannot be surprised by it |
 | `compose_label_repo_segment_is_verbatim_basename_of_repo_root` | S5's value-match guarantee (§3.5) |
 | `sanitize_segment_strips_the_separator_character` | title `"evil · injected"` → one segment. **The S5 contract, and the forged-boundary attack (§3.7)** |
-| `compose_label_survives_kdl_metacharacters_in_every_segment` | `"` and `\` in title and words |
+| `compose_label_survives_kdl_metacharacters_in_every_segment` | `"` and `\` in title and summary |
 | `compose_label_never_returns_empty` | a pathological all-control-char `repo_root` falls back to a uuid prefix, never `""` (§4.4c) |
-| `agent_record_loads_a_pre_s4_store_file` | JSON without `title`/`words`/`live_cwd` deserializes with `None` |
+| `agent_record_loads_a_pre_s4_store_file` | JSON without `live_cwd` deserializes with `None`. (`title`/`summary` defaulting is #69's roundtrip test, `clave-types`, not re-asserted here) |
 
 **`crates/clave-bar/src/model.rs`**:
 
@@ -1336,20 +1688,29 @@ write, and a `starts_with` match against `basename(repo_root)` cannot be fooled.
 
 ### 5.2 Tier 1 — existing tests that change, and why
 
+> **Read this first (2026-07-28, #79).** Every existing assertion about
+> `LabelSource::Summary` in this suite was green against a **hand-written
+> fixture** of a line type Claude does not emit — `{"type":"summary"}`, 0 of 919
+> transcripts (§1.3). They were testing fiction, faithfully. **Re-point them at
+> `ai-title`; do not delete them.** What they pin — last-non-empty-wins, the
+> injected-prefix guard, tier precedence — is all still the contract; only the
+> line type feeding it changed. A deleted test here is coverage lost for a
+> behaviour that still exists.
+
 | Test | File:line | Change | Why |
 |---|---|---|---|
 | `first_words_clamps` | `hook.rs:444-452` | **none** | `first_words` is refactored onto `clamp_chars` with identical behaviour. It passing unmodified is the evidence the refactor is behaviour-preserving |
-| `summary_from_tail_takes_last_summary_line` | `hook.rs:454-464` | **none** | the summary extractor is untouched; `custom_title_from_tail` is a sibling, not a replacement |
-| `refresh_label_upgrades_first_prompt_then_summary_then_stops` | `hook.rs:466-486` | **rewritten, and renamed** → `refresh_label_upgrades_first_prompt_then_summary_then_stops_upgrading_words` | two things change. (i) Its step 3 asserts `assert!(!refresh_label(&mut r, "Stop", &p, Some(tail)))` — "once Summary, we STOP re-deriving". Under S4 that claim is **narrowed**: words stop, the label does not; step 3 becomes two assertions (identical input → `false`; a *new title* in the tail → `true` and a changed label). (ii) Its expected strings change from `"x · main · fix the flaky auth"` to `"x · fix the flaky auth"` — **the branch is gone from the grammar**. The `rec()` fixture has `cwd == repo_root == "/x"`, so the repo segment stays `x` and the diff isolates exactly the branch removal. **This is the single most important diff in the suite** — it is the test that encoded the frozen-label behaviour *and* the four-segment grammar, and a reviewer must see both change deliberately |
-| `injected_task_notification_does_not_earn_label_but_next_prompt_does` | `hook.rs:488-515` | gate assertion updated **and** expected strings change | it asserts `r.label == "x · main"` and `r.label_source == FirstPrompt` as proxies for "still eligible". The proxy is now `r.words == None` — the byte-compare gate is gone (§3.3) — and the bare label is now `"x"`, not `"x · main"`, since branch no longer renders. #17's property is unchanged and is now re-asserted **directly** rather than through a string proxy, which is strictly stronger |
-| `every_injected_prefix_is_blocked_on_both_earn_paths` | `hook.rs:517-552` | extended → `..._on_all_three_earn_paths` | a third earn path exists (the title tier). CodeRabbit's original point on PR #25 was that a prefix guarding only one path is a latent re-leak; a *tier* guarding none is worse. Every prefix now drives prompt, summary **and** `custom-title`, asserting `words == None` **and** `title == None`. Its `assert_eq!(r.label, "x · main")` lines become `"x"` |
+| `summary_from_tail_takes_last_summary_line` | `hook.rs:454-464` | **re-pointed and renamed** → `ai_title_from_tail_takes_last_non_empty` | `summary_from_tail` is deleted with its extinct tier (§4.3b). The test's *contract* — last non-empty wins over a tail of mixed line types — is unchanged and still needed; only its fixture's `"type"` moves from `summary` to `ai-title` and its `"summary"` key to `"aiTitle"`. **Do not delete it**: it is the only place that pins the extractor's reverse scan |
+| `refresh_label_upgrades_first_prompt_then_summary_then_stops` | `hook.rs:466-486` | **rewritten, re-pointed, and renamed** → `refresh_label_upgrades_first_prompt_then_ai_title_and_keeps_upgrading` | three things change. (i) Its fixture's `{"type":"summary"}` line becomes `{"type":"ai-title","aiTitle":…}` — the old one matched nothing Claude writes (§1.3). (ii) Its step 3 asserts `assert!(!refresh_label(&mut r, "Stop", &p, Some(tail)))` — "once Summary, we STOP re-deriving". That claim is now **wrong, not merely narrowed**: `ai-title` rolls, so a *second, different* ai-title must return `true` and replace the segment (§3.3). Step 3 becomes three assertions — identical tail → `false`; a **new ai-title** → `true` with a changed segment; a **new title** → `true` with a changed label. (iii) Its expected strings change from `"x · main · fix the flaky auth"` to `"x · fix the flaky auth"` — **the branch is gone from the grammar**. The `rec()` fixture has `cwd == repo_root == "/x"`, so the repo segment stays `x` and the diff isolates exactly the branch removal. **This is the single most important diff in the suite** — it encoded the frozen-label behaviour, the extinct tier *and* the four-segment grammar, and a reviewer must see all three change deliberately |
+| `injected_task_notification_does_not_earn_label_but_next_prompt_does` | `hook.rs:488-515` | gate assertion updated **and** expected strings change | it asserts `r.label == "x · main"` and `r.label_source == FirstPrompt` as proxies for "still eligible". The proxy is now `r.summary.is_empty()` — the byte-compare gate is gone (§3.3) — and the bare label is now `"x"`, not `"x · main"`, since branch no longer renders. #17's property is unchanged and is now re-asserted **directly** rather than through a string proxy, which is strictly stronger |
+| `every_injected_prefix_is_blocked_on_both_earn_paths` | `hook.rs:517-552` | extended → `..._on_all_four_earn_paths` | S4 opens **three** new doors on a guard written for one. CodeRabbit's original point on PR #25 was that a prefix guarding only one path is a latent re-leak; a *tier* guarding none is worse. Every prefix now drives the payload prompt, `ai-title`, `last-prompt` **and** `custom-title`, asserting `summary.is_empty()` **and** `title == None`. Its `assert_eq!(r.label, "x · main")` lines become `"x"` |
 | `refresh_label_sanitizes_kdl_metacharacters` | `hook.rs:554-573` | extended | keep the prompt case; add a hostile **title** through the same assertion. Titles are Claude-authored text on the same KDL path |
-| `merge_resume_preserves_existing_row_and_resets_status` | `add.rs:889-922` | **extended, not changed in intent** | `..row.clone()` already preserves the three new fields; the test must *say so*. Add `row.title = Some("F-CLA")`, `row.words = Some("fix auth")`, `row.live_cwd = Some(…)` and assert all three survive. **The cwd/label/label_source assertions at `add.rs:913-916` are unchanged** — §3.2 does not touch `rec.cwd`, so no stated intentional decision is required here |
+| `merge_resume_preserves_existing_row_and_resets_status` | `add.rs:889-922` | **extended, not changed in intent** | `..row.clone()` already preserves them; the test must *say so*. Add `row.title = Some("F-CLA")`, `row.summary = "fix auth".into()`, `row.live_cwd = Some(…)` and assert all three survive. **The cwd/label/label_source assertions at `add.rs:913-916` are unchanged** — §3.2 does not touch `rec.cwd`, so no stated intentional decision is required here |
 | `store_rows_without_live_tabs_render_dormant` | `model.rs:2085-2110` | **none** | it builds `a.label = "repo · main · fix"` by hand and asserts `d.name` round-trips it verbatim. `rows()` is untouched by S4 and the fitter runs at *render*, not in `rows()`. That this passes **unmodified — with a label in the old four-segment shape** — is the evidence that S4 stayed out of S5's and S6's seam and that `rows()` remains format-agnostic |
 | `resume_candidates_*` worktree-label tests | `add.rs:925+`, `add.rs:1039`, `add.rs:1088` | expected picker strings change | §4.5(c) collapses the two `is_worktree` arms, so an earned-label worktree candidate now picks as `<repo> · <branch> (wt)` instead of `<repo> (wt)`. **Red-first here specifically** — the old assertion passing after the grammar change would mean the picker had silently gone ambiguous |
 | `rename_only_when_label_changes_not_when_tab_name_differs` | `model.rs:1326-1353` | **none** | S4 does not touch the rename block (`model.rs:563-582`). §5.3 explains why more-frequent label changes do not invalidate it |
-| every `AgentRecord` literal | §4.4(d) | three `None` fields | mechanical; the compiler enumerates them |
-| `eager_record` | `kdl_guardrail.rs:59-73` | three fields + a new case | see §5.5 |
+| every `AgentRecord` literal | §4.4(d) | one `live_cwd: None` | mechanical; the compiler enumerates them. `title` / `summary` were added by #69 |
+| `eager_record` | `kdl_guardrail.rs:59-73` | `live_cwd` + populated `title`/`summary` + a new case | see §5.5 |
 
 ### 5.3 Rename churn — the analysis, and why it is bounded
 
@@ -1362,12 +1723,19 @@ the label now changes.
 |---|---|---|
 | title | a handful of times per session (a rename is a deliberate human act) | — |
 | ~~branch~~ | **never** — branch is not in the label (§3.1). A `git switch` updates the store and produces **no rename at all** | the grammar itself |
-| words | unchanged: at most twice (first prompt, then summary) | the §3.3 state machine |
+| summary, `ai-title` tier | **revised 2026-07-28**: no longer "at most twice". `ai-title` rolls — **373 occurrences across the 40 newest transcripts, ≈ 9 per session** — and §3.3 deliberately lets each new one replace the held value | the emission rate itself, plus the `first_words` 32-char clamp: many ai-titles differ only past the clamp and compose to the *same* label, which the firewall below turns into `false` |
+| summary, prompt / `last-prompt` fallback | at most **once** — earn-once (§3.3) | `summary.is_empty()` |
 | **re-derivation with no change** | every `Stop` / `UserPromptSubmit` | **`refresh_label` returns `rec.label != before`** (§4.3c) |
 
-Dropping branch from the grammar removed the *only* frequent change source this
-design would have introduced. Renames are the sole remaining new trigger, and
-they are deliberate human acts.
+Dropping branch from the grammar removed the *only* per-`git switch` change
+source this design would have introduced. The retargeted summary tier adds one
+back, at a rate the earlier draft did not have to reason about — so state it
+plainly: **~9 tab renames per session, worst case, spread across its whole life.**
+That is the same order as the title tier and an order below a per-turn rename;
+it is the price of a label that actually tracks what the agent is doing, which is
+#24 item 3's entire ask. If it proves visible in live validation (§6 Step 7), the
+lever is a *debounce on the composed label*, not a re-freeze of the tier — the
+freeze is what §1.3 exists to remove.
 
 That last row is the whole answer. An unchanged branch, an unchanged title and an
 unchanged summary produce `false`, so `apply_hook_event` does not bump `seq`
@@ -1411,27 +1779,49 @@ today. The written argument, for the PR dossier:
    unchanged. Present but nonsense → `head_branch` returns `None` → branch
    unchanged. It is never written to `rec.cwd`, so it cannot reach `munge_cwd`,
    `spawn_mode` or the resume path.
-4. **The `custom-title` shape is verified on disk**, not assumed — #24 comment,
-   2026-07-21, on a real transcript, 61 records. The one *unverified* assumption
-   is that every hook event carries `cwd`; **Live-validation Step 2 verifies it
-   directly**, and its absence is a no-op rather than a defect.
-5. **No subprocess is added to the hook.** §3.8 rejects the `git` shellout for
-   exactly this reason.
+4. **`payload.transcript_path` is optional and fails closed.** Absent → no tail
+   read this event → held title/summary stand → `false`. Present but pointing at
+   a missing or unreadable file → `read_tail` yields `None` → same. It is used
+   **only** to open a file for reading; it is never stored, never munged, never
+   handed to `spawn`. A hostile value is a failed read.
+5. **Every line type this spec reads is verified on disk, with counts**, not
+   assumed — `custom-title` (#24 comment 2026-07-21, 61 records in one
+   transcript; 1057 across 40), `ai-title` (373), `last-prompt` (1340),
+   `worktree-state` (384), and the *absence* of `summary` (0 of 919). See
+   [`2026-07-28-agentsnapshot-v2-design.md`](2026-07-28-agentsnapshot-v2-design.md)
+   §3.6 for the reproduction commands. **That measurement is itself the lesson**:
+   the extinct tier survived a full design round because nobody counted, so a
+   reviewer should treat "Claude writes X" as a claim requiring a count.
+6. **The remaining unverified assumptions are two**, and both are Live Step 2's:
+   that every hook event carries `cwd`, and that every hook event carries
+   `transcript_path`. `cwd`'s absence is a no-op. **`transcript_path`'s absence is
+   not** — it would leave the label pipeline with no path at all, and the
+   fallback would have to be the derived path this spec just proved unsafe after
+   a relocation. Step 2 must report it explicitly.
+7. **No subprocess is added to the hook.** §3.8 rejects the `git` shellout for
+   exactly this reason, and the `worktree-state` tier removes even the filesystem
+   walk for the common worktree case.
 
 Adversarial reviewer brief: attack (a) the `gitdir:` resolution against real git
 worktree and submodule layouts, (b) whether any path can make `refresh_label`
 return `true` on an unchanged label, (c) whether any composed label can contain
-a U+00B7 that `sanitize_segment` did not put there, and (d) the §4.5(c) picker
+a U+00B7 that `sanitize_segment` did not put there, (d) the §4.5(c) picker
 regression — specifically whether any *other* consumer assumed the label encoded
-a branch. Grep for the assumption, do not reason about it.
+a branch (grep for the assumption, do not reason about it), (e) **whether any
+code path still derives a transcript path from a cwd** and could therefore go
+stale on relocation (§3.2 — `spawn.rs` legitimately does; the label pipeline must
+not), and (f) **whether an older binary's read-modify-write can destroy an earned
+`title` or `summary` in a way §3.6's re-derivation does not heal.** (f) is the
+one with no automated coverage below the unit level and the one whose failure is
+silent.
 
 ### 5.5 Real-parser guardrail (generated-artifacts class — mandatory)
 
-`crates/clave/tests/kdl_guardrail.rs` currently proves a `dir · branch · words`
+`crates/clave/tests/kdl_guardrail.rs` currently proves a `dir · branch · summary`
 label survives the real zellij 0.44.3 parser. Extend it:
 
-- `eager_record()` (`kdl_guardrail.rs:59-73`) gains the three fields, with
-  `title: Some("F-CLA")` and `words: Some("fix the KDL guardrail")` so the
+- `eager_record()` (`kdl_guardrail.rs:59-73`) gains `live_cwd`, and sets
+  `title: Some("F-CLA")` and `summary: "fix the KDL guardrail".into()` so the
   **full three-segment** label is the one the existing cases already exercise.
   Its literal `label:` field is replaced by `compose_label()` output so the
   guardrail parses what the composer actually emits, not a hand-written
@@ -1480,16 +1870,18 @@ private local paths in staged lines, and it has fired twice.
 
 Two facts the agent must hold while reading reports:
 
-- `clave ls --json` emits an `AgentSnapshot`, which **drops** `label_source`,
-  `title`, `words`, `live_cwd` and `worktree` (`store.rs:167-189`). Every S4
-  diagnostic therefore reads the **raw store**.
+- `clave ls --json` emits an `AgentSnapshot`, which since #69 **carries**
+  `title`, `summary` and `worktree` but still **drops** `label_source` and
+  `live_cwd` (`store.rs:185`). Two of S4's three diagnostics are therefore
+  snapshot-only, and every step below still reads the **raw store** so one
+  command covers all five fields.
 - `clave dev status` is the **wrong tool** here: `run_status` calls
   `enter_sandbox` first (`dev.rs:262-265`), so it reads the sandbox store.
 
 The one command used throughout, printed once:
 
 ```bash
-jq '[.agents[] | {label, label_source, title, words, branch, cwd, live_cwd, repo_root, tab_id}]' \
+jq '[.agents[] | {label, label_source, title, summary, branch, cwd, live_cwd, repo_root, tab_id}]' \
   "$HOME/.local/state/clave/agents.json"
 ```
 
@@ -1541,6 +1933,15 @@ JSON.
 > staying still is the **pass** condition, not a failure. The observable is the
 > raw store, and this step exists to prove the payload seam works at all, and to
 > catch the one catastrophic outcome (`cwd` being overwritten).
+>
+> **Amended 2026-07-28 (#79).** This step now carries a second, heavier job. A
+> cwd change makes Claude **relocate the whole transcript** into a project
+> directory keyed on the new cwd (§3.2), so this is also the live check that the
+> label pipeline followed it — that is, that `payload.transcript_path` is
+> present and is what the tail read uses. **Do not stop at the `live_cwd`
+> reading.** After the `cd`, send one more prompt and confirm the label still
+> upgrades; a label that goes quiet after a `cd` is the derived path still being
+> used somewhere.
 
 **(a) Do:** in a Claude session running in a **worktree** (e.g. one of the
 `.claude-worktrees/…` agents), type into Claude:
@@ -1560,9 +1961,13 @@ after.
 | `live_cwd` is now the main checkout, `cwd` is still the worktree, `branch` is the main branch, **and the sidebar is unchanged** | **the seam works and the grammar is correct.** `payload.cwd` is confirmed present (§5.4 assumption 5) | Step 3 |
 | all of the above **except** the sidebar changed | the branch leaked into the label after all | report both strings; §4.4(c) regression |
 | `live_cwd` is `null` after a completed turn | Claude's hook payload does **not** carry `cwd` on this CLI version — the live-branch tier is inert. Nothing rendered depends on it, so this is not user-visible | **report.** Not a merge blocker under the new format, but it invalidates §3.2's seam and S6 must know before it builds the worktree marker on it |
+| no `title` or `summary` has ever changed on **any** row since the upgrade | `payload.transcript_path` may be absent on this CLI version, which leaves the tail read with no path at all (§5.4 assumption 6) | **merge blocker, and it is the one assumption with no fallback.** Report one raw hook payload — the maintainer can capture it by adding a `tee` to the hook command line, printed by the driving agent, never run by it |
 | `live_cwd` updated but `branch` did not | `head_branch` failed on that path — the `.git` walk or the `gitdir:` pointer | report `live_cwd` verbatim plus `ls -la "<live_cwd>/.git"` output |
-| `cwd` changed too | **stop-the-line defect.** §3.2's hard invariant is violated; the transcript join key is now wrong and resume will break | report immediately; do not continue |
+| `cwd` changed too | **stop-the-line defect.** `rec.cwd` is still frozen (§3.2) and still scopes `spawn_mode` and `claude --resume`; rewriting it breaks resume | report immediately; do not continue |
 | `seq` jumped on this turn with no label change | the churn firewall leaked — a branch-only change must return `false` (§5.3) | report; also covered by Step 7 |
+| **after one further prompt, the label still upgrades** (a new `ai-title` or a rename lands) | **the transcript followed the relocation and the tail read followed it too** — `transcript_path` is present and wired. This is the check §3.2's correction exists for | Step 3 |
+| the label goes **silent** after the `cd` — `title` and `summary` stop changing while Claude is clearly still working | the tail read is still opening the **pre-relocation** path. Either `payload.transcript_path` is absent on this CLI version, or `jsonl_path(claude_dir, &rec.cwd, uuid)` survived somewhere in the label pipeline | **merge blocker.** Report `find "$HOME/.claude/projects" -name '<uuid>.jsonl'` — one hit under the *new* munged dir confirms relocation; then grep the diff for `jsonl_path` |
+| `find` returns the jsonl under the **old** munged dir after a completed `cd` turn | relocation did not happen on this CLI version — §3.2's correction still holds for the versions where it does, and nothing here regresses | note the CLI version and continue |
 
 ### Step 3 — rename a Claude session and watch the sidebar
 
@@ -1583,6 +1988,8 @@ header.
 | `title` is right but the sidebar still shows the old name | the rename did not reach the tab — same fork as Step 2 (`tab_id` null ⇒ S0) | record |
 | the row shows the title but **lost the summary** | expected at a narrow pane — §3.4 makes the summary the give-way segment | confirm by comparing against a wider row; then Step 4 |
 | that agent's `label_source` is `summary` and the title still appeared | **§1.3's obstacle is genuinely fixed** — note it explicitly, it is the headline behaviour change | Step 4 |
+| **any** row anywhere reaches `label_source: summary` | **the retargeted tier fires.** Before this change no agent in the fleet had ever left `first_prompt` (14/14 rows, §1.3) — reaching `summary` at all is the proof `ai-title` is being read | note it; it is a merge-report headline |
+| every row is still `first_prompt` after several turns on a busy agent | the `ai-title` extractor is not matching. Report `grep -c '"type":"ai-title"' <transcript>` — zero means this CLI version does not emit it either, non-zero means the extractor is broken | report; do not merge on a still-inert tier |
 
 ### Step 4 — `/clear` must not erase the held rename
 
@@ -1601,32 +2008,36 @@ one-word prompt.
 
 ### Step 5 — an injected/system prompt must NOT earn a label
 
-**(a) Do:** find a *fresh* agent with no earned words (`words: null` in `STORE`)
-— or make one with `clave add` and give it no prompt. Then trigger a
+**(a) Do:** find a *fresh* agent with no earned summary (`summary: ""` in
+`STORE`) — or make one with `clave add` and give it no prompt. Then trigger a
 harness-injected turn: the reliable shape from #17 is **resuming a session that
 died with a pending background task**, which auto-fires a `<task-notification>`
 turn. If none is available, the read-only substitute is to inspect an existing
 transcript for one:
 
 ```bash
-grep -c '"customTitle"' "$HOME/.claude/projects/<munged-cwd>/<uuid>.jsonl"
+# find the transcript BY UUID, not by munging a cwd — it may have relocated (§3.2)
+T=$(find "$HOME/.claude/projects" -name '<uuid>.jsonl')
+grep -o '"type":"[a-z-]*"' "$T" | sort | uniq -c | sort -rn
 grep -o '<task-notification\|<system-reminder\|<local-command-caveat\|<command-name' \
-  "$HOME/.claude/projects/<munged-cwd>/<uuid>.jsonl" | sort | uniq -c
+  "$T" | sort | uniq -c
 ```
 
-(the munged dir is `cwd` with every non-alphanumeric replaced by `-` —
-`munge.rs:20-25`; `STORE` prints the `cwd` to munge.)
+(**do not** reconstruct the path by munging `cwd` — that is exactly the derivation
+§3.2 corrects, and it silently misses a relocated transcript. Project directory
+names begin with `-`, which bare `ls` parses as flags; `find` sidesteps it.)
 
-**(b) Look at:** whether that agent's row gained a words segment.
+**(b) Look at:** whether that agent's row gained a summary segment.
 
-**(c) Report:** `STORE` for that agent, specifically `words`, `title` and
+**(c) Report:** `STORE` for that agent, specifically `summary`, `title` and
 `label_source`.
 
 | Report | Conclusion | Next |
 |---|---|---|
-| `words` is still `null` and the label is the bare `repo` | **#17's guard holds through the rewrite** — this is the regression this step exists for | Step 6 |
-| `words` contains `<task-notification` or any other tag | **#17 has re-leaked.** The byte-compare gate was replaced by `words.is_none()` (§3.3) and the guard was lost | report immediately; this is a merge blocker |
-| `title` contains a tag | the new **third** earn path leaked — the title tier is missing `is_harness_injected` | report immediately; merge blocker |
+| `summary` is still `""` and the label is the bare `repo` | **#17's guard holds through the rewrite** — this is the regression this step exists for | Step 6 |
+| `summary` contains `<task-notification` or any other tag | **#17 has re-leaked.** The byte-compare gate was replaced by `summary.is_empty()` (§3.3) and the guard was lost | report immediately; this is a merge blocker |
+| `title` contains a tag | one of the **three new** earn paths leaked — the title tier is missing `is_harness_injected` | report immediately; merge blocker |
+| `summary` contains a tag **and** `label_source` is `summary` | the leak came through the retargeted `ai-title` tier — a path that did not exist when #17 was written | report immediately; merge blocker |
 | the agent never took an injected turn | inconclusive, not a pass | say so plainly; the Tier-1 table-driven test (§5.2) is the standing guard |
 
 ### Step 6 — width behaviour at the real bar
@@ -1704,7 +2115,10 @@ with a recommended resolution, not a format question.
 | **S6 and S8 land in either order and the budget arithmetic drifts** | S4 introduces **no width constant** and asserts none. `budget` is a parameter; `gutter_cells` is one named expression at `main.rs:546` (§4.8). Whoever lands changes that one line |
 | the picker regression (§4.5c) is missed | it is the reason `resume_candidates_*` tests are on the red-first list (§5.2), and it is item (d) in the adversarial reviewer brief (§5.4) |
 | the 64 KiB tail is smaller than the distance to the last rename | `rec.title` holds the last non-empty value; the tail is an update channel, not a source of truth (§3.3) |
-| the tail read now runs on every `Stop`/`UserPromptSubmit` instead of stopping at `Summary` | 64 KiB, for **tracked agents only** (the untracked fast path at `hook.rs:270-272` already returned). Measured cost is a single `seek`+`read`; no subprocess. If it ever matters, `payload.transcript_path` removes the path derivation too (deferred, below) |
+| the tail read now runs on every `Stop`/`UserPromptSubmit` instead of stopping at `Summary` | 64 KiB, for **tracked agents only** (the untracked fast path at `hook.rs:270-272` already returned). Measured cost is a single `seek`+`read`; no subprocess, and no path derivation either — `payload.transcript_path` (§4.3) removed it |
+| **`payload.transcript_path` is absent on this Claude CLI version** | the label pipeline has **no path at all** and every tier goes inert. Unlike `payload.cwd` this has no benign degradation: the alternative is the derived path, which #79 proved silently wrong after a relocation. **Live Step 2 is the check**, and it is a merge blocker if it fails |
+| **an older `clave` binary strips an earned `title` / `summary` on write** | §3.6's re-derivation heals it from the next tail read, keyed on `label_source == Summary` surviving the strip. Residual: a value that has scrolled out of the 64 KiB window before the strip is lost until Claude emits a fresh one. Bounded to the #43/#44 mixed-version window; pinned by `stale_binary_strip_is_re_derived_from_the_tail`; item (f) in the §5.4 reviewer brief |
+| **the retargeted `ai-title` tier is itself extinct on a future CLI version** | the failure is *inert*, not wrong — the segment falls back to the prompt tier and the label stops upgrading. That is exactly how the `type:"summary"` tier died unnoticed for months (§1.3), so the detection is a **count, not an assumption**: Live Step 3's `grep -c '"type":"ai-title"'` row, and `FOOTGUNS.md`'s entry on how to spot an extinct tier |
 | a Claude-authored title forges a segment boundary | `sanitize_segment` strips U+00B7 (§3.7), tested at unit level and through the real KDL parser (§5.5) |
 | a very long title crowds the whole row | bounded by the 32-char clamp (§3.7) and then by the tail-truncate; the title is the user's own choice and §3.4 deliberately does not second-guess it |
 | an old `clave` binary in a mixed-version window recomposes labels under the old rule | degrades to old-style labels until the next event from the new binary; no data loss (§3.6). This is #43/#44's blast radius, not S4's |
@@ -1735,6 +2149,21 @@ with a recommended resolution, not a format question.
    unaffected (§4.5c restores its branch suffix), and that is where it matters
    most. Stated because it is a real, temporary regression in the sidebar and it
    should not be discovered on screen.
+5. **`spawn_mode` still derives the transcript path from the frozen `rec.cwd`,
+   and a relocated session therefore resumes as a *new* one** (§3.2, #79). The
+   probe misses, `spawn_mode` chooses create, and the history is orphaned —
+   silently. **Pre-existing and independent of the label**; newly *visible*
+   because relocation is now known, and newly *diagnosable* because `live_cwd`
+   records the move. Not fixed here: resume-vs-create arbitration is not a label
+   change and must not ride this diff. **File it**, and note that `live_cwd`
+   gives the fix a second path to probe.
+6. **An older `clave` binary can permanently lose an earned `title`** in the
+   mixed-version window, if the last `custom-title` line has already scrolled out
+   of the 64 KiB tail (§3.6). `summary` self-heals within a few turns because
+   `ai-title` re-emits; `custom-title` may never re-emit, because a rename is a
+   one-off human act. Closing it properly needs a store schema version, which
+   #69 §2.1 rules out. **File it** against the #43/#44 mixed-binary work, not
+   against S4.
 
 ### Out of scope
 
@@ -1746,7 +2175,10 @@ with a recommended resolution, not a format question.
 | context battery (#24 item 4), model badge (#24 item 5) | the extended tail scan in §4.3(b) is the seam both plug into — **noted as the integration point**, not built |
 | collapsed 4-col design (#24 item 7) | needs both the gutter and the colour channel |
 | `Row` gains structured fields ("stop rendering the label string") | unreachable this batch: live rows render the *zellij tab name*, not `Agent.label` (§3.5) |
-| `payload.transcript_path` replacing `jsonl_path(claude_dir, &rec.cwd, uuid)` | strictly better and ~5 lines, but a further change in a diff that already crosses two classes. **File as a follow-up**; the derived path is proven in production |
+| ~~`payload.transcript_path` replacing `jsonl_path(claude_dir, &rec.cwd, uuid)`~~ | **NO LONGER OUT OF SCOPE — it is mandatory (§4.3, §3.8).** The deferral rested on "the derived path is proven in production", which #79 falsified: the derived path is wrong from the first relocation onward, silently |
+| fixing `spawn_mode`'s derived transcript path (limitation 5) | resume-vs-create arbitration, not a label change. **The relocation finding exposes it; S4 files it** |
+| a store schema version to close the mixed-version strip (limitation 6) | #69 §2.1 rules it out; S4 ships the re-derivation path instead (§3.6) |
+| **S6's worktree marker, even though `worktree-state` now hands S4 its inputs** | `worktreePath` / `worktreeName` reach `refresh_label` for free (§3.2) and S4 stores none of them beyond `branch`. **S6 decides what it wants and where it lands** — S4's contribution is naming the zero-cost source, not choosing the field |
 | `lsview.rs` printing the repo twice (§4.5e) | cosmetic; named so it is seen to have been considered |
 | dwell-open on dormant rows (#24's last comment) | unrelated nav question |
 | anything in `model.rs` ordering, `apply_tabs`, or the executor election | S0/S1/S3 |

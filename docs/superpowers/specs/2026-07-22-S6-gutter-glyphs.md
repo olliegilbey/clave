@@ -35,7 +35,9 @@
 
 _2026-07-22 · workstream **S6** · builds on **RC-G** of
 [`2026-07-22-ux-defect-dossier.md`](2026-07-22-ux-defect-dossier.md) · feature,
-not a defect · main `50fa26a`_
+not a defect · main `50fa26a` · **§2.4's wire field is DELIVERED** —
+[`2026-07-28-agentsnapshot-v2-design.md`](2026-07-28-agentsnapshot-v2-design.md)
+§2 landed it (#69); §2.4, §3.1 and §3.2 are amended to consume it_
 
 **The requirement, verbatim from the maintainer:**
 
@@ -254,41 +256,34 @@ generated input that occupancy never changes the gutter's width.
 
 ### 2.4 The worktree signal
 
-#### 2.4.1 The field exists and the plugin never sees it — confirmed
+#### 2.4.1 The field is on the wire — DELIVERED
 
-`AgentRecord.worktree: Option<String>` — `crates/clave/src/store.rs:54-55`,
-*"Worktree path if `clave add --worktree` created one (§6.3), else None."*
+S6 was written against a wire that dropped `worktree`: `snapshot_from` mapped
+ten fields onto `clave_types::Agent` and that was not one of them, and the
+`AgentRecord` struct doc listed it as store-only. The dossier recorded the same
+from the other end (`:540-541`).
 
-`snapshot_from` (`store.rs:166-189`) maps ten fields onto `clave_types::Agent`
-and `worktree` is not among them:
+**That is no longer true.** The AgentSnapshot v2 wire shape
+([`2026-07-28-agentsnapshot-v2-design.md`](2026-07-28-agentsnapshot-v2-design.md)
+§2, #69) landed `worktree` alongside `title` and `summary`, so the field S6 asked
+for is already there:
 
-```rust
-/// Store → pipe snapshot (§5): drop the store-only fields, keep the order.
-pub fn snapshot_from(store: &Store) -> AgentSnapshot {
-    …
-            .map(|r| Agent {
-                uuid: r.uuid.clone(),
-                cwd: r.cwd.clone(),
-                repo_root: r.repo_root.clone(),
-                branch: r.branch.clone(),
-                label: r.label.clone(),
-                status: r.status,
-                last_interacted: r.last_interacted,
-                last_visited: r.last_visited,
-                tab_id: r.tab_id,
-                stale: r.stale,
-            })
-```
+- `clave_types::Agent` carries `#[serde(default)] pub worktree: Option<String>`
+  — `crates/clave-types/src/lib.rs:95-101`, whose doc comment cites *this*
+  section for the type choice.
+- `snapshot_from` projects `r.worktree.clone()` — `crates/clave/src/store.rs:208`
+  (the fn opens at `:185`), with the comment *"Projected now — `AgentRecord` has
+  carried this since §6.3 and the wire simply never did (S6 #61 §2.4)."*
+- `AgentRecord.worktree` is unchanged at `store.rs:55-56`; the struct doc
+  (`store.rs:37-38`) now records that `worktree` **stopped** being store-only.
 
-The struct doc says so out loud (`store.rs:35-37`): *"plus store-only fields
-(`worktree`, `label_source`) that the plugin never needs to see."* The dossier
-records the same from the other end (`:540-541`). **Confirmed: the plugin cannot
-know today.**
+**S6 consumes the field. It does not add it** — see §3.1 and §3.2, which are
+amended to nothing-to-do. The design work below is retained because it is what
+that PR implemented, and because §2.4.3's soundness argument is still live.
 
-#### 2.4.2 The plumbing
+#### 2.4.2 Why `Option<String>` and not `bool` — the type choice, as shipped
 
-`Agent` gains `#[serde(default)] pub worktree: Option<String>` and
-`snapshot_from` carries `r.worktree.clone()`. `Option<String>`, not `bool`:
+`Option<String>`, not `bool`:
 
 - #24 item 1 wants `<repo> » <worktree-dir>` in the *name*, which needs the path.
   A `bool` would force a second wire change for the same fact.
@@ -298,7 +293,11 @@ know today.**
   marker — a missing hint, never a wrong one), and a new `clave` pushing to an
   old bar is ignored. This is exactly the #43/#44 mixed-binary window the
   `tab_id` and `stale` fields were designed for (`clave-types/src/lib.rs:60-67`),
-  and `agent_worktree_roundtrips_and_defaults_none` pins it the same way.
+  and `agent_title_summary_worktree_roundtrip_and_default`
+  (`clave-types/src/lib.rs:311`) pins it the same way. The wire spec gives the
+  sharper reason (§2.1 there): serde requires every key to be **present**, so
+  without `default` the first run against an existing `agents.json` is a
+  whole-document parse failure — the fleet index vanishes, it does not degrade.
 
 The bar derives `Row.worktree: Option<(char, u8)>` — `Some(mark)` when
 `a.worktree.is_some()`, `None` otherwise. Resolving the *character* in `rows()`
@@ -307,10 +306,10 @@ The bar derives `Row.worktree: Option<(char, u8)>` — `Some(mark)` when
 
 #### 2.4.3 Is the signal trustworthy? Precisely: it is sound, not complete
 
-`worktree` has exactly one writer in production, `add.rs:750`
+`worktree` has exactly one writer in production, `add.rs:757`
 (`worktree: worktree_path.clone()`), and `worktree_path` is `Some` only in the
 `new` arm when `--worktree` was passed and clave itself ran
-`git worktree add -b clave/<short>` (`add.rs:647-668`). Plus `dev.rs:242`
+`git worktree add -b clave/<short>` (`add.rs:654-672`). Plus `dev.rs:242`
 (scenario seeding) and `merge_resume_record`'s `..row.clone()`
 (`add.rs:343-354`), which preserves it across a resume for free.
 
@@ -330,15 +329,49 @@ a missing hint; a wrong marker would be a lie. Shipping the sound half is safe.
 **But the false-negative rate is real, not theoretical.** The maintainer's own
 reported case, `issue-10-kdl-guardrail`, is a *named* worktree not created by
 `clave add --worktree` (clave's own naming is `.claude-worktrees/<8-hex>` on
-branch `clave/<8-hex>`, `add.rs:648-664`). His daily fleet contains worktrees S6
+branch `clave/<8-hex>`, `add.rs:656-665`). His daily fleet contains worktrees S6
 will not mark.
 
-**The correct long-term source, and why S6 does not build it.** Git's definitive
-test is one `stat`: in a linked worktree `.git` is a **file** containing
+**The cheapest source is not a git call at all — `worktree-state`.** Claude
+writes a `{"type":"worktree-state"}` line into the transcript carrying
+`worktreePath`, `worktreeName`, `worktreeBranch` and `originalCwd` — 384
+occurrences across the 40 newest transcripts on the maintainer's machine
+([`2026-07-28-agentsnapshot-v2-design.md`](2026-07-28-agentsnapshot-v2-design.md)
+§3.2, §3.4). That is the whole input to the design lock's provenance cell
+(lock §5: worktree glyph · branch glyph · nothing) **with no git subprocess and
+no `stat`**, and the hook already tails that file every event for the title and
+summary tiers, so the line costs one more `match` on a string it has in hand.
+`worktreeBranch` even feeds the branch glyph, so a worktree row can render cell 3
+without S4's `head.rs` being consulted once.
+
+So the provenance sources rank, cheapest and most certain first:
+
+| # | Source | Cost | Covers |
+|---|---|---|---|
+| 1 | `AgentRecord.worktree` written by `clave add --worktree` (`add.rs:750`) | none — already in the store | worktrees clave made. **Sound, never wrong** |
+| 2 | `worktree-state` in the transcript tail | none beyond a tail read the hook already performs | worktree sessions Claude knows it is in, i.e. the §2.4.3 false negatives, and it carries the *name* #24 item 1 wants |
+| 3 | the `.git`-is-a-file `stat` (below) | one `stat` per refresh | the completeness backstop: any cwd that *is* a linked worktree, however it got there |
+
+Tier 2 is S4's to write — it owns the transcript reader, and the wire spec
+already obligates it there (§4, *"Add `worktree-state` … as a zero-cost
+provenance source ahead of `head.rs`"*). S6 consumes whichever tier filled the
+field; the gutter cannot tell them apart, which is the point of keeping the
+signal in one store field.
+
+**Whether tier 3 is still needed is a measurement, not a deduction.** The spike
+reads `worktree-state` as present *"for any session inside a worktree"*, but its
+`originalCwd` field is the signature of Claude relocating into one (§3.3, the
+same mechanism that moves the transcript). A session **launched** with its cwd
+already inside a worktree may never emit the line. §5 Step 5 is where that gets
+counted, on the real fleet, before anyone writes tier 3.
+
+**The definitive test, if tier 3 is wanted, and why S6 does not build it.** Git's
+own test is one `stat`: in a linked worktree `.git` is a **file** containing
 `gitdir: <path>`; in a main checkout it is a directory. S4 is already building
-exactly that walk — `crates/clave/src/head.rs::git_dir_for`, S4 §4.2 steps 2–3.
-So the accurate signal is three lines inside S4's `refresh_label`, not a new
-subsystem. S6 declines to write them because:
+exactly that walk — `crates/clave/src/head.rs::git_dir_for`, S4 §4.2 steps 2–3
+(`head.rs` does not exist yet; S4 is unlanded). So the accurate signal is three
+lines inside S4's `refresh_label`, not a new subsystem. S6 declines to write them
+because:
 
 1. They live in `add.rs`'s record-construction block and `hook.rs`'s
    `refresh_label` — **both of which S4 is restructuring** (S4 §4.3(c), §4.5(a)
@@ -370,7 +403,10 @@ if rec.worktree.is_none()
 ```
 
 The maintainer's call, recorded in §5 Step 5's branch table, not taken by an
-agent.
+agent. Reasons 1 and 2 apply **verbatim to tier 2** — the `worktree-state` read
+lands in the same `hook.rs` block and widens the field's meaning the same way —
+which is why both tiers belong to S4 and neither is in S6's diff. Reason 3 is why
+S6 can ship its geometry before either exists.
 
 #### 2.4.4 The dossier's accepted `repo_root` limitation does **not** affect the marker
 
@@ -1018,7 +1054,7 @@ prose figures need correcting. Whoever lands after S6 fixes the prose.
 | A variable-width gutter (drop trailing blanks) | the whole point is that text starts in the same column on every row. A gutter that shrinks when a cell is empty is a ragged text column — the defect §2.3 exists to prevent |
 | `Row.worktree: bool`, resolve the glyph in `gutter_segments` | forces the gutter builder to reach for `self.glyphs` it does not have (it is a free function taking `&Row`), or forces `GlyphSet` into `Row`. Resolving to `(char, u8)` in `rows()` keeps the tier confined to the one place that already holds `self` |
 | `compose_row(&Row, cols, collapsed: bool)` with the gutter built inside | §2.9.1 — S5's ruling. `collapsed` is UI state and `compose_row` is geometry; passing finished segments keeps state out of it and costs S6 one call-site line |
-| `Agent.worktree: bool` on the wire | #24 item 1 needs the path for `<repo> » <worktree-dir>`; a bool buys nothing and costs a second wire change |
+| `Agent.worktree: bool` on the wire | #24 item 1 needs the path for `<repo> » <worktree-dir>`; a bool buys nothing and costs a second wire change. **Ratified**: #69 shipped `Option<String>` and its doc comment cites this reason (`clave-types/src/lib.rs:95-101`) |
 | Fix the `worktree` field's false negatives in S6 | §2.4.3 — it lands inside the `add.rs` / `hook.rs` blocks S4 is restructuring, it is a store-semantics decision with picker fallout, and it moves no columns |
 | Derive collapsed/expanded from `cols` instead of the mode flag | §2.8 — makes the text budget non-monotone in `cols` at the threshold |
 | `CLAVE_GLYPHS` env var read at snapshot time | §2.6.5 — four writer environments, tier flickers per push |
@@ -1046,29 +1082,17 @@ v1 (§2.6.5's gap, deferred to #40). TDD red-first throughout.
 
 ### 3.1 `crates/clave-types/src/lib.rs` — the wire field and the glyph vocabulary
 
-**(a) `Agent` gains `worktree`.** After `stale` (`:66-67`):
+**(a) `Agent.worktree` — DELIVERED, nothing to write.** #69 landed it
+(`clave-types/src/lib.rs:95-101`), and every `Agent` literal already carries it:
+the compiler enumerated them then, including `clave-bar/src/model.rs:1161` and
+`:1180` (the test helpers of §4.2) and `store.rs:208` (§3.2).
+`crates/clave/tests/kdl_guardrail.rs` builds an `AgentRecord`, not an `Agent`,
+and was untouched — as predicted.
 
-```rust
-    /// The worktree path when this agent lives in one, else `None` — the
-    /// gutter's cell-3 marker (#24 item 4's sibling, S6 §2.4). The PATH and
-    /// not a bool: #24 item 1 renders `<repo> » <worktree-dir>` from it, and
-    /// a bool would force a second wire change for the same fact.
-    ///
-    /// SOUND, NOT COMPLETE (S6 §2.4.3): it is set only where clave itself
-    /// created the worktree (`add.rs:750`) or preserved one across a resume,
-    /// so a session started inside a worktree clave did not make records
-    /// `None`. A missing marker is a missing hint; there is no false
-    /// positive. `default` keeps pre-field payloads parseable — an old
-    /// `clave` pushing to a new bar simply shows no markers.
-    #[serde(default)]
-    pub worktree: Option<String>,
-```
-
-Every `Agent` literal gains it — the compiler enumerates them:
-`clave-types/src/lib.rs:160`, `:181`, `:205`, `:231` (tests, `None`);
-`crates/clave/src/store.rs:175` (§3.2); `crates/clave-bar/src/model.rs:1148`,
-`:1164` (test helpers, `None`). `crates/clave/tests/kdl_guardrail.rs` builds an
-`AgentRecord`, not an `Agent`, and is untouched.
+An implementer's only job here is to **read** the shipped doc comment before
+relying on the field: it records the `Option<String>`-not-`bool` choice (§2.4.2)
+and the SOUND-NOT-COMPLETE caveat (§2.4.3) that governs how the marker may be
+described to a user.
 
 **(b) `GlyphSet` and the marks.** After `impl Status` (`:33`), beside
 `Status::glyph()` for the reason `lib.rs:21-23` already gives — *"so both
@@ -1141,38 +1165,13 @@ impl GlyphSet {
 
 No struct change beyond (a), so `AgentSnapshot`/`Register` are untouched.
 
-### 3.2 `crates/clave/src/store.rs` — stop dropping `worktree`
+### 3.2 `crates/clave/src/store.rs` — DELIVERED, no diff owed
 
-Replace `store.rs:166-189`:
-
-```rust
-/// Store → pipe snapshot (§5): drop the store-only fields, keep the order.
-pub fn snapshot_from(store: &Store) -> AgentSnapshot {
-    …
-                last_visited: r.last_visited,
-                tab_id: r.tab_id,
-                stale: r.stale,
-            })
-```
-
-with (one line added; the doc comment corrected because `worktree` stops being
-store-only):
-
-```rust
-/// Store → pipe snapshot (§5): drop the store-only fields, keep the order.
-/// `worktree` is NO LONGER store-only (S6 §2.4.2) — the bar's gutter cell 3
-/// renders it. `label_source` remains store-only.
-pub fn snapshot_from(store: &Store) -> AgentSnapshot {
-    …
-                last_visited: r.last_visited,
-                tab_id: r.tab_id,
-                stale: r.stale,
-                worktree: r.worktree.clone(),
-            })
-```
-
-And `AgentRecord`'s struct doc (`store.rs:35-37`) loses `worktree` from its
-store-only list.
+`snapshot_from` (`store.rs:185`) already projects `worktree: r.worktree.clone()`
+at `store.rs:208`, and `AgentRecord`'s struct doc (`store.rs:37-38`) already
+records that it stopped being store-only. `label_source` remains store-only, as
+S6 assumed. **S6's diff no longer touches `store.rs` at all** — which removes the
+one file S6 and S4 shared (§6, dependencies table).
 
 ### 3.3 `crates/clave-bar/src/model.rs` — `Row` becomes three cells
 
@@ -1560,13 +1559,13 @@ adjudicate. The PR carries `needs-live-validation` **and** `host-untestable`.
 | `glyph_tiers_are_width_identical` | `Full` and `Plain` produce the same total width for each cell. The claim §2.6.2 makes, mechanised |
 | `glyph_set_parses_and_defaults_to_full` | `parse("plain") == Plain`; `parse("Plain")`, `parse(" plain ")` likewise; `parse("")`, `parse("nerd")`, `parse("ful")` all `Full`. A typo must degrade to the default vocabulary |
 | `gutter_marks_are_not_status_shapes` | for both tiers, `worktree_mark().0` and `terminal_mark().0` are absent from the status/dormant char set. Pins the S3-composition property (§2.5), not the codepoints, so a later glyph change cannot silently re-collide |
-| `agent_worktree_roundtrips_and_defaults_none` | mirrors `agent_stale_roundtrips_and_defaults_false` (`:227-251`): `Some(path)` round-trips; a payload with the key removed parses as `None`. The #43/#44 mixed-binary guarantee |
+| ~~`agent_worktree_roundtrips_and_defaults_none`~~ | **already shipped** by #69 as `agent_title_summary_worktree_roundtrip_and_default` (`clave-types/src/lib.rs:311`): `Some(path)` round-trips and a payload with the key removed parses as `None`. The #43/#44 mixed-binary guarantee, pinned. Do not add a second one |
 
-**`crates/clave/src/store.rs`:**
-
-| Test | Asserts |
-|---|---|
-| `snapshot_carries_worktree` | a record with `worktree: Some("/x/.claude-worktrees/ab")` reaches `snapshot_from`'s `Agent` intact, and a `None` record yields `None`. The exact drop this workstream exists to fix |
+**`crates/clave/src/store.rs`:** nothing owed —
+`snapshot_projects_title_summary_and_worktree_from_the_record` (`store.rs:737`)
+already asserts a record's `worktree: Some("/x/.claude/worktrees/wt")` reaches
+`snapshot_from`'s `Agent` intact. That was the exact drop this workstream existed
+to fix, and #69 fixed it.
 
 **`crates/clave-bar/src/model.rs`:**
 
@@ -1590,12 +1589,12 @@ adjudicate. The PR carries `needs-live-validation` **and** `host-untestable`.
 
 | Site | Action |
 |---|---|
-| `model.rs:1147-1161` `fn agent`, `:1163-1175` `fn agent_labelled` | add `worktree: None` ⇒ every pre-existing test keeps a blank cell 3, which makes them a control group. Add a builder `agent_in_worktree(uuid, tab_id)` for the new tests |
+| `model.rs` `fn agent`, `fn agent_labelled` | **already carry `worktree: None`** (`:1161`, `:1180`) — #69's field addition forced it, so every pre-existing test is already the blank-cell-3 control group. Only the new builder `agent_in_worktree(uuid, tab_id)` is owed |
 | **S5's `compose_row_measures_the_gutter_it_is_given`** | **extend, do not replace** — it currently compares a 2-cell and a 4-cell gutter. Add a 6-cell case so the shipped gutter width is exercised by S5's own contract test as well as S6's |
 | S5's other `compose_row_*` tests (S5 §5.1) | mechanical: they build a gutter via `gutter_segments`, whose signature gains `cols` and `collapsed`. Their *name-side* assertions are unchanged, which is the point — S6 must not perturb S5's text half |
 | S5's `compose_row_narrow_width_overflow_is_preexisting` | **superseded** by `compose_row_emits_no_ellipsis_at_zero_budget` (§2.9.3). Record it in the PR as a deliberate supersession, not a regression |
 | S5's `render_segments_matches_the_pre_s5_line_when_untinted` | keep, but re-baseline: the line it reproduces now carries a 6-cell gutter |
-| `clave-types` tests `:158-173`, `:199-225`, `:227-251`, `:253-270`, `:272-289` | `Agent` literals gain `worktree: None`; assertions unchanged |
+| `clave-types` tests | **done by #69** — every `Agent` literal already carries `worktree: None` (`lib.rs:218`, `:242`, `:269`, `:298`) and their assertions were unchanged, as predicted |
 | `crates/clave/tests/kdl_guardrail.rs` | unchanged — it builds an `AgentRecord`, which already has the field, and no generated artifact changes |
 | `model.rs:2106` `store_rows_without_live_tabs_render_dormant` | extend with `assert_eq!(d.worktree, None)` so the empty-`worktree` path is pinned rather than incidental |
 
@@ -1865,13 +1864,28 @@ clave ls --json | jq -r '.agents[] | "\(.worktree // "-")\t\(.cwd)"'
 **(b) Look at:** rows whose `cwd` is obviously inside a worktree (a
 `.claude-worktrees/…` or similar path) but whose `worktree` column is `-`.
 
-**(c) Report:** how many of your live rows are worktrees clave did not create.
+**(c) Also settle §2.4.3's open question** — whether tier 2 alone is enough.
+For one such row, check whether its transcript carries the free provenance:
+
+```bash
+grep -c '"type":"worktree-state"' ~/.claude/projects/<munged-cwd>/<uuid>.jsonl
+```
+
+A non-zero count on a session you **launched** inside a worktree (rather than one
+Claude relocated into) means `worktree-state` covers the false negatives on its
+own and tier 3 is never needed. A zero means the `.git` `stat` is still the
+backstop. Project directories begin with `-`, which bare `ls` parses as flags —
+use `find` or `/bin/ls --`.
+
+**(d) Report:** how many of your live rows are worktrees clave did not create,
+and the count above.
 
 | Report | Conclusion | Next |
 |---|---|---|
 | none — every worktree of yours was made by `clave add --worktree` | the sound-not-complete signal is complete in practice for you | Step 6 |
-| one or two | the false negatives are real but tolerable | your call: take §2.4.3's three-line upgrade now (it needs S4's `head.rs` landed) or defer to #24 item 1. **Say which** |
-| most of them | the marker is silent where it matters most | take the upgrade — but as its own change with its own review, **not** folded into S6's merge. S6's geometry is independent and can ship first |
+| one or two | the false negatives are real but tolerable | your call: take §2.4.3's tier 2 (S4 reads `worktree-state`; no git call, no new subsystem) or defer to #24 item 1. **Say which** |
+| most of them | the marker is silent where it matters most | take tier 2 — but as its own change with its own review, **not** folded into S6's merge. S6's geometry is independent and can ship first |
+| the `grep` returns 0 on a launched-in-worktree session | tier 2 covers relocation only | tier 3's `stat` is owed as well; it needs S4's `head.rs` landed |
 
 ### Step 6 — collapsed mode: **the open decision, made from real rows** (§2.8)
 
@@ -1957,7 +1971,7 @@ the four columns it cost the text hurt; whether the status dot still reads first
 |---|---|
 | **S5** | **hard dependency, must land first.** S6 replaces exactly one S5 function — `gutter_segments`, which S5 ships as a transitional stand-in for this purpose — and does not touch `compose_row`, `render_segments`, `Ink`, `Segment` or `clamp_name` except for §2.9.3 (§2.9.1). Building the render seam here instead would duplicate S5's `compose_row`/`render_segments` work, so S6 lands **second**; if S6 must land first, it introduces the seam and S5 rebases onto it (the same rebase-coupling S4↔S5 has). |
 | **S3** | composes cleanly. S3 changes the dormant glyph expression *above* the `Row` literal; S6 adds fields *inside* it. Same block, trivial conflict, no semantic overlap. S6 strengthens S3's argument (§2.5): dim marks now live in columns 2 and 4, never column 0, and never as circles |
-| **S4** | no file overlap in S6's diff. S4 owns `hook.rs`/`add.rs`/`store.rs`'s record; S6 touches `store.rs` only at `snapshot_from`. The one *contract* S6 hands S4 is the text budget, `cols - 7` (§2.10). §2.4.3's optional marker upgrade would sit in S4's `refresh_label` and is deliberately not taken here |
+| **S4** | **no file overlap at all** now that #69 has landed `snapshot_from`'s projection (§3.2): S4 owns `hook.rs`/`add.rs`/`store.rs`'s record, and S6 touches `store.rs` nowhere. The one *contract* S6 hands S4 is the text budget, `cols - 7` (§2.10). Both marker-accuracy upgrades — `worktree-state` (tier 2) and the `.git` `stat` (tier 3) — sit in S4's `refresh_label` and are deliberately not taken here (§2.4.3) |
 | **S7** (context battery) | consumes the reserved cell. See below |
 | **S8** (widths, #24 item 6) | independent but **recommended first** — S6 costs 4 text columns at 30 (§2.10) |
 
@@ -2020,7 +2034,7 @@ the four columns it cost the text hurt; whether the status dot still reads first
 | `𖣂` renders as tofu | medium, **expected** | §2.6.3 predicts it and pre-clears `\u{e0a0}`. Geometry is unaffected (tofu is one cell); it is a one-constant change |
 | The terminal mark's codepoint is wrong (§2.6.4) | low | Step 1 identifies it by position among four candidates; all four are one cell, so no test's geometry changes |
 | 4 fewer text columns at 30 makes rows worse overall | medium | S4's drop policy absorbs it (§2.10); S8 restores it. Step 8's branch table is where the maintainer rules |
-| The worktree marker is silent for worktrees clave did not create | medium | §2.4.3 states it precisely, Step 5 measures its real incidence, and the three-line upgrade is written out and ready |
+| The worktree marker is silent for worktrees clave did not create | medium | §2.4.3 states it precisely and ranks three sources; Step 5 measures the real incidence. The cheap fix is now S4 reading `worktree-state` from the transcript tail (no git call at all); the `.git` `stat` upgrade stays written out and ready as the backstop |
 | A hand-edited `glyphs` key is lost to the next `clave setup` | low | §2.6.5 states it; the complete fix is #40's follow-up. Absent = `Full` means the default path is unaffected |
 | The three cells clutter more than they inform | medium | Tier 3 by construction. Step 8 is the maintainer's verdict; the interim lever (collapse to two cells) is one constant |
 | **#24 item 7 regresses**: repo identity vanishes when collapsed (§2.8.1) | medium | Not mitigated — **decided**. §2.8.2 costs four options, §2.8.3 recommends (a) and names the pre-costed upgrades, and §5 Step 6 puts the choice in front of the maintainer with real rows. S5 flags the same risk from its side |
@@ -2038,10 +2052,12 @@ the four columns it cost the text hurt; whether the status dot still reads first
   compile-time assertion — which is the assertion doing its job, and which forces
   #24 item 5 to resolve §2.8 first.
 - **Worktree provenance in the *name*** (#24 item 1, `<repo> » <worktree-dir>`) —
-  S6 renders a marker, not a name. The wire now carries the path it would need.
-- **Fixing `worktree`'s false negatives** (§2.4.3) and **fixing `repo_root` for
-  `new`-inside-a-worktree** (§2.4.4) — both are `add.rs`/`hook.rs` changes inside
-  S4's restructure, both are #24 item 1's territory, and neither moves a column.
+  S6 renders a marker, not a name. The wire carries the path it would need
+  (#69, §2.4.1), and `worktree-state` carries `worktreeName` ready-formatted.
+- **Fixing `worktree`'s false negatives** (§2.4.3, either tier) and **fixing
+  `repo_root` for `new`-inside-a-worktree** (§2.4.4) — both are `add.rs`/`hook.rs`
+  changes inside S4's restructure, both are #24 item 1's territory, and neither
+  moves a column.
 - **Baking the `glyphs` key into the generated layouts** (§2.6.5) — #40.
 - **A real font check in `doctor`** (§2.6.6) — declined on principle, not
   deferred.
