@@ -184,10 +184,16 @@ pub fn layout_kdl(binary: &str, wasm: &str) -> String {
     // S8 §3.4 documents — the same derivation that made 15% right for 30
     // columns and 19% for 38, re-run for 44 (LEDGER D2). It is a HINT, not a
     // contract: the seek corrects a bad birth either way, so a stale percent
-    // costs a visible flicker on every launch, not a wrong bar. Hand-derived
-    // in a second crate on purpose (S8 §3.3) — a KDL-carried target would give
-    // per-tab divergence with no self-heal, because `add::tab_node` runs from
-    // whatever `clave` is on PATH.
+    // costs a visible flicker on every launch, not a wrong bar — S8 §3.3's own
+    // words, "the percent is a birth hint, the seek is the authority".
+    //
+    // That it is HAND-derived here is not what §3.3 recommends: §3.3 says move
+    // both targets into `clave-types`, put the percent beside them, and have
+    // `setup.rs`/`add.rs` FORMAT it. Deliberately deferred — that refactor is
+    // out of scope for this change, and §3.3 itself names the hand-derived
+    // literal as the acceptable fallback ("strictly worse … but it is not
+    // wrong"). Until it lands, this number is kept in sync with
+    // `clave-bar`'s `BAR_TARGET_COLS` by hand.
     // The plugin's configuration is HALF of zellij's identity for it: pipe
     // destinations match on (location, configuration) exactly, so this key
     // must equal what config_kdl bakes into every MessagePlugin keybind or

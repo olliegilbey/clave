@@ -798,8 +798,9 @@ mod tests {
         }
     }
 
-    /// `chars().count()` is what today's renderer clamps with, and it is wrong
-    /// by one column per wide glyph.
+    /// A `chars().count()` clamp is wrong by one column per wide glyph. `main.rs`
+    /// used to do exactly that; this renderer replaced it, and this test is what
+    /// pins the replacement to cells rather than code points.
     #[test]
     fn truncation_is_cell_correct_not_char_correct() {
         // Eight W-width CJK chars = 16 cells in 8 code points.

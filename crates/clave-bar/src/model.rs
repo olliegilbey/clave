@@ -784,12 +784,6 @@ impl BarModel {
         self.prune_opening();
     }
 
-    /// Rows in display order (§6.6 C8): ONE unified recency-desc list — live
-    /// tabs keyed by the store tab_timeline, dormant store rows keyed by
-    /// last_interacted. Tiebreak: tab position for live rows (fresh
-    /// same-second tabs sit in tab order); for same-second dormant rows,
-    /// stable and deterministic in uuid-DESCENDING order (uuid-ascending
-    /// sort under a `usize::MAX - i` key inverts to descending).
     /// The row content for a live-or-dormant agent (lock §2). `dormant` is the
     /// caller's own classification rather than a re-derivation, because the two
     /// loops below already know which list they are walking.
@@ -820,12 +814,24 @@ impl BarModel {
         };
         // Three-state (lock §5.1), and a main checkout renders NOTHING — that
         // is the researched choice, and it is what makes the two marked states
-        // mean something. An EMPTY branch is the case the design did not name:
-        // an agent outside a repo has no branch, and painting the branch glyph
-        // for it would assert a provenance nobody has — so it takes the blank.
+        // mean something. NO branch is the case the design did not name: an
+        // agent outside a repo has none, and painting the branch glyph for it
+        // would assert a provenance nobody has — so it takes the blank.
+        //
+        // `"-"` is the value that matters, NOT the empty string: the host
+        // writes `"-"` when `git rev-parse --abbrev-ref HEAD` fails
+        // (`clave/src/add.rs:517`) and `record_branch` returns `"-"` for a
+        // detached-worktree resume (`add.rs:459`). Nothing in the host ever
+        // writes an empty branch — every `branch: String::new()` in the tree
+        // is a test builder, so the empty clause is kept only to keep those
+        // honest. Verified against the writer, not against a fixture.
         let provenance = if a.worktree.is_some() {
             Provenance::Worktree
-        } else if a.branch.is_empty() || a.branch == "main" || a.branch == "master" {
+        } else if a.branch.is_empty()
+            || a.branch == "-"
+            || a.branch == "main"
+            || a.branch == "master"
+        {
             Provenance::Main
         } else {
             Provenance::Branch
@@ -868,8 +874,14 @@ impl BarModel {
         self.collapsed && !self.peeking
     }
 
+    /// Rows in display order (§6.6 C8): ONE unified recency-desc list — live
+    /// tabs keyed by the store tab_timeline, dormant store rows keyed by
+    /// last_interacted. Tiebreak: tab position for live rows (fresh
+    /// same-second tabs sit in tab order); for same-second dormant rows,
+    /// stable and deterministic in uuid-DESCENDING order (uuid-ascending
+    /// sort under a `usize::MAX - i` key inverts to descending).
     pub fn rows(&self) -> Vec<(RowKey, Row)> {
-        // §6.6 C8 virtual cursor: `Row.active` means "visually SELECTED".
+        // §6.6 C8 virtual cursor: `Row.selected` means "visually SELECTED".
         // While nav sits on a dormant row, the selection follows the walk
         // (claude.ai-style) — that dormant row reads active and EVERY live
         // row drops its highlight, so the stale previous-tab highlight can't
@@ -2155,8 +2167,13 @@ mod tests {
         let mut m = BarModel::default();
         assert!(!m.visited(7), "expanded bar must not arm a peek");
         assert_eq!(m.current_tab(), Some(7)); // beacon still lands
-        // No seek was armed — geometry stays the user's business.
-        assert_eq!(m.width_seek(44), Vec::<Effect>::new());
+        // NOT "no seek was armed": a default model IS birth-armed, which
+        // `a_newborn_model_seeks_the_template_width` proves. What this shows
+        // is that the beacon left the collapse state alone — the bar is at the
+        // EXPANDED target, so an armed seek has nothing to say. Kept (rather
+        // than deleted) because it does fail if `visited` ever corrupted
+        // `collapsed`: the target would drop to 30 and 44 would emit a shrink.
+        assert_eq!(m.width_seek(BAR_TARGET_COLS), Vec::<Effect>::new());
     }
 
     #[test]
@@ -2422,21 +2439,31 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_with_no_branch_takes_the_blank_provenance() {
-        // Not in the design, and decided here: an agent outside a repo has an
-        // empty branch, and painting the branch glyph for it would assert a
+    fn an_agent_outside_a_repo_takes_the_blank_provenance() {
+        // Not in the design, and decided here: an agent outside a repo has no
+        // branch, and painting the branch glyph for it would assert a
         // provenance nobody has. The blank cell is the honest one.
+        //
+        // `"-"` is the value that matters: it is what the HOST actually writes
+        // (`clave/src/add.rs:517`, the `git rev-parse --abbrev-ref HEAD`
+        // fallback, and `record_branch` for a detached-worktree resume). The
+        // empty string is only ever produced by test builders — asserted
+        // second, and kept, so those builders stay honest.
         let mut m = BarModel::default();
-        m.apply_tabs(vec![tab(10, 0, "a", false)]);
-        m.apply_snapshot(snap(1, vec![agent("u1", Status::Working, Some(10))]));
-        assert!(matches!(
-            content_at(&m, 0),
-            RowContent::Agent {
-                provenance: Provenance::Main,
-                repo_ink: None,
-                ..
-            }
+        m.apply_tabs(vec![tab(10, 0, "a", false), tab(11, 1, "b", false)]);
+        m.apply_snapshot(snap(
+            1,
+            vec![
+                dressed("u-dash", "/r/one", "-", None, Some(10)),
+                dressed("u-empty", "/r/one", "", None, Some(11)),
+            ],
         ));
+        let provenance = |i: usize| match content_at(&m, i) {
+            RowContent::Agent { provenance, .. } => provenance,
+            RowContent::Terminal { .. } => panic!("row {i} is not an agent"),
+        };
+        assert_eq!(provenance(0), Provenance::Main, "the host's non-repo value");
+        assert_eq!(provenance(1), Provenance::Main, "a test builder's default");
     }
 
     #[test]
@@ -2484,6 +2511,31 @@ mod tests {
         // status the store carries.
         m.opening.clear();
         assert_eq!(status_at(&m, 0), Some(RowStatus::Dormant));
+
+        // The half that is NEW. Every case above is a dormant row, where the
+        // old (char, u8) logic already answered the same way — it only reached
+        // stale/opening off the dormant path. The unified projection applies
+        // the precedence to a LIVE row too, so bind the agent to a tab and
+        // assert the model state still outranks the store's `Status`.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "t", false)]);
+        let mut a = agent("u1", Status::Working, Some(10));
+        a.stale = true;
+        m.apply_snapshot(snap(1, vec![a]));
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Stale), "live and stale");
+
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "t", false)]);
+        m.apply_snapshot(snap(1, vec![agent("u1", Status::Working, Some(10))]));
+        // Sanity: without a flag the live row does show the store's status,
+        // so the two assertions below are a genuine override, not a constant.
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Working));
+        m.opening.insert("u1".into());
+        assert_eq!(
+            status_at(&m, 0),
+            Some(RowStatus::Opening),
+            "live and opening"
+        );
     }
 
     #[test]
@@ -2531,9 +2583,8 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        assert_eq!(inks_of(1), inks_of(1));
-        // And across model instances, which is where a per-process hash seed
-        // would show up.
+        // Two INDEPENDENT models over the same snapshot, which is where a
+        // per-process hash seed would show up.
         let a = inks_of(1);
         let b = inks_of(1);
         assert_eq!(a, b);
@@ -2601,12 +2652,13 @@ mod tests {
     #[test]
     fn store_rows_without_live_tabs_render_dormant() {
         // §6.6 C8: row set = TabUpdate ∪ dormant store rows. An agent whose
-        // bind points at no current tab and whose registered pane is gone
-        // renders ◌ dim, labeled from the store, recency = last_interacted.
+        // bind points at no current tab and whose registered pane is gone gets
+        // a row of its own, marked Dormant, recency = last_interacted. It is
+        // NOT labeled from the store any more — the projection renders title,
+        // repo and summary (lock §2), so `label` is dead to this row.
         let mut m = BarModel::default();
         m.apply_tabs(vec![tab(1, 0, "shell", true)]); // one plain live tab
         let mut a = agent("u-dormant", Status::Idle, None);
-        a.label = "repo · main · fix".into();
         a.last_interacted = 500;
         m.apply_snapshot(AgentSnapshot {
             collapsed: false,
@@ -3208,9 +3260,20 @@ mod tests {
     fn harness_newborn_converges_on_the_template_from_above() {
         // A percent-sized birth lands window-dependent and the birth-armed seek
         // (C8 2026-07-18) must finish the job onto BAR_TARGET_COLS.
+        //
+        // The START WIDTH is chosen to force MORE THAN ONE resize, and that is
+        // the point of the test — one step would only prove the pre-learning
+        // ±4 slack. With step 12: 66 → 54 (diff 10 > the learned band half 6,
+        // so it acts again) → 42 (diff 2, accepted). The old start of 60 drove
+        // two steps against the old target of 30 but only ONE against 44 — a
+        // test that stayed green and quietly covered less (#63 shape).
         let mut m = BarModel::default();
-        let mut sim = SimZellij::new(60, 12, 0, 200, false);
-        drive(&mut m, &mut sim, None);
+        let mut sim = SimZellij::new(66, 12, 0, 200, false);
+        let steps = drive(&mut m, &mut sim, None);
+        assert!(
+            steps >= 2,
+            "start width must drive at least two resizes, drove {steps}"
+        );
         assert!(
             sim.cols.abs_diff(BAR_TARGET_COLS) <= band_half(sim.step),
             "newborn ended at {} (target {BAR_TARGET_COLS})",
@@ -3384,7 +3447,10 @@ mod tests {
                 // effective step of the active target, OR rested at the floor,
                 // OR the budget was spent mid-travel (round 20 admits all three
                 // as terminal states — (c) already proved the rest is quiet).
-                let target = if m.collapsed && !m.peeking {
+                // `showing_collapsed()`, never a restatement of it: it is the
+                // single source of the peek-aware collapse rule, and a copy
+                // here is the one site that could drift from the seek.
+                let target = if m.showing_collapsed() {
                     COLLAPSED_TARGET_COLS
                 } else {
                     BAR_TARGET_COLS
