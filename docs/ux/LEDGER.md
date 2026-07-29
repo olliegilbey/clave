@@ -477,6 +477,32 @@ resting-width costs become dead paths:
   ever catch it. Needs a display area around 400 columns; Ollie runs ~280, so it
   is out of reach today. **Not out of reach forever.**
 
+### D28 — The release sequence, ruled by Ollie (2026-07-29)
+
+Merging #86 **installs nothing** — his fleet runs the stable binary from a
+previous cut, and only `just release` (his command, never an agent's) promotes.
+So "merged" is the midpoint, not the finish line. Asked, and ruled:
+
+> *"after a live interaction test and being happy with testing, then we will
+> release and switch my daily driver."*
+
+The gates, in order, each of which must pass before the next:
+
+1. **Merge #86.** Done when he approves; all threads resolved, all checks green.
+2. **A live INTERACTION test** — not another look. Gate 1 validated the *design*;
+   this validates the *behaviour*, and no interaction path has run live at 44
+   columns. The checklist lives with `docs/dev/TESTING.md`'s live-validation SOP.
+   **D26's and the Gate 1 section's predictions exist to be settled here.**
+3. **Confidence in the testing itself** — `docs/dev/TESTING.md`'s six shapes and
+   the `just mutants` gate. Note the honest gap: the `--in-diff` path has never
+   run end to end.
+4. **`just release`, then switch the daily driver.** His hands only.
+
+**Consequence for planning:** the 54-column work (#63) and S5 sit *after* a
+release that has already shipped 44. That is deliberate — it gets the validated
+design onto his daily driver rather than holding it behind more change, and it
+means 44 must be genuinely good rather than merely a waypoint.
+
 ### D27 — Five shapes of bad test, all found in one session (2026-07-29)
 
 **Queued work, agreed with Ollie: write this into `docs/dev/TESTING.md` and add

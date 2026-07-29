@@ -71,13 +71,16 @@ disposition, get a ruling, then execute.
 
 ## Open decisions for Ollie
 
-1. **Does this ship to his daily driver, and when?** Merging #86 does not install
-   anything — his fleet runs the stable binary from a previous cut, and only
-   `just release` (his command, never yours) promotes. The bar changes
-   completely, so this is a real decision, not a formality. It was never asked.
-2. **Reconcile-or-delete, per S-spec** (above).
-3. **The two open PR threads** — 54 columns and #87 — resolve at merge or stay
-   open as visible follow-ups? Recommendation: leave open.
+1. ~~Does this ship to his daily driver, and when?~~ **Ruled — see D28.** Merge,
+   then a live **interaction** test, then confidence in the testing itself, then
+   `just release` and switch the daily driver. His hands for the last one.
+   **Consequence: #63 and S5 land AFTER a release that ships 44** — deliberate,
+   so the validated design reaches his daily driver rather than waiting behind
+   more change.
+2. **Reconcile-or-delete, per S-spec** (above). Still open, and still his.
+3. ~~The two open PR threads~~ — **both resolved**, each with a reply pointing at
+   where the work is tracked: 54 columns is **#63** (retitled, carrying the full
+   arithmetic and D26's inherited reservations), `transcript_path` is **#87**.
 
 ## Known-unverified — do not assume these are fine
 
