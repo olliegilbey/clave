@@ -130,16 +130,20 @@ pub fn classify_timer(elapsed: f64, pending_dwells: usize, pending_peeks: u32) -
     }
 }
 
-/// The expanded width the seek converges to. The generated layouts
-/// (setup::layout_kdl and add::tab_layout) size the bar pane in PERCENT —
-/// a fixed `size=30` made zellij refuse every resize (CantResizeFixedPanes)
-/// — so births land near this and the birth-armed seek finishes the job.
-const BAR_TARGET_COLS: usize = 30;
-/// Collapsed width target (Alt+c): a glyph gutter — the state glyph plus a
-/// couple of name chars survive the renderer's own truncation, so "mini
-/// mode" needs no special render path. Zellij's resize floor may stop the
-/// seek above this; wherever cols stop changing is accepted.
-const COLLAPSED_TARGET_COLS: usize = 4;
+/// The expanded width the seek converges to (LEDGER D2, design-lock §2): the
+/// ratified 44-column render, `1 cap + 8 gutter + 7 title + 1 + 7 repo + 1 +
+/// 17 summary + 1 margin + 1 cap`. The generated layouts (setup::layout_kdl
+/// and add::tab_layout) size the bar pane in PERCENT — a fixed `size=30` made
+/// zellij refuse every resize (CantResizeFixedPanes) — so births land near
+/// this and the birth-armed seek finishes the job.
+const BAR_TARGET_COLS: usize = 44;
+/// Collapsed width target (Alt+c), LEDGER D17: `Widths::COLLAPSED` at 30 —
+/// `30 - 13 - 7 title - 3 repo` leaves the summary 7. Collapsed is a WIDTH
+/// PROFILE, not a squeezed layout (D16), so the gutter is identical and only
+/// repo and summary narrow; the render path is the same `render_rows`.
+/// Zellij's resize floor may stop the seek above this; wherever cols stop
+/// changing is accepted.
+const COLLAPSED_TARGET_COLS: usize = 30;
 /// Seek steps allowed per toggle (each is a real zellij layout action):
 /// enough for the widest transition at ~5%-of-viewport per step, small
 /// enough that a layout which refuses to converge isn't fought forever.
@@ -1665,6 +1669,35 @@ mod tests {
         m
     }
 
+    /// LEDGER D15 — the separation invariant, derived rather than restated.
+    ///
+    /// Design-lock §3 gives it as `BAR_TARGET_COLS − COLLAPSED_TARGET_COLS >
+    /// MAX_LEARNABLE_STEP (20)`, and at `44 − 30 = 14` that form fails. The
+    /// `20` is a restatement of somebody else's derivation, not a physical
+    /// bound: `width_seek` accepts when `2 * |cols − target| <= step`, so the
+    /// acceptance HALF-band is `step / 2`, and `step` is capped at
+    /// `MAX_LEARNABLE_STEP`. The widest half-band is therefore **10**, and the
+    /// real requirement is that neither target's value fall inside the other's
+    /// band — separation `> 10`. S8 derives exactly this itself and then
+    /// asserts `> 20` anyway, because `38 − 4 = 34` cleared it for free.
+    ///
+    /// Pinned here so a future move of either constant fails loudly at the
+    /// bound that is actually load-bearing.
+    #[test]
+    fn the_two_targets_are_separated_by_more_than_the_widest_acceptance_band() {
+        let half_band = MAX_LEARNABLE_STEP / 2;
+        assert_eq!(half_band, 10);
+        assert!(
+            BAR_TARGET_COLS.abs_diff(COLLAPSED_TARGET_COLS) > half_band,
+            "targets {BAR_TARGET_COLS}/{COLLAPSED_TARGET_COLS} are within one \
+             acceptance band of each other: a collapse would be accepted as \
+             an expand"
+        );
+        // The bands are also disjoint AT the widest learnable step: neither
+        // target is acceptable while seeking the other.
+        assert!(2 * BAR_TARGET_COLS.abs_diff(COLLAPSED_TARGET_COLS) > MAX_LEARNABLE_STEP);
+    }
+
     #[test]
     fn a_newborn_model_seeks_the_template_width() {
         // The generated layouts size the bar pane in PERCENT — fixed sizes
@@ -1672,8 +1705,12 @@ mod tests {
         // Alt+c-dead live finding, c8-cold-start 2026-07-18) — so a newborn
         // bar's cols depend on the window. The seek must be armed at birth
         // to converge on the exact template width from either side.
+        // Both start widths are outside the pre-learning ±4 band around
+        // BAR_TARGET_COLS (44) — 45 used to be a shrink toward 30 and is now
+        // one column off target, which is exactly the "the number moved, the
+        // test's meaning did not" trap (#63).
         let mut m = BarModel::default();
-        assert_eq!(m.width_seek(45), vec![Effect::ShrinkSelf]);
+        assert_eq!(m.width_seek(60), vec![Effect::ShrinkSelf]);
         let mut m = BarModel::default();
         assert_eq!(m.width_seek(18), vec![Effect::GrowSelf]);
     }
@@ -1681,16 +1718,20 @@ mod tests {
     #[test]
     fn seek_collapses_to_the_gutter_despite_coarse_steps() {
         // Round 20 (collapse-in-place): Alt+c drives OWN width between the
-        // template (30) and the glyph gutter (4) — the pane is never
-        // suppressed. Zellij resizes in ~5%-of-viewport steps (7–14 cols),
-        // far coarser than either target: the step is LEARNED from each
-        // resize's observed effect and acceptance is within half a step
-        // (round-9 lesson: naive loops overshoot straight through).
+        // template (44, LEDGER D2) and the collapsed profile (30, D17) — the
+        // pane is never suppressed. Zellij resizes in ~5%-of-viewport steps
+        // (7–14 cols), far coarser than the 14-column separation between the
+        // two targets: the step is LEARNED from each resize's observed effect
+        // and acceptance is within half a step (round-9 lesson: naive loops
+        // overshoot straight through).
         let mut m = BarModel::default();
-        // Never toggled: geometry is the user's business.
-        assert_eq!(m.width_seek(30), Vec::<Effect>::new());
+        // Already AT the expanded target: nothing to do.
+        assert_eq!(m.width_seek(44), Vec::<Effect>::new());
         let mut m = collapsed_model();
-        let mut cols = 30i64;
+        // 72, not 30: 30 IS the collapsed target now, so the old start width
+        // would have converged in zero steps and asserted nothing (#63 —
+        // `30` was both the target and an arbitrary start width).
+        let mut cols = 72i64;
         let mut acted = 0;
         loop {
             match m.width_seek(cols as usize).as_slice() {
@@ -1702,16 +1743,16 @@ mod tests {
             acted += 1;
             assert!(acted < 20, "did not converge");
         }
-        // Within half a learned step of the 4-col gutter — and STAYS done
+        // Within half a learned step of the collapsed target — and STAYS done
         // (later geometry is the user's business until the next toggle).
-        assert!((cols - 4).abs() <= 4, "ended at {cols} cols");
+        assert!((cols - 30).abs() <= 4, "ended at {cols} cols");
         assert_eq!(m.width_seek(140), Vec::<Effect>::new());
     }
 
     #[test]
     fn seek_expands_back_to_template_width() {
         let mut m = collapsed_model();
-        m.toggle(); // expanded again → seek re-armed toward 30
+        m.toggle(); // expanded again → seek re-armed toward 44
         let mut cols = 5i64;
         let mut acted = 0;
         loop {
@@ -1724,10 +1765,12 @@ mod tests {
             acted += 1;
             assert!(acted < 20, "did not converge");
         }
-        // Simulated step 9 (not 7): from 5 the 7-ladder lands ON 26, which
-        // the ±4 slack band accepts for either template width — 9 makes the
-        // end position actually distinguish 30 from the old 26.
-        assert!((cols - 30).abs() <= 4, "ended at {cols} cols");
+        // Simulated step 9 (not 7): the ladder from 5 must land on a width
+        // that DISTINGUISHES the expanded target from the collapsed one, or
+        // the assertion passes for the wrong target. 5+9k gives 41 (|41−44| =
+        // 3, accepted) where the collapsed target 30 would have stopped at 32
+        // — 14 columns apart, exactly the D15/D17 separation.
+        assert!((cols - 44).abs() <= 4, "ended at {cols} cols");
     }
 
     #[test]
@@ -1738,20 +1781,28 @@ mod tests {
         // old guard could not tell the two apart, so it WAITED FOREVER — the
         // very stall that left a drifted bar parked (F1). Now: grace exactly
         // one render, then re-drive; the budget bounds a clobber we cannot win.
-        let mut m = collapsed_model(); // target 4
-        assert_eq!(m.width_seek(30), vec![Effect::ShrinkSelf]);
-        // FAR off target and still 30: one render of grace, no double-fire.
-        assert_eq!(m.width_seek(30), Vec::<Effect>::new());
-        // Still 30 after the grace → the resize was clobbered; re-drive (#4).
-        assert_eq!(m.width_seek(30), vec![Effect::ShrinkSelf]);
-        // Landed (30 → 16): learned step 14, keep shrinking toward 4.
-        assert_eq!(m.width_seek(16), vec![Effect::ShrinkSelf]);
-        // Floor: |16 − 4| is within a learned step, so zellij's refusal to
-        // shrink further is a NEAR-target wall — accepted in place (round 20:
-        // "wherever cols stop changing is accepted") and silent forever, with
-        // no burst of refused resizes. This keeps the collapsed floor benign.
+        // FOOTGUNS names this test by name: `30` was BOTH the old collapsed
+        // target's arbitrary start width and, now, the target itself. The
+        // widths below are re-derived from the new targets, not substituted:
+        // start 60 (far above the collapsed target 30), land 44 (delta 16 —
+        // a LEARNABLE step, ≤ MAX_LEARNABLE_STEP) leaving |44 − 30| = 14
+        // inside that learned step, which is what makes the last stanza a
+        // near-target wall rather than a clobber.
+        let mut m = collapsed_model(); // target 30
+        assert_eq!(m.width_seek(60), vec![Effect::ShrinkSelf]);
+        // FAR off target and still 60: one render of grace, no double-fire.
+        assert_eq!(m.width_seek(60), Vec::<Effect>::new());
+        // Still 60 after the grace → the resize was clobbered; re-drive (#4).
+        assert_eq!(m.width_seek(60), vec![Effect::ShrinkSelf]);
+        // Landed (60 → 44): learned step 16, keep shrinking toward 30.
+        assert_eq!(m.width_seek(44), vec![Effect::ShrinkSelf]);
+        // Floor: |44 − 30| = 14 is within the learned step of 16, so zellij's
+        // refusal to shrink further is a NEAR-target wall — accepted in place
+        // (round 20: "wherever cols stop changing is accepted") and silent
+        // forever, with no burst of refused resizes. This keeps the collapsed
+        // floor benign.
         for _ in 0..10 {
-            assert_eq!(m.width_seek(16), Vec::<Effect>::new());
+            assert_eq!(m.width_seek(44), Vec::<Effect>::new());
         }
     }
 
@@ -1762,10 +1813,12 @@ mod tests {
         // until the next toggle/peek. It must now re-seek — but only after the
         // drift is CONFIRMED stable (same width twice), so a mid-drag flicker
         // or a thrashing layout never provokes a perpetual re-seek.
-        let mut m = collapsed_model(); // target 4
-        // Converge to the gutter and go dormant.
-        assert_eq!(m.width_seek(30), vec![Effect::ShrinkSelf]);
-        assert_eq!(m.width_seek(6), Vec::<Effect>::new()); // within band → done
+        let mut m = collapsed_model(); // target 30
+        // Converge to the collapsed target and go dormant. 60 → 44 learns a
+        // step of 16; 44 → 28 lands 2 columns under target, inside the band.
+        assert_eq!(m.width_seek(60), vec![Effect::ShrinkSelf]);
+        assert_eq!(m.width_seek(44), vec![Effect::ShrinkSelf]);
+        assert_eq!(m.width_seek(28), Vec::<Effect>::new()); // within band → done
         assert_eq!(m.seek_budget, 0, "seek should be dormant after converging");
         // A relayout slams the pane wide (6 → 140). The FIRST render only
         // observes it (could be a transient mid-relayout value); no action yet.
@@ -1783,20 +1836,21 @@ mod tests {
         // emit. Otherwise a later EXTERNAL relayout that lands within a step of
         // the STALE emit anchor (but far from rest) is misread as self-inflicted
         // and accepted as rest — the F1 off-target park, reborn in a corner.
-        let mut m = collapsed_model(); // target 4
-        // Converge in coarse steps so the FINAL landing (→ 6) is many cols from
-        // the previous emit position (16): 30 → 16 → 6.
-        assert_eq!(m.width_seek(30), vec![Effect::ShrinkSelf]); // emit @30
-        assert_eq!(m.width_seek(16), vec![Effect::ShrinkSelf]); // learn 14, emit @16
-        assert_eq!(m.width_seek(6), Vec::<Effect>::new()); // learn 10, within band → REST @6
+        let mut m = collapsed_model(); // target 30
+        // Converge in coarse steps so the FINAL landing (→ 32) is many cols
+        // from the previous emit position (52): 72 → 52 → 32, learning a step
+        // of 20 (MAX_LEARNABLE_STEP, the widest anchor window there is).
+        assert_eq!(m.width_seek(72), vec![Effect::ShrinkSelf]); // emit @72
+        assert_eq!(m.width_seek(52), vec![Effect::ShrinkSelf]); // learn 20, emit @52
+        assert_eq!(m.width_seek(32), Vec::<Effect>::new()); // within band → REST @32
         assert_eq!(m.seek_budget, 0, "must be dormant after converging");
-        // A stable external relayout parks the bar at 26 — FAR from the rest
-        // width 6 (|26−6| = 20), but within a learned step of the stale emit
-        // anchor 16 (|26−16| = 10 ≤ ~10). A genuine drift: confirm it (twice)
-        // and re-seek the gutter, NOT settle at 26.
-        assert_eq!(m.width_seek(26), Vec::<Effect>::new()); // observe
+        // A stable external relayout parks the bar at 62 — FAR from the rest
+        // width 32 (|62−32| = 30 > 20), but within a learned step of the stale
+        // emit anchor 52 (|62−52| = 10 ≤ 20). A genuine drift: confirm it
+        // (twice) and re-seek the collapsed target, NOT settle at 62.
+        assert_eq!(m.width_seek(62), Vec::<Effect>::new()); // observe
         assert_eq!(
-            m.width_seek(26),
+            m.width_seek(62),
             vec![Effect::ShrinkSelf],
             "a far-from-rest drift must re-arm, not be classified as self-inflicted"
         );
@@ -1805,17 +1859,19 @@ mod tests {
     #[test]
     fn idle_seek_ignores_an_oscillating_layout_and_a_resting_width() {
         // The two bounds that keep the drift re-arm from fighting forever.
-        let mut m = collapsed_model(); // target 4
-        assert_eq!(m.width_seek(30), vec![Effect::ShrinkSelf]);
-        assert_eq!(m.width_seek(6), Vec::<Effect>::new()); // settled at ~gutter
+        let mut m = collapsed_model(); // target 30
+        assert_eq!(m.width_seek(60), vec![Effect::ShrinkSelf]);
+        // 60 → 32 is a 28-column delta: NOT learnable (> MAX_LEARNABLE_STEP),
+        // so the pre-learning ±4 slack band accepts |32 − 30| = 2 and settles.
+        assert_eq!(m.width_seek(32), Vec::<Effect>::new()); // settled at ~target
         // (1) A render at the exact settled width is a no-op, however often it
         // repeats — a converged bar never wakes itself.
         for _ in 0..8 {
-            assert_eq!(m.width_seek(6), Vec::<Effect>::new());
+            assert_eq!(m.width_seek(32), Vec::<Effect>::new());
         }
         // (2) A layout that never holds still (alternating off-target widths)
         // is never CONFIRMED, so it never re-arms — no perpetual re-seek
-        // (round 20). Both widths are far from the gutter target.
+        // (round 20). Both widths are far from the collapsed target.
         for cols in [200, 100, 200, 100, 200, 100] {
             assert_eq!(
                 m.width_seek(cols),
@@ -1833,10 +1889,10 @@ mod tests {
         // reappearance would spuriously "confirm" (round 20: never fight a
         // layout that will not hold still). A real reflow, by contrast, moves
         // cols ONCE to a new stable value and never revisits rest in between.
-        let mut m = collapsed_model(); // target 4
-        assert_eq!(m.width_seek(30), vec![Effect::ShrinkSelf]);
-        assert_eq!(m.width_seek(6), Vec::<Effect>::new()); // settled at ~gutter
-        for cols in [200, 6, 200, 6, 200, 6] {
+        let mut m = collapsed_model(); // target 30
+        assert_eq!(m.width_seek(60), vec![Effect::ShrinkSelf]);
+        assert_eq!(m.width_seek(32), Vec::<Effect>::new()); // settled at ~target
+        for cols in [200, 32, 200, 32, 200, 32] {
             assert_eq!(
                 m.width_seek(cols),
                 Vec::<Effect>::new(),
@@ -1850,12 +1906,11 @@ mod tests {
         // The round-9 live defect, seek edition: an overshoot past the
         // target is recovered by growing, and the half-step band accepts.
         let mut m = collapsed_model();
-        m.toggle(); // expanded → target 30
-        assert_eq!(m.width_seek(13), vec![Effect::GrowSelf]);
-        // Landed (+14 → 27): learned step 14, |27−30| within half a step →
-        // accept and retire.
-        assert_eq!(m.width_seek(27), Vec::<Effect>::new());
-        assert_eq!(m.width_seek(13), Vec::<Effect>::new()); // retired
+        m.toggle(); // expanded → target 44
+        assert_eq!(m.width_seek(30), vec![Effect::GrowSelf]);
+        // Landed (+14 → 44): learned step 14, on target → accept and retire.
+        assert_eq!(m.width_seek(44), Vec::<Effect>::new());
+        assert_eq!(m.width_seek(30), Vec::<Effect>::new()); // retired
     }
 
     #[test]
@@ -1864,12 +1919,16 @@ mod tests {
         // than one resize step; learning that delta poisons the acceptance
         // band (step=60 accepted a 13-col bar as "close enough" to 26).
         let mut m = collapsed_model();
-        m.toggle(); // expanded → target 30
+        m.toggle(); // expanded → target 44
         assert_eq!(m.width_seek(75), vec![Effect::ShrinkSelf]);
         // External jump 75 → 15 (delta 60): recover, but don't learn 60.
         assert_eq!(m.width_seek(15), vec![Effect::GrowSelf]);
-        // 40 is far off-template; a step of 60 would fake-accept it.
-        assert_eq!(m.width_seek(40), vec![Effect::ShrinkSelf]);
+        // 60 is 16 off-template: outside the unlearned ±4 band, but well
+        // inside the ±30 band a learned step of 60 would have opened — so a
+        // poisoned step fake-accepts it and this assertion catches it. (The
+        // old `40` was chosen against target 30 and is only 4 off 44, i.e.
+        // legitimately accepted now — the numbers are re-derived, not moved.)
+        assert_eq!(m.width_seek(60), vec![Effect::ShrinkSelf]);
     }
 
     #[test]
@@ -1891,16 +1950,18 @@ mod tests {
         // clave-visited pipe) briefly expands the bar; ~1s after the last
         // nav it sinks back to the gutter.
         let mut m = collapsed_model();
-        assert_eq!(m.width_seek(4), Vec::<Effect>::new()); // settled at gutter
+        assert_eq!(m.width_seek(30), Vec::<Effect>::new()); // settled, collapsed
         assert!(m.visited(7), "collapsed bar must arm a peek");
         assert_eq!(m.current_tab(), Some(7)); // still a beacon
-        // Peek re-armed the seek toward the TEMPLATE despite collapsed.
-        assert_eq!(m.width_seek(4), vec![Effect::GrowSelf]);
+        // Peek re-armed the seek toward the TEMPLATE despite collapsed: the
+        // 14-column separation (D15/D17) exceeds the ±4 pre-learning band, so
+        // the same width that was AT rest collapsed is now a grow.
+        assert_eq!(m.width_seek(30), vec![Effect::GrowSelf]);
         // A second nav during the peek re-arms (main.rs counts its timers).
         assert!(m.visited(8));
-        // Expiry: sink back toward the gutter.
+        // Expiry: sink back toward the collapsed target.
         assert!(m.peek_expired());
-        assert_eq!(m.width_seek(30), vec![Effect::ShrinkSelf]);
+        assert_eq!(m.width_seek(44), vec![Effect::ShrinkSelf]);
     }
 
     #[test]
@@ -1909,13 +1970,13 @@ mod tests {
         assert!(!m.visited(7), "expanded bar must not arm a peek");
         assert_eq!(m.current_tab(), Some(7)); // beacon still lands
         // No seek was armed — geometry stays the user's business.
-        assert_eq!(m.width_seek(30), Vec::<Effect>::new());
+        assert_eq!(m.width_seek(44), Vec::<Effect>::new());
     }
 
     #[test]
     fn toggle_cancels_a_peek_and_a_late_expiry_is_a_noop() {
         let mut m = collapsed_model();
-        assert_eq!(m.width_seek(4), Vec::<Effect>::new());
+        assert_eq!(m.width_seek(30), Vec::<Effect>::new());
         assert!(m.visited(7));
         // Alt+c mid-peek: now genuinely expanded; the peek flag must not
         // survive to fight the user's explicit toggle.
@@ -1936,9 +1997,9 @@ mod tests {
         s.collapsed = true;
         m.apply_snapshot(s);
         assert!(m.collapsed, "snapshot-carried flag did not hydrate");
-        // Born at template width among gutter bars → must shrink, exactly
-        // as if it had heard the toggle itself.
-        assert_eq!(m.width_seek(30), vec![Effect::ShrinkSelf]);
+        // Born at template width (44) among collapsed bars → must shrink,
+        // exactly as if it had heard the toggle itself.
+        assert_eq!(m.width_seek(44), vec![Effect::ShrinkSelf]);
     }
 
     /// Issue #5 path (c), missed pipe: an instance that missed the toggle
@@ -1951,16 +2012,16 @@ mod tests {
         // Desynced: expanded while the store says collapsed.
         let mut missed = BarModel::default();
         missed.apply_snapshot(snap(1, vec![])); // hydrated expanded, seq 1
-        let converged = missed.width_seek(30); // within band → seek done
+        let converged = missed.width_seek(44); // within band → seek done
         assert_eq!(converged, Vec::<Effect>::new());
         let mut heal = snap(2, vec![]);
         heal.collapsed = true;
         missed.apply_snapshot(heal);
         assert!(missed.collapsed, "missed-pipe instance did not heal");
         assert_eq!(
-            missed.width_seek(30),
+            missed.width_seek(44),
             vec![Effect::ShrinkSelf],
-            "healing must re-arm the seek toward the gutter"
+            "healing must re-arm the seek toward the collapsed target"
         );
 
         // Synced: toggled locally (broadcast heard), then the store's own
@@ -1968,8 +2029,8 @@ mod tests {
         let mut synced = BarModel::default();
         synced.apply_snapshot(snap(1, vec![]));
         synced.toggle(); // collapsed, seek armed
-        // Drain the seek to quiescence at the gutter floor.
-        assert_eq!(synced.width_seek(4), Vec::<Effect>::new());
+        // Drain the seek to quiescence at the collapsed target.
+        assert_eq!(synced.width_seek(30), Vec::<Effect>::new());
         let budget_before = synced.seek_budget;
         let mut same = snap(2, vec![]);
         same.collapsed = true;
@@ -2716,7 +2777,9 @@ mod tests {
     fn harness_collapse_converges_on_the_gutter() {
         let mut m = BarModel::default();
         m.toggle(); // collapsed → target COLLAPSED_TARGET_COLS
-        let mut sim = SimZellij::new(30, 9, 0, 200, false);
+        // Start at 72, not 30: 30 IS the collapsed target now, and a harness
+        // that starts on its target proves nothing (#63).
+        let mut sim = SimZellij::new(72, 9, 0, 200, false);
         drive(&mut m, &mut sim, None);
         assert!(
             sim.cols.abs_diff(COLLAPSED_TARGET_COLS) <= band_half(sim.step),
@@ -2728,13 +2791,16 @@ mod tests {
     #[test]
     fn harness_floor_above_target_rests_benignly() {
         // Round 20 ruling: "wherever cols stop changing is accepted." When the
-        // resize floor sits ABOVE the gutter target, the seek rests at the
+        // resize floor sits ABOVE the collapsed target, the seek rests at the
         // floor and the in-flight guard keeps it silent — no thrash.
         let mut m = BarModel::default();
         m.toggle();
-        let mut sim = SimZellij::new(30, 8, 12, 200, false); // floor 12 > target 4
+        // Floor 38 > COLLAPSED_TARGET_COLS (30), and far enough above it that
+        // the ±4 slack band cannot mistake the floor for convergence. The old
+        // pair (start 30, floor 12) was derived against a target of 4.
+        let mut sim = SimZellij::new(72, 8, 38, 200, false);
         drive(&mut m, &mut sim, None);
-        assert_eq!(sim.cols, 12, "did not rest at the floor");
+        assert_eq!(sim.cols, 38, "did not rest at the floor");
         for _ in 0..8 {
             assert_eq!(m.width_seek(sim.cols), Vec::<Effect>::new());
         }
@@ -2761,8 +2827,10 @@ mod tests {
         // peeking, then sinks to the gutter when the peek expires.
         let mut m = BarModel::default();
         m.toggle(); // collapsed
-        let mut sim = SimZellij::new(30, 8, 0, 200, false);
-        drive(&mut m, &mut sim, None); // settle at the gutter
+        // 60, not 30: starting on COLLAPSED_TARGET_COLS would make the first
+        // leg a no-op and the assertion below vacuous (#63).
+        let mut sim = SimZellij::new(60, 8, 0, 200, false);
+        drive(&mut m, &mut sim, None); // settle at the collapsed target
         assert!(sim.cols.abs_diff(COLLAPSED_TARGET_COLS) <= band_half(sim.step));
         // A nav arms a peek (collapsed → template) and re-arms the seek.
         assert!(m.visited(7));
@@ -2785,8 +2853,9 @@ mod tests {
     #[test]
     fn harness_toggle_mid_seek_re_aims_at_the_new_target() {
         // Alt+c mid-flight: the in-progress expand is abandoned and the seek
-        // re-aims at the gutter, still converging within one fresh budget.
-        let mut m = BarModel::default(); // expanded, target 30
+        // re-aims at the collapsed target, still converging within one fresh
+        // budget.
+        let mut m = BarModel::default(); // expanded, target 44
         let mut sim = SimZellij::new(5, 7, 0, 200, false);
         let max_seg = drive(&mut m, &mut sim, Some((2, Interrupt::Toggle)));
         assert!(
