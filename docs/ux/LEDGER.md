@@ -228,8 +228,15 @@ That is one layout parameterised by `(title_w, repo_w)`, with summary flexing:
 
 ```
 expanded  44 = 1 cap + 8 gutter + 7 title + 1 + 7 repo + 1 + 17 summary + 1 margin + 1 cap
-collapsed 26 = 1 cap + 8 gutter + 5 title + 1 + 3 repo + 1 +  6 summary + 1 margin + 1 cap
+collapsed 26 = 1 cap + 8 gutter + 5 title + 1 + 3 repo + 1 +  5 summary + 1 margin + 1 cap
 ```
+
+Fixed overhead is **13** (`1 cap + 8 gutter + 2 separators + 1 margin + 1 cap`), so
+`summary = cols - 13 - title - repo`. The collapsed line above originally read
+`6 summary` and summed to 27, not 26 — a coordinator arithmetic slip, caught by
+the implementing agent deriving the value instead of trusting the brief. Every
+candidate's summary width was one too high. **Derive; do not restate.** That is
+the same failure mode as D15, one document away.
 
 Not a separate code path — the same `render_rows` with a different profile.
 
@@ -240,10 +247,40 @@ are *already* on the collapsed profile and the summary simply grows shorter.
 built to contain cannot arise. D13 survives only as a guard against pathological
 widths, not as something a user would ever see.
 
-Open: the exact collapsed target (26 → 6 summary chars, separation 18; 28 → 8
-chars, separation 16 — both clear D15's bound of 10 comfortably) and whether
-title shrinks to 5 or holds at 7 so the chip never reflows between states.
-**To be settled by looking, not by arguing.**
+### D17 — Collapsed is `(title 7, repo 3)` at 30 columns (2026-07-29)
+
+Chosen by Ollie from three rendered candidates. `Widths::COLLAPSED = { title: 7, repo: 3 }`,
+`COLLAPSED_TARGET_COLS = 30`, summary = `30 − 13 − 7 − 3` = **7**. Separation
+from 44 is 14, clearing D15's bound of 10.
+
+**The title holds at 7 and does not shrink.** The rejected 5-column variant
+bought two more summary characters and cost title legibility outright:
+`API-GW` and `API-V2` both render `API-` plus one character, and `KDL-GRD`
+becomes `KDL-G`. The chip is the thing you identify a tab *by* — truncating it
+to buy prose is the wrong trade. Holding it also means the chip does not reflow
+when you toggle, so the eye keeps its anchor across the transition.
+
+### D18 — An ellipsis is suppressed in columns of 4 cells or fewer (2026-07-29)
+
+**Found by looking, and it would have shipped otherwise.** At `repo = 3`,
+`clamp` spent one of the three cells on `\u{2026}`, so every repo rendered as two
+characters plus an ellipsis — `cl\u{2026}`, `do\u{2026}`, `ap\u{2026}` — which defeats the entire
+reason 3 was chosen (*"'cla' for clave, and 'nal' for nalu — distinct"*).
+
+Rule: at 4 cells or fewer the ellipsis consumes 25% or more of the field, and in
+a fixed-column layout it tells the reader nothing they cannot already see. So it
+is dropped and the field truncates hard. Above 4 it stays.
+
+This leaves the ratified 44-column render untouched (expanded repo is 7, so
+`dotfil\u{2026}` is unchanged) and gives collapsed the three real characters intended.
+
+**Deferred to Gate 1, deliberately:** the design lock's own §3 argues the
+stronger form — that an ellipsis *"carries no information"* in an identifier
+field at any width, and that `dotfiles` beats `dotfile\u{2026}`. That would drop the
+ellipsis from repo and title everywhere, including at 44, gaining a character on
+every truncated identifier. It is a change to the ratified render, and it is
+exactly the kind of judgement that is cheap to make while looking at a real bar
+and expensive to argue in prose. **Look at it then; do not litigate it now.**
 
 ## Known-stale spec content — recognise, do not fix
 
