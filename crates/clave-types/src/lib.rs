@@ -179,11 +179,20 @@ pub const LABEL_SEP: &str = " \u{00b7} ";
 // is the #43/#44 mixed-artifact shape).
 
 /// The expanded width the bar is drawn at and the width seek converges to
-/// (LEDGER D2, design-lock §2): `1 cap + 8 gutter + 7 title + 1 + 7 repo + 1 +
-/// 17 summary + 1 margin + 1 cap`. The renderer takes `cols` as a parameter —
+/// (LEDGER D2, then D19): `1 cap + 8 gutter + 9 title + 1 + 7 repo + 1 +
+/// 25 summary + 1 margin + 1 cap`. The renderer takes `cols` as a parameter —
 /// zellij hands the plugin whatever the pane actually is — but every number in
 /// the ratified design was chosen against this one.
-pub const BAR_TARGET_COLS: usize = 44;
+///
+/// **44 → 54 (LEDGER D19), Ollie's call after running the fleet live:** *"mostly
+/// for the summary, but could do another two chars for the title."* So title
+/// takes 7 → 9 and summary takes the remaining 17 → 25. Collapsed is unchanged,
+/// which widens the separation from 14 to 24 — see the separation test below,
+/// where that change retires a whole class of seek behaviour.
+///
+/// At a genuinely 80-column session this leaves the agent pane 26 columns.
+/// Accepted (D32): few sessions are that narrow, and collapsed still leaves 50.
+pub const BAR_TARGET_COLS: usize = 54;
 
 /// The collapsed width (Alt+c), LEDGER D17: `30 - 13 - 7 title - 3 repo`
 /// leaves the summary 7. Collapsed is a width PROFILE, not a squeezed layout
@@ -229,7 +238,8 @@ mod tests {
     /// §3.3 was written to remove, and the one round 21 had to fix by hand.
     #[test]
     fn birth_percent_is_derived_from_the_bar_target() {
-        assert_eq!(BAR_BIRTH_PERCENT, 22);
+        // 54 * 100 / 200. Derived, not chosen — it was 22 at a 44 target.
+        assert_eq!(BAR_BIRTH_PERCENT, 27);
         assert_eq!(
             BAR_BIRTH_PERCENT,
             BAR_TARGET_COLS * 100 / REFERENCE_VIEWPORT_COLS
@@ -243,13 +253,19 @@ mod tests {
     /// The seek's two targets, and the property that is not local to either:
     /// their separation. `clave-bar`'s `converged` refuses any width both
     /// bands would accept, so the geometry cannot silently make Alt+c a no-op
-    /// again (LEDGER D21) — but a separation at or below the widest learnable
-    /// step (20) means every toggle on a wide display pays a disambiguating
-    /// step, which is a design decision, not an accident. Fail here if it
-    /// changes.
+    /// again (LEDGER D21). Fail here if it changes.
+    ///
+    /// **24 since D19, and the number crossed a threshold on the way.** At
+    /// 44/30 the separation was 14 — at or below the widest learnable step
+    /// (`MAX_LEARNABLE_STEP` = 20), so the two acceptance bands could overlap
+    /// and every toggle on a wide display paid a disambiguating step. At 54/30
+    /// the separation EXCEEDS the widest step the seek can learn, so the bands
+    /// can no longer overlap at all: the disqualification, the bracket rule and
+    /// both resting-width costs become unreachable paths rather than live ones
+    /// (D26's four inherited reservations, three of which this retires).
     #[test]
     fn the_collapsed_target_is_narrower_and_separated_from_the_expanded_one() {
-        assert_eq!(BAR_TARGET_COLS.abs_diff(COLLAPSED_TARGET_COLS), 14);
+        assert_eq!(BAR_TARGET_COLS.abs_diff(COLLAPSED_TARGET_COLS), 24);
     }
 
     #[test]

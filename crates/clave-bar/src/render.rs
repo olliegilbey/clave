@@ -22,14 +22,17 @@ use unicode_width::UnicodeWidthChar;
 
 // ── geometry ────────────────────────────────────────────────────────────────
 
-/// The ratified expanded width (lock §2). `cols` stays a parameter — zellij
-/// hands the plugin whatever the pane actually is — but every number in the
-/// design was chosen against 44, and at 44 the output IS the lock's table.
+/// The ratified expanded width (lock §2, widened by LEDGER D19). `cols` stays a
+/// parameter — zellij hands the plugin whatever the pane actually is — but every
+/// number in the design was chosen against this one, and at this width the
+/// output IS the lock's table. The lock's own table is written at 44; D19 moved
+/// the width to 54 and the goldens here moved with it.
 ///
 /// **The same number the width seek drives the pane to**, not a parallel copy
-/// of it: nothing tied the two together, so moving the seek's target alone
-/// (LEDGER D19 is about to) left every golden here green while pinning the old
-/// width (S8 §3.3, #86).
+/// of it: nothing tied the two together, so moving the seek's target alone left
+/// every golden here green while pinning the old width (S8 §3.3, #86). D19 is
+/// the move that machinery was built for, and it worked — seven tests failed
+/// loudly on the target change rather than passing against a stale picture.
 pub const DESIGN_COLS: usize = clave_types::BAR_TARGET_COLS;
 
 /// The collapsed profile's design width (LEDGER D17) — likewise the seek's
@@ -55,20 +58,32 @@ pub struct Widths {
 }
 
 impl Widths {
-    /// Design-lock §2, unchanged. At `cols == DESIGN_COLS` this profile's
-    /// output is byte-for-byte the pre-D16 renderer's — that is the regression
-    /// pin (`golden_bar_at_forty_four_columns`, `bar-preview`'s captured
-    /// prefix).
-    pub const EXPANDED: Widths = Widths { title: 7, repo: 7 };
+    /// LEDGER D19, Ollie's call after the Gate 1 live look: the bar goes to 54
+    /// and the extra ten columns split *"mostly for the summary, but could do
+    /// another two chars for the title"*. So title 7 → 9, repo unchanged at 7,
+    /// and summary takes the rest — `54 - 13 - 9 - 7` = **25**, from 17.
+    ///
+    /// This supersedes the byte-for-byte pin against the pre-D16 renderer that
+    /// stood while the target was 44: the design width moved, so the golden
+    /// moves with it. `min_intact_cols()` rises 27 → 29 as a consequence, which
+    /// slightly widens the sub-floor regime D31's clip now covers.
+    pub const EXPANDED: Widths = Widths { title: 9, repo: 7 };
 
     /// LEDGER D17: chosen by Ollie from three rendered candidates. Repo drops
     /// to three (`cla`, `nal` — collisions are rare and the repo ink still
-    /// disambiguates); title HOLDS at 7, identical to `EXPANDED` — the
-    /// rejected 5-column variant bought two summary characters by truncating
-    /// the chip itself (`API-GW`/`API-V2` both to `API-`, `KDL-GRD` to
-    /// `KDL-G`), and the chip is the thing a tab is identified BY. Holding it
-    /// also means the chip does not reflow when the profile toggles, so the
-    /// eye keeps its anchor across the transition.
+    /// disambiguates); title holds at 7 — the rejected 5-column variant bought
+    /// two summary characters by truncating the chip itself (`API-GW`/`API-V2`
+    /// both to `API-`, `KDL-GRD` to `KDL-G`), and the chip is the thing a tab
+    /// is identified BY.
+    ///
+    /// **D17's second reason is RETIRED at D19, knowingly.** It used to read
+    /// "identical to `EXPANDED` … so the chip does not reflow when the profile
+    /// toggles, and the eye keeps its anchor across the transition." `EXPANDED`
+    /// now takes title 9, so the chip DOES reflow 9 → 7 on every Alt+c. Put to
+    /// Ollie against two alternatives that preserve the anchor — holding 9 in
+    /// both profiles (collapsed summary 7 → 5) and leaving title at 7 to give
+    /// the summary all ten new columns — and he took the reflow. Titles of 7
+    /// cells or fewer are unaffected; only longer ones truncate on collapse.
     pub const COLLAPSED: Widths = Widths { title: 7, repo: 3 };
 
     /// Fixed columns everywhere; `summary` is the only flex cell (LEDGER D9).
@@ -306,7 +321,7 @@ pub fn cell_slice(s: &str, start: usize, end: usize) -> String {
 
 /// Drop SGR sequences so what remains can be MEASURED. Shared by the width
 /// invariant in the tests and by the preview's self-check — the lock only
-/// CLAIMS every row is 44 cells, and a claim about a rendered row is worth
+/// CLAIMS every row is `DESIGN_COLS` cells, and a claim about a rendered row is worth
 /// exactly as much as the thing that proves it.
 pub fn strip_sgr(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -397,7 +412,7 @@ fn clamp(s: &str, w: usize) -> String {
     // REPLACED with a space, not dropped (task 1.5 D16 follow-up): a `\n` in a
     // summary is a wrapped sentence, and `"a\nb"` collapsing to `"ab"` silently
     // merges two words at the join. A space preserves the word boundary that
-    // dropping destroys, and is neutral to every 44-column golden either way.
+    // dropping destroys, and is neutral to every golden either way.
     let s: String = s
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
@@ -633,7 +648,7 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
     out.push_str(RESET);
     if row.selected {
         out.push_str(&SEL_BG.fg());
-        out.push(RCAP); // col 44
+        out.push(RCAP); // the right cap, col `cols`
         out.push_str(RESET);
     } else {
         out.push(' ');
@@ -871,10 +886,10 @@ mod tests {
     /// is not title or repo itself (D12, generalised to a profile by D16).
     #[test]
     fn min_intact_cols_is_thirteen_plus_title_plus_repo() {
-        assert_eq!(Widths::EXPANDED.min_intact_cols(), 13 + 7 + 7);
-        assert_eq!(Widths::EXPANDED.min_intact_cols(), 27); // D12, unchanged
+        assert_eq!(Widths::EXPANDED.min_intact_cols(), 13 + 9 + 7);
+        assert_eq!(Widths::EXPANDED.min_intact_cols(), 29); // 27 before D19
         assert_eq!(Widths::COLLAPSED.min_intact_cols(), 13 + 7 + 3);
-        assert_eq!(Widths::COLLAPSED.min_intact_cols(), 23); // D17
+        assert_eq!(Widths::COLLAPSED.min_intact_cols(), 23); // D17, unchanged
     }
 
     /// A missing glyph renders a blank cell and does not reflow the row (lock
@@ -899,7 +914,7 @@ mod tests {
         );
     }
 
-    /// Track the active background per CELL, so "spans all 44 columns" is a
+    /// Track the active background per CELL, so "spans all columns" is a
     /// measurement rather than an assertion. `None` = terminal default.
     fn cell_backgrounds(line: &str) -> Vec<Option<String>> {
         let mut out = Vec::new();
@@ -931,7 +946,10 @@ mod tests {
 
     /// Lock §6, verbatim: "a row background must span all 44 columns, including
     /// the pad after a short summary — resetting at end-of-text leaves a ragged
-    /// selection. Worth a test."
+    /// selection. Worth a test." (The lock says 44 because it predates D19; the
+    /// assertions below read `DESIGN_COLS`, so the property is "all columns",
+    /// whatever the width is. Quote left as written rather than silently
+    /// re-numbered.)
     #[test]
     fn a_selected_rows_background_spans_every_column() {
         let mut row = agent(RowStatus::Working, Provenance::Worktree, Some("T"), "short");
@@ -941,7 +959,7 @@ mod tests {
         assert_eq!(bgs.len(), DESIGN_COLS);
 
         let sel = Some(String::from("45;79;103"));
-        // Cols 1 and 44 are the caps: the half-circle is a FOREGROUND glyph on
+        // Cols 1 and DESIGN_COLS are the caps: the half-circle is a FOREGROUND glyph on
         // the default background, which is what makes the row read as rounded.
         assert_eq!(bgs[0], None);
         assert_eq!(bgs[DESIGN_COLS - 1], None);
@@ -1040,11 +1058,11 @@ mod tests {
     /// — check it against design-lock §2 rather than against `render_rows`:
     ///
     /// - Stripped of SGR, each row is
-    ///   `1+1+1+1+1+1+1+1+1 + 7 + 1 + 7 + 1 + 17 + 1 + 1 = 44` cells: the
+    ///   `1+1+1+1+1+1+1+1+1 + 9 + 1 + 7 + 1 + 25 + 1 + 1 = 54` cells: the
     ///   nine-cell gutter (§2.1), title, space, repo, space, summary, right
-    ///   margin, right cap.
-    /// - Row 1 has no title, so cols 10–16 are blank; `clave` is padded to 7 at
-    ///   cols 18–24. Row 3 is a terminal, so its name runs the whole body.
+    ///   margin, right cap. (`7 + 1 + 7 + 1 + 17` = 44 before D19.)
+    /// - Row 1 has no title, so cols 10–18 are blank; `clave` is padded to 7 at
+    ///   cols 20–26. Row 3 is a terminal, so its name runs the whole body.
     /// - The hues are crystalBlue `#7E9CD8`, waveRed `#E46876`, carpYellow
     ///   `#E6C384` and fujiWhite `#DCD7BA` (§4), each mixed 25% toward sumiInk3
     ///   `#1F1F28` on the unselected rows (§6) — e.g. waveRed's red is
@@ -1055,7 +1073,7 @@ mod tests {
     /// Regenerate with `cargo run -p clave-bar --example bar-preview` only
     /// AFTER confirming the change against the lock.
     #[test]
-    fn golden_bar_at_forty_four_columns() {
+    fn golden_bar_at_fifty_four_columns() {
         let rows = vec![
             agent(
                 RowStatus::NeedsYou,
@@ -1080,14 +1098,14 @@ mod tests {
             },
         ];
         let expected = [
-            " \u{1b}[38;2;179;86;98m\u{25cf} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;180;154;109m\u{f007c}           \u{1b}[38;2;102;125;172mclave   \u{1b}[38;2;173;169;150mI just passed th\u{2026} \u{1b}[0m ",
-            "\u{1b}[38;2;45;79;103m\u{e0b6}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m\u{1b}[38;2;255;158;59m\u{25cf}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;220;215;186m\u{2502}\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;230;195;132m\u{f007c}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;126;156;216m\u{168c2}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;122;168;159m\u{1b}[38;2;22;22;29mS6-GUT \u{1b}[0m\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;126;156;216mclave  \u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m picking the gutt\u{2026}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[0m\u{1b}[38;2;45;79;103m\u{e0b4}\u{1b}[0m",
-            "   \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;71;71;92m\u{f018d}   \u{1b}[38;2;92;101;103mTab #16                           \u{1b}[0m ",
+            " \u{1b}[38;2;179;86;98m\u{25cf} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;180;154;109m\u{f007c}             \u{1b}[38;2;102;125;172mclave   \u{1b}[38;2;173;169;150mI just passed the spec o\u{2026} \u{1b}[0m ",
+            "\u{1b}[38;2;45;79;103m\u{e0b6}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m\u{1b}[38;2;255;158;59m\u{25cf}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;220;215;186m\u{2502}\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;230;195;132m\u{f007c}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;126;156;216m\u{168c2}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;122;168;159m\u{1b}[38;2;22;22;29mS6-GUT   \u{1b}[0m\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;126;156;216mclave  \u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m picking the gutter set   \u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[0m\u{1b}[38;2;45;79;103m\u{e0b4}\u{1b}[0m",
+            "   \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;71;71;92m\u{f018d}   \u{1b}[38;2;92;101;103mTab #16                                     \u{1b}[0m ",
         ];
         assert_eq!(render_rows(&rows, DESIGN_COLS, Widths::EXPANDED), expected);
         // The same derived self-checks the COLLAPSED golden carries. A golden
         // is only as good as its regeneration ritual, and this is the more
-        // load-bearing of the two — everything in the design was chosen at 44.
+        // load-bearing of the two — everything in the design was chosen at this width.
         // These re-derive the column map from `Widths::EXPANDED` rather than
         // reading it off the string above, so a golden regenerated from a
         // renderer that moved a column fails HERE, in arithmetic traceable to
@@ -1104,27 +1122,28 @@ mod tests {
                 GUTTER_W + w.title + 1 + w.repo,
             )
         };
-        // Row 1 has no title: seven blank cells, and the repo still starts
+        // Row 1 has no title: nine blank cells, and the repo still starts
         // exactly one space later (an absent chip must not pull the row left).
         assert_eq!(title(expected[0]), " ".repeat(w.title));
         assert_eq!(repo(expected[0]), "clave  ");
-        // Row 2's chip is byte-identical to the COLLAPSED golden's — D17 holds
-        // title at 7 in both profiles, so the eye keeps its anchor across a
-        // toggle — and its repo is the full 7-cell `EXPANDED` field.
-        assert_eq!(title(expected[1]), "S6-GUT ");
+        // Row 2's chip is NINE cells since D19, and therefore no longer
+        // byte-identical to the COLLAPSED golden's seven. That anchor property
+        // was D17's, and Ollie retired it knowingly when he took the title to 9
+        // — see `Widths::COLLAPSED`. Its repo is the full 7-cell field.
+        assert_eq!(title(expected[1]), "S6-GUT   ");
         assert_eq!(repo(expected[1]), "clave  ");
         // Summary runs from after the repo to the right margin: `cols - 13 -
-        // title - repo` = 17 cells (D16's formula), ellipsis included.
+        // title - repo` = 25 cells (D16's formula), ellipsis included.
         let summary_start = GUTTER_W + w.title + 1 + w.repo + 1;
         assert_eq!(
             cell_slice(&strip_sgr(expected[0]), summary_start, DESIGN_COLS - 2),
-            "I just passed th\u{2026}"
+            "I just passed the spec o\u{2026}"
         );
-        assert_eq!(DESIGN_COLS - 2 - summary_start, 17);
+        assert_eq!(DESIGN_COLS - 2 - summary_start, 25);
     }
 
     /// The same picture, one layout, the other profile (LEDGER D16, D17):
-    /// same three rows as `golden_bar_at_forty_four_columns`,
+    /// same three rows as `golden_bar_at_fifty_four_columns`,
     /// `Widths::COLLAPSED` at `cols = 30` — Ollie's chosen collapsed profile.
     ///
     /// Column arithmetic, derived from D16's formula (`summary = cols - 13 -
@@ -1236,7 +1255,7 @@ mod tests {
         let wave_red = PALETTE[3].0;
         assert_eq!(wave_red, Rgb(0xE4, 0x68, 0x76));
         assert_eq!(wave_red.mix(BASE, FADE).2, 98);
-        // The whole faded hue, as it appears in `golden_bar_at_forty_four_columns`.
+        // The whole faded hue, as it appears in `golden_bar_at_fifty_four_columns`.
         assert_eq!(wave_red.mix(BASE, FADE), Rgb(179, 86, 98));
     }
 

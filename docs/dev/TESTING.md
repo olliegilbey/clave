@@ -585,7 +585,7 @@ Three parts, all present in
    comes from — D17 for holding `title` at 7 across both profiles, D18 for why a
    3-cell repo drops the ellipsis and truncates `"clave"` to `"cla"`.
 3. **Self-checks that re-derive rather than re-read.**
-   `golden_bar_at_forty_four_columns` (`render.rs:907`) was the weaker of the two
+   `golden_bar_at_fifty_four_columns` (`render.rs:907`) was the weaker of the two
    and was strengthened to match: it now recomputes the title, repo and summary
    spans from `Widths::EXPANDED` and asserts `DESIGN_COLS - 2 - summary_start ==
    17`, so a golden regenerated from a renderer that moved a column fails **here**,

@@ -50,6 +50,12 @@ Not worth a substitution round now. *(Ollie, 2026-07-29.)*
 
 ### D2 — 44 columns is the expanded target (2026-07-29)
 
+> **SUPERSEDED by D19, implemented at D33 (2026-07-30). The expanded target is
+> 54.** Left standing rather than rewritten: 44 was the width every ratified
+> number in the design-lock was chosen against, and the goldens, the preview and
+> `min_intact_cols` all trace back through it. Read this entry as the origin of
+> the arithmetic, not as the current width.
+
 Confirmed. Issue #63 still says "30 → 38 columns" and is wrong; the issue gets
 amended rather than the design changed.
 
@@ -477,6 +483,103 @@ resting-width costs become dead paths:
   ever catch it. Needs a display area around 400 columns; Ollie runs ~280, so it
   is out of reach today. **Not out of reach forever.**
 
+### D34 — The target is a suggestion. 54 does not reach Ollie's display (2026-07-30)
+
+> **This is the finding that matters from D33's task, and it says the task did
+> not achieve what it was for.** Measured through the real `width_seek`, not
+> argued.
+
+The seek accepts any width within HALF a step of its target. At a display of 280
+columns the step is 14, so the band is ±7 — and the widths actually reachable are
+lattice points, one step apart. From a collapsed rest of 33 the next point up is
+47, and `2 × |47 − 54| = 14 <= 14`, so **47 is accepted and the seek stops
+there.** It never reaches 54.
+
+Swept across plausible displays, newborn driven to rest then toggled twice so the
+expanded figure is the steady-state one:
+
+| display | step | expanded rest | summary | collapsed rest | summary |
+|---|---|---|---|---|---|
+| 120 | 6 | 50 | 21 | 32 | 9 |
+| 160 | 8 | 51 | 22 | 27 | **4** |
+| 200 | 10 | **54** | 25 | 34 | 11 |
+| 240 | 12 | 52 | 23 | 28 | 5 |
+| **280 (Ollie's)** | 14 | **47** | **18** | 33 | 10 |
+| 320 | 16 | **54** | 25 | 38 | 15 |
+| 400 | 20 | 48 | 19 | 28 | 5 |
+
+**Consequence, and it is a regression for the maintainer.** At 280 the expanded
+bar rested at 47 before this change too — but under the old `(7, 7)` profile that
+bought `47 − 13 − 7 − 7` = **20** summary cells. Under `(9, 7)` the same 47 buys
+**18**. The title took two columns and the pane never widened, so the change
+Ollie asked for *"mostly for the summary"* delivers two FEWER summary characters
+in the state he spends his time in. Only a freshly-born bar (61) is genuinely
+wider, and the first Alt+c cycle destroys that.
+
+54 is also the unluckiest available number: it sits exactly where the nearer
+lattice point is still inside the band. `2 × 7 <= 14` is an equality, so one
+column either way on the target changes the answer.
+
+**This is not a bug in D33's implementation** — every number there is right, and
+the gates and mutation run are clean. It is the seek's acceptance contract
+meeting a coarse lattice, which is precisely what **D20's second item** (compute
+the step from `display_area_columns` and land on the target instead of near it)
+exists to remove. **D19 does not actually ship until that lands.** Recorded here
+so the next agent does not read D33's green gates as "the bar is 54 wide now".
+
+Do not "fix" this by nudging the target until 280 happens to work: the lattice is
+display-dependent, so a number tuned for 280 is wrong for 240 and 400. The
+options are the real fix (D20), or a strict acceptance that refuses the nearer
+point, which touches the property D26 verified by exhaustive census and must not
+be done casually.
+
+### D33 — 54 lands, and it retires D17's anchor property (2026-07-30)
+
+D19 is implemented. `BAR_TARGET_COLS` 44 → 54, `Widths::EXPANDED` `(7, 7)` →
+`(9, 7)`, summary 17 → 25, collapsed untouched at 30 `(7, 3)`. The birth percent
+re-derives itself (`54 * 100 / 200` = 27, was 22) because #86 made it a
+computation rather than three literals — that machinery earned itself here.
+
+**The thing D19 did not notice: it breaks D17.** D17 held collapsed's title at 7
+for two reasons, and the second was *"identical to `EXPANDED` … so the chip does
+not reflow when the profile toggles, and the eye keeps its anchor across the
+transition."* Taking expanded to 9 makes the chip reflow 9 → 7 on every Alt+c —
+precisely the property D17 chose that layout to preserve.
+
+Put to Ollie as a three-way with the arithmetic rendered, because it is a design
+question and not an implementation one:
+
+| | expanded | collapsed | anchor |
+|---|---|---|---|
+| **taken** | 9 title, 25 summary | 7 title, 7 summary | reflows 9 → 7 |
+| holding 9 in both | 9 title, 25 summary | 9 title, **5** summary | holds |
+| all ten to summary | 7 title, **27** summary | 7 title, 7 summary | holds |
+
+**Ruled: take the reflow.** Titles of 7 cells or fewer are unaffected; only
+longer ones truncate on collapse. D17's first reason — the chip is what a tab is
+identified BY, so do not truncate it — still stands and is why collapsed did not
+simply follow expanded to 9.
+
+**Three of D26's four reservations are now dead**, as D26 predicted. The
+separation goes 14 → 24, above `MAX_LEARNABLE_STEP` (20), so the two acceptance
+bands can no longer overlap at any learnable step: the disqualification, the
+bracket rule and both resting-width costs become unreachable. The proptest's
+widened terminal clause was **re-tightened to `>` the separation rather than
+`>=`**, exactly as D26 required — at 24 the branch is unreachable either way, but
+the `>=` form was wrong on its own terms and would have greened "the collapsed
+bar settled at the expanded target" at step 20. The fourth reservation
+(livelock above `MAX_LEARNABLE_STEP`, needing ~400 columns) is untouched and
+still out of reach.
+
+**Seven tests failed on the constant change rather than passing against a stale
+picture** — the #86 single-source work doing its job. Two needed their start
+widths RE-DERIVED rather than bumped, because at 54 they would have converged in
+one step and gone green while covering less (#63's shape, and the harness
+newborn's start has now moved with the target three times).
+
+At a genuinely 80-column session this leaves the agent pane 26 columns. Accepted
+(D32): few sessions are that narrow, and collapsed still leaves 50.
+
 ### D32 — Fixed pane sizes are not on the table, and absolute widths already are (2026-07-30)
 
 Ollie, during the gate-2 run: *"why does it resist fixed pane sizes? … Why do we
@@ -825,6 +928,8 @@ Catalogued deliberately. If one blocks a task, override it in the brief.
 | 4 — the hook persists `title` and `summary` | **complete** | `0ccf04d` | Found `{"type":"summary"}` extinct (D23) and retargeted to `ai-title`. Three-tier summary makes the bar non-regressive (D25). |
 | **Gate 1 — live look** | **DONE 2026-07-29** | — | Verdict **keep** (D19). |
 | 5 — pre-merge review round | **complete** | `3da3235`..`94daccb` | Whole-branch review + a focused review of the seek change. D21's bug fixed and verified by exhaustive census (D26). |
-| 6 — expanded 44 → 54 (D19) | next | — | Carries the birth percent, and D26's four inherited reservations. |
-| 7 — the width simplifications (D20) | not started | — | Compute the step from `display_area_columns`; birth from the real terminal width. |
+| 6 — expanded 44 → 54 (D19) | **implemented, NOT delivered** | this branch | Target, profile `(9, 7)`, summary 25, birth percent 27 — all derived, not restated. Retires D17's anchor property (D33) and three of D26's four reservations; proptest clause re-tightened to `>`. **But see D34: the seek rests at 47 on a 280-column display, so the maintainer gets 18 summary cells where he had 20. Does not ship without 7c.** |
+| 7a — the sub-floor clip (D31) | **complete** | this branch | `clip_to_cells`: the over-run is truncated here rather than left to a terminal that wraps it. Fixes the live double-height bug. Three tests that PINNED the over-run changed. |
+| 7b — birth from the real terminal width (D20) | **not started, and now cosmetic** | — | Blocked on a dependency call: `clave` has nothing that reads terminal width. With D31's clip in, a wrong birth is a flicker rather than a corrupted bar. |
+| 7c — the step from `display_area_columns` (D20) | not started | — | `PaneInfo.pane_columns` is in the manifest and `main.rs` drops it. Deletes the whole learning apparatus. Larger and riskier than 7a/7b — D26's census covers current behaviour. |
 | 8 — S5, store-backed ink allocation | not started | — | Ollie's colour-stability requirement. The provisional allocator is positional and renumbers. |
