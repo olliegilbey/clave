@@ -466,8 +466,9 @@ a mid-drag flicker or a thrashing layout.
 lot** — halve its width, from ≈280 to ≈140 — then leave it alone and watch.
 
 **Correct.** The bar's cols fall proportionally (≈47 → ≈23, which is under the
-27-cell floor, so expect a transient uniform over-run), the same off-target width
-is observed twice, the seek re-arms, and the bar grows back to ≈44 and stops. Then
+29-cell floor, so expect a transient uniform CLIP — D31, not an over-run), the
+same off-target width is observed twice, the seek re-arms, and the bar grows back
+to ≈54 and stops. Then
 widen the window again and watch it come back down. No thrashing, no parking
 off-target, no fight with the layout.
 

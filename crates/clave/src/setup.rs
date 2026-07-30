@@ -865,7 +865,7 @@ mod tests {
         // cache, which rewrites sizes as percentages.
         for kdl in [
             layout_kdl("clave", "/w.wasm"),
-            launch_layout_kdl("clave", "/w.wasm", None, false),
+            launch_layout_kdl_for("clave", "/w.wasm", None, None, false),
             crate::add::tab_layout("clave", "/w.wasm", "l", "u", "/c"),
         ] {
             // All THREE generators carry the one derived percent (S8 §3.3):
@@ -906,11 +906,16 @@ mod tests {
 
     /// LEDGER D35 — the launch percent comes from the REAL terminal.
     ///
-    /// Every other test in this module calls `launch_layout_kdl`, which under
-    /// `cargo test` finds no TTY and quietly takes the fallback. They therefore
-    /// prove nothing about the behaviour that matters, and would keep passing
-    /// if the width were ignored entirely. This one drives the parameterised
-    /// form so the width is actually exercised.
+    /// Every other test passes `None` for the width, so they take the fallback
+    /// deliberately and prove nothing about the behaviour that matters — they
+    /// would keep passing if the width were ignored entirely. This one supplies
+    /// real widths so the derivation is actually exercised.
+    ///
+    /// **No test may call `launch_layout_kdl` itself** (PR #90, Codex P1): the
+    /// wrapper reads the TTY, so a percent assertion behind it passes under
+    /// `cargo test` — no TTY — and fails from Ollie's interactive zellij shell,
+    /// where 142 columns emits 38% and not `BAR_BIRTH_PERCENT`. The
+    /// parameterised form exists precisely so the gate is width-independent.
     #[test]
     fn the_launch_percent_is_derived_from_the_real_terminal_width() {
         // 54/280 = 19.29%, not expressible; 19% floors to 53, inside the band.
@@ -950,7 +955,7 @@ mod tests {
     fn launch_layout_is_bar_only_when_store_empty() {
         // §6.8 cold start, empty store: today's behavior — template + one
         // plain tab, no agent tabs.
-        let kdl = launch_layout_kdl("clave", "/w.wasm", None, false);
+        let kdl = launch_layout_kdl_for("clave", "/w.wasm", None, None, false);
         assert!(kdl.contains("default_tab_template"));
         assert!(kdl.contains("tab name=\"clave\" focus=true"));
         assert!(!kdl.contains("\"spawn\""));
@@ -977,7 +982,7 @@ mod tests {
             summary: String::new(),
             default_branch: None,
         };
-        let kdl = launch_layout_kdl("clave", "/w.wasm", Some(&r), false);
+        let kdl = launch_layout_kdl_for("clave", "/w.wasm", Some(&r), None, false);
         assert!(kdl.contains("default_tab_template")); // native new-tabs still barred
         assert!(kdl.contains("\"spawn\" \"u-recent\""));
         assert!(kdl.contains("cwd=\"/repo/.claude-worktrees/ab\""));
@@ -1180,7 +1185,7 @@ mod tests {
             summary: String::new(),
             default_branch: None,
         };
-        let lay = launch_layout_kdl(abs, "/w.wasm", Some(&r), false);
+        let lay = launch_layout_kdl_for(abs, "/w.wasm", Some(&r), None, false);
         assert!(lay.contains(&format!("command=\"{abs}\"")));
         assert!(!lay.contains("command=\"clave\""));
     }
@@ -1454,7 +1459,7 @@ mod tests {
         // The launch layout is composed at launch time and takes the eager
         // agent row — synthesize one so the eager-tab's baked `command=`
         // (the version-bearing binary reference) is present to check too.
-        let launch = launch_layout_kdl(binary, wasm, Some(&r), false);
+        let launch = launch_layout_kdl_for(binary, wasm, Some(&r), None, false);
 
         // Check PER ARTIFACT, not over the union (Codex, PR #52): flattening
         // first would let an artifact that lost its versioned reference

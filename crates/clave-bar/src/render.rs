@@ -92,7 +92,7 @@ impl Widths {
     /// this floor a row is wider than the pane rather than misaligned. `13` is
     /// the 9-column gutter plus the space after title, the space after repo,
     /// the right margin and the right cap (D12's arithmetic, generalised by
-    /// D16 to any profile): `27` for `EXPANDED`, `23` for `COLLAPSED` (D17). That is
+    /// D16 to any profile): `29` for `EXPANDED` (D33 took it to (9, 7)), `23` for `COLLAPSED` (D17). That is
     /// deliberate, not a compromise: a row that silently reflowed its columns
     /// to fit would be the one failure mode §2.1 exists to forbid. S6 §2.10's
     /// `cols - 7` text budget is superseded.
@@ -353,7 +353,7 @@ pub fn strip_sgr(s: &str) -> String {
 /// it**, and a wrapped row makes every bar row double-height with a blank
 /// second line. Observed live 2026-07-29: on a monitor change, and on every
 /// tab spawn below ~123 columns where the birth percent lands the pane under
-/// `EXPANDED`'s 27-cell floor.
+/// `EXPANDED`'s 29-cell floor.
 ///
 /// So the clip happens here instead of being assumed. Only truncation changes:
 /// the row is still BUILT at the floor, so no column reflows and every row
@@ -732,10 +732,10 @@ mod tests {
     #[test]
     fn every_row_is_exactly_cols_cells() {
         for cols in [
-            // BELOW `EXPANDED`'s 27-cell floor: the row is built at the floor
+            // BELOW `EXPANDED`'s 29-cell floor: the row is built at the floor
             // and clipped back, which is the regime a spawning tab lands in on
             // any window under ~123 columns. Before `clip_to_cells` these
-            // widths produced 27-cell rows in a narrower pane, and the
+            // widths produced full-floor rows in a narrower pane, and the
             // terminal wrapped them.
             1,
             20,
@@ -776,9 +776,10 @@ mod tests {
     }
 
     /// The live 2026-07-29 regression, at the width that produced it: an
-    /// `EXPANDED` bar in a pane below its 27-cell floor. The bar was built at
-    /// 27, the pane was narrower, and the terminal wrapped the surplus onto a
-    /// blank second line — every row double-height. Asserting `<= cols` rather
+    /// `EXPANDED` bar in a pane below its intact floor. The bar was built at the
+    /// floor (27 then, 29 since D33), the pane was narrower, and the terminal
+    /// wrapped the surplus onto a blank second line — every row double-height.
+    /// Asserting `<= cols` rather
     /// than `== cols` would pass on a row of zero cells, so it asserts both.
     #[test]
     fn a_sub_floor_pane_never_receives_a_row_wider_than_itself() {
