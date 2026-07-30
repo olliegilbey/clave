@@ -232,8 +232,15 @@ pub fn launch_layout_kdl(
     binary: &str,
     wasm: &str,
     most_recent: Option<&crate::store::AgentRecord>,
+    collapsed: bool,
 ) -> String {
-    launch_layout_kdl_for(binary, wasm, most_recent, launching_terminal_cols())
+    launch_layout_kdl_for(
+        binary,
+        wasm,
+        most_recent,
+        launching_terminal_cols(),
+        collapsed,
+    )
 }
 
 /// The testable half: the display width is a PARAMETER, so the tests can pin
@@ -243,6 +250,7 @@ pub fn launch_layout_kdl_for(
     wasm: &str,
     most_recent: Option<&crate::store::AgentRecord>,
     display_cols: Option<usize>,
+    collapsed: bool,
 ) -> String {
     let tab = match most_recent {
         // The label is re-sanitized for KDL safety: it can be hook-derived
@@ -281,10 +289,9 @@ pub fn launch_layout_kdl_for(
          \x20       children\n\
          \x20   }}\n{tab}}}\n",
         key = clave_types::CLAVE_BINARY_KEY,
-        pct = display_cols.map_or(
-            clave_types::BAR_BIRTH_PERCENT,
-            clave_types::birth_percent_for
-        )
+        pct = display_cols.map_or(clave_types::BAR_BIRTH_PERCENT, |cols| {
+            clave_types::birth_percent_for(cols, clave_types::target_cols_for(collapsed))
+        })
     )
 }
 
@@ -795,7 +802,15 @@ pub fn launch_session() -> Result<()> {
     // copy's absolute path in a stable session (immune to a newer PATH
     // `clave`), bare `clave` in the dev/sandbox one (§2 binary split).
     let binary = crate::release::runtime_binary();
-    let layout_text = launch_layout_kdl(&binary, wasm.to_str().context("wasm path")?, most_recent);
+    // `store.collapsed` is LOAD-BEARING here, not decoration (D36): the mode
+    // persists across a launch, so a fleet left collapsed must be BORN at 30 or
+    // it arrives at 54 and visibly shrinks — the jank D35 exists to remove.
+    let layout_text = launch_layout_kdl(
+        &binary,
+        wasm.to_str().context("wasm path")?,
+        most_recent,
+        store.collapsed,
+    );
     // STABLE path in the data dir, not a pid-suffixed temp file: the exec()
     // below never returns, so nothing here can clean up — a unique-per-launch
     // file would leak one KDL forever. Overwrite the one file each launch.
@@ -850,7 +865,7 @@ mod tests {
         // cache, which rewrites sizes as percentages.
         for kdl in [
             layout_kdl("clave", "/w.wasm"),
-            launch_layout_kdl("clave", "/w.wasm", None),
+            launch_layout_kdl("clave", "/w.wasm", None, false),
             crate::add::tab_layout("clave", "/w.wasm", "l", "u", "/c"),
         ] {
             // All THREE generators carry the one derived percent (S8 §3.3):
@@ -899,10 +914,10 @@ mod tests {
     #[test]
     fn the_launch_percent_is_derived_from_the_real_terminal_width() {
         // 54/280 = 19.29%, not expressible; 19% floors to 53, inside the band.
-        let wide = launch_layout_kdl_for("clave", "/w.wasm", None, Some(280));
+        let wide = launch_layout_kdl_for("clave", "/w.wasm", None, Some(280), false);
         assert!(wide.contains("size=\"19%\""), "{wide}");
         // 54/120 = 45% exactly.
-        let narrow = launch_layout_kdl_for("clave", "/w.wasm", None, Some(120));
+        let narrow = launch_layout_kdl_for("clave", "/w.wasm", None, Some(120), false);
         assert!(narrow.contains("size=\"45%\""), "{narrow}");
         // The two must actually DIFFER, or the parameter is decorative — the
         // shape a single-width assertion cannot see.
@@ -910,8 +925,21 @@ mod tests {
             wide, narrow,
             "the display width did not reach the emitted layout"
         );
+        // D36, found live: the collapse mode PERSISTS across a launch, so the
+        // birth must be computed against the target the bar will actually seek.
+        // On the 95-column window this was found on, the expanded computation
+        // put 57% of the terminal under the sidebar before it shrank away.
+        let expanded_95 = launch_layout_kdl_for("clave", "/w.wasm", None, Some(95), false);
+        let collapsed_95 = launch_layout_kdl_for("clave", "/w.wasm", None, Some(95), true);
+        assert!(expanded_95.contains("size=\"57%\""), "{expanded_95}");
+        assert!(collapsed_95.contains("size=\"32%\""), "{collapsed_95}");
+        assert_ne!(
+            expanded_95, collapsed_95,
+            "the collapse mode did not reach the emitted layout"
+        );
+
         // No TTY (a script, CI): the 200-column fiction, still a valid layout.
-        let headless = launch_layout_kdl_for("clave", "/w.wasm", None, None);
+        let headless = launch_layout_kdl_for("clave", "/w.wasm", None, None, false);
         assert!(
             headless.contains(&format!("size=\"{}%\"", clave_types::BAR_BIRTH_PERCENT)),
             "{headless}"
@@ -922,7 +950,7 @@ mod tests {
     fn launch_layout_is_bar_only_when_store_empty() {
         // §6.8 cold start, empty store: today's behavior — template + one
         // plain tab, no agent tabs.
-        let kdl = launch_layout_kdl("clave", "/w.wasm", None);
+        let kdl = launch_layout_kdl("clave", "/w.wasm", None, false);
         assert!(kdl.contains("default_tab_template"));
         assert!(kdl.contains("tab name=\"clave\" focus=true"));
         assert!(!kdl.contains("\"spawn\""));
@@ -949,7 +977,7 @@ mod tests {
             summary: String::new(),
             default_branch: None,
         };
-        let kdl = launch_layout_kdl("clave", "/w.wasm", Some(&r));
+        let kdl = launch_layout_kdl("clave", "/w.wasm", Some(&r), false);
         assert!(kdl.contains("default_tab_template")); // native new-tabs still barred
         assert!(kdl.contains("\"spawn\" \"u-recent\""));
         assert!(kdl.contains("cwd=\"/repo/.claude-worktrees/ab\""));
@@ -1152,7 +1180,7 @@ mod tests {
             summary: String::new(),
             default_branch: None,
         };
-        let lay = launch_layout_kdl(abs, "/w.wasm", Some(&r));
+        let lay = launch_layout_kdl(abs, "/w.wasm", Some(&r), false);
         assert!(lay.contains(&format!("command=\"{abs}\"")));
         assert!(!lay.contains("command=\"clave\""));
     }
@@ -1426,7 +1454,7 @@ mod tests {
         // The launch layout is composed at launch time and takes the eager
         // agent row — synthesize one so the eager-tab's baked `command=`
         // (the version-bearing binary reference) is present to check too.
-        let launch = launch_layout_kdl(binary, wasm, Some(&r));
+        let launch = launch_layout_kdl(binary, wasm, Some(&r), false);
 
         // Check PER ARTIFACT, not over the union (Codex, PR #52): flattening
         // first would let an artifact that lost its versioned reference

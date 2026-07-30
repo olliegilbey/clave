@@ -269,6 +269,27 @@ fn basename(path: &str) -> &str {
 }
 
 pub struct BarModel {
+    /// The collapse mode is not known yet, so the seek must not act (D37).
+    ///
+    /// A newborn model is `collapsed: false` because that is the only thing it
+    /// can assume, but the mode PERSISTS in the store — so a fleet left
+    /// collapsed loads a bar that believes it is expanded, seeks 54, and is
+    /// corrected to 30 the moment `clave snapshot` returns. Ollie watched
+    /// exactly that: born at the right width (D36), grown wide by the plugin,
+    /// then shrunk back about half a second later.
+    ///
+    /// Since D36 the pane is BORN at the width its true mode wants, so any seek
+    /// before hydration can only move it away from correct. Gating is therefore
+    /// strictly better than seeking on a guess.
+    ///
+    /// **Defaults to `false` (= ready) so that every existing model test keeps
+    /// its exact meaning** — they construct models that are by definition in a
+    /// known state. `main.rs`'s `load()` is the one place that sets it, marking
+    /// the real plugin as awaiting the snapshot it has just asked for. If that
+    /// shellout never returns the bar simply stays at its birth width, which is
+    /// correct for the launch tab and stale-but-static otherwise — strictly
+    /// better than today's guaranteed wrong-then-heal.
+    awaiting_hydration: bool,
     /// §5 pipe contract: apply only strictly-newer seq.
     seq: u64,
     agents: Vec<Agent>,
@@ -394,6 +415,7 @@ impl Default for BarModel {
             // c8-cold-start 2026-07-18), so a newborn's cols are
             // window-dependent and must converge on the template.
             seek_budget: SEEK_BUDGET,
+            awaiting_hydration: false,
             seq: 0,
             agents: Vec::new(),
             uuid_to_pane: BTreeMap::new(),
@@ -621,6 +643,8 @@ impl BarModel {
             return Vec::new(); // stale/out-of-order: discard (S1)
         }
         self.seq = snap.seq;
+        // The mode below is now authoritative, so the seek may act (D37).
+        self.awaiting_hydration = false;
         self.agents = snap.agents;
         // REPLACE the tab timeline — the store's map is authoritative and
         // self-healing by construction; merging deltas is the exact failure
@@ -1193,6 +1217,12 @@ impl BarModel {
         self.seek_drift = None;
     }
 
+    /// Mark this model as awaiting its first snapshot — `main.rs` calls it at
+    /// `load()`, right after asking for one. See `awaiting_hydration` (D37).
+    pub fn await_hydration(&mut self) {
+        self.awaiting_hydration = true;
+    }
+
     /// One width-seek step for OUR OWN pane, driven by render cols (each of
     /// our resizes repaints us with the new width — the feedback loop
     /// proven in rounds 9–10; zellij sends no events for plugin resizes).
@@ -1221,6 +1251,14 @@ impl BarModel {
     ///      zellij simply refuses to leave (the granularity floor, C8) is
     ///      accepted in place rather than hammered.
     pub fn width_seek(&mut self, own_cols: usize) -> Vec<Effect> {
+        // D37: the collapse mode is not known yet. Since D36 the pane is BORN
+        // at the width its true mode wants, so a seek on the assumed-expanded
+        // default can only move it away from correct — and then visibly move it
+        // back when `clave snapshot` returns. Budget is NOT consumed: this is a
+        // deferral, not an attempt.
+        if self.awaiting_hydration {
+            return Vec::new();
+        }
         // ONE collapse rule, shared with `widths()` — the profile the rows are
         // drawn at and the width being sought must not drift apart (D16). The
         // OTHER target comes along because acceptance is defined against both
@@ -3454,6 +3492,51 @@ mod tests {
     /// 20), where seek_step learns the sim's own step (≤ MAX_LEARNABLE_STEP).
     fn band_half(step: usize) -> usize {
         step.max(8) / 2
+    }
+
+    /// D37, found live: a bar loading into a fleet that was left COLLAPSED
+    /// believes it is expanded until `clave snapshot` answers. Acting on that
+    /// belief grows a correctly-born 30-column bar toward 54, then shrinks it
+    /// back when the snapshot lands — visible jank at every launch and every
+    /// new tab.
+    ///
+    /// The first assertion is the one that matters and the one no existing test
+    /// could make: an ungated model at 30 emits `GrowSelf`, which is precisely
+    /// the wrong move. Asserting only the post-hydration half would pass
+    /// whether or not the gate exists.
+    #[test]
+    fn a_bar_awaiting_hydration_does_not_seek_on_its_assumed_mode() {
+        // Ungated, for contrast: believing itself expanded, it grows away from
+        // the width it was correctly born at.
+        let mut ungated = BarModel::default();
+        assert_eq!(
+            ungated.width_seek(COLLAPSED_TARGET_COLS),
+            vec![Effect::GrowSelf],
+            "the pre-D37 behaviour this gate exists to prevent"
+        );
+
+        let mut m = BarModel::default();
+        m.await_hydration();
+        assert_eq!(
+            m.width_seek(COLLAPSED_TARGET_COLS),
+            Vec::<Effect>::new(),
+            "seeked before knowing its own collapse mode"
+        );
+        // The budget is intact — a deferral must not spend an attempt, or a
+        // slow snapshot would leave the bar unable to correct a stale birth.
+        assert_eq!(m.seek_budget, SEEK_BUDGET);
+
+        // The snapshot lands carrying the real mode; the seek is live again and
+        // now agrees with the width the pane was born at, so it stays put.
+        let mut collapsed_snap = snap(1, vec![]);
+        collapsed_snap.collapsed = true;
+        m.apply_snapshot(collapsed_snap);
+        assert!(m.collapsed);
+        assert_eq!(
+            m.width_seek(COLLAPSED_TARGET_COLS),
+            Vec::<Effect>::new(),
+            "a correctly-born collapsed bar must not move"
+        );
     }
 
     #[test]

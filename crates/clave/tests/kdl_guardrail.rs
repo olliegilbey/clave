@@ -222,7 +222,7 @@ fn layout_kdl_parses_through_real_zellij_parser() {
 fn launch_layout_kdl_parses_in_both_branches() {
     // Empty store → bar-only (template + one plain `clave` tab).
     assert_layout_ok(
-        &setup::launch_layout_kdl("clave", WASM, None),
+        &setup::launch_layout_kdl("clave", WASM, None, false),
         "launch.kdl (empty store, bar-only)",
     );
     // Non-empty store → the eager most-recent branch, which composes in
@@ -230,7 +230,7 @@ fn launch_layout_kdl_parses_in_both_branches() {
     // that the empty branch never touches.
     let r = eager_record();
     assert_layout_ok(
-        &setup::launch_layout_kdl(BIN_ABS, WASM, Some(&r)),
+        &setup::launch_layout_kdl(BIN_ABS, WASM, Some(&r), false),
         "launch.kdl (eager most-recent tab)",
     );
 }
@@ -405,8 +405,8 @@ fn keybind_and_layout_plugin_configurations_match() {
     let agreed_keybind_config = kb[0].clone();
 
     let r = eager_record();
-    let launch_eager = setup::launch_layout_kdl(BIN_ABS, WASM, Some(&r));
-    let launch_empty = setup::launch_layout_kdl(BIN_ABS, WASM, None);
+    let launch_eager = setup::launch_layout_kdl(BIN_ABS, WASM, Some(&r), false);
+    let launch_empty = setup::launch_layout_kdl(BIN_ABS, WASM, None, false);
     let one_shot = add::tab_layout(BIN_ABS, WASM, "lbl", "u-1", "/home/o/x");
     let layout_kdl_text = setup::layout_kdl(BIN_ABS, WASM);
 

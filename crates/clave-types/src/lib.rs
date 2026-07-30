@@ -256,14 +256,31 @@ pub const BAR_BIRTH_PERCENT: usize = BAR_TARGET_COLS * 100 / REFERENCE_VIEWPORT_
 /// display narrower than the target clamps to 100 rather than overflowing — the
 /// bar asks for the whole tab, the seek argues it down, and `render_rows`' clip
 /// (D31) keeps the rows inside the pane while that happens.
-pub fn birth_percent_for(display_cols: usize) -> usize {
+/// `target_cols` is the width the bar will actually SEEK, which is
+/// [`COLLAPSED_TARGET_COLS`] when the store says the fleet was left collapsed.
+/// **Taking the expanded target unconditionally was the D36 bug**: the mode
+/// persists across a launch, so a maintainer who quit collapsed got a bar born
+/// at 54 that immediately shrank to 30 — the exact jank this function exists to
+/// remove, reintroduced by ignoring half the state.
+pub fn birth_percent_for(display_cols: usize, target_cols: usize) -> usize {
     if display_cols == 0 {
         return BAR_BIRTH_PERCENT;
     }
     // Round to nearest rather than truncate: truncation is biased narrow, and
     // a bar born narrow is the case that renders below its own intact floor.
-    let pct = (BAR_TARGET_COLS * 100 + display_cols / 2) / display_cols;
+    let pct = (target_cols * 100 + display_cols / 2) / display_cols;
     pct.clamp(1, 100)
+}
+
+/// The width the bar seeks in a given collapse mode — the one place the two
+/// targets are chosen between outside the plugin, so a caller cannot pick the
+/// wrong one by writing the constant it happens to remember.
+pub fn target_cols_for(collapsed: bool) -> usize {
+    if collapsed {
+        COLLAPSED_TARGET_COLS
+    } else {
+        BAR_TARGET_COLS
+    }
 }
 
 #[cfg(test)]
@@ -313,21 +330,44 @@ mod tests {
     #[test]
     fn a_known_display_births_the_bar_within_a_column_or_two_of_target() {
         for display in [80usize, 120, 160, 200, 240, 280, 320, 400, 500] {
-            let pct = birth_percent_for(display);
-            let born = pct * display / 100;
-            let err = born.abs_diff(BAR_TARGET_COLS);
-            assert!(
-                err * 200 <= display + 200,
-                "display {display}: {pct}% births {born}, {err} off {BAR_TARGET_COLS}"
-            );
+            for collapsed in [false, true] {
+                let target = target_cols_for(collapsed);
+                let pct = birth_percent_for(display, target);
+                let born = pct * display / 100;
+                let err = born.abs_diff(target);
+                assert!(
+                    err * 200 <= display + 200,
+                    "display {display} collapsed={collapsed}: {pct}% births {born}, \
+                     {err} off {target}"
+                );
+            }
         }
         // The maintainer's own display, pinned as a number rather than a bound:
         // 54/280 is 19.29%, which is not expressible, so 19% -> 53.
-        assert_eq!(birth_percent_for(280), 19);
+        assert_eq!(birth_percent_for(280, BAR_TARGET_COLS), 19);
         assert_eq!(19 * 280 / 100, 53);
         // A display where it IS exact — 54/120 = 45% exactly.
-        assert_eq!(birth_percent_for(120), 45);
+        assert_eq!(birth_percent_for(120, BAR_TARGET_COLS), 45);
         assert_eq!(45 * 120 / 100, 54);
+    }
+
+    /// D36, the live failure: the collapse mode PERSISTS across a launch, so a
+    /// birth computed for the expanded target is born wrong whenever the fleet
+    /// was left collapsed. Measured on the maintainer's own 95-column window,
+    /// where it put 57% of the terminal under the sidebar before shrinking.
+    #[test]
+    fn a_collapsed_fleet_is_born_at_the_collapsed_width() {
+        // 95 columns, the window the bug was found on.
+        assert_eq!(birth_percent_for(95, BAR_TARGET_COLS), 57); // what shipped
+        assert_eq!(57 * 95 / 100, 54); // 57% of the window — the jank
+        let collapsed = birth_percent_for(95, target_cols_for(true));
+        assert_eq!(collapsed, 32);
+        assert_eq!(32 * 95 / 100, 30); // born AT the collapsed target
+        // The two modes must actually differ, or the parameter is decorative.
+        assert_ne!(
+            birth_percent_for(95, target_cols_for(true)),
+            birth_percent_for(95, target_cols_for(false))
+        );
     }
 
     /// The degenerate inputs, each of which has a wrong answer that looks fine.
@@ -335,12 +375,12 @@ mod tests {
     fn birth_percent_for_survives_absurd_displays() {
         // No TTY: fall back to the fiction rather than emitting `0%`, which
         // zellij rejects and which would fail at session launch, not here.
-        assert_eq!(birth_percent_for(0), BAR_BIRTH_PERCENT);
+        assert_eq!(birth_percent_for(0, BAR_TARGET_COLS), BAR_BIRTH_PERCENT);
         // Narrower than the bar wants: ask for everything, never over 100.
-        assert_eq!(birth_percent_for(20), 100);
-        assert_eq!(birth_percent_for(BAR_TARGET_COLS), 100);
+        assert_eq!(birth_percent_for(20, BAR_TARGET_COLS), 100);
+        assert_eq!(birth_percent_for(BAR_TARGET_COLS, BAR_TARGET_COLS), 100);
         // Never zero, however wide the display — `size="0%"` is not a layout.
-        assert!(birth_percent_for(100_000) >= 1);
+        assert!(birth_percent_for(100_000, BAR_TARGET_COLS) >= 1);
     }
 
     #[test]

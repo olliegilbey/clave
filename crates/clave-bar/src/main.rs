@@ -381,6 +381,15 @@ impl ZellijPlugin for State {
             );
             "clave".to_string()
         });
+        // D37: gate the width seek HERE, not when the snapshot is requested.
+        // `load()` only ASKS for permission; the grant arrives later as an
+        // event, and zellij renders this pane before then — so a gate set in
+        // the `PermissionRequestResult` arm is set AFTER the first render has
+        // already seeked on the assumed-expanded default. That is the first
+        // fix for this failing live and the reason it failed: the ordering,
+        // not the gate. Nothing before hydration may move the pane, and
+        // `load()` is the only point that precedes every render.
+        self.model.await_hydration();
         // §6.6 permission set — EXACTLY these four; grants are all-or-nothing
         // per plugin and the prompt is unanswerable in the bar pane, so
         // `clave setup` pre-seeds permissions.kdl with THIS set (both key

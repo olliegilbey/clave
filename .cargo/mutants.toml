@@ -38,4 +38,12 @@ exclude_re = [
     # one-line I/O shim, and the honest way to cover it is a live run
     # (LIVE-INTERACTION-CHECKLIST item 2), not a unit test.
     "launching_terminal_cols",
+    # Orchestration that ends in `exec`: discovers zellij, reconciles a live or
+    # dead session, composes and writes the launch layout, then replaces the
+    # process. `-> Ok(())` survives because a test cannot reach past the exec to
+    # observe that nothing happened. The pieces it ORCHESTRATES are each tested
+    # directly — `launch_layout_kdl_for` for the layout, `session_is_live` /
+    # `session_exists` for the reconciliation — which is where the decisions
+    # actually live. Covering the seam needs tier 2 (#47), not a unit test.
+    "launch_session",
 ]

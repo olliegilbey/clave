@@ -483,6 +483,87 @@ resting-width costs become dead paths:
   ever catch it. Needs a display area around 400 columns; Ollie runs ~280, so it
   is out of reach today. **Not out of reach forever.**
 
+### D37 — The plugin seeks before it knows its own mode. Reduced, not fixed (2026-07-30)
+
+> **PARTIAL. The flash is smaller and still there.** Filed as an issue with the
+> next diagnostic named, rather than chased further — see the task table.
+
+With D36 the *pane* is born at the width its true mode wants. The *plugin* still
+is not: `BarModel::default()` is `collapsed: false`, because that is all a
+newborn can assume, and the real mode arrives only when `clave snapshot` returns
+(shelled out on `PermissionRequestResult`, ~half a second). So the bar grew a
+correctly-born 30-column pane toward 54 and shrank it back on hydration.
+
+`await_hydration()` gates `width_seek` until the first snapshot lands. Budget is
+not consumed, so a genuinely stale birth can still be corrected afterwards.
+
+**The first attempt failed live, and the reason is the interesting part.** The
+gate was set in the `PermissionRequestResult` arm — but `load()` only REQUESTS
+permission; the grant is an event, and zellij renders the pane before it. So the
+gate was armed *after* the first render had already seeked. **The gate was
+correct; its call site was one event too late.** Moving it into `load()` reduced
+the flash measurably but did not remove it, so at least one more mover remains
+unaccounted for.
+
+**The structural finding, which outlives this bug.** Both misses lived in
+`crates/clave-bar/src/main.rs` — `test = false`, and excluded from mutation
+testing by `.cargo/mutants.toml` on the reasoning that "nothing here is reachable
+by ANY test, by construction". The model logic is well covered and
+`a_bar_awaiting_hydration_does_not_seek_on_its_assumed_mode` genuinely proves the
+gate works. **But which line calls it lives in the one file no tier can see**, so
+a correct mechanism wired at the wrong moment passes every gate in the repo. This
+is not a testing gap to be closed with more tests of `main.rs`; it is an argument
+for moving decisions OUT of it.
+
+**The principled fix, deliberately not taken mid-loop:** derive the gate from
+`seq == 0`, which already means "no snapshot has ever been applied" — no field,
+no call site, impossible to misplace, and testable. It was not done here because
+every existing seek test constructs a model and seeks without hydrating, so all
+of them would change meaning, including the ones D26 verified by exhaustive
+census. That is a deliberate change to make on its own, not a step in a live
+debugging loop.
+
+**And the process lesson, which cost two rounds:** both attempts reasoned about
+render ordering instead of measuring it. `docs/dev/TESTING.md`'s instrumentation
+recipe exists for exactly this — a temporary `eprintln!` of `cols` per render,
+hot-reloaded into the sandbox — and reaching for it after the FIRST failure would
+have been cheaper than the second guess.
+
+### D36 — Birth ignored half the state, and the live run caught it (2026-07-30)
+
+**D35 shipped a birth percent computed for the EXPANDED target unconditionally.
+The collapse mode persists across a launch.** So a maintainer who quit collapsed
+got a bar born at 54 that immediately shrank to 30 — the exact jank D35 exists to
+delete, reintroduced from the other side.
+
+Found by running it, not by reading it. Ollie relaunched on a ~95-column window
+and reported the sidebar "took up most of the terminal, then healed". Both halves
+were true and neither was a mystery once measured:
+
+- `launch.kdl` emitted **57%**, and `57% × 95 = 54`. The code did exactly what it
+  was told: put 54 columns on screen. On a 95-column terminal that IS most of the
+  window.
+- The store carried **`collapsed: true`**, so the bar restored collapsed, targeted
+  30, and seeked down from 54.
+
+His `Alt+t` showed the same thing compounded with the stale-template limitation
+D35 already records: the template baked 57% for a 95-column window, he then went
+full width, and 57% of ~230 is ~131 columns — "almost the entire window" — before
+healing to 30.
+
+**Fixed:** `birth_percent_for` takes the target as a parameter, `target_cols_for`
+is the one place outside the plugin that chooses between the two, and
+`launch_session` passes `store.collapsed`. At 95 columns collapsed that is 32%,
+which births 30 — on target, no shrink.
+
+**The lesson is about the shape of the test, not the arithmetic.** Every unit
+test of D35 asserted the percent against the expanded target, because that is the
+number the implementation computes. Nothing exercised the mode, so nothing could
+fail. It is `TESTING.md` shape 1 — an assertion satisfied by the behaviour and by
+its opposite — and the only instrument that caught it was a human looking at a
+terminal. **Mutation testing could not have found it either**: there was no
+mutant to kill, because the collapse input was not in the function.
+
 ### D35 — Birth anchors the lattice, so birth is the fix (2026-07-30)
 
 **D34's problem, solved from the other end — and not where either the
