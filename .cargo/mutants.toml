@@ -23,3 +23,19 @@ exclude_globs = [
     # is driven by `render_rows`, which IS mutated.
     "crates/*/examples/**",
 ]
+
+# Functions whose mutants cannot be distinguished by ANY host test, because
+# what they read is process-global state the test binary does not have. Excluded
+# by name rather than by file — the files themselves are full of testable logic.
+exclude_re = [
+    # Reads the controlling TTY's width. Under `cargo test` there is no TTY, so
+    # the real function already returns `None` and both of its mutants (`None`,
+    # `Some(0)` — which falls back to the same percent) are behaviourally
+    # identical to it. The LOGIC is tested: `launch_layout_kdl_for` takes the
+    # width as a parameter precisely so the derivation is reachable without a
+    # terminal, and `the_launch_percent_is_derived_from_the_real_terminal_width`
+    # pins it at two widths plus the no-TTY fallback. What is left here is a
+    # one-line I/O shim, and the honest way to cover it is a live run
+    # (LIVE-INTERACTION-CHECKLIST item 2), not a unit test.
+    "launching_terminal_cols",
+]

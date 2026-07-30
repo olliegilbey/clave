@@ -215,10 +215,34 @@ pub fn layout_kdl(binary: &str, wasm: &str) -> String {
 /// time. Base = the bar template; store non-empty → ONE eager tab for the
 /// most-recent row, baked `clave spawn` (resumes via the jsonl check).
 /// Everything else surfaces as dormant bar rows (§6.6).
+/// The width of the terminal `clave` is being launched FROM, or `None` when
+/// there is no TTY (a script, a CI run, a piped invocation).
+///
+/// Correct by construction only on the launch path: `clave dev launch` and
+/// `clave` run in a real terminal OUTSIDE zellij, so the controlling TTY's
+/// width IS the display area the layout's percent will be resolved against.
+/// The same call from a process running INSIDE a zellij pane would return the
+/// PANE's width — which is why `add::tab_node` still uses the fiction and
+/// LEDGER D35 records that as the remaining gap.
+fn launching_terminal_cols() -> Option<usize> {
+    terminal_size::terminal_size().map(|(w, _)| usize::from(w.0))
+}
+
 pub fn launch_layout_kdl(
     binary: &str,
     wasm: &str,
     most_recent: Option<&crate::store::AgentRecord>,
+) -> String {
+    launch_layout_kdl_for(binary, wasm, most_recent, launching_terminal_cols())
+}
+
+/// The testable half: the display width is a PARAMETER, so the tests can pin
+/// what a 280-column terminal emits without owning a TTY.
+pub fn launch_layout_kdl_for(
+    binary: &str,
+    wasm: &str,
+    most_recent: Option<&crate::store::AgentRecord>,
+    display_cols: Option<usize>,
 ) -> String {
     let tab = match most_recent {
         // The label is re-sanitized for KDL safety: it can be hook-derived
@@ -236,6 +260,15 @@ pub fn launch_layout_kdl(
     };
     // percent-sized, not size=30: fixed panes refuse resizes — see layout_kdl.
     // `clave_binary` identity requirement: see layout_kdl.
+    //
+    // The percent is derived from the REAL terminal width when there is one
+    // (LEDGER D35). This is the single highest-leverage number in the width
+    // system: zellij only resizes in whole increments, so the widths the bar
+    // can ever occupy form a lattice anchored at its BIRTH. Born near the
+    // target, a collapse and expand return to it on any display; born at the
+    // 200-column fiction's percent, a 280-column display rests at 47 forever
+    // and never reaches 54 (D34, measured). This template is also what every
+    // Alt+t tab inherits, so one correct number here fixes the whole session.
     format!(
         "// GENERATED at launch — §6.8 clave-owned cold start.\n\
          layout {{\n\
@@ -248,7 +281,10 @@ pub fn launch_layout_kdl(
          \x20       children\n\
          \x20   }}\n{tab}}}\n",
         key = clave_types::CLAVE_BINARY_KEY,
-        pct = clave_types::BAR_BIRTH_PERCENT
+        pct = display_cols.map_or(
+            clave_types::BAR_BIRTH_PERCENT,
+            clave_types::birth_percent_for
+        )
     )
 }
 
@@ -850,6 +886,35 @@ mod tests {
         assert!(
             !p.to_string_lossy()
                 .contains(&std::process::id().to_string())
+        );
+    }
+
+    /// LEDGER D35 — the launch percent comes from the REAL terminal.
+    ///
+    /// Every other test in this module calls `launch_layout_kdl`, which under
+    /// `cargo test` finds no TTY and quietly takes the fallback. They therefore
+    /// prove nothing about the behaviour that matters, and would keep passing
+    /// if the width were ignored entirely. This one drives the parameterised
+    /// form so the width is actually exercised.
+    #[test]
+    fn the_launch_percent_is_derived_from_the_real_terminal_width() {
+        // 54/280 = 19.29%, not expressible; 19% floors to 53, inside the band.
+        let wide = launch_layout_kdl_for("clave", "/w.wasm", None, Some(280));
+        assert!(wide.contains("size=\"19%\""), "{wide}");
+        // 54/120 = 45% exactly.
+        let narrow = launch_layout_kdl_for("clave", "/w.wasm", None, Some(120));
+        assert!(narrow.contains("size=\"45%\""), "{narrow}");
+        // The two must actually DIFFER, or the parameter is decorative — the
+        // shape a single-width assertion cannot see.
+        assert_ne!(
+            wide, narrow,
+            "the display width did not reach the emitted layout"
+        );
+        // No TTY (a script, CI): the 200-column fiction, still a valid layout.
+        let headless = launch_layout_kdl_for("clave", "/w.wasm", None, None);
+        assert!(
+            headless.contains(&format!("size=\"{}%\"", clave_types::BAR_BIRTH_PERCENT)),
+            "{headless}"
         );
     }
 

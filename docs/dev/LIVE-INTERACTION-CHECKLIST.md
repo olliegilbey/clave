@@ -1,9 +1,18 @@
-# Live interaction checklist — the sidebar at 44 columns
+# Live interaction checklist — the sidebar at 54 columns
+
+> **Partially run 2026-07-30, then invalidated by its own findings.** Item 1
+> passed decisively — six-plus toggles across three display widths, the pane
+> moved every time, so D21's bug is dead and D26's fix holds live. Item 5 was
+> started and surfaced the wrap bug that became D31. **Everything numeric below
+> was then superseded**: D33 took expanded 44 → 54, and D35 changed how the bar
+> is BORN, which changes every resting width. The numbers here are the new ones,
+> re-derived through the real `width_seek`; they have not themselves been seen
+> live yet. Item 1 is worth re-running only because the widths it observes are
+> different now, not because it failed.
 
 The D28 gate-2 run: **Gate 1 validated the design by looking at it; this validates
-the behaviour by driving it.** Nothing below is covered by any automated tier, and
-nothing below has ever run live — no interaction path has been exercised at 44/30
-columns on a real display. It belongs to [`TESTING.md`](TESTING.md)'s
+the behaviour by driving it.** Nothing below is covered by any automated tier.
+It belongs to [`TESTING.md`](TESTING.md)'s
 live-validation SOP: the interaction contract there governs (**the human drives
 every keypress and every session launch; the agent reads observability and never
 puppets the session**), and the sanctioned-command list there is the whole of what
@@ -46,8 +55,9 @@ cheapest first:
 1. **Count the summary cell.** Only `summary` flexes (D9/D16), so for any row
    whose summary text is *longer* than its cell, the rendered summary occupies
    exactly the cell: `cols = 13 + title_w + repo_w + summary_cells` — i.e.
-   `27 + summary_cells` expanded `(7, 7)` and `23 + summary_cells` collapsed
-   `(7, 3)`. `ux-gate1`'s summaries are all long enough. No rebuild, no reload.
+   **`29 + summary_cells` expanded `(9, 7)`** since D33, and `23 +
+   summary_cells` collapsed `(7, 3)`, unchanged. `ux-gate1`'s summaries are all
+   long enough. No rebuild, no reload.
 2. **Percent × display, from the layout dump** (agent-side, liveness-gated,
    ±2 columns because the serialized constraint is an integer percent):
    `ZELLIJ_SESSION_NAME=clave-test zellij action dump-layout`. The bar pane is
@@ -60,9 +70,35 @@ cheapest first:
    pinning to a number.
 
 Also record the **window width** once, in columns, because every expected number
-below is derived from it. Zellij resizes in ≈5%-of-display-area steps (D20), so
-`step ≈ W × 5 / 100`, and the step is what decides where the seek comes to rest.
-At W = 280 (the maintainer's usual), `step = 14`.
+below is derived from it. Zellij resizes in ≈5%-of-display-area steps, so
+`step ≈ W × 5 / 100`. At W = 280 (the maintainer's usual), `step = 14`.
+
+**Since D35 the step no longer decides where the bar rests — birth does.** The
+bar is born at `birth_percent_for(W)` of the real terminal, which lands it within
+a column or two of 54, inside the acceptance band at any step. It therefore
+settles immediately and every later toggle returns to that same width. Predicted
+rests, derived through the real `width_seek` (not yet confirmed live — that is
+what this run is for):
+
+| W | step | born | expanded rest (summary) | collapsed rest (summary) |
+|---|---|---|---|---|
+| 120 | 6 | 54 | 54 (25) | 30 (7) |
+| 160 | 8 | 54 | 54 (25) | 30 (7) |
+| 200 | 10 | 54 | 54 (25) | 34 (11) |
+| 240 | 12 | 55 | 55 (26) | 31 (8) |
+| **280** | 14 | 53 | **53 (24)** | **25 (2)** |
+| 320 | 16 | 54 | 54 (25) | 38 (15) |
+| 400 | 20 | 56 | 56 (27) | 36 (13) |
+
+54 is not exactly expressible as a whole percent of most displays — at 280 one
+percent is 2.8 columns — so 53 rather than 54 is correct, not a defect.
+
+**The collapsed number at 280 is the one to look at with fresh eyes.** It was 33
+(summary 10) before this branch and is predicted at 25 (summary 2). The title
+chip and the 3-cell repo still fit (13 + 7 + 3 = 23), so the gutter reads; only
+the summary is nearly gone. If that is too thin, the lever is
+`COLLAPSED_TARGET_COLS` — around 36–39 selects the 39 lattice point instead
+(summary 16). **This is a design question for the maintainer, not a bug.**
 
 ## Setup
 
@@ -159,9 +195,14 @@ it does not restore `~/.claude/settings.json`'s hook path.
 
 ## 1. Collapse and expand — the highest-value item
 
-This is where a real bug lived (D21) and was fixed (D26), and the fix has never
-run live. The bug was that `Alt+c` emitted **zero** resizes on a wide display and
-the pane silently did not move.
+This is where a real bug lived (D21) and was fixed (D26). The bug was that
+`Alt+c` emitted **zero** resizes on a wide display and the pane silently did not
+move.
+
+> **This item already PASSED, 2026-07-30**: six-plus toggles across three display
+> widths, clean every time, including a monitor change and a half-width window.
+> D21 is dead and D26's fix holds live. It is re-listed only because D33 and D35
+> changed every width it observes — the property is settled, the numbers are not.
 
 **Do.** Press `Alt+c`. Wait until the bar stops moving. Press it again. Repeat for
 **at least six consecutive toggles**, one at a time, and count.
@@ -171,25 +212,27 @@ the pane silently did not move.
 - **The pane moves on every single toggle.** Six presses, six visible width
   changes. This is the D26 property, and it is the whole point of the item.
 - It comes to rest somewhere and stays there — no pacing, no oscillation, no
-  crawl. Each toggle should be **one** resize step on a 280-column display.
-- The rows render the collapsed profile the whole way: title still 7 wide (D17 —
-  the chip must **not** reflow), repo 3 characters with **no ellipsis** (D18), and
-  the summary simply shorter. Nothing over-runs the pane at any point in the
-  animation.
-- **Record the two rest widths.** At W = 280 the derivation predicts **47
-  expanded and 33 collapsed** (`step = 14`; from 47 a shrink lands 33, which is
-  within half a step of 30 and not of 44, so it settles there) — i.e. summary
-  cells of **20 and 10** against designed 17 and 7. So:
-  - **Collapsed resting wider than 30 is correct**, and Gate-1 prediction 1
-    called it. The visible difference between the two states will be smaller than
-    the constants suggest. The lever, if it bothers the eye, is
-    `COLLAPSED_TARGET_COLS` — not the profile.
-  - Collapsed resting at or below **23** puts it inside `Widths::COLLAPSED`'s own
-    clipping regime (D26's third reservation, sharpest at 14). If you see rows
-    wider than the pane while collapsed, that is this, and it is a finding. A
-    collapsed rest between 24 and 27 is milder and still worth recording: the
-    first frame of the *expand* renders the `EXPANDED` profile at a width below
-    its 27-cell floor, so expect exactly one over-run frame on the way out.
+  crawl.
+- The rows render the collapsed profile the whole way: repo 3 characters with
+  **no ellipsis** (D18) and the summary simply shorter. Nothing over-runs the
+  pane at any point in the animation — and since D31 nothing *can*, so a row
+  wrapping onto a second line is now a hard finding rather than an expected
+  transient.
+- **The title chip now REFLOWS, 9 → 7, and that is correct** (D33). D17's
+  no-reflow-across-toggle property was retired deliberately when expanded took
+  the title to 9. Titles of 7 characters or fewer look identical either way, so
+  on the `ux-gate1` fleet you may not see it at all.
+- **Record the two rest widths.** At W = 280 the derivation predicts **53
+  expanded and 25 collapsed** — summary cells of **24 and 2**. Both differ from
+  the pre-D35 run (47 and 33), and for a different reason than before: the bar
+  is now born near target and the toggle lattice is anchored there.
+  - **53, not 54, is correct.** 54/280 is 19.29%, and a KDL size is a whole
+    percent, so 19% floors to 53.
+  - **Collapsed at 25 with a 2-cell summary is the number to judge with fresh
+    eyes.** It is above `Widths::COLLAPSED`'s 23-cell floor, so nothing clips —
+    the chip and repo are intact and only the summary is nearly gone. If it
+    reads as too thin, `COLLAPSED_TARGET_COLS` around 36–39 selects the 39
+    lattice point instead (summary 16). A design call, not a bug.
 
 **Vacuous if.**
 
@@ -208,37 +251,45 @@ the pane silently did not move.
 
 ## 2. A new tab's first paint
 
-The birth percent is derived against a **fictional 200-column reference viewport**
-(`BAR_BIRTH_PERCENT = 44 × 100 / 200 = 22%`), so a newborn bar is born at
-≈ `0.22 × W` columns and the seek corrects it. On a wide window that means born
-too wide and visibly healing — which the maintainer already saw and called janky
-(D20). This item pins the sequence and the *other* end of it.
+**This item tested the birth jank, and D35 is supposed to have removed it.** The
+percent is now derived from the real terminal at launch rather than a fictional
+200-column viewport, so the newborn should arrive at its rest width instead of
+healing toward it. The item is therefore inverted: it used to pin the jank, and
+now it pins the jank's ABSENCE.
 
 **Do (a), wide window.** `Alt+t`. Watch the new tab's own bar on its first paints.
 
-**Correct (a).** At W = 280: born ≈ **61** columns, exactly **one** visible shrink,
-rest ≈ **47**. Two paints of jank, no more. If it takes more than two steps or
-lands off 47, record the numbers.
+**Correct (a).** At W = 280 the bar is born at **53** and **stays there — zero
+visible resizes**. Any shrink-then-settle is a finding now, not the expected
+behaviour: it means the percent reaching the layout is not the one derived from
+the terminal. Record the birth width and the number of steps.
 
-**Do (b), narrow window.** Resize the terminal to **≈ 115 columns** (anything
-under ~123), then `Alt+t`.
+**Do (b), narrow window.** Resize the terminal to **≈ 115 columns**, then
+`Alt+t`.
 
-**Correct (b).** `0.22 × 115 ≈ 25`, which is **below `Widths::EXPANDED`'s 27-cell
-floor**, so the newborn's rows are deliberately **wider than the pane** — clipped,
-uniformly, every row kind at the same width (D13) — until the seek grows it to
-44 (three grows at `step ≈ 6`). Correct behaviour is: clipped-but-aligned, then
-healed. **Ragged** clipping — agent rows and terminal rows disagreeing on width —
-is a finding.
+**Correct (b).** `birth_percent_for(115)` = 47%, which floors to **54** — still
+at target, still above `EXPANDED`'s 29-cell floor, so no over-run at all. The old
+expectation here was a deliberately clipped newborn healing upward; that regime
+is now only reachable on a display too narrow to hold 54, where the percent
+clamps to 100 and D31's clip keeps the rows inside the pane. **Ragged** clipping
+— agent rows and terminal rows disagreeing on width — remains a finding.
 
 **Vacuous if.**
 
-- Your window is ≈ 200 columns wide. At W = 200 the reference fiction is *true*,
-  the newborn is born within a column of 44, and there is nothing to observe.
-  This is the single most important vacuity condition in the document: the defect
-  is invisible on exactly one window size. **Record W.**
+- **You launched the session before this branch.** The percent is baked into
+  `launch.kdl` at session-create time, so a session started with the old binary
+  carries the old percent whatever the code says. Relaunch, do not hot-reload.
+- **You resized the terminal after launching.** The template's percent was
+  correct for the width at launch; resizing changes the display area underneath
+  it, so a later `Alt+t` is born against the old ratio. That is expected, and it
+  is what item 6's drift re-arm exists to absorb.
+- **You opened the tab with `Alt+a` or by dwelling a dormant row.** Those go
+  through `clave open`, which builds a one-shot layout that bypasses the
+  template — and still uses the fiction (D35's named gap, task 7b′). Only
+  `Alt+t` exercises the fixed path.
 - You watched the *old* tab's bar. `Alt+t` focuses the new tab; the newborn is the
   bar in it.
-- The bar was collapsed. Then the newborn seeks 30, not 44, and the arithmetic
+- The bar was collapsed. Then the newborn seeks 30, not 54, and the arithmetic
   above does not apply.
 
 ## 3. The hook writing `title` and `summary` — the newest, least-tested path

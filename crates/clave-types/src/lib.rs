@@ -228,6 +228,44 @@ pub const REFERENCE_VIEWPORT_COLS: usize = 200;
 /// strings, and round 21 had to remember to touch each one by hand.
 pub const BAR_BIRTH_PERCENT: usize = BAR_TARGET_COLS * 100 / REFERENCE_VIEWPORT_COLS;
 
+/// The birth percent for a display of KNOWN width — the fiction removed.
+///
+/// **This is what makes the target reachable at all (LEDGER D34/D35).** Zellij
+/// resizes in whole increments, so the widths a bar can ever occupy are a
+/// lattice anchored at wherever it was BORN. Born at 54, a collapse and expand
+/// return to exactly 54 on any display; born at `27% × 280` = 75, the same
+/// toggle rests at 47 forever and the target is never reached. Measured through
+/// the real `width_seek` across seven display widths: exact birth lands 54 on
+/// every one of them, the percent fiction on two.
+///
+/// Falls back to [`BAR_BIRTH_PERCENT`] when the width is unknown or absurd —
+/// there is no honest percent for a zero-width display, and a caller with no
+/// TTY (a `clave setup` in a script) must still emit a valid layout.
+///
+/// **Exactness is not available, and pretending otherwise would be the bug.**
+/// A KDL size is a whole percent, and zellij resolves it by FLOORING
+/// `(percent / 100) × display` (`zellij-utils-0.44.3/src/pane_size.rs:136`). On
+/// a 280-column display one percent is 2.8 columns, so 54 (19.29%) is simply
+/// not expressible: 19% floors to 53, 20% to 56. This rounds to NEAREST, which
+/// bounds the residual at roughly half a percent of the display — 53 here, one
+/// column under. That is inside the seek's acceptance band at every step, so the
+/// bar settles on its birth width immediately and the lattice is anchored there
+/// rather than at the fiction's 75.
+///
+/// The result is clamped to `1..=100`: zellij rejects anything outside that. A
+/// display narrower than the target clamps to 100 rather than overflowing — the
+/// bar asks for the whole tab, the seek argues it down, and `render_rows`' clip
+/// (D31) keeps the rows inside the pane while that happens.
+pub fn birth_percent_for(display_cols: usize) -> usize {
+    if display_cols == 0 {
+        return BAR_BIRTH_PERCENT;
+    }
+    // Round to nearest rather than truncate: truncation is biased narrow, and
+    // a bar born narrow is the case that renders below its own intact floor.
+    let pct = (BAR_TARGET_COLS * 100 + display_cols / 2) / display_cols;
+    pct.clamp(1, 100)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,6 +304,43 @@ mod tests {
     #[test]
     fn the_collapsed_target_is_narrower_and_separated_from_the_expanded_one() {
         assert_eq!(BAR_TARGET_COLS.abs_diff(COLLAPSED_TARGET_COLS), 24);
+    }
+
+    /// What the percent actually RESOLVES to, computed the way zellij computes
+    /// it — `floor((pct/100) × display)`. Asserting the percent alone would
+    /// prove nothing about the width the bar is born at, which is the only
+    /// thing D34/D35 care about.
+    #[test]
+    fn a_known_display_births_the_bar_within_a_column_or_two_of_target() {
+        for display in [80usize, 120, 160, 200, 240, 280, 320, 400, 500] {
+            let pct = birth_percent_for(display);
+            let born = pct * display / 100;
+            let err = born.abs_diff(BAR_TARGET_COLS);
+            assert!(
+                err * 200 <= display + 200,
+                "display {display}: {pct}% births {born}, {err} off {BAR_TARGET_COLS}"
+            );
+        }
+        // The maintainer's own display, pinned as a number rather than a bound:
+        // 54/280 is 19.29%, which is not expressible, so 19% -> 53.
+        assert_eq!(birth_percent_for(280), 19);
+        assert_eq!(19 * 280 / 100, 53);
+        // A display where it IS exact — 54/120 = 45% exactly.
+        assert_eq!(birth_percent_for(120), 45);
+        assert_eq!(45 * 120 / 100, 54);
+    }
+
+    /// The degenerate inputs, each of which has a wrong answer that looks fine.
+    #[test]
+    fn birth_percent_for_survives_absurd_displays() {
+        // No TTY: fall back to the fiction rather than emitting `0%`, which
+        // zellij rejects and which would fail at session launch, not here.
+        assert_eq!(birth_percent_for(0), BAR_BIRTH_PERCENT);
+        // Narrower than the bar wants: ask for everything, never over 100.
+        assert_eq!(birth_percent_for(20), 100);
+        assert_eq!(birth_percent_for(BAR_TARGET_COLS), 100);
+        // Never zero, however wide the display — `size="0%"` is not a layout.
+        assert!(birth_percent_for(100_000) >= 1);
     }
 
     #[test]
