@@ -477,6 +477,92 @@ resting-width costs become dead paths:
   ever catch it. Needs a display area around 400 columns; Ollie runs ~280, so it
   is out of reach today. **Not out of reach forever.**
 
+### D32 — Fixed pane sizes are not on the table, and absolute widths already are (2026-07-30)
+
+Ollie, during the gate-2 run: *"why does it resist fixed pane sizes? … Why do we
+need relative? Is that a zellij quirk?"* Worth answering from the source once, in
+the ledger, because the question recurs every time someone meets the birth
+percent.
+
+`Dimension { constraint, inner }` (`zellij-utils-0.44.3/src/pane_size.rs:96-160`).
+`inner` is the resolved column count; `constraint` says how it is derived —
+`Percent(p)` resolves to `(p/100) * full_size`, `Fixed(n)` resolves to `n` and
+ignores the container. The decisive detail is what is **absent**: the only
+constraint mutator is `set_percent` (`:122`). There is **no `set_fixed`**.
+Resizing in zellij *is* percent arithmetic — the engine rewrites the percent and
+re-resolves. A `Fixed` pane has no percent to rewrite, so the resize is rejected
+wholesale as `CantResizeFixedPanes` (`errors.rs:710`).
+
+So it is not a relative-versus-absolute preference. **`Fixed` is a lock** — "the
+user pinned this, never touch it" — and `Percent` is the only writable channel
+for a width. `size=44` would leave `Alt+c` permanently dead, which is D21's bug
+made unconditional.
+
+**And the premise is already satisfied.** The seek's targets are absolute column
+counts; it converges the pane onto exactly those. Percent is the *encoding*
+zellij accepts and the *birth hint*, nothing more. The 200-column fiction affects
+precisely one thing: the width of the first frame, before the seek acts.
+
+Ollie's 80-column argument is sound on its own terms — 54 + 26 does fit, and few
+users run an 80-column session; if they do, collapsed leaves 50. The coordinator
+initially rebutted it with "22% of 80 is 17 columns, below both floors", which
+describes *today's percent scheme* and is therefore an argument **for** his
+complaint, not against his proposal. Recorded because the rebuttal was aimed at
+the wrong claim, and the next agent should not re-run it.
+
+Ruled, and still open: constants like these should eventually be **user
+configurable**, in a style matching zellij's own config. A later refactor, not
+this branch.
+
+### D31 — The sub-floor over-run is CLIPPED here, not left to the terminal (2026-07-30)
+
+**D13 is half wrong, and the live gate-2 run falsified the half that mattered.**
+
+D13 ruled that below `min_intact_cols()` the fixed columns hold and the row is
+built WIDER than the pane, uniformly across row kinds, rather than reflowing a
+fixed column — that part stands and is not touched. What it also assumed is that
+an over-wide row would read on screen as **clipped**. It does not. **A terminal
+wraps it**, and a wrapped row makes every bar row double-height with a blank
+second line.
+
+Observed by Ollie 2026-07-30, twice, in the D28 gate-2 run: once on moving the
+window to a second monitor, and once on every tab spawn — a new tab is born at
+the birth percent, which under ~123 columns lands the pane below `EXPANDED`'s
+27-cell floor while the state still (correctly) says expanded. In the second
+screenshot the repo names themselves spilled to line two. **`Alt+c` healed it
+every time**, because any event forces a fresh render at the settled width.
+
+The uniformity D13 chose was intact throughout — every row over-ran by the same
+amount. Only the assumption about what a terminal does with an over-wide line was
+false.
+
+**The fix is one function.** `render_row` still builds at the floor, so no fixed
+column reflows and D9/D13's guarantee is untouched; `render_rows` then clips the
+finished line to `cols` (`clip_to_cells`), SGR-aware so the colour state is
+closed rather than left open, and padding rather than half-drawing a wide glyph
+that straddles the cut.
+
+**Three tests PINNED the over-run and were changed** — this is a behavioural
+change, not a bug fix, and it should read as one:
+`every_row_is_exactly_cols_cells_under_collapsed` and
+`degenerate_widths_do_not_panic` both asserted
+`cols.max(min_intact_cols())`; both now assert `cols` unconditionally.
+`every_row_is_exactly_cols_cells` gained sub-floor widths it never covered.
+
+**A correction the next agent needs, because D20 invites the opposite reading.**
+D20 says `main.rs` drops `pane_columns` when building `PaneMeta`, which is true —
+but that is about computing the seek's STEP. It does **not** mean the bar renders
+at a stale belief: `ZellijPlugin::render(&mut self, _rows, cols)` receives the
+real pane width from zellij and passes it straight to `render_rows`
+(`main.rs:560`). The bar has always known its own width at render time. The wrap
+was never a missing input — it was a deliberate over-run meeting a terminal that
+wraps.
+
+**What this does NOT fix.** The birth width is still derived against the fictional
+200-column viewport (D20's second item, still open). A stale or wrong birth now
+renders *clipped* instead of *corrupted*, and the seek corrects it within a frame
+— so the remaining symptom is a brief flicker, not a broken bar.
+
 ### D30 — `just sandbox` DOES write `~/.claude/settings.json`. Two documents say it does not (2026-07-29)
 
 **Found by the agent writing the live-interaction checklist, which refused to run

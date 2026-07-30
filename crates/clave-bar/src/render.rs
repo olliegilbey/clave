@@ -329,6 +329,55 @@ pub fn strip_sgr(s: &str) -> String {
     out
 }
 
+/// Truncate a RENDERED row — SGR sequences and all — to exactly `cols` cells.
+///
+/// `render_row` builds every row at `widths.min_intact_cols()` even when the
+/// pane is narrower: the fixed columns cannot reflow (lock §2.1), so a
+/// sub-floor row over-runs UNIFORMLY rather than going ragged (D13). D13 then
+/// assumed the terminal would clip that over-run. **It does not — it wraps
+/// it**, and a wrapped row makes every bar row double-height with a blank
+/// second line. Observed live 2026-07-29: on a monitor change, and on every
+/// tab spawn below ~123 columns where the birth percent lands the pane under
+/// `EXPANDED`'s 27-cell floor.
+///
+/// So the clip happens here instead of being assumed. Only truncation changes:
+/// the row is still BUILT at the floor, so no column reflows and every row
+/// loses the same trailing cells — the uniformity D13 chose is preserved, and
+/// only the wrap is removed.
+///
+/// The pad after `RESET` matters. A wide glyph straddling the boundary is
+/// excluded rather than half-drawn (same rule as `cell_slice`), which can
+/// leave the row one cell short; padding unstyled keeps the row exactly `cols`
+/// without painting a colour into a cell the clip just took away.
+fn clip_to_cells(s: &str, cols: usize) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut at = 0;
+    let mut rest = s;
+    while !rest.is_empty() {
+        // SGR carries no width and must survive the cut: dropping it would
+        // leave the terminal's colour state open past the end of the row.
+        if let Some(tail) = rest.strip_prefix("\u{1b}[")
+            && let Some(j) = tail.find(|c: char| !matches!(c, '0'..='9' | ';'))
+            && tail.as_bytes()[j] == b'm'
+        {
+            out.push_str(&rest[..2 + j + 1]);
+            rest = &tail[j + 1..];
+            continue;
+        }
+        let ch = rest.chars().next().expect("rest is non-empty");
+        let w = ch.width().unwrap_or(0);
+        if at + w > cols {
+            break;
+        }
+        out.push(ch);
+        at += w;
+        rest = &rest[ch.len_utf8()..];
+    }
+    out.push_str(RESET);
+    out.push_str(&" ".repeat(cols - at));
+    out
+}
+
 /// A fixed-width column, measured in cells: truncate when long, pad when short.
 /// The PAD is load-bearing — alignment is the separator (lock §2.3), which is
 /// why one space suffices where the bar previously spent three on ` \u{b7} `.
@@ -401,6 +450,17 @@ pub fn render_rows(rows: &[Row], cols: usize, widths: Widths) -> Vec<String> {
     let any_selected = rows.iter().any(|r| r.selected);
     rows.iter()
         .map(|row| render_row(row, cols, widths, any_selected))
+        // Below the floor the row was built wider than the pane on purpose;
+        // `clip_to_cells` is what stops the terminal WRAPPING that over-run
+        // into a second, blank line. Above the floor the row is already
+        // exactly `cols`, so this is a no-op the branch skips.
+        .map(|line| {
+            if cols < widths.min_intact_cols() {
+                clip_to_cells(&line, cols)
+            } else {
+                line
+            }
+        })
         .collect()
 }
 
@@ -657,6 +717,14 @@ mod tests {
     #[test]
     fn every_row_is_exactly_cols_cells() {
         for cols in [
+            // BELOW `EXPANDED`'s 27-cell floor: the row is built at the floor
+            // and clipped back, which is the regime a spawning tab lands in on
+            // any window under ~123 columns. Before `clip_to_cells` these
+            // widths produced 27-cell rows in a narrower pane, and the
+            // terminal wrapped them.
+            1,
+            20,
+            26,
             Widths::EXPANDED.min_intact_cols(),
             COLLAPSED_DESIGN_COLS,
             DESIGN_COLS,
@@ -681,12 +749,89 @@ mod tests {
     #[test]
     fn every_row_is_exactly_cols_cells_under_collapsed() {
         for cols in [0, 1, 13, 23, COLLAPSED_DESIGN_COLS, DESIGN_COLS] {
-            let expected = cols.max(Widths::COLLAPSED.min_intact_cols());
+            // Was `cols.max(min_intact_cols())` — the sub-floor over-run this
+            // test used to PIN. `clip_to_cells` now truncates it back, so the
+            // guarantee is unconditional: a row is `cols` cells at every width,
+            // including the pathological ones.
             for line in render_rows(&fleet(), cols, Widths::COLLAPSED) {
                 let width = display_cells(&strip_sgr(&line));
-                assert_eq!(width, expected, "at cols={cols}: {line:?}");
+                assert_eq!(width, cols, "at cols={cols}: {line:?}");
             }
         }
+    }
+
+    /// The live 2026-07-29 regression, at the width that produced it: an
+    /// `EXPANDED` bar in a pane below its 27-cell floor. The bar was built at
+    /// 27, the pane was narrower, and the terminal wrapped the surplus onto a
+    /// blank second line — every row double-height. Asserting `<= cols` rather
+    /// than `== cols` would pass on a row of zero cells, so it asserts both.
+    #[test]
+    fn a_sub_floor_pane_never_receives_a_row_wider_than_itself() {
+        for cols in 1..Widths::EXPANDED.min_intact_cols() {
+            for line in render_rows(&fleet(), cols, Widths::EXPANDED) {
+                let width = display_cells(&strip_sgr(&line));
+                assert_eq!(width, cols, "at cols={cols}: {line:?}");
+            }
+        }
+    }
+
+    /// The clip's boundary is inclusive on the PASS-THROUGH side: a pane at
+    /// exactly the floor is already `cols` cells, so it must not be re-walked.
+    ///
+    /// Pinned byte-for-byte because a width assertion cannot see this — at
+    /// `cols == min_intact_cols()` clipping and not clipping produce the same
+    /// number of cells, differing only by a redundant trailing `RESET`. Mutation
+    /// testing found exactly that hole: `<` → `<=` at the branch survived the
+    /// entire suite. One cell below the floor the two must differ.
+    #[test]
+    fn the_floor_itself_is_not_clipped() {
+        let floor = Widths::EXPANDED.min_intact_cols();
+        let rows = fleet();
+        let any = rows.iter().any(|r| r.selected);
+
+        for (clipped, direct) in render_rows(&rows, floor, Widths::EXPANDED).iter().zip(
+            rows.iter()
+                .map(|r| render_row(r, floor, Widths::EXPANDED, any)),
+        ) {
+            assert_eq!(*clipped, direct, "the floor took the clip path");
+        }
+
+        let under = floor - 1;
+        let clipped = &render_rows(&rows, under, Widths::EXPANDED)[0];
+        let direct = render_row(&rows[0], under, Widths::EXPANDED, any);
+        assert_ne!(
+            *clipped, direct,
+            "one cell below the floor the clip must engage"
+        );
+    }
+
+    /// A clip that dropped SGR would leave the row exactly `cols` cells and
+    /// still be wrong — the colour state would stay open and bleed into
+    /// whatever the terminal drew next. So the width assertion alone cannot
+    /// carry this; the reset must be checked directly.
+    #[test]
+    fn clipping_keeps_the_colour_it_cuts_through_and_closes_it() {
+        let painted = format!("{}abcdef{}", CHIP_INK.fg(), RESET);
+        let clipped = clip_to_cells(&painted, 3);
+        assert_eq!(strip_sgr(&clipped), "abc");
+        assert!(
+            clipped.contains(&CHIP_INK.fg()),
+            "the SGR the cut passed through was dropped: {clipped:?}"
+        );
+        assert!(
+            clipped.ends_with(RESET) || clipped.contains(RESET),
+            "colour left open past the end of the row: {clipped:?}"
+        );
+    }
+
+    /// `chars().count()` would cut a two-cell glyph in half and report success.
+    /// The glyph is excluded and the row padded back, so the width holds
+    /// without half a character on screen.
+    #[test]
+    fn clipping_excludes_a_wide_glyph_that_straddles_the_boundary() {
+        // U+1F600 is two cells; it cannot fit in one and must not be halved.
+        assert_eq!(strip_sgr(&clip_to_cells("\u{1f600}", 1)), " ");
+        assert_eq!(strip_sgr(&clip_to_cells("\u{1f600}", 2)), "\u{1f600}");
     }
 
     /// Selection must not move a single column (lock §2.2) — the cap columns
@@ -849,17 +994,23 @@ mod tests {
     }
 
     /// Degenerate widths must not panic. Below `min_intact_cols()` the fixed
-    /// columns hold and the row is WIDER than the pane (LEDGER D9) — recorded
-    /// here so the behaviour is a decision, not a surprise. This is a guard
-    /// against pathological widths now (LEDGER D16), not the mechanism a user
-    /// ever sees — the collapsed profile is chosen by STATE, so a live seek
-    /// never crosses this floor.
+    /// columns hold and the row is BUILT wider than the pane (LEDGER D9) —
+    /// recorded here so the behaviour is a decision, not a surprise.
     ///
-    /// Pinned to equality, not bounded: the widths are exact, and a future
-    /// change that silently reflows a fixed column downward to fit should fail
-    /// here rather than be tolerated by a `<=`. The fleet mixes agent and
-    /// terminal rows on purpose — the over-run has to be UNIFORM across row
-    /// kinds, or the visible part of the bar is ragged rather than clipped.
+    /// This used to add "not the mechanism a user ever sees — the collapsed
+    /// profile is chosen by STATE, so a live seek never crosses this floor."
+    /// **That was false, and the live run of 2026-07-29 falsified it.** The
+    /// seek is not the only thing that sets the width: a tab is BORN at the
+    /// birth percent, which on any window under ~123 columns lands the pane
+    /// below `EXPANDED`'s floor while the state still says expanded. Ollie hit
+    /// it on every tab spawn and on a monitor change.
+    ///
+    /// So the row is still built at the floor — no fixed column reflows — but
+    /// `render_rows` now clips the result back to `cols`. Pinned to equality,
+    /// not bounded: a future change that silently reflows a fixed column
+    /// downward to fit should fail here rather than be tolerated by a `<=`.
+    /// The fleet mixes agent and terminal rows on purpose — the clip has to be
+    /// UNIFORM across row kinds, or the bar goes ragged instead of clipped.
     #[test]
     fn degenerate_widths_do_not_panic() {
         for cols in [
@@ -871,13 +1022,12 @@ mod tests {
             DESIGN_COLS,
             200,
         ] {
-            let expected = cols.max(Widths::EXPANDED.min_intact_cols());
             for (i, line) in render_rows(&fleet(), cols, Widths::EXPANDED)
                 .iter()
                 .enumerate()
             {
                 let width = display_cells(&strip_sgr(line));
-                assert_eq!(width, expected, "row {i} at cols={cols}");
+                assert_eq!(width, cols, "row {i} at cols={cols}");
             }
         }
         assert_eq!(clamp("anything", 0), "");
