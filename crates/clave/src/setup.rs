@@ -85,8 +85,20 @@ pub fn config_kdl(binary: &str, wasm: &str) -> String {
         )
     };
     let mut binds = String::new();
+    // The picker's geometry is clave-types' (#110), shared with #7's helper
+    // pane when it lands. Without it zellij applies `half_size_middle_geom` —
+    // half of a viewport the bar has ALREADY shrunk, which is the tiny pane
+    // the issue reports. The values are percents of that non-bar area, and
+    // they must be KDL STRINGS: `kdl_child_string_value_for_entry` is what
+    // reads x/y/width/height (`zellij-utils/src/kdl/mod.rs:1981-1993`), so a
+    // bare integer is read as no value and the geometry silently vanishes.
     binds.push_str(&format!(
-        "        bind \"Alt a\" {{ Run \"{binary}\" \"add\" {{ floating true; close_on_exit true; }}; }}\n"
+        "        bind \"Alt a\" {{ Run \"{binary}\" \"add\" {{ floating true; close_on_exit true; \
+         x \"{x}%\"; y \"{y}%\"; width \"{w}%\"; height \"{h}%\"; }}; }}\n",
+        x = clave_types::FLOATING_X_PERCENT,
+        y = clave_types::FLOATING_Y_PERCENT,
+        w = clave_types::FLOATING_WIDTH_PERCENT,
+        h = clave_types::FLOATING_HEIGHT_PERCENT,
     ));
     binds.push_str(&format!(
         "        bind \"Alt c\" {{ MessagePlugin \"file:{wasm}\" {{ name \"clave-toggle\"; {key} \"{binary}\"; }}; }}\n",
