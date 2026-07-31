@@ -203,16 +203,30 @@ fn last_tail_field(tail: &str, kind: &str, field: &str) -> Option<String> {
 /// `ai-title` lines in one transcript and never more than one distinct VALUE
 /// per session. It is a subtitle for the conversation, not a running commentary.
 /// THE source for `rec.summary` (#79): it is what Claude Code writes where it
-/// once wrote `type:"summary"`, present in 74 of 153 local transcripts as of
-/// 2026-07-29 while `type:"summary"` appears in 0 of them.
+/// once wrote `type:"summary"`, which appears in 0 transcripts.
+/// BUT IT IS MOSTLY ABSENT, and increasingly so — re-measured 2026-07-31 over
+/// all 770 local transcripts, only 68 carry one (45 of the 389 with >=20 user
+/// turns; 7 of 132 for the preceding 7 days), down from 74 of 153 on
+/// 2026-07-29. So `rec.summary` is blank for most rows, by absence of the
+/// source rather than by any failure here. `custom-title` is near-exclusive
+/// with it — 62 sessions carry only this, 74 only `custom-title`, 6 both — and
+/// the discriminator is unknown (#111). Do not read "has ai-title" as "not
+/// renamed".
 pub fn ai_title_from_tail(tail: &str) -> Option<String> {
     last_tail_field(tail, "ai-title", "aiTitle")
 }
 
-/// The user's own session rename — `{"type":"custom-title","customTitle":…}`,
+/// This session's title — `{"type":"custom-title","customTitle":…}`,
 /// re-appended latest-wins. The source for `rec.title` (design-lock §5/§7.1:
 /// the filled chip). Verified against a live sandbox transcript 2026-07-29:
 /// the line carries exactly `type`, `customTitle`, `sessionId`.
+///
+/// NOT only a user rename, despite the name. Measured 2026-07-31: it is
+/// written from a session's FIRST line and re-stamped every few user turns,
+/// single-valued throughout, in sessions that were never renamed (15 lines
+/// across 75 user turns in one; 71 across 280; 95 across 363). Re-derivation
+/// is therefore NOT cadence-limited — the line stays well inside the tail
+/// window. Presence is the real limit: 80 of 770 local transcripts carry one.
 pub fn custom_title_from_tail(tail: &str) -> Option<String> {
     last_tail_field(tail, "custom-title", "customTitle")
 }
