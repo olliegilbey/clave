@@ -395,9 +395,12 @@ last-writer-by-`seq` wins with no lost update. The uuid→pane join lives in the
 > `custom-title`, `claude --resume`'s own picker falls back to the `aiTitle`, a
 > description of the actual work, where `--name` overwrote it with `<dir> ·
 > <branch>` — identical across every agent on the same branch. The
-> `--name <label>` ARGUMENT stays parseable on purpose: zellij has this exact argv
-> baked into the serialized layouts of already-running sessions, and a pane whose
-> replayed command no longer parses fails to resurrect. Create is
+> `--name <label>` ARGUMENT is still RECEIVED and ignored — `add::tab_node` and
+> `tab_node_bare` bake it into every tab command written today, and `main.rs`
+> binds it to `_name`. What changed is that it is no longer forwarded to
+> `claude`. Do not read this as a legacy shim and delete the emission: keeping
+> the argument parseable is also what lets a pane whose argv was serialized into
+> an already-running session's layout still resurrect. Create is
 > `claude --session-id <uuid>`, nothing else.
 >
 > **Resume names the LIVE conversation, not the minted uuid** (#99, fixed in #101).
@@ -632,7 +635,8 @@ self-hydrates on load via `RunCommands` — §6.6).
   **compile-time constants in `clave-types`, deliberately NOT configurable**, one
   definition shared by the width seek, the renderer and the three KDL generators;
   S8 §3.2 rejects every config channel as the #43/#44 mixed-artifact shape. The
-  "~24 cols, configurable" here and in §6.4 predates the ratified design.) Plain tabs render
+  pre-ratification "configurable" figures — "~24 cols" here, "~22 cols" in §6.4 —
+  both predate the design lock.) Plain tabs render
   name-only. Focused row highlighted. No repo grouping, no per-repo colours
   (deleted). **Dormant rows** (2026-07-17): ◌ glyph, dimmed, label from the
   store row; transient ↻ while an open's spawn is in flight (flips to live via

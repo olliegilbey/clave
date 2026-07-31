@@ -19,43 +19,54 @@ and who finished while you were looking elsewhere.
 └──────────────────────────────────────────────────────┘
 ```
 
-**Colour is the state** — the four dots above are red, amber, green and grey in a
+**Colour is the state** — those four dots are red, amber, green and grey in a
 real terminal, which is the whole point and the one thing a code block can't
-show. Shape changes only where a row isn't a live conversation.
+show.
 
 Then: a mark for a branch or a worktree, blank on a normal checkout. The
-session's own name, once you `/rename` it. The repo. And Claude's description of
-what it's actually doing — its words, not your prompt.
+session's own name, once you `/rename` it. The repo. And Claude's own one-line
+description of the session — its words, not your prompt. That last one is a
+subtitle rather than a status line: Claude picks it early and keeps it.
 
 ## Try it
 
-Needs `zellij`, `claude` and `git` on your PATH, plus `fzf` and `zoxide` for the
-directory picker, and a [Nerd Font](https://www.nerdfonts.com/) in your terminal.
+**Runtime:** `zellij` (0.44.3 is what's tested), `claude`, `git`, plus `fzf` and
+`zoxide` for the directory picker. macOS and Linux. A
+[Nerd Font](https://www.nerdfonts.com/) for the branch and terminal marks.
+
+**To build:** Rust (stable) and [`just`](https://just.systems).
 
 ```bash
 git clone https://github.com/olliegilbey/clave && cd clave
-git checkout "$(git tag --sort=-v:refname | head -1)"   # release cuts are tagged
-just release          # builds, then installs the launcher and versioned artifacts
+git checkout v0.1.2        # `just release` refuses a dirty or untagged tree
+just setup-toolchain       # adds the wasm32-wasip1 target, once
+just release               # builds, then installs the launcher and versioned artifacts
 export PATH="$HOME/.local/share/clave/bin:$PATH"
-clave                 # from a terminal OUTSIDE zellij — clave makes its own session
+clave                      # from a terminal OUTSIDE zellij — clave makes its own session
 ```
 
-No packaged release yet; building from a tag is the supported path. `just
-release` refuses a dirty or untagged tree on purpose, and `clave doctor` will
-tell you what's missing if the launch doesn't go cleanly.
+No packaged release yet; building from a tag is the supported path. Take the tag
+literally — earlier ones predate the launcher this puts on your PATH.
 
-Then `Alt+a` and pick a directory. That's your first agent.
+`just release` also registers clave's status hooks in `~/.claude/settings.json`
+(additive — your own hooks are left alone) and seeds Zellij's plugin permission
+cache. That's what lets an agent report its own state. `clave doctor` explains
+anything that didn't land.
+
+Then `Alt+a`, pick a directory, choose `new`. That's your first agent.
 
 | | |
 |---|---|
-| `Alt+a` | add an agent — pick a directory, optionally in its own git worktree |
+| `Alt+a` | add an agent — pick a directory, then new or resume |
 | `Alt+↑` `Alt+↓` (or `Alt+k` `Alt+j`) | walk the fleet |
 | `Alt+1`…`Alt+9` | jump straight to a row |
 | `Alt+o` | back to where you were |
 | `Alt+c` | collapse the bar to a strip, or expand it |
 | `Alt+t` `Alt+w` | new tab, close tab |
 
-Every other keystroke goes straight through to the focused Claude session.
+`Alt` is clave's namespace. Five stock Zellij bindings that Claude Code needs
+are unbound for you (`Ctrl+g/t/o/b/q`); the rest of Zellij's `Ctrl` keys still
+belong to Zellij ([#24](../../issues/24)).
 
 ## How it works
 
@@ -66,19 +77,17 @@ Every other keystroke goes straight through to the focused Claude session.
   not screen-scraping. Each agent reports its own turn lifecycle, so a row
   changes the moment the agent does.
 - **Conversations survive restarts.** Every pane runs an idempotent
-  resume-or-create, so closing a tab, restarting Zellij, or upgrading clave
-  brings the same conversations back — including the ones you've `/clear`ed,
-  which start a fresh session id underneath.
-- **Worktrees are first class.** Add an agent on its own git worktree and it
-  gets its own branch and directory, so two agents in one repo never fight over
-  your working tree.
+  resume-or-create. A cold start reopens your most recent agent and brings the
+  rest back as dormant rows — open one and it picks up where it left off,
+  including the ones you've `/clear`ed, which start a fresh session id
+  underneath.
+- **Worktrees are first class.** `clave add --worktree` puts an agent on its own
+  branch in its own directory, so two agents in one repo never fight over your
+  working tree.
 
-## Why "clave"?
-
-The **clave** is the foundational rhythm an entire ensemble locks to — the part
-everything else syncs around. It's also Spanish for *key* / *keystone* (it's
-keyboard-driven), and the archaic past tense of *cleave*, to split — as in
-splitting the screen into panes. Logo: the two-stick percussion instrument.
+**What it isn't:** a wrapper around Claude, a scheduler, or something you
+configure. There is no config file — the bar's layout is a ratified design, not
+a preference, and clave's job is to get out of the way of the agents.
 
 ## Status
 
@@ -86,9 +95,17 @@ splitting the screen into panes. Logo: the two-stick percussion instrument.
 session, which is why the rough edges get found fast. If something breaks,
 [open an issue](../../issues); that's the most useful thing you can do right now.
 
-Design and rationale: [`docs/design.md`](docs/design.md). Want to work on it?
-[CONTRIBUTING](CONTRIBUTING.md) — start there rather than here, especially
-before you install anything over a running session.
+Design and rationale:
+[the orchestrator design spec](docs/superpowers/specs/2026-06-30-clave-orchestrator-design.md).
+Want to work on it? [CONTRIBUTING](CONTRIBUTING.md) — start there rather than
+here, especially before you install anything over a running session.
+
+## Why "clave"?
+
+The **clave** is the foundational rhythm an entire ensemble locks to — the part
+everything else syncs around. It's also Spanish for *key* / *keystone* (it's
+keyboard-driven), and the archaic past tense of *cleave*, to split — as in
+splitting the screen into panes. Logo: the two-stick percussion instrument.
 
 ## License
 

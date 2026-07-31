@@ -274,7 +274,7 @@ The adapter constructs argv without a shell:
   adapter must not reintroduce one. Claude records it as a `custom-title` that
   the hook cannot tell from a user `/rename`, so it filled the bar's title chip
   on an agent nobody had named, and it overwrote the `aiTitle` that Claude's own
-  resume picker falls back to (#91, dropped in #98). clave never titles a
+  resume picker falls back to (#91, dropped in #90). clave never titles a
   session at birth; the chip stays blank until the user renames it;
 - Claude resume: `claude --resume <live-provider-id>` — the id the conversation
   is using NOW, which is not the minted one once the pane has been `/clear`ed.

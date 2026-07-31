@@ -308,13 +308,18 @@ and expensive to argue in prose. **Look at it then; do not litigate it now.**
 
 ### D19 — Gate 1 verdict: KEEP. Expanded goes to 54 (2026-07-29)
 
-> **NOT YET IMPLEMENTED.** The verdict is real; the width is not. The tree still
+> **IMPLEMENTED at D33 (2026-07-30) — the reservation below is discharged.** The
+> tree ships 54 with `Widths::EXPANDED = { title: 9, repo: 7 }` and a 25-cell
+> summary. Left standing because it records why the width could not move on its
+> own; the warning it carried is now history, not a caveat.
+>
+> ~~**NOT YET IMPLEMENTED.** The verdict is real; the width is not. The tree still
 > ships **44** with `Widths::EXPANDED = { title: 7, repo: 7 }` and a 17-cell
 > summary, and D2 describes that shipped state correctly. 54 lands in its own
 > task, together with the birth percent and D26's four inherited reservations,
 > because moving the target alone would leave every golden green while pinning
 > the wrong width. Codex flagged the gap between this entry and the code, and
-> was right to.
+> was right to.~~
 
 Ollie ran the `ux-gate1` fleet live and ruled **keep** — not refactor, not
 re-engineer. *"It's looking very good indeed… The expansion and collapse do seem

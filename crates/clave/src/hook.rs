@@ -198,7 +198,10 @@ fn last_tail_field(tail: &str, kind: &str, field: &str) -> Option<String> {
     })
 }
 
-/// Claude's rolling auto-description — `{"type":"ai-title","aiTitle":…}`.
+/// Claude's own auto-description — `{"type":"ai-title","aiTitle":…}`. NOT
+/// rolling, despite how often it is re-emitted: LEDGER D24 measured up to 85
+/// `ai-title` lines in one transcript and never more than one distinct VALUE
+/// per session. It is a subtitle for the conversation, not a running commentary.
 /// THE source for `rec.summary` (#79): it is what Claude Code writes where it
 /// once wrote `type:"summary"`, present in 74 of 153 local transcripts as of
 /// 2026-07-29 while `type:"summary"` appears in 0 of them.
@@ -552,7 +555,7 @@ const CLAUDE_PID_ENV: &str = "CLAUDE_PID";
 ///
 /// Prefers the payload's `transcript_path`, which is the only source that is
 /// right under BOTH failure modes of the derived path: a relocated session
-/// (the file moves) and a rotated session id (a `/clear` or resume starts a
+/// (the file moves) and a rotated session id (a `/clear` starts a
 /// new file, #97). Deriving from `rec.cwd` + `uuid` misses both.
 ///
 /// `transcript_path` is untrusted input whose CONTENTS get written into the
