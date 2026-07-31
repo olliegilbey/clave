@@ -17,6 +17,15 @@ here. Foundation + spikes S0/S0b/S1/S2 are implemented and **PASS** (§9).
 > Changed: §1, §2 #2/#11, §3, §4 (Zellij facts), §5, §6.2/§6.4/§6.5/§6.6/§6.7/§6.8,
 > §7–§10.
 
+> **Revision 2026-07-31 (session-id rotation + shipped drift):** Claude Code
+> **rotates its session id on `/clear`**, which breaks the one thing this spec
+> assumed was constant — that the minted uuid is the payload id, the transcript name
+> and the join key at once. It is now the **store key only** (#97, #87, #99).
+> Alongside it: `--name` is no longer passed to claude (#91), and the bar's width is
+> a compile-time constant. Changed: invariants #2/#3, §4 (CLI), §5 (four shipped
+> record fields), §6.1, §6.3 (liveness), §6.5, §6.6 (width), §8. Measured facts here
+> are marked with the CLI version they were measured on.
+
 ---
 
 ## 0. How to use this document
@@ -81,12 +90,21 @@ Spanish for *key/keystone* (keyboard-driven, central); archaic past tense of
 2. **`clave` owns identity.** The label (`cwd · branch · summary`) and colours are
    computed by `clave`; the label is written onto the **real Zellij tab**
    (`rename_tab_with_id`, on label *change* only — so manual renames stick between
-   changes) and the bar renders `TabInfo.name` for every row. The launch `--name` is
-   a courtesy push into Claude's own session list; never read `/rename` or `/color`
-   back — they are not exposed (see §4).
+   changes) and the bar renders `TabInfo.name` for every row. (Revised 2026-07-31,
+   #91: the launch `--name` courtesy push is GONE — clave's own label came back as a
+   `custom-title` and filled the bar's title chip on an agent nobody had named, §6.1.)
+   Never read `/rename` or `/color` back — they are not exposed (see §4).
 3. **The minted UUID is the join key.** `clave` generates each session's UUID and
-   passes it to `--session-id`. That UUID locates the transcript, correlates every
-   hook event, and joins the store row to its Zellij pane. Everything keys off it.
+   passes it to `--session-id`. It keys the store row and joins it to its Zellij
+   pane, stable for the life of the row. (Revised 2026-07-31, #97/#87/#99: it is
+   **only** that. Claude rotates its own session id on `/clear` — new id, new
+   transcript — so the minted uuid no longer locates the transcript and no longer
+   matches the hook payload. Hook correlation is `CLAVE_AGENT_UUID`, carried across
+   `spawn`'s exec and gated on `CLAVE_AGENT_PID == CLAUDE_PID` so a nested `claude`
+   that merely inherited the env cannot write this row (`hook::resolve_row`, §6.5);
+   the transcript is `payload.transcript_path`, canonicalized and confined under the
+   claude config dir (`hook::resolve_transcript`). See UBIQUITOUS_LANGUAGE, "minted
+   uuid vs live session id".) Everything in the store keys off the minted uuid.
 4. **Status is event-driven, never polled.** Derive state from Claude hooks and turn
    lifecycle — not from screen text or timers.
 5. **Spawn is idempotent → restart-safe.** (Revised 2026-07-17, C8 redesign.) The
@@ -153,10 +171,16 @@ Spanish for *key/keystone* (keyboard-driven, central); archaic past tense of
 ## 4. Verified knowledge base (don't re-research)
 
 ### Claude Code CLI (`claude --help`, v2.1.197 on target)
+
+> Version discipline (2026-07-31): the flag survey below is v2.1.197; the rotation
+> and pid facts measured for #97/#99 are **v2.1.220**, and each is stated with the
+> version it was measured on. Neither is a general truth about Claude Code.
+
 - `--session-id <uuid>` — start a session with a specific UUID. **We mint it.**
   (`--help` text is ambiguous on create-vs-resume; spike **S0** pins that a *fresh*
   UUID creates.)
 - `-n, --name <name>` — set the session display name at launch. **No `--color` flag.**
+  **clave does not use it** (2026-07-31, #91 — §6.1 has the why).
 - `-r, --resume <id>` — resume by UUID. (`--resume` with no id shows Claude's own
   picker, but clave does **not** use that: it must know the UUID up front so the pane
   command is the idempotent `clave spawn <uuid>` — see §6.3 and invariant #5.)
@@ -200,8 +224,9 @@ Spanish for *key/keystone* (keyboard-driven, central); archaic past tense of
 ### Claude Code hooks (the status source)
 - Configured **globally** in `~/.claude/settings.json` (managed on this machine from
   the dotfiles repo at `src/.claude/settings.json`). Every session reports; there is
-  no per-session hook config — so `clave hook` must **no-op fast** for any
-  `session_id` not in its store.
+  no per-session hook config — so `clave hook` must **no-op fast** for any event it
+  cannot resolve to a store row (2026-07-31: *resolve*, not `session_id` lookup —
+  §6.5, #97).
 - Each hook receives JSON on **stdin** incl. `session_id`, `cwd`, `transcript_path`,
   `permission_mode`, `hook_event_name`.
 - Status-relevant events: `UserPromptSubmit` (turn starts → working; also bumps
@@ -302,8 +327,18 @@ never serialises unrelated sessions' hooks.
   "worktree":        null,       // path if spawned in a git worktree, else null
   "label_source":    "first_prompt", // first_prompt|summary; once summary, stop re-scanning jsonl (§6.4)
   "tab_id":          4,          // zellij tab hosting the agent (§6.6 B); null until bound; session-scoped
-  "stale":           false       // 2026-07-17: `clave open` found cwd missing → bar ✗; NOT a status
+  "stale":           false,      // 2026-07-17: `clave open` found cwd missing → bar ✗; NOT a status
                                  // (statuses are hook lifecycle); cleared by a later successful open
+  // added 2026-07-31 (the four fields shipped since; all `serde(default)` so a
+  // pre-field store file still parses — a missing key fails the WHOLE store):
+  "title":           null,       // Claude's session rename, from the transcript's `custom-title`;
+                                 // null = never renamed (most rows) → blank title chip (#69, #91)
+  "summary":         "rotate the signing keys", // the words segment, held structurally rather than only inside
+                                 // `label`; written from `ai-title` (the summary tier is extinct, #79)
+  "default_branch":  "main",     // the REPOSITORY's default branch, resolved once at `add` time;
+                                 // null = not discoverable (no remote) → bar falls back (#86)
+  "live_session":    null        // the id Claude is using NOW, when it is no longer `uuid` (#99).
+                                 // null = the two are not KNOWN to disagree → use `uuid`
 }
 ```
 
@@ -336,7 +371,7 @@ last-writer-by-`seq` wins with no lost update. The uuid→pane join lives in the
 **Decided:**
 - Existence check (via the shared munging helper, §4): if
   `~/.claude/projects/<munged-cwd>/<uuid>.jsonl` exists → `exec claude --resume
-  <uuid>`; else → `exec claude --session-id <uuid> --name <label>` in `<cwd>`. `exec`
+  <uuid>`; else → `exec claude --session-id <uuid>` in `<cwd>`. `exec`
   (replace process) so the pane *is* Claude.
 - A brand-new agent has no jsonl ⇒ create path; a resume can never race a
   not-yet-written jsonl. Spike **S0** confirms `--session-id <fresh-uuid>` *creates*
@@ -345,7 +380,40 @@ last-writer-by-`seq` wins with no lost update. The uuid→pane join lives in the
   that was wrong — `--resume` errors when no jsonl exists. A UUID collision is a
   genuine error: surface it, don't silently resume.)
 - `--name` is set only on create; the bar label is clave-owned and rendered by
-  `clave-bar`, so nothing is re-pushed on resume.
+  `clave-bar`, so nothing is re-pushed on resume. **Superseded — see the revision
+  below: it is not set at all.**
+
+> **Revision 2026-07-31 (#91, #99 — what `spawn` actually execs today):** two of the
+> three flags above have moved.
+>
+> **`--name` is never passed** (#91). Claude recorded it as a `custom-title`
+> transcript entry, indistinguishable from a user `/rename`, so the hook read
+> clave's own label straight back into `AgentRecord.title` and the bar rendered a
+> filled title chip on an agent nobody had named. Filtering it downstream was tried
+> and refused — the per-turn header block re-emits the current title, so it
+> reappears on turn 2 and turn 30. It also cost the user something: with no
+> `custom-title`, `claude --resume`'s own picker falls back to the `aiTitle`, a
+> description of the actual work, where `--name` overwrote it with `<dir> ·
+> <branch>` — identical across every agent on the same branch. The
+> `--name <label>` ARGUMENT stays parseable on purpose: zellij has this exact argv
+> baked into the serialized layouts of already-running sessions, and a pane whose
+> replayed command no longer parses fails to resurrect. Create is
+> `claude --session-id <uuid>`, nothing else.
+>
+> **Resume names the LIVE conversation, not the minted uuid** (#99, fixed in #101).
+> `spawn::resume_target` execs `--resume <live_session>` when the store row
+> remembers a rotated id AND that transcript is on disk; otherwise it falls back to
+> the minted uuid on the §6.1 existence check exactly as before (a stored id that
+> would reach argv as a flag is refused the same way). Resurrecting on the minted
+> uuid after a `/clear` reopens the PRE-rotation conversation and orphans everything
+> since — live-validated 2026-07-31, the resumed agent knew only the pre-clear
+> content. `--resume <superseded-id>` does not re-chain lineage; it reopens that
+> file and appends. (Rotation triggers: §6.5.)
+>
+> Both paths also export `CLAVE_AGENT_UUID` and `CLAVE_AGENT_PID` before the exec —
+> the hook's identity channel (invariant #3, §6.5). The env is wired once, outside
+> the create/resume match, so only the flag varies.
+
 - On start, `clave spawn` registers its pane with `clave-bar`:
   `zellij pipe --name clave-register -- '{"uuid":…, "pane_id":<$ZELLIJ_PANE_ID>}'`
   so the plugin can map uuid → pane → live tab position (spike **S2** verifies
@@ -384,7 +452,15 @@ self-hydrates on load via `RunCommands` — §6.6).
     permanent ZOMBIE under claude, and zellij serialized the pane as
     `command="<defunct>"` — blinding liveness AND resurrection; the register
     pipe is therefore double-forked (reparented to init, nothing left in the
-    pane's tree).
+    pane's tree). **(Revised 2026-07-31, #99: the scanned id is no longer
+    necessarily the row's uuid.** A resurrected pane runs
+    `--resume <live_session>` — the ROTATED id — so every scan must be
+    translated back through the store: `add::live_uuid_union` maps a scanned id
+    to the row whose `live_session` it is, and `open::open_is_live` accepts
+    either. Read literally, a rotated live agent looks DEAD: an unattached
+    resume candidate for a session already in a tab, and a dwell-open that
+    spawns a SECOND tab on it. Note this blind spot is one the resurrection fix
+    itself created — before it, the pane ran `--resume <minted>`.)
   - *Rejected:* letting `claude --resume` show its own picker. It's tempting (no
     picker to build), but the UUID would only be known *after* launch (via the
     `SessionStart` hook), leaving the pane command as `claude --resume` — which
@@ -453,9 +529,51 @@ self-hydrates on load via `RunCommands` — §6.6).
 
 ### 6.5 Status + `clave hook <event>`
 **Goal:** translate hook events into per-agent status, keyed by the UUID we own.
+
+> **Revision 2026-07-31 (#97, #87, #99 — the payload's id is not the row):**
+> **Claude Code rotates its session id on `/clear`** — a new id AND a new transcript
+> — while `--resume` does **not**: it continues the resumed transcript under that
+> transcript's own id, so a resurrected pane keeps the id clave handed it. Both
+> measured 2026-07-31 on **CLI v2.1.220**; neither is a documented guarantee, and
+> the code fails closed if either changes.
+>
+> The consequence is why this section moved. Keyed on the payload id alone, a row
+> silently orphans the moment the user clears: the hook finds no row, takes its
+> untracked fast path, and the row never stamps `last_interacted` again — never
+> rises, never changes status, never rolls title/summary, while the tab is alive and
+> being typed into. Measured at **5.9 days stale** on the maintainer's daily driver.
+> Invisible to every test, because fixtures use one uuid for the life of a row, so
+> rotation is not an input anywhere.
+>
+> Two independent repairs, both in `hook.rs`: `resolve_row` for WHICH row (below),
+> and `resolve_transcript` for WHICH FILE — `payload.transcript_path`, canonicalized
+> and confined inside `<claude_config_dir>/projects` with a `<session_id>.jsonl`
+> filename check, because that string arrives on hook stdin and what is read from it
+> is WRITTEN into the store (#87/#98). When the row was reached BY ROTATION it
+> returns `None` rather than the derived path: the derived path names the
+> pre-rotation transcript, which still exists and still reads, so falling back would
+> roll title/summary out of an abandoned conversation — a subtler bug than the
+> freeze. No tail this event means the held values stand.
+>
+> The env fallback is gated because env is inherited: a nested `claude` (an agent
+> shelling one out, `clave dev`'s own `claude -p`) carries `CLAVE_AGENT_UUID` too,
+> and its unknown session id would take the same fallback and drive the PARENT
+> agent's status, ordering and prose. `CLAUDE_PID` is Claude's own pid — verified
+> 2026-07-31 that a nested `claude` reports its own, not its parent's — and `exec`
+> preserves the pid, so `clave spawn`'s `process::id()` IS the agent Claude's.
+> Missing value, stale pid or mismatch all resolve to `None`: the worst case is the
+> old freeze, never a write to the wrong agent. It is **not** a defence against a
+> deliberate local caller (same user, same machine, who could write the store
+> directly).
+
 **Decided:**
-- `clave hook <event>` reads the hook JSON from stdin and maps `session_id` → agent.
-  If the session is **untracked** it exits 0 immediately on a **lock-free** read
+- `clave hook <event>` reads the hook JSON from stdin and resolves it to a store
+  row (`hook::resolve_row`, revised 2026-07-31 — #97; the plain `session_id` →
+  agent map it replaced is below). The order is: the payload's `session_id` **when
+  it names a row** — the ordinary case, first, so nothing about an unrotated
+  session changes — else `CLAVE_AGENT_UUID` **gated on
+  `CLAVE_AGENT_PID == CLAUDE_PID`**, else decline.
+  If the row is **untracked** it exits 0 immediately on a **lock-free** read
   (§5) — clave must never delay or perturb other sessions. It **never emits a
   permission decision**: a `PermissionRequest`/PreToolUse hook *can* approve/deny tool
   use, so clave's handler is strictly pass-through and any internal error still exits
@@ -509,7 +627,12 @@ self-hydrates on load via `RunCommands` — §6.6).
   interaction recency · row **decoration** = clave's pushed status (S1 pipe
   contract unchanged).
 - **Rows:** status glyph (agent tabs only; state colour) + `TabInfo.name`, clamped to
-  the bar width (~24 cols, configurable) with a trailing `…`. Plain tabs render
+  the bar width with a trailing `…`. (Revised 2026-07-31: the width is
+  `BAR_TARGET_COLS = 54` expanded / `COLLAPSED_TARGET_COLS = 30` collapsed —
+  **compile-time constants in `clave-types`, deliberately NOT configurable**, one
+  definition shared by the width seek, the renderer and the three KDL generators;
+  S8 §3.2 rejects every config channel as the #43/#44 mixed-artifact shape. The
+  "~24 cols, configurable" here and in §6.4 predates the ratified design.) Plain tabs render
   name-only. Focused row highlighted. No repo grouping, no per-repo colours
   (deleted). **Dormant rows** (2026-07-17): ◌ glyph, dimmed, label from the
   store row; transient ↻ while an open's spawn is in flight (flips to live via
@@ -743,7 +866,7 @@ Alt+a → clave add ──┐ pick repo (fzf/zoxide) · new|resume · mint/pick 
                     │                              │
    clave spawn pipes clave-register {uuid,pane_id}─┘
                     │
-Claude hooks ──► clave hook <event>   (stdin JSON; session_id == uuid)
+Claude hooks ──► clave hook <event>   (stdin JSON; row = payload id, else env+pid)
                     │ update store (lock+atomic) · map status · bump recency
                     ▼ zellij pipe --name clave-status -- <AgentSnapshot>
             clave-bar ──► rows = TabUpdate · order = recency · glyph on agent rows
@@ -751,6 +874,12 @@ Claude hooks ──► clave hook <event>   (stdin JSON; session_id == uuid)
                     ▲ click / Alt nav → MessagePlugin clave-nav → focus_pane_with_id
                     └ focus change (TabUpdate) → clave focus <uuid> → clears unread
 ```
+
+> **Revision 2026-07-31 (#97):** this diagram used to assert `session_id == uuid` on
+> the hook line. That equality WAS the bug — it holds only until the first `/clear`,
+> after which the payload carries a rotated id that names no row. Resolution is
+> `hook::resolve_row` (payload id when it names a row, else `CLAVE_AGENT_UUID` gated
+> on the pid), §6.5.
 
 ---
 
