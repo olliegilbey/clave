@@ -627,31 +627,48 @@ nothing in it can exec a real `claude --resume`.
 1. From an agent you have already `/clear`ed and prompted again (item 8, steps
    3–4), say something the pre-`/clear` conversation cannot know — a number is
    easiest: *"remember the number 7272"*.
-2. Note both transcript ids under `~/.claude/projects/<munged cwd>/`. There will
-   be two: the minted one, frozen at the clear, and the live one.
-3. Close the tab (`Alt+w`) and reopen the row from the bar.
-4. Ask the resurrected agent, with no tool access, what number it was told.
+2. Note the two transcript **ids and mtimes** under
+   `~/.claude/projects/<munged cwd>/`: the minted one, frozen at the clear, and
+   the live one still moving. (Do not count files — that dir holds one jsonl per
+   session that has ever run in this cwd.)
+3. **Check `clave-dev dev status` shows this row's `live_session` set to the
+   rotated id, BEFORE closing the tab.** If it is `null`, stop: the pointer the
+   fix reads was never written, and everything below will reproduce the pre-fix
+   answer for an item-8 reason. This is the step that makes the rest mean
+   something.
+4. Close the tab (`Alt+w`) and reopen the row from the bar.
+5. Ask the resurrected agent, with no tool access, what number it was told.
 
 ### Correct
 
 - **It answers 7272.** The pane came back on the post-`/clear` conversation,
   which is the entire fix.
-- **The LIVE transcript is the one that grows.** After step 3 the minted file's
-  mtime must not move; the rotated file's must. A minted file that gets appended
-  to means the exec targeted the wrong id — the pre-fix behaviour exactly.
+- **The LIVE transcript is the one that grows.** Compare mtimes against step 2
+  after step **5**, not after the reopen — resuming writes nothing, so both
+  files sit still until the agent actually answers. The rotated file's mtime
+  must move and the minted one's must not. A minted file that gets appended to
+  means the exec targeted the wrong id: the pre-fix behaviour exactly.
 - **`clave-dev dev status` still keys the row on the MINTED uuid**, and its
   `live_session` names the rotated id. The row's identity must not follow the
   conversation; if the store key moved, binds and the tab timeline moved with
-  it, which is a worse bug than the one being fixed.
-- **The row's `summary` does not regress.** The pre-fix symptom was visible
-  without any prompting: the summary rolled backwards to the older `ai-title`,
-  because the bar was faithfully describing a conversation that went backwards.
+  it, which is a worse bug than the one being fixed. Note its top-level
+  `live_uuids` is the RAW dump scan and is deliberately not translated through
+  the store — a rotated id appearing there is expected, not a finding.
+- **The row's `summary` rolls forward, not back.** After step 5 it describes the
+  new exchange; a summary that reverts to a pre-`/clear` `ai-title` is the
+  pre-fix symptom. Nothing moves before step 5 — `title` and `summary` only roll
+  on `UserPromptSubmit` and `Stop`, and resurrection fires neither.
 
 ### Vacuous if
 
 - **The agent never rotated.** No `/clear` between spawn and resurrection means
-  minted == live and every path agrees — the run proves nothing. Two transcript
-  files in the project dir is the check.
+  minted == live and every path agrees — the run proves nothing. The check is
+  the two ids from step 2, not the file count.
+- **`live_session` was never written** (step 3 said `null`). The row's live
+  pointer is what the fix reads; without it resurrection correctly falls back to
+  the minted uuid, so you would reproduce the pre-fix answer while testing #97,
+  not #99. It is written only by a hook that fired AFTER the clear and passed
+  the pid gate.
 - **You asked the resurrected agent to *check* the number** (grep, a file, its
   own transcript). It will find it and answer correctly from the wrong
   conversation. Ask it what it REMEMBERS, with no tools.

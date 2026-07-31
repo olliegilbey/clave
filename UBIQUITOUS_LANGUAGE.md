@@ -24,7 +24,7 @@ here in the same change.**
 | **plugin pane** | The pane running `clave-bar`, one per tab. Every tab has its own bar instance. | the sidebar as a concept |
 | **agent session** | One Claude Code conversation, identified by its minted **uuid**. Say "agent session" or "conversation" — never bare "session". | a zellij session |
 | **minted uuid** | The id `clave add` generates and passes as `--session-id`. The store's join key, **stable for the life of the row** — binds, the tab timeline and every wire field depend on it never moving. | the session id in a hook payload |
-| **live session id** | The id Claude is using *right now*, in the hook payload and in the transcript filename. Starts equal to the minted uuid and **changes** when the pane gets a fresh conversation (a `/clear`, and probably a resume). Never a join key — but it IS remembered, as `AgentRecord::live_session` (`None` while the two agree), because resurrection has to name a conversation before any Claude exists to report one (#99). | the minted uuid |
+| **live session id** | The id Claude is using *right now*, in the hook payload and in the transcript filename. Starts equal to the minted uuid and **changes** when the pane gets a fresh conversation (a `/clear`, and probably a resume). Never the STORE's key — the minted uuid is that, always. It is a translation input: `AgentRecord::live_session` remembers it (`None` while the two are not known to disagree) because resurrection has to name a conversation before any Claude exists to report one, and `resume_candidates`, `live_uuid_union` and `open_is_live` map it back to the row it belongs to (#99). | the minted uuid |
 
 > The single most expensive ambiguity in this project. When you write "session",
 > qualify it.

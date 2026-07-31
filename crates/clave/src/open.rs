@@ -28,8 +28,20 @@ pub enum OpenDecision {
 /// `claude`, C7 corollary 2026-07-21), so a live agent read as dead and a
 /// dwell-open spawned a DUPLICATE tab. The intended dwell path opens a DORMANT
 /// row (tab_id None), so the bind check is a pure safety add there.
+///
+/// The scan is matched against the row's LIVE session id as well as its uuid
+/// (#99). A resurrected rotated pane runs `claude --resume <live-id>`, so the
+/// dump names the conversation, not the row — and this fallback exists for
+/// precisely the case where `tab_id` is None, so reading it literally would
+/// call a live agent dormant and dwell-open a SECOND tab on it. That is the
+/// double-attach this function was written to prevent, reintroduced by the
+/// thing that fixed the resurrection. `add::live_uuid_union` is the same
+/// translation for the picker; this one keeps a single row's answer local.
 pub fn open_is_live(row: &AgentRecord, dump_layout: &str) -> bool {
-    row.tab_id.is_some() || crate::add::live_uuids(dump_layout).contains(&row.uuid)
+    row.tab_id.is_some()
+        || crate::add::live_uuids(dump_layout)
+            .iter()
+            .any(|u| *u == row.uuid || Some(u.as_str()) == row.live_session.as_deref())
 }
 
 pub fn open_decision(_row: &AgentRecord, is_live: bool, cwd_exists: bool) -> OpenDecision {
@@ -186,6 +198,17 @@ mod tests {
         // real dump-layout shape live_uuids parses).
         let dump = "tab {\n  pane command=\"claude\" {\n    args \"--resume\" \"u2\"\n  }\n}";
         assert!(open_is_live(&unbound, dump));
+        // …and the fallback survives ROTATION (#99): the resurrected pane runs
+        // `--resume <live-id>`, which is not the row's uuid. Read literally,
+        // this unbound-but-live row would be dwell-opened a SECOND time.
+        let mut rotated = rec("u3");
+        rotated.live_session = Some("rot-3".into());
+        let dump = "tab {\n  pane command=\"claude\" {\n    args \"--resume\" \"rot-3\"\n  }\n}";
+        assert!(open_is_live(&rotated, dump));
+        assert!(
+            !open_is_live(&rec("u3"), dump),
+            "a stranger's id is not this row"
+        );
     }
 
     #[test]

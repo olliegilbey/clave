@@ -59,26 +59,32 @@ pub fn spawn_mode(claude_dir: &Path, physical_cwd: &str, uuid: &str) -> SpawnMod
 /// upgrade time, silently, across the whole fleet.
 ///
 /// So the store's `live_session` — written by the hook from the payload — is
-/// preferred when it is BOTH different from the minted uuid and present on
-/// disk. Existence is what keeps this from being trust: a stale id (the
+/// preferred whenever the transcript it names is present on disk. That it
+/// DIFFERS from the minted uuid is guaranteed upstream, not checked here: the
+/// hook stores agreement as `None` (see `AgentRecord::live_session`), and if an
+/// equal value ever did arrive both paths agree anyway — `(Resume, uuid)` when
+/// that transcript exists, `(Create, uuid)` when it does not.
+///
+/// Existence is what keeps the preference from being trust: a stale id (the
 /// transcript deleted, the session relocated to another cwd) degrades to
 /// exactly the pre-#99 behaviour rather than handing `--resume` an id it will
-/// reject, which would leave the pane dead instead of merely behind.
+/// reject, which would leave the pane dead instead of merely behind. The
+/// leading-`-` refusal is the same instinct one step earlier — `--resume` takes
+/// an OPTIONAL value, so a stored id shaped like a flag would be read by
+/// `claude` as a flag rather than rejected as a session. It is stored payload
+/// text reaching argv; `resolve_transcript` validates its sibling field from
+/// the same payload, and this one should not be the exception.
 ///
 /// The returned id is the exec ARGUMENT only. The row's identity on the wire
 /// stays the minted uuid — `CLAVE_AGENT_UUID`, the store key, the bar's join —
 /// so nothing downstream has to learn about rotation.
-///
-/// A live id EQUAL to the minted uuid needs no branch here: the hook stores
-/// that state as `None` (see `AgentRecord::live_session`), and if one ever
-/// arrived anyway both paths would produce the same `(Resume, uuid)`.
 pub fn resume_target(
     claude_dir: &Path,
     physical_cwd: &str,
     uuid: &str,
     live_session: Option<&str>,
 ) -> (SpawnMode, String) {
-    if let Some(live) = live_session
+    if let Some(live) = live_session.filter(|l| !l.starts_with('-'))
         && jsonl_path(claude_dir, physical_cwd, live).exists()
     {
         return (SpawnMode::Resume, live.to_string());
@@ -195,6 +201,19 @@ mod tests {
         assert_eq!(
             resume_target(&claude, cwd, "unminted", Some("unminted")),
             (SpawnMode::Create, "unminted".to_string())
+        );
+        assert_eq!(
+            resume_target(&claude, cwd, "minted", Some("minted")),
+            (SpawnMode::Resume, "minted".to_string())
+        );
+
+        // A stored id shaped like a FLAG never reaches argv. `--resume` takes an
+        // optional value, so `claude` would read it as a flag rather than
+        // rejecting it as a session id.
+        plant("--dangerously-skip-permissions");
+        assert_eq!(
+            target(Some("--dangerously-skip-permissions")),
+            (SpawnMode::Resume, "minted".to_string())
         );
     }
 
