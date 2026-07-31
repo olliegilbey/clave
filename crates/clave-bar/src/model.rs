@@ -269,6 +269,27 @@ fn basename(path: &str) -> &str {
 }
 
 pub struct BarModel {
+    /// The collapse mode is not known yet, so the seek must not act (D37).
+    ///
+    /// A newborn model is `collapsed: false` because that is the only thing it
+    /// can assume, but the mode PERSISTS in the store — so a fleet left
+    /// collapsed loads a bar that believes it is expanded, seeks 54, and is
+    /// corrected to 30 the moment `clave snapshot` returns. Ollie watched
+    /// exactly that: born at the right width (D36), grown wide by the plugin,
+    /// then shrunk back about half a second later.
+    ///
+    /// Since D36 the pane is BORN at the width its true mode wants, so any seek
+    /// before hydration can only move it away from correct. Gating is therefore
+    /// strictly better than seeking on a guess.
+    ///
+    /// **Defaults to `false` (= ready) so that every existing model test keeps
+    /// its exact meaning** — they construct models that are by definition in a
+    /// known state. `main.rs`'s `load()` is the one place that sets it, marking
+    /// the real plugin as awaiting the snapshot it has just asked for. If that
+    /// shellout never returns the bar simply stays at its birth width, which is
+    /// correct for the launch tab and stale-but-static otherwise — strictly
+    /// better than today's guaranteed wrong-then-heal.
+    awaiting_hydration: bool,
     /// §5 pipe contract: apply only strictly-newer seq.
     seq: u64,
     agents: Vec<Agent>,
@@ -394,6 +415,7 @@ impl Default for BarModel {
             // c8-cold-start 2026-07-18), so a newborn's cols are
             // window-dependent and must converge on the template.
             seek_budget: SEEK_BUDGET,
+            awaiting_hydration: false,
             seq: 0,
             agents: Vec::new(),
             uuid_to_pane: BTreeMap::new(),
@@ -621,6 +643,8 @@ impl BarModel {
             return Vec::new(); // stale/out-of-order: discard (S1)
         }
         self.seq = snap.seq;
+        // The mode below is now authoritative, so the seek may act (D37).
+        self.awaiting_hydration = false;
         self.agents = snap.agents;
         // REPLACE the tab timeline — the store's map is authoritative and
         // self-healing by construction; merging deltas is the exact failure
@@ -1193,6 +1217,12 @@ impl BarModel {
         self.seek_drift = None;
     }
 
+    /// Mark this model as awaiting its first snapshot — `main.rs` calls it at
+    /// `load()`, right after asking for one. See `awaiting_hydration` (D37).
+    pub fn await_hydration(&mut self) {
+        self.awaiting_hydration = true;
+    }
+
     /// One width-seek step for OUR OWN pane, driven by render cols (each of
     /// our resizes repaints us with the new width — the feedback loop
     /// proven in rounds 9–10; zellij sends no events for plugin resizes).
@@ -1221,6 +1251,14 @@ impl BarModel {
     ///      zellij simply refuses to leave (the granularity floor, C8) is
     ///      accepted in place rather than hammered.
     pub fn width_seek(&mut self, own_cols: usize) -> Vec<Effect> {
+        // D37: the collapse mode is not known yet. Since D36 the pane is BORN
+        // at the width its true mode wants, so a seek on the assumed-expanded
+        // default can only move it away from correct — and then visibly move it
+        // back when `clave snapshot` returns. Budget is NOT consumed: this is a
+        // deferral, not an attempt.
+        if self.awaiting_hydration {
+            return Vec::new();
+        }
         // ONE collapse rule, shared with `widths()` — the profile the rows are
         // drawn at and the width being sought must not drift apart (D16). The
         // OTHER target comes along because acceptance is defined against both
@@ -2033,9 +2071,11 @@ mod tests {
         // bar's cols depend on the window. The seek must be armed at birth
         // to converge on the exact template width from either side.
         // Both start widths are outside the pre-learning ±4 band around
-        // BAR_TARGET_COLS (44) — 45 used to be a shrink toward 30 and is now
-        // one column off target, which is exactly the "the number moved, the
-        // test's meaning did not" trap (#63).
+        // BAR_TARGET_COLS (54 since D19; 44 before) — and both still are, which
+        // is why they did not move here. Re-checked rather than assumed: at 54,
+        // |60 − 54| = 6 and |18 − 54| = 36, both over the ±4 slack. A start
+        // that silently fell INSIDE the band would be the "the number moved,
+        // the test's meaning did not" trap (#63).
         let mut m = BarModel::default();
         assert_eq!(m.width_seek(60), vec![Effect::ShrinkSelf]);
         let mut m = BarModel::default();
@@ -2045,15 +2085,17 @@ mod tests {
     #[test]
     fn seek_collapses_to_the_gutter_despite_coarse_steps() {
         // Round 20 (collapse-in-place): Alt+c drives OWN width between the
-        // template (44, LEDGER D2) and the collapsed profile (30, D17) — the
-        // pane is never suppressed. Zellij resizes in ~5%-of-viewport steps
-        // (7–14 cols), far coarser than the 14-column separation between the
-        // two targets: the step is LEARNED from each resize's observed effect
-        // and acceptance is within half a step (round-9 lesson: naive loops
+        // template (54, LEDGER D2 then D19) and the collapsed profile (30,
+        // D17) — the pane is never suppressed. Zellij resizes in
+        // ~5%-of-viewport steps (7–14 cols). Since D19 those steps are FINER
+        // than the 24-column separation between the two targets rather than
+        // coarser than it, which is what retires D26's overlap reservations;
+        // the step is still LEARNED from each resize's observed effect and
+        // acceptance is within half a step (round-9 lesson: naive loops
         // overshoot straight through).
         let mut m = BarModel::default();
         // Already AT the expanded target: nothing to do.
-        assert_eq!(m.width_seek(44), Vec::<Effect>::new());
+        assert_eq!(m.width_seek(BAR_TARGET_COLS), Vec::<Effect>::new());
         let mut m = collapsed_model();
         // 72, not 30: 30 IS the collapsed target now, so the old start width
         // would have converged in zero steps and asserted nothing (#63 —
@@ -2098,10 +2140,14 @@ mod tests {
         }
         // Simulated step 9 (not 7): the ladder from 5 must land on a width
         // that DISTINGUISHES the expanded target from the collapsed one, or
-        // the assertion passes for the wrong target. 5+9k gives 41 (|41−44| =
-        // 3, accepted) where the collapsed target 30 would have stopped at 32
-        // — 14 columns apart, exactly the D15/D17 separation.
-        assert!((cols - 44).abs() <= 4, "ended at {cols} cols");
+        // the assertion passes for the wrong target. 5+9k gives 50, and
+        // |50 − 54| = 4 is inside the half-band (2·4 <= 9), where the collapsed
+        // target 30 would have stopped at 32 — 18 columns away from where this
+        // rests, so a target mix-up cannot pass here.
+        assert!(
+            (cols - BAR_TARGET_COLS as i64).abs() <= 4,
+            "ended at {cols} cols"
+        );
     }
 
     #[test]
@@ -2237,10 +2283,13 @@ mod tests {
         // The round-9 live defect, seek edition: an overshoot past the
         // target is recovered by growing, and the half-step band accepts.
         let mut m = collapsed_model();
-        m.toggle(); // expanded → target 44
+        m.toggle(); // expanded → target 54 (D19)
         assert_eq!(m.width_seek(30), vec![Effect::GrowSelf]);
-        // Landed (+14 → 44): learned step 14, on target → accept and retire.
-        assert_eq!(m.width_seek(44), Vec::<Effect>::new());
+        // Landed (+20 → 50): delta 20 is exactly MAX_LEARNABLE_STEP, so it IS
+        // learned, and |50 − 54| = 4 clears the half-step band (2·4 <= 20).
+        // Also unambiguous under D26's second clause — 50 is 4 from the
+        // expanded target and 20 from the collapsed one. Accept and retire.
+        assert_eq!(m.width_seek(50), Vec::<Effect>::new());
         assert_eq!(m.width_seek(30), Vec::<Effect>::new()); // retired
     }
 
@@ -2348,14 +2397,15 @@ mod tests {
         // Desynced: expanded while the store says collapsed.
         let mut missed = BarModel::default();
         missed.apply_snapshot(snap(1, vec![])); // hydrated expanded, seq 1
-        let converged = missed.width_seek(44); // within band → seek done
+        // AT the expanded target, so "within band" needs no slack to be true.
+        let converged = missed.width_seek(BAR_TARGET_COLS); // within band → done
         assert_eq!(converged, Vec::<Effect>::new());
         let mut heal = snap(2, vec![]);
         heal.collapsed = true;
         missed.apply_snapshot(heal);
         assert!(missed.collapsed, "missed-pipe instance did not heal");
         assert_eq!(
-            missed.width_seek(44),
+            missed.width_seek(BAR_TARGET_COLS),
             vec![Effect::ShrinkSelf],
             "healing must re-arm the seek toward the collapsed target"
         );
@@ -3444,6 +3494,51 @@ mod tests {
         step.max(8) / 2
     }
 
+    /// D37, found live: a bar loading into a fleet that was left COLLAPSED
+    /// believes it is expanded until `clave snapshot` answers. Acting on that
+    /// belief grows a correctly-born 30-column bar toward 54, then shrinks it
+    /// back when the snapshot lands — visible jank at every launch and every
+    /// new tab.
+    ///
+    /// The first assertion is the one that matters and the one no existing test
+    /// could make: an ungated model at 30 emits `GrowSelf`, which is precisely
+    /// the wrong move. Asserting only the post-hydration half would pass
+    /// whether or not the gate exists.
+    #[test]
+    fn a_bar_awaiting_hydration_does_not_seek_on_its_assumed_mode() {
+        // Ungated, for contrast: believing itself expanded, it grows away from
+        // the width it was correctly born at.
+        let mut ungated = BarModel::default();
+        assert_eq!(
+            ungated.width_seek(COLLAPSED_TARGET_COLS),
+            vec![Effect::GrowSelf],
+            "the pre-D37 behaviour this gate exists to prevent"
+        );
+
+        let mut m = BarModel::default();
+        m.await_hydration();
+        assert_eq!(
+            m.width_seek(COLLAPSED_TARGET_COLS),
+            Vec::<Effect>::new(),
+            "seeked before knowing its own collapse mode"
+        );
+        // The budget is intact — a deferral must not spend an attempt, or a
+        // slow snapshot would leave the bar unable to correct a stale birth.
+        assert_eq!(m.seek_budget, SEEK_BUDGET);
+
+        // The snapshot lands carrying the real mode; the seek is live again and
+        // now agrees with the width the pane was born at, so it stays put.
+        let mut collapsed_snap = snap(1, vec![]);
+        collapsed_snap.collapsed = true;
+        m.apply_snapshot(collapsed_snap);
+        assert!(m.collapsed);
+        assert_eq!(
+            m.width_seek(COLLAPSED_TARGET_COLS),
+            Vec::<Effect>::new(),
+            "a correctly-born collapsed bar must not move"
+        );
+    }
+
     #[test]
     fn harness_newborn_converges_on_the_template_from_above() {
         // A percent-sized birth lands window-dependent and the birth-armed seek
@@ -3451,12 +3546,18 @@ mod tests {
         //
         // The START WIDTH is chosen to force MORE THAN ONE resize, and that is
         // the point of the test — one step would only prove the pre-learning
-        // ±4 slack. With step 12: 66 → 54 (diff 10 > the learned band half 6,
-        // so it acts again) → 42 (diff 2, accepted). The old start of 60 drove
-        // two steps against the old target of 30 but only ONE against 44 — a
-        // test that stayed green and quietly covered less (#63 shape).
+        // ±4 slack. RE-DERIVED for the 54 target (D19), because the old start
+        // of 66 lands 66 → 54 in a single step and would have gone green while
+        // covering half of what it claims. Requiring the first landing outside
+        // the band and the second inside gives `S − 24 ∈ [48, 60]` and
+        // `|S − 66| > 6`, so S > 72: at S = 78, 78 → 66 (diff 12 > the learned
+        // band half 6, so it acts again) → 54 (diff 0, accepted).
+        //
+        // This is the third time this start has had to move with the target,
+        // and each time the failure mode is the same one (#63 shape): a test
+        // that stays green and quietly covers less.
         let mut m = BarModel::default();
-        let mut sim = SimZellij::new(66, 12, 0, 200, false);
+        let mut sim = SimZellij::new(78, 12, 0, 200, false);
         let steps = drive(&mut m, &mut sim, None);
         assert!(
             steps >= 2,
@@ -3644,16 +3745,29 @@ mod tests {
                     BAR_TARGET_COLS
                 };
                 // The band is HALF a step — except where the lattice is coarse
-                // enough for the two targets' bands to overlap (an effective
-                // step at or above the 14-column separation, LEDGER D21).
-                // There, `converged` refuses the overlap outright and the
+                // enough for the two targets' bands to overlap. There,
+                // `converged` refuses the overlap outright and the
                 // disambiguating step can land up to a FULL step out: a
                 // visibly-collapsed bar a few columns off target, rather than a
-                // perfectly-parked one that never moved. Below that separation
-                // the tight half-band still holds, so this does not blanket the
-                // whole space — it names exactly the steps that pay for D21.
+                // perfectly-parked one that never moved.
+                //
+                // **RE-TIGHTENED at D19 as D26 required.** The threshold is
+                // `>` the separation, not `>=`: at exactly the separation the
+                // tight half-band still holds, and the `>=` form permitted
+                // `|w − target| <= step`, which at step 20 and target 30 spans
+                // 44 — it would have greened "the collapsed bar settled exactly
+                // at the expanded target". The invariant is separately and
+                // exhaustively pinned by `no_width_is_accepted_for_both_targets`,
+                // which mutation testing confirmed is the only test that catches
+                // a reversion.
+                //
+                // At 54/30 the separation is 24 and `effective` cannot exceed
+                // `MAX_LEARNABLE_STEP` (20), so the widening branch is now
+                // UNREACHABLE — kept because it is the seek's actual contract,
+                // not because this geometry needs it. Narrow the targets back
+                // under 20 apart and it goes live again.
                 let effective = step.max(PRE_LEARNING_STEP);
-                let bound = if effective >= BAR_TARGET_COLS.abs_diff(COLLAPSED_TARGET_COLS) {
+                let bound = if effective > BAR_TARGET_COLS.abs_diff(COLLAPSED_TARGET_COLS) {
                     effective
                 } else {
                     effective / 2

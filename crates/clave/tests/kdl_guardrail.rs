@@ -222,7 +222,7 @@ fn layout_kdl_parses_through_real_zellij_parser() {
 fn launch_layout_kdl_parses_in_both_branches() {
     // Empty store → bar-only (template + one plain `clave` tab).
     assert_layout_ok(
-        &setup::launch_layout_kdl("clave", WASM, None),
+        &setup::launch_layout_kdl_for("clave", WASM, None, None, false),
         "launch.kdl (empty store, bar-only)",
     );
     // Non-empty store → the eager most-recent branch, which composes in
@@ -230,7 +230,7 @@ fn launch_layout_kdl_parses_in_both_branches() {
     // that the empty branch never touches.
     let r = eager_record();
     assert_layout_ok(
-        &setup::launch_layout_kdl(BIN_ABS, WASM, Some(&r)),
+        &setup::launch_layout_kdl_for(BIN_ABS, WASM, Some(&r), None, false),
         "launch.kdl (eager most-recent tab)",
     );
 }
@@ -244,7 +244,7 @@ fn add_tab_layout_parses_through_real_zellij_parser() {
     let label = add::sanitize_label("fix \"auth\"\nflow · main");
     let cwd = "/home/o/code/clave/.claude-worktrees/ab12cd34";
     add::validate_cwd(cwd).expect("test cwd must pass validate_cwd");
-    let kdl = add::tab_layout(BIN_ABS, WASM, &label, "u-1", cwd);
+    let kdl = add::tab_layout(BIN_ABS, WASM, &label, "u-1", cwd, None, false);
     assert_layout_ok(&kdl, "add/open one-shot tab layout");
 }
 
@@ -333,14 +333,22 @@ fn backslash_label_is_guarded_through_real_parser() {
     // introducer — `\d` is not a valid escape, so a raw backslash in a label
     // must FAIL zellij's parser. Tripwire premise first: if a future zellij
     // kdl accepts it, this assert flips and the guard can be reconsidered.
-    let raw = add::tab_layout(BIN_ABS, WASM, r"fix the \d regex", "u-1", "/home/o/x");
+    let raw = add::tab_layout(
+        BIN_ABS,
+        WASM,
+        r"fix the \d regex",
+        "u-1",
+        "/home/o/x",
+        None,
+        false,
+    );
     assert!(
         Layout::from_str(&raw, "guardrail:raw-backslash".into(), None, None).is_err(),
         "premise broken: zellij's KDL parser now ACCEPTS a raw backslash — re-vet the guard\n---\n{raw}"
     );
     // The guard: the same label THROUGH sanitize_label must parse clean.
     let label = add::sanitize_label(r"fix the \d regex");
-    let kdl = add::tab_layout(BIN_ABS, WASM, &label, "u-1", "/home/o/x");
+    let kdl = add::tab_layout(BIN_ABS, WASM, &label, "u-1", "/home/o/x", None, false);
     assert_layout_ok(&kdl, "add/open tab layout (backslash-bearing label)");
     // And a backslash-bearing cwd must be REFUSED, not baked.
     assert!(add::validate_cwd(r"/home/o/we\ird").is_err());
@@ -405,9 +413,9 @@ fn keybind_and_layout_plugin_configurations_match() {
     let agreed_keybind_config = kb[0].clone();
 
     let r = eager_record();
-    let launch_eager = setup::launch_layout_kdl(BIN_ABS, WASM, Some(&r));
-    let launch_empty = setup::launch_layout_kdl(BIN_ABS, WASM, None);
-    let one_shot = add::tab_layout(BIN_ABS, WASM, "lbl", "u-1", "/home/o/x");
+    let launch_eager = setup::launch_layout_kdl_for(BIN_ABS, WASM, Some(&r), None, false);
+    let launch_empty = setup::launch_layout_kdl_for(BIN_ABS, WASM, None, None, false);
+    let one_shot = add::tab_layout(BIN_ABS, WASM, "lbl", "u-1", "/home/o/x", None, false);
     let layout_kdl_text = setup::layout_kdl(BIN_ABS, WASM);
 
     for (what, text) in [

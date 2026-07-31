@@ -558,8 +558,8 @@ Three parts, all present in
    space, rule, space, battery, space, provenance, space* — so `13` is `9`
    gutter `+ 1` space after title `+ 1` space after repo `+ 1` right margin
    `+ 1` right cap, and `Widths::min_intact_cols()` is that `13 + title + repo`
-   (`23` collapsed, `27` expanded). Adding a cap **on top of** the 9 counts it
-   twice and totals 31.
+   (`23` collapsed, `29` expanded — D33 took `EXPANDED` to `(9, 7)`). Adding a
+   cap **on top of** the 9 counts it twice and totals 31.
 
    The full collapsed row at `cols = 30`, checkable a line at a time against
    `render_row`:
@@ -577,18 +577,18 @@ Three parts, all present in
                                             30
    ```
 
-   The same map at `EXPANDED`/44 is `9 + 7 + 1 + 7 + 1 + 17 + 1 + 1 = 44`: only
-   `repo` and `summary` moved, which is what makes collapsed a width profile and
-   not a second layout (D16).
+   The same map at `EXPANDED`/54 is `9 + 9 + 1 + 7 + 1 + 25 + 1 + 1 = 54`
+   (`title = 9, repo = 7` per D33): only `title`, `repo` and `summary` moved,
+   which is what makes collapsed a width profile and not a second layout (D16).
 
 2. **The citation.** Every choice names the lock section or LEDGER decision it
    comes from — D17 for holding `title` at 7 across both profiles, D18 for why a
    3-cell repo drops the ellipsis and truncates `"clave"` to `"cla"`.
 3. **Self-checks that re-derive rather than re-read.**
-   `golden_bar_at_forty_four_columns` (`render.rs:907`) was the weaker of the two
+   `golden_bar_at_fifty_four_columns` (`render.rs:907`) was the weaker of the two
    and was strengthened to match: it now recomputes the title, repo and summary
    spans from `Widths::EXPANDED` and asserts `DESIGN_COLS - 2 - summary_start ==
-   17`, so a golden regenerated from a renderer that moved a column fails **here**,
+   25`, so a golden regenerated from a renderer that moved a column fails **here**,
    in arithmetic traceable to lock §2, instead of being accepted as the new
    picture.
 

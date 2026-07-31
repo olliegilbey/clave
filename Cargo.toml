@@ -29,6 +29,11 @@ fs4 = "0.13"
 # respects cwd, and clave runs in arbitrary project dirs where a ./brew
 # would satisfy the probe.
 which = "8"
+# The launching terminal's real width, for the bar pane's birth percent
+# (LEDGER D35). The alternative was shelling out to `tput cols`, which is a
+# PATH-resolved subprocess at launch — "the one leak" that broke v0.1.1. This
+# reads the controlling TTY directly, so it is also correct over SSH.
+terminal_size = "0.4"
 # Store tests write to throwaway dirs, never the real ~/.local/state/clave.
 tempfile = "3"
 # Zellij plugin — EXACT pin (#9, fugu nit): clave leans on observed 0.44.3

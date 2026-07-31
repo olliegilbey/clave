@@ -50,6 +50,12 @@ Not worth a substitution round now. *(Ollie, 2026-07-29.)*
 
 ### D2 — 44 columns is the expanded target (2026-07-29)
 
+> **SUPERSEDED by D19, implemented at D33 (2026-07-30). The expanded target is
+> 54.** Left standing rather than rewritten: 44 was the width every ratified
+> number in the design-lock was chosen against, and the goldens, the preview and
+> `min_intact_cols` all trace back through it. Read this entry as the origin of
+> the arithmetic, not as the current width.
+
 Confirmed. Issue #63 still says "30 → 38 columns" and is wrong; the issue gets
 amended rather than the design changed.
 
@@ -477,6 +483,338 @@ resting-width costs become dead paths:
   ever catch it. Needs a display area around 400 columns; Ollie runs ~280, so it
   is out of reach today. **Not out of reach forever.**
 
+### D37 — The plugin seeks before it knows its own mode. Reduced, not fixed (2026-07-30)
+
+> **PARTIAL. The flash is smaller and still there.** Filed as an issue with the
+> next diagnostic named, rather than chased further — see the task table.
+
+With D36 the *pane* is born at the width its true mode wants. The *plugin* still
+is not: `BarModel::default()` is `collapsed: false`, because that is all a
+newborn can assume, and the real mode arrives only when `clave snapshot` returns
+(shelled out on `PermissionRequestResult`, ~half a second). So the bar grew a
+correctly-born 30-column pane toward 54 and shrank it back on hydration.
+
+`await_hydration()` gates `width_seek` until the first snapshot lands. Budget is
+not consumed, so a genuinely stale birth can still be corrected afterwards.
+
+**The first attempt failed live, and the reason is the interesting part.** The
+gate was set in the `PermissionRequestResult` arm — but `load()` only REQUESTS
+permission; the grant is an event, and zellij renders the pane before it. So the
+gate was armed *after* the first render had already seeked. **The gate was
+correct; its call site was one event too late.** Moving it into `load()` reduced
+the flash measurably but did not remove it, so at least one more mover remains
+unaccounted for.
+
+**The structural finding, which outlives this bug.** Both misses lived in
+`crates/clave-bar/src/main.rs` — `test = false`, and excluded from mutation
+testing by `.cargo/mutants.toml` on the reasoning that "nothing here is reachable
+by ANY test, by construction". The model logic is well covered and
+`a_bar_awaiting_hydration_does_not_seek_on_its_assumed_mode` genuinely proves the
+gate works. **But which line calls it lives in the one file no tier can see**, so
+a correct mechanism wired at the wrong moment passes every gate in the repo. This
+is not a testing gap to be closed with more tests of `main.rs`; it is an argument
+for moving decisions OUT of it.
+
+**The principled fix, deliberately not taken mid-loop:** derive the gate from
+`seq == 0`, which already means "no snapshot has ever been applied" — no field,
+no call site, impossible to misplace, and testable. It was not done here because
+every existing seek test constructs a model and seeks without hydrating, so all
+of them would change meaning, including the ones D26 verified by exhaustive
+census. That is a deliberate change to make on its own, not a step in a live
+debugging loop.
+
+**And the process lesson, which cost two rounds:** both attempts reasoned about
+render ordering instead of measuring it. `docs/dev/TESTING.md`'s instrumentation
+recipe exists for exactly this — a temporary `eprintln!` of `cols` per render,
+hot-reloaded into the sandbox — and reaching for it after the FIRST failure would
+have been cheaper than the second guess.
+
+### D36 — Birth ignored half the state, and the live run caught it (2026-07-30)
+
+**D35 shipped a birth percent computed for the EXPANDED target unconditionally.
+The collapse mode persists across a launch.** So a maintainer who quit collapsed
+got a bar born at 54 that immediately shrank to 30 — the exact jank D35 exists to
+delete, reintroduced from the other side.
+
+Found by running it, not by reading it. Ollie relaunched on a ~95-column window
+and reported the sidebar "took up most of the terminal, then healed". Both halves
+were true and neither was a mystery once measured:
+
+- `launch.kdl` emitted **57%**, and `57% × 95 = 54`. The code did exactly what it
+  was told: put 54 columns on screen. On a 95-column terminal that IS most of the
+  window.
+- The store carried **`collapsed: true`**, so the bar restored collapsed, targeted
+  30, and seeked down from 54.
+
+His `Alt+t` showed the same thing compounded with the stale-template limitation
+D35 already records: the template baked 57% for a 95-column window, he then went
+full width, and 57% of ~230 is ~131 columns — "almost the entire window" — before
+healing to 30.
+
+**Fixed:** `birth_percent_for` takes the target as a parameter, `target_cols_for`
+is the one place outside the plugin that chooses between the two, and
+`launch_session` passes `store.collapsed`. At 95 columns collapsed that is 32%,
+which births 30 — on target, no shrink.
+
+**The lesson is about the shape of the test, not the arithmetic.** Every unit
+test of D35 asserted the percent against the expanded target, because that is the
+number the implementation computes. Nothing exercised the mode, so nothing could
+fail. It is `TESTING.md` shape 1 — an assertion satisfied by the behaviour and by
+its opposite — and the only instrument that caught it was a human looking at a
+terminal. **Mutation testing could not have found it either**: there was no
+mutant to kill, because the collapse input was not in the function.
+
+### D35 — Birth anchors the lattice, so birth is the fix (2026-07-30)
+
+**D34's problem, solved from the other end — and not where either the
+coordinator or D20 expected.**
+
+Ollie approved D20's first item (compute the step from `display_area_columns`)
+on the coordinator's framing that it was the fix for D34. **It is not**, and the
+framing was wrong: computing the step does not add a single reachable width.
+Zellij resizes in whole increments, so the widths a bar can occupy are a lattice
+`birth ± k × step`. Knowing the step precisely makes every acceptance decision
+correct from the first render — worth having — but it cannot put 54 on a lattice
+that does not contain it.
+
+**What does: being born on it.** Measured through the real `width_seek`, newborn
+driven to rest then toggled twice so the expanded figure is the steady state:
+
+| display | percent-fiction birth → expanded | exact birth → expanded |
+|---|---|---|
+| 120 | 50 (summary 21) | **54 (25)** |
+| 160 | 51 (22) | **54 (25)** |
+| 200 | 54 (25) | 54 (25) |
+| 240 | 52 (23) | **54 (25)** |
+| **280** | **47 (18)** | **54 (25)** |
+| 320 | 54 (25) | 54 (25) |
+| 400 | 48 (19) | **54 (25)** |
+
+Toggle away from the birth width by whole steps and you return to it exactly, on
+every display. The 280 case rests at 47 today for one reason only: the bar is
+BORN at 75 (27% of 280) and the lattice inherits that offset forever.
+
+**Exactness is not available, and the code must not pretend otherwise.** A KDL
+size is a whole percent and zellij FLOORS `(pct/100) × display`
+(`pane_size.rs:136`). At 280 one percent is 2.8 columns, so 54 = 19.29% is
+inexpressible: 19% → 53, 20% → 56. `birth_percent_for` rounds to nearest,
+bounding the residual near half a percent of the display. 53 is one column under
+target, inside the acceptance band at every step, so the bar settles on its birth
+width immediately — which is all the anchoring needs.
+
+Reading the width: **`terminal_size`**, Ollie's call from three options. The
+zero-dependency alternative was shelling out to `tput cols`, which is a
+PATH-resolved subprocess at launch — the hazard `CONTRIBUTING.md` calls *"the one
+leak"*. Reading the controlling TTY also works over SSH.
+
+**Correct by construction only on the launch path**, and this is the constraint
+that shapes the rest. `clave dev launch` runs in a real terminal OUTSIDE zellij,
+so the TTY's width IS the display area. The same call from inside a zellij pane
+returns the PANE's width. This fixes session launch and — because zellij applies
+`default_tab_template` to new tabs — every `Alt+t` tab too.
+
+**The remaining gap:** `clave open` / `clave add` build one-shot
+`new-tab --layout` files that deliberately bypass the template (`add.rs:90`), and
+they are invoked BY THE BAR, from inside zellij. They still use the fiction. The
+honest fix is for the bar to pass its own tab's `display_area_columns` — which
+`get_tab_info` returns synchronously (verified in
+`zellij-tile-0.44.3/src/shim.rs:307`) — down as a CLI argument. That is a CLI
+surface change and is queued, not done. Until it lands, dwell-opened and
+`Alt+a` tabs are born at the fiction; D31's clip means they look clipped rather
+than corrupted while the seek corrects them.
+
+**A correction to D20 worth carrying forward.** Its first item proposes deleting
+the whole learning apparatus in favour of `display_area_columns × 5 / 100`. The
+5% figure is **empirical, not source-verified**: `zellij-server` is not vendored
+here, only `zellij-tile` and `zellij-utils`, so nothing in reach confirms the
+granularity. Seeding the step from the computation while still correcting it
+from observation is safe; deleting the observation is a bet on an unverified
+constant, and D26 already recorded what happens when the seek's arithmetic is
+approximated rather than derived.
+
+### D34 — The target is a suggestion. 54 does not reach Ollie's display (2026-07-30)
+
+> **This is the finding that matters from D33's task, and it says the task did
+> not achieve what it was for.** Measured through the real `width_seek`, not
+> argued.
+
+The seek accepts any width within HALF a step of its target. At a display of 280
+columns the step is 14, so the band is ±7 — and the widths actually reachable are
+lattice points, one step apart. From a collapsed rest of 33 the next point up is
+47, and `2 × |47 − 54| = 14 <= 14`, so **47 is accepted and the seek stops
+there.** It never reaches 54.
+
+Swept across plausible displays, newborn driven to rest then toggled twice so the
+expanded figure is the steady-state one:
+
+| display | step | expanded rest | summary | collapsed rest | summary |
+|---|---|---|---|---|---|
+| 120 | 6 | 50 | 21 | 32 | 9 |
+| 160 | 8 | 51 | 22 | 27 | **4** |
+| 200 | 10 | **54** | 25 | 34 | 11 |
+| 240 | 12 | 52 | 23 | 28 | 5 |
+| **280 (Ollie's)** | 14 | **47** | **18** | 33 | 10 |
+| 320 | 16 | **54** | 25 | 38 | 15 |
+| 400 | 20 | 48 | 19 | 28 | 5 |
+
+**Consequence, and it is a regression for the maintainer.** At 280 the expanded
+bar rested at 47 before this change too — but under the old `(7, 7)` profile that
+bought `47 − 13 − 7 − 7` = **20** summary cells. Under `(9, 7)` the same 47 buys
+**18**. The title took two columns and the pane never widened, so the change
+Ollie asked for *"mostly for the summary"* delivers two FEWER summary characters
+in the state he spends his time in. Only a freshly-born bar (61) is genuinely
+wider, and the first Alt+c cycle destroys that.
+
+54 is also the unluckiest available number: it sits exactly where the nearer
+lattice point is still inside the band. `2 × 7 <= 14` is an equality, so one
+column either way on the target changes the answer.
+
+**This is not a bug in D33's implementation** — every number there is right, and
+the gates and mutation run are clean. It is the seek's acceptance contract
+meeting a coarse lattice, which is precisely what **D20's second item** (compute
+the step from `display_area_columns` and land on the target instead of near it)
+exists to remove. **D19 does not actually ship until that lands.** Recorded here
+so the next agent does not read D33's green gates as "the bar is 54 wide now".
+
+Do not "fix" this by nudging the target until 280 happens to work: the lattice is
+display-dependent, so a number tuned for 280 is wrong for 240 and 400. The
+options are the real fix (D20), or a strict acceptance that refuses the nearer
+point, which touches the property D26 verified by exhaustive census and must not
+be done casually.
+
+### D33 — 54 lands, and it retires D17's anchor property (2026-07-30)
+
+D19 is implemented. `BAR_TARGET_COLS` 44 → 54, `Widths::EXPANDED` `(7, 7)` →
+`(9, 7)`, summary 17 → 25, collapsed untouched at 30 `(7, 3)`. The birth percent
+re-derives itself (`54 * 100 / 200` = 27, was 22) because #86 made it a
+computation rather than three literals — that machinery earned itself here.
+
+**The thing D19 did not notice: it breaks D17.** D17 held collapsed's title at 7
+for two reasons, and the second was *"identical to `EXPANDED` … so the chip does
+not reflow when the profile toggles, and the eye keeps its anchor across the
+transition."* Taking expanded to 9 makes the chip reflow 9 → 7 on every Alt+c —
+precisely the property D17 chose that layout to preserve.
+
+Put to Ollie as a three-way with the arithmetic rendered, because it is a design
+question and not an implementation one:
+
+| | expanded | collapsed | anchor |
+|---|---|---|---|
+| **taken** | 9 title, 25 summary | 7 title, 7 summary | reflows 9 → 7 |
+| holding 9 in both | 9 title, 25 summary | 9 title, **5** summary | holds |
+| all ten to summary | 7 title, **27** summary | 7 title, 7 summary | holds |
+
+**Ruled: take the reflow.** Titles of 7 cells or fewer are unaffected; only
+longer ones truncate on collapse. D17's first reason — the chip is what a tab is
+identified BY, so do not truncate it — still stands and is why collapsed did not
+simply follow expanded to 9.
+
+**Three of D26's four reservations are now dead**, as D26 predicted. The
+separation goes 14 → 24, above `MAX_LEARNABLE_STEP` (20), so the two acceptance
+bands can no longer overlap at any learnable step: the disqualification, the
+bracket rule and both resting-width costs become unreachable. The proptest's
+widened terminal clause was **re-tightened to `>` the separation rather than
+`>=`**, exactly as D26 required — at 24 the branch is unreachable either way, but
+the `>=` form was wrong on its own terms and would have greened "the collapsed
+bar settled at the expanded target" at step 20. The fourth reservation
+(livelock above `MAX_LEARNABLE_STEP`, needing ~400 columns) is untouched and
+still out of reach.
+
+**Seven tests failed on the constant change rather than passing against a stale
+picture** — the #86 single-source work doing its job. Two needed their start
+widths RE-DERIVED rather than bumped, because at 54 they would have converged in
+one step and gone green while covering less (#63's shape, and the harness
+newborn's start has now moved with the target three times).
+
+At a genuinely 80-column session this leaves the agent pane 26 columns. Accepted
+(D32): few sessions are that narrow, and collapsed still leaves 50.
+
+### D32 — Fixed pane sizes are not on the table, and absolute widths already are (2026-07-30)
+
+Ollie, during the gate-2 run: *"why does it resist fixed pane sizes? … Why do we
+need relative? Is that a zellij quirk?"* Worth answering from the source once, in
+the ledger, because the question recurs every time someone meets the birth
+percent.
+
+`Dimension { constraint, inner }` (`zellij-utils-0.44.3/src/pane_size.rs:96-160`).
+`inner` is the resolved column count; `constraint` says how it is derived —
+`Percent(p)` resolves to `(p/100) * full_size`, `Fixed(n)` resolves to `n` and
+ignores the container. The decisive detail is what is **absent**: the only
+constraint mutator is `set_percent` (`:122`). There is **no `set_fixed`**.
+Resizing in zellij *is* percent arithmetic — the engine rewrites the percent and
+re-resolves. A `Fixed` pane has no percent to rewrite, so the resize is rejected
+wholesale as `CantResizeFixedPanes` (`errors.rs:710`).
+
+So it is not a relative-versus-absolute preference. **`Fixed` is a lock** — "the
+user pinned this, never touch it" — and `Percent` is the only writable channel
+for a width. `size=44` would leave `Alt+c` permanently dead, which is D21's bug
+made unconditional.
+
+**And the premise is already satisfied.** The seek's targets are absolute column
+counts; it converges the pane onto exactly those. Percent is the *encoding*
+zellij accepts and the *birth hint*, nothing more. The 200-column fiction affects
+precisely one thing: the width of the first frame, before the seek acts.
+
+Ollie's 80-column argument is sound on its own terms — 54 + 26 does fit, and few
+users run an 80-column session; if they do, collapsed leaves 50. The coordinator
+initially rebutted it with "22% of 80 is 17 columns, below both floors", which
+describes *today's percent scheme* and is therefore an argument **for** his
+complaint, not against his proposal. Recorded because the rebuttal was aimed at
+the wrong claim, and the next agent should not re-run it.
+
+Ruled, and still open: constants like these should eventually be **user
+configurable**, in a style matching zellij's own config. A later refactor, not
+this branch.
+
+### D31 — The sub-floor over-run is CLIPPED here, not left to the terminal (2026-07-30)
+
+**D13 is half wrong, and the live gate-2 run falsified the half that mattered.**
+
+D13 ruled that below `min_intact_cols()` the fixed columns hold and the row is
+built WIDER than the pane, uniformly across row kinds, rather than reflowing a
+fixed column — that part stands and is not touched. What it also assumed is that
+an over-wide row would read on screen as **clipped**. It does not. **A terminal
+wraps it**, and a wrapped row makes every bar row double-height with a blank
+second line.
+
+Observed by Ollie 2026-07-30, twice, in the D28 gate-2 run: once on moving the
+window to a second monitor, and once on every tab spawn — a new tab is born at
+the birth percent, which under ~123 columns lands the pane below `EXPANDED`'s
+27-cell floor while the state still (correctly) says expanded. In the second
+screenshot the repo names themselves spilled to line two. **`Alt+c` healed it
+every time**, because any event forces a fresh render at the settled width.
+
+The uniformity D13 chose was intact throughout — every row over-ran by the same
+amount. Only the assumption about what a terminal does with an over-wide line was
+false.
+
+**The fix is one function.** `render_row` still builds at the floor, so no fixed
+column reflows and D9/D13's guarantee is untouched; `render_rows` then clips the
+finished line to `cols` (`clip_to_cells`), SGR-aware so the colour state is
+closed rather than left open, and padding rather than half-drawing a wide glyph
+that straddles the cut.
+
+**Three tests PINNED the over-run and were changed** — this is a behavioural
+change, not a bug fix, and it should read as one:
+`every_row_is_exactly_cols_cells_under_collapsed` and
+`degenerate_widths_do_not_panic` both asserted
+`cols.max(min_intact_cols())`; both now assert `cols` unconditionally.
+`every_row_is_exactly_cols_cells` gained sub-floor widths it never covered.
+
+**A correction the next agent needs, because D20 invites the opposite reading.**
+D20 says `main.rs` drops `pane_columns` when building `PaneMeta`, which is true —
+but that is about computing the seek's STEP. It does **not** mean the bar renders
+at a stale belief: `ZellijPlugin::render(&mut self, _rows, cols)` receives the
+real pane width from zellij and passes it straight to `render_rows`
+(`main.rs:560`). The bar has always known its own width at render time. The wrap
+was never a missing input — it was a deliberate over-run meeting a terminal that
+wraps.
+
+**What this does NOT fix.** The birth width is still derived against the fictional
+200-column viewport (D20's second item, still open). A stale or wrong birth now
+renders *clipped* instead of *corrupted*, and the seek corrects it within a frame
+— so the remaining symptom is a brief flicker, not a broken bar.
+
 ### D30 — `just sandbox` DOES write `~/.claude/settings.json`. Two documents say it does not (2026-07-29)
 
 **Found by the agent writing the live-interaction checklist, which refused to run
@@ -739,6 +1077,12 @@ Catalogued deliberately. If one blocks a task, override it in the brief.
 | 4 — the hook persists `title` and `summary` | **complete** | `0ccf04d` | Found `{"type":"summary"}` extinct (D23) and retargeted to `ai-title`. Three-tier summary makes the bar non-regressive (D25). |
 | **Gate 1 — live look** | **DONE 2026-07-29** | — | Verdict **keep** (D19). |
 | 5 — pre-merge review round | **complete** | `3da3235`..`94daccb` | Whole-branch review + a focused review of the seek change. D21's bug fixed and verified by exhaustive census (D26). |
-| 6 — expanded 44 → 54 (D19) | next | — | Carries the birth percent, and D26's four inherited reservations. |
-| 7 — the width simplifications (D20) | not started | — | Compute the step from `display_area_columns`; birth from the real terminal width. |
+| 6 — expanded 44 → 54 (D19) | **complete** | this branch | Target, profile `(9, 7)`, summary 25 — all derived, not restated. Retires D17's anchor property (D33) and three of D26's four reservations; proptest clause re-tightened to `>`. D34 found it did not REACH the display; D35's birth fix delivers it. |
+| 7a — the sub-floor clip (D31) | **complete** | this branch | `clip_to_cells`: the over-run is truncated here rather than left to a terminal that wraps it. Fixes the live double-height bug. Three tests that PINNED the over-run changed. |
+| 7b — birth from the real terminal width (D20/D35) | **complete for the LAUNCH path** | this branch | `terminal_size`, `birth_percent_for`. Turned out to be the fix for D34, not the cosmetic tidy-up it was filed as. Covers session launch and every `Alt+t` tab. |
+| 7d — the residual launch flash | **filed, #89** | — | D37 reduced it, did not remove it. Next step is the instrumentation recipe, NOT another guess. The principled fix (derive the gate from `seq == 0`) is described there. |
+| 7b′ — birth for `clave open` tabs | **complete** | `31ef83b` | Was: the launch tab's bar sat at 28% (terminal-derived) and every dwell-opened tab at 27% (the fiction), one column apart and visible on every tab switch. One-shot layouts bypass the template and run INSIDE zellij, so a `terminal_size()` read there reports the CALLING PANE. The bar passes `get_tab_info().display_area_columns` (shim.rs:307) and its collapse mode down as CLI args instead. Collapse rides along for D36's reason. `clave add` from a shell still takes the fallback — it has no better width to offer. |
+| RC-B (#55) — the hydrate arm did not fire binds | **complete** | `31ef83b` | `RunCommandResult` first populates `agents`, and was the one state-mutating arm not calling `fire_binds()`. TabUpdate/PaneUpdate normally land BEFORE the snapshot result, so their own calls ran against an empty list. The eager cold-start tab stayed unbound and its first prompt never moved it — Ollie's "some tabs don't rise" symptom. The S0 position-join identity is UNTOUCHED and #55 stays open. |
+| #91 — the title chip carried clave's own label | **complete** | `e7036ae` | `--name` dropped. The filed fix (ignore `custom-title` before the first prompt) was refuted against real transcripts: Claude re-emits a per-turn header block that rewrites the title, so the label returns on turn 2. Dropping it also RESTORES `aiTitle` in `claude --resume`'s picker, which `--name` had been overwriting with a non-unique `<dir> · <branch>`. |
+| 7c — the step from `display_area_columns` (D20) | not started, **and demoted** | — | Does NOT affect reachable widths (D35) — a simplification, not a fix. D20's premise that the 5% granularity is knowable is unverified here; seed from it, keep the observation. |
 | 8 — S5, store-backed ink allocation | not started | — | Ollie's colour-stability requirement. The provisional allocator is positional and renumbers. |

@@ -13,8 +13,15 @@ use crate::munge::munge_cwd;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnMode {
-    /// No jsonl on disk → `claude --session-id <uuid> --name <label>`.
+    /// No jsonl on disk → `claude --session-id <uuid>`.
     /// S0: a fresh uuid CREATES the session and writes the jsonl.
+    ///
+    /// **No `--name`**, and the constraint is design-lock §2 / LEDGER D19:
+    /// the title chip stays BLANK until the user renames. Claude records
+    /// `--name` as a `custom-title`, which the hook cannot tell from a
+    /// `/rename`, so passing it filled that chip with clave's own label on
+    /// an agent nobody had named (#91). Full reasoning, including why
+    /// filtering it downstream fails, is at the exec site in `main.rs`.
     Create,
     /// jsonl exists → `claude --resume <uuid>`. `--resume` errors when no
     /// jsonl exists, which is why existence drives the branch (S0).
