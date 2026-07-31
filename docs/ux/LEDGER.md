@@ -266,6 +266,14 @@ widths, not as something a user would ever see.
 
 ### D17 — Collapsed is `(title 7, repo 3)` at 30 columns (2026-07-29)
 
+> **The PROFILE stands; its anchor argument was retired at D33 (2026-07-30).**
+> `(title 7, repo 3)` at 30 is still what collapsed renders. What no longer
+> holds is the reason given below for choosing it — expanded went to `(9, 7)`,
+> so the title cell narrows 9 → 7 on collapse and a chip longer than 7 cells
+> truncates; titles of 7 cells or fewer survive the toggle unchanged (D33). The
+> separation from the expanded target is 24, not 14. Read the reasoning as the origin of the
+> collapsed numbers, not as a live property of the pair.
+
 Chosen by Ollie from three rendered candidates. `Widths::COLLAPSED = { title: 7, repo: 3 }`,
 `COLLAPSED_TARGET_COLS = 30`, summary = `30 − 13 − 7 − 3` = **7**. Separation
 from 44 is 14, clearing D15's bound of 10.
@@ -301,13 +309,18 @@ and expensive to argue in prose. **Look at it then; do not litigate it now.**
 
 ### D19 — Gate 1 verdict: KEEP. Expanded goes to 54 (2026-07-29)
 
-> **NOT YET IMPLEMENTED.** The verdict is real; the width is not. The tree still
+> **IMPLEMENTED at D33 (2026-07-30) — the reservation below is discharged.** The
+> tree ships 54 with `Widths::EXPANDED = { title: 9, repo: 7 }` and a 25-cell
+> summary. Left standing because it records why the width could not move on its
+> own; the warning it carried is now history, not a caveat.
+>
+> ~~**NOT YET IMPLEMENTED.** The verdict is real; the width is not. The tree still
 > ships **44** with `Widths::EXPANDED = { title: 7, repo: 7 }` and a 17-cell
 > summary, and D2 describes that shipped state correctly. 54 lands in its own
 > task, together with the birth percent and D26's four inherited reservations,
 > because moving the target alone would leave every golden green while pinning
 > the wrong width. Codex flagged the gap between this entry and the code, and
-> was right to.
+> was right to.~~
 
 Ollie ran the `ux-gate1` fleet live and ruled **keep** — not refactor, not
 re-engineer. *"It's looking very good indeed… The expansion and collapse do seem

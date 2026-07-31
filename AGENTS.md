@@ -7,7 +7,7 @@ lives inside a clave session while developing clave from a session inside it.
 
 clave will support other CLI-based agents down the line, keep this in mind as a design decision for DRY and neat APIs that are sensible and straightforward.
 
-Be deliberate in avoiding overengineering early.
+Be deliberate in avoiding overengineering early - this is greenfield, we are iterating quickly with minimal buildout to achieve the goals.
 
 Two crates, one workspace:
 
@@ -23,7 +23,7 @@ a `vX.Y.Z` tag plus `just release` is the promotion event.
 
 [FOOTGUNS.md](FOOTGUNS.md) | traps that already cost someone a round — things that compile, read, or look fine and are wrong anyway. **Grep it the moment something behaves unexpectedly**, before you start debugging. Add to it when you lose time to something the next agent would also lose time to
 
-[UBIQUITOUS_LANGUAGE.md](UBIQUITOUS_LANGUAGE.md) | the shared vocabulary. **zellij session vs agent session**, **title vs label**, gutter · cell · ink · chip · provenance. Short, and it unlocks every other document — "session" alone is ambiguous three ways in this codebase
+[UBIQUITOUS_LANGUAGE.md](UBIQUITOUS_LANGUAGE.md) | the shared vocabulary. **zellij session vs agent session**, **title vs label**, gutter · cell · ink · chip · provenance. Short, and it unlocks every other document — "session" alone is ambiguous three ways in this codebase - add to it when a term is agreed upon between you and the maintainer.
 
 [CONTRIBUTING.md](CONTRIBUTING.md) | the two environments (stable vs sandbox), the release model, the PR flow, where work is tracked — **and "The one leak"**, the PATH hazard that broke v0.1.1 in the field (#43, #44)
 
@@ -51,6 +51,8 @@ building on it — `TabUpdate` reaches only the active tab, `resize_pane_with_id
 silently refuses fixed panes, `show_self` is a focus action. Each of those cost a
 round.
 
+Ollie is happy to test anything you can't discover yourself inside his terminal or clave session.
+
 The four commands a PR must show green — or `just gates`, which runs exactly
 these in this order:
 
@@ -61,4 +63,6 @@ cargo build -p clave-bar --target wasm32-wasip1
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-If updating CLAUDE.md or AGENTS.md, first have a conversation with Ollie to lock in directives and information.
+And use cargo mutants.
+
+When considering updates for CLAUDE.md or AGENTS.md, first have a conversation with Ollie to lock in directives and information.

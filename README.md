@@ -2,22 +2,125 @@
 
 **Conduct a fleet of Claude Code agents from a Zellij sidebar.**
 
-`clave` turns [Zellij](https://zellij.dev) into an orchestration cockpit for
-[Claude Code](https://claude.com/claude-code): every agent is a tab running the
-real Claude TUI, listed in a vertical left bar that shows — at a glance — which
-agent is **working**, which **needs you**, and which has **finished**.
+Run three agents and you can hold it in your head. Run eight and you can't — you
+start tabbing through them to find the one that asked you a question ten minutes
+ago. clave gives the fleet one vertical bar: every agent is a Zellij tab running
+the real Claude TUI, and a glance tells you who needs an answer, who is working,
+and who finished while you were looking elsewhere.
 
-No desktop app, no custom UI, no leaving the terminal. Just the agents you
-already run, finally in one view.
+<!-- Regenerate: `cargo run -q -p clave-bar --example bar-preview -- --showcase`,
+     screenshot the output, replace docs/assets/sidebar.png. The fleet is the
+     `showcase()` fixture in that example — edit it there, not here, so the
+     frame always comes from the real `render_rows`. -->
+<img src="docs/assets/sidebar.png" alt="The clave sidebar: nine rows, each a coloured status dot, an optional branch or worktree mark, a rename chip, the repo name, and a one-line description. Red is waiting on you, amber working, green done, grey idle; a red cross has failed, a hollow ring is dormant, and two rows are plain terminal tabs." width="720">
 
+### The whole vocabulary
+
+**Colour is the state.** The shape only changes where a row isn't a live
+conversation.
+
+| | | | |
+|---|---|---|---|
+| `●` red | waiting on you | `✖` | last turn failed |
+| `●` amber | working | `✗` | its directory is gone |
+| `●` green | finished while you were away | `◌` | dormant — no process, opens where it left off |
+| `●` grey | idle | `↻` | opening |
+
+Then, left to right across the row:
+
+| | |
+|---|---|
+| *nothing* | a plain checkout — the common case, so it stays quiet |
+| `󰘬` | on a branch |
+| `𖣂` | in its own git worktree |
+| `󰆍` | a terminal tab rather than an agent — the bar is the whole session |
+| **chip** | your `/rename`; blank until you rename |
+| **repo** | one colour per repo, wherever it appears |
+| **text** | Claude's own description of the session, not your prompt |
+
+<sub>These marks may show as boxes here on GitHub — they render in your
+terminal. The branch and terminal marks are Nerd Font glyphs; the worktree mark
+is U+168C2, which no Nerd Font carries — install Noto Sans Bamum (or any font
+with Bamum coverage) as a fallback, or that one row shows a box. The screenshot
+shows all of them.</sub>
+
+## Try it
+
+**Runtime:** `zellij` (0.44.3 is what's tested), `claude`, `git`, plus `fzf` and
+`zoxide` for the directory picker. macOS and Linux. A
+[Nerd Font](https://www.nerdfonts.com/) for the branch and terminal marks.
+
+**To build:** Rust (stable) and [`just`](https://just.systems).
+
+```bash
+git clone https://github.com/olliegilbey/clave && cd clave
+git checkout v0.1.2        # `just release` refuses a dirty or untagged tree
+just setup-toolchain       # adds the wasm32-wasip1 target, once
+just release               # builds, then installs the launcher and versioned artifacts
+export PATH="$HOME/.local/share/clave/bin:$PATH"
+clave                      # from a terminal OUTSIDE zellij — clave makes its own session
 ```
-┌─────────────────────┐
-│ 🔴 main·api·fix-au…  │  needs you (waiting for input / approval)
-│ ⚙️ feat·web·add-na…  │  working
-│ ✅ main·docs·updat…  │  done, unread
-│ ⚪ main·cli·refacto…  │  idle
-└─────────────────────┘
-```
+
+No packaged release yet; building from a tag is the supported path. Take the tag
+literally — earlier ones predate the launcher this puts on your PATH.
+
+**Upgrading? Quit every running clave session first, and start it fresh
+afterwards.** `just release` regenerates Zellij's keybinds, and Zellij swaps
+those into sessions that are already running — but a sidebar that is already
+loaded keeps the identity it booted with, so the next keypress opens a *second*
+sidebar beside the first. A cold restart is the whole fix.
+
+`just release` also registers clave's status hooks in `~/.claude/settings.json`
+(additive — your own hooks are left alone) and seeds Zellij's plugin permission
+cache. That's what lets an agent report its own state. `clave doctor` explains
+anything that didn't land.
+
+Then `Alt+a`, pick a directory, choose `new`. That's your first agent.
+
+| | |
+|---|---|
+| `Alt+a` | add an agent — pick a directory, then new or resume |
+| `Alt+↑` `Alt+↓` (or `Alt+k` `Alt+j`) | walk the fleet |
+| `Alt+1`…`Alt+9` | jump straight to a row |
+| `Alt+o` | back to where you were |
+| `Alt+c` | collapse the bar to a strip, or expand it |
+| `Alt+t` `Alt+w` | new tab, close tab |
+
+`Alt` is clave's namespace. Five stock Zellij bindings that Claude Code needs
+are unbound for you (`Ctrl+g/t/o/b/q`); the rest of Zellij's `Ctrl` keys still
+belong to Zellij ([#24](../../issues/24)).
+
+## How it works
+
+- **One agent = one Zellij tab**, running the actual `claude` binary — vim mode,
+  slash commands, MCP servers, all of it. clave never reimplements the TUI. It
+  just always knows where each conversation is.
+- **Status comes from [Claude Code hooks](https://code.claude.com/docs/en/hooks)**,
+  not screen-scraping. Each agent reports its own turn lifecycle, so a row
+  changes the moment the agent does.
+- **Conversations survive restarts.** Every pane runs an idempotent
+  resume-or-create. A cold start reopens your most recent agent and brings the
+  rest back as dormant rows — open one and it picks up where it left off,
+  including the ones you've `/clear`ed, which start a fresh session id
+  underneath.
+- **Worktrees are first class.** `clave add --worktree` puts an agent on its own
+  branch in its own directory, so two agents in one repo never fight over your
+  working tree.
+
+**What it isn't:** a wrapper around Claude, a scheduler, or something you
+configure. There is no config file — the bar's layout is a ratified design, not
+a preference, and clave's job is to get out of the way of the agents.
+
+## Status
+
+🚧 Early, and its author's daily driver — clave is developed from inside a clave
+session, which is why the rough edges get found fast. If something breaks,
+[open an issue](../../issues); that's the most useful thing you can do right now.
+
+Design and rationale:
+[the orchestrator design spec](docs/superpowers/specs/2026-06-30-clave-orchestrator-design.md).
+Want to work on it? [CONTRIBUTING](CONTRIBUTING.md) — start there rather than
+here, especially before you install anything over a running session.
 
 ## Why "clave"?
 
@@ -25,40 +128,6 @@ The **clave** is the foundational rhythm an entire ensemble locks to — the par
 everything else syncs around. It's also Spanish for *key* / *keystone* (it's
 keyboard-driven), and the archaic past tense of *cleave*, to split — as in
 splitting the screen into panes. Logo: the two-stick percussion instrument.
-
-## How it works
-
-- **One agent = one Zellij tab** running the actual `claude` TUI — vim mode,
-  slash commands, all of it. Not a reimplementation.
-- **Status comes from [Claude Code hooks](https://code.claude.com/docs/en/hooks)**,
-  not screen-scraping. `clave` mints each session's UUID, so hook events map
-  exactly to the right tab and repaint its emoji.
-- **Conversations survive restarts** — each pane runs an idempotent
-  resume-or-create, so Zellij serialization brings every agent back.
-- **Keyboard-first**: `Alt+a` add · `Alt+c` toggle bar · `Alt+t`/`Alt+w` new and
-  close tab · `Alt+↑/↓` walk the fleet · `Alt+1…9` jump. Every key fires
-  straight through a focused Claude session.
-
-## Status
-
-🚧 Early days. The full design and rationale live in
-[`docs/design.md`](docs/design.md).
-
-**If you build from source**, use `just sandbox` — it wires an isolated
-`clave-test` session to your working tree and verifies it touched neither your
-installed binary nor your stable artifacts.
-
-`just dev-install` installs the working-tree CLI as **`clave-dev`**, so it never
-takes over the `clave` command ([#43](https://github.com/olliegilbey/clave/issues/43)).
-A plain `cargo install` would put `clave` on your `PATH` under the same name the
-daily surface answers to, and a stale build winning that name is what produced
-two sidebars and dead navigation in v0.1.1.
-
-A release cut installs its own launcher at `~/.local/share/clave/bin/clave` —
-put that directory on your `PATH`.
-
-Either way: **don't install over a session that is currently running.** See
-[CONTRIBUTING](CONTRIBUTING.md#the-rule-that-matters-most).
 
 ## License
 

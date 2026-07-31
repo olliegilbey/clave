@@ -82,9 +82,30 @@ Nothing here touches a live session. All of it must pass before a tag exists.
    **`just release` is the maintainer's command, always. An agent never runs
    it.**
 
-3. **Run Part C.** Do not continue past it without a go.
+3. **If the release adds a store field the hooks populate, warm the live rows
+   NOW — before anything is killed.** A field the previous binary never wrote is
+   `null` on every existing row, and the row cannot be backfilled from outside:
+   guessing it (say, by picking the newest transcript in the project dir) is
+   worse than leaving it null, because attaching the *wrong* conversation is
+   unrecoverable where a null merely falls back. The only honest source is the
+   agent itself. So, while the fleet is still up and now that `just release` has
+   rewritten the hooks: **prompt each agent you care about once**, then confirm
+   the field populated (`clave ls`, or read `~/.local/state/clave/agents.json`).
 
-4. **On a go — publish the tag:**
+   Whether that works at all turns on **whether a running Claude re-reads
+   `~/.claude/settings.json` per hook event or caches it at session start** —
+   unmeasured as of v0.1.2. Record the answer in FOOTGUNS.md either way; it is
+   the kind of fact that costs a round to rediscover.
+
+   *v0.1.2 instance:* `AgentRecord::live_session` (#99). A row left null resumes
+   its minted uuid once — pre-#99 behaviour, one last time — which for a row
+   `/clear`ed since its last resurrection reopens the pre-clear conversation.
+   Nothing is destroyed: the stranded conversation stays reachable via
+   `claude --resume <id>` from its directory, just not through clave.
+
+4. **Run Part C.** Do not continue past it without a go.
+
+5. **On a go — publish the tag:**
 
    ```bash
    git push origin vX.Y.Z

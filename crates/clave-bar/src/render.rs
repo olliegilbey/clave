@@ -524,7 +524,12 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
             out.push(' ');
             push_rule(&mut out, &o, &ink); // cols 3–5
             out.push_str(&o);
-            out.push_str(&ink(UNTINTED));
+            // TERMINAL_INK, not UNTINTED: a terminal tab is a real row the
+            // user navigates to, and sumiInk4 read as disabled against the bar
+            // background rather than as "no battery here" (Ollie, live
+            // 2026-07-31). katanaGray is the same ink the tab's NAME already
+            // uses on this row, so the row now reads as one thing.
+            out.push_str(&ink(TERMINAL_INK));
             out.push(CONSOLE); // col 6
             out.push_str(&o);
             out.push_str(&o);
@@ -1101,7 +1106,7 @@ mod tests {
         let expected = [
             " \u{1b}[38;2;179;86;98m\u{25cf} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;180;154;109m\u{f007c}             \u{1b}[38;2;102;125;172mclave   \u{1b}[38;2;173;169;150mI just passed the spec o\u{2026} \u{1b}[0m ",
             "\u{1b}[38;2;45;79;103m\u{e0b6}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m\u{1b}[38;2;255;158;59m\u{25cf}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;220;215;186m\u{2502}\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;230;195;132m\u{f007c}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;126;156;216m\u{168c2}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;122;168;159m\u{1b}[38;2;22;22;29mS6-GUT   \u{1b}[0m\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;126;156;216mclave  \u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m picking the gutter set   \u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[0m\u{1b}[38;2;45;79;103m\u{e0b4}\u{1b}[0m",
-            "   \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;71;71;92m\u{f018d}   \u{1b}[38;2;92;101;103mTab #16                                     \u{1b}[0m ",
+            "   \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;92;101;103m\u{f018d}   \u{1b}[38;2;92;101;103mTab #16                                     \u{1b}[0m ",
         ];
         assert_eq!(render_rows(&rows, DESIGN_COLS, Widths::EXPANDED), expected);
         // The same derived self-checks the COLLAPSED golden carries. A golden
@@ -1191,7 +1196,7 @@ mod tests {
         let expected = [
             " \u{1b}[38;2;179;86;98m\u{25cf} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;180;154;109m\u{f007c}           \u{1b}[38;2;102;125;172mcla \u{1b}[38;2;173;169;150mI just\u{2026} \u{1b}[0m ",
             "\u{1b}[38;2;45;79;103m\u{e0b6}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m\u{1b}[38;2;255;158;59m\u{25cf}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;220;215;186m\u{2502}\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;230;195;132m\u{f007c}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;126;156;216m\u{168c2}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;122;168;159m\u{1b}[38;2;22;22;29mS6-GUT \u{1b}[0m\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;126;156;216mcla\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m pickin\u{2026}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[0m\u{1b}[38;2;45;79;103m\u{e0b4}\u{1b}[0m",
-            "   \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;71;71;92m\u{f018d}   \u{1b}[38;2;92;101;103mTab #16             \u{1b}[0m ",
+            "   \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;92;101;103m\u{f018d}   \u{1b}[38;2;92;101;103mTab #16             \u{1b}[0m ",
         ];
         assert_eq!(
             render_rows(&rows, COLLAPSED_DESIGN_COLS, Widths::COLLAPSED),
