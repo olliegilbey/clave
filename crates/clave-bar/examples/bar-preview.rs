@@ -36,7 +36,7 @@ const DIM: Rgb = Rgb(0x71, 0x7C, 0x7C);
 
 fn agent(
     status: RowStatus,
-    battery: u8,
+    battery: Option<u8>,
     provenance: Provenance,
     repo: &str,
     repo_ink: u8,
@@ -46,7 +46,7 @@ fn agent(
     Row {
         content: RowContent::Agent {
             status,
-            battery: Some(battery),
+            battery,
             provenance,
             title: title.map(|(t, _)| String::from(t)),
             title_ink: title.map(|(_, i)| i),
@@ -70,7 +70,7 @@ fn fleet() -> Vec<Row> {
     let mut rows = vec![
         agent(
             RowStatus::NeedsYou,
-            1,
+            Some(1),
             Provenance::Main,
             "dotfiles",
             DOTFILES,
@@ -79,7 +79,7 @@ fn fleet() -> Vec<Row> {
         ),
         agent(
             RowStatus::Working,
-            3,
+            Some(3),
             Provenance::Worktree,
             "clave",
             CLAVE,
@@ -88,7 +88,7 @@ fn fleet() -> Vec<Row> {
         ),
         agent(
             RowStatus::Working,
-            2,
+            Some(2),
             Provenance::Branch,
             "api-svc",
             API_SVC,
@@ -97,7 +97,7 @@ fn fleet() -> Vec<Row> {
         ),
         agent(
             RowStatus::Done,
-            0,
+            Some(0),
             Provenance::Main,
             "clave",
             CLAVE,
@@ -112,7 +112,7 @@ fn fleet() -> Vec<Row> {
         },
         agent(
             RowStatus::Stale,
-            4,
+            Some(4),
             Provenance::Worktree,
             "clave",
             CLAVE,
@@ -121,7 +121,7 @@ fn fleet() -> Vec<Row> {
         ),
         agent(
             RowStatus::Dormant,
-            0,
+            Some(0),
             Provenance::Worktree,
             "clave",
             CLAVE,
@@ -130,7 +130,7 @@ fn fleet() -> Vec<Row> {
         ),
         agent(
             RowStatus::Dormant,
-            1,
+            Some(1),
             Provenance::Branch,
             "infra",
             INFRA,
@@ -139,7 +139,7 @@ fn fleet() -> Vec<Row> {
         ),
         agent(
             RowStatus::Idle,
-            2,
+            Some(2),
             Provenance::Branch,
             "webapp",
             WEBAPP,
@@ -176,7 +176,117 @@ fn bar(rows: &[Row], cols: usize, widths: Widths, label: &str) {
     println!("  {dim}\u{2514}{rule}\u{2518}{RESET}");
 }
 
+/// The screenshot fleet (`--showcase`): the row vocabulary in one frame, with
+/// NO preview chrome — no ruler, no border, no column map — so a screenshot of
+/// this is a screenshot of the bar rather than of the graph paper it is drawn
+/// on. Used for the README until a real capture replaces it.
+///
+/// `battery: None` throughout, deliberately. S7 has not landed, so the shipped
+/// bar renders that cell blank, and a promotional image is the last place to
+/// show a column the code does not fill yet.
+fn showcase() -> Vec<Row> {
+    let mut rows = vec![
+        agent(
+            RowStatus::NeedsYou,
+            None,
+            Provenance::Branch,
+            "api-svc",
+            API_SVC,
+            Some(("AUTH-7", 3)),
+            "rotate the signing keys before the cutover",
+        ),
+        agent(
+            RowStatus::Working,
+            None,
+            Provenance::Worktree,
+            "clave",
+            CLAVE,
+            Some(("S6-GUT", 5)),
+            "wiring the status column into render_rows",
+        ),
+        agent(
+            RowStatus::Done,
+            None,
+            Provenance::Main,
+            "webapp",
+            WEBAPP,
+            Some(("CART-99", 6)),
+            "cart totals round the same way on both sides",
+        ),
+        Row {
+            content: RowContent::Terminal {
+                name: String::from("shell"),
+            },
+            selected: false,
+        },
+        agent(
+            RowStatus::Idle,
+            None,
+            Provenance::Main,
+            "clave",
+            CLAVE,
+            None,
+            "ready for the next prompt",
+        ),
+        agent(
+            RowStatus::Failed,
+            None,
+            Provenance::Branch,
+            "infra",
+            INFRA,
+            Some(("DNS-TTL", 1)),
+            "the staging rollout timed out on the new zone",
+        ),
+        Row {
+            content: RowContent::Terminal {
+                name: String::from("logs"),
+            },
+            selected: false,
+        },
+        agent(
+            RowStatus::Stale,
+            None,
+            Provenance::Worktree,
+            "clave",
+            CLAVE,
+            Some(("KDL-GRD", 7)),
+            "its worktree was deleted underneath it",
+        ),
+        agent(
+            RowStatus::Dormant,
+            None,
+            Provenance::Main,
+            "notes",
+            DOTFILES,
+            Some(("ZSH", 2)),
+            "no process — opens where it left off",
+        ),
+    ];
+    rows[1].selected = true;
+    rows
+}
+
+/// Bare rows, nothing else on stdout. The width assertion still runs — a
+/// screenshot of a ragged bar would be worse than no screenshot.
+fn print_showcase() {
+    let rows = showcase();
+    for (line, row) in render_rows(&rows, DESIGN_COLS, Widths::EXPANDED)
+        .iter()
+        .zip(&rows)
+    {
+        let width = display_cells(&strip_sgr(line));
+        assert_eq!(width, DESIGN_COLS, "row is {width} cells: {row:?}");
+        println!("{line}");
+    }
+}
+
 fn main() {
+    // `--showcase` prints the screenshot frame and exits: the chrome below is
+    // for reading the design, not for showing it.
+    if std::env::args().any(|a| a == "--showcase") {
+        print_showcase();
+        return;
+    }
     let dim = DIM.fg();
     let bar_rule = "\u{2550}".repeat(78);
     println!(
