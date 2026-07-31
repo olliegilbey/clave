@@ -515,6 +515,100 @@ list, that is this, and it is deterministic rather than racy.
 — then you are reading a different string than the default and the clamp behaviour
 you are checking is not the one the golden pins.
 
+## 8. Session-id rotation and the identity gate (#97, PR #98)
+
+**This item is unlike the others: it verifies an assumption, not a rendering.**
+The whole rotation fix rests on one thing no test can reach — that a hook
+process inherits the environment `clave spawn` set before exec'ing Claude. If
+it does not, `resolve_row`'s fallback never fires and the fix is a silent no-op
+that still passes all 286 tests.
+
+**Partial reassurance before you start, so you know what is actually novel.**
+`dev.rs:352` records that hook processes already inherit `CLAVE_STATE_DIR` from
+their Claude parent — that is how sandbox events reach the sandbox store, and it
+has been load-bearing since 2026-07-18. So inheritance-through-Claude is proven.
+What is NOT proven is this injection point: `CLAVE_STATE_DIR` is set on the
+zellij session and flows down, while `CLAVE_AGENT_UUID` is set on the
+`Command` immediately before `exec`. Both should land in the same place. Should.
+
+### Setup
+
+`just dev-install` builds the working tree as `clave-dev` and copies the wasm —
+**Ollie runs this**, it writes outside the repo. Then `just sandbox`, which
+wipes the sandbox store first; that is fine here because this item needs a
+genuinely new agent anyway.
+
+### Do
+
+1. **Create a new agent** — `Alt+a` → pick a directory → `new`. A seeded row
+   cannot be used: seeded rows never went near a real transcript or a real
+   `clave spawn`, so they have no `CLAVE_AGENT_UUID` in any process.
+2. Send it a prompt, let the turn finish. Confirm the row behaves normally —
+   this is the **control**, and it exercises the payload-id path, not the fix.
+3. **`/clear` the agent.** This is the rotation trigger, confirmed on
+   2026-07-31: Claude mints a new session id and starts a new transcript.
+4. **Send another prompt.** This is the whole experiment.
+5. **The nested-Claude probe.** In the same agent, run
+   `claude -p 'Reply with exactly: OK'` and let it finish.
+6. **Optional, answers #99.** Note both session ids, close the tab, reopen the
+   row from the bar, and see which conversation comes back.
+
+### Correct
+
+- **After step 4 the row rises to the top and its status updates.** That is the
+  fix working, and it is decisive: after a `/clear` the payload's session id
+  names no row, so the *only* thing that can have resolved it is
+  `CLAVE_AGENT_UUID` reaching the hook. **A row that goes quiet here means the
+  env did not arrive, and the fix is inert.** That is the single most important
+  observation in this item.
+- **`title` and `summary` keep rolling** on subsequent turns, read from the new
+  transcript via `payload.transcript_path`. A row that rises but whose summary
+  freezes at its pre-`/clear` value means `resolve_transcript` is falling back
+  to the derived path — a different bug, and one the fix explicitly guards
+  against by holding the old value rather than reading the abandoned file.
+- **After step 5 the row is NOT stamped by the nested run**, and
+  `~/.local/state/clave-dev/state/clave.log` gains a `declined … is not the
+  agent's` line naming both pids. A row whose `last_interacted` jumps when the
+  nested Claude finishes means `PidGate` failed open, which is the
+  ambient-authority bug the review caught before it shipped.
+
+### Vacuous if
+
+- **You used a seeded row.** No real spawn, so no env, so the experiment tests
+  nothing. Only an `Alt+a` → `new` agent works.
+- **You are running the stable `clave`, not `clave-dev`.** The stable binary
+  predates this branch and sets neither variable — the row will freeze exactly
+  as it does today, and that is not a finding. Check `clave-dev --version`
+  carries the working-tree build tag.
+- **The tab was resurrected rather than freshly spawned** between steps 3 and 4.
+  Resurrection re-execs `clave spawn`, which re-sets the env — so the experiment
+  still passes but proves less than you think; it no longer isolates the
+  rotation path.
+
+### What I read, and what I will not do
+
+Ollie drives; the observability is mine to read and report:
+
+- `clave-dev dev status` — the sandbox store as JSON. `last_interacted`,
+  `status`, `title`, `summary` per row.
+- `~/.local/state/clave-dev/state/clave.log` — the decline lines from step 5.
+- The two transcript ids under `~/.claude/projects/<munged cwd>/`, which show
+  the rotation directly.
+
+I will not drive the session, and I will not run `zellij`, `just release` or
+`just dev-install`. If step 4 fails, the next move is the instrumentation recipe
+in `docs/dev/TESTING.md`, **not** another hypothesis — this branch has already
+spent three review rounds on assertions that were not checked.
+
+### If it fails
+
+The fix degrades to today's behaviour rather than misbehaving, so a failure here
+is not a rollback — it is "#97 is still open and the mechanism was wrong". The
+next candidate is not another env variable: it is reading the identity from a
+channel Claude cannot drop, most plausibly the pane. Record the result either
+way in **FOOTGUNS.md**, since "does a hook inherit the spawner's env" is exactly
+the kind of fact that costs a round to rediscover.
+
 ## What this checklist CANNOT test
 
 So that absence of a finding is not read as absence of a problem:
@@ -586,3 +680,7 @@ Fill it in as you go; the numbers are the deliverable, not the ticks.
 | Resize healed unaided / healed on next event / parked | |
 | Terminal row: console mark, name, sort position | |
 | One bar per tab, one build tag | |
+| **#97** After `/clear`, the row still rises and its status updates | |
+| **#97** `title`/`summary` keep rolling from the NEW transcript | |
+| **#97** A nested `claude -p` does NOT stamp the row; decline logged | |
+| **#99** Which conversation a resurrected rotated tab comes back on | |

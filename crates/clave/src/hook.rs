@@ -14,12 +14,24 @@ use serde::Deserialize;
 
 use crate::spawn::jsonl_path;
 use crate::store::{
-    AgentRecord, LabelSource, now_unix, read_store, snapshot_from, store_paths, with_store_mut,
+    AgentRecord, LabelSource, Store, now_unix, read_store, snapshot_from, store_paths,
+    with_store_mut,
 };
 
 /// The fields we care about across ALL hook events (each event's JSON is a
 /// superset; serde ignores the rest). Everything optional — a malformed or
-/// novel payload must degrade to a no-op, never an error.
+/// novel payload must degrade quietly, never error.
+///
+/// "Quietly" no longer means "no-op unconditionally", and the change is
+/// deliberate (#97). An unparseable payload yields `session_id: None`; before
+/// the rotation work that returned immediately, because the session id was the
+/// only key. It is no longer the only key — a hook firing from the agent's own
+/// Claude, proven by [`PidGate`], belongs to that agent whatever its JSON
+/// looked like, and refusing it would reintroduce the freeze for exactly the
+/// events most likely to be malformed. The event NAME comes from argv, not
+/// from this payload, so the status transition is still driven by something
+/// trustworthy. With no `session_id` there is no transcript to trust either,
+/// so the tail read is skipped and `title`/`summary` hold. (opus review, #98)
 #[derive(Debug, Default, Deserialize)]
 pub struct HookPayload {
     #[serde(default)]
@@ -31,6 +43,20 @@ pub struct HookPayload {
     /// Notification carries a human message; §6.5 matches on its text.
     #[serde(default)]
     pub message: Option<String>,
+    /// Where Claude is writing this session's transcript RIGHT NOW (#87).
+    ///
+    /// The alternative — rebuilding the path from the store's creation-time
+    /// `rec.cwd` and `uuid` — is broken twice over, and S4 §4.3a/d records it
+    /// as MANDATORY to replace rather than merely preferable: it misses when
+    /// the session relocates, and it misses when Claude rotates the session id
+    /// (a `/clear` or resume starts a new id AND a new file), which is #97.
+    ///
+    /// **This is attacker-adjacent input.** It arrives on hook stdin and what
+    /// is read from it is written into the store, so an unvalidated path is a
+    /// write primitive rather than a bad read. Always go through
+    /// [`resolve_transcript`], never straight to the filesystem.
+    #[serde(default)]
+    pub transcript_path: Option<String>,
 }
 
 /// §6.5's transition table. Latest-wins, with ONE status-aware exception
@@ -393,19 +419,214 @@ pub fn apply_hook_event(
     changed
 }
 
+/// Which store row does this hook event belong to? (#97)
+///
+/// The payload's `session_id` is authoritative WHEN IT IS A ROW — that is the
+/// ordinary case and it stays first, so nothing about a normal session changes.
+/// It stops being a row the moment Claude rotates the id on resume: a new
+/// session id, a new transcript, and a lookup that misses. Before this, the
+/// hook returned there, so the row never stamped `last_interacted` again and
+/// silently stopped rising. Measured on a live tab: 5.9 days stale while in
+/// active use.
+///
+/// `CLAVE_AGENT_UUID` is the fallback, set by `clave spawn` before the exec.
+///
+/// **Store membership is NOT sufficient to accept it**, and an earlier version
+/// of this function got that wrong. The env var is inherited by every
+/// descendant of the agent's Claude, so a nested `claude` — an agent shelling
+/// one out, `clave dev`'s own `claude -p` — carries it too, and its session id
+/// is likewise unknown to the store. Membership proves the value names *a*
+/// row, never *this* row: the nested session's Stop, Notification and
+/// UserPromptSubmit would all have driven the parent agent's status, ordering
+/// and prose. Caught in review, three independent lanes.
+///
+/// So the fallback is gated on [`PidGate`]: it is taken only when the Claude
+/// that fired this hook IS the Claude clave exec'd. `CLAUDE_PID` is set by
+/// Claude Code to its own pid — verified empirically, a nested `claude`
+/// reported its own pid and not its parent's — and `exec` preserves the pid,
+/// so `clave spawn`'s `process::id()` IS the agent Claude's pid.
+///
+/// The routes that matter fail CLOSED: a missing value, a STALE one (a dead
+/// pid cannot match a live `CLAUDE_PID`), or a pid mismatch all resolve to
+/// `None` and the hook declines exactly as it did before any of this existed.
+/// The worst case is the old freeze, never an ACCIDENTAL write to the wrong
+/// agent — which is the threat, since the mechanism exists because environment
+/// is inherited without anyone intending it.
+///
+/// It is NOT a defence against a deliberate local caller: exporting a real
+/// row's uuid with matching `CLAVE_AGENT_PID` and `CLAUDE_PID` passes. That is
+/// same-user, same-machine, and anyone who can set that environment can write
+/// the store directly, so there is nothing to defend. Stated because an earlier
+/// draft claimed "hand-set" values fail closed, and they do not.
+///
+/// Pure and total: map lookups and integer comparison, no I/O, so it is safe
+/// on the §6.5 fast path and testable without a store on disk.
+pub fn resolve_row(
+    store: &Store,
+    session: Option<&str>,
+    env_uuid: Option<&str>,
+    gate: PidGate,
+) -> Option<String> {
+    if let Some(s) = session.filter(|s| store.agents.contains_key(*s)) {
+        return Some(s.to_string());
+    }
+    if !gate.is_the_agents_own_claude() {
+        return None;
+    }
+    env_uuid
+        .filter(|e| store.agents.contains_key(*e))
+        .map(str::to_string)
+}
+
+/// "Is the Claude that fired this hook the one clave exec'd?" — the guard that
+/// keeps [`resolve_row`]'s env fallback from being ambient authority.
+///
+/// Both halves are read from the environment by the caller so this stays pure.
+/// `agent` is clave's own `CLAVE_AGENT_PID`; `firing` is Claude's `CLAUDE_PID`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PidGate {
+    pub agent: Option<u32>,
+    pub firing: Option<u32>,
+}
+
+impl PidGate {
+    /// Read both sides from the ambient environment.
+    pub fn from_env() -> Self {
+        let get = |k: &str| std::env::var(k).ok()?.parse::<u32>().ok();
+        Self {
+            agent: get(clave_types::AGENT_PID_ENV),
+            firing: get(CLAUDE_PID_ENV),
+        }
+    }
+
+    /// True only when both are present AND equal. `None` on either side is a
+    /// refusal, not a pass: an absent `CLAUDE_PID` means we cannot tell which
+    /// Claude fired, and guessing is the whole bug this exists to prevent.
+    pub fn is_the_agents_own_claude(self) -> bool {
+        matches!((self.agent, self.firing), (Some(a), Some(f)) if a == f)
+    }
+}
+
+/// Claude Code's own pid, exported into every process it spawns — including
+/// hooks. NOT clave's to set, which is why it lives here rather than in
+/// `clave-types` beside the two clave owns: it is an OBSERVED property of an
+/// external tool (verified 2026-07-31; a nested `claude` reported its own pid,
+/// not its parent's), and if Claude ever stops setting it, [`PidGate`] fails
+/// closed and the rotation fix degrades to the pre-fix freeze.
+const CLAUDE_PID_ENV: &str = "CLAUDE_PID";
+
+/// The transcript to read for this event, validated (#87 / S4 §4.3a/d).
+///
+/// Prefers the payload's `transcript_path`, which is the only source that is
+/// right under BOTH failure modes of the derived path: a relocated session
+/// (the file moves) and a rotated session id (a `/clear` or resume starts a
+/// new file, #97). Deriving from `rec.cwd` + `uuid` misses both.
+///
+/// `transcript_path` is untrusted input whose CONTENTS get written into the
+/// store, so it is canonicalized and then confined:
+///
+/// - it must resolve inside `<claude_config_dir>/projects` — canonicalized on
+///   both sides, so `..` traversal and symlinks out are refused after
+///   resolution rather than by string inspection;
+/// - its filename must be `<session_id>.jsonl`. Note precisely what that does
+///   and does not buy: both the path and the id come from the SAME payload, so
+///   this is self-CONSISTENCY, not verification — a liar can lie consistently.
+///   #87 specified the store row's uuid here, which would be a real binding;
+///   rotation makes that impossible, because the live file is not named after
+///   the minted uuid. What still holds is confinement plus [`PidGate`], so the
+///   worst case is grafting another transcript from the same tree, not an
+///   arbitrary file read. When `session_id` DOES name a row the binding is
+///   strong again, because then `uuid == session`.
+///
+/// **Returns `None` rather than the derived path when the row was reached by
+/// rotation** (`uuid != session`). A hook must never fail hard — that blocks
+/// the agent (§6.5) — but for a rotated row the derived path names the
+/// PRE-ROTATION transcript, which still exists and still reads, so falling
+/// back to it would roll `title`/`summary` out of an abandoned conversation.
+/// That is the "subtler bug than the freeze" this branch's first attempt
+/// named, and #87's fall-back-to-derived rule predates rotation being known:
+/// it assumed the fallback was a MISSING file, not a stale-but-readable one.
+/// No tail this event means the held values stand, which is S4 §5.4's
+/// fail-closed rule. (opus review, #98)
+pub fn resolve_transcript(
+    claude_dir: &Path,
+    payload_path: Option<&str>,
+    session: Option<&str>,
+    rec_cwd: &str,
+    uuid: &str,
+) -> Option<std::path::PathBuf> {
+    // Safe only while the row was reached by its own id; see above.
+    let derived = || (session == Some(uuid)).then(|| jsonl_path(claude_dir, rec_cwd, uuid));
+    let (Some(raw), Some(session)) = (payload_path, session) else {
+        return derived();
+    };
+    // The root must be ABSOLUTE before it can confine anything. `run_hook`
+    // builds `claude_dir` with `unwrap_or_default()`, so a failure there gives
+    // an EMPTY path — `join("projects")` would then be the relative `projects`,
+    // and `canonicalize` resolves that against the hook's working directory,
+    // which is the agent's cwd. A `projects` directory sitting there would
+    // become the confinement root, and every check below would pass for a file
+    // the payload chose. The derived path degrades in the same case, but a
+    // wrong derived read is a MISSING tail; a wrong root is an accepted read of
+    // an attacker-named file whose contents reach the store. (CodeRabbit, #98)
+    if !claude_dir.is_absolute() {
+        return derived();
+    }
+    let root = match std::fs::canonicalize(claude_dir.join("projects")) {
+        Ok(r) => r,
+        Err(_) => return derived(),
+    };
+    match std::fs::canonicalize(raw) {
+        Ok(p)
+            if p.starts_with(&root)
+                && p.file_name()
+                    .is_some_and(|f| f == format!("{session}.jsonl").as_str()) =>
+        {
+            Some(p)
+        }
+        _ => derived(),
+    }
+}
+
 /// The whole hook flow. Errors bubble up ONLY so main can log them to
 /// stderr — main exits 0 no matter what (Global Constraint).
 pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
     let payload: HookPayload = serde_json::from_str(stdin_json).unwrap_or_default();
-    let Some(uuid) = payload.session_id.clone() else {
-        return Ok(()); // no session_id → nothing to key on
-    };
+    let session = payload.session_id.clone();
     let paths = store_paths()?;
     // FAST PATH (§6.5): lock-free read; untracked session → exit immediately.
     // clave must never serialize unrelated sessions' hooks behind its lock.
-    if !read_store(&paths)?.agents.contains_key(&uuid) {
+    // `resolve_row` keeps that property — map lookups and an integer compare,
+    // no I/O. The admitted set does GROW, by exactly one case and deliberately:
+    // the agent's own Claude firing with a rotated id, which used to return
+    // early and is the whole point of #97. What the pid gate preserves is the
+    // invariant §6.5 actually cares about — no UNRELATED session ever reaches
+    // this lock. (An earlier draft of this comment claimed the set was
+    // unchanged; that was an overclaim, and this file treats those as defects.)
+    let env_uuid = std::env::var(clave_types::AGENT_UUID_ENV).ok();
+    let gate = PidGate::from_env();
+    let store = read_store(&paths)?;
+    let Some(uuid) = resolve_row(&store, session.as_deref(), env_uuid.as_deref(), gate) else {
+        // Observability for the ONE silent drop that is hard to reason about
+        // from outside: the env named a real row and the gate refused it. The
+        // condition is deliberately narrow — an unrelated session carries no
+        // `CLAVE_AGENT_UUID`, so this cannot become per-event noise for the
+        // whole machine, which §6.5 forbids. #97 was a silent freeze; a
+        // mechanism that can silently decline should say so. (CodeRabbit, #98)
+        if let Some(e) = env_uuid
+            .as_deref()
+            .filter(|e| store.agents.contains_key(*e))
+        {
+            crate::evlog::log_event(
+                "hook",
+                &format!(
+                    "{event}: declined {e} — firing claude {:?} is not the agent's {:?}",
+                    gate.firing, gate.agent
+                ),
+            );
+        }
         return Ok(());
-    }
+    };
     // §6.9: claude_config_dir() (not raw home) so the sandbox override
     // reaches the same jsonl tree real claude processes write to.
     let claude_dir = crate::env::claude_config_dir().unwrap_or_default();
@@ -418,9 +639,28 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
         // 64 KiB tail read on the two label-bearing events, well inside the
         // §6.5 hook budget; the other events still read nothing.
         let tail = s.agents.get(&uuid).and_then(|rec| {
-            matches!(event, "Stop" | "UserPromptSubmit")
-                .then(|| read_tail(&jsonl_path(&claude_dir, &rec.cwd, &uuid), 64 * 1024))
-                .flatten()
+            // Event gate FIRST. `resolve_transcript` does up to two
+            // `canonicalize` calls, and this closure runs while
+            // `with_store_mut` holds the exclusive flock — computing a path
+            // only to discard it would put filesystem syscalls under the lock
+            // on every `PreToolUse`, i.e. on every tool call of every tracked
+            // agent. The comment above promises the other events read nothing;
+            // this is what makes that true. (CodeRabbit, #98 — the previous
+            // ordering was a regression against the code this replaced.)
+            if !matches!(event, "Stop" | "UserPromptSubmit") {
+                return None;
+            }
+            // The payload names its own CURRENT transcript, so this is right
+            // through both a relocation and an id rotation without the store
+            // having to remember anything (#87 dissolves #97's read half).
+            resolve_transcript(
+                &claude_dir,
+                payload.transcript_path.as_deref(),
+                session.as_deref(),
+                &rec.cwd,
+                &uuid,
+            )
+            .and_then(|path| read_tail(&path, 64 * 1024))
         });
         apply_hook_event(s, &uuid, event, &payload, tail.as_deref(), now_unix())
             .then(|| snapshot_from(s))
@@ -457,6 +697,223 @@ mod tests {
         }
     }
 
+    /// #97, the bug this exists to prevent recurring.
+    ///
+    /// Claude starts a NEW session id and transcript when the pane gets a
+    /// fresh conversation, so the payload id stops naming a row. `run_hook`
+    /// returned there, and the row silently stopped stamping
+    /// `last_interacted` — 5.9 days stale on a tab in active use.
+    ///
+    /// Why no test caught it: every fixture used ONE uuid for the life of a
+    /// row, so rotation was not an input anywhere and there was nothing to
+    /// vary. Same family as D23 and #91 — the fixture encoded the assumption
+    /// under test.
+    #[test]
+    fn a_rotated_session_id_resolves_only_for_the_agents_own_claude() {
+        let mut store = Store::default();
+        store.agents.insert("minted".into(), rec("minted"));
+        let same = PidGate {
+            agent: Some(42),
+            firing: Some(42),
+        };
+        let nested = PidGate {
+            agent: Some(42),
+            firing: Some(99),
+        };
+
+        // The ordinary case is UNCHANGED and needs no gate at all: a payload
+        // id that names a row wins outright, whatever the pids say.
+        for g in [same, nested, PidGate::default()] {
+            assert_eq!(
+                resolve_row(&store, Some("minted"), None, g).as_deref(),
+                Some("minted")
+            );
+        }
+        assert_eq!(
+            resolve_row(&store, Some("minted"), Some("other"), same).as_deref(),
+            Some("minted"),
+            "a valid payload id must not be overridden by the environment"
+        );
+
+        // The rotation: the new id names nothing, the env carries the minted
+        // key, and the firing Claude IS the agent's — so the row is found.
+        assert_eq!(
+            resolve_row(&store, Some("rotated"), Some("minted"), same).as_deref(),
+            Some("minted")
+        );
+
+        // THE REVIEW FINDING. A nested `claude` inherits the env and its own
+        // session id is equally unknown, so store membership alone would have
+        // handed it this row. The pid gate is the only thing refusing it.
+        assert_eq!(
+            resolve_row(&store, Some("nested-session"), Some("minted"), nested),
+            None,
+            "a nested claude must never resolve to the agent's row"
+        );
+
+        // Every unknown fails CLOSED, including a half-populated gate — an
+        // absent CLAUDE_PID means we cannot tell which Claude fired.
+        for g in [
+            PidGate::default(),
+            PidGate {
+                agent: Some(42),
+                firing: None,
+            },
+            PidGate {
+                agent: None,
+                firing: Some(42),
+            },
+        ] {
+            assert_eq!(
+                resolve_row(&store, Some("rotated"), Some("minted"), g),
+                None
+            );
+        }
+        assert_eq!(
+            resolve_row(&store, Some("rotated"), Some("bogus"), same),
+            None
+        );
+        assert_eq!(resolve_row(&store, None, None, same), None);
+
+        // A MALFORMED payload (serde yields `session_id: None`) resolves via
+        // the env when the gate passes. This is a deliberate behaviour change
+        // — the old code returned early on a missing session id — and it was
+        // untested until the opus review pointed out that a mutation
+        // restoring the `session.is_some()` requirement would have survived.
+        assert_eq!(
+            resolve_row(&store, None, Some("minted"), same).as_deref(),
+            Some("minted"),
+            "the agent's own Claude is still its own Claude with unparseable JSON"
+        );
+        // …but never for a nested one, which is the whole point of the gate.
+        assert_eq!(resolve_row(&store, None, Some("minted"), nested), None);
+    }
+
+    /// #87 / S4 §4.3a/d. The payload names its own current transcript, which
+    /// is right through BOTH a relocation and an id rotation — but it arrives
+    /// on hook stdin and its contents are written to the store, so it is a
+    /// write primitive unless confined.
+    ///
+    /// Asserts on `resolve_transcript` itself, not on a re-implementation of
+    /// its rule. The previous version of this test rebuilt the selection in a
+    /// local closure and asserted on the copy, so deleting the real one left
+    /// it green — caught in review.
+    #[test]
+    fn the_transcript_path_is_used_when_confined_and_refused_otherwise() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path();
+        let proj = claude.join("projects").join(crate::munge::munge_cwd("/x"));
+        std::fs::create_dir_all(&proj).unwrap();
+        for id in ["minted", "rotated"] {
+            std::fs::write(proj.join(format!("{id}.jsonl")), "{}\n").unwrap();
+        }
+        let outside = dir.path().join("outside.jsonl");
+        std::fs::write(&outside, "{}\n").unwrap();
+        let derived = jsonl_path(claude, "/x", "minted");
+        let go =
+            |p: Option<&str>, s: Option<&str>| resolve_transcript(claude, p, s, "/x", "minted");
+
+        // The rotation case: the payload points at the LIVE file, and it is
+        // taken — no stored field involved, which is why #97 needs none.
+        let rotated = proj.join("rotated.jsonl");
+        assert_eq!(
+            go(rotated.to_str(), Some("rotated")),
+            Some(std::fs::canonicalize(&rotated).unwrap())
+        );
+
+        // RELOCATION — #87's original motivation, and a gap the opus review
+        // found: every other case here lives in the SAME munged dir as the
+        // derived path, so a rule constraining accepted paths to
+        // `<root>/<munge(rec_cwd)>/` would have passed the whole suite while
+        // silently reintroducing the bug this function exists to fix.
+        let moved = claude
+            .join("projects")
+            .join(crate::munge::munge_cwd("/somewhere/else"));
+        std::fs::create_dir_all(&moved).unwrap();
+        let relocated = moved.join("minted.jsonl");
+        std::fs::write(&relocated, "{}\n").unwrap();
+        assert_eq!(
+            go(relocated.to_str(), Some("minted")),
+            Some(std::fs::canonicalize(&relocated).unwrap()),
+            "a relocated transcript is still this session's, in any project dir"
+        );
+
+        // Absent payload, NOT rotated → the derived path, unchanged.
+        assert_eq!(go(None, Some("minted")), Some(derived.clone()));
+
+        // Absent payload WHILE rotated → no tail at all. The derived path
+        // would name the pre-rotation transcript, which still exists and
+        // still reads, so falling back would roll title/summary out of an
+        // abandoned conversation — worse than holding them. (opus review)
+        assert_eq!(go(None, Some("rotated")), None);
+
+        // CONFINEMENT. Outside the projects root, and a path whose filename
+        // does not belong to the sending session. Both refuse; because these
+        // are rotated, refusing means None rather than the stale file.
+        assert_eq!(go(outside.to_str(), Some("rotated")), None);
+        assert_eq!(
+            go(rotated.to_str(), Some("someone-else")),
+            None,
+            "the path and the id must at least agree with each other"
+        );
+        // Traversal is refused AFTER canonicalization, not by string match.
+        let traversal = proj.join("..").join("..").join("outside.jsonl");
+        assert_eq!(go(traversal.to_str(), Some("outside")), None);
+        assert_eq!(
+            go(Some("/nonexistent/rotated.jsonl"), Some("rotated")),
+            None
+        );
+        // A refused path on a NON-rotated row still gets the derived file:
+        // there it is the row's own live transcript, not a stale one.
+        assert_eq!(
+            go(outside.to_str(), Some("minted")),
+            Some(derived),
+            "the derived fallback is safe exactly when the row was reached by its own id"
+        );
+    }
+
+    /// CodeRabbit on #98. `run_hook` builds `claude_dir` with
+    /// `unwrap_or_default()`, so a failure there yields an EMPTY path — and
+    /// `join("projects")` on empty is the RELATIVE `projects`, which
+    /// `canonicalize` resolves against the hook's working directory (the
+    /// agent's cwd). A `projects` dir sitting there would have become the
+    /// confinement root, and every later check would pass for a file the
+    /// payload named. A wrong derived path is a missing tail; a wrong root is
+    /// an accepted read whose contents reach the store.
+    /// Does NOT mutate the process cwd to build the trap. An earlier version
+    /// called `set_current_dir`, which is process-global — cargo runs this
+    /// binary multi-threaded, so it was a latent flake for whoever next added
+    /// a cwd-dependent test (opus review). The property under test is
+    /// "non-absolute root ⇒ never confine", and that is expressible directly:
+    /// a relative `claude_dir` reaches the guard whatever the cwd happens to
+    /// be, so the assertion holds without touching global state.
+    #[test]
+    fn a_relative_claude_dir_never_confines_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        // A real, canonicalizable planted file whose name satisfies the
+        // session check — so ONLY the absolute-root guard can refuse it.
+        let proj = dir.path().join("projects").join("anything");
+        std::fs::create_dir_all(&proj).unwrap();
+        let planted = proj.join("evil.jsonl");
+        std::fs::write(&planted, "{}\n").unwrap();
+
+        // Both non-absolute shapes: empty (what `unwrap_or_default()` yields)
+        // and an ordinary relative path.
+        for root in [Path::new(""), Path::new("some/relative/dir")] {
+            let got = resolve_transcript(root, planted.to_str(), Some("evil"), "/x", "evil");
+            assert_eq!(
+                got,
+                Some(jsonl_path(root, "/x", "evil")),
+                "a non-absolute claude_dir must fall back, never confine"
+            );
+            assert_ne!(
+                got,
+                Some(planted.clone()),
+                "the planted file must never be accepted"
+            );
+        }
+    }
+
     #[test]
     fn prompt_stamps_bound_tabs_timeline_atomically() {
         // §6.6 Design B: a prompt is a USER COMMITMENT to the agent's TAB.
@@ -471,6 +928,7 @@ mod tests {
             session_id: Some("u1".into()),
             prompt: None,
             message: None,
+            transcript_path: None,
         };
         assert!(apply_hook_event(
             &mut s,
@@ -612,6 +1070,7 @@ mod tests {
             session_id: Some("u1".into()),
             prompt: Some("fix the flaky auth test".into()),
             message: None,
+            transcript_path: None,
         };
         assert!(refresh_label(&mut r, "UserPromptSubmit", &p, None));
         assert_eq!(r.label, "x · main · fix the flaky auth");
@@ -639,6 +1098,7 @@ mod tests {
             session_id: Some("u1".into()),
             prompt: Some("<task-notification> <task-id>bai</task-notification>".into()),
             message: None,
+            transcript_path: None,
         };
         assert!(!refresh_label(&mut r, "UserPromptSubmit", &injected, None));
         assert_eq!(r.label, "x · main"); // unchanged — still the bare prefix
@@ -649,6 +1109,7 @@ mod tests {
             session_id: Some("u1".into()),
             prompt: Some("fix the flaky auth test".into()),
             message: None,
+            transcript_path: None,
         };
         assert!(refresh_label(&mut r, "UserPromptSubmit", &real, None));
         assert_eq!(r.label, "x · main · fix the flaky auth");
@@ -668,6 +1129,7 @@ mod tests {
                 session_id: Some("u1".into()),
                 prompt: Some(injected_text.clone()),
                 message: None,
+                transcript_path: None,
             };
             assert!(
                 !refresh_label(&mut r, "UserPromptSubmit", &p, None),
@@ -814,6 +1276,7 @@ mod tests {
             session_id: Some("u1".into()),
             prompt: Some("a prompt that must not win".into()),
             message: None,
+            transcript_path: None,
         };
         let mut r = rec("u1");
         let tail = format!(
@@ -838,6 +1301,7 @@ mod tests {
             session_id: Some("u1".into()),
             prompt: Some("a later prompt".into()),
             message: None,
+            transcript_path: None,
         };
         refresh_label(&mut r, "UserPromptSubmit", &p2, None);
         assert_eq!(r.summary, "a prompt that must not win");
@@ -925,6 +1389,7 @@ mod tests {
             session_id: Some("u1".into()),
             prompt: Some(r#"fix the \d "regex" now"#.into()),
             message: None,
+            transcript_path: None,
         };
         assert!(refresh_label(&mut r, "UserPromptSubmit", &p, None));
         assert!(

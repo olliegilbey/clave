@@ -16,6 +16,27 @@ use serde::{Deserialize, Serialize};
 /// silently spawns a second bar instead of erroring.
 pub const CLAVE_BINARY_KEY: &str = "clave_binary";
 
+/// Env var carrying the agent's store join key across the exec into Claude
+/// (#97). `clave spawn` sets it; `clave hook` reads it when the hook payload's
+/// `session_id` is not a row clave knows — which is what a resumed session
+/// looks like, because Claude mints a new id and starts a new transcript.
+///
+/// Shared here for the same reason as [`CLAVE_BINARY_KEY`]: two commands in
+/// two different processes have to agree on the spelling, and a typo would be
+/// silent — the hook would simply go on declining every rotated session, which
+/// is exactly the pre-fix behaviour and therefore invisible.
+pub const AGENT_UUID_ENV: &str = "CLAVE_AGENT_UUID";
+
+/// Env var carrying the pid of the Claude that clave itself exec'd (#97), so
+/// the hook can tell that Claude apart from any `claude` nested inside it.
+///
+/// `exec` preserves the pid, so `clave spawn`'s own `process::id()` IS the
+/// agent Claude's pid. Without this, [`AGENT_UUID_ENV`] would be ambient
+/// authority: environment is inherited by every descendant, so a nested
+/// `claude` would carry the uuid, take the same fallback, and write its status
+/// and prose into another agent's row.
+pub const AGENT_PID_ENV: &str = "CLAVE_AGENT_PID";
+
 /// Per-agent status. This is a *latest-wins state machine* (spec §6.5), not a
 /// priority-max: a later event can downgrade an earlier one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

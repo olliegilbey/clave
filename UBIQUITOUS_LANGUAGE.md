@@ -23,9 +23,15 @@ here in the same change.**
 | **pane** | A zellij pane inside a tab. | a tab |
 | **plugin pane** | The pane running `clave-bar`, one per tab. Every tab has its own bar instance. | the sidebar as a concept |
 | **agent session** | One Claude Code conversation, identified by its minted **uuid**. Say "agent session" or "conversation" — never bare "session". | a zellij session |
+| **minted uuid** | The id `clave add` generates and passes as `--session-id`. The store's join key, **stable for the life of the row** — binds, the tab timeline and every wire field depend on it never moving. | the session id in a hook payload |
+| **live session id** | The id Claude is using *right now*, in the hook payload and in the transcript filename. Starts equal to the minted uuid and **changes** when the pane gets a fresh conversation (a `/clear`, and probably a resume). Never a join key. | the minted uuid |
 
 > The single most expensive ambiguity in this project. When you write "session",
 > qualify it.
+>
+> The minted/live split is the same trap one level down, and it cost #97: the
+> two are equal right up until the first `/clear`, so code that conflates them
+> works perfectly in every test and freezes the row in the field.
 
 ---
 

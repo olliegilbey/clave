@@ -265,7 +265,7 @@ fn main() -> Result<()> {
                          (or set CLAVE_CLAUDE_BIN to its location)"
                     )
                 })?;
-            let err = match mode {
+            let err = {
                 // NO `--name` (#91). It used to be passed here on create, and
                 // it was the whole bug: Claude records `--name` as a
                 // `custom-title` transcript entry, indistinguishable from a
@@ -297,12 +297,42 @@ fn main() -> Result<()> {
                 // baked into the serialized layouts of every existing session,
                 // and a pane whose replayed command no longer parses would
                 // fail to resurrect.
-                spawn::SpawnMode::Create => std::process::Command::new(&claude)
-                    .args(["--session-id", &uuid])
-                    .exec(),
-                spawn::SpawnMode::Resume => std::process::Command::new(&claude)
-                    .args(["--resume", &uuid])
-                    .exec(),
+                //
+                // `CLAVE_AGENT_UUID` carries the row's join key across the
+                // exec (#97). Claude starts a NEW session id and a new
+                // transcript whenever the pane gets a fresh conversation — a
+                // `/clear` is confirmed to do it — so the hook's payload id
+                // stops matching the store and the row silently freezes,
+                // measured at 5.9 days stale on a tab in active use. The env
+                // is the one channel that survives: `exec` replaces the image
+                // but keeps the environment, and hooks are children of that
+                // process.
+                //
+                // `CLAVE_AGENT_PID` is what makes the uuid SAFE to act on.
+                // Env is inherited by every descendant, so a nested `claude`
+                // carries the uuid too and its unknown session id would take
+                // the same fallback — writing another agent's status, order
+                // and prose into THIS row. `process::id()` here is the agent
+                // Claude's own pid, because `exec` preserves it, and the hook
+                // compares it against Claude's `CLAUDE_PID`. Both verified
+                // rather than assumed (2026-07-31): a nested `claude`
+                // reported its own pid, not its parent's.
+                //
+                // The identity env is wired ONCE rather than per arm, so a
+                // future third variable cannot land on one of them only. Only
+                // the FLAG varies by mode, and that match stays exhaustive
+                // over `SpawnMode` — no catch-all, so a variant added later
+                // fails to compile here rather than silently picking a
+                // behaviour. This is the exec that starts every agent.
+                let flag = match mode {
+                    spawn::SpawnMode::Create => "--session-id",
+                    spawn::SpawnMode::Resume => "--resume",
+                };
+                std::process::Command::new(&claude)
+                    .env(clave_types::AGENT_UUID_ENV, &uuid)
+                    .env(clave_types::AGENT_PID_ENV, std::process::id().to_string())
+                    .args([flag, &uuid])
+                    .exec()
             };
             // exec only returns on failure — surface it in the pane.
             Err(anyhow::anyhow!("exec claude failed: {err}"))
