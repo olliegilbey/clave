@@ -306,13 +306,30 @@ pub fn apply_bind(paths: &StorePaths, uuid: &str, tab_id: usize) -> Result<Optio
         // whichever uuid sorts first. One tab hosts one agent: the freshest
         // bind wins. (Prune_tabs is the primary cleaner; this closes the
         // close-then-immediately-reuse window where the id never went absent.)
-        let mut evicted = false;
+        let mut evicted: Vec<String> = Vec::new();
         for r in s.agents.values_mut() {
             if r.uuid != uuid && r.tab_id == Some(tab_id) {
                 r.tab_id = None;
-                evicted = true;
+                evicted.push(r.uuid.clone());
             }
         }
+        if !evicted.is_empty() {
+            // #55 observability: this whole bug class was invisible to the
+            // evlog — bind/touch/prune-tabs/focus log nothing. A legitimate
+            // eviction (tab-id reuse, the branch above) and an RC-A mis-bind
+            // look identical in the store, so the discriminator is whether the
+            // evicted uuid still has a live pane in that tab — a question only
+            // answerable by joining this line against `zellij action
+            // list-panes`. Costs nothing when nothing is wrong: the log stays
+            // empty. Cheap and store-side-effect-free on purpose —
+            // `with_store_mut` holds an exclusive flock across this closure.
+            crate::evlog::log_event_in(
+                &paths.dir,
+                "bind-evict",
+                &format!("tab={tab_id} winner={uuid} evicted={evicted:?}"),
+            );
+        }
+        let evicted = !evicted.is_empty();
         let already = s.agents.get(uuid).and_then(|r| r.tab_id) == Some(tab_id);
         if already && !evicted {
             return None; // re-report of an existing bind, no collision → free
@@ -626,6 +643,40 @@ mod tests {
         assert_eq!(snap.agents[0].tab_id, Some(9));
         // Unknown uuid: silently none (bar may race a pruned agent).
         assert!(apply_bind(&p, "ghost", 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn bind_logs_only_when_it_evicts_and_logs_beside_its_own_store() {
+        // #55 observability: the eviction is the ONE store-side trace of a
+        // wrong bind, and the live-validation SOP joins these lines against
+        // `zellij action list-panes` to tell a legitimate tab-id-reuse
+        // eviction (victim has no pane) from an RC-A mis-bind (victim still
+        // has a live pane in that tab). It must stay silent when nothing goes
+        // wrong, or the signal drowns — and it must land beside the store
+        // being written, not in the ambient one, so the sandbox's evictions
+        // are readable in the sandbox's log.
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            s.agents.insert("u1".into(), rec("u1"));
+            s.agents.insert("u2".into(), rec("u2"));
+        })
+        .unwrap();
+        let log = p.dir.join("clave.log");
+        // An uncontested bind evicts nobody: no line.
+        apply_bind(&p, "u1", 4).unwrap().expect("bound");
+        assert!(!log.exists(), "an uncontested bind must log nothing");
+        // u2 takes tab 4 from u1: one line, naming both sides.
+        apply_bind(&p, "u2", 4).unwrap().expect("bound");
+        let body = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(body.lines().count(), 1);
+        let v: serde_json::Value = serde_json::from_str(body.trim()).unwrap();
+        assert_eq!(v["cmd"], "bind-evict");
+        let detail = v["detail"].as_str().unwrap();
+        assert!(detail.contains("tab=4"), "{detail}");
+        assert!(detail.contains("winner=u2"), "{detail}");
+        assert!(detail.contains("u1"), "{detail}");
+        assert_eq!(read_store(&p).unwrap().agents["u1"].tab_id, None);
     }
 
     #[test]

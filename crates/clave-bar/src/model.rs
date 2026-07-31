@@ -88,6 +88,16 @@ pub enum Effect {
     /// run_command(["clave","open",uuid]) — §6.3. Fired by dwell expiry and
     /// explicit picks; the model has already marked the uuid in-flight (↻).
     OpenAgent { uuid: String },
+    /// run_command(["clave","touch",tab_id]) — the once-EVER birth stamp for a
+    /// tab the store timeline has never seen. Was an inline `run_command` in
+    /// the adapter, which put it out of reach of every test (`main.rs` is
+    /// `test = false`) and gave it no retry trigger: the block lived only in
+    /// the TabUpdate arm, and a close delivers exactly ONE TabUpdate to the
+    /// newly-active instance — the one where the manifest is stale and the
+    /// gate is false. As an effect it is emitted by `identity_effects`, which
+    /// every frame arm re-enters, so the PaneUpdate that resolves the
+    /// incoherence is the retry (#55, RC-A/RC-B).
+    Touch { tab_id: usize },
     /// run_command(["clave","collapse",bool]) — issue #5 durability. Emitted
     /// by toggle() (the write we owe the store) and by apply_snapshot's
     /// one-shot re-assert (out-of-order write recovery). Bookkeeping runs on
@@ -268,6 +278,24 @@ fn basename(path: &str) -> &str {
     path.rsplit('/').find(|s| !s.is_empty()).unwrap_or("")
 }
 
+/// One instance's outstanding `clave bind` for a uuid: which tab we claimed,
+/// the store `seq` at the moment we claimed it, and how many times we have
+/// tried THIS target. See `bind_effects` for the emit rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BindSent {
+    tab_id: usize,
+    at_seq: u64,
+    tries: u32,
+}
+
+/// Bind re-emissions per (uuid, target tab) episode before we stop fighting.
+/// The heal RC-A needs is ONE; a lost push needs one or two; beyond that we
+/// are in an eviction ping-pong we cannot win (two agents whose panes both
+/// resolve into one tab, each bind evicting the other and advancing `seq`),
+/// and wrong-but-consistent beats a storm — the `collapse_reasserted`
+/// precedent (a second contradiction means someone else is authoritative).
+const BIND_MAX_TRIES: u32 = 4;
+
 pub struct BarModel {
     /// The collapse mode is not known yet, so the seek must not act (D37).
     ///
@@ -312,10 +340,20 @@ pub struct BarModel {
     /// Last label WE wrote per uuid — the rename loop-guard (§6.4). Renames
     /// fire on label CHANGE only, so user manual renames stick in between.
     renamed: BTreeMap<String, String>,
-    /// Last uuid→tab bind THIS instance sent (`clave bind`). Guard is
-    /// last-SENT, deliberately not the snapshot echo — echo-gated guards
-    /// re-fire under congestion (C5 rd 4 spawn storm).
-    sent_binds: BTreeMap<String, usize>,
+    /// OUR plugin pane id (`get_plugin_ids().plugin_id`), set once at load.
+    /// Identity resolution lives HERE, not in the adapter, because `main.rs`
+    /// is `test = false` — everything that joins the two zellij frames must be
+    /// host-testable or it is unguarded (RC-A shipped for exactly that reason).
+    own_pane: Option<u32>,
+    /// uuid → the bind we last SENT, the `seq` in effect when we sent it, and
+    /// how many times we have tried this target. Replaces `sent_binds`, whose
+    /// "last sent, never cleared" latch made a wrong bind permanent for the
+    /// life of the plugin instance (RC-A, #55). The guard is still NOT the
+    /// snapshot echo — it is the store's monotonic `seq`, which advances only
+    /// on a real store mutation, so a quiescent store costs zero subprocesses
+    /// no matter how many frames arrive (C5 rd 4's echo gate re-fired per
+    /// TabUpdate and exhausted the server's fds; this cannot).
+    bind_sent: BTreeMap<String, BindSent>,
     /// Local unread-override: Done agents we've already cleared on focus.
     /// Render-side only; `clave focus` persists the real transition.
     read_locally: BTreeSet<String>,
@@ -424,7 +462,8 @@ impl Default for BarModel {
             timeline: BTreeMap::new(),
             birth_touched: BTreeSet::new(),
             renamed: BTreeMap::new(),
-            sent_binds: BTreeMap::new(),
+            own_pane: None,
+            bind_sent: BTreeMap::new(),
             read_locally: BTreeSet::new(),
             seek_last_cols: None,
             seek_step: 0,
@@ -522,6 +561,139 @@ impl BarModel {
             .map(|p| p.tab_position)
     }
 
+    /// Record OUR plugin pane id. `main.rs`'s `load()` is the one caller.
+    pub fn set_own_pane(&mut self, plugin_pane_id: u32) {
+        self.own_pane = Some(plugin_pane_id);
+    }
+
+    /// Our own tab position, per the LAST PaneUpdate. Plugin and terminal pane
+    /// ids are separate id spaces ("unique to all panes of this kind",
+    /// zellij-utils data.rs:2297-2300), so the `is_plugin` filter is
+    /// load-bearing — the same reason `tab_position_of_pane` filters
+    /// `!is_plugin`.
+    fn own_tab_position(&self) -> Option<usize> {
+        let own = self.own_pane?;
+        self.panes
+            .iter()
+            .find(|p| p.is_plugin && p.pane_id == own)
+            .map(|p| p.tab_position)
+    }
+
+    /// True when the last TabUpdate and the last PaneUpdate describe the same
+    /// tab set. The manifest is keyed by tab POSITION (zellij-utils
+    /// data.rs:2277-2282) and every live tab has at least one pane, so a
+    /// coherent pair covers exactly the same positions. They diverge for
+    /// exactly as long as one frame predates a tab create/close — the
+    /// renumbering window RC-A rides.
+    ///
+    /// It reads ALL panes, not just plugin ones. Every clave tab does get
+    /// exactly one bar, but keying the witness on that would make it fail
+    /// permanently the day a tab without a bar exists; keying on all panes is
+    /// unconditionally true of a coherent manifest.
+    ///
+    /// Known residual (documented, not fixed here): an identity permutation
+    /// that PRESERVES the position set — close the lowest tab and create one
+    /// in the same window — satisfies this witness while every occupant has
+    /// shifted. `PaneManifest` carries no `tab_id` and `TabInfo` carries no
+    /// pane identity, so position is the only cross-frame key these two events
+    /// share and no stronger witness is constructible from them. The
+    /// self-healing bind below degrades that case from "permanent mis-bind" to
+    /// "one transient mis-bind that self-corrects on the next `seq` advance".
+    fn frames_coherent(&self) -> bool {
+        // Pre-first-frame: fail closed. Note for the next reader (and for
+        // `cargo mutants`, which flags `||`→`&&` here as MISSED): the two
+        // operators are behaviourally identical, because a frame pair with
+        // exactly ONE side empty already fails the set comparison below. The
+        // case this line uniquely covers is BOTH sides empty, where two empty
+        // frames would otherwise trivially "agree". That state is unreachable
+        // through any public path — `own_tab_position()` is None with no panes
+        // — so no test can kill the mutant. It is equivalent, not a gap.
+        if self.tabs.is_empty() || self.panes.is_empty() {
+            return false;
+        }
+        let tab_pos: BTreeSet<usize> = self.tabs.iter().map(|t| t.position).collect();
+        let pane_pos: BTreeSet<usize> = self.panes.iter().map(|p| p.tab_position).collect();
+        tab_pos == pane_pos
+    }
+
+    /// Our tab id — `Some` ONLY when the two frames agree. Fail closed: the
+    /// caller does nothing and re-enters on the next frame, which is the very
+    /// frame that resolves the disagreement.
+    pub fn own_tab(&self) -> Option<usize> {
+        if !self.frames_coherent() {
+            return None;
+        }
+        let pos = self.own_tab_position()?;
+        self.tabs
+            .iter()
+            .find(|t| t.position == pos)
+            .map(|t| t.tab_id)
+    }
+
+    /// Election, strong form: the frames agree AND the tab they resolve us
+    /// into is the active one. Gates `Bind`, `Touch`, `PruneTabs` and the
+    /// `clave-nav` executor — every effect that either retries or would do
+    /// lasting damage from the wrong instance. `Confirmed` implies `Presumed`.
+    pub fn elects_confirmed(&self) -> bool {
+        self.own_tab()
+            .is_some_and(|id| self.tabs.iter().any(|t| t.tab_id == id && t.active))
+    }
+
+    /// The PRE-#55 computation, byte-for-byte: join the two frames on position
+    /// and ask whether that tab is active, with no coherence witness. Kept for
+    /// the four effects that latch at emit and therefore CANNOT survive a
+    /// fail-closed gate — `RenameTab`, `MarkRead`, `ReanchorVisit`,
+    /// `PersistCollapse` all drop silently under a false gate with no trigger
+    /// to re-evaluate them, so tightening them converts a wrong-action bug
+    /// into a missed-action bug. Their emit-time latch is the real defect and
+    /// is deliberately out of scope for #55.
+    pub fn elects_presumed(&self) -> bool {
+        self.own_tab_position()
+            .and_then(|pos| self.tabs.iter().find(|t| t.position == pos))
+            .is_some_and(|t| t.active)
+    }
+
+    /// The tab zellij's last frame says is active — any instance's view.
+    pub fn active_tab_id(&self) -> Option<usize> {
+        self.tabs.iter().find(|t| t.active).map(|t| t.tab_id)
+    }
+
+    /// Every effect keyed on THIS instance's tab identity. Fail-closed by
+    /// construction: `elects_confirmed()` is false while the frames disagree,
+    /// so this returns nothing and the caller re-enters on the next frame.
+    ///
+    /// The single entry point exists because bind emission used to be an
+    /// adapter-level call every snapshot/frame arm had to remember separately
+    /// — and one of them forgot, which is RC-B.
+    pub fn identity_effects(&mut self) -> Vec<Effect> {
+        if !self.elects_confirmed() {
+            return Vec::new();
+        }
+        let Some(own) = self.own_tab() else {
+            return Vec::new();
+        };
+        let mut fx = Vec::new();
+        // Birth touch FIRST: a newly-created tab wants its timeline stamp
+        // before its bind. `needs_birth_touch` is once-EVER per (instance,
+        // tab) and the latch is consumed here and only here — i.e. only when
+        // we are actually emitting, so a false gate DEFERS rather than
+        // consumes (C5 rd 4: echo-gated re-arming is the storm).
+        //
+        // `active == own` is the fix to a second, one-line-away instance of
+        // RC-A: the old adapter block touched the active id from the TAB frame
+        // while gating on a position join against the PANE frame. Requiring
+        // the active tab to be OUR tab makes the touch self-consistent by
+        // construction.
+        if let Some(active) = self.active_tab_id()
+            && active == own
+            && self.needs_birth_touch(active)
+        {
+            fx.push(Effect::Touch { tab_id: active });
+        }
+        fx.extend(self.bind_effects(own));
+        fx
+    }
+
     /// The agent bound to this tab, per the SNAPSHOT (§6.6 Design B) — the
     /// only join every instance agrees on. Local register/manifest joins are
     /// used solely to CREATE binds (bind_effects).
@@ -530,32 +702,79 @@ impl BarModel {
     }
 
     /// §6.6 Design B bootstrap: agents whose REGISTERED pane sits in
-    /// `own_tab` per MY manifest, but whose snapshot bind disagrees. Callers
-    /// gate to the active instance (fresh manifest — a stale one would bind
-    /// wrong tabs). Once per computed value per instance (sent_binds).
+    /// `own_tab` per MY manifest, but whose snapshot bind disagrees.
+    ///
+    /// Reached through `identity_effects`, which is already coherence-gated;
+    /// the early return below closes the DIRECT-call path so this is not a
+    /// hole (a stale manifest joined to a fresh tab set is RC-A itself).
+    ///
+    /// The emit rule is progress-gated, not echo-gated: re-emission requires
+    /// the store's `seq` to have strictly advanced since our own send, and is
+    /// capped at `BIND_MAX_TRIES` per (uuid, target) episode. A successful
+    /// `clave bind` always bumps `seq` and pushes, so "only once a strictly
+    /// newer snapshot has been accepted and the join STILL disagrees" means:
+    /// never while our own write is in flight, and immediately once its result
+    /// is known. An unwinnable bind (`apply_bind` returns `None` for an
+    /// unknown uuid — no push, no `seq` bump) costs exactly one subprocess.
     pub fn bind_effects(&mut self, own_tab: usize) -> Vec<Effect> {
+        if !self.frames_coherent() {
+            return Vec::new();
+        }
         let own_position = self
             .tabs
             .iter()
             .find(|t| t.tab_id == own_tab)
             .map(|t| t.position);
+        let seq = self.seq;
         let mut out = Vec::new();
+        let mut clear: Vec<String> = Vec::new();
+        let mut sent: Vec<(String, BindSent)> = Vec::new();
         for a in &self.agents {
             let joined_here = self
                 .uuid_to_pane
                 .get(&a.uuid)
                 .and_then(|p| self.tab_position_of_pane(*p))
                 .is_some_and(|pos| Some(pos) == own_position);
-            if joined_here
-                && a.tab_id != Some(own_tab)
-                && self.sent_binds.get(&a.uuid) != Some(&own_tab)
-            {
-                self.sent_binds.insert(a.uuid.clone(), own_tab);
+            // The episode is over when the store confirms our join, or when
+            // the pane has left our tab. Clearing re-arms the healer at FULL
+            // attempt budget, so a LATER divergence is fought afresh rather
+            // than inheriting an exhausted counter.
+            if !joined_here || a.tab_id == Some(own_tab) {
+                clear.push(a.uuid.clone());
+                continue;
+            }
+            let prev = self.bind_sent.get(&a.uuid);
+            let (may_send, tries) = match prev {
+                // Never tried this episode.
+                None => (true, 0),
+                // A different target is a NEW episode: full budget.
+                Some(s) if s.tab_id != own_tab => (true, 0),
+                // Same target: only once the store has moved on since our
+                // send, and only BIND_MAX_TRIES times. `seq` advances on a
+                // real store mutation and nothing else, so a quiescent store
+                // costs zero subprocesses however many frames arrive.
+                Some(s) => (seq > s.at_seq && s.tries < BIND_MAX_TRIES, s.tries),
+            };
+            if may_send {
+                sent.push((
+                    a.uuid.clone(),
+                    BindSent {
+                        tab_id: own_tab,
+                        at_seq: seq,
+                        tries: tries + 1,
+                    },
+                ));
                 out.push(Effect::Bind {
                     uuid: a.uuid.clone(),
                     tab_id: own_tab,
                 });
             }
+        }
+        for uuid in clear {
+            self.bind_sent.remove(&uuid);
+        }
+        for (uuid, s) in sent {
+            self.bind_sent.insert(uuid, s);
         }
         out
     }
@@ -1745,6 +1964,381 @@ mod tests {
                 agent("u2", Status::Working, None),
             ],
         ));
+        assert_eq!(m.bind_effects(11), Vec::<Effect>::new());
+    }
+
+    // --- #55 frame coherence & executor election (RC-A / RC-B) -------------
+
+    /// Snapshot carrying agents AND a tab timeline. The #55 tests need both:
+    /// a seeded timeline suppresses the birth touch so a test can assert on
+    /// binds alone.
+    fn snap_full(seq: u64, agents: Vec<Agent>, timeline: &[(usize, u64)]) -> AgentSnapshot {
+        AgentSnapshot {
+            collapsed: false,
+            seq,
+            agents,
+            tab_timeline: timeline.iter().copied().collect(),
+        }
+    }
+
+    /// The dossier's reproduction fleet: three tabs `10@0, 11@1, 12@2`, each
+    /// with one plugin pane (100/101/102) and one terminal pane (5/6/7). WE
+    /// are the bar in tab 11, so our plugin pane is 101.
+    fn fleet_of_three(active: usize) -> BarModel {
+        let mut m = BarModel::default();
+        m.set_own_pane(101);
+        m.apply_panes(panes_at(&FLEET_PANES));
+        m.apply_tabs(vec![
+            tab(10, 0, "a", active == 10),
+            tab(11, 1, "b", active == 11),
+            tab(12, 2, "c", active == 12),
+        ]);
+        m
+    }
+
+    /// A manifest over `(tab_position, plugin pane, terminal pane)` triples.
+    /// Pane ids are stable IDENTITIES and positions are not — the whole of
+    /// RC-A is that a close renumbers the latter — so these tests must name
+    /// both, never derive one from the other.
+    fn panes_at(rows: &[(usize, u32, u32)]) -> Vec<PaneMeta> {
+        rows.iter()
+            .flat_map(|&(pos, plug, term)| {
+                [pane(pos, plug, true, false), pane(pos, term, false, false)]
+            })
+            .collect()
+    }
+
+    /// The three-tab fleet's coherent manifest: bars 100/101/102 and terminals
+    /// 5/6/7 at positions 0/1/2.
+    const FLEET_PANES: [(usize, u32, u32); 3] = [(0, 100, 5), (1, 101, 6), (2, 102, 7)];
+    /// The same fleet after tab 10 (position 0) closes: everything shifts down
+    /// one, so OUR pane 101 moves from position 1 to position 0.
+    const FLEET_PANES_AFTER_CLOSE: [(usize, u32, u32); 2] = [(0, 101, 6), (1, 102, 7)];
+
+    #[test]
+    fn own_tab_is_none_while_the_pane_and_tab_frames_disagree() {
+        // RC-A verbatim. The two frames are delivered independently and joined
+        // on tab POSITION, which zellij renumbers after a close — so in the
+        // window between one frame landing and the other, the join names a
+        // DIFFERENT tab. Driven manifest-first (the mirror of the dossier's
+        // trace) because that is the direction in which the pre-#55
+        // computation does not merely fail, it confidently returns a dead tab.
+        let mut m = fleet_of_three(10);
+        // The close of tab 10 renumbers everything; the PaneUpdate lands first.
+        m.apply_panes(panes_at(&FLEET_PANES_AFTER_CLOSE));
+        // Our pane is now at position 0. The FROZEN tab frame says position 0
+        // is tab 10 — the tab that was just closed — and that it is active.
+        assert_eq!(m.own_tab(), None, "fail closed while the frames disagree");
+        assert!(!m.elects_confirmed());
+        // The regression this fix pins: the pre-#55 join elects us, and would
+        // have bound our agent to tab 10, evicting whoever holds it next.
+        assert!(
+            m.elects_presumed(),
+            "the pre-#55 computation elects on the stale join — this is RC-A"
+        );
+    }
+
+    #[test]
+    fn a_newborn_model_is_incoherent_before_either_frame_has_arrived() {
+        // The pre-first-frame fail-closed arm. Asserted on `frames_coherent`
+        // directly because two EMPTY frames trivially cover the same (empty)
+        // position set — the set comparison alone would call that coherent,
+        // which is the one case the explicit guard exists for.
+        let mut m = BarModel::default();
+        m.set_own_pane(101);
+        assert!(!m.frames_coherent());
+        assert_eq!(m.own_tab(), None);
+        assert!(!m.elects_confirmed());
+        assert!(!m.elects_presumed());
+        // One frame alone is not enough either.
+        m.apply_tabs(vec![tab(11, 0, "b", true)]);
+        assert!(!m.frames_coherent());
+        assert_eq!(m.own_tab(), None);
+    }
+
+    #[test]
+    fn own_tab_resolves_once_the_lagging_tab_frame_lands() {
+        let mut m = fleet_of_three(10);
+        m.apply_panes(panes_at(&FLEET_PANES_AFTER_CLOSE));
+        assert_eq!(m.own_tab(), None);
+        // The renumbering TabUpdate — the event that was always going to
+        // arrive anyway — is the retry.
+        m.apply_tabs(vec![tab(11, 0, "b", true), tab(12, 1, "c", false)]);
+        assert_eq!(m.own_tab(), Some(11));
+        assert!(m.elects_confirmed());
+    }
+
+    #[test]
+    fn own_tab_is_none_while_the_tab_frame_is_the_fresh_one() {
+        // The dossier's own direction: fresh tabs, stale manifest. The witness
+        // is symmetric — position-set equality does not care which side lags.
+        let mut m = fleet_of_three(10);
+        m.apply_tabs(vec![tab(11, 0, "b", true), tab(12, 1, "c", false)]);
+        assert_eq!(m.own_tab(), None);
+        assert!(!m.elects_confirmed());
+    }
+
+    #[test]
+    fn identity_effects_emit_nothing_from_an_incoherent_frame_and_retry_on_the_next() {
+        // The fail-closed contract end to end — the test RC-A would have
+        // failed. Timeline pre-seeded so the birth touch is out of the way.
+        let mut m = fleet_of_three(10);
+        m.register("u1".into(), 6); // our tab's terminal pane
+        m.apply_snapshot(snap_full(
+            1,
+            vec![agent("u1", Status::Working, None)],
+            &[(10, 100), (11, 100), (12, 100)],
+        ));
+        m.apply_panes(panes_at(&FLEET_PANES_AFTER_CLOSE));
+        assert_eq!(
+            m.identity_effects(),
+            Vec::<Effect>::new(),
+            "an incoherent frame emits nothing at all"
+        );
+        m.apply_tabs(vec![tab(11, 0, "b", true), tab(12, 1, "c", false)]);
+        assert_eq!(
+            m.identity_effects(),
+            vec![Effect::Bind {
+                uuid: "u1".into(),
+                tab_id: 11
+            }]
+        );
+    }
+
+    #[test]
+    fn bind_re_emits_after_an_eviction_once_the_store_seq_advances() {
+        // Under the old `sent_binds` latch this returned [] forever: the wrong
+        // bind was sticky for the life of the plugin instance, which is what
+        // made RC-A a fleet-wide outage rather than a flicker.
+        let mut m = fleet_of_three(11);
+        m.register("u1".into(), 6);
+        m.apply_snapshot(snap_full(
+            1,
+            vec![agent("u1", Status::Working, None)],
+            &[(11, 100)],
+        ));
+        assert_eq!(
+            m.identity_effects(),
+            vec![Effect::Bind {
+                uuid: "u1".into(),
+                tab_id: 11
+            }]
+        );
+        // The store confirms the join: the episode is over, ledger cleared.
+        m.apply_snapshot(snap_full(
+            2,
+            vec![agent("u1", Status::Working, Some(11))],
+            &[(11, 100)],
+        ));
+        assert_eq!(m.identity_effects(), Vec::<Effect>::new());
+        // Someone else's bind evicts us (store.rs apply_bind) — tab_id goes
+        // back to None at a higher seq. We must fight back.
+        m.apply_snapshot(snap_full(
+            3,
+            vec![agent("u1", Status::Working, None)],
+            &[(11, 100)],
+        ));
+        assert_eq!(
+            m.identity_effects(),
+            vec![Effect::Bind {
+                uuid: "u1".into(),
+                tab_id: 11
+            }]
+        );
+    }
+
+    #[test]
+    fn bind_is_silent_while_its_own_write_is_in_flight() {
+        // The debounce. `seq` advances only on a real store mutation, so
+        // frames, renders, pipes and timers cost nothing — this is what keeps
+        // the retry out of the C5 rd-4 echo-gated storm class.
+        let mut m = fleet_of_three(11);
+        m.register("u1".into(), 6);
+        m.apply_snapshot(snap_full(
+            1,
+            vec![agent("u1", Status::Working, None)],
+            &[(11, 100)],
+        ));
+        assert_eq!(m.identity_effects().len(), 1);
+        for _ in 0..20 {
+            // A burst of frames at an unadvanced seq: our `clave bind` is
+            // still in flight and must not be re-spawned.
+            m.apply_panes(panes_at(&FLEET_PANES));
+            assert_eq!(m.identity_effects(), Vec::<Effect>::new());
+        }
+    }
+
+    #[test]
+    fn bind_stops_after_bind_max_tries_against_an_unwinnable_target() {
+        // The anti-storm bound. The one loop that DOES advance seq every round
+        // is eviction ping-pong — two agents whose panes both resolve into one
+        // tab, each bind evicting the other. Wrong-but-consistent beats a
+        // storm, so we stop fighting after BIND_MAX_TRIES.
+        let mut m = fleet_of_three(11);
+        m.register("u1".into(), 6);
+        let mut emitted = 0;
+        for seq in 1..=20 {
+            m.apply_snapshot(snap_full(
+                seq,
+                vec![agent("u1", Status::Working, None)],
+                &[(11, 100)],
+            ));
+            emitted += m.identity_effects().len();
+        }
+        assert_eq!(emitted, BIND_MAX_TRIES as usize);
+    }
+
+    #[test]
+    fn bind_ledger_clears_on_confirmation_so_a_later_divergence_rebinds_at_full_budget() {
+        let mut m = fleet_of_three(11);
+        m.register("u1".into(), 6);
+        // Exhaust an episode.
+        for seq in 1..=20 {
+            m.apply_snapshot(snap_full(
+                seq,
+                vec![agent("u1", Status::Working, None)],
+                &[(11, 100)],
+            ));
+            m.identity_effects();
+        }
+        assert_eq!(m.identity_effects(), Vec::<Effect>::new());
+        // A confirming snapshot ends the episode…
+        m.apply_snapshot(snap_full(
+            21,
+            vec![agent("u1", Status::Working, Some(11))],
+            &[(11, 100)],
+        ));
+        assert_eq!(m.identity_effects(), Vec::<Effect>::new());
+        // …so a LATER divergence is fought afresh rather than inheriting an
+        // exhausted counter.
+        let mut emitted = 0;
+        for seq in 22..=40 {
+            m.apply_snapshot(snap_full(
+                seq,
+                vec![agent("u1", Status::Working, None)],
+                &[(11, 100)],
+            ));
+            emitted += m.identity_effects().len();
+        }
+        assert_eq!(emitted, BIND_MAX_TRIES as usize);
+    }
+
+    #[test]
+    fn bind_ledger_clears_when_the_pane_leaves_our_tab() {
+        let mut m = fleet_of_three(11);
+        m.register("u1".into(), 6);
+        m.apply_snapshot(snap_full(
+            1,
+            vec![agent("u1", Status::Working, None)],
+            &[(11, 100)],
+        ));
+        assert_eq!(m.identity_effects().len(), 1);
+        // The agent's pane moves to another tab: not ours to bind, ledger
+        // cleared. When it comes back, the budget is full again.
+        m.register("u1".into(), 7);
+        m.apply_snapshot(snap_full(
+            2,
+            vec![agent("u1", Status::Working, None)],
+            &[(11, 100)],
+        ));
+        assert_eq!(m.identity_effects(), Vec::<Effect>::new());
+        m.register("u1".into(), 6);
+        let mut emitted = 0;
+        for seq in 3..=20 {
+            m.apply_snapshot(snap_full(
+                seq,
+                vec![agent("u1", Status::Working, None)],
+                &[(11, 100)],
+            ));
+            emitted += m.identity_effects().len();
+        }
+        assert_eq!(emitted, BIND_MAX_TRIES as usize);
+    }
+
+    #[test]
+    fn birth_touch_is_deferred_not_consumed_when_the_frames_disagree() {
+        // The `&&` short-circuit was always an intentional property — a false
+        // gate must DEFER the once-ever latch, not spend it. What it lacked
+        // was a trigger: the block lived only in the TabUpdate arm, and a
+        // close delivers exactly one TabUpdate to the newly-active instance —
+        // the one where the frames disagree. `identity_effects` runs on both
+        // frame kinds, so the resolving PaneUpdate is now the retry.
+        let mut m = fleet_of_three(10);
+        m.apply_tabs(vec![tab(11, 0, "b", true), tab(12, 1, "c", false)]);
+        assert_eq!(
+            m.identity_effects(),
+            Vec::<Effect>::new(),
+            "incoherent: no touch, and the latch is NOT spent"
+        );
+        m.apply_panes(panes_at(&FLEET_PANES_AFTER_CLOSE));
+        assert_eq!(m.identity_effects(), vec![Effect::Touch { tab_id: 11 }]);
+        // Once-EVER: never a second time, however many frames arrive.
+        m.apply_panes(panes_at(&FLEET_PANES_AFTER_CLOSE));
+        assert_eq!(m.identity_effects(), Vec::<Effect>::new());
+    }
+
+    #[test]
+    fn birth_touch_targets_our_own_tab_only() {
+        // The old adapter touched the ACTIVE id from the tab frame while
+        // gating on a position join against the pane frame — RC-A's shape, one
+        // line away. Requiring active == own makes it self-consistent.
+        let mut m = fleet_of_three(12); // coherent, but tab 12 is active
+        assert!(!m.elects_confirmed());
+        // Not a coherence failure — the frames agree. We are simply not the
+        // active instance, which the weak gate agrees about.
+        assert!(m.frames_coherent());
+        assert!(!m.elects_presumed());
+        assert_eq!(m.identity_effects(), Vec::<Effect>::new());
+    }
+
+    #[test]
+    fn a_new_target_starts_a_fresh_episode_without_waiting_for_the_store() {
+        // zellij REUSES tab ids (get_new_tab_id = max-key+1), so the tab at
+        // our position can become a DIFFERENT tab without our pane moving.
+        // That is a new target, not a retry of the old one, so it must not
+        // inherit the old episode's debounce — it emits immediately, at the
+        // same seq, with a full attempt budget.
+        let mut m = BarModel::default();
+        m.set_own_pane(101);
+        m.apply_panes(panes_at(&[(0, 100, 5), (1, 101, 6)]));
+        m.apply_tabs(vec![tab(10, 0, "a", false), tab(11, 1, "b", true)]);
+        m.register("u1".into(), 6);
+        m.apply_snapshot(snap_full(
+            1,
+            vec![agent("u1", Status::Working, None)],
+            &[(10, 100), (11, 100), (99, 100)],
+        ));
+        assert_eq!(
+            m.identity_effects(),
+            vec![Effect::Bind {
+                uuid: "u1".into(),
+                tab_id: 11
+            }]
+        );
+        // Same seq, same pane, new tab id at our position.
+        m.apply_tabs(vec![tab(10, 0, "a", false), tab(99, 1, "b", true)]);
+        assert_eq!(
+            m.identity_effects(),
+            vec![Effect::Bind {
+                uuid: "u1".into(),
+                tab_id: 99
+            }],
+            "a new target must not wait behind the old target's debounce"
+        );
+    }
+
+    #[test]
+    fn bind_effects_called_directly_refuse_an_incoherent_frame() {
+        // `identity_effects` is already gated; this closes the direct-call
+        // path so the guard is not a hole.
+        let mut m = fleet_of_three(11);
+        m.register("u1".into(), 6);
+        m.apply_snapshot(snap_full(
+            1,
+            vec![agent("u1", Status::Working, None)],
+            &[(11, 100)],
+        ));
+        m.apply_panes(panes_at(&FLEET_PANES_AFTER_CLOSE));
         assert_eq!(m.bind_effects(11), Vec::<Effect>::new());
     }
 
@@ -4095,6 +4689,247 @@ mod tests {
                     classify_timer(TIMER_KIND_CUTOFF_SECS + over, dwells, peeks),
                     TimerKind::Peek
                 );
+            }
+
+            /// Property 8 (#55) — the invariant RC-A violates, stated
+            /// directly: a `Bind` never names a tab that does not hold the
+            /// agent's registered pane.
+            ///
+            /// The strong claim is scoped to frames delivered from the SAME
+            /// world version, which is exactly the scope the coherence witness
+            /// can defend. A position-preserving identity permutation (close
+            /// the lowest tab, create one in the same window) satisfies the
+            /// witness across two different worlds — the documented residual
+            /// — so asserting over it would be asserting a property the data
+            /// cannot support. The unscoped half is still universal and is
+            /// asserted alongside: nothing is ever emitted from an incoherent
+            /// frame.
+            #[test]
+            fn prop_bind_never_names_a_tab_that_does_not_hold_the_pane(
+                ops in prop::collection::vec(0u8..6, 1..40),
+            ) {
+                let mut w = IdentityWorld::new();
+                for op in ops {
+                    w.step(op)?;
+                }
+            }
+
+            /// Property 9 (#55) — the anti-storm rule as a universal: a bind
+            /// is never re-emitted until the store makes PROGRESS or our own
+            /// identity changes. Frames, renders, pipes and timers do not
+            /// advance `seq`, so a quiescent store costs zero subprocesses
+            /// however many events arrive — which is precisely what keeps the
+            /// self-healing retry out of the C5 rd-4 echo-gated storm class
+            /// (that guard re-fired per TabUpdate and exhausted the zellij
+            /// server's file descriptors). Asserted inside `settle`, where the
+            /// (own tab, seq) pair each emission happened under is known.
+            #[test]
+            fn prop_binds_never_repeat_without_store_progress(
+                ops in prop::collection::vec(0u8..6, 1..40),
+            ) {
+                let mut w = IdentityWorld::new();
+                for op in ops {
+                    w.step(op)?;
+                }
+            }
+        }
+
+        /// A tiny zellij + store world for properties 8 and 9. Tabs live at
+        /// their vector index (position), each carrying one bar pane and one
+        /// terminal pane whose ids are STABLE — the renumbering is the point.
+        /// We are the bar in tab `OWN_TAB`; agent `u1` owns the terminal pane
+        /// of tab `AGENT_TAB` (the same tab, so binds are ours to make).
+        struct IdentityWorld {
+            m: BarModel,
+            /// tab ids at their current positions.
+            tabs: Vec<usize>,
+            active: usize,
+            next_tab: usize,
+            /// Bumped by every mutation of `tabs` — two frames stamped with
+            /// the same version describe the same world.
+            version: u64,
+            /// The (world version, tab count) each delivered frame was stamped
+            /// with, or None before that frame kind has ever arrived. Judged
+            /// from the WORLD, never from the model: a witness that grades its
+            /// own homework proves nothing.
+            tabs_frame: Option<(u64, Vec<usize>)>,
+            panes_frame: Option<(u64, Vec<usize>)>,
+            seq: u64,
+            /// The (own tab, seq) pair the last bind was emitted under, and
+            /// how many have been emitted under THAT pair. Property 9's
+            /// bookkeeping: the count may never exceed one.
+            last_emit: Option<(usize, u64)>,
+            emits_at_last: usize,
+        }
+
+        /// Tab id → its bar pane / its terminal pane. Stable across closes.
+        fn bar_pane(tab_id: usize) -> u32 {
+            100 + tab_id as u32
+        }
+        fn term_pane(tab_id: usize) -> u32 {
+            200 + tab_id as u32
+        }
+
+        impl IdentityWorld {
+            const OWN_TAB: usize = 11;
+
+            fn new() -> Self {
+                let mut m = BarModel::default();
+                m.set_own_pane(bar_pane(Self::OWN_TAB));
+                m.register("u1".into(), term_pane(Self::OWN_TAB));
+                Self {
+                    m,
+                    tabs: vec![10, 11, 12],
+                    active: Self::OWN_TAB,
+                    next_tab: 13,
+                    version: 0,
+                    tabs_frame: None,
+                    panes_frame: None,
+                    seq: 0,
+                    last_emit: None,
+                    emits_at_last: 0,
+                }
+            }
+
+            /// The tab truly holding our agent's pane in the world `tabs`
+            /// describes, or None if that tab had been closed by then. Judged
+            /// against the world the FRAMES describe, not the world now: a bar
+            /// acting on a coherent pair of stale frames is acting correctly
+            /// on the information it has, and the store's own bind is
+            /// idempotent about a tab that has since died.
+            fn true_tab_in(tabs: &[usize]) -> Option<usize> {
+                tabs.contains(&Self::OWN_TAB).then_some(Self::OWN_TAB)
+            }
+
+            fn step(&mut self, op: u8) -> Result<(), TestCaseError> {
+                match op {
+                    // Close a tab (never the last remaining one) — this is the
+                    // renumbering that RC-A rides.
+                    0 | 1 if self.tabs.len() > 1 => {
+                        let i = self.version as usize % self.tabs.len();
+                        self.tabs.remove(i);
+                        self.active = self.tabs[0];
+                        self.version += 1;
+                    }
+                    // Create a tab.
+                    2 => {
+                        self.tabs.push(self.next_tab);
+                        self.active = self.next_tab;
+                        self.next_tab += 1;
+                        self.version += 1;
+                    }
+                    // Deliver a TabUpdate.
+                    3 => {
+                        let metas: Vec<TabMeta> = self
+                            .tabs
+                            .iter()
+                            .enumerate()
+                            .map(|(pos, &id)| tab(id, pos, "t", id == self.active))
+                            .collect();
+                        self.m.apply_tabs(metas);
+                        self.tabs_frame = Some((self.version, self.tabs.clone()));
+                        self.settle()?;
+                    }
+                    // Deliver a PaneUpdate.
+                    4 => {
+                        let metas: Vec<PaneMeta> = self
+                            .tabs
+                            .iter()
+                            .enumerate()
+                            .flat_map(|(pos, &id)| {
+                                [
+                                    PaneMeta {
+                                        tab_position: pos,
+                                        pane_id: bar_pane(id),
+                                        is_plugin: true,
+                                        is_focused: false,
+                                    },
+                                    PaneMeta {
+                                        tab_position: pos,
+                                        pane_id: term_pane(id),
+                                        is_plugin: false,
+                                        is_focused: false,
+                                    },
+                                ]
+                            })
+                            .collect();
+                        self.m.apply_panes(metas);
+                        self.panes_frame = Some((self.version, self.tabs.clone()));
+                        self.settle()?;
+                    }
+                    // A store push that never confirms the bind — the
+                    // adversarial case for the retry cap.
+                    _ => {
+                        self.seq += 1;
+                        self.m.apply_snapshot(AgentSnapshot {
+                            collapsed: false,
+                            seq: self.seq,
+                            agents: vec![agent("u1", Status::Working, None)],
+                            // Seeded so the birth touch never fires: these two
+                            // properties are about binds.
+                            tab_timeline: (10..40).map(|t| (t, 100u64)).collect(),
+                        });
+                        self.settle()?;
+                    }
+                }
+                Ok(())
+            }
+
+            fn settle(&mut self) -> Result<(), TestCaseError> {
+                // Coherence as the WORLD defines it, computed with no help
+                // from the code under test: both frame kinds must have
+                // arrived, and they must describe worlds with the same number
+                // of tabs (positions are always 0..n, so equal counts is
+                // exactly equal position sets).
+                let witness_should_hold = match (&self.tabs_frame, &self.panes_frame) {
+                    (Some((_, t)), Some((_, p))) => t.len() == p.len(),
+                    _ => false,
+                };
+                let fx = self.m.identity_effects();
+                if !witness_should_hold {
+                    prop_assert!(
+                        fx.is_empty(),
+                        "emitted {fx:?} from frames describing different tab \
+                         sets — this is RC-A"
+                    );
+                }
+                for e in &fx {
+                    if let Effect::Bind { tab_id, .. } = e {
+                        // Property 9: at most one emission per (own tab, seq).
+                        let here = (*tab_id, self.seq);
+                        if self.last_emit == Some(here) {
+                            self.emits_at_last += 1;
+                        } else {
+                            self.last_emit = Some(here);
+                            self.emits_at_last = 1;
+                        }
+                        prop_assert!(
+                            self.emits_at_last <= 1,
+                            "re-emitted a bind for tab {} without the store \
+                             advancing past seq {} — the debounce is not holding",
+                            tab_id,
+                            self.seq
+                        );
+                        // Same-world frames: the witness must have resolved us
+                        // to the tab that genuinely holds the pane. Frames
+                        // from DIFFERENT worlds that happen to share a tab
+                        // count are the documented residual (a position-
+                        // preserving identity permutation), which no witness
+                        // constructible from these two events can catch — so
+                        // the strong claim is deliberately not asserted there.
+                        if let (Some((tv, tabs)), Some((pv, _))) =
+                            (&self.tabs_frame, &self.panes_frame)
+                            && tv == pv
+                        {
+                            prop_assert_eq!(
+                                Some(*tab_id),
+                                Self::true_tab_in(tabs),
+                                "bound to a tab that does not hold the pane"
+                            );
+                        }
+                    }
+                }
+                Ok(())
             }
         }
 

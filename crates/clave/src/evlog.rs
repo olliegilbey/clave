@@ -6,16 +6,29 @@
 
 use std::io::Write;
 
-/// Append one event line. Swallows all errors (stderr note only).
+/// Append one event line to the AMBIENT state dir (`store_paths()`). For the
+/// CLI entry points, which resolve their store the same way. Swallows all
+/// errors (stderr note only).
 pub fn log_event(cmd: &str, detail: &str) {
-    if let Err(e) = try_log(cmd, detail) {
+    match crate::store::store_paths() {
+        Ok(paths) => log_event_in(&paths.dir, cmd, detail),
+        Err(e) => eprintln!("clave evlog: {e:#}"),
+    }
+}
+
+/// Append one event line beside a SPECIFIC store. Callers already holding a
+/// `StorePaths` must use this: re-resolving the ambient dir would send the
+/// sandbox's events to the stable log (and, in unit tests, would append to the
+/// maintainer's real `~/.local/state/clave/clave.log` — which is exactly what
+/// happened when `apply_bind` first grew its eviction line).
+pub fn log_event_in(dir: &std::path::Path, cmd: &str, detail: &str) {
+    if let Err(e) = try_log(dir, cmd, detail) {
         eprintln!("clave evlog: {e:#}");
     }
 }
 
-fn try_log(cmd: &str, detail: &str) -> anyhow::Result<()> {
-    let paths = crate::store::store_paths()?;
-    std::fs::create_dir_all(&paths.dir)?;
+fn try_log(dir: &std::path::Path, cmd: &str, detail: &str) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dir)?;
     let line = serde_json::json!({
         "ts": crate::store::now_unix(),
         "cmd": cmd,
@@ -24,21 +37,36 @@ fn try_log(cmd: &str, detail: &str) -> anyhow::Result<()> {
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(paths.dir.join("clave.log"))?;
+        .open(dir.join("clave.log"))?;
     writeln!(f, "{line}")?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn log_lines_are_json_with_ts_cmd_detail() {
-        // Shape-only test through the serializer (try_log's path comes from
-        // store_paths(), which tests can't redirect without process-global
-        // env — the WRITE path is exercised live by every C8 scenario).
-        let line = serde_json::json!({"ts": 1u64, "cmd": "open", "detail": "d"});
-        let v: serde_json::Value = serde_json::from_str(&line.to_string()).unwrap();
+        // The real WRITE path, now that it takes its directory as an argument
+        // rather than re-resolving the ambient one. Before that it could only
+        // be shape-tested through the serializer.
+        let d = tempfile::tempdir().unwrap();
+        log_event_in(d.path(), "open", "d");
+        let body = std::fs::read_to_string(d.path().join("clave.log")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(body.trim()).unwrap();
         assert_eq!(v["cmd"], "open");
+        assert_eq!(v["detail"], "d");
         assert!(v["ts"].is_u64());
+    }
+
+    #[test]
+    fn lines_append_and_the_directory_is_created_on_demand() {
+        let d = tempfile::tempdir().unwrap();
+        let nested = d.path().join("state");
+        log_event_in(&nested, "a", "1");
+        log_event_in(&nested, "b", "2");
+        let body = std::fs::read_to_string(nested.join("clave.log")).unwrap();
+        assert_eq!(body.lines().count(), 2);
     }
 }

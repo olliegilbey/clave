@@ -23,11 +23,6 @@ struct State {
     /// (RenameTab, MarkRead) run on the active-tab instance only, so N
     /// instances don't fire N duplicate renames / `clave focus` runs.
     own_plugin_id: Option<u32>,
-    /// Raw pane rows kept so we can locate our own plugin pane per tab.
-    plugin_panes: Vec<(usize, u32)>, // (tab_position, plugin pane id)
-    /// The last TabUpdate, verbatim — is_active_instance reads it (rows()
-    /// is display-ordered, so it can't answer "is position P active").
-    last_tabs: Vec<TabMeta>,
     /// Peek-on-nav timers in flight: each armed peek starts one
     /// set_timeout(1.0); only the LAST expiry sinks the bar, so a nav burst
     /// keeps it expanded until ~1s after the final press.
@@ -51,53 +46,22 @@ struct State {
 register_plugin!(State);
 
 impl State {
-    /// Is THIS instance the one living in the currently-active tab?
-    fn is_active_instance(&self) -> bool {
-        let Some(own) = self.own_plugin_id else {
-            return false;
-        };
-        // Find our tab position via our plugin pane id, then check active.
-        self.plugin_panes
-            .iter()
-            .find(|(_, id)| *id == own)
-            .map(|(pos, _)| *pos)
-            .and_then(|pos| self.model_tab_active_at(pos))
-            .unwrap_or(false)
-    }
-
-    /// tab_id of the tab hosting OUR pane, from the latest local data.
-    /// Trustworthy exactly when it matters: the executor check compares it
-    /// to the replicated current_tab, and only the truly-active instance
-    /// (fresh TabUpdate/PaneUpdate) can match.
-    fn own_tab_id(&self) -> Option<usize> {
-        let own = self.own_plugin_id?;
-        let pos = self
-            .plugin_panes
-            .iter()
-            .find(|(_, id)| *id == own)
-            .map(|(pos, _)| *pos)?;
-        self.last_tabs
-            .iter()
-            .find(|t| t.position == pos)
-            .map(|t| t.tab_id)
-    }
-
-    fn model_tab_active_at(&self, position: usize) -> Option<bool> {
-        // rows() is display-ordered; go through the raw tabs instead.
-        // (model exposes rows; keep a tiny helper here off the same data we
-        // fed it — the last TabUpdate.)
-        self.last_tabs
-            .iter()
-            .find(|t| t.position == position)
-            .map(|t| t.active)
-    }
-
     /// Execute model effects. Gate WRITES to the active-tab instance;
     /// FocusPane is intentionally ungated (every instance computes the same
     /// target — focusing twice is idempotent, and the keybind MessagePlugin
     /// may reach instances in any order).
     fn run_effects(&mut self, effects: Vec<Effect>) {
-        let active = self.is_active_instance();
+        // TWO gate strengths (#55). `confirmed` additionally requires the last
+        // TabUpdate and the last PaneUpdate to describe the same tab set — it
+        // gates the effects that retry or do lasting damage from the wrong
+        // instance. `presumed` is the pre-#55 position join, byte-for-byte,
+        // kept for the four effects that latch at emit and so cannot survive a
+        // fail-closed gate: tightening them would convert a wrong-action bug
+        // into a missed-action bug. DO NOT "tidy" a presumed arm into
+        // confirmed without first giving that effect a retry trigger.
+        // confirmed ⇒ presumed.
+        let confirmed = self.model.elects_confirmed();
+        let presumed = self.model.elects_presumed();
         // Bound once: several arms below take `&mut self`, so borrowing the
         // field inline would conflict. One String clone per batch is noise.
         let bin = self.clave_binary.clone();
@@ -129,7 +93,7 @@ impl State {
                         BTreeMap::new(),
                     );
                 }
-                Effect::ReanchorVisit { tab_id } if active => {
+                Effect::ReanchorVisit { tab_id } if presumed => {
                     // #23: same clave-visited beacon as AnnounceVisit, but
                     // GATED to the active instance — a toggle burst delivers the
                     // fresh set to every bar (doc:371-394), so an ungated
@@ -149,15 +113,31 @@ impl State {
                         BTreeMap::new(),
                     );
                 }
-                Effect::RenameTab { tab_id, name } if active => {
+                Effect::RenameTab { tab_id, name } if presumed => {
                     rename_tab_with_id(tab_id as u64, name);
                 }
-                Effect::MarkRead { uuid } if active => {
+                Effect::MarkRead { uuid } if presumed => {
                     // Persist the unread clear (§6.5). Fire-and-forget; the
                     // local repaint already happened in the model.
                     run_command(&[bin.as_str(), "focus", &uuid], BTreeMap::new());
                 }
-                Effect::Bind { uuid, tab_id } if active => {
+                Effect::Touch { tab_id } if confirmed => {
+                    // The once-EVER birth stamp for a tab the store timeline
+                    // has never seen (its creation moment). `clave touch`
+                    // stamps host time into the STORE and pushes the snapshot
+                    // that carries the new order back to every instance. The
+                    // model consumes its once-ever latch only when it actually
+                    // emits, so a false gate DEFERS the touch to the next
+                    // coherent frame rather than losing it — and the latch
+                    // stays echo-INDEPENDENT (C5 rd 4: echo-gated guards
+                    // re-fired per TabUpdate → spawn storm → server fd
+                    // exhaustion).
+                    run_command(
+                        &[bin.as_str(), "touch", &tab_id.to_string()],
+                        BTreeMap::new(),
+                    );
+                }
+                Effect::Bind { uuid, tab_id } if confirmed => {
                     // Report the uuid→tab join to the store (§6.6 Design B);
                     // `clave bind` RMWs and pushes the snapshot that carries
                     // it to every instance.
@@ -166,7 +146,7 @@ impl State {
                         BTreeMap::new(),
                     );
                 }
-                Effect::PruneTabs { stale_ids } if active => {
+                Effect::PruneTabs { stale_ids } if confirmed => {
                     // #6/F3: report the OBSERVED-STALE ids (not the live set) so
                     // the store removes exactly those binds/timeline entries —
                     // idempotent removals commute, so two out-of-order prunes
@@ -219,8 +199,13 @@ impl State {
                     // this fix, dwell-opened tabs rested at 27% against the
                     // launch tab's 28% — one column apart, visible on every
                     // tab switch. Collapse mode rides along for D36's reason.
+                    // Fail-closed since #55: an incoherent frame yields None
+                    // and we simply omit --display-cols, falling back to
+                    // `clave open`'s own default — strictly better than
+                    // measuring a DIFFERENT tab's width off a mismatched join.
                     let cols = self
-                        .own_tab_id()
+                        .model
+                        .own_tab()
                         .and_then(get_tab_info)
                         .map(|t| t.display_area_columns);
                     let cols_s = cols.map(|c| c.to_string());
@@ -233,7 +218,7 @@ impl State {
                     }
                     run_command(&argv, BTreeMap::new());
                 }
-                Effect::PersistCollapse { collapsed } if active => {
+                Effect::PersistCollapse { collapsed } if presumed => {
                     // Issue #5: report the ABSOLUTE collapse mode to the
                     // store (the one writer); its seq-bumped push heals any
                     // instance the toggle broadcast missed. Every instance
@@ -252,18 +237,31 @@ impl State {
         }
     }
 
-    /// §6.6 Design B bootstrap: only the ACTIVE instance reports binds — its
-    /// manifest is the fresh one; a hidden instance's stale positions would
-    /// bind agents to the wrong tabs.
-    fn fire_binds(&mut self) {
-        if self.is_active_instance()
-            && let Some(own) = self.own_tab_id()
-        {
-            let fx = self.model.bind_effects(own);
-            if !fx.is_empty() {
-                self.run_effects(fx);
-            }
+    /// Run every effect keyed on THIS instance's tab identity (bind, birth
+    /// touch). Called from EVERY arm that mutates model state from an external
+    /// input — both snapshot paths, both frame kinds, `clave-register`.
+    ///
+    /// The single entry point is the point (#55): bind emission used to be an
+    /// adapter-level call each of those arms had to remember separately, and
+    /// the hydrate arm — the only path that populates `agents` at session
+    /// birth — was the one that forgot (RC-B). Fail-closed inside the model,
+    /// so calling it on an incoherent frame is a no-op and the next frame is
+    /// the retry.
+    fn settle_identity(&mut self) {
+        let fx = self.model.identity_effects();
+        if !fx.is_empty() {
+            self.run_effects(fx);
         }
+    }
+
+    /// The ONE snapshot path — hydrate (`RunCommandResult`) and the live
+    /// `clave-status` push both land here. Two call sites that each had to
+    /// remember `settle_identity()` is how the hydrate came to be the only
+    /// snapshot that never bound anything (RC-B).
+    fn apply_snapshot_and_settle(&mut self, snap: clave_types::AgentSnapshot) {
+        let fx = self.model.apply_snapshot(snap);
+        self.run_effects(fx);
+        self.settle_identity();
     }
 
     /// Alt+c (round 20, collapse-in-place): flip the width target and let
@@ -299,9 +297,7 @@ impl State {
         match name {
             "clave-status" => match serde_json::from_str(payload) {
                 Ok(snap) => {
-                    let fx = self.model.apply_snapshot(snap);
-                    self.run_effects(fx);
-                    self.fire_binds(); // a new agent row may need its bind
+                    self.apply_snapshot_and_settle(snap);
                     true
                 }
                 Err(e) => {
@@ -312,7 +308,7 @@ impl State {
             "clave-register" => match serde_json::from_str::<clave_types::Register>(payload) {
                 Ok(reg) => {
                     self.model.register(reg.uuid, reg.pane_id);
-                    self.fire_binds(); // the join input just landed
+                    self.settle_identity(); // the join input just landed
                     true // a row may just have gained its glyph
                 }
                 Err(e) => {
@@ -352,8 +348,14 @@ impl State {
                 // Row jumps and dir walks need a FRESH tab set — only the
                 // active instance has one. Executor = the instance whose own
                 // tab is the replicated beacon (converged via visited pipes).
+                // Fail-closed since #55: `own_tab()` is None while the two
+                // zellij frames disagree, so a nav processed inside the
+                // renumbering window no longer resolves SwitchTab's position
+                // off a mismatched pair. A dropped Alt+j is a repeatable
+                // keypress; a jump to the wrong tab is not.
                 let executor = self
-                    .own_tab_id()
+                    .model
+                    .own_tab()
                     .filter(|own| self.model.current_tab() == Some(*own));
                 let fx = self.model.nav(payload, executor);
                 if fx.is_empty() {
@@ -439,7 +441,13 @@ impl ZellijPlugin for State {
         // directly (no focus-stealing first click) and MoveFocus skips it —
         // nothing the bar does needs focus (clicks, pipes, hide_self).
         set_selectable(false);
-        self.own_plugin_id = Some(get_plugin_ids().plugin_id);
+        // `own_plugin_id` stays for ShrinkSelf/GrowSelf's resize_pane_with_id;
+        // the model gets the same id because identity resolution lives there
+        // now — this file is `test = false`, and RC-A shipped precisely
+        // because the frame join was written where nothing could assert on it.
+        let id = get_plugin_ids().plugin_id;
+        self.own_plugin_id = Some(id);
+        self.model.set_own_pane(id);
     }
 
     fn update(&mut self, event: Event) -> bool {
@@ -465,22 +473,17 @@ impl ZellijPlugin for State {
                 }
                 match serde_json::from_slice(&stdout) {
                     Ok(snap) => {
-                        let fx = self.model.apply_snapshot(snap);
-                        self.run_effects(fx);
                         // RC-B (#55): this is the arm that FIRST populates
-                        // `agents`, and it was the one arm that did not fire
-                        // binds. TabUpdate/PaneUpdate normally arrive before
-                        // the snapshot result — permissions land, the frames
-                        // flow, then `clave snapshot` returns — so their own
-                        // `fire_binds()` (below, :491/:511) ran against an
-                        // EMPTY agent list and bound nothing. Nothing else
-                        // arrives until a frame changes, so the eager
-                        // cold-start tab stayed unbound and its first prompt
-                        // never moved it. Same gate as every other call site
-                        // (active instance + resolvable own tab), and
-                        // `bind_effects`' guard is last-SENT per (uuid, tab),
-                        // so a re-fire is silent rather than a storm.
-                        self.fire_binds();
+                        // `agents`. TabUpdate/PaneUpdate normally arrive
+                        // before the snapshot result — permissions land, the
+                        // frames flow, then `clave snapshot` returns — so
+                        // their own settle ran against an EMPTY agent list and
+                        // bound nothing. Nothing else arrives until a frame
+                        // changes, so the eager cold-start tab stayed unbound
+                        // and its first prompt never moved it. Both snapshot
+                        // paths now go through one method, so this cannot
+                        // diverge from the `clave-status` arm again.
+                        self.apply_snapshot_and_settle(snap);
                         true
                     }
                     Err(_) => false, // not a snapshot (e.g. clave focus) — fine
@@ -496,7 +499,6 @@ impl ZellijPlugin for State {
                         active: t.active,
                     })
                     .collect();
-                self.last_tabs = metas.clone();
                 let fx = self.model.apply_tabs(metas);
                 // NO beacon announce here (round 11): TabUpdate announces
                 // were poisoned by design — a hidden instance's stale set
@@ -504,36 +506,28 @@ impl ZellijPlugin for State {
                 // bursts deliver TabUpdates to ALL instances, so they
                 // warred over the beacon (~15 pipes/s storm). The beacon is
                 // announced from render() instead — the one signal only the
-                // on-screen bar receives. This block only fires the
-                // one-time BIRTH touch for a tab the timeline has never
-                // seen (its creation moment; `clave touch` stamps time).
-                if let Some(active_id) = self.last_tabs.iter().find(|t| t.active).map(|t| t.tab_id)
-                    && self.is_active_instance()
-                    && self.model.needs_birth_touch(active_id)
-                {
-                    // Once-EVER per instance/tab, snapshot-aware but
-                    // echo-INDEPENDENT (C5 rd 4: echo-gated guards re-fired
-                    // per TabUpdate → spawn storm → server fd exhaustion).
-                    // `clave touch` stamps host time into the STORE and
-                    // pushes the snapshot that carries the new order back
-                    // to every instance.
-                    run_command(
-                        &[self.clave_binary.as_str(), "touch", &active_id.to_string()],
-                        BTreeMap::new(),
-                    );
-                }
+                // on-screen bar receives. The one-time BIRTH touch used to
+                // live inline here; it is now `Effect::Touch`, emitted by
+                // `identity_effects` (#55) — it was untestable in this file
+                // and, living only in this arm, had no trigger to retry after
+                // the one TabUpdate a close delivers.
                 self.run_effects(fx);
-                self.fire_binds(); // fresh tab set → own-tab joins resolvable
+                // Ordering note: the touch now runs AFTER PruneTabs rather
+                // than before. Both are fire-and-forget subprocesses with no
+                // arrival-order guarantee either way, and their payloads are
+                // disjoint id sets (prune removes observed-dead ids, touch
+                // stamps a live one), so they commute.
+                self.settle_identity(); // fresh tab set → own-tab joins resolvable
                 true
             }
             Event::PaneUpdate(manifest) => {
+                // EVERY pane goes into `metas`, plugin ones included: the
+                // model's `own_tab_position` locates our own plugin pane in
+                // it, and the coherence witness reads all of them (a tab
+                // without a bar must not make the witness fail forever).
                 let mut metas = Vec::new();
-                self.plugin_panes.clear();
                 for (tab_position, panes) in &manifest.panes {
                     for p in panes {
-                        if p.is_plugin {
-                            self.plugin_panes.push((*tab_position, p.id));
-                        }
                         metas.push(PaneMeta {
                             tab_position: *tab_position,
                             pane_id: p.id,
@@ -543,7 +537,7 @@ impl ZellijPlugin for State {
                     }
                 }
                 self.model.apply_panes(metas);
-                self.fire_binds(); // fresh manifest → own-tab joins resolvable
+                self.settle_identity(); // fresh manifest → own-tab joins resolvable
                 true
             }
             Event::Timer(elapsed) => {
