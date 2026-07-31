@@ -383,6 +383,12 @@ pub fn push_snapshot(snap: &AgentSnapshot) {
 /// The one store mutation a hook event performs, factored out of run_hook's
 /// lock closure so it unit-tests against a plain `Store`. Returns whether
 /// anything changed; bumps `seq` itself (exactly once) when it did.
+///
+/// `own_claude` is [`PidGate::is_the_agents_own_claude`], and it gates ONE
+/// field — `live_session`. Everything else here is driven by an event
+/// `resolve_row` already admitted; that pointer is the only value whose
+/// lifetime outlives the event, so it is the only one that can be poisoned by a
+/// Claude that merely LOOKS like this row's (see the write site below).
 pub fn apply_hook_event(
     s: &mut crate::store::Store,
     uuid: &str,
@@ -390,6 +396,7 @@ pub fn apply_hook_event(
     payload: &HookPayload,
     jsonl_tail: Option<&str>,
     now: u64,
+    own_claude: bool,
 ) -> bool {
     let Some(rec) = s.agents.get_mut(uuid) else {
         return false; // raced a prune — fine
@@ -398,6 +405,32 @@ pub fn apply_hook_event(
     if let Some(next) = status_for_event(event, payload.message.as_deref(), rec.status) {
         changed |= rec.status != next;
         rec.status = next;
+    }
+    // Remember which conversation this row is actually living in (#99). The
+    // payload's id is the live one BY DEFINITION — Claude is reporting its own
+    // session. Held as `None` when it equals `uuid`, so the field can go BACK
+    // to agreeing rather than keep pointing at a superseded conversation.
+    //
+    // GATED ON THE PID, unlike everything else here, and the asymmetry is the
+    // point. `resolve_row` admits a payload whose `session_id` NAMES A ROW
+    // without consulting the gate — correctly, that is the ordinary path — but
+    // the minted transcript this bug leaves orphaned is listed in `claude
+    // --resume`'s own picker, so a Claude started by hand OUTSIDE clave can
+    // fire hooks carrying exactly that id. Ungated, its `session_id == uuid`
+    // would read as "the two agree again" and WIPE a live pointer that is still
+    // true, silently re-arming #99 for the next release. Every other field here
+    // describes the event and is corrected by the next one; this pointer is
+    // read once, much later, by a process with nothing else to go on.
+    //
+    // Fails closed: no `CLAUDE_PID`, or a mismatch, and the pointer simply
+    // holds. Worst case is the pre-#99 target, never a wrong one.
+    //
+    // Not part of `changed`, on purpose. `with_store_mut` persists the record
+    // either way; `changed` gates only the SNAPSHOT PUSH, and the bar renders
+    // nothing from this field — bumping `seq` for it would push a pipe message
+    // that changes no pixel.
+    if let Some(live) = payload.session_id.as_deref().filter(|_| own_claude) {
+        rec.live_session = (live != uuid).then(|| live.to_string());
     }
     let mut stamp = None;
     if event == "UserPromptSubmit" {
@@ -662,8 +695,16 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
             )
             .and_then(|path| read_tail(&path, 64 * 1024))
         });
-        apply_hook_event(s, &uuid, event, &payload, tail.as_deref(), now_unix())
-            .then(|| snapshot_from(s))
+        apply_hook_event(
+            s,
+            &uuid,
+            event,
+            &payload,
+            tail.as_deref(),
+            now_unix(),
+            gate.is_the_agents_own_claude(),
+        )
+        .then(|| snapshot_from(s))
     })?;
     if let Some(snap) = snap {
         push_snapshot(&snap);
@@ -694,7 +735,91 @@ mod tests {
             title: None,
             summary: String::new(),
             default_branch: None,
+            live_session: None,
         }
+    }
+
+    /// #99's write half: the row remembers WHICH conversation it is living in.
+    ///
+    /// `clave spawn` runs before any Claude exists to send a payload, so the
+    /// live id has to have been written down beforehand or resurrection has
+    /// nothing but the minted uuid — which is the pre-rotation conversation,
+    /// confirmed live to lose everything said after a `/clear`.
+    #[test]
+    fn a_rotated_payload_id_is_remembered_and_an_agreeing_one_clears_it() {
+        let mut s = Store::default();
+        s.agents.insert("minted".into(), rec("minted"));
+        let event = |session: Option<&str>| HookPayload {
+            session_id: session.map(str::to_string),
+            ..Default::default()
+        };
+        let live = |s: &Store| s.agents["minted"].live_session.clone();
+        // A REGISTERED event (setup.rs's HOOK_EVENTS) that moves nothing else:
+        // an unmatched Notification maps to no status and carries no tail, so
+        // `changed` reflects the live-id write alone. Using an event clave does
+        // not register would prove the property on a path that never fires.
+        let quiet = "Notification";
+
+        // A rotated id is recorded — and NOT as a snapshot-worthy change: the
+        // bar renders nothing from this field, and `with_store_mut` persists
+        // the record whether or not `seq` moves.
+        let before = s.seq;
+        assert!(!apply_hook_event(
+            &mut s,
+            "minted",
+            quiet,
+            &event(Some("rotated")),
+            None,
+            100,
+            true
+        ));
+        assert_eq!(live(&s).as_deref(), Some("rotated"));
+        assert_eq!(s.seq, before, "a live-id write pushes no pipe message");
+
+        // A payload that AGREES with the minted uuid clears it. Without this
+        // the row would keep pointing at a superseded file forever — the exact
+        // stale-but-readable failure #98 refused for the transcript read.
+        apply_hook_event(
+            &mut s,
+            "minted",
+            quiet,
+            &event(Some("minted")),
+            None,
+            101,
+            true,
+        );
+        assert_eq!(live(&s), None);
+
+        // A malformed payload (serde yields `session_id: None`) says nothing
+        // about which conversation is live, so it must not erase what does.
+        apply_hook_event(
+            &mut s,
+            "minted",
+            quiet,
+            &event(Some("rotated")),
+            None,
+            102,
+            true,
+        );
+        apply_hook_event(&mut s, "minted", quiet, &event(None), None, 103, true);
+        assert_eq!(live(&s).as_deref(), Some("rotated"));
+
+        // …and NEITHER does a Claude that is not this agent's. `resolve_row`
+        // admits a payload whose id names a row without consulting the gate, so
+        // a hand-started `claude --resume <minted>` — the orphaned transcript
+        // is in Claude's own picker — arrives here looking like agreement. It
+        // must not wipe a pointer that is still true, or the next release
+        // resurrects on the superseded conversation again.
+        apply_hook_event(
+            &mut s,
+            "minted",
+            quiet,
+            &event(Some("minted")),
+            None,
+            104,
+            false,
+        );
+        assert_eq!(live(&s).as_deref(), Some("rotated"));
     }
 
     /// #97, the bug this exists to prevent recurring.
@@ -936,7 +1061,8 @@ mod tests {
             "UserPromptSubmit",
             &p,
             None,
-            1700
+            1700,
+            true
         ));
         assert_eq!(s.agents["u1"].last_interacted, 1700);
         assert_eq!(s.tab_timeline.get(&4), Some(&1700));
@@ -948,23 +1074,27 @@ mod tests {
             "UserPromptSubmit",
             &p,
             None,
-            1800
+            1800,
+            true
         ));
         assert_eq!(s.agents["u2"].last_interacted, 1800);
         assert_eq!(s.tab_timeline.len(), 1);
         // Non-commitment events don't stamp the timeline (Stop ≠ user input).
-        assert!(apply_hook_event(&mut s, "u1", "Stop", &p, None, 1900));
+        assert!(apply_hook_event(&mut s, "u1", "Stop", &p, None, 1900, true));
         assert_eq!(s.tab_timeline.get(&4), Some(&1700));
         // Unknown uuid / no-op event: unchanged, no seq bump.
         let seq = s.seq;
-        assert!(!apply_hook_event(&mut s, "ghost", "Stop", &p, None, 2000));
+        assert!(!apply_hook_event(
+            &mut s, "ghost", "Stop", &p, None, 2000, true
+        ));
         assert!(!apply_hook_event(
             &mut s,
             "u1",
             "PreToolUse",
             &p,
             None,
-            2000
+            2000,
+            true
         ));
         assert_eq!(s.seq, seq);
     }

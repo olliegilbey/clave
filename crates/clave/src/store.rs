@@ -91,6 +91,40 @@ pub struct AgentRecord {
     /// store files loading — a missing key is a whole-store parse failure.
     #[serde(default)]
     pub default_branch: Option<String>,
+    /// The session id Claude is CURRENTLY using for this row, when it is no
+    /// longer the minted `uuid` — see UBIQUITOUS_LANGUAGE, "minted uuid vs live
+    /// session id".
+    ///
+    /// `None` means the two are NOT KNOWN to disagree, which is not quite the
+    /// same as agreeing: a row written before this field existed, and a seeded
+    /// sandbox row, are both `None` regardless of what Claude is doing. Every
+    /// consumer treats that as "fall back to the minted uuid", which is exactly
+    /// the pre-#99 behaviour.
+    ///
+    /// Deliberately reintroduced (#99). #98 deleted a field of this shape
+    /// because its only job was keeping a DERIVED jsonl path alive, which S4
+    /// forbids — `payload.transcript_path` replaced it for the READ half. This
+    /// one exists for the RESURRECTION half, which no payload can serve: `clave
+    /// spawn` runs before any Claude exists to send one, so the id must have
+    /// been written down beforehand or it is gone. (`spawn::resume_target` does
+    /// still DERIVE a path from it, as `spawn_mode` always has — but only to
+    /// probe existence. S4's withdrawal is of the derived READ.) Justified by
+    /// measured loss, not symmetry: resurrection on the minted uuid reopens the
+    /// pre-rotation conversation and orphans everything since the `/clear`
+    /// (confirmed live 2026-07-31 — the resumed agent knew only the pre-clear
+    /// content).
+    ///
+    /// Written by `hook::apply_hook_event` under [`PidGate`] — BOTH directions,
+    /// which is stricter than the event admission around it: `resolve_row` lets
+    /// a payload whose id names a row through ungated, and an outside `claude
+    /// --resume <minted>` on the orphaned transcript would otherwise read as
+    /// agreement and wipe a pointer that is still true. Never trusted blind on
+    /// the way out either: `resume_target` requires the named jsonl to EXIST,
+    /// and refuses a value shaped like a flag, before it reaches argv.
+    ///
+    /// [`PidGate`]: crate::hook::PidGate
+    #[serde(default)]
+    pub live_session: Option<String>,
 }
 
 /// The whole store file. `seq` is the monotonic snapshot counter of the §5
@@ -463,6 +497,7 @@ mod tests {
             title: None,
             summary: String::new(),
             default_branch: None,
+            live_session: None,
         }
     }
 
@@ -783,10 +818,15 @@ mod tests {
         // #86's field joins the same set, and it is the one Ollie's REAL store
         // is about to be missing: every row written before this branch.
         o.remove("default_branch");
+        // #99's field joins it too. Note what `None` means for a row read this
+        // way: not "the ids agree" but "nothing has told us otherwise yet" —
+        // resurrection falls back to the minted uuid until a hook reports.
+        o.remove("live_session");
         let back: AgentRecord = serde_json::from_value(serde_json::Value::Object(o)).unwrap();
         assert_eq!(back.title, None);
         assert!(back.summary.is_empty());
         assert_eq!(back.default_branch, None);
+        assert_eq!(back.live_session, None);
     }
 
     #[test]

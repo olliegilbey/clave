@@ -239,8 +239,17 @@ fn main() -> Result<()> {
                 .with_context(|| format!("canonicalizing --cwd {cwd}"))?;
             let physical_str = physical.to_str().context("non-UTF8 cwd")?.to_string();
             let claude_dir = clave::env::claude_config_dir()?;
-            let mode = spawn::spawn_mode(&claude_dir, &physical_str, &uuid);
-            clave::evlog::log_event("spawn", &format!("{uuid}: {mode:?}"));
+            // The row may be living in a ROTATED conversation (#99). Read
+            // lock-free and best-effort: a missing or unreadable store must
+            // never stop a pane from launching, and `None` is precisely the
+            // pre-#99 behaviour.
+            let live = clave::store::store_paths()
+                .and_then(|p| clave::store::read_store(&p))
+                .ok()
+                .and_then(|s| s.agents.get(&uuid).and_then(|r| r.live_session.clone()));
+            let (mode, session) =
+                spawn::resume_target(&claude_dir, &physical_str, &uuid, live.as_deref());
+            clave::evlog::log_event("spawn", &format!("{uuid}: {mode:?} {session}"));
             // Register uuid→pane BEFORE exec (this process is about to be
             // replaced; best-effort — see register_pane).
             spawn::register_pane(&uuid);
@@ -328,10 +337,16 @@ fn main() -> Result<()> {
                     spawn::SpawnMode::Create => "--session-id",
                     spawn::SpawnMode::Resume => "--resume",
                 };
+                // `session` is the conversation to OPEN and may be a rotated id
+                // (#99); `uuid` stays the row's identity in the environment. The
+                // two differ when this pane has rotated since it was minted — a
+                // `/clear` does that, a `--resume` does not (both measured) —
+                // AND that conversation's transcript is still on disk. That is
+                // the case that used to lose work.
                 std::process::Command::new(&claude)
                     .env(clave_types::AGENT_UUID_ENV, &uuid)
                     .env(clave_types::AGENT_PID_ENV, std::process::id().to_string())
-                    .args([flag, &uuid])
+                    .args([flag, &session])
                     .exec()
             };
             // exec only returns on failure — surface it in the pane.
