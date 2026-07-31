@@ -38,8 +38,11 @@ Then, left to right across the row:
 | **repo** | one colour per repo, wherever it appears |
 | **text** | Claude's own description of the session, not your prompt |
 
-<sub>The three marks above are Nerd Font glyphs and may show as boxes here on
-GitHub — they render in your terminal. The screenshot shows all of them.</sub>
+<sub>These marks may show as boxes here on GitHub — they render in your
+terminal. The branch and terminal marks are Nerd Font glyphs; the worktree mark
+is U+168C2, which no Nerd Font carries — install Noto Sans Bamum (or any font
+with Bamum coverage) as a fallback, or that one row shows a box. The screenshot
+shows all of them.</sub>
 
 ## Try it
 
@@ -60,6 +63,12 @@ clave                      # from a terminal OUTSIDE zellij — clave makes its 
 
 No packaged release yet; building from a tag is the supported path. Take the tag
 literally — earlier ones predate the launcher this puts on your PATH.
+
+**Upgrading? Quit every running clave session first, and start it fresh
+afterwards.** `just release` regenerates Zellij's keybinds, and Zellij swaps
+those into sessions that are already running — but a sidebar that is already
+loaded keeps the identity it booted with, so the next keypress opens a *second*
+sidebar beside the first. A cold restart is the whole fix.
 
 `just release` also registers clave's status hooks in `~/.claude/settings.json`
 (additive — your own hooks are left alone) and seeds Zellij's plugin permission

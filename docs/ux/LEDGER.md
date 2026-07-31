@@ -269,8 +269,9 @@ widths, not as something a user would ever see.
 > **The PROFILE stands; its anchor argument was retired at D33 (2026-07-30).**
 > `(title 7, repo 3)` at 30 is still what collapsed renders. What no longer
 > holds is the reason given below for choosing it — expanded went to `(9, 7)`,
-> so the chip does **not** survive the toggle unchanged, and the separation from
-> the expanded target is 24, not 14. Read the reasoning as the origin of the
+> so the title cell narrows 9 → 7 on collapse and a chip longer than 7 cells
+> truncates; titles of 7 cells or fewer survive the toggle unchanged (D33). The
+> separation from the expanded target is 24, not 14. Read the reasoning as the origin of the
 > collapsed numbers, not as a live property of the pair.
 
 Chosen by Ollie from three rendered candidates. `Widths::COLLAPSED = { title: 7, repo: 3 }`,

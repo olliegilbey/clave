@@ -90,7 +90,9 @@ Spanish for *key/keystone* (keyboard-driven, central); archaic past tense of
 2. **`clave` owns identity.** The label (`cwd · branch · summary`) and colours are
    computed by `clave`; the label is written onto the **real Zellij tab**
    (`rename_tab_with_id`, on label *change* only — so manual renames stick between
-   changes) and the bar renders `TabInfo.name` for every row. (Revised 2026-07-31,
+   changes). The bar renders `TabInfo.name` only for **terminal** rows; an agent
+   row is projected from the store's own fields, never from the tab name (§7.1).
+   (Revised 2026-07-31,
    #91: the launch `--name` courtesy push is GONE — clave's own label came back as a
    `custom-title` and filled the bar's title chip on an agent nobody had named, §6.1.)
    Never read `/rename` or `/color` back — they are not exposed (see §4).
