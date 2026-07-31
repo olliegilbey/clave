@@ -266,6 +266,13 @@ widths, not as something a user would ever see.
 
 ### D17 — Collapsed is `(title 7, repo 3)` at 30 columns (2026-07-29)
 
+> **The PROFILE stands; its anchor argument was retired at D33 (2026-07-30).**
+> `(title 7, repo 3)` at 30 is still what collapsed renders. What no longer
+> holds is the reason given below for choosing it — expanded went to `(9, 7)`,
+> so the chip does **not** survive the toggle unchanged, and the separation from
+> the expanded target is 24, not 14. Read the reasoning as the origin of the
+> collapsed numbers, not as a live property of the pair.
+
 Chosen by Ollie from three rendered candidates. `Widths::COLLAPSED = { title: 7, repo: 3 }`,
 `COLLAPSED_TARGET_COLS = 30`, summary = `30 − 13 − 7 − 3` = **7**. Separation
 from 44 is 14, clearing D15's bound of 10.

@@ -263,7 +263,8 @@ manual.
 hard-codes has moved onto the value it used to be contrasted against, so it now
 exercises none of the behaviour it was written for.
 
-**The instance.** `BAR_TARGET_COLS` went 30 -> 44 and `COLLAPSED_TARGET_COLS` 4
+**The instance.** (`BAR_TARGET_COLS` has since gone 44 -> 54 at D33; the lesson
+is unchanged.) `BAR_TARGET_COLS` went 30 -> 44 and `COLLAPSED_TARGET_COLS` 4
 -> 30 (#63). `30` had been both the old expanded target *and* the seek tests'
 arbitrary "far from target" start width — and it is now the **collapsed** target.
 `seek_collapses_to_the_gutter_despite_coarse_steps`
@@ -566,7 +567,7 @@ Three parts, all present in
 
    ```text
    cols  1–9   gutter, left cap included    9
-   cols 10–16   title                       7   (D17: holds at 7 in BOTH profiles)
+   cols 10–16   title                       7   (D17; EXPANDED went to 9 at D33)
    col     17   space                       1
    cols 18–20   repo                        3   (D17; D18 drops the ellipsis)
    col     21   space                       1
@@ -582,7 +583,8 @@ Three parts, all present in
    which is what makes collapsed a width profile and not a second layout (D16).
 
 2. **The citation.** Every choice names the lock section or LEDGER decision it
-   comes from — D17 for holding `title` at 7 across both profiles, D18 for why a
+   comes from — D17 for the collapsed `title` of 7 — D33 retired its hold-across-both-profiles
+   property when EXPANDED went to `(9, 7)` — D18 for why a
    3-cell repo drops the ellipsis and truncates `"clave"` to `"cla"`.
 3. **Self-checks that re-derive rather than re-read.**
    `golden_bar_at_fifty_four_columns` (`render.rs:907`) was the weaker of the two

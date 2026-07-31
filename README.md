@@ -11,13 +11,36 @@ No desktop app, no custom UI, no leaving the terminal. Just the agents you
 already run, finally in one view.
 
 ```
-┌─────────────────────┐
-│ 🔴 main·api·fix-au…  │  needs you (waiting for input / approval)
-│ ⚙️ feat·web·add-na…  │  working
-│ ✅ main·docs·updat…  │  done, unread
-│ ⚪ main·cli·refacto…  │  idle
-└─────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│ ● │   󰘬           api     rotate the signing keys    │
+│ ● │   𖣂 S6-GUT    web     add the nav skeleton       │
+│ ● │               docs    update the install steps   │
+│ ● │   󰘬           cli     refactor the arg parser    │
+│ ◌ │               infra   bump the runner image      │
+│   │ 󰆍   shell                                        │
+└──────────────────────────────────────────────────────┘
 ```
+
+Rendered by the real bar, so the columns are exactly what you get. Reading
+left to right: **status**, then a fixed gutter, then **provenance**, the
+**rename chip**, the **repo**, and what the agent is actually doing.
+
+**Colour is the state**, which a code block cannot show: the four `●` rows
+above are red *needs you*, amber *working*, green *done*, and grey *idle*. Only
+where a row is not a live conversation does the shape change too — `◌` dormant,
+`↻` opening, `✖` failed, `✗` its directory has gone.
+
+A **main checkout renders nothing** in the provenance cell. That is deliberate:
+blanking the most common row is what makes `󰘬` (a branch) and `𖣂` (a worktree)
+mean something at a glance. The chip beside it stays empty until you `/rename`
+a session — clave never fills it with a label of its own — and the last column
+is Claude's own description of the work, not your prompt.
+
+Terminal tabs sit in the same list rather than being hidden, so the bar is the
+whole session and not just its agents.
+
+> Needs a [Nerd Font](https://www.nerdfonts.com/) in your terminal for the
+> provenance and terminal glyphs. Everything else is plain Unicode.
 
 ## Why "clave"?
 
@@ -31,10 +54,12 @@ splitting the screen into panes. Logo: the two-stick percussion instrument.
 - **One agent = one Zellij tab** running the actual `claude` TUI — vim mode,
   slash commands, all of it. Not a reimplementation.
 - **Status comes from [Claude Code hooks](https://code.claude.com/docs/en/hooks)**,
-  not screen-scraping. `clave` mints each session's UUID, so hook events map
-  exactly to the right tab and repaint its emoji.
+  not screen-scraping. `clave` mints each session's UUID and hands it to the
+  agent's own process, so every event lands on the right row — including after
+  a `/clear`, which starts Claude on a fresh id.
 - **Conversations survive restarts** — each pane runs an idempotent
-  resume-or-create, so Zellij serialization brings every agent back.
+  resume-or-create, so Zellij serialization brings every agent back on the
+  conversation you were actually in, not the one the tab started with.
 - **Keyboard-first**: `Alt+a` add · `Alt+c` toggle bar · `Alt+t`/`Alt+w` new and
   close tab · `Alt+↑/↓` walk the fleet · `Alt+1…9` jump. Every key fires
   straight through a focused Claude session.
