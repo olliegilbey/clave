@@ -611,6 +611,14 @@ the kind of fact that costs a round to rediscover.
 
 ## 9. Resurrection comes back on the LIVE conversation (#99)
 
+**RUN AND PASSED 2026-07-31** (PR #101, sandbox, CLI v2.1.220). Minted
+`162e889f`, rotated to `02fdcf5a` on the `/clear`; the resurrected pane execed
+`Resume 02fdcf5a` (evlog), answered `7272` from memory with the post-clear
+history intact, and the minted transcript's mtime never moved. Two facts fell
+out that were open beforehand: **a `--resume` does not rotate** (no third
+transcript, `live_session` unchanged after resurrection), and the raw
+`live_uuids` in `dev status` does report the rotated id, as predicted below.
+
 **Item 8's step 6, run in the other direction.** That step measured the loss;
 this one confirms it is gone. Same setup, and it is the same experiment — if you
 are running item 8 anyway, carry straight on from its step 5 rather than

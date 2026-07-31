@@ -340,9 +340,9 @@ fn main() -> Result<()> {
                 // `session` is the conversation to OPEN and may be a rotated id
                 // (#99); `uuid` stays the row's identity in the environment. The
                 // two differ when this pane has rotated since it was minted — a
-                // `/clear` is confirmed, a resume suspected — AND that
-                // conversation's transcript is still on disk. That is the case
-                // that used to lose work.
+                // `/clear` does that, a `--resume` does not (both measured) —
+                // AND that conversation's transcript is still on disk. That is
+                // the case that used to lose work.
                 std::process::Command::new(&claude)
                     .env(clave_types::AGENT_UUID_ENV, &uuid)
                     .env(clave_types::AGENT_PID_ENV, std::process::id().to_string())
