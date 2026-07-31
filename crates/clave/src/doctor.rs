@@ -268,10 +268,27 @@ pub fn diagnose(f: &Facts) -> Vec<Finding> {
             vec!["Run `clave setup` — this binary carries the wasm and will extract it.".into()],
         )
     } else {
+        // The path is IN the label, not just the Ok branch's: a dev build can
+        // be pointed at either data dir, and only the sandbox one is what the
+        // repair below fills. Seeing `~/.local/state/clave-dev/data` vs
+        // `~/.local/share/clave` is how the reader tells which case they are in.
         setup(
             Severity::Problem,
-            "clave-bar wasm not installed (dev build — no embedded copy)".into(),
-            vec!["Run `just dev-install` (builds the sandbox wasm).".into()],
+            format!(
+                "clave-bar wasm not installed (dev build — no embedded copy): {}",
+                tilde(&f.wasm_path, &f.home)
+            ),
+            // `just sandbox`, NOT `just dev-install` (CONTRIBUTING §Quick start,
+            // FOOTGUNS §PATH and version coherence): dev-install builds the same
+            // wasm but never regenerates config.kdl, so it leaves a new wasm
+            // beside a stale config — indistinguishable from "the fix didn't
+            // work" — and it rebuilds in place under a live clave-test session.
+            vec![
+                "Run `just sandbox` — it builds the working-tree wasm into the sandbox".into(),
+                "data dir and regenerates the config that references it.".into(),
+                "(`just dev-install` builds the same wasm but leaves config.kdl stale,".into(),
+                "and rebuilds in place under a live clave-test session.)".into(),
+            ],
         )
     });
     let missing: Vec<&str> = f
@@ -337,9 +354,21 @@ pub fn diagnose(f: &Facts) -> Vec<Finding> {
             (Some(c), Some((n, nv))) if c > n => out.push(setup(
                 Severity::Warn,
                 format!("this binary is ahead of the newest installed release (v{nv})"),
+                // The old copy said "a stable launch will fall back to this dev
+                // binary". True before #43a, when nothing owned the name `clave`
+                // and whatever PATH resolved won the cold start — that is the
+                // 2026-07-22 outage. Since #43a the cut installs its own
+                // launcher at <data>/bin/clave, so a stable launch runs the
+                // release, and the only thing that can still divert it is a
+                // pre-#43b ~/.cargo/bin/clave shadowing it on PATH. doctor
+                // cannot see PATH (#48), so it names the check rather than
+                // promising an answer it does not have.
                 vec![
-                    "A stable launch will fall back to this dev binary — you are running".into(),
-                    "unreleased code (CONTRIBUTING: the binary split).".into(),
+                    "You are running unreleased code (CONTRIBUTING: Two environments,".into(),
+                    "one code path). The daily surface is unaffected: `clave` runs the".into(),
+                    format!("launcher the v{nv} cut installed under <data>/bin, not this binary."),
+                    "doctor cannot see your PATH — if a pre-#43b ~/.cargo/bin/clave still".into(),
+                    "exists it shadows that launcher; `command -v clave` says which wins.".into(),
                 ],
             )),
             (_, Some((_, nv))) => out.push(setup(
@@ -839,13 +868,20 @@ mod tests {
         let cfg = f.iter().find(|x| x.label.contains("config.kdl")).unwrap();
         assert_eq!(cfg.severity, Severity::Problem);
         assert!(cfg.advice.iter().any(|l| l.contains("clave setup")));
-        // Embedded build → repair is `clave setup`; dev build → dev-install.
+        // Embedded build → repair is `clave setup`; dev build → `just sandbox`,
+        // the only path that leaves a fresh wasm beside a config that names it.
         let wasm = f.iter().find(|x| x.label.contains("wasm")).unwrap();
         assert!(wasm.advice.iter().any(|l| l.contains("clave setup")));
         facts.has_embedded_wasm = false;
         let f = diagnose(&facts);
         let wasm = f.iter().find(|x| x.label.contains("wasm")).unwrap();
-        assert!(wasm.advice.iter().any(|l| l.contains("just dev-install")));
+        assert!(wasm.advice.iter().any(|l| l.contains("just sandbox")));
+        // The path is what tells a dev build WHICH data dir came up empty.
+        assert!(
+            wasm.label.contains("~/.local/share/clave"),
+            "{}",
+            wasm.label
+        );
     }
 
     #[test]
@@ -892,6 +928,17 @@ mod tests {
         let s = f.iter().find(|x| x.label.contains("ahead")).unwrap();
         assert_eq!(s.severity, Severity::Warn);
         assert!(s.advice.iter().any(|l| l.contains("unreleased")));
+        // Post-#43a the cut owns <data>/bin/clave, so the warning must say the
+        // daily surface still runs the RELEASE — the old copy promised the
+        // opposite ("a stable launch will fall back to this dev binary") — and
+        // must name the PATH check, the one thing that can still divert it and
+        // the one thing doctor cannot see for itself (#48).
+        assert!(
+            s.advice
+                .iter()
+                .any(|l| l.contains("launcher the v0.1.0 cut"))
+        );
+        assert!(s.advice.iter().any(|l| l.contains("command -v clave")));
     }
 
     #[test]
