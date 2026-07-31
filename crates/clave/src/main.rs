@@ -48,7 +48,11 @@ enum Command {
     Spawn {
         /// The Claude session UUID this agent owns (minted by `clave add`).
         uuid: String,
-        /// Display name passed to `claude --name` on first creation.
+        /// The clave label. ACCEPTED AND DELIBERATELY UNUSED since #91 — it
+        /// is no longer forwarded to `claude --name`, but it stays parseable
+        /// because zellij replays this exact argv from the serialized layout
+        /// of every pre-existing session. Pinned by
+        /// `spawn_still_accepts_the_baked_name_arg`.
         #[arg(long)]
         name: String,
         /// Working directory to start the agent in.
@@ -224,7 +228,11 @@ fn main() -> Result<()> {
         None => setup::launch_session(),
         // Each arm is implemented in its own task — see docs/design.md "v1 scope".
         Some(Command::Add { worktree }) => add::run_add(worktree),
-        Some(Command::Spawn { uuid, name, cwd }) => {
+        Some(Command::Spawn {
+            uuid,
+            name: _name,
+            cwd,
+        }) => {
             // S0b: canonicalize BEFORE munging — Claude keys the transcript
             // dir off the PHYSICAL getcwd() path.
             let physical = std::fs::canonicalize(&cwd)
@@ -258,9 +266,39 @@ fn main() -> Result<()> {
                     )
                 })?;
             let err = match mode {
-                // --name only on create: the bar label is clave-owned (§6.1).
+                // NO `--name` (#91). It used to be passed here on create, and
+                // it was the whole bug: Claude records `--name` as a
+                // `custom-title` transcript entry, indistinguishable from a
+                // user `/rename`, so the hook wrote clave's OWN label into
+                // `AgentRecord.title` and the bar rendered a filled title chip
+                // on an agent nobody had named. Design-lock §2 and LEDGER D19
+                // both require that chip BLANK until renamed.
+                //
+                // Filtering it downstream was tried and refused: Claude
+                // re-emits a per-turn header block that rewrites the current
+                // title, so clave's label reappears on turn 2, turn 3, and 30
+                // times in one sampled session — a positional "ignore it
+                // before the first prompt" rule looks fixed on a one-prompt
+                // check and is not.
+                //
+                // Passing it also cost the user something. With no
+                // `custom-title`, `claude --resume`'s picker falls back to
+                // `aiTitle` — a description of the actual work. `--name`
+                // OVERWROTE that with `<dir> · <branch>`, which is identical
+                // across every agent on the same branch. Verified in a real
+                // transcript: zero `customTitle` entries, `aiTitle` present,
+                // and the picker showed the aiTitle.
+                //
+                // Nothing else consumed it. The zellij tab name comes from
+                // clave's store label directly, and `/rename` still writes a
+                // `custom-title` that the hook picks up exactly as before.
+                //
+                // The `--name` ARG stays parseable on purpose: zellij has it
+                // baked into the serialized layouts of every existing session,
+                // and a pane whose replayed command no longer parses would
+                // fail to resurrect.
                 spawn::SpawnMode::Create => std::process::Command::new(&claude)
-                    .args(["--session-id", &uuid, "--name", &name])
+                    .args(["--session-id", &uuid])
                     .exec(),
                 spawn::SpawnMode::Resume => std::process::Command::new(&claude)
                     .args(["--resume", &uuid])
@@ -382,6 +420,36 @@ mod tests {
                 Some(Command::Collapse { collapsed }) => assert_eq!(collapsed, want),
                 _ => panic!("parsed into the wrong command"),
             }
+        }
+    }
+
+    /// #91 left `clave spawn --name` accepted but UNUSED, and that is load
+    /// bearing rather than dead: zellij has the full `args "spawn" "<uuid>"
+    /// "--name" "<label>" "--cwd" "<cwd>"` form baked into the serialized
+    /// layout of every session created before the change, and replays it
+    /// verbatim on resurrection. Deleting the arg as "unused" would make those
+    /// panes fail to parse their own resurrect command — a break that no test
+    /// touching `claude`'s argv could catch, because the damage is at clave's
+    /// OWN CLI boundary.
+    #[test]
+    fn spawn_still_accepts_the_baked_name_arg() {
+        let cli = Cli::try_parse_from([
+            "clave",
+            "spawn",
+            "u-1",
+            "--name",
+            "repo \u{00b7} main",
+            "--cwd",
+            "/x",
+        ])
+        .expect("the baked resurrect command must still parse");
+        match cli.command {
+            Some(Command::Spawn { uuid, name, cwd }) => {
+                assert_eq!(uuid, "u-1");
+                assert_eq!(name, "repo \u{00b7} main");
+                assert_eq!(cwd, "/x");
+            }
+            _ => panic!("parsed into the wrong command"),
         }
     }
 

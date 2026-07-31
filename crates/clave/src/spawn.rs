@@ -13,8 +13,9 @@ use crate::munge::munge_cwd;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnMode {
-    /// No jsonl on disk → `claude --session-id <uuid> --name <label>`.
+    /// No jsonl on disk → `claude --session-id <uuid>`.
     /// S0: a fresh uuid CREATES the session and writes the jsonl.
+    /// NO `--name` — see the exec site in `main.rs` for why (#91).
     Create,
     /// jsonl exists → `claude --resume <uuid>`. `--resume` errors when no
     /// jsonl exists, which is why existence drives the branch (S0).
