@@ -57,7 +57,12 @@ git clone https://github.com/olliegilbey/clave && cd clave
 git checkout v0.1.2        # `just release` refuses a dirty or untagged tree
 just setup-toolchain       # adds the wasm32-wasip1 target, once
 just release               # builds, then installs the launcher and versioned artifacts
-export PATH="$HOME/.local/share/clave/bin:$PATH"
+
+# Put the launcher on your PATH — in your SHELL CONFIG, not just this shell,
+# or `clave` is gone the next time you open a terminal:
+echo 'export PATH="$HOME/.local/share/clave/bin:$PATH"' >> ~/.zshrc   # or ~/.bashrc
+exec $SHELL
+
 clave                      # from a terminal OUTSIDE zellij — clave makes its own session
 ```
 
