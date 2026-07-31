@@ -205,13 +205,14 @@ fn last_tail_field(tail: &str, kind: &str, field: &str) -> Option<String> {
 /// THE source for `rec.summary` (#79): it is what Claude Code writes where it
 /// once wrote `type:"summary"`, which appears in 0 transcripts.
 /// BUT IT IS MOSTLY ABSENT, and increasingly so — re-measured 2026-07-31 over
-/// all 770 local transcripts, only 68 carry one (45 of the 389 with >=20 user
+/// all 770 local transcripts, only 68 carry one (45 of the 390 with >=20 user
 /// turns; 7 of 132 for the preceding 7 days), down from 74 of 153 on
-/// 2026-07-29. So `rec.summary` is blank for most rows, by absence of the
-/// source rather than by any failure here. `custom-title` is near-exclusive
-/// with it — 62 sessions carry only this, 74 only `custom-title`, 6 both — and
-/// the discriminator is unknown (#111). Do not read "has ai-title" as "not
-/// renamed".
+/// 2026-07-29. That does NOT mean most summaries are blank: `refresh_row_fields`
+/// seeds an empty `summary` from the current prompt, so absence here demotes the
+/// row to a prompt-derived summary rather than emptying it. `custom-title` is
+/// near-exclusive with this field — across all 770, 62 carry only `ai-title`,
+/// 74 only `custom-title`, 6 both — and the discriminator is unknown (#111).
+/// Do not read "has ai-title" as "not renamed".
 pub fn ai_title_from_tail(tail: &str) -> Option<String> {
     last_tail_field(tail, "ai-title", "aiTitle")
 }
@@ -224,9 +225,14 @@ pub fn ai_title_from_tail(tail: &str) -> Option<String> {
 /// NOT only a user rename, despite the name. Measured 2026-07-31: it is
 /// written from a session's FIRST line and re-stamped every few user turns,
 /// single-valued throughout, in sessions that were never renamed (15 lines
-/// across 75 user turns in one; 71 across 280; 95 across 363). Re-derivation
-/// is therefore NOT cadence-limited — the line stays well inside the tail
-/// window. Presence is the real limit: 80 of 770 local transcripts carry one.
+/// across 75 user turns in one; 71 across 280; 95 across 363). So a stripped or
+/// missing `title` re-derives on the next read in practice — measured, not
+/// guaranteed: re-stamping is paced by TURNS while the tail is 64 KiB of BYTES,
+/// so a turn emitting more than a window's worth of transcript could still evict
+/// the last line. It has not been observed (worst case across all 148 carrying
+/// transcripts: 34,808 bytes from EOF). Unlike `summary` this field has NO
+/// fallback tier, so absence renders the blank chip D25 ratified. Presence is
+/// the real limit: 80 of 770 local transcripts carry one.
 pub fn custom_title_from_tail(tail: &str) -> Option<String> {
     last_tail_field(tail, "custom-title", "customTitle")
 }
