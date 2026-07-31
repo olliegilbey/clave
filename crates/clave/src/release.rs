@@ -156,13 +156,15 @@ pub fn long_version() -> String {
 /// else bare `clave` on PATH (dev/sandbox — the working-tree binary is what
 /// should run there).
 ///
-/// Keyed on the versioned copy's EXISTENCE, not `current_exe()`: a stable
+/// Keyed on the versioned copy's EXISTENCE, not `current_exe()` (split spec §2
+/// Release mechanics — "stable sessions never invoke the dev binary: their
+/// keybinds/layout/hooks bake the versioned copy's absolute path"): a stable
 /// session is cold-started by typing `clave`, which resolves on PATH to the
-/// unversioned launcher (`<data>/bin/clave` since #43a; before that, whatever
-/// `clave` happened to be — the 2026-07-22 outage) — so the launching process
-/// is never the versioned copy even in stable. The installed versioned copy
-/// under the stable data dir is the reliable "this is a release install"
-/// signal.
+/// unversioned launcher (`LAUNCHER_NAME` at `<data>/bin/clave` since #43a;
+/// before that, whatever `clave` happened to be — the 2026-07-22 outage) — so
+/// the launching process is never the versioned copy even in stable. The
+/// installed versioned copy under the stable data dir is the reliable "this is
+/// a release install" signal.
 pub fn baked_binary(versioned_cli: Option<&Path>, installed: bool) -> String {
     match versioned_cli {
         Some(p) if installed => p.to_string_lossy().into_owned(),

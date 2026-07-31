@@ -170,6 +170,12 @@ installs — npm *and* native — are a real footgun Claude Code's own
 
 ## Check catalogue
 
+**Amended 2026-07-31 (#118).** Two rows below were written against the install
+layout as it stood before #43a/#43b, and `doctor.rs` shipped their copy
+verbatim — so the audit that corrected the code had to correct its source too.
+Both are fixed in place; the superseded text is quoted under the table so the
+belief that produced it stays legible.
+
 Every tool check is three-state via `discover()`: **on PATH** (Ok, path
 shown) / **found off-PATH** (Warn — functional, clave uses the absolute
 path) / **not found** (Problem + remediation).
@@ -183,12 +189,34 @@ path) / **not found** (Problem + remediation).
 | Agent picker | fzf discoverable | Problem (labeled "needed by `clave add`"; off-PATH → Warn) |
 | | zoxide discoverable | Problem (same) |
 | clave setup | config.kdl + layout.kdl generated in data dir | Problem → "run `clave setup`" |
-| | wasm present at `wasm_path()` | Problem → "run `clave setup`" (release) / "run `just dev-install`" (dev build — see Embedding) |
+| | wasm present at `wasm_path()` — **label carries the resolved path** | Problem → "run `clave setup`" (release) / "run `just sandbox`" (dev build — see Embedding) |
 | | Claude hooks merged, exactly one clave entry per event (reuses `is_clave_hook_command`) | Problem → "run `clave setup`" |
 | | Zellij permission cache seeded for the wasm | Warn → "run `clave setup`" (first bar load will prompt otherwise) |
-| | Version skew: dev binary ahead of newest versioned copy — **only when `<data>/bin/` exists** (maintainer machinery; end users never see it) | Warn |
+| | Version skew: dev binary ahead of newest versioned copy — **only when `<data>/bin/` exists** (maintainer machinery; end users never see it) | Warn — copy branches on whether `<data>/bin/clave` exists |
 | Environment | `XDG_RUNTIME_DIR` set — **Linux only** | Warn (SSH session-discovery, zellij#3708) |
 | | `clave --version` line (semver + build tag) | informational, always shown |
+
+**What the two amended rows used to say, and why they were wrong (#118):**
+
+- **wasm row:** *"run `just dev-install` (dev build)"*. `dev-install` builds the
+  wasm but never regenerates `config.kdl`, so it leaves a fresh wasm beside a
+  config naming the old one — the false negative FOOTGUNS records from #44's own
+  live validation — and it rebuilds in place under a live `clave-test`. `just
+  sandbox` does both halves and refuses while that session is alive (§1
+  Environments; CONTRIBUTING §Quick start). The row now also requires the
+  resolved path in the label: `just sandbox` fills the **sandbox** data dir, so a
+  dev build aimed at the stable one runs the advised command and sees doctor
+  repeat itself verbatim — the path is how the reader tells which case they are
+  in.
+- **skew row:** the severity was right, but the copy it produced said *"a stable
+  launch will fall back to this dev binary"*. True until #43a gave the cut its
+  own launcher at `<data>/bin/clave`. **#43a shipped in v0.1.2**, so "a release
+  is installed" does not imply "a launcher is installed" — on a machine whose
+  newest cut is older the old sentence was still right, and a flat rewrite
+  inverts a true warning into false reassurance. Doctor cannot see `PATH` (#48)
+  but it can stat that file, so the copy branches on it and both branches hand
+  the reader `command -v clave`: an installed launcher only wins if `<data>/bin`
+  is ordered first, which is an operator step, not something a cut guarantees.
 
 Remediation copy (hedged, flutter-voice; package-manager line only when the
 manager actually probed):

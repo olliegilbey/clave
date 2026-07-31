@@ -274,21 +274,25 @@ pub fn diagnose(f: &Facts) -> Vec<Finding> {
             vec!["Run `clave setup` — this binary carries the wasm and will extract it.".into()],
         )
     } else {
-        // The path is IN the label, not just the Ok branch's: a dev build can
-        // be pointed at either data dir, and only the sandbox one is what the
-        // repair below fills. Seeing `~/.local/state/clave-dev/data` vs
-        // `~/.local/share/clave` is how the reader tells which case they are in.
+        // The path is IN the label, not just the Ok branch's (doctor spec
+        // §Check catalogue, wasm row as amended 2026-07-31): a dev build can
+        // be pointed at either data dir of split spec §1 Environments, and only
+        // the sandbox one is what the repair below fills. Seeing
+        // `~/.local/state/clave-dev/data` vs `~/.local/share/clave` is how the
+        // reader tells which case they are in.
         setup(
             Severity::Problem,
             format!(
                 "clave-bar wasm not installed (dev build — no embedded copy): {}",
                 tilde(&f.wasm_path, &f.home)
             ),
-            // `just sandbox`, NOT `just dev-install` (CONTRIBUTING §Quick start,
-            // FOOTGUNS §PATH and version coherence): dev-install builds the same
-            // wasm but never regenerates config.kdl, so it leaves a new wasm
-            // beside a stale config — indistinguishable from "the fix didn't
-            // work" — and it rebuilds in place under a live clave-test session.
+            // `just sandbox`, NOT `just dev-install`. The spec row this arm
+            // implements USED to say dev-install (doctor spec §Check catalogue,
+            // superseded text quoted under the table): it builds the same wasm
+            // but never regenerates config.kdl, so it leaves a new wasm beside a
+            // stale config — the false negative recorded against #44's own live
+            // validation (FOOTGUNS §PATH and version coherence) — and it
+            // rebuilds in place under a live clave-test session.
             //
             // The last two lines are load-bearing, not a footnote: `just
             // sandbox` fills the SANDBOX data dir, so if this dev build is
@@ -373,6 +377,11 @@ pub fn diagnose(f: &Facts) -> Vec<Finding> {
             (Some(c), Some((n, nv))) if c > n => out.push(setup(
                 Severity::Warn,
                 format!("this binary is ahead of the newest installed release (v{nv})"),
+                // Doctor spec §Check catalogue (skew row, amended 2026-07-31)
+                // and split spec §2 Release mechanics, whose "binary split"
+                // paragraph is the one #43a rewrote — `release.rs::LAUNCHER_NAME`
+                // carries the current contract.
+                //
                 // The old copy said "a stable launch will fall back to this dev
                 // binary". True before #43a, when nothing owned the name `clave`
                 // and whatever PATH resolved won the cold start — that is the
@@ -924,8 +933,10 @@ mod tests {
         let cfg = f.iter().find(|x| x.label.contains("config.kdl")).unwrap();
         assert_eq!(cfg.severity, Severity::Problem);
         assert!(cfg.advice.iter().any(|l| l.contains("clave setup")));
-        // Embedded build → repair is `clave setup`; dev build → `just sandbox`,
-        // the only path that leaves a fresh wasm beside a config that names it.
+        // Doctor spec §Check catalogue, wasm row: one check, two repairs, keyed
+        // on whether this binary carries an embedded copy (§Distribution).
+        // Embedded → `clave setup` extracts it; dev build → `just sandbox`, the
+        // only path that leaves a fresh wasm beside a config that names it.
         let wasm = f.iter().find(|x| x.label.contains("wasm")).unwrap();
         assert!(wasm.advice.iter().any(|l| l.contains("clave setup")));
         facts.has_embedded_wasm = false;
@@ -939,14 +950,15 @@ mod tests {
         // a revert to "Run `just dev-install`" that merely mentioned sandbox
         // later in the block.
         assert!(wasm.advice[0].contains("Run `just sandbox`"), "{wasm:#?}");
-        // The path is what tells a dev build WHICH data dir came up empty, and
-        // the advice must say so — `just sandbox` fills the sandbox dir, so
-        // against the stable one the advised command changes nothing.
-        assert!(
-            wasm.label.contains("~/.local/share/clave/clave-bar.wasm"),
-            "{}",
-            wasm.label
-        );
+        // The path is what tells a dev build WHICH data dir came up empty
+        // (spec §Check catalogue, wasm row as amended): `just sandbox` fills the
+        // sandbox dir, so against the stable one the advised command changes
+        // nothing. Compare the WHOLE rendered path, not a directory prefix —
+        // a label that dropped or mangled the filename would still pass a
+        // prefix check, and the filename is half of what distinguishes a
+        // release's versioned artifact from a dev build's.
+        let shown = tilde(&facts.wasm_path, &facts.home);
+        assert!(wasm.label.contains(&shown), "{} !~ {shown}", wasm.label);
         assert!(wasm.advice.iter().any(|l| l.contains("stable data dir")));
     }
 
@@ -994,10 +1006,12 @@ mod tests {
         let s = f.iter().find(|x| x.label.contains("ahead")).unwrap();
         assert_eq!(s.severity, Severity::Warn);
         assert!(s.advice.iter().any(|l| l.contains("unreleased")));
-        // No launcher (the state every pre-v0.1.2 cut leaves): the warning must
-        // say PATH decides the cold start. This is the case the old copy got
-        // RIGHT, and the case a launcher-blind rewrite would invert into false
-        // reassurance — the whole reason this branches on a probed file.
+        // Spec §Check catalogue, skew row as amended: the copy branches on the
+        // launcher. No launcher is the state every pre-v0.1.2 cut leaves, and
+        // there the warning must say PATH decides the cold start (split spec §2
+        // Release mechanics, as rewritten by #43a). This is the case the old
+        // copy got RIGHT, and the case a launcher-blind rewrite inverts into
+        // false reassurance — the whole reason this probes a file.
         let joined = s.advice.join(" ");
         assert!(joined.contains("NO launcher"), "{joined}");
         assert!(joined.contains("wins the cold start"), "{joined}");
@@ -1017,6 +1031,11 @@ mod tests {
         assert!(!joined_l.contains("NO launcher"), "{joined_l}");
         for j in [&joined, &joined_l] {
             assert!(j.contains("command -v clave"), "{j}");
+            // Name the file, not just the check. `~/.cargo/bin/clave` is the
+            // one concrete path a reader can go look for, and the pre-#43b
+            // install that put it there is the documented usual cause of a
+            // shadowed launcher (FOOTGUNS §PATH and version coherence).
+            assert!(j.contains("~/.cargo/bin/clave"), "{j}");
         }
     }
 
