@@ -67,18 +67,6 @@ pub struct AgentRecord {
     /// pre-field payloads parseable.
     #[serde(default)]
     pub stale: bool,
-    /// The session id Claude is CURRENTLY writing, when it is no longer
-    /// `uuid` (#97). Claude mints a NEW session id on resume and starts a new
-    /// transcript; the row keeps `uuid` as its join key — binds, the timeline
-    /// and every wire field depend on that stability — but the jsonl to read
-    /// moves. `None` means "never rotated", which is the common case and
-    /// makes the tail read fall back to `uuid`.
-    ///
-    /// Measured 2026-07-31: a live row froze 5.9 days earlier at the moment
-    /// its id rotated, because the hook keyed on the payload's session id,
-    /// failed the store lookup and returned before stamping anything.
-    #[serde(default)]
-    pub live_session: Option<String>,
     /// Claude's session rename, from the transcript's `custom-title` line.
     /// Store-side home for the wire field of the same name (#69). Written by
     /// `hook::refresh_row_fields`, held last-non-empty — `None` means the
@@ -475,7 +463,6 @@ mod tests {
             title: None,
             summary: String::new(),
             default_branch: None,
-            live_session: None,
         }
     }
 

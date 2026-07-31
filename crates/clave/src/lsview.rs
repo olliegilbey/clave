@@ -48,7 +48,6 @@ mod tests {
             title: None,
             summary: String::new(),
             default_branch: None,
-            live_session: None,
         }
     }
 

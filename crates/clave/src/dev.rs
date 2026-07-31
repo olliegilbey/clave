@@ -327,7 +327,6 @@ fn agent_record(
         label_source: crate::store::LabelSource::FirstPrompt,
         tab_id: None,
         stale: false,
-        live_session: None,
         title: a.title.map(String::from),
         summary: a.summary.to_string(),
         // `run_scenario` pins every seeded repo with `git init -q -b main`

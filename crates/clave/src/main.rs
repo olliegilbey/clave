@@ -299,25 +299,37 @@ fn main() -> Result<()> {
                 // fail to resurrect.
                 //
                 // `CLAVE_AGENT_UUID` carries the row's join key across the
-                // exec (#97). Claude mints a NEW session id on resume and
-                // writes a new transcript, so the hook's payload id stops
-                // matching the store and the row silently freezes — measured
-                // at 5.9 days stale on a tab that was in active use. The env
-                // is the one channel that survives: `exec` replaces the
-                // image but keeps the environment, and hooks are children of
-                // that process (proven in situ — `ZELLIJ_PANE_ID`, exported
-                // to layout `command` panes, is visible to them).
+                // exec (#97). Claude starts a NEW session id and a new
+                // transcript whenever the pane gets a fresh conversation — a
+                // `/clear` is confirmed to do it — so the hook's payload id
+                // stops matching the store and the row silently freezes,
+                // measured at 5.9 days stale on a tab in active use. The env
+                // is the one channel that survives: `exec` replaces the image
+                // but keeps the environment, and hooks are children of that
+                // process.
+                //
+                // `CLAVE_AGENT_PID` is what makes the uuid SAFE to act on.
+                // Env is inherited by every descendant, so a nested `claude`
+                // carries the uuid too and its unknown session id would take
+                // the same fallback — writing another agent's status, order
+                // and prose into THIS row. `process::id()` here is the agent
+                // Claude's own pid, because `exec` preserves it, and the hook
+                // compares it against Claude's `CLAUDE_PID`. Both verified
+                // rather than assumed (2026-07-31): a nested `claude`
+                // reported its own pid, not its parent's.
                 //
                 // Set on BOTH arms deliberately. Create looks unnecessary
-                // today, since the ids agree until the first resume — but
-                // the row is created once and resumed forever, and an arm
-                // that is right only until someone resumes is the bug.
+                // today, since the ids agree until the first rotation — but
+                // the row is created once and lives forever, and an arm that
+                // is right only until the first `/clear` is the bug.
                 spawn::SpawnMode::Create => std::process::Command::new(&claude)
                     .env(clave_types::AGENT_UUID_ENV, &uuid)
+                    .env(clave_types::AGENT_PID_ENV, std::process::id().to_string())
                     .args(["--session-id", &uuid])
                     .exec(),
                 spawn::SpawnMode::Resume => std::process::Command::new(&claude)
                     .env(clave_types::AGENT_UUID_ENV, &uuid)
+                    .env(clave_types::AGENT_PID_ENV, std::process::id().to_string())
                     .args(["--resume", &uuid])
                     .exec(),
             };

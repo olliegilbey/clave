@@ -32,6 +32,20 @@ pub struct HookPayload {
     /// Notification carries a human message; §6.5 matches on its text.
     #[serde(default)]
     pub message: Option<String>,
+    /// Where Claude is writing this session's transcript RIGHT NOW (#87).
+    ///
+    /// The alternative — rebuilding the path from the store's creation-time
+    /// `rec.cwd` and `uuid` — is broken twice over, and S4 §4.3a/d records it
+    /// as MANDATORY to replace rather than merely preferable: it misses when
+    /// the session relocates, and it misses when Claude rotates the session id
+    /// (a `/clear` or resume starts a new id AND a new file), which is #97.
+    ///
+    /// **This is attacker-adjacent input.** It arrives on hook stdin and what
+    /// is read from it is written into the store, so an unvalidated path is a
+    /// write primitive rather than a bad read. Always go through
+    /// [`resolve_transcript`], never straight to the filesystem.
+    #[serde(default)]
+    pub transcript_path: Option<String>,
 }
 
 /// §6.5's transition table. Latest-wins, with ONE status-aware exception
@@ -404,21 +418,129 @@ pub fn apply_hook_event(
 /// silently stopped rising. Measured on a live tab: 5.9 days stale while in
 /// active use.
 ///
-/// `CLAVE_AGENT_UUID` is the fallback, set by `clave spawn` and inherited
-/// across the exec into Claude and on into its hook children.
+/// `CLAVE_AGENT_UUID` is the fallback, set by `clave spawn` before the exec.
 ///
-/// Both candidates are checked AGAINST THE STORE rather than trusted. A stale
-/// or hand-set env var naming no row resolves to `None` and the hook declines,
-/// which is precisely the old behaviour — so the failure mode of this whole
-/// mechanism is "no worse than before", never a misattributed write.
+/// **Store membership is NOT sufficient to accept it**, and an earlier version
+/// of this function got that wrong. The env var is inherited by every
+/// descendant of the agent's Claude, so a nested `claude` — an agent shelling
+/// one out, `clave dev`'s own `claude -p` — carries it too, and its session id
+/// is likewise unknown to the store. Membership proves the value names *a*
+/// row, never *this* row: the nested session's Stop, Notification and
+/// UserPromptSubmit would all have driven the parent agent's status, ordering
+/// and prose. Caught in review, three independent lanes.
 ///
-/// Pure and total: two map lookups, no I/O, so it is safe on the §6.5 fast
-/// path and testable without a store on disk.
-pub fn resolve_row(store: &Store, session: Option<&str>, env_uuid: Option<&str>) -> Option<String> {
-    session
-        .filter(|s| store.agents.contains_key(*s))
-        .or(env_uuid.filter(|e| store.agents.contains_key(*e)))
+/// So the fallback is gated on [`PidGate`]: it is taken only when the Claude
+/// that fired this hook IS the Claude clave exec'd. `CLAUDE_PID` is set by
+/// Claude Code to its own pid — verified empirically, a nested `claude`
+/// reported its own pid and not its parent's — and `exec` preserves the pid,
+/// so `clave spawn`'s `process::id()` IS the agent Claude's pid.
+///
+/// Every route fails CLOSED: a missing, stale or hand-set value, or a pid
+/// mismatch, resolves to `None` and the hook declines exactly as it did before
+/// any of this existed. The worst case is the old freeze, never a write
+/// attributed to the wrong agent.
+///
+/// Pure and total: map lookups and integer comparison, no I/O, so it is safe
+/// on the §6.5 fast path and testable without a store on disk.
+pub fn resolve_row(
+    store: &Store,
+    session: Option<&str>,
+    env_uuid: Option<&str>,
+    gate: PidGate,
+) -> Option<String> {
+    if let Some(s) = session.filter(|s| store.agents.contains_key(*s)) {
+        return Some(s.to_string());
+    }
+    if !gate.is_the_agents_own_claude() {
+        return None;
+    }
+    env_uuid
+        .filter(|e| store.agents.contains_key(*e))
         .map(str::to_string)
+}
+
+/// "Is the Claude that fired this hook the one clave exec'd?" — the guard that
+/// keeps [`resolve_row`]'s env fallback from being ambient authority.
+///
+/// Both halves are read from the environment by the caller so this stays pure.
+/// `agent` is clave's own `CLAVE_AGENT_PID`; `firing` is Claude's `CLAUDE_PID`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PidGate {
+    pub agent: Option<u32>,
+    pub firing: Option<u32>,
+}
+
+impl PidGate {
+    /// Read both sides from the ambient environment.
+    pub fn from_env() -> Self {
+        let get = |k: &str| std::env::var(k).ok()?.parse::<u32>().ok();
+        Self {
+            agent: get(clave_types::AGENT_PID_ENV),
+            firing: get(CLAUDE_PID_ENV),
+        }
+    }
+
+    /// True only when both are present AND equal. `None` on either side is a
+    /// refusal, not a pass: an absent `CLAUDE_PID` means we cannot tell which
+    /// Claude fired, and guessing is the whole bug this exists to prevent.
+    pub fn is_the_agents_own_claude(self) -> bool {
+        matches!((self.agent, self.firing), (Some(a), Some(f)) if a == f)
+    }
+}
+
+/// Claude Code's own pid, exported into every process it spawns — including
+/// hooks. NOT clave's to set, which is why it lives here rather than in
+/// `clave-types` beside the two clave owns: it is an OBSERVED property of an
+/// external tool (verified 2026-07-31; a nested `claude` reported its own pid,
+/// not its parent's), and if Claude ever stops setting it, [`PidGate`] fails
+/// closed and the rotation fix degrades to the pre-fix freeze.
+const CLAUDE_PID_ENV: &str = "CLAUDE_PID";
+
+/// The transcript to read for this event, validated (#87 / S4 §4.3a/d).
+///
+/// Prefers the payload's `transcript_path`, which is the only source that is
+/// right under BOTH failure modes of the derived path: a relocated session
+/// (the file moves) and a rotated session id (a `/clear` or resume starts a
+/// new file, #97). Deriving from `rec.cwd` + `uuid` misses both.
+///
+/// `transcript_path` is untrusted input whose CONTENTS get written into the
+/// store, so it is canonicalized and then confined:
+///
+/// - it must resolve inside `<claude_config_dir>/projects` — canonicalized on
+///   both sides, so `..` traversal and symlinks out are refused after
+///   resolution rather than by string inspection;
+/// - its filename must be `<session_id>.jsonl`, i.e. the transcript must be the
+///   one belonging to the session that sent the event. This is why rotation
+///   needs no stored field: the payload names its own current file.
+///
+/// A path failing any check falls back to the derived one rather than erroring
+/// — a hook that fails hard blocks the agent (§6.5 do-no-harm), and the derived
+/// path is exactly today's behaviour.
+pub fn resolve_transcript(
+    claude_dir: &Path,
+    payload_path: Option<&str>,
+    session: Option<&str>,
+    rec_cwd: &str,
+    uuid: &str,
+) -> std::path::PathBuf {
+    let derived = || jsonl_path(claude_dir, rec_cwd, uuid);
+    let (Some(raw), Some(session)) = (payload_path, session) else {
+        return derived();
+    };
+    let root = match std::fs::canonicalize(claude_dir.join("projects")) {
+        Ok(r) => r,
+        Err(_) => return derived(),
+    };
+    match std::fs::canonicalize(raw) {
+        Ok(p)
+            if p.starts_with(&root)
+                && p.file_name()
+                    .is_some_and(|f| f == format!("{session}.jsonl").as_str()) =>
+        {
+            p
+        }
+        _ => derived(),
+    }
 }
 
 /// The whole hook flow. Errors bubble up ONLY so main can log them to
@@ -429,31 +551,22 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
     let paths = store_paths()?;
     // FAST PATH (§6.5): lock-free read; untracked session → exit immediately.
     // clave must never serialize unrelated sessions' hooks behind its lock.
-    // `resolve_row` keeps that property — it is two map lookups, no I/O.
+    // `resolve_row` keeps that property — map lookups and an integer compare,
+    // no I/O — and its pid gate keeps the ADMITTED SET unchanged: only the
+    // agent's own Claude can reach the lock, exactly as before.
     let env_uuid = std::env::var(clave_types::AGENT_UUID_ENV).ok();
     let Some(uuid) = resolve_row(
         &read_store(&paths)?,
         session.as_deref(),
         env_uuid.as_deref(),
+        PidGate::from_env(),
     ) else {
         return Ok(());
     };
-    // The transcript to read is the LIVE one, which after a rotation is not
-    // `uuid` (#97) — the row is keyed on the minted uuid forever, but Claude
-    // has moved on to a new jsonl. Recorded below so it survives the process.
-    let rotated = session.filter(|s| *s != uuid);
     // §6.9: claude_config_dir() (not raw home) so the sandbox override
     // reaches the same jsonl tree real claude processes write to.
     let claude_dir = crate::env::claude_config_dir().unwrap_or_default();
     let snap = with_store_mut(&paths, |s| {
-        // Record the rotation BEFORE the tail read, so the read below already
-        // follows the live transcript on the very event that discovers it.
-        if let Some(live) = rotated.as_deref()
-            && let Some(rec) = s.agents.get_mut(&uuid)
-            && rec.live_session.as_deref() != Some(live)
-        {
-            rec.live_session = Some(live.to_string());
-        }
         // The tail read is gated on the EVENT only — no longer on
         // `label_source`. `title` and `summary` roll for the whole life of a
         // row (design-lock §7.1), so gating the read on "the label has not
@@ -462,12 +575,18 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
         // 64 KiB tail read on the two label-bearing events, well inside the
         // §6.5 hook budget; the other events still read nothing.
         let tail = s.agents.get(&uuid).and_then(|rec| {
-            // `live_session` first: after a rotation the row's own uuid names
-            // a transcript Claude stopped writing, so reading it would roll
-            // `title`/`summary` from a dead conversation.
-            let read_id = rec.live_session.as_deref().unwrap_or(&uuid);
+            // The payload names its own CURRENT transcript, so this is right
+            // through both a relocation and an id rotation without the store
+            // having to remember anything (#87 dissolves #97's read half).
+            let path = resolve_transcript(
+                &claude_dir,
+                payload.transcript_path.as_deref(),
+                session.as_deref(),
+                &rec.cwd,
+                &uuid,
+            );
             matches!(event, "Stop" | "UserPromptSubmit")
-                .then(|| read_tail(&jsonl_path(&claude_dir, &rec.cwd, read_id), 64 * 1024))
+                .then(|| read_tail(&path, 64 * 1024))
                 .flatten()
         });
         apply_hook_event(s, &uuid, event, &payload, tail.as_deref(), now_unix())
@@ -502,100 +621,138 @@ mod tests {
             title: None,
             summary: String::new(),
             default_branch: None,
-            live_session: None,
         }
     }
 
     /// #97, the bug this exists to prevent recurring.
     ///
-    /// Claude mints a NEW session id on resume and starts a new transcript, so
-    /// the hook's payload id stops naming a row. Before the fix, `run_hook`
-    /// returned there and the row silently stopped stamping `last_interacted`
-    /// — measured on a live tab as 5.9 days stale WHILE IN ACTIVE USE, which
-    /// is why it never rose in the sidebar.
+    /// Claude starts a NEW session id and transcript when the pane gets a
+    /// fresh conversation, so the payload id stops naming a row. `run_hook`
+    /// returned there, and the row silently stopped stamping
+    /// `last_interacted` — 5.9 days stale on a tab in active use.
     ///
-    /// No test could have caught it, and the reason is worth naming: every
-    /// fixture used ONE uuid for the life of a row, so rotation was not an
-    /// input anywhere and there was nothing to vary. Same family as D23 and
-    /// #91 — the fixture encoded the assumption under test.
+    /// Why no test caught it: every fixture used ONE uuid for the life of a
+    /// row, so rotation was not an input anywhere and there was nothing to
+    /// vary. Same family as D23 and #91 — the fixture encoded the assumption
+    /// under test.
     #[test]
-    fn a_rotated_session_id_still_resolves_to_its_row() {
+    fn a_rotated_session_id_resolves_only_for_the_agents_own_claude() {
         let mut store = Store::default();
         store.agents.insert("minted".into(), rec("minted"));
+        let same = PidGate {
+            agent: Some(42),
+            firing: Some(42),
+        };
+        let nested = PidGate {
+            agent: Some(42),
+            firing: Some(99),
+        };
 
-        // The ordinary case is UNCHANGED and stays first: a payload id that
-        // names a row wins outright, whatever the environment says.
+        // The ordinary case is UNCHANGED and needs no gate at all: a payload
+        // id that names a row wins outright, whatever the pids say.
+        for g in [same, nested, PidGate::default()] {
+            assert_eq!(
+                resolve_row(&store, Some("minted"), None, g).as_deref(),
+                Some("minted")
+            );
+        }
         assert_eq!(
-            resolve_row(&store, Some("minted"), None).as_deref(),
-            Some("minted")
-        );
-        assert_eq!(
-            resolve_row(&store, Some("minted"), Some("something-else")).as_deref(),
+            resolve_row(&store, Some("minted"), Some("other"), same).as_deref(),
             Some("minted"),
-            "the payload must not be overridden by the env when it is valid"
+            "a valid payload id must not be overridden by the environment"
         );
 
-        // The rotation: Claude's new id names nothing, the env carries the
-        // minted key across the exec, and the row is found anyway.
+        // The rotation: the new id names nothing, the env carries the minted
+        // key, and the firing Claude IS the agent's — so the row is found.
         assert_eq!(
-            resolve_row(&store, Some("rotated"), Some("minted")).as_deref(),
+            resolve_row(&store, Some("rotated"), Some("minted"), same).as_deref(),
             Some("minted")
         );
 
-        // Both candidates are checked AGAINST THE STORE, never trusted. A
-        // stale or hand-set env naming no row declines exactly as before, so
-        // the worst case of this mechanism is the old behaviour — never a
-        // write attributed to the wrong agent.
-        assert_eq!(resolve_row(&store, Some("rotated"), Some("bogus")), None);
-        assert_eq!(resolve_row(&store, Some("rotated"), None), None);
-        assert_eq!(resolve_row(&store, None, Some("bogus")), None);
-
-        // No session id at all (a malformed payload) still degrades to the
-        // env, because a hook that fires from a pane clave owns belongs to
-        // that agent regardless of what the JSON carried.
+        // THE REVIEW FINDING. A nested `claude` inherits the env and its own
+        // session id is equally unknown, so store membership alone would have
+        // handed it this row. The pid gate is the only thing refusing it.
         assert_eq!(
-            resolve_row(&store, None, Some("minted")).as_deref(),
-            Some("minted")
+            resolve_row(&store, Some("nested-session"), Some("minted"), nested),
+            None,
+            "a nested claude must never resolve to the agent's row"
         );
-        assert_eq!(resolve_row(&store, None, None), None);
+
+        // Every unknown fails CLOSED, including a half-populated gate — an
+        // absent CLAUDE_PID means we cannot tell which Claude fired.
+        for g in [
+            PidGate::default(),
+            PidGate {
+                agent: Some(42),
+                firing: None,
+            },
+            PidGate {
+                agent: None,
+                firing: Some(42),
+            },
+        ] {
+            assert_eq!(
+                resolve_row(&store, Some("rotated"), Some("minted"), g),
+                None
+            );
+        }
+        assert_eq!(
+            resolve_row(&store, Some("rotated"), Some("bogus"), same),
+            None
+        );
+        assert_eq!(resolve_row(&store, None, None, same), None);
     }
 
-    /// The other half of #97: once rotated, the tail must follow the LIVE
-    /// transcript. Reading `uuid`'s jsonl after a rotation would roll `title`
-    /// and `summary` from a conversation Claude abandoned — the row would
-    /// start rising again while showing six-day-old prose, which is a subtler
-    /// failure than the freeze it replaced.
+    /// #87 / S4 §4.3a/d. The payload names its own current transcript, which
+    /// is right through BOTH a relocation and an id rotation — but it arrives
+    /// on hook stdin and its contents are written to the store, so it is a
+    /// write primitive unless confined.
+    ///
+    /// Asserts on `resolve_transcript` itself, not on a re-implementation of
+    /// its rule. The previous version of this test rebuilt the selection in a
+    /// local closure and asserted on the copy, so deleting the real one left
+    /// it green — caught in review.
     #[test]
-    fn the_tail_follows_the_live_session_not_the_minted_uuid() {
+    fn the_transcript_path_is_used_when_confined_and_refused_otherwise() {
         let dir = tempfile::tempdir().unwrap();
         let claude = dir.path();
-        let mut r = rec("minted");
-        r.cwd = "/x".into();
-
-        // Both transcripts exist; only the live one carries the new words.
         let proj = claude.join("projects").join(crate::munge::munge_cwd("/x"));
         std::fs::create_dir_all(&proj).unwrap();
-        std::fs::write(
-            proj.join("minted.jsonl"),
-            "{\"type\":\"ai-title\",\"aiTitle\":\"dead conversation\"}\n",
-        )
-        .unwrap();
-        std::fs::write(
-            proj.join("rotated.jsonl"),
-            "{\"type\":\"ai-title\",\"aiTitle\":\"live conversation\"}\n",
-        )
-        .unwrap();
+        for id in ["minted", "rotated"] {
+            std::fs::write(proj.join(format!("{id}.jsonl")), "{}\n").unwrap();
+        }
+        let outside = dir.path().join("outside.jsonl");
+        std::fs::write(&outside, "{}\n").unwrap();
+        let derived = jsonl_path(claude, "/x", "minted");
+        let go =
+            |p: Option<&str>, s: Option<&str>| resolve_transcript(claude, p, s, "/x", "minted");
 
-        let read_for = |rec: &AgentRecord| {
-            let id = rec.live_session.as_deref().unwrap_or(&rec.uuid);
-            read_tail(&jsonl_path(claude, &rec.cwd, id), 64 * 1024).unwrap()
-        };
-        assert!(read_for(&r).contains("dead conversation"), "pre-rotation");
+        // The rotation case: the payload points at the LIVE file, and it is
+        // taken — no stored field involved, which is why #97 needs none.
+        let rotated = proj.join("rotated.jsonl");
+        assert_eq!(
+            go(rotated.to_str(), Some("rotated")),
+            std::fs::canonicalize(&rotated).unwrap()
+        );
 
-        r.live_session = Some("rotated".into());
-        assert!(
-            read_for(&r).contains("live conversation"),
-            "after rotation the tail must come from the live transcript"
+        // Absent payload → today's derived path, unchanged.
+        assert_eq!(go(None, Some("rotated")), derived);
+
+        // CONFINEMENT. Outside the projects root, and a path whose filename
+        // does not belong to the sending session, both fall back rather than
+        // erroring — a hook that fails hard blocks the agent (§6.5).
+        assert_eq!(go(outside.to_str(), Some("rotated")), derived);
+        assert_eq!(
+            go(rotated.to_str(), Some("someone-else")),
+            derived,
+            "the transcript must belong to the session that sent the event"
+        );
+        // Traversal is refused AFTER canonicalization, not by string match.
+        let traversal = proj.join("..").join("..").join("outside.jsonl");
+        assert_eq!(go(traversal.to_str(), Some("outside")), derived);
+        assert_eq!(
+            go(Some("/nonexistent/rotated.jsonl"), Some("rotated")),
+            derived
         );
     }
 
@@ -613,6 +770,7 @@ mod tests {
             session_id: Some("u1".into()),
             prompt: None,
             message: None,
+            transcript_path: None,
         };
         assert!(apply_hook_event(
             &mut s,
@@ -754,6 +912,7 @@ mod tests {
             session_id: Some("u1".into()),
             prompt: Some("fix the flaky auth test".into()),
             message: None,
+            transcript_path: None,
         };
         assert!(refresh_label(&mut r, "UserPromptSubmit", &p, None));
         assert_eq!(r.label, "x · main · fix the flaky auth");
@@ -781,6 +940,7 @@ mod tests {
             session_id: Some("u1".into()),
             prompt: Some("<task-notification> <task-id>bai</task-notification>".into()),
             message: None,
+            transcript_path: None,
         };
         assert!(!refresh_label(&mut r, "UserPromptSubmit", &injected, None));
         assert_eq!(r.label, "x · main"); // unchanged — still the bare prefix
@@ -791,6 +951,7 @@ mod tests {
             session_id: Some("u1".into()),
             prompt: Some("fix the flaky auth test".into()),
             message: None,
+            transcript_path: None,
         };
         assert!(refresh_label(&mut r, "UserPromptSubmit", &real, None));
         assert_eq!(r.label, "x · main · fix the flaky auth");
@@ -810,6 +971,7 @@ mod tests {
                 session_id: Some("u1".into()),
                 prompt: Some(injected_text.clone()),
                 message: None,
+                transcript_path: None,
             };
             assert!(
                 !refresh_label(&mut r, "UserPromptSubmit", &p, None),
@@ -956,6 +1118,7 @@ mod tests {
             session_id: Some("u1".into()),
             prompt: Some("a prompt that must not win".into()),
             message: None,
+            transcript_path: None,
         };
         let mut r = rec("u1");
         let tail = format!(
@@ -980,6 +1143,7 @@ mod tests {
             session_id: Some("u1".into()),
             prompt: Some("a later prompt".into()),
             message: None,
+            transcript_path: None,
         };
         refresh_label(&mut r, "UserPromptSubmit", &p2, None);
         assert_eq!(r.summary, "a prompt that must not win");
@@ -1067,6 +1231,7 @@ mod tests {
             session_id: Some("u1".into()),
             prompt: Some(r#"fix the \d "regex" now"#.into()),
             message: None,
+            transcript_path: None,
         };
         assert!(refresh_label(&mut r, "UserPromptSubmit", &p, None));
         assert!(
