@@ -8,25 +8,24 @@ ago. clave gives the fleet one vertical bar: every agent is a Zellij tab running
 the real Claude TUI, and a glance tells you who needs an answer, who is working,
 and who finished while you were looking elsewhere.
 
-```
-┌──────────────────────────────────────────────────────┐
-│ ● │   󰘬           api     rotate the signing keys    │ ← needs you
-│ ● │   𖣂 S6-GUT    web     add the nav skeleton       │ ← working
-│ ● │               docs    update the install steps   │ ← done, unread
-│ ● │               cli     refactor the arg parser    │ ← idle
-│ ◌ │               infra   bump the runner image      │ ← dormant, no process
-│   │ 󰆍   shell                                        │ ← a plain terminal tab
-└──────────────────────────────────────────────────────┘
-```
+<!-- Regenerate: `cargo run -q -p clave-bar --example bar-preview -- --showcase`,
+     screenshot the output, replace docs/assets/sidebar.png. The fleet is the
+     `showcase()` fixture in that example — edit it there, not here, so the
+     frame always comes from the real `render_rows`. -->
+<img src="docs/assets/sidebar.png" alt="The clave sidebar: nine rows, each a coloured status dot, an optional branch or worktree mark, a rename chip, the repo name, and a one-line description. Red is waiting on you, amber working, green done, grey idle; a red cross has failed, a hollow ring is dormant, and two rows are plain terminal tabs." width="720">
 
-**Colour is the state** — those four dots are red, amber, green and grey in a
-real terminal, which is the whole point and the one thing a code block can't
-show.
+**Colour is the state.** Red is waiting on you, amber is working, green finished
+while you were elsewhere, grey is idle. Shape changes only where a row isn't a
+live conversation: `✖` failed, `✗` its directory is gone, `◌` dormant — no
+process running, but open it and the conversation picks up where it left off.
 
-Then: a mark for a branch or a worktree, blank on a normal checkout. The
-session's own name, once you `/rename` it. The repo. And Claude's own one-line
-description of the session — its words, not your prompt. That last one is a
-subtitle rather than a status line: Claude picks it early and keeps it.
+Then a mark for a branch or a worktree, blank on a normal checkout. The session's
+own name once you `/rename` it. The repo — one colour per repo, wherever it
+appears. And Claude's own one-line description of the session: its words, not
+your prompt, and a subtitle rather than a status line.
+
+Terminal tabs sit in the same list. The bar is the whole session, not just its
+agents.
 
 ## Try it
 
