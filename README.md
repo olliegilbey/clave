@@ -14,18 +14,32 @@ and who finished while you were looking elsewhere.
      frame always comes from the real `render_rows`. -->
 <img src="docs/assets/sidebar.png" alt="The clave sidebar: nine rows, each a coloured status dot, an optional branch or worktree mark, a rename chip, the repo name, and a one-line description. Red is waiting on you, amber working, green done, grey idle; a red cross has failed, a hollow ring is dormant, and two rows are plain terminal tabs." width="720">
 
-**Colour is the state.** Red is waiting on you, amber is working, green finished
-while you were elsewhere, grey is idle. Shape changes only where a row isn't a
-live conversation: `✖` failed, `✗` its directory is gone, `◌` dormant — no
-process running, but open it and the conversation picks up where it left off.
+### The whole vocabulary
 
-Then a mark for a branch or a worktree, blank on a normal checkout. The session's
-own name once you `/rename` it. The repo — one colour per repo, wherever it
-appears. And Claude's own one-line description of the session: its words, not
-your prompt, and a subtitle rather than a status line.
+**Colour is the state.** The shape only changes where a row isn't a live
+conversation.
 
-Terminal tabs sit in the same list. The bar is the whole session, not just its
-agents.
+| | | | |
+|---|---|---|---|
+| `●` red | waiting on you | `✖` | last turn failed |
+| `●` amber | working | `✗` | its directory is gone |
+| `●` green | finished while you were away | `◌` | dormant — no process, opens where it left off |
+| `●` grey | idle | `↻` | opening |
+
+Then, left to right across the row:
+
+| | |
+|---|---|
+| *nothing* | a plain checkout — the common case, so it stays quiet |
+| `󰘬` | on a branch |
+| `𖣂` | in its own git worktree |
+| `󰆍` | a terminal tab rather than an agent — the bar is the whole session |
+| **chip** | your `/rename`; blank until you rename |
+| **repo** | one colour per repo, wherever it appears |
+| **text** | Claude's own description of the session, not your prompt |
+
+<sub>The three marks above are Nerd Font glyphs and may show as boxes here on
+GitHub — they render in your terminal. The screenshot shows all of them.</sub>
 
 ## Try it
 
