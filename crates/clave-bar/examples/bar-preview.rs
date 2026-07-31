@@ -184,6 +184,14 @@ fn bar(rows: &[Row], cols: usize, widths: Widths, label: &str) {
 /// `battery: None` throughout, deliberately. S7 has not landed, so the shipped
 /// bar renders that cell blank, and a promotional image is the last place to
 /// show a column the code does not fill yet.
+///
+/// The summaries copy the SHAPE of real `ai-title` values, sampled from the
+/// local transcript corpus 2026-07-31: sentence case, verb first, no trailing
+/// period, 13-60 characters. They are invented rather than copied — the corpus
+/// is the maintainer's own work and this repo is public — but a fixture that
+/// invents the format too would misrepresent the column in the one image most
+/// people will ever see. Several run past the 25-cell summary column and
+/// truncate, which is the honest common case.
 fn showcase() -> Vec<Row> {
     let mut rows = vec![
         agent(
@@ -193,7 +201,7 @@ fn showcase() -> Vec<Row> {
             "api-svc",
             API_SVC,
             Some(("AUTH-7", 3)),
-            "rotate the signing keys before the cutover",
+            "Rotate the signing keys",
         ),
         agent(
             RowStatus::Working,
@@ -202,7 +210,7 @@ fn showcase() -> Vec<Row> {
             "clave",
             CLAVE,
             Some(("S6-GUT", 5)),
-            "wiring the status column into render_rows",
+            "Wire the status column into render_rows",
         ),
         agent(
             RowStatus::Done,
@@ -211,7 +219,7 @@ fn showcase() -> Vec<Row> {
             "webapp",
             WEBAPP,
             Some(("CART-99", 6)),
-            "cart totals round the same way on both sides",
+            "Fix cart total rounding mismatch",
         ),
         Row {
             content: RowContent::Terminal {
@@ -226,7 +234,7 @@ fn showcase() -> Vec<Row> {
             "clave",
             CLAVE,
             None,
-            "ready for the next prompt",
+            "Review the spawn identity gate",
         ),
         agent(
             RowStatus::Failed,
@@ -235,7 +243,7 @@ fn showcase() -> Vec<Row> {
             "infra",
             INFRA,
             Some(("DNS-TTL", 1)),
-            "the staging rollout timed out on the new zone",
+            "Debug staging rollout DNS timeout",
         ),
         Row {
             content: RowContent::Terminal {
@@ -250,7 +258,7 @@ fn showcase() -> Vec<Row> {
             "clave",
             CLAVE,
             Some(("KDL-GRD", 7)),
-            "its worktree was deleted underneath it",
+            "Validate generated KDL artifacts",
         ),
         agent(
             RowStatus::Dormant,
@@ -259,7 +267,7 @@ fn showcase() -> Vec<Row> {
             "notes",
             DOTFILES,
             Some(("ZSH", 2)),
-            "no process — opens where it left off",
+            "Tidy the shell startup files",
         ),
     ];
     rows[1].selected = true;
