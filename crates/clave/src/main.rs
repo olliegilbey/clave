@@ -163,6 +163,15 @@ enum Command {
     Open {
         /// The agent's session UUID (the store join key).
         uuid: String,
+        /// The display width the new tab is born into, from the bar's
+        /// `get_tab_info().display_area_columns` (task 7b′). Absent =
+        /// fall back to the reference viewport.
+        #[arg(long)]
+        display_cols: Option<usize>,
+        /// Born collapsed, so a fleet left collapsed does not flash wide
+        /// (LEDGER D36, applied to the open path).
+        #[arg(long)]
+        collapsed: bool,
     },
 
     /// Live-validation harness (§6.9): seed sandboxed scenarios, dump status,
@@ -338,7 +347,11 @@ fn main() -> Result<()> {
         }
         Some(Command::Setup) => setup::run_setup(),
         Some(Command::Doctor { json }) => clave::doctor::run_doctor(json),
-        Some(Command::Open { uuid }) => open::run_open(&uuid),
+        Some(Command::Open {
+            uuid,
+            display_cols,
+            collapsed,
+        }) => open::run_open(&uuid, display_cols, collapsed),
         Some(Command::Dev { action }) => match action {
             DevAction::Scenario { name } => dev::run_scenario(&name),
             DevAction::Launch => dev::run_launch(),
@@ -369,6 +382,49 @@ mod tests {
                 Some(Command::Collapse { collapsed }) => assert_eq!(collapsed, want),
                 _ => panic!("parsed into the wrong command"),
             }
+        }
+    }
+
+    /// Task 7b′: the bar shells `clave open <uuid> [--display-cols N]
+    /// [--collapsed]` so a dwell-opened tab is born at the real display width
+    /// and in the right mode. Same ledger rule as the two pins around it — a
+    /// new CLI surface gets a parse pin, because clap-derive shape bugs panic
+    /// debug builds at the parse layer and nothing else reaches it. Both flags
+    /// must stay OPTIONAL: a hand-run `clave open` passes neither.
+    #[test]
+    fn open_cli_parses_the_birth_width_and_mode() {
+        let bare = Cli::try_parse_from(["clave", "open", "u-1"]).expect("must parse");
+        match bare.command {
+            Some(Command::Open {
+                uuid,
+                display_cols,
+                collapsed,
+            }) => {
+                assert_eq!(uuid, "u-1");
+                assert_eq!(display_cols, None);
+                assert!(!collapsed);
+            }
+            _ => panic!("parsed into the wrong command"),
+        }
+        let full = Cli::try_parse_from([
+            "clave",
+            "open",
+            "u-1",
+            "--display-cols",
+            "280",
+            "--collapsed",
+        ])
+        .expect("must parse");
+        match full.command {
+            Some(Command::Open {
+                display_cols,
+                collapsed,
+                ..
+            }) => {
+                assert_eq!(display_cols, Some(280));
+                assert!(collapsed);
+            }
+            _ => panic!("parsed into the wrong command"),
         }
     }
 

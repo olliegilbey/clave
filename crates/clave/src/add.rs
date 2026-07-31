@@ -94,7 +94,24 @@ pub fn sanitize_label(s: &str) -> String {
 /// template too, so a bar-carrying node there renders a DOUBLE bar (live
 /// finding, c8-cold-start 2026-07-18 — the eager tab loaded two plugin
 /// instances in the same second and broke executor election).
-pub fn tab_node(binary: &str, wasm: &str, label: &str, uuid: &str, cwd: &str) -> String {
+///
+/// `display_cols` is the width the new tab will actually be born into, and
+/// `collapsed` the mode it must be born in (LEDGER D35/D36, task 7b′). Both are
+/// `Option`/`bool` rather than read here because this runs INSIDE zellij: a
+/// `terminal_size()` call would report the *calling pane's* width, not the
+/// tab's, which is the fiction that made dwell-opened tabs rest one column off
+/// every template-born tab (measured live 2026-07-31). `None` keeps the
+/// reference-viewport fallback for callers with nothing better — `clave add`
+/// from a shell, and the tests.
+pub fn tab_node(
+    binary: &str,
+    wasm: &str,
+    label: &str,
+    uuid: &str,
+    cwd: &str,
+    display_cols: Option<usize>,
+    collapsed: bool,
+) -> String {
     // split_direction="vertical" is REQUIRED for a LEFT bar: zellij stacks
     // sibling panes horizontally (rows) by default (Task 9 C1 finding; same
     // wrapper as setup::layout_kdl and the S2 spike layout). The size is a
@@ -122,7 +139,9 @@ pub fn tab_node(binary: &str, wasm: &str, label: &str, uuid: &str, cwd: &str) ->
     }}
 "#,
         key = clave_types::CLAVE_BINARY_KEY,
-        pct = clave_types::BAR_BIRTH_PERCENT
+        pct = display_cols.map_or(clave_types::BAR_BIRTH_PERCENT, |cols| {
+            clave_types::birth_percent_for(cols, clave_types::target_cols_for(collapsed))
+        })
     )
 }
 
@@ -166,10 +185,18 @@ pub fn validate_cwd(cwd: &str) -> Result<()> {
 /// `zellij action new-tab --layout`, then deleted. Baking the command in
 /// makes tab creation IDEMPOTENT — resurrection is clave's job, not
 /// zellij's (§6.8, C8 redesign 2026-07-17).
-pub fn tab_layout(binary: &str, wasm: &str, label: &str, uuid: &str, cwd: &str) -> String {
+pub fn tab_layout(
+    binary: &str,
+    wasm: &str,
+    label: &str,
+    uuid: &str,
+    cwd: &str,
+    display_cols: Option<usize>,
+    collapsed: bool,
+) -> String {
     format!(
         "layout {{\n{}}}\n",
-        tab_node(binary, wasm, label, uuid, cwd)
+        tab_node(binary, wasm, label, uuid, cwd, display_cols, collapsed)
     )
 }
 
@@ -805,7 +832,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
     validate_cwd(&agent_cwd)?;
     let wasm = wasm_path()?.to_str().context("wasm path")?.to_string();
     let binary = crate::release::runtime_binary();
-    let layout = tab_layout(&binary, &wasm, &label, &uuid, &agent_cwd);
+    let layout = tab_layout(&binary, &wasm, &label, &uuid, &agent_cwd, None, false);
     let tmp = std::env::temp_dir().join(format!("clave-{uuid}.kdl"));
     std::fs::write(&tmp, layout)?;
     let status = Command::new(&zellij) // discovered above (Fix 2)
@@ -949,9 +976,58 @@ mod tests {
         assert_eq!(live_uuids(dump), vec!["exec-uuid-1", "exec-uuid-2"]);
     }
 
+    /// Task 7b′, the bug this fixed: a dwell-opened tab and a template-born
+    /// tab must rest at the SAME width. They did not — measured live
+    /// 2026-07-31, the launch tab sat at 28% (terminal-derived) and every
+    /// dwell-opened tab at 27% (the reference-viewport fiction), one column
+    /// apart and visible on every tab switch.
+    ///
+    /// Pinning the two generators against EACH OTHER rather than against a
+    /// literal is deliberate: the failure mode is DIVERGENCE, so a test that
+    /// restated the expected percent would go on passing if both moved and
+    /// still disagreed.
+    #[test]
+    fn the_open_path_and_the_launch_path_agree_on_birth_width() {
+        let pct = |kdl: &str| {
+            kdl.split("size=\"")
+                .nth(1)
+                .and_then(|s| s.split('%').next())
+                .map(str::to_string)
+                .expect("a percent-sized bar pane")
+        };
+        for cols in [95, 115, 142, 200, 280] {
+            for collapsed in [false, true] {
+                let open = tab_layout("clave", "/w.wasm", "l", "u", "/c", Some(cols), collapsed);
+                let launch = crate::setup::launch_layout_kdl_for(
+                    "clave",
+                    "/w.wasm",
+                    None,
+                    Some(cols),
+                    collapsed,
+                );
+                assert_eq!(
+                    pct(&open),
+                    pct(&launch),
+                    "open vs launch disagree at {cols} cols, collapsed={collapsed}"
+                );
+            }
+        }
+        // And the fallback still holds for a caller with no width to give.
+        let fiction = tab_layout("clave", "/w.wasm", "l", "u", "/c", None, false);
+        assert_eq!(pct(&fiction), clave_types::BAR_BIRTH_PERCENT.to_string());
+    }
+
     #[test]
     fn tab_layout_bakes_the_idempotent_spawn() {
-        let kdl = tab_layout("clave", "/data/clave-bar.wasm", "x · main", "u-1", "/x");
+        let kdl = tab_layout(
+            "clave",
+            "/data/clave-bar.wasm",
+            "x · main",
+            "u-1",
+            "/x",
+            None,
+            false,
+        );
         // The bar pane, the baked spawn (idempotent resurrection, §6.3/S4),
         // and the cwd all present:
         assert!(kdl.contains("location=\"file:/data/clave-bar.wasm\""));
@@ -963,7 +1039,15 @@ mod tests {
         // §2 binary split: the pane command is the passed binary. A stable
         // session bakes the versioned copy's absolute path instead of bare.
         assert!(kdl.contains("command=\"clave\""));
-        let abs = tab_layout("/data/clave/bin/clave-v0.1.0", "/w", "l", "u", "/x");
+        let abs = tab_layout(
+            "/data/clave/bin/clave-v0.1.0",
+            "/w",
+            "l",
+            "u",
+            "/x",
+            None,
+            false,
+        );
         assert!(abs.contains("command=\"/data/clave/bin/clave-v0.1.0\""));
         assert!(!abs.contains("command=\"clave\""));
     }
@@ -1248,7 +1332,15 @@ garbage that should be ignored
         }];
         let c = resume_candidates(&Store::default(), "/repo", &dirs, &[]);
         let picked = &c[0];
-        let kdl = tab_layout("clave", "/w.wasm", &picked.label, &picked.uuid, &picked.cwd);
+        let kdl = tab_layout(
+            "clave",
+            "/w.wasm",
+            &picked.label,
+            &picked.uuid,
+            &picked.cwd,
+            None,
+            false,
+        );
         assert!(kdl.contains("cwd=\"/repo/.claude/worktrees/wt\""));
         assert!(!kdl.contains("cwd=\"/repo\"")); // NOT the picker/root dir
         assert!(kdl.contains("\"--cwd\" \"/repo/.claude/worktrees/wt\""));

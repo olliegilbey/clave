@@ -866,7 +866,7 @@ mod tests {
         for kdl in [
             layout_kdl("clave", "/w.wasm"),
             launch_layout_kdl_for("clave", "/w.wasm", None, None, false),
-            crate::add::tab_layout("clave", "/w.wasm", "l", "u", "/c"),
+            crate::add::tab_layout("clave", "/w.wasm", "l", "u", "/c", None, false),
         ] {
             // All THREE generators carry the one derived percent (S8 §3.3):
             // `BAR_BIRTH_PERCENT` is `BAR_TARGET_COLS` against §3.4's

@@ -210,7 +210,28 @@ impl State {
                     set_timeout(PEEK_SINK_SECS);
                 }
                 Effect::OpenAgent { uuid } => {
-                    run_command(&[bin.as_str(), "open", &uuid], BTreeMap::new());
+                    // Task 7b′: the new tab's bar percent is derived from the
+                    // REAL display width, not the reference-viewport fiction.
+                    // `clave open` runs inside zellij, so it cannot read this
+                    // itself — a `terminal_size()` there reports the calling
+                    // pane. We can: `get_tab_info` is a synchronous host call
+                    // (zellij-tile-0.44.3 shim.rs:307). Measured live before
+                    // this fix, dwell-opened tabs rested at 27% against the
+                    // launch tab's 28% — one column apart, visible on every
+                    // tab switch. Collapse mode rides along for D36's reason.
+                    let cols = self
+                        .own_tab_id()
+                        .and_then(get_tab_info)
+                        .map(|t| t.display_area_columns);
+                    let cols_s = cols.map(|c| c.to_string());
+                    let mut argv = vec![bin.as_str(), "open", &uuid];
+                    if let Some(c) = cols_s.as_deref() {
+                        argv.extend_from_slice(&["--display-cols", c]);
+                    }
+                    if self.model.collapsed {
+                        argv.push("--collapsed");
+                    }
+                    run_command(&argv, BTreeMap::new());
                 }
                 Effect::PersistCollapse { collapsed } if active => {
                     // Issue #5: report the ABSOLUTE collapse mode to the
@@ -446,6 +467,20 @@ impl ZellijPlugin for State {
                     Ok(snap) => {
                         let fx = self.model.apply_snapshot(snap);
                         self.run_effects(fx);
+                        // RC-B (#55): this is the arm that FIRST populates
+                        // `agents`, and it was the one arm that did not fire
+                        // binds. TabUpdate/PaneUpdate normally arrive before
+                        // the snapshot result — permissions land, the frames
+                        // flow, then `clave snapshot` returns — so their own
+                        // `fire_binds()` (below, :491/:511) ran against an
+                        // EMPTY agent list and bound nothing. Nothing else
+                        // arrives until a frame changes, so the eager
+                        // cold-start tab stayed unbound and its first prompt
+                        // never moved it. Same gate as every other call site
+                        // (active instance + resolvable own tab), and
+                        // `bind_effects`' guard is last-SENT per (uuid, tab),
+                        // so a re-fire is silent rather than a storm.
+                        self.fire_binds();
                         true
                     }
                     Err(_) => false, // not a snapshot (e.g. clave focus) — fine
