@@ -265,7 +265,7 @@ fn main() -> Result<()> {
                          (or set CLAVE_CLAUDE_BIN to its location)"
                     )
                 })?;
-            let err = match mode {
+            let err = {
                 // NO `--name` (#91). It used to be passed here on create, and
                 // it was the whole bug: Claude records `--name` as a
                 // `custom-title` transcript entry, indistinguishable from a
@@ -318,20 +318,21 @@ fn main() -> Result<()> {
                 // rather than assumed (2026-07-31): a nested `claude`
                 // reported its own pid, not its parent's.
                 //
-                // Set on BOTH arms deliberately. Create looks unnecessary
-                // today, since the ids agree until the first rotation — but
-                // the row is created once and lives forever, and an arm that
-                // is right only until the first `/clear` is the bug.
-                spawn::SpawnMode::Create => std::process::Command::new(&claude)
+                // The identity env is wired ONCE rather than per arm, so a
+                // future third variable cannot land on one of them only. Only
+                // the FLAG varies by mode, and that match stays exhaustive
+                // over `SpawnMode` — no catch-all, so a variant added later
+                // fails to compile here rather than silently picking a
+                // behaviour. This is the exec that starts every agent.
+                let flag = match mode {
+                    spawn::SpawnMode::Create => "--session-id",
+                    spawn::SpawnMode::Resume => "--resume",
+                };
+                std::process::Command::new(&claude)
                     .env(clave_types::AGENT_UUID_ENV, &uuid)
                     .env(clave_types::AGENT_PID_ENV, std::process::id().to_string())
-                    .args(["--session-id", &uuid])
-                    .exec(),
-                spawn::SpawnMode::Resume => std::process::Command::new(&claude)
-                    .env(clave_types::AGENT_UUID_ENV, &uuid)
-                    .env(clave_types::AGENT_PID_ENV, std::process::id().to_string())
-                    .args(["--resume", &uuid])
-                    .exec(),
+                    .args([flag, &uuid])
+                    .exec()
             };
             // exec only returns on failure — surface it in the pane.
             Err(anyhow::anyhow!("exec claude failed: {err}"))

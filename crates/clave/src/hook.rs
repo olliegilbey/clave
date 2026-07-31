@@ -527,6 +527,18 @@ pub fn resolve_transcript(
     let (Some(raw), Some(session)) = (payload_path, session) else {
         return derived();
     };
+    // The root must be ABSOLUTE before it can confine anything. `run_hook`
+    // builds `claude_dir` with `unwrap_or_default()`, so a failure there gives
+    // an EMPTY path — `join("projects")` would then be the relative `projects`,
+    // and `canonicalize` resolves that against the hook's working directory,
+    // which is the agent's cwd. A `projects` directory sitting there would
+    // become the confinement root, and every check below would pass for a file
+    // the payload chose. The derived path degrades in the same case, but a
+    // wrong derived read is a MISSING tail; a wrong root is an accepted read of
+    // an attacker-named file whose contents reach the store. (CodeRabbit, #98)
+    if !claude_dir.is_absolute() {
+        return derived();
+    }
     let root = match std::fs::canonicalize(claude_dir.join("projects")) {
         Ok(r) => r,
         Err(_) => return derived(),
@@ -552,15 +564,34 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
     // FAST PATH (§6.5): lock-free read; untracked session → exit immediately.
     // clave must never serialize unrelated sessions' hooks behind its lock.
     // `resolve_row` keeps that property — map lookups and an integer compare,
-    // no I/O — and its pid gate keeps the ADMITTED SET unchanged: only the
-    // agent's own Claude can reach the lock, exactly as before.
+    // no I/O. The admitted set does GROW, by exactly one case and deliberately:
+    // the agent's own Claude firing with a rotated id, which used to return
+    // early and is the whole point of #97. What the pid gate preserves is the
+    // invariant §6.5 actually cares about — no UNRELATED session ever reaches
+    // this lock. (An earlier draft of this comment claimed the set was
+    // unchanged; that was an overclaim, and this file treats those as defects.)
     let env_uuid = std::env::var(clave_types::AGENT_UUID_ENV).ok();
-    let Some(uuid) = resolve_row(
-        &read_store(&paths)?,
-        session.as_deref(),
-        env_uuid.as_deref(),
-        PidGate::from_env(),
-    ) else {
+    let gate = PidGate::from_env();
+    let store = read_store(&paths)?;
+    let Some(uuid) = resolve_row(&store, session.as_deref(), env_uuid.as_deref(), gate) else {
+        // Observability for the ONE silent drop that is hard to reason about
+        // from outside: the env named a real row and the gate refused it. The
+        // condition is deliberately narrow — an unrelated session carries no
+        // `CLAVE_AGENT_UUID`, so this cannot become per-event noise for the
+        // whole machine, which §6.5 forbids. #97 was a silent freeze; a
+        // mechanism that can silently decline should say so. (CodeRabbit, #98)
+        if let Some(e) = env_uuid
+            .as_deref()
+            .filter(|e| store.agents.contains_key(*e))
+        {
+            crate::evlog::log_event(
+                "hook",
+                &format!(
+                    "{event}: declined {e} — firing claude {:?} is not the agent's {:?}",
+                    gate.firing, gate.agent
+                ),
+            );
+        }
         return Ok(());
     };
     // §6.9: claude_config_dir() (not raw home) so the sandbox override
@@ -575,6 +606,17 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
         // 64 KiB tail read on the two label-bearing events, well inside the
         // §6.5 hook budget; the other events still read nothing.
         let tail = s.agents.get(&uuid).and_then(|rec| {
+            // Event gate FIRST. `resolve_transcript` does up to two
+            // `canonicalize` calls, and this closure runs while
+            // `with_store_mut` holds the exclusive flock — computing a path
+            // only to discard it would put filesystem syscalls under the lock
+            // on every `PreToolUse`, i.e. on every tool call of every tracked
+            // agent. The comment above promises the other events read nothing;
+            // this is what makes that true. (CodeRabbit, #98 — the previous
+            // ordering was a regression against the code this replaced.)
+            if !matches!(event, "Stop" | "UserPromptSubmit") {
+                return None;
+            }
             // The payload names its own CURRENT transcript, so this is right
             // through both a relocation and an id rotation without the store
             // having to remember anything (#87 dissolves #97's read half).
@@ -585,9 +627,7 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
                 &rec.cwd,
                 &uuid,
             );
-            matches!(event, "Stop" | "UserPromptSubmit")
-                .then(|| read_tail(&path, 64 * 1024))
-                .flatten()
+            read_tail(&path, 64 * 1024)
         });
         apply_hook_event(s, &uuid, event, &payload, tail.as_deref(), now_unix())
             .then(|| snapshot_from(s))
@@ -754,6 +794,43 @@ mod tests {
             go(Some("/nonexistent/rotated.jsonl"), Some("rotated")),
             derived
         );
+    }
+
+    /// CodeRabbit on #98. `run_hook` builds `claude_dir` with
+    /// `unwrap_or_default()`, so a failure there yields an EMPTY path — and
+    /// `join("projects")` on empty is the RELATIVE `projects`, which
+    /// `canonicalize` resolves against the hook's working directory (the
+    /// agent's cwd). A `projects` dir sitting there would have become the
+    /// confinement root, and every later check would pass for a file the
+    /// payload named. A wrong derived path is a missing tail; a wrong root is
+    /// an accepted read whose contents reach the store.
+    #[test]
+    fn a_relative_claude_dir_never_confines_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        // Build the trap exactly: a `projects` tree, reachable RELATIVELY,
+        // holding a file whose name would satisfy the session check.
+        let proj = dir.path().join("projects").join("anything");
+        std::fs::create_dir_all(&proj).unwrap();
+        let planted = proj.join("evil.jsonl");
+        std::fs::write(&planted, "{}\n").unwrap();
+
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let got = resolve_transcript(
+            Path::new(""),
+            planted.to_str(),
+            Some("evil"),
+            "/x",
+            "minted",
+        );
+        std::env::set_current_dir(prev).unwrap();
+
+        assert_eq!(
+            got,
+            jsonl_path(Path::new(""), "/x", "minted"),
+            "an empty (non-absolute) claude_dir must fall back, never confine"
+        );
+        assert_ne!(got, planted, "the planted file must never be accepted");
     }
 
     #[test]
