@@ -14,7 +14,8 @@ use serde::Deserialize;
 
 use crate::spawn::jsonl_path;
 use crate::store::{
-    AgentRecord, LabelSource, now_unix, read_store, snapshot_from, store_paths, with_store_mut,
+    AgentRecord, LabelSource, Store, now_unix, read_store, snapshot_from, store_paths,
+    with_store_mut,
 };
 
 /// The fields we care about across ALL hook events (each event's JSON is a
@@ -393,23 +394,66 @@ pub fn apply_hook_event(
     changed
 }
 
+/// Which store row does this hook event belong to? (#97)
+///
+/// The payload's `session_id` is authoritative WHEN IT IS A ROW — that is the
+/// ordinary case and it stays first, so nothing about a normal session changes.
+/// It stops being a row the moment Claude rotates the id on resume: a new
+/// session id, a new transcript, and a lookup that misses. Before this, the
+/// hook returned there, so the row never stamped `last_interacted` again and
+/// silently stopped rising. Measured on a live tab: 5.9 days stale while in
+/// active use.
+///
+/// `CLAVE_AGENT_UUID` is the fallback, set by `clave spawn` and inherited
+/// across the exec into Claude and on into its hook children.
+///
+/// Both candidates are checked AGAINST THE STORE rather than trusted. A stale
+/// or hand-set env var naming no row resolves to `None` and the hook declines,
+/// which is precisely the old behaviour — so the failure mode of this whole
+/// mechanism is "no worse than before", never a misattributed write.
+///
+/// Pure and total: two map lookups, no I/O, so it is safe on the §6.5 fast
+/// path and testable without a store on disk.
+pub fn resolve_row(store: &Store, session: Option<&str>, env_uuid: Option<&str>) -> Option<String> {
+    session
+        .filter(|s| store.agents.contains_key(*s))
+        .or(env_uuid.filter(|e| store.agents.contains_key(*e)))
+        .map(str::to_string)
+}
+
 /// The whole hook flow. Errors bubble up ONLY so main can log them to
 /// stderr — main exits 0 no matter what (Global Constraint).
 pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
     let payload: HookPayload = serde_json::from_str(stdin_json).unwrap_or_default();
-    let Some(uuid) = payload.session_id.clone() else {
-        return Ok(()); // no session_id → nothing to key on
-    };
+    let session = payload.session_id.clone();
     let paths = store_paths()?;
     // FAST PATH (§6.5): lock-free read; untracked session → exit immediately.
     // clave must never serialize unrelated sessions' hooks behind its lock.
-    if !read_store(&paths)?.agents.contains_key(&uuid) {
+    // `resolve_row` keeps that property — it is two map lookups, no I/O.
+    let env_uuid = std::env::var(clave_types::AGENT_UUID_ENV).ok();
+    let Some(uuid) = resolve_row(
+        &read_store(&paths)?,
+        session.as_deref(),
+        env_uuid.as_deref(),
+    ) else {
         return Ok(());
-    }
+    };
+    // The transcript to read is the LIVE one, which after a rotation is not
+    // `uuid` (#97) — the row is keyed on the minted uuid forever, but Claude
+    // has moved on to a new jsonl. Recorded below so it survives the process.
+    let rotated = session.filter(|s| *s != uuid);
     // §6.9: claude_config_dir() (not raw home) so the sandbox override
     // reaches the same jsonl tree real claude processes write to.
     let claude_dir = crate::env::claude_config_dir().unwrap_or_default();
     let snap = with_store_mut(&paths, |s| {
+        // Record the rotation BEFORE the tail read, so the read below already
+        // follows the live transcript on the very event that discovers it.
+        if let Some(live) = rotated.as_deref()
+            && let Some(rec) = s.agents.get_mut(&uuid)
+            && rec.live_session.as_deref() != Some(live)
+        {
+            rec.live_session = Some(live.to_string());
+        }
         // The tail read is gated on the EVENT only — no longer on
         // `label_source`. `title` and `summary` roll for the whole life of a
         // row (design-lock §7.1), so gating the read on "the label has not
@@ -418,8 +462,12 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
         // 64 KiB tail read on the two label-bearing events, well inside the
         // §6.5 hook budget; the other events still read nothing.
         let tail = s.agents.get(&uuid).and_then(|rec| {
+            // `live_session` first: after a rotation the row's own uuid names
+            // a transcript Claude stopped writing, so reading it would roll
+            // `title`/`summary` from a dead conversation.
+            let read_id = rec.live_session.as_deref().unwrap_or(&uuid);
             matches!(event, "Stop" | "UserPromptSubmit")
-                .then(|| read_tail(&jsonl_path(&claude_dir, &rec.cwd, &uuid), 64 * 1024))
+                .then(|| read_tail(&jsonl_path(&claude_dir, &rec.cwd, read_id), 64 * 1024))
                 .flatten()
         });
         apply_hook_event(s, &uuid, event, &payload, tail.as_deref(), now_unix())
@@ -454,7 +502,101 @@ mod tests {
             title: None,
             summary: String::new(),
             default_branch: None,
+            live_session: None,
         }
+    }
+
+    /// #97, the bug this exists to prevent recurring.
+    ///
+    /// Claude mints a NEW session id on resume and starts a new transcript, so
+    /// the hook's payload id stops naming a row. Before the fix, `run_hook`
+    /// returned there and the row silently stopped stamping `last_interacted`
+    /// — measured on a live tab as 5.9 days stale WHILE IN ACTIVE USE, which
+    /// is why it never rose in the sidebar.
+    ///
+    /// No test could have caught it, and the reason is worth naming: every
+    /// fixture used ONE uuid for the life of a row, so rotation was not an
+    /// input anywhere and there was nothing to vary. Same family as D23 and
+    /// #91 — the fixture encoded the assumption under test.
+    #[test]
+    fn a_rotated_session_id_still_resolves_to_its_row() {
+        let mut store = Store::default();
+        store.agents.insert("minted".into(), rec("minted"));
+
+        // The ordinary case is UNCHANGED and stays first: a payload id that
+        // names a row wins outright, whatever the environment says.
+        assert_eq!(
+            resolve_row(&store, Some("minted"), None).as_deref(),
+            Some("minted")
+        );
+        assert_eq!(
+            resolve_row(&store, Some("minted"), Some("something-else")).as_deref(),
+            Some("minted"),
+            "the payload must not be overridden by the env when it is valid"
+        );
+
+        // The rotation: Claude's new id names nothing, the env carries the
+        // minted key across the exec, and the row is found anyway.
+        assert_eq!(
+            resolve_row(&store, Some("rotated"), Some("minted")).as_deref(),
+            Some("minted")
+        );
+
+        // Both candidates are checked AGAINST THE STORE, never trusted. A
+        // stale or hand-set env naming no row declines exactly as before, so
+        // the worst case of this mechanism is the old behaviour — never a
+        // write attributed to the wrong agent.
+        assert_eq!(resolve_row(&store, Some("rotated"), Some("bogus")), None);
+        assert_eq!(resolve_row(&store, Some("rotated"), None), None);
+        assert_eq!(resolve_row(&store, None, Some("bogus")), None);
+
+        // No session id at all (a malformed payload) still degrades to the
+        // env, because a hook that fires from a pane clave owns belongs to
+        // that agent regardless of what the JSON carried.
+        assert_eq!(
+            resolve_row(&store, None, Some("minted")).as_deref(),
+            Some("minted")
+        );
+        assert_eq!(resolve_row(&store, None, None), None);
+    }
+
+    /// The other half of #97: once rotated, the tail must follow the LIVE
+    /// transcript. Reading `uuid`'s jsonl after a rotation would roll `title`
+    /// and `summary` from a conversation Claude abandoned — the row would
+    /// start rising again while showing six-day-old prose, which is a subtler
+    /// failure than the freeze it replaced.
+    #[test]
+    fn the_tail_follows_the_live_session_not_the_minted_uuid() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path();
+        let mut r = rec("minted");
+        r.cwd = "/x".into();
+
+        // Both transcripts exist; only the live one carries the new words.
+        let proj = claude.join("projects").join(crate::munge::munge_cwd("/x"));
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("minted.jsonl"),
+            "{\"type\":\"ai-title\",\"aiTitle\":\"dead conversation\"}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            proj.join("rotated.jsonl"),
+            "{\"type\":\"ai-title\",\"aiTitle\":\"live conversation\"}\n",
+        )
+        .unwrap();
+
+        let read_for = |rec: &AgentRecord| {
+            let id = rec.live_session.as_deref().unwrap_or(&rec.uuid);
+            read_tail(&jsonl_path(claude, &rec.cwd, id), 64 * 1024).unwrap()
+        };
+        assert!(read_for(&r).contains("dead conversation"), "pre-rotation");
+
+        r.live_session = Some("rotated".into());
+        assert!(
+            read_for(&r).contains("live conversation"),
+            "after rotation the tail must come from the live transcript"
+        );
     }
 
     #[test]

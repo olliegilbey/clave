@@ -297,10 +297,27 @@ fn main() -> Result<()> {
                 // baked into the serialized layouts of every existing session,
                 // and a pane whose replayed command no longer parses would
                 // fail to resurrect.
+                //
+                // `CLAVE_AGENT_UUID` carries the row's join key across the
+                // exec (#97). Claude mints a NEW session id on resume and
+                // writes a new transcript, so the hook's payload id stops
+                // matching the store and the row silently freezes — measured
+                // at 5.9 days stale on a tab that was in active use. The env
+                // is the one channel that survives: `exec` replaces the
+                // image but keeps the environment, and hooks are children of
+                // that process (proven in situ — `ZELLIJ_PANE_ID`, exported
+                // to layout `command` panes, is visible to them).
+                //
+                // Set on BOTH arms deliberately. Create looks unnecessary
+                // today, since the ids agree until the first resume — but
+                // the row is created once and resumed forever, and an arm
+                // that is right only until someone resumes is the bug.
                 spawn::SpawnMode::Create => std::process::Command::new(&claude)
+                    .env(clave_types::AGENT_UUID_ENV, &uuid)
                     .args(["--session-id", &uuid])
                     .exec(),
                 spawn::SpawnMode::Resume => std::process::Command::new(&claude)
+                    .env(clave_types::AGENT_UUID_ENV, &uuid)
                     .args(["--resume", &uuid])
                     .exec(),
             };
