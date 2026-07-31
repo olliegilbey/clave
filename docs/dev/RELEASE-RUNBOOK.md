@@ -82,26 +82,26 @@ Nothing here touches a live session. All of it must pass before a tag exists.
    **`just release` is the maintainer's command, always. An agent never runs
    it.**
 
-3. **If the release adds a store field the hooks populate, warm the live rows
-   NOW — before anything is killed.** A field the previous binary never wrote is
-   `null` on every existing row, and the row cannot be backfilled from outside:
-   guessing it (say, by picking the newest transcript in the project dir) is
-   worse than leaving it null, because attaching the *wrong* conversation is
-   unrecoverable where a null merely falls back. The only honest source is the
-   agent itself. So, while the fleet is still up and now that `just release` has
-   rewritten the hooks: **prompt each agent you care about once**, then confirm
-   the field populated (`clave ls`, or read `~/.local/state/clave/agents.json`).
+3. **If the release adds a store field the hooks populate, the COLD RESTART is
+   the migration. There is no warm path — do not invent one.** `clave release`
+   writes the new versioned hook commands into `~/.claude/settings.json`, but
+   the agents already running keep firing the *previous* binary, which has no
+   such field. Prompting them to "warm" the rows therefore cannot work: the
+   process doing the writing is the one that lacks the field. This was tried on
+   the v0.1.2 cut and cut again the same hour — FOOTGUNS has the evidence.
 
-   Whether that works at all turns on **whether a running Claude re-reads
-   `~/.claude/settings.json` per hook event or caches it at session start** —
-   unmeasured as of v0.1.2. Record the answer in FOOTGUNS.md either way; it is
-   the kind of fact that costs a round to rediscover.
+   Say plainly in the release notes what a row loses by carrying a default
+   through the restart, and move on. Attempting a backfill is worse than the
+   default: the store cannot distinguish "never populated" from "correctly
+   equal to the default", so any backfill is a guess, and a wrong guess is
+   unrecoverable where a default merely falls back.
 
-   *v0.1.2 instance:* `AgentRecord::live_session` (#99). A row left null resumes
-   its minted uuid once — pre-#99 behaviour, one last time — which for a row
-   `/clear`ed since its last resurrection reopens the pre-clear conversation.
-   Nothing is destroyed: the stranded conversation stays reachable via
-   `claude --resume <id>` from its directory, just not through clave.
+   *v0.1.2 instance:* `AgentRecord::live_session` (#99). A row that was
+   `/clear`ed since its last resurrection resumes its minted uuid once, so it
+   reopens the pre-clear conversation. Rows that never rotated are unaffected —
+   null is their correct value. Nothing is destroyed either way: a stranded
+   conversation stays reachable via `claude --resume <id>` from its directory,
+   just not through clave. The general fix is a versioned store schema (#106).
 
 4. **Run Part C.** Do not continue past it without a go.
 
@@ -188,7 +188,7 @@ else — a `cargo install` dev build, a shim, a stale copy.
 | What you see | Conclusion | Next |
 |---|---|---|
 | `clave` resolves inside `~/.local/share/clave/bin/` and its version == the tag | coherent | Step 2 |
-| `clave` resolves to `~/.cargo/bin/clave` | **STOP.** This is the v0.1.1 mechanism. A dev build will cold-start and bake its own version into `launch.kdl` | fix PATH, then restart Step 1 |
+| `clave` resolves to `~/.cargo/bin/clave` | **STOP.** This is the v0.1.1 mechanism: whatever lives at that name will cold-start and bake ITS version into `launch.kdl`. Do not stop at "but that one is fine" — on the v0.1.2 cut it was byte-identical to the `clave-v0.1.1` release artifact, and it was still wrong, because nothing updates it and it outranks the launcher forever. Provenance is not the question; which path wins is | `cargo uninstall clave` (it is registered even if the metadata version is stale), or `rm` it if cargo does not know it. Then restart Step 1 |
 | versions disagree anywhere | **STOP** | do not launch a session; report and diagnose |
 
 ### Step 2 — the generated artifact set agrees on one version
