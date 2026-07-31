@@ -91,6 +91,28 @@ pub struct AgentRecord {
     /// store files loading — a missing key is a whole-store parse failure.
     #[serde(default)]
     pub default_branch: Option<String>,
+    /// The session id Claude is CURRENTLY using for this row, when it is no
+    /// longer the minted `uuid` — see UBIQUITOUS_LANGUAGE, "minted uuid vs live
+    /// session id". `None` means "the two still agree", which is most rows.
+    ///
+    /// Deliberately reintroduced (#99). #98 deleted a field of this shape
+    /// because its only job was keeping a DERIVED jsonl path alive, which S4
+    /// forbids — `payload.transcript_path` replaced it for the READ half. This
+    /// one exists for the RESURRECTION half, which no payload can serve: `clave
+    /// spawn` runs before any Claude exists to send one, so the id must have
+    /// been written down beforehand or it is gone. Justified by measured loss,
+    /// not symmetry: resurrection on the minted uuid reopens the pre-rotation
+    /// conversation and orphans everything since the `/clear` (confirmed live
+    /// 2026-07-31 — the resumed agent knew only the pre-clear content).
+    ///
+    /// Written by `hook::apply_hook_event` under the same [`PidGate`] that
+    /// admits the event, so it can only ever be set from the agent's own
+    /// Claude. Never trusted blind: `spawn::resume_target` requires the named
+    /// jsonl to EXIST before targeting it, and falls back to the minted uuid.
+    ///
+    /// [`PidGate`]: crate::hook::PidGate
+    #[serde(default)]
+    pub live_session: Option<String>,
 }
 
 /// The whole store file. `seq` is the monotonic snapshot counter of the §5
@@ -463,6 +485,7 @@ mod tests {
             title: None,
             summary: String::new(),
             default_branch: None,
+            live_session: None,
         }
     }
 

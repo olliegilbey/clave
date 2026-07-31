@@ -47,6 +47,45 @@ pub fn spawn_mode(claude_dir: &Path, physical_cwd: &str, uuid: &str) -> SpawnMod
     }
 }
 
+/// WHICH conversation this pane comes back on, and how to open it (#99).
+///
+/// The minted uuid names the conversation this pane STARTED with, not the one
+/// it is in: Claude rotates its session id whenever the pane gets a fresh
+/// conversation (a `/clear` is confirmed), and the rotated transcript is a
+/// separate file that `--resume <minted>` does not chain forward to. Confirmed
+/// live rather than reasoned: resurrecting on the minted uuid reopened the
+/// pre-`/clear` file, appended to it, and the agent knew nothing said after the
+/// clear. A `just release` puts EVERY pane through that, so the loss lands at
+/// upgrade time, silently, across the whole fleet.
+///
+/// So the store's `live_session` — written by the hook from the payload — is
+/// preferred when it is BOTH different from the minted uuid and present on
+/// disk. Existence is what keeps this from being trust: a stale id (the
+/// transcript deleted, the session relocated to another cwd) degrades to
+/// exactly the pre-#99 behaviour rather than handing `--resume` an id it will
+/// reject, which would leave the pane dead instead of merely behind.
+///
+/// The returned id is the exec ARGUMENT only. The row's identity on the wire
+/// stays the minted uuid — `CLAVE_AGENT_UUID`, the store key, the bar's join —
+/// so nothing downstream has to learn about rotation.
+///
+/// A live id EQUAL to the minted uuid needs no branch here: the hook stores
+/// that state as `None` (see `AgentRecord::live_session`), and if one ever
+/// arrived anyway both paths would produce the same `(Resume, uuid)`.
+pub fn resume_target(
+    claude_dir: &Path,
+    physical_cwd: &str,
+    uuid: &str,
+    live_session: Option<&str>,
+) -> (SpawnMode, String) {
+    if let Some(live) = live_session
+        && jsonl_path(claude_dir, physical_cwd, live).exists()
+    {
+        return (SpawnMode::Resume, live.to_string());
+    }
+    (spawn_mode(claude_dir, physical_cwd, uuid), uuid.to_string())
+}
+
 /// Register this pane with the bar: uuid → $ZELLIJ_PANE_ID (spike S2 verified
 /// the env var IS exported to layout `command` panes). Best-effort: a failed
 /// registration only costs nav-to-this-agent until the next register; it must
@@ -113,6 +152,49 @@ mod tests {
         assert_eq!(
             p,
             std::path::PathBuf::from("/Users/x/.claude/projects/-Users-x-code-clave/u-1.jsonl")
+        );
+    }
+
+    /// #99, confirmed live: resurrection on the minted uuid reopens the
+    /// PRE-ROTATION conversation and orphans everything said since the
+    /// `/clear`. `--resume <superseded-id>` does not re-chain — it appends to
+    /// that file — so the recovery has to happen here, at the choice of id.
+    #[test]
+    fn resurrection_targets_the_live_conversation_and_degrades_safely() {
+        let d = tempfile::tempdir().unwrap();
+        let claude = d.path().join(".claude");
+        let cwd = "/Users/x/code/clave";
+        let dir = claude.join("projects/-Users-x-code-clave");
+        std::fs::create_dir_all(&dir).unwrap();
+        let plant = |stem: &str| std::fs::write(dir.join(format!("{stem}.jsonl")), b"{}").unwrap();
+        let target = |live| resume_target(&claude, cwd, "minted", live);
+
+        // No rotation recorded: exactly the pre-#99 behaviour, both ways.
+        assert_eq!(target(None), (SpawnMode::Create, "minted".to_string()));
+        plant("minted");
+        assert_eq!(target(None), (SpawnMode::Resume, "minted".to_string()));
+
+        // Rotated, but the live transcript is not on disk (deleted, or the
+        // session relocated): fall back rather than hand `--resume` an id it
+        // would reject, which leaves the pane DEAD instead of merely behind.
+        assert_eq!(
+            target(Some("rotated")),
+            (SpawnMode::Resume, "minted".to_string())
+        );
+
+        // Rotated and present: the live conversation wins.
+        plant("rotated");
+        assert_eq!(
+            target(Some("rotated")),
+            (SpawnMode::Resume, "rotated".to_string())
+        );
+
+        // A live id that AGREES with the minted uuid is stored as `None` by the
+        // hook and so should never arrive; pinned anyway because it is what
+        // lets this function skip the comparison — it decides nothing.
+        assert_eq!(
+            resume_target(&claude, cwd, "unminted", Some("unminted")),
+            (SpawnMode::Create, "unminted".to_string())
         );
     }
 

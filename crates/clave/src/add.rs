@@ -71,6 +71,32 @@ pub fn bound_live_uuids(store: &Store) -> Vec<String> {
         .collect()
 }
 
+/// Every uuid the picker must treat as LIVE (a jump, never a resume — a resume
+/// would double-attach). Issue #6: the store's binds are authoritative, because
+/// serialized command strings go blind under an MCP server, and the
+/// `dump-layout` scan is folded in as an ADDITIVE fallback for a bind that has
+/// not landed yet. A uuid live by either signal is live.
+///
+/// The scan's uuids are translated back through `live_session` (#99). A
+/// resurrected rotated pane runs `claude --resume <live-id>`, so what
+/// `live_uuids` reads out of the dump is the CONVERSATION's id, not the row's —
+/// unmapped it would name nothing the picker knows and the fallback would go
+/// silently blind for exactly the panes #99 fixed.
+pub fn live_uuid_union(store: &Store, dump_layout: &str) -> Vec<String> {
+    let mut live = bound_live_uuids(store);
+    for u in live_uuids(dump_layout) {
+        let u = store
+            .agents
+            .values()
+            .find(|r| r.live_session.as_deref() == Some(u.as_str()))
+            .map_or(u, |r| r.uuid.clone());
+        if !live.contains(&u) {
+            live.push(u);
+        }
+    }
+    live
+}
+
 /// Labels get interpolated into KDL string literals and fzf menu lines —
 /// strip the things that break them: quotes, control chars, and backslash
 /// (KDL's escape introducer — a raw `\` is a parse error at whichever seam
@@ -309,6 +335,19 @@ pub fn resume_candidates(
         }
     }
     for r in store.agents.values().filter(|r| r.repo_root == repo_root) {
+        // A ROTATED row owns two stems on disk, and the scan above cannot tell:
+        // it joins by `stem == uuid`, so the live transcript matched no row and
+        // stood as its own UNATTACHED candidate — the picker offering a second
+        // copy of a session already open in a tab, and resuming it would give a
+        // live agent a second store row (#99). The row is the one that knows,
+        // so its live stem is folded in here, keeping the FRESHER mtime: that
+        // file is the conversation actually being typed into, so it is also the
+        // truer recency for this row.
+        let rotated = r
+            .live_session
+            .as_deref()
+            .and_then(|l| by_uuid.remove(l))
+            .map(|row| row.0);
         let e = by_uuid.entry(r.uuid.clone()).or_insert((
             r.last_interacted,
             None,
@@ -323,6 +362,9 @@ pub fn resume_candidates(
         e.1 = Some(r.label.clone());
         e.2 = r.cwd.clone();
         e.3 = Some(r.branch.clone());
+        if let Some(mtime) = rotated {
+            e.0 = e.0.max(mtime);
+        }
     }
     let mut list: Vec<(u64, ResumeCandidate)> = by_uuid
         .into_iter()
@@ -633,16 +675,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
     let dump = cmd_stdout(&zellij, &["action", "dump-layout"]).unwrap_or_default();
     let paths = store_paths()?;
     let store = crate::store::read_store(&paths)?;
-    // Issue #6: liveness from the store's binds (authoritative — command
-    // strings go blind under MCP servers), with the dump-layout scan folded in
-    // as an additive fallback for a bind that hasn't landed. Union: a uuid live
-    // by EITHER signal is a jump, never a resume (never a double-attach).
-    let mut live = bound_live_uuids(&store);
-    for u in live_uuids(&dump) {
-        if !live.contains(&u) {
-            live.push(u);
-        }
-    }
+    let live = live_uuid_union(&store, &dump);
 
     // 4) new vs resume.
     let Some(choice) = fzf_pick(&["new".into(), "resume".into()], "agent> ")? else {
@@ -870,6 +903,11 @@ pub fn run_add(worktree: bool) -> Result<()> {
             title: None,
             summary: String::new(),
             default_branch: default_branch.clone(),
+            // A fresh row is by definition still on its minted uuid. An
+            // EXISTING row's live id survives this via `merge_resume_record`'s
+            // `..row.clone()`, which is what keeps a re-added rotated agent
+            // pointing at its live conversation (#99).
+            live_session: None,
         };
         // Note `merge_resume_record` PRESERVES an existing row's
         // `default_branch` along with everything else, so a row written before
@@ -911,6 +949,7 @@ mod tests {
             title: None,
             summary: String::new(),
             default_branch: None,
+            live_session: None,
         }
     }
 
@@ -974,6 +1013,37 @@ mod tests {
             }
         "#;
         assert_eq!(live_uuids(dump), vec!["exec-uuid-1", "exec-uuid-2"]);
+    }
+
+    /// The liveness fallback survives rotation (#99). A resurrected rotated
+    /// pane runs `claude --resume <live-id>`, so the dump names the
+    /// CONVERSATION, not the row — read literally it is a uuid nobody has
+    /// heard of, and the row it actually belongs to looks dormant.
+    #[test]
+    fn the_dump_scan_translates_a_rotated_id_back_to_its_row() {
+        let mut s = Store::default();
+        let mut row = rec("minted");
+        row.tab_id = None; // the bind has not landed — this IS the fallback case
+        row.live_session = Some("rotated".into());
+        s.agents.insert("minted".into(), row);
+        let dump = r#"
+            layout {
+                tab name="a" {
+                    pane command="claude" {
+                        args "--resume" "rotated"
+                    }
+                }
+                tab name="b" {
+                    pane command="claude" {
+                        args "--resume" "stranger"
+                    }
+                }
+            }
+        "#;
+        assert_eq!(
+            live_uuid_union(&s, dump),
+            vec!["minted".to_string(), "stranger".to_string()]
+        );
     }
 
     /// Task 7b′, the bug this fixed: a dwell-opened tab and a template-born
@@ -1316,6 +1386,57 @@ garbage that should be ignored
         assert_eq!(c[0].uuid, "u-wt");
         assert_eq!(c[0].cwd, "/repo/wt"); // store cwd kept
         assert_eq!(c[0].label, "wt · feat/x · earned (wt)");
+    }
+
+    /// #99's picker half: a rotated row must not be offered TWICE.
+    ///
+    /// After a `/clear` the live transcript is `<rotated>.jsonl`, whose stem
+    /// matches no row, so the scan stood it up as its own candidate — clave
+    /// offering a duplicate of a session already open in a tab, and picking it
+    /// would give that live agent a second store row. The row's `live_session`
+    /// is what links the two, and the fold also takes the live file's mtime,
+    /// which is the recency the user actually experienced.
+    #[test]
+    fn a_rotated_transcript_folds_into_its_row_rather_than_standing_alone() {
+        let mut s = Store::default();
+        let mut row = rec("minted");
+        row.repo_root = "/repo".into();
+        row.cwd = "/repo".into();
+        row.label = "repo · main · earned".into();
+        row.last_interacted = 10;
+        row.live_session = Some("rotated".into());
+        s.agents.insert("minted".into(), row);
+
+        let dirs = vec![DirScan {
+            cwd: "/repo".into(),
+            branch: Some("main".into()),
+            is_worktree: false,
+            // Both files exist on disk: the minted one frozen at the clear, the
+            // rotated one still being written.
+            stems: vec![("minted".into(), 100), ("rotated".into(), 900)],
+        }];
+        let c = resume_candidates(&s, "/repo", &dirs, &[]);
+        assert_eq!(c.len(), 1, "the rotated stem is the row, not a candidate");
+        assert_eq!(c[0].uuid, "minted"); // the row's identity, not the live id
+        assert_eq!(c[0].label, "repo · main · earned");
+
+        // …and it sorts on the LIVE transcript's recency: without the fold the
+        // row would rank on its frozen stem (100) and sit below a stranger.
+        let dirs = vec![DirScan {
+            cwd: "/repo".into(),
+            branch: Some("main".into()),
+            is_worktree: false,
+            stems: vec![
+                ("minted".into(), 100),
+                ("rotated".into(), 900),
+                ("stranger".into(), 500),
+            ],
+        }];
+        let c = resume_candidates(&s, "/repo", &dirs, &[]);
+        assert_eq!(
+            c.iter().map(|c| c.uuid.as_str()).collect::<Vec<_>>(),
+            ["minted", "stranger"]
+        );
     }
 
     #[test]

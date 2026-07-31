@@ -981,6 +981,7 @@ mod tests {
             title: None,
             summary: String::new(),
             default_branch: None,
+            live_session: None,
         };
         let kdl = launch_layout_kdl_for("clave", "/w.wasm", Some(&r), None, false);
         assert!(kdl.contains("default_tab_template")); // native new-tabs still barred
@@ -1020,6 +1021,7 @@ mod tests {
             title: None,
             summary: String::new(),
             default_branch: None,
+            live_session: None,
         };
         // Most-recent row's cwd is GONE; the older row's cwd exists.
         let mut store = Store::default();
@@ -1184,6 +1186,7 @@ mod tests {
             title: None,
             summary: String::new(),
             default_branch: None,
+            live_session: None,
         };
         let lay = launch_layout_kdl_for(abs, "/w.wasm", Some(&r), None, false);
         assert!(lay.contains(&format!("command=\"{abs}\"")));
@@ -1453,6 +1456,7 @@ mod tests {
             title: None,
             summary: String::new(),
             default_branch: None,
+            live_session: None,
         };
         let cfg = config_kdl(binary, wasm);
         let lay = layout_kdl(binary, wasm);

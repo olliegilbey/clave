@@ -399,6 +399,20 @@ pub fn apply_hook_event(
         changed |= rec.status != next;
         rec.status = next;
     }
+    // Remember which conversation this row is actually living in (#99). The
+    // payload's id is the live one BY DEFINITION — Claude is reporting its own
+    // session — and getting here at all means `resolve_row` admitted the event,
+    // so a rotated id already passed the `PidGate`. Held even when it equals
+    // `uuid`, as `None`, so the field can go BACK to agreeing: a row whose live
+    // id is cleared must not keep pointing at a superseded conversation.
+    //
+    // Not part of `changed`, on purpose. `with_store_mut` persists the record
+    // either way; `changed` gates only the SNAPSHOT PUSH, and the bar renders
+    // nothing from this field — bumping `seq` for it would push a pipe message
+    // that changes no pixel.
+    if let Some(live) = payload.session_id.as_deref() {
+        rec.live_session = (live != uuid).then(|| live.to_string());
+    }
     let mut stamp = None;
     if event == "UserPromptSubmit" {
         rec.last_interacted = now; // recency (§6.6 order)
@@ -694,7 +708,52 @@ mod tests {
             title: None,
             summary: String::new(),
             default_branch: None,
+            live_session: None,
         }
+    }
+
+    /// #99's write half: the row remembers WHICH conversation it is living in.
+    ///
+    /// `clave spawn` runs before any Claude exists to send a payload, so the
+    /// live id has to have been written down beforehand or resurrection has
+    /// nothing but the minted uuid — which is the pre-rotation conversation,
+    /// confirmed live to lose everything said after a `/clear`.
+    #[test]
+    fn a_rotated_payload_id_is_remembered_and_an_agreeing_one_clears_it() {
+        let mut s = Store::default();
+        s.agents.insert("minted".into(), rec("minted"));
+        let event = |session: Option<&str>| HookPayload {
+            session_id: session.map(str::to_string),
+            ..Default::default()
+        };
+        let live = |s: &Store| s.agents["minted"].live_session.clone();
+
+        // A rotated id is recorded — and NOT as a snapshot-worthy change: the
+        // bar renders nothing from this field, and `with_store_mut` persists
+        // the record whether or not `seq` moves.
+        let before = s.seq;
+        assert!(!apply_hook_event(
+            &mut s,
+            "minted",
+            "PreToolUse",
+            &event(Some("rotated")),
+            None,
+            100
+        ));
+        assert_eq!(live(&s).as_deref(), Some("rotated"));
+        assert_eq!(s.seq, before, "a live-id write pushes no pipe message");
+
+        // A payload that AGREES with the minted uuid clears it. Without this
+        // the row would keep pointing at a superseded file forever — the exact
+        // stale-but-readable failure #98 refused for the transcript read.
+        apply_hook_event(&mut s, "minted", "Stop", &event(Some("minted")), None, 101);
+        assert_eq!(live(&s), None);
+
+        // A malformed payload (serde yields `session_id: None`) says nothing
+        // about which conversation is live, so it must not erase what does.
+        apply_hook_event(&mut s, "minted", "Stop", &event(Some("rotated")), None, 102);
+        apply_hook_event(&mut s, "minted", "Stop", &event(None), None, 103);
+        assert_eq!(live(&s).as_deref(), Some("rotated"));
     }
 
     /// #97, the bug this exists to prevent recurring.

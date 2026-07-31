@@ -609,6 +609,55 @@ channel Claude cannot drop, most plausibly the pane. Record the result either
 way in **FOOTGUNS.md**, since "does a hook inherit the spawner's env" is exactly
 the kind of fact that costs a round to rediscover.
 
+## 9. Resurrection comes back on the LIVE conversation (#99)
+
+**Item 8's step 6, run in the other direction.** That step measured the loss;
+this one confirms it is gone. Same setup, and it is the same experiment — if you
+are running item 8 anyway, carry straight on from its step 5 rather than
+rebuilding the world.
+
+Worth stating plainly because it decides the release: `just release` kills and
+relaunches every session, so it puts EVERY pane through this path at once. A
+regression here loses conversations across the whole fleet, silently, at upgrade
+time. That is why this item exists and why a green test suite is not enough —
+nothing in it can exec a real `claude --resume`.
+
+### Do
+
+1. From an agent you have already `/clear`ed and prompted again (item 8, steps
+   3–4), say something the pre-`/clear` conversation cannot know — a number is
+   easiest: *"remember the number 7272"*.
+2. Note both transcript ids under `~/.claude/projects/<munged cwd>/`. There will
+   be two: the minted one, frozen at the clear, and the live one.
+3. Close the tab (`Alt+w`) and reopen the row from the bar.
+4. Ask the resurrected agent, with no tool access, what number it was told.
+
+### Correct
+
+- **It answers 7272.** The pane came back on the post-`/clear` conversation,
+  which is the entire fix.
+- **The LIVE transcript is the one that grows.** After step 3 the minted file's
+  mtime must not move; the rotated file's must. A minted file that gets appended
+  to means the exec targeted the wrong id — the pre-fix behaviour exactly.
+- **`clave-dev dev status` still keys the row on the MINTED uuid**, and its
+  `live_session` names the rotated id. The row's identity must not follow the
+  conversation; if the store key moved, binds and the tab timeline moved with
+  it, which is a worse bug than the one being fixed.
+- **The row's `summary` does not regress.** The pre-fix symptom was visible
+  without any prompting: the summary rolled backwards to the older `ai-title`,
+  because the bar was faithfully describing a conversation that went backwards.
+
+### Vacuous if
+
+- **The agent never rotated.** No `/clear` between spawn and resurrection means
+  minted == live and every path agrees — the run proves nothing. Two transcript
+  files in the project dir is the check.
+- **You asked the resurrected agent to *check* the number** (grep, a file, its
+  own transcript). It will find it and answer correctly from the wrong
+  conversation. Ask it what it REMEMBERS, with no tools.
+- **The store was wiped between the clear and the resurrection.** `live_session`
+  lives in the store, so a wipe degrades this to the pre-fix path by design.
+
 ## What this checklist CANNOT test
 
 So that absence of a finding is not read as absence of a problem:
