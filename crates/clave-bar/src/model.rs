@@ -735,12 +735,34 @@ impl BarModel {
                 .get(&a.uuid)
                 .and_then(|p| self.tab_position_of_pane(*p))
                 .is_some_and(|pos| Some(pos) == own_position);
-            // The episode is over when the store confirms our join, or when
-            // the pane has left our tab. Clearing re-arms the healer at FULL
-            // attempt budget, so a LATER divergence is fought afresh rather
-            // than inheriting an exhausted counter.
-            if !joined_here || a.tab_id == Some(own_tab) {
+            // The pane has left our tab: the episode is genuinely over and the
+            // ledger clears, so a later arrival is fought afresh at full
+            // budget.
+            if !joined_here {
                 clear.push(a.uuid.clone());
+                continue;
+            }
+            // The store confirms our join: nothing to send — but the attempt
+            // history for this target is deliberately KEPT.
+            //
+            // Clearing here is the obvious move and it is wrong (Codex P1 on
+            // PR #120; the S0 spec §1.4 prescribed it, and its own storm
+            // argument contradicts it). Under eviction ping-pong — two agents
+            // whose panes both resolve into this tab — every bind evicts the
+            // other and pushes a snapshot confirming the new winner. A clear
+            // on confirmation therefore wipes the winner's counter on the very
+            // round it wins, so it re-enters the fight at tries=1 and
+            // BIND_MAX_TRIES bounds nothing. That is an unbounded subprocess
+            // loop: the C5 rd-4 fd-exhaustion class, which is the single worst
+            // failure this codebase has had.
+            //
+            // Keeping the count costs a real but bounded thing: an agent that
+            // legitimately needs to re-bind to the SAME tab more than
+            // BIND_MAX_TRIES times in one session (only lost store pushes can
+            // do that — a moved pane changes the target or clears above) goes
+            // quiet and stays wrong-but-consistent. That is the accepted trade
+            // this cap was chosen for.
+            if a.tab_id == Some(own_tab) {
                 continue;
             }
             let prev = self.bind_sent.get(&a.uuid);
@@ -2189,10 +2211,14 @@ mod tests {
     }
 
     #[test]
-    fn bind_ledger_clears_on_confirmation_so_a_later_divergence_rebinds_at_full_budget() {
+    fn a_confirmation_does_not_refresh_an_exhausted_attempt_budget() {
+        // The counterpart to the ping-pong test, stated as a unit: once a
+        // target's budget is spent, a confirming snapshot does NOT hand it
+        // back. Confirmations are exactly what an eviction fight produces, so
+        // treating one as "episode over, start again" is what made the cap
+        // unbounded in the first cut (Codex P1 on PR #120).
         let mut m = fleet_of_three(11);
         m.register("u1".into(), 6);
-        // Exhaust an episode.
         for seq in 1..=20 {
             m.apply_snapshot(snap_full(
                 seq,
@@ -2202,15 +2228,16 @@ mod tests {
             m.identity_effects();
         }
         assert_eq!(m.identity_effects(), Vec::<Effect>::new());
-        // A confirming snapshot ends the episode…
+        // A confirming snapshot: nothing to send, and the history is kept.
         m.apply_snapshot(snap_full(
             21,
             vec![agent("u1", Status::Working, Some(11))],
             &[(11, 100)],
         ));
         assert_eq!(m.identity_effects(), Vec::<Effect>::new());
-        // …so a LATER divergence is fought afresh rather than inheriting an
-        // exhausted counter.
+        // A later divergence against the SAME target stays silent — we have
+        // already lost this fight four times and wrong-but-consistent beats a
+        // storm.
         let mut emitted = 0;
         for seq in 22..=40 {
             m.apply_snapshot(snap_full(
@@ -2220,7 +2247,66 @@ mod tests {
             ));
             emitted += m.identity_effects().len();
         }
-        assert_eq!(emitted, BIND_MAX_TRIES as usize);
+        assert_eq!(emitted, 0);
+        // But a genuinely NEW target is a new fight, at full budget — the
+        // budget tracks a contested tab, not the agent.
+        m.apply_tabs(vec![
+            tab(10, 0, "a", false),
+            tab(99, 1, "b", true),
+            tab(12, 2, "c", false),
+        ]);
+        // (tab 99 is new to the timeline, so it earns its birth stamp too.)
+        assert_eq!(
+            m.identity_effects(),
+            vec![
+                Effect::Touch { tab_id: 99 },
+                Effect::Bind {
+                    uuid: "u1".into(),
+                    tab_id: 99
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn two_agents_contesting_one_tab_cannot_ping_pong_forever() {
+        // The exact scenario BIND_MAX_TRIES exists to bound, and the one the
+        // first cut of this code did NOT bound (Codex P1 on PR #120): two
+        // agents whose registered panes both resolve into our tab. Each bind
+        // evicts the other (`store.rs` apply_bind) and pushes a snapshot
+        // CONFIRMING the new winner — so if confirmation cleared the ledger,
+        // every agent's counter would be wiped on the round it won and it
+        // would re-enter the fight at tries=1, forever. Unbounded subprocess
+        // loop; the C5 rd-4 fd-exhaustion class.
+        let mut m = fleet_of_three(11);
+        m.register("u1".into(), 6);
+        m.register("u2".into(), 6); // same pane → both resolve into tab 11
+        let mut emitted = 0;
+        let mut winner_is_u1 = true;
+        for seq in 1..=40 {
+            // The store: whoever bound last holds 11, the other is evicted.
+            let (a, b) = if winner_is_u1 {
+                (Some(11), None)
+            } else {
+                (None, Some(11))
+            };
+            m.apply_snapshot(snap_full(
+                seq,
+                vec![
+                    agent("u1", Status::Working, a),
+                    agent("u2", Status::Working, b),
+                ],
+                &[(11, 100)],
+            ));
+            emitted += m.identity_effects().len();
+            winner_is_u1 = !winner_is_u1;
+        }
+        // Both agents' budgets are finite and never refreshed by the
+        // confirmations they win, so the whole episode is bounded.
+        assert!(
+            emitted <= 2 * BIND_MAX_TRIES as usize,
+            "ping-pong emitted {emitted} binds — the cap is not holding"
+        );
     }
 
     #[test]
@@ -4755,10 +4841,14 @@ mod tests {
             tabs_frame: Option<(u64, Vec<usize>)>,
             panes_frame: Option<(u64, Vec<usize>)>,
             seq: u64,
-            /// The (own tab, seq) pair the last bind was emitted under, and
-            /// how many have been emitted under THAT pair. Property 9's
+            /// Which of the two contenders currently holds the tab, flipped
+            /// on every store push — `apply_bind` evicts the incumbent, so a
+            /// real fight produces exactly this alternation of confirmations.
+            u1_holds: bool,
+            /// The (uuid, own tab, seq) the last bind was emitted under, and
+            /// how many have been emitted under THAT triple. Property 9's
             /// bookkeeping: the count may never exceed one.
-            last_emit: Option<(usize, u64)>,
+            last_emit: Option<(String, usize, u64)>,
             emits_at_last: usize,
         }
 
@@ -4776,7 +4866,12 @@ mod tests {
             fn new() -> Self {
                 let mut m = BarModel::default();
                 m.set_own_pane(bar_pane(Self::OWN_TAB));
+                // TWO agents on ONE pane: both resolve into the same tab, so
+                // every generated run can produce the eviction contention that
+                // a single-agent world structurally cannot (the gap that let
+                // the unbounded ping-pong through review on PR #120).
                 m.register("u1".into(), term_pane(Self::OWN_TAB));
+                m.register("u2".into(), term_pane(Self::OWN_TAB));
                 Self {
                     m,
                     tabs: vec![10, 11, 12],
@@ -4786,6 +4881,7 @@ mod tests {
                     tabs_frame: None,
                     panes_frame: None,
                     seq: 0,
+                    u1_holds: true,
                     last_emit: None,
                     emits_at_last: 0,
                 }
@@ -4861,10 +4957,14 @@ mod tests {
                     // adversarial case for the retry cap.
                     _ => {
                         self.seq += 1;
+                        self.u1_holds = !self.u1_holds; // the eviction flip
                         self.m.apply_snapshot(AgentSnapshot {
                             collapsed: false,
                             seq: self.seq,
-                            agents: vec![agent("u1", Status::Working, None)],
+                            agents: vec![
+                                agent("u1", Status::Working, self.holder(true)),
+                                agent("u2", Status::Working, self.holder(false)),
+                            ],
                             // Seeded so the birth touch never fires: these two
                             // properties are about binds.
                             tab_timeline: (10..40).map(|t| (t, 100u64)).collect(),
@@ -4873,6 +4973,12 @@ mod tests {
                     }
                 }
                 Ok(())
+            }
+
+            /// The tab id an agent's snapshot row carries: the incumbent
+            /// holds `OWN_TAB`, the loser holds nothing.
+            fn holder(&self, is_u1: bool) -> Option<usize> {
+                (is_u1 == self.u1_holds).then_some(Self::OWN_TAB)
             }
 
             fn settle(&mut self) -> Result<(), TestCaseError> {
@@ -4894,10 +5000,10 @@ mod tests {
                     );
                 }
                 for e in &fx {
-                    if let Effect::Bind { tab_id, .. } = e {
-                        // Property 9: at most one emission per (own tab, seq).
-                        let here = (*tab_id, self.seq);
-                        if self.last_emit == Some(here) {
+                    if let Effect::Bind { uuid, tab_id } = e {
+                        // Property 9: one emission per (uuid, own tab, seq).
+                        let here = (uuid.clone(), *tab_id, self.seq);
+                        if self.last_emit.as_ref() == Some(&here) {
                             self.emits_at_last += 1;
                         } else {
                             self.last_emit = Some(here);
@@ -4905,8 +5011,10 @@ mod tests {
                         }
                         prop_assert!(
                             self.emits_at_last <= 1,
-                            "re-emitted a bind for tab {} without the store \
-                             advancing past seq {} — the debounce is not holding",
+                            "re-emitted a bind for {} → tab {} without the \
+                             store advancing past seq {} — the debounce is \
+                             not holding",
+                            uuid,
                             tab_id,
                             self.seq
                         );
