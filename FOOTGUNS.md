@@ -23,10 +23,31 @@ lose time to. One line, mechanism first, cite the source.
 ## Zellij behaviour
 
 Zellij's own source is the authority. Vendored at
-`~/.cargo/registry/src/*/zellij-tile-0.44.3/` and `…/zellij-utils-0.44.3/`.
-Note `zellij-server` is **not** vendored — claims about it trace to
-[SUBSYSTEM-VALIDATION.md](docs/superpowers/spikes/SUBSYSTEM-VALIDATION.md),
-which is a ledger of things observed live.
+`~/.cargo/registry/src/*/zellij-tile-0.44.3/` and `…/zellij-utils-0.44.3/` —
+cite those by path and the next reader can grep them.
+
+`zellij-server` is **not** vendored, so a claim about it has to say where it
+came from. Two routes, both fine, and the citation itself says which was taken:
+
+- **Observed live** → cite the C-section of
+  [SUBSYSTEM-VALIDATION.md](docs/superpowers/spikes/SUBSYSTEM-VALIDATION.md)
+  that records it. This is the only route for anything the source cannot
+  settle — timing, event ordering, what actually happened on screen.
+- **Read at the pinned tag** → fetch it and cite `zellij-server/<path>:<lines>`
+  the same way a vendored crate is cited. The tag is the one Cargo.lock pins,
+  which the `=` version pins hold at 0.44.3:
+
+  ```
+  curl -sL https://raw.githubusercontent.com/zellij-org/zellij/v0.44.3/zellij-server/src/<path>
+  ```
+
+  Read the tag, never `main` — `main` is not the code running on anyone's
+  machine, and a line number from it is worse than no citation, because it
+  looks checkable and isn't.
+
+A source citation says what the code *does*; a ledger citation says what clave
+*saw*. When an entry has both, give both — that pairing is the strongest form,
+and it is what distinguishes a mechanism from a symptom.
 
 - **Plugin identity is `(location, configuration)` compared exactly — a miss STARTS A NEW PLUGIN rather than no-oping.** `impl PartialEq for RunPlugin` compares exactly `(&self.location, &self.configuration)` and `RunPlugin` derives `Hash` (`zellij-utils/src/input/layout.rs:518-526`, `:424-425`). A pipe or reload whose config does not match logs `"Plugin {} not found, starting it instead"` and spawns a second bar. This is the mechanism behind the v0.1.1 double-sidebar (#43/#44). Grep string when it happens: `not found, starting it instead`.
 - **`PluginUserConfiguration::new` silently strips 14 reserved keys** — `hold_on_close`, `hold_on_start`, `cwd`, `name`, `direction`, `floating`, `move_to_focused_tab`, `launch_new`, `payload`, `skip_cache`, `title`, `in_place`, `skip_plugin_cache` (`zellij-utils/src/input/layout.rs:532-548`). A config key with one of those names is invisible to plugin identity, so it can never disambiguate two instances. Check this before adding a config key to fix a skew problem.
@@ -37,8 +58,8 @@ which is a ledger of things observed live.
 - **zellij emits NO events for plugin-initiated resizes** — the only feedback is the plugin's own `render()`. Cross-tab width healing is structurally blind. This killed the entire repair-by-command architecture. (C6 rounds 10, 18)
 - **`show_self()` is a focus action** — the server maps it to `Action::FocusPluginPaneWithId`, which switches to that pane's tab; ten hidden instances calling it is ten racing focus actions. Use `show_pane_with_id(PaneId::Plugin(own), false, false)` → `UnsuppressOrExpandPane`. (C6 round 14)
 - **`suppress_pane` damages the tab's swap state, so `swap_tiled_layout` can never restore an unsuppressed pane** — `suppress_pane` → `extract_pane` → `set_is_tiled_damaged()`, and `add_tiled_pane` auto-relayouts only when NOT damaged. Other damage-setters: `resize_pane_with_id`, `resize_whole_tab`, close/extract/splits. The swap layout parsed perfectly and never fired. (C6 round 19)
-- **A floating pane can never cover the bar — `set_selectable(false)` already fenced it off, so any "clear the sidebar" geometry is arithmetic for a problem that does not exist.** `offset_viewport` resets the viewport to the display area and then, for every **non-selectable** pane flush against an edge and spanning the perpendicular axis, moves that edge past it (`zellij-server/src/tab/layout_applier.rs:1032-1075`). `clave-bar` is full-height at `x=0` and calls `set_selectable(false)` (`main.rs`), so a tab's viewport BEGINS at the bar's right edge, and every floating percent is a percent of the reduced area. `#110` was raised — and half-designed — believing an explicit `x` past the bar was needed to keep it visible. Note the qualifier: a plugin pane is selectable by default (`plugin_pane.rs:136`); it is the plugin's own `set_selectable(false)` call, not `borderless=true`, that does this.
-- **The two floating-geometry paths clamp overflow DIFFERENTLY — one shrinks the pane, the other slides it out from under you.** A `Run { floating true; … }` keybind lands in `adjust_coordinates`, which floors `x` at `viewport.x` and then *narrows* the pane to the viewport's right edge (`zellij-utils/src/pane_size.rs:291-321`) — safe. A floating pane declared in a **layout** lands in `position_floating_pane_layout`, which compares against `viewport.cols` having dropped `viewport.x`, and on overflow *decrements `x`* (`zellij-server/src/panes/floating_panes/mod.rs:319-327`) — so an oversized layout pane walks left over anything the viewport offset was protecting. Don't carry a geometry from one path to the other without re-checking it.
+- **A floating pane can never cover the bar — `set_selectable(false)` already fenced it off, so any "clear the sidebar" geometry is arithmetic for a problem that does not exist.** `offset_viewport` resets the viewport to the display area and then, for every **non-selectable** pane flush against an edge and spanning the perpendicular axis, moves that edge past it (`zellij-server/src/tab/layout_applier.rs:1032-1075`). `clave-bar` is full-height at `x=0` and calls `set_selectable(false)` (`crates/clave-bar/src/main.rs:441`), so a tab's viewport BEGINS at the bar's right edge, and every floating percent is a percent of the reduced area. `#110` was raised — and half-designed — believing an explicit `x` past the bar was needed to keep it visible; Ollie disproved it live, resizing a floating pane with `Alt n` `+` until it stopped and never reaching the bar. Note the qualifier: a plugin pane is selectable by default (`zellij-server/src/panes/plugin_pane.rs:136`); it is the plugin's own `set_selectable(false)` call, not `borderless=true`, that does this.
+- **The two floating-geometry paths clamp overflow DIFFERENTLY — one shrinks the pane, the other slides it out from under you.** A `Run { floating true; … }` keybind lands in `adjust_coordinates`, which floors `x` at `viewport.x` and then *narrows* the pane to the viewport's right edge (`zellij-utils/src/pane_size.rs:291-321`) — safe. A floating pane declared in a **layout** lands in `position_floating_pane_layout`, which compares against `viewport.cols` having dropped `viewport.x`, and on overflow *decrements `x`* (`zellij-server/src/panes/floating_panes/mod.rs:320-323`) — so an oversized layout pane walks left over anything the viewport offset was protecting. Don't carry a geometry from one path to the other without re-checking it.
 - **zellij RECYCLES tab ids** — `get_new_tab_id` is `self.tabs.keys().last() + 1` over a `BTreeMap` (`zellij-server/src/screen.rs:1617`), so closing the *highest*-id tab hands that id to the next tab created. Makes bind/timeline pruning correctness-critical, not hygiene.
 - **`children` must be a DIRECT child of `default_tab_template`.** Nesting it inside a wrapper pane *parses fine*, but the fill path `default_template()` inserts the default terminal pane only at the template's own top-level `external_children_index` and does not recurse (`zellij-utils/src/kdl/kdl_layout_parser.rs:1747-1761`, non-recursion enforced at `:1712`). Result: tabs with a bar and **no terminal**. Symptom in a dump: the wrapper keeps `external_children_index=Some(n)` forever.
 - **`default_tab_template` wraps EXPLICIT `tab` nodes too** — so a `tab` node carrying its own bar pane renders TWO plugin instances in one tab: visibly wider, executor election scrambled, presenting as a dead Alt+c. Launch layouts must use a bare tab node and let the template's `children` slot take the terminal. (commit `5cb8b17`)
