@@ -279,13 +279,30 @@ impl State {
     fn handle_pipe(&mut self, message: PipeMessage) -> bool {
         let name = message.name.as_str();
         let Some(payload) = message.payload.as_deref() else {
-            // Toggle carries no payload; everything else must.
-            if name == "clave-toggle" {
-                self.toggle_collapsed();
-                return true;
+            // Toggle and organic carry no payload; everything else must.
+            // A keybind MessagePlugin without a payload attribute delivers
+            // payload=None, so a payload-less pipe NEVER reaches the named
+            // match below — clave-organic sat dead there and the Alt+o
+            // beacon never announced (#128 live check, 2026-08-01: the
+            // departed bar kept cursor AND current_tab==own indefinitely,
+            // so a commit 18s after the switch still opened the old
+            // selection).
+            match name {
+                "clave-toggle" => {
+                    self.toggle_collapsed();
+                    return true;
+                }
+                "clave-organic" => {
+                    // Arms the bounded announce AND spends any dormant
+                    // selection (#100) — the selection drop must repaint.
+                    self.model.set_organic_pending();
+                    return true;
+                }
+                _ => {
+                    eprintln!("clave-bar: dropped {name} pipe with empty payload");
+                    return false;
+                }
             }
-            eprintln!("clave-bar: dropped {name} pipe with empty payload");
-            return false;
         };
         match name {
             "clave-status" => match serde_json::from_str(payload) {
@@ -330,11 +347,11 @@ impl State {
                 }
             },
             "clave-organic" => {
-                // Alt+o's bind: ToggleTab + this pipe. Arms ONE announce on
-                // the next TabUpdate (which steady-state zellij delivers
-                // only to the newly-active instance — C3).
+                // Alt+o's bind: ToggleTab + this pipe. Normally payload-less
+                // (handled above); kept here so a payload-carrying variant
+                // behaves identically rather than silently diverging.
                 self.model.set_organic_pending();
-                false
+                true
             }
             // NO clave-touch/clave-touch-pane arms: tab order now travels
             // INSIDE clave-status snapshots (store tab_timeline, §6.6) —
