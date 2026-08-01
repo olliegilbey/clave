@@ -819,6 +819,51 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_open_touches_no_ordering_field_so_stale_rows_sink() {
+        // #124's whole retention rule, and it is an ABSENCE: stale rows are
+        // never deleted and never hidden, they just sink. That works only
+        // because a failed open mints nothing an ordering key reads, so the
+        // row's recency freezes at its last real prompt while every row that
+        // IS used passes it. Nothing in `apply_open_result` implements this
+        // -- it is a property of what the function does not do, which is
+        // exactly the kind of guarantee a refactor deletes silently.
+        //
+        // Asserted as a WHOLE-RECORD comparison rather than a field list on
+        // purpose: S1 (#56) moves the dormant sort key from `last_interacted`
+        // to `commit_ord`, and a field-list assertion would keep passing while
+        // the new field got minted on a failed open. This form fails the day
+        // any field but `stale` moves here, including one that does not exist
+        // yet.
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        let mut row = rec("u1");
+        row.last_interacted = 5_000; // non-zero: catches a clobber-to-0 too
+        row.last_visited = 4_000;
+        with_store_mut(&p, |s| {
+            s.agents.insert("u1".into(), row.clone());
+        })
+        .unwrap();
+
+        apply_open_result(&p, "u1", true).unwrap().expect("changed");
+        let mut only_stale_moved = row.clone();
+        only_stale_moved.stale = true;
+        assert_eq!(
+            read_store(&p).unwrap().agents["u1"],
+            only_stale_moved,
+            "a failed open must flip `stale` and nothing else -- any other \
+             field moving here lets a dead row hold its place in the ring"
+        );
+
+        // Healing is symmetric: remount the volume, open again, and the row
+        // is byte-for-byte what it was. The grace period for a transiently
+        // missing cwd is this retry, not a timer (#124).
+        apply_open_result(&p, "u1", false)
+            .unwrap()
+            .expect("cleared");
+        assert_eq!(read_store(&p).unwrap().agents["u1"], row);
+    }
+
+    #[test]
     fn clear_tab_timeline_wipes_session_scoped_ids() {
         // tab_ids are SESSION-scoped: a recreated session reuses ids, so a
         // stale timeline would order new tabs by dead tabs' commitments.
