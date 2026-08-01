@@ -131,12 +131,18 @@ lives in `render.rs`, and `Status::glyph()` keeps its current contract.
 | `Done` | `\u{25cf}` | `#98BB6C` springGreen |
 | `Idle` | `\u{25cf}` | `#54546D` sumiInk4 |
 | `Failed` | `\u{2716}` | `#E82424` samuraiRed |
-| `Dormant` | `\u{25cc}` | `#54546D` sumiInk4 |
+| `Dormant` | `\u{25cc}` | `#DCD7BA` fujiWhite |
 | `Opening` | `\u{21bb}` | `#E6C384` carpYellow |
 | `Stale` | `\u{2717}` | `#E82424` samuraiRed |
 
 `Failed` is U+2716 **heavy** multiplication x; the `stale` flag is U+2717. They
 are different glyphs for different things (lock §5) and are easy to transpose.
+
+`Dormant` was sumiInk4 and read as absent rather than dim — sumiInk4 on the
+sumiInk3 bar is barely a glyph at all (#123). The **hollow shape** already says
+"not running", so the ink is free to be legible: fujiWhite, the same
+`DEFAULT_INK` the rule and summary take. `Idle` keeps sumiInk4 — it is a live
+row with nothing to say, and its filled `●` is what separates the two.
 
 ### D11 — `bar-preview.py` becomes a Rust example and is deleted (2026-07-29)
 
