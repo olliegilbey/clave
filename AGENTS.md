@@ -31,12 +31,14 @@ a `vX.Y.Z` tag plus `just release` is the promotion event.
 
 [SUBSYSTEM-VALIDATION.md](docs/superpowers/spikes/SUBSYSTEM-VALIDATION.md) | the C-section for the subsystem you are about to change — the ledger of approaches tried and _why they failed_. Read it first; every forbidden path was expensive to learn
 
-**Never kill or launch a zellij session.** Ollie dog-foods clave daily — the
-Claude you are is running _inside_ a live clave session, so `zellij
-kill-session` takes down his working fleet, and a bare `zellij` command targets
-his session, not a sandbox. Print the command; let him run it. Same for `just
-release` and anything writing `~/.local/share/clave/` — that is the stable
-surface he is driving.
+**Drive the sandbox; never touch his session.** Ollie dog-foods clave daily —
+the Claude you are is running _inside_ a live clave session, so a bare `zellij`
+command targets his working fleet. Against `clave-test` you may run `zellij
+action` freely (`ZELLIJ_SESSION_NAME=clave-test …` — stage it with `just
+sandbox`); against his session you run nothing, not even a read. **Launching or
+killing any session is his**, as is `just release` and anything writing
+`~/.local/share/clave/`. Print those; let him run them. The loop is
+[docs/dev/TESTING.md](docs/dev/TESTING.md) § the sandbox drive loop.
 
 Something behaving strangely? Grep FOOTGUNS.md before you start debugging.
 
