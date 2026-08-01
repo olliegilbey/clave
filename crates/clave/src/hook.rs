@@ -1100,7 +1100,15 @@ mod tests {
             transcript_path: None,
         };
         // One real commitment first, so there is a rank to preserve.
-        assert!(apply_hook_event(&mut s, "u1", "UserPromptSubmit", &p, None, 1000, true));
+        assert!(apply_hook_event(
+            &mut s,
+            "u1",
+            "UserPromptSubmit",
+            &p,
+            None,
+            1000,
+            true
+        ));
         let order = s.tab_order.clone();
         let ord = s.agents["u1"].commit_ord;
         assert_eq!((ord, order.get(&4)), (1, Some(&1)));
@@ -1134,7 +1142,15 @@ mod tests {
         // A hook event that is not in the status map at all is a total no-op —
         // it must not even mint an ordinal it then discards.
         let seq = s.seq;
-        assert!(!apply_hook_event(&mut s, "u1", "PreToolUse", &p, None, 9999, true));
+        assert!(!apply_hook_event(
+            &mut s,
+            "u1",
+            "PreToolUse",
+            &p,
+            None,
+            9999,
+            true
+        ));
         assert_eq!(s.seq, seq, "a no-op event must not consume an ordinal");
         assert_eq!(s.tab_order, order);
         assert_eq!(s.agents["u1"].commit_ord, ord);
@@ -1170,7 +1186,10 @@ mod tests {
         };
         apply_hook_event(&mut s, "u-a", "UserPromptSubmit", &pa, None, 1000, true);
         apply_hook_event(&mut s, "u-b", "UserPromptSubmit", &pb, None, 1000, true);
-        assert_eq!(s.agents["u-a"].last_interacted, s.agents["u-b"].last_interacted);
+        assert_eq!(
+            s.agents["u-a"].last_interacted,
+            s.agents["u-b"].last_interacted
+        );
         assert!(
             s.tab_order[&2] > s.tab_order[&1],
             "the later prompt must rank higher despite an identical clock"
@@ -1232,7 +1251,10 @@ mod tests {
         // Non-commitment events don't touch the order (Stop ≠ user input).
         assert!(apply_hook_event(&mut s, "u1", "Stop", &p, None, 1900, true));
         assert_eq!(s.tab_order.get(&4), Some(&1));
-        assert_eq!(s.agents["u1"].commit_ord, 1, "Stop must not re-rank the row");
+        assert_eq!(
+            s.agents["u1"].commit_ord, 1,
+            "Stop must not re-rank the row"
+        );
         // Unknown uuid / no-op event: unchanged, no seq bump.
         let seq = s.seq;
         assert!(!apply_hook_event(

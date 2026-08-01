@@ -102,7 +102,10 @@ mod tests {
         // Unbind it and the row falls back to its own ordinal, which loses.
         s.agents.get_mut("live").unwrap().tab_id = None;
         let lines: Vec<String> = render_ls(&s).lines().map(String::from).collect();
-        assert!(lines[0].contains("dormant"), "own ordinal now rules: {lines:?}");
+        assert!(
+            lines[0].contains("dormant"),
+            "own ordinal now rules: {lines:?}"
+        );
     }
 
     #[test]

@@ -828,7 +828,11 @@ mod tests {
         for tab in [4usize, 4, 9, 4, 9] {
             seen.push(apply_touch(&p, tab).unwrap().tab_order[&tab]);
         }
-        assert_eq!(seen, vec![1, 2, 3, 4, 5], "same tab and different tabs both advance");
+        assert_eq!(
+            seen,
+            vec![1, 2, 3, 4, 5],
+            "same tab and different tabs both advance"
+        );
         for w in seen.windows(2) {
             assert!(w[1] > w[0], "ordinals must strictly increase");
         }
@@ -857,7 +861,10 @@ mod tests {
         let carried = apply_touch(&p, 10).unwrap().tab_order[&10]; // ordinal 2
         apply_prune_tabs(&p, &[10]).unwrap().expect("pruned");
         let s = read_store(&p).unwrap();
-        assert_eq!(s.agents["u-A"].commit_ord, carried, "row inherited its tab's rank");
+        assert_eq!(
+            s.agents["u-A"].commit_ord, carried,
+            "row inherited its tab's rank"
+        );
         assert_eq!(s.agents["u-A"].tab_id, None, "and was unbound");
         assert!(!s.tab_order.contains_key(&10), "tab entry gone");
         assert!(
@@ -934,14 +941,20 @@ mod tests {
         .unwrap();
         clear_session_order(&p).unwrap();
         let s = read_store(&p).unwrap();
-        assert_eq!(s.agents["u-done"].commit_ord, 7, "existing ordinal untouched");
+        assert_eq!(
+            s.agents["u-done"].commit_ord, 7,
+            "existing ordinal untouched"
+        );
         assert_eq!(s.agents["u-never"].commit_ord, 0, "no clock ⇒ no seed");
         let (old, mid, new) = (
             s.agents["u-old"].commit_ord,
             s.agents["u-mid"].commit_ord,
             s.agents["u-new"].commit_ord,
         );
-        assert!(old > 0 && old < mid && mid < new, "wall-clock ranking preserved: {old} < {mid} < {new}");
+        assert!(
+            old > 0 && old < mid && mid < new,
+            "wall-clock ranking preserved: {old} < {mid} < {new}"
+        );
         // Self-limiting: a second launch finds nothing to seed and changes none
         // of the values it wrote.
         let before = read_store(&p).unwrap();
@@ -974,7 +987,10 @@ mod tests {
         let s = read_store(&p).unwrap();
         assert!(s.tab_order.is_empty(), "session-scoped tab order cleared");
         assert_eq!(s.agents["u1"].tab_id, None, "session-scoped bind cleared");
-        assert_eq!(s.agents["u1"].commit_ord, 42, "agent-scoped ordinal SURVIVES");
+        assert_eq!(
+            s.agents["u1"].commit_ord, 42,
+            "agent-scoped ordinal SURVIVES"
+        );
     }
 
     #[test]
@@ -1056,7 +1072,11 @@ mod tests {
         // tabs and rows interleave correctly with no cross-space comparison.
         let snap = apply_touch(&p, 9).unwrap();
         assert_eq!(snap.tab_order.get(&9), Some(&3));
-        assert_eq!(snap.tab_order.get(&4), Some(&2), "another tab's touch must not move this one");
+        assert_eq!(
+            snap.tab_order.get(&4),
+            Some(&2),
+            "another tab's touch must not move this one"
+        );
         assert_eq!(snap.seq, 3);
         // Persisted: a fresh read sees the same map.
         assert_eq!(read_store(&p).unwrap().tab_order.get(&4), Some(&2));

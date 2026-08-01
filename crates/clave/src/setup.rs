@@ -118,6 +118,15 @@ pub fn config_kdl(binary: &str, wasm: &str) -> String {
     // reorder on user commitments, never on focus — so walking the visible
     // order is stable, no ping-pong). Executor-gated in the plugin: only the
     // active instance (fresh tab set, the bar being read) computes the step.
+    //
+    // The two rules that make walking safe, stated for #39 (S1):
+    //   R1 — a prompt always moves its row to the top. No tie, no clock, no
+    //        dependence on where the tab happens to sit.
+    //   R2 — closing a tab reorders nothing relative to anything else. The
+    //        closed row changes glyph and keeps its rank; no untouched row
+    //        overtakes another.
+    // Everything else — Claude finishing, focus, clicks, these nav keys —
+    // changes status or selection and never the order.
     binds.push_str(&format!(
         "        bind \"Alt j\" \"Alt Down\" {{ {} }}\n",
         nav("{\\\"dir\\\":\\\"next\\\"}")
