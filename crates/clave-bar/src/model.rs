@@ -286,6 +286,10 @@ struct BindSent {
     tab_id: usize,
     at_seq: u64,
     tries: u32,
+    /// Consecutive store advances that have shown this bind CONFIRMED. The
+    /// budget is refunded only once this reaches `BIND_CONFIRMS_TO_RESET`;
+    /// any divergence resets it to zero. See `bind_effects`.
+    confirms: u32,
 }
 
 /// Bind re-emissions per (uuid, target tab) episode before we stop fighting.
@@ -295,6 +299,17 @@ struct BindSent {
 /// and wrong-but-consistent beats a storm — the `collapse_reasserted`
 /// precedent (a second contradiction means someone else is authoritative).
 const BIND_MAX_TRIES: u32 = 4;
+
+/// Consecutive confirming store advances required before a (uuid, tab)
+/// episode is considered genuinely healed and its attempt budget refunded.
+///
+/// It must be at least TWO, and that is the whole design. Eviction ping-pong
+/// produces a confirmation for whoever won each round, so a budget refunded on
+/// a SINGLE confirmation is refunded to every contender on the round it wins —
+/// which is the unbounded loop this cap exists to stop. Alternating winners can
+/// never post two consecutive confirmations, so they stay capped; a genuinely
+/// healed bind sits confirmed across successive snapshots and resets.
+const BIND_CONFIRMS_TO_RESET: u32 = 2;
 
 pub struct BarModel {
     /// The collapse mode is not known yet, so the seek must not act (D37).
@@ -691,6 +706,11 @@ impl BarModel {
             fx.push(Effect::Touch { tab_id: active });
         }
         fx.extend(self.bind_effects(own));
+        // Prune LAST: its payload is disjoint from the touch's (dead ids vs a
+        // live one) and from any bind's, so ordering is free, and keeping it
+        // after the binds means a settle that both binds and prunes reports
+        // the bind first.
+        fx.extend(self.prune_effect());
         fx
     }
 
@@ -728,6 +748,8 @@ impl BarModel {
         let seq = self.seq;
         let mut out = Vec::new();
         let mut clear: Vec<String> = Vec::new();
+        let mut confirmed: Vec<String> = Vec::new();
+        let mut diverged: Vec<String> = Vec::new();
         let mut sent: Vec<(String, BindSent)> = Vec::new();
         for a in &self.agents {
             let joined_here = self
@@ -742,29 +764,39 @@ impl BarModel {
                 clear.push(a.uuid.clone());
                 continue;
             }
-            // The store confirms our join: nothing to send — but the attempt
-            // history for this target is deliberately KEPT.
+            // The store confirms our join: nothing to send. The attempt
+            // history is NOT dropped here — it is dropped only once the
+            // confirmation has HELD across BIND_CONFIRMS_TO_RESET store
+            // advances (handled after the loop).
             //
-            // Clearing here is the obvious move and it is wrong (Codex P1 on
-            // PR #120; the S0 spec §1.4 prescribed it, and its own storm
-            // argument contradicts it). Under eviction ping-pong — two agents
-            // whose panes both resolve into this tab — every bind evicts the
-            // other and pushes a snapshot confirming the new winner. A clear
-            // on confirmation therefore wipes the winner's counter on the very
-            // round it wins, so it re-enters the fight at tries=1 and
-            // BIND_MAX_TRIES bounds nothing. That is an unbounded subprocess
-            // loop: the C5 rd-4 fd-exhaustion class, which is the single worst
-            // failure this codebase has had.
+            // Dropping it on a single confirmation is the obvious move and it
+            // is wrong (Codex P1 on PR #120; the S0 spec §1.4 prescribed it,
+            // and the spec's own storm argument contradicts it). Under
+            // eviction ping-pong — two agents whose panes both resolve into
+            // this tab — every bind evicts the other and pushes a snapshot
+            // confirming the new winner, so a single-confirmation reset hands
+            // the budget back to each contender on the round it wins and
+            // BIND_MAX_TRIES bounds nothing: an unbounded subprocess loop, the
+            // C5 rd-4 fd-exhaustion class.
             //
-            // Keeping the count costs a real but bounded thing: an agent that
-            // legitimately needs to re-bind to the SAME tab more than
-            // BIND_MAX_TRIES times in one session (only lost store pushes can
-            // do that — a moved pane changes the target or clears above) goes
-            // quiet and stays wrong-but-consistent. That is the accepted trade
-            // this cap was chosen for.
+            // But never resetting is the mirror bug (adversarial review, same
+            // PR): an eviction changes neither our pane nor our target, so
+            // every eviction our agent ever suffers would spend a try
+            // permanently, and after four LIFETIME evictions a correct bind
+            // would be silenced for the life of the plugin instance — the old
+            // `sent_binds` permanent latch, reached slowly. Requiring the
+            // confirmation to hold separates the two: a fight cannot post two
+            // consecutive confirmations, a healed bind can.
             if a.tab_id == Some(own_tab) {
+                confirmed.push(a.uuid.clone());
                 continue;
             }
+            // Joined here and NOT confirmed: the run of confirmations is
+            // broken whether or not we go on to emit. Resetting only on emit
+            // let a capped agent quietly bank alternating confirmations until
+            // it hit the reset threshold and won its budget back — which is
+            // the ping-pong refund by a slower route.
+            diverged.push(a.uuid.clone());
             let prev = self.bind_sent.get(&a.uuid);
             let (may_send, tries) = match prev {
                 // Never tried this episode.
@@ -784,6 +816,7 @@ impl BarModel {
                         tab_id: own_tab,
                         at_seq: seq,
                         tries: tries + 1,
+                        confirms: 0, // a divergence resets the run of confirmations
                     },
                 ));
                 out.push(Effect::Bind {
@@ -795,9 +828,34 @@ impl BarModel {
         for uuid in clear {
             self.bind_sent.remove(&uuid);
         }
+        for uuid in diverged {
+            if let Some(rec) = self.bind_sent.get_mut(&uuid) {
+                rec.confirms = 0;
+            }
+        }
+        // A confirmation counts only when the STORE has advanced since we last
+        // looked, so a burst of frames at one seq cannot fake a run of them.
+        for uuid in confirmed {
+            let Some(rec) = self.bind_sent.get_mut(&uuid) else {
+                continue; // nothing outstanding — already healed
+            };
+            if seq > rec.at_seq {
+                rec.at_seq = seq;
+                rec.confirms += 1;
+            }
+            if rec.confirms >= BIND_CONFIRMS_TO_RESET {
+                self.bind_sent.remove(&uuid); // held: the episode is over
+            }
+        }
         for (uuid, s) in sent {
             self.bind_sent.insert(uuid, s);
         }
+        // Ledger hygiene: an agent that has left the snapshot entirely can
+        // never be matched again, so its entry would otherwise persist for the
+        // life of the instance.
+        let known: BTreeSet<&str> = self.agents.iter().map(|a| a.uuid.as_str()).collect();
+        self.bind_sent
+            .retain(|uuid, _| known.contains(uuid.as_str()));
         out
     }
 
@@ -1056,27 +1114,57 @@ impl BarModel {
         // — a failure mode that already breaks bind/collapse identically. Never
         // treat an EMPTY live set as "all died": closing the last tab closes the
         // session, so it is a degenerate update, not a real signal.
-        if !live.is_empty() {
-            let mut stale: BTreeSet<usize> = self
-                .agents
-                .iter()
-                .filter_map(|a| a.tab_id)
-                .filter(|id| !live.contains(id))
-                .collect();
-            stale.extend(
-                self.timeline
-                    .keys()
-                    .copied()
-                    .filter(|id| !live.contains(id)),
-            );
-            if !stale.is_empty() {
-                effects.push(Effect::PruneTabs {
-                    stale_ids: stale.into_iter().collect(), // BTreeSet → sorted, deduped
-                });
-            }
-        }
         self.prune_opening(); // an appeared tab retires its ↻ mark
         effects
+    }
+
+    /// The observed-stale tab ids, per the contract documented above. Derived
+    /// fresh from the CURRENT tab set every time — never cached, never
+    /// set-change-gated.
+    ///
+    /// Emitted from `identity_effects`, not from `apply_tabs`. It used to be
+    /// emitted here and gated to the active instance in the adapter, which was
+    /// correct until #55 tightened that gate to require frame coherence: a
+    /// close TabUpdate is precisely when the frames disagree, and `apply_tabs`
+    /// is reached only BY a TabUpdate, so the drop had no retry. A close at a
+    /// position above ours would then never prune at all — the next TabUpdate
+    /// arrives when a tab is created, and zellij reuses ids, so by then the
+    /// dead id is back in the live set and no longer reads as stale. The dead
+    /// agent's bind and timeline entry survive into the new tab: it inherits
+    /// the dead row's glyph and sort order, and the dead row reads live to
+    /// `bound_live_uuids`. Emitting from `identity_effects` gives it the same
+    /// retry `Touch` gets — the PaneUpdate that restores coherence.
+    ///
+    /// Rate note: this is now re-derived on every identity settle (both frame
+    /// kinds, both snapshot paths) rather than on TabUpdate alone. The bound is
+    /// unchanged in kind and still the store echo — a clean store derives an
+    /// EMPTY stale set and spawns nothing — but the window between emitting a
+    /// prune and its echo landing now admits more re-emissions. Removals are
+    /// idempotent and commute, and this fires only when a tab has actually
+    /// died, so the cost is a few duplicate subprocesses on a real close, not
+    /// the per-render unbounded class of C5 rd 4.
+    fn prune_effect(&self) -> Option<Effect> {
+        let live: BTreeSet<usize> = self.tabs.iter().map(|t| t.tab_id).collect();
+        // Never treat an EMPTY live set as "all died": closing the last tab
+        // closes the session, so it is a degenerate update, not a real signal.
+        if live.is_empty() {
+            return None;
+        }
+        let mut stale: BTreeSet<usize> = self
+            .agents
+            .iter()
+            .filter_map(|a| a.tab_id)
+            .filter(|id| !live.contains(id))
+            .collect();
+        stale.extend(
+            self.timeline
+                .keys()
+                .copied()
+                .filter(|id| !live.contains(id)),
+        );
+        (!stale.is_empty()).then(|| Effect::PruneTabs {
+            stale_ids: stale.into_iter().collect(), // BTreeSet → sorted, deduped
+        })
     }
 
     pub fn apply_panes(&mut self, panes: Vec<PaneMeta>) {
@@ -2118,12 +2206,19 @@ mod tests {
             "an incoherent frame emits nothing at all"
         );
         m.apply_tabs(vec![tab(11, 0, "b", true), tab(12, 1, "c", false)]);
+        // Tab 10 died with the close, so the same settle also prunes it — one
+        // coherent frame pair, every identity-keyed effect it authorises.
         assert_eq!(
             m.identity_effects(),
-            vec![Effect::Bind {
-                uuid: "u1".into(),
-                tab_id: 11
-            }]
+            vec![
+                Effect::Bind {
+                    uuid: "u1".into(),
+                    tab_id: 11
+                },
+                Effect::PruneTabs {
+                    stale_ids: vec![10]
+                }
+            ]
         );
     }
 
@@ -2146,7 +2241,9 @@ mod tests {
                 tab_id: 11
             }]
         );
-        // The store confirms the join: the episode is over, ledger cleared.
+        // The store confirms the join: nothing to send. The attempt history
+        // is deliberately NOT dropped on a single confirmation — see
+        // `bind_effects`; dropping it there was the unbounded-ping-pong bug.
         m.apply_snapshot(snap_full(
             2,
             vec![agent("u1", Status::Working, Some(11))],
@@ -2263,6 +2360,10 @@ mod tests {
                 Effect::Bind {
                     uuid: "u1".into(),
                     tab_id: 99
+                },
+                // 11 left the tab set when 99 replaced it at that position.
+                Effect::PruneTabs {
+                    stale_ids: vec![11]
                 }
             ]
         );
@@ -2299,6 +2400,14 @@ mod tests {
                 &[(11, 100)],
             ));
             emitted += m.identity_effects().len();
+            // Frames keep arriving BETWEEN store pushes. They must not be able
+            // to complete a run of confirmations: only a real store advance
+            // counts, or a burst of PaneUpdates would refund the budget at the
+            // same seq and the cap would break by a second route.
+            for _ in 0..3 {
+                m.apply_panes(panes_at(&FLEET_PANES));
+                emitted += m.identity_effects().len();
+            }
             winner_is_u1 = !winner_is_u1;
         }
         // Both agents' budgets are finite and never refreshed by the
@@ -2307,6 +2416,47 @@ mod tests {
             emitted <= 2 * BIND_MAX_TRIES as usize,
             "ping-pong emitted {emitted} binds — the cap is not holding"
         );
+    }
+
+    #[test]
+    fn a_bind_that_keeps_healing_is_never_starved_of_budget() {
+        // The mirror of the ping-pong bound, and the reason the reset needs a
+        // threshold rather than being removed outright (adversarial review, PR
+        // #120). An eviction changes neither our pane nor our target, so if a
+        // confirmation never refunded the budget, four LIFETIME evictions
+        // would silence a correct bind for the life of the plugin instance —
+        // the old `sent_binds` permanent latch, reached slowly. A HELD
+        // confirmation must hand the budget back.
+        let mut m = fleet_of_three(11);
+        m.register("u1".into(), 6);
+        let mut seq = 0;
+        for cycle in 0..(BIND_MAX_TRIES + 4) {
+            // Evicted: we must fight for our tab again.
+            seq += 1;
+            m.apply_snapshot(snap_full(
+                seq,
+                vec![agent("u1", Status::Working, None)],
+                &[(11, 100)],
+            ));
+            assert_eq!(
+                m.identity_effects(),
+                vec![Effect::Bind {
+                    uuid: "u1".into(),
+                    tab_id: 11
+                }],
+                "cycle {cycle}: a healed bind was starved of budget"
+            );
+            // The bind lands and HOLDS across successive store advances.
+            for _ in 0..BIND_CONFIRMS_TO_RESET {
+                seq += 1;
+                m.apply_snapshot(snap_full(
+                    seq,
+                    vec![agent("u1", Status::Working, Some(11))],
+                    &[(11, 100)],
+                ));
+                assert_eq!(m.identity_effects(), Vec::<Effect>::new());
+            }
+        }
     }
 
     #[test]
@@ -2396,19 +2546,30 @@ mod tests {
         ));
         assert_eq!(
             m.identity_effects(),
-            vec![Effect::Bind {
-                uuid: "u1".into(),
-                tab_id: 11
-            }]
+            vec![
+                Effect::Bind {
+                    uuid: "u1".into(),
+                    tab_id: 11
+                },
+                // 99 is seeded in the timeline but not in the tab set yet.
+                Effect::PruneTabs {
+                    stale_ids: vec![99]
+                }
+            ]
         );
         // Same seq, same pane, new tab id at our position.
         m.apply_tabs(vec![tab(10, 0, "a", false), tab(99, 1, "b", true)]);
         assert_eq!(
             m.identity_effects(),
-            vec![Effect::Bind {
-                uuid: "u1".into(),
-                tab_id: 99
-            }],
+            vec![
+                Effect::Bind {
+                    uuid: "u1".into(),
+                    tab_id: 99
+                },
+                Effect::PruneTabs {
+                    stale_ids: vec![11]
+                }
+            ],
             "a new target must not wait behind the old target's debounce"
         );
     }
@@ -2538,69 +2699,91 @@ mod tests {
 
     #[test]
     fn tab_close_prunes_stale_ids_and_retries_until_echo_clears() {
-        // #6/F3 + Codex P2: on tab CLOSE the model emits the OBSERVED-STALE ids
+        // #6/F3: on tab CLOSE the model emits the OBSERVED-STALE ids
         // (bound-or-timelined ids absent from the delivered live set) — NOT the
         // live set, so out-of-order prunes commute (idempotent removes) and a
-        // late one can't unbind a tab created after it. Emission is
-        // DETECTION-driven, NOT set-change-gated: a close TabUpdate arriving
-        // before its PaneUpdate finds is_active_instance() false → run_effects
-        // DROPS the prune; a set-change gate would then never re-emit and the
-        // stale bind would make a dead agent read LIVE (jump-only, un-resumable)
-        // for an unbounded window. So a REPEAT TabUpdate, while the stale entry
-        // is still in the mirror, MUST re-emit (the retry that lands once the
-        // PaneUpdate arrives); only the store echo clearing the mirror silences.
+        // late one can't unbind a tab created after it.
+        //
+        // Emission is DETECTION-driven, never set-change-gated, and since #55
+        // it comes from `identity_effects` rather than `apply_tabs` — which is
+        // what gives it a retry. A close is exactly when the two zellij frames
+        // disagree, so the prune is refused on the close TabUpdate; the
+        // PaneUpdate that restores coherence must re-derive and emit it. Only
+        // the store echo clearing the mirror silences it.
         let mut m = BarModel::default();
+        m.set_own_pane(100); // our bar sits in tab 10, at position 0
+        m.apply_panes(panes_at(&[(0, 100, 5), (1, 101, 6)]));
         m.apply_tabs(vec![tab(10, 0, "a", true), tab(11, 1, "b", false)]);
         let mut s = snap(1, vec![agent("u-b", Status::Working, Some(11))]);
         s.tab_timeline = [(10usize, 100u64), (11, 200)].into();
         m.apply_snapshot(s);
-        // Tab 11 closes → its bind (u-b) and timeline entry are the stale ids.
-        let fx = m.apply_tabs(vec![tab(10, 0, "a", true)]);
-        assert!(
-            fx.contains(&Effect::PruneTabs {
-                stale_ids: vec![11]
-            }),
-            "a closed tab must prune EXACTLY the stale id, never the live set"
+        assert_eq!(
+            m.identity_effects(),
+            Vec::<Effect>::new(),
+            "all live: no prune"
         );
-        // RETRY (contract inverted, P2): the SAME live set, while the mirror
-        // still shows u-b bound to 11 (echo pending — e.g. the first prune was
-        // dropped because is_active_instance() was false pre-PaneUpdate), MUST
-        // re-emit. A set-change gate would wrongly stay silent here.
-        let fx = m.apply_tabs(vec![tab(10, 0, "a", true)]);
-        assert!(
-            fx.contains(&Effect::PruneTabs {
-                stale_ids: vec![11]
-            }),
-            "prune must retry while the stale entry persists in the mirror"
+
+        // Tab 11 closes ABOVE us. The TabUpdate leads, so the frames disagree.
+        m.apply_tabs(vec![tab(10, 0, "a", true)]);
+        assert_eq!(
+            m.identity_effects(),
+            Vec::<Effect>::new(),
+            "incoherent frames authorise nothing — the prune included"
         );
-        // The store's prune echoes back (u-b unbound, timeline trimmed): the
-        // SAME TabUpdate now derives an EMPTY stale set → detection self-limits.
+        // The resolving PaneUpdate is the retry. Without this the prune is
+        // lost outright: the next TabUpdate arrives when a tab is CREATED, and
+        // zellij reuses ids, so the dead id would be back in the live set and
+        // no longer read as stale — the dead agent's bind and timeline entry
+        // would be inherited by the new tab.
+        m.apply_panes(panes_at(&[(0, 100, 5)]));
+        assert_eq!(
+            m.identity_effects(),
+            vec![Effect::PruneTabs {
+                stale_ids: vec![11]
+            }],
+            "the frame that restores coherence must re-derive the prune"
+        );
+        // Still pending in the mirror → still emitted (detection-driven).
+        assert_eq!(
+            m.identity_effects(),
+            vec![Effect::PruneTabs {
+                stale_ids: vec![11]
+            }]
+        );
+        // The store's prune echoes back: an EMPTY stale set, so it self-limits.
         m.apply_snapshot(snap_t(2, &[(10, 100)]));
-        let fx = m.apply_tabs(vec![tab(10, 0, "a", true)]);
-        assert!(
-            fx.iter().all(|e| !matches!(e, Effect::PruneTabs { .. })),
-            "a clean store must cost no prune subprocess (self-limiting)"
+        assert_eq!(
+            m.identity_effects(),
+            Vec::<Effect>::new(),
+            "a clean store must cost no prune subprocess"
         );
-        // A plain focus-move on the clean store also stays silent.
-        let fx = m.apply_tabs(vec![tab(10, 0, "a", true), tab(12, 1, "c", false)]);
-        assert!(fx.iter().all(|e| !matches!(e, Effect::PruneTabs { .. })));
     }
 
     #[test]
     fn birth_and_steady_state_never_prune() {
-        // Detection self-limit (P2): silence comes from an EMPTY derived stale
-        // set, not a set-change gate. A fresh instance (no binds/timeline yet)
+        // Detection self-limit: silence comes from an EMPTY derived stale set,
+        // not a set-change gate. A fresh instance (no binds/timeline yet)
         // derives nothing stale at birth, and an all-live set derives nothing
         // stale on every focus-move — only genuinely-absent ids emit.
         let mut m = BarModel::default();
-        let fx = m.apply_tabs(vec![tab(10, 0, "a", true), tab(11, 1, "b", false)]);
-        assert!(fx.iter().all(|e| !matches!(e, Effect::PruneTabs { .. })));
+        m.set_own_pane(100);
+        m.apply_panes(panes_at(&[(0, 100, 5), (1, 101, 6)]));
+        m.apply_tabs(vec![tab(10, 0, "a", true), tab(11, 1, "b", false)]);
+        assert!(
+            m.identity_effects()
+                .iter()
+                .all(|e| !matches!(e, Effect::PruneTabs { .. }))
+        );
         let mut s = snap(1, vec![agent("u-b", Status::Working, Some(11))]);
         s.tab_timeline = [(10usize, 100u64), (11, 200)].into();
         m.apply_snapshot(s);
         // Focus moves (active flag flips) but every id is still live: no prune.
-        let fx = m.apply_tabs(vec![tab(10, 0, "a", false), tab(11, 1, "b", true)]);
-        assert!(fx.iter().all(|e| !matches!(e, Effect::PruneTabs { .. })));
+        m.apply_tabs(vec![tab(10, 0, "a", false), tab(11, 1, "b", true)]);
+        assert!(
+            m.identity_effects()
+                .iter()
+                .all(|e| !matches!(e, Effect::PruneTabs { .. }))
+        );
     }
 
     #[test]
@@ -4845,11 +5028,12 @@ mod tests {
             /// on every store push — `apply_bind` evicts the incumbent, so a
             /// real fight produces exactly this alternation of confirmations.
             u1_holds: bool,
-            /// The (uuid, own tab, seq) the last bind was emitted under, and
-            /// how many have been emitted under THAT triple. Property 9's
-            /// bookkeeping: the count may never exceed one.
-            last_emit: Option<(String, usize, u64)>,
-            emits_at_last: usize,
+            /// Every (uuid, own tab, seq) a bind has been emitted under.
+            /// Property 9 asserts this set never takes the same triple twice —
+            /// tracking only the MOST RECENT triple was weaker than the
+            /// property claimed, because two agents emitting in one settle
+            /// reset each other's counter.
+            emitted: BTreeSet<(String, usize, u64)>,
         }
 
         /// Tab id → its bar pane / its terminal pane. Stable across closes.
@@ -4882,8 +5066,7 @@ mod tests {
                     panes_frame: None,
                     seq: 0,
                     u1_holds: true,
-                    last_emit: None,
-                    emits_at_last: 0,
+                    emitted: BTreeSet::new(),
                 }
             }
 
@@ -4965,9 +5148,13 @@ mod tests {
                                 agent("u1", Status::Working, self.holder(true)),
                                 agent("u2", Status::Working, self.holder(false)),
                             ],
-                            // Seeded so the birth touch never fires: these two
-                            // properties are about binds.
-                            tab_timeline: (10..40).map(|t| (t, 100u64)).collect(),
+                            // Seeded wide so the birth touch is mostly out of
+                            // the way — these properties are about binds. A
+                            // long run can still create a tab id past the seed
+                            // and emit a Touch, which is harmless: only Bind is
+                            // inspected, and the fail-closed assert covers all
+                            // effects either way.
+                            tab_timeline: (0..256).map(|t| (t, 100u64)).collect(),
                         });
                         self.settle()?;
                     }
@@ -5003,14 +5190,8 @@ mod tests {
                     if let Effect::Bind { uuid, tab_id } = e {
                         // Property 9: one emission per (uuid, own tab, seq).
                         let here = (uuid.clone(), *tab_id, self.seq);
-                        if self.last_emit.as_ref() == Some(&here) {
-                            self.emits_at_last += 1;
-                        } else {
-                            self.last_emit = Some(here);
-                            self.emits_at_last = 1;
-                        }
                         prop_assert!(
-                            self.emits_at_last <= 1,
+                            self.emitted.insert(here),
                             "re-emitted a bind for {} → tab {} without the \
                              store advancing past seq {} — the debounce is \
                              not holding",

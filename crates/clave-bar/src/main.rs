@@ -51,6 +51,13 @@ impl State {
     /// target — focusing twice is idempotent, and the keybind MessagePlugin
     /// may reach instances in any order).
     fn run_effects(&mut self, effects: Vec<Effect>) {
+        // Nothing to gate. render() calls this every repaint with the width
+        // seek's usually-empty result, and both gates below build a pair of
+        // BTreeSets to test frame coherence — so without this the hottest path
+        // in the plugin pays for an election it never uses.
+        if effects.is_empty() {
+            return;
+        }
         // TWO gate strengths (#55). `confirmed` additionally requires the last
         // TabUpdate and the last PaneUpdate to describe the same tab set — it
         // gates the effects that retry or do lasting damage from the wrong
