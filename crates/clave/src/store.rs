@@ -874,6 +874,35 @@ mod tests {
     }
 
     #[test]
+    fn prune_pushes_when_only_a_bind_was_cleared() {
+        // A tab born and BOUND but never touched has no entry in the tab order
+        // at all. Pruning it changes exactly one thing — the bind — and that
+        // still has to reach the bar: the two change sources are independent,
+        // so the push gate must be an OR over them, not an AND.
+        //
+        // Caught by cargo-mutants (`|=` → `&=` survived): under the AND the
+        // store would clear the bind and stay silent, leaving every bar
+        // rendering the row as live until some unrelated write pushed.
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            let mut a = rec("u-A");
+            a.tab_id = Some(10); // bound…
+            s.agents.insert("u-A".into(), a);
+        })
+        .unwrap();
+        assert!(
+            read_store(&p).unwrap().tab_order.is_empty(),
+            "…but never touched, so it holds no ordinal"
+        );
+        let snap = apply_prune_tabs(&p, &[10])
+            .unwrap()
+            .expect("a cleared bind alone must still push");
+        assert!(snap.agents.iter().all(|a| a.tab_id.is_none()));
+        assert_eq!(read_store(&p).unwrap().agents["u-A"].tab_id, None);
+    }
+
+    #[test]
     fn prune_carry_is_idempotent_and_commutes() {
         // The #6/F3 order-safety property, extended to the new write: prunes are
         // fire-and-forget with no arrival-order guarantee, so a second prune of
