@@ -568,25 +568,44 @@ impl BarModel {
         !self.tab_order.contains_key(&tab_id) && self.birth_touched.insert(tab_id)
     }
 
-    /// §6.6 ordering key for a LIVE tab row: the STORE's tab order, nothing
-    /// else. Agent prompts reach it via the hook's bind-keyed stamp (Design B)
-    /// — a render-time last_interacted join here is exactly what diverged in
-    /// round 6 (each instance's register/manifest state differs).
+    /// §6.6 ordering key for a LIVE tab row (S1): the higher of the STORE's
+    /// ordinal for that tab and — when an agent occupies it — that agent's own
+    /// ordinal.
+    ///
+    /// A plain terminal tab has only the tab's ordinal, which is why the tab
+    /// map is still the primary source. Taking the max with the agent's is what
+    /// makes this the SAME rule as [`Self::dormant_ord`], and that identity is
+    /// load-bearing: a row must rank by the same number whether it is live or
+    /// dormant, or merely closing its tab would change its rank (R2). `clave
+    /// add` creates the tab BEFORE it writes the row, so the two ordinals
+    /// genuinely can arrive in either order — see
+    /// `a_rows_rank_does_not_change_when_it_goes_dormant` (Codex, PR #135).
+    ///
+    /// Both values ride the SAME seq-gated snapshot, so this is not the
+    /// round-6 hazard: that one was a render-time join against per-instance
+    /// register/manifest state, which differs between instances. This has one
+    /// source and cannot diverge.
     fn live_ord(&self, t: &TabMeta) -> u64 {
-        self.tab_order
+        let tab = self
+            .tab_order
             .get(&t.tab_id)
             .copied()
-            .unwrap_or(NO_COMMITMENT)
+            .unwrap_or(NO_COMMITMENT);
+        match self.agent_in_tab(t.tab_id) {
+            Some(a) => tab.max(a.commit_ord),
+            None => tab,
+        }
     }
 
-    /// §6.6 ordering key for a DORMANT row (S1). The agent's own ordinal, OR —
-    /// while the store has not yet pruned the tab it was bound to — that tab's
-    /// ordinal. The second leg is what holds the row's RANK (R2) on the FIRST
-    /// repaint, without waiting for the fire-and-forget `clave prune-tabs` echo.
-    /// Both legs come from the SAME seq-gated snapshot, so no instance can
-    /// compute a different value (the round-6 / C5-rd-5 divergence class needs
-    /// two independent sources; this has one). `is_dormant` guarantees no LIVE
-    /// tab holds `a.tab_id`, so a recycled id can never be read here.
+    /// §6.6 ordering key for a DORMANT row (S1) — the same rule as
+    /// [`Self::live_ord`], read from the other side: the agent's own ordinal,
+    /// OR, while the store has not yet pruned the tab it was bound to, that
+    /// tab's ordinal.
+    ///
+    /// That second leg is what holds the row's RANK on the FIRST repaint,
+    /// without waiting for the fire-and-forget `clave prune-tabs` echo.
+    /// `is_dormant` guarantees no LIVE tab holds `a.tab_id`, so a recycled id
+    /// can never be read here.
     fn dormant_ord(&self, a: &Agent) -> u64 {
         let carried = a
             .tab_id
@@ -3868,6 +3887,52 @@ mod tests {
     }
 
     #[test]
+    fn a_rows_rank_does_not_change_when_it_goes_dormant() {
+        // Codex review, PR #135. `clave add` creates the tab (step 6) BEFORE it
+        // writes the row (step 7), so the new tab's birth touch can mint its
+        // ordinal FIRST and the row's own ordinal comes out higher. If a live
+        // row keyed only on its tab while a dormant row keyed on its own
+        // ordinal, closing the tab would swap which of the two numbers ranks
+        // the row — and any commitment that landed in between would be
+        // overtaken on close. That is exactly the "unrelated tab jumped"
+        // symptom R2 forbids, reintroduced through a different door.
+        //
+        // The fix is one key for both classes: a row ranks by the HIGHER of its
+        // own ordinal and its tab's, live or dormant. Going dormant then cannot
+        // change the number.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "ours", true), tab(11, 1, "other", false)]);
+        let mut ours = agent("u-ours", Status::Idle, Some(10));
+        ours.commit_ord = 3; // add's write, minted LAST
+        let mut other = agent("u-other", Status::Idle, Some(11));
+        other.commit_ord = 2; // a prompt that landed in between
+        m.apply_snapshot(snap_full(
+            1,
+            vec![ours, other],
+            &[(10, 1), (11, 2)], // 1 = our birth touch, minted FIRST
+        ));
+        let before = keys(&m);
+        assert_eq!(
+            before,
+            vec![RowKey::Tab(10), RowKey::Tab(11)],
+            "our row ranks by its own ordinal 3, above the intervening prompt at 2"
+        );
+
+        // Close ours. The prune carries max(3, 1) = 3 — unchanged.
+        m.apply_tabs(vec![tab(11, 0, "other", true)]);
+        let mut dormant = agent("u-ours", Status::Idle, None);
+        dormant.commit_ord = 3;
+        let mut other = agent("u-other", Status::Idle, Some(11));
+        other.commit_ord = 2;
+        m.apply_snapshot(snap_full(2, vec![dormant, other], &[(11, 2)]));
+        assert_eq!(
+            keys(&m),
+            vec![RowKey::Dormant("u-ours".into()), RowKey::Tab(11)],
+            "going dormant must not change which number ranks the row"
+        );
+    }
+
+    #[test]
     fn close_does_not_reorder_neighbours() {
         // The S1 §1.2 regression test, end to end through the model.
         //
@@ -5086,6 +5151,13 @@ mod tests {
             fn prop_close_preserves_relative_order(
                 n in 2usize..=4,
                 tl_vals in prop::collection::vec(1u64..40, 4),
+                // Each agent's OWN ordinal, generated independently of its
+                // tab's. They diverge for real: `clave add` creates the tab
+                // before it writes the row, so the birth touch and the row's
+                // mint can arrive in either order (Codex, PR #135). Generating
+                // them together would have hidden that entirely — as the first
+                // version of this property did.
+                own_vals in prop::collection::vec(0u64..40, 4),
                 victim in 0usize..4,
                 pruned in prop::bool::ANY,
             ) {
@@ -5095,20 +5167,34 @@ mod tests {
                 // Distinct ordinals only — ties are the `0`/eviction residual
                 // covered by property 6, not this one.
                 let vals: Vec<u64> = tl_vals.iter().take(n).copied().collect();
-                let mut uniq = vals.clone();
+                let owns: Vec<u64> = own_vals.iter().take(n).copied().collect();
+                // A row's rank is the higher of its two ordinals. Ties between
+                // ROWS are the `0`/eviction residual covered by property 6, not
+                // this one, so only distinct effective ranks are considered.
+                let ranks: Vec<u64> = vals
+                    .iter()
+                    .zip(&owns)
+                    .map(|(t, o)| *t.max(o))
+                    .collect();
+                let mut uniq = ranks.clone();
                 uniq.sort_unstable();
                 uniq.dedup();
-                prop_assume!(uniq.len() == vals.len());
+                prop_assume!(uniq.len() == ranks.len());
 
                 let timeline: std::collections::BTreeMap<usize, u64> =
                     ids.iter().enumerate().map(|(i, &id)| (id, vals[i])).collect();
                 // Every tab hosts an agent, so every close produces a dormant
-                // row. `commit_ord` is 0 on purpose: the row has nothing of its
-                // own and rides entirely on the carry, which is the case that
-                // used to plunge to the bottom.
+                // row. Each agent carries its OWN ordinal, independent of its
+                // tab's — including the case where the row's is higher, which
+                // is what `clave add`'s tab-before-row sequencing produces.
                 let agents: Vec<Agent> = ids
                     .iter()
-                    .map(|&id| agent(&format!("u{id}"), Status::Idle, Some(id)))
+                    .enumerate()
+                    .map(|(i, &id)| {
+                        let mut a = agent(&format!("u{id}"), Status::Idle, Some(id));
+                        a.commit_ord = owns[i];
+                        a
+                    })
                     .collect();
 
                 let mut m = BarModel::default();
@@ -5130,6 +5216,18 @@ mod tests {
                     .map(|(k, _)| k)
                     .filter(|k| k != &RowKey::Tab(victim_id))
                     .collect();
+                // The rank the row holds while it is still LIVE. Comparing this
+                // against its dormant rank below is what makes the property see
+                // a live/dormant key mismatch at all — comparing only survivors
+                // cannot, because they are all still live and all still keyed
+                // the same way (Codex, PR #135).
+                let victim_tab = m
+                    .tabs
+                    .iter()
+                    .find(|t| t.tab_id == victim_id)
+                    .expect("victim tab")
+                    .clone();
+                let live_rank = m.live_ord(&victim_tab);
 
                 // The close. The tab leaves the tab list either way; the store
                 // echo may or may not have landed yet.
@@ -5148,7 +5246,10 @@ mod tests {
                         .map(|mut a| {
                             if a.tab_id == Some(victim_id) {
                                 a.tab_id = None;
-                                a.commit_ord = carried;
+                                // `max`, mirroring the store's carry — an
+                                // assignment here would model a demotion the
+                                // real prune refuses to perform.
+                                a.commit_ord = a.commit_ord.max(carried);
                             }
                             a
                         })
@@ -5183,8 +5284,18 @@ mod tests {
                     .expect("the closed tab's agent");
                 prop_assert_eq!(
                     m.dormant_ord(row),
-                    timeline[&victim_id],
-                    "the closed row lost its tab's rank (pruned={})", pruned
+                    ranks[victim],
+                    "the closed row's rank changed on close (pruned={})", pruned
+                );
+                // The same claim stated as the identity that actually matters:
+                // closing a tab must not change WHICH NUMBER ranks the row.
+                // This is segregation-proof — it is about the key, not the
+                // position — and it is the assertion that catches a live_ord
+                // and dormant_ord that disagree.
+                prop_assert_eq!(
+                    live_rank,
+                    m.dormant_ord(row),
+                    "live and dormant rank the same row differently (pruned={})", pruned
                 );
             }
 

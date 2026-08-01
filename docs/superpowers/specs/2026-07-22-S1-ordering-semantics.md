@@ -255,6 +255,21 @@ tab_order[tab_id])`, then the entry is removed as today. This is what fixes the
 aggravator in §1.2 — a touch-only tab's ordinal lands on the agent instead of
 being thrown away.
 
+**One key for both row classes (corrected 2026-08-01, Codex on PR #135).** A
+row ranks by `max(its own ordinal, its tab's ordinal)` whether it is live or
+dormant. The original design gave live rows the tab's ordinal *only*, which is
+wrong for a reason the spec did not anticipate: **`clave add` creates the tab
+before it writes the row** (`add.rs` step 6 precedes step 7), so the new tab's
+birth touch and the row's own mint can arrive in either order. When the row's
+mint lands second it is the higher of the two, and a live-row rule that ignored
+it would rank the row lower than its dormant rule would — so merely closing the
+tab would change which number ranks the row, and any commitment that landed in
+between would be overtaken on close. That is the §1.2 symptom coming back
+through a different door. Making the two rules identical removes the class:
+going dormant cannot change a row's rank if both classes compute it the same
+way. A plain terminal tab has no agent and so still ranks on the tab's ordinal
+alone.
+
 **Render-side (immediate).** The bar computes a dormant row's ordinal as
 `max(agent.commit_ord, tab_order[agent.tab_id])`. Between the tab vanishing from
 `TabUpdate` and the prune's snapshot echo landing, the bar still holds both
