@@ -144,7 +144,9 @@ pub const RESET: &str = "\u{1b}[0m";
 
 const BASE: Rgb = Rgb(0x1F, 0x1F, 0x28); // sumiInk3 — the bar background
 const SEL_BG: Rgb = Rgb(0x2D, 0x4F, 0x67); // waveBlue2 — the selected row
-const RULE_INK: Rgb = Rgb(0xDC, 0xD7, 0xBA); // fujiWhite — rule and summary
+/// fujiWhite — kanagawa's default foreground. Inks the rule, the summary, and
+/// the dormant glyph, which was sumiInk4 and all but invisible against `BASE`.
+const DEFAULT_INK: Rgb = Rgb(0xDC, 0xD7, 0xBA);
 /// sumiInk0 — text ON a title chip. Public because the preview draws the same
 /// chip in its palette swatches (lock §4).
 pub const CHIP_INK: Rgb = Rgb(0x16, 0x16, 0x1D);
@@ -226,7 +228,9 @@ impl RowStatus {
             RowStatus::Done => ('\u{25cf}', Rgb(0x98, 0xBB, 0x6C)),     // springGreen
             RowStatus::Idle => ('\u{25cf}', UNTINTED),
             RowStatus::Failed => ('\u{2716}', Rgb(0xE8, 0x24, 0x24)), // samuraiRed
-            RowStatus::Dormant => ('\u{25cc}', UNTINTED),
+            // Hollow, not dim: sumiInk4 on the sumiInk3 bar was near-invisible
+            // (#123). The SHAPE carries "not running"; the ink stays legible.
+            RowStatus::Dormant => ('\u{25cc}', DEFAULT_INK),
             RowStatus::Opening => ('\u{21bb}', Rgb(0xE6, 0xC3, 0x84)), // carpYellow
             RowStatus::Stale => ('\u{2717}', Rgb(0xE8, 0x24, 0x24)),   // samuraiRed
         }
@@ -641,7 +645,7 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
             // fades by 0), which silently painted every summary its repo colour
             // until the moment a row was selected.
             if !row.selected {
-                out.push_str(&ink(RULE_INK));
+                out.push_str(&ink(DEFAULT_INK));
             }
             out.push_str(&clamp(summary, summary_w));
             out.push_str(&o);
@@ -666,7 +670,7 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
 fn push_rule(out: &mut String, o: &str, ink: &impl Fn(Rgb) -> String) {
     out.push_str(o);
     out.push(' ');
-    out.push_str(&ink(RULE_INK));
+    out.push_str(&ink(DEFAULT_INK));
     out.push(RULE);
     out.push_str(o);
     out.push(' ');
@@ -1275,6 +1279,7 @@ mod tests {
         let ronin_yellow = Rgb(0xFF, 0x9E, 0x3B);
         let spring_green = Rgb(0x98, 0xBB, 0x6C);
         let sumi_ink4 = Rgb(0x54, 0x54, 0x6D);
+        let fuji_white = Rgb(0xDC, 0xD7, 0xBA);
         let samurai_red = Rgb(0xE8, 0x24, 0x24);
         let carp_yellow = Rgb(0xE6, 0xC3, 0x84);
         let table = [
@@ -1283,7 +1288,7 @@ mod tests {
             (RowStatus::Done, '\u{25cf}', spring_green),
             (RowStatus::Idle, '\u{25cf}', sumi_ink4),
             (RowStatus::Failed, '\u{2716}', samurai_red), // HEAVY multiplication x
-            (RowStatus::Dormant, '\u{25cc}', sumi_ink4),
+            (RowStatus::Dormant, '\u{25cc}', fuji_white),
             (RowStatus::Opening, '\u{21bb}', carp_yellow),
             (RowStatus::Stale, '\u{2717}', samurai_red), // BALLOT x — a flag, not a Status
         ];
@@ -1314,7 +1319,7 @@ mod tests {
         // Unfaded fujiWhite: nothing is selected, so the fade is 0.
         let (before, after) = line.split_once("summary text").expect("the summary");
         assert!(
-            before.ends_with(&RULE_INK.fg()),
+            before.ends_with(&DEFAULT_INK.fg()),
             "the summary must be set to fujiWhite, not left on the repo ink: {before:?}"
         );
         assert!(!after.is_empty());
@@ -1327,7 +1332,7 @@ mod tests {
         };
         let line = &render_rows(&[selected], DESIGN_COLS, Widths::EXPANDED)[0];
         let (before, _) = line.split_once("summary text").expect("the summary");
-        assert!(!before.ends_with(&RULE_INK.fg()));
+        assert!(!before.ends_with(&DEFAULT_INK.fg()));
         assert!(
             before.contains(&PALETTE[0].0.fg()),
             "the repo ink carries over"
