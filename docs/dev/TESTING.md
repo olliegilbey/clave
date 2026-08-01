@@ -635,9 +635,11 @@ observability, you do not drive the terminal.**
 
 There is a hard division of labor, and it is not negotiable:
 
-- **The human drives all live input.** Every keypress, every session launch and
-  kill, every visual observation — the human. They are the only one who can see
-  the screen and the only one who should touch it.
+- **The human owns his own session, and owns every visual observation.** Every
+   keypress into the daily fleet, every session launch and kill (including
+   `clave-test`'s), and every "does this look right" — his. He is the only one
+   who can see the screen. Nothing below widens this: the agent's licence is
+   scoped to the sandbox, and the sandbox has no screen worth trusting.
 - **The agent drives the SANDBOX and never touches the live session.** Against
   `clave-test`, an agent may run `zellij action` freely — open tabs, close tabs,
   list panes, dump layout. Against the maintainer's session it may run nothing
@@ -668,10 +670,22 @@ Each step exists because skipping it produces a confident, wrong result.
    the *stable* binary and every CLI-side assertion silently measures the wrong
    build.
 2. **The human launches.** The only step in the loop that is his.
-3. **Prove which build you are measuring.** Build with `CLAVE_BUILD_TAG` and
-   grep the zellij log for `clave-bar: loaded v… build=<tag>`. If your own tag
-   is not there, stop — everything below is measuring someone else's binary,
-   and it will look like a pass.
+3. **Prove which build you are measuring.** Read the **last** loaded lines and
+   check the tag on them:
+
+   ```bash
+   grep 'clave-bar: loaded' "$TMPDIR/zellij-$(id -u)/zellij-log/zellij.log" | tail -5
+   ```
+
+   Do **not** `grep -c` for your tag. `just sandbox` derives the tag from `git
+   rev-parse --short HEAD` (`scripts/sandbox-setup.sh:89`), the zellij log is
+   shared across sessions and never truncated, and a re-run at the same HEAD —
+   which is exactly what testing an uncommitted fix looks like — leaves an
+   older line carrying the same tag. A presence check then passes on a stale
+   entry while the plugin you just staged failed to load. Match on the tail,
+   after launch, or override `CLAVE_BUILD_TAG` with something unique per run.
+   If the newest lines are not yours, stop: everything below is measuring
+   someone else's binary and will look like a pass.
 4. **Baseline before provoking.** Capture the store and the pane truth and join
    them *before* touching anything. Without a baseline a clean reading proves
    nothing, because you cannot tell "fixed" from "never fired".
@@ -684,8 +698,11 @@ Each step exists because skipping it produces a confident, wrong result.
    idle log is a failure.
 7. **Force what the script missed.** Scripted rounds drift into the easy case —
    five tab closes in a row never recycled a tab id, because zellij hands out
-   `max+1`. Close the **highest** tab to force reuse, which is where stale
-   timeline entries actually bite.
+   `max+1`. Reuse takes **two** steps and the close is only the first: close the
+   **highest** tab, then **create one**, and join again. `max+1` over the
+   surviving tabs hands the new tab the id that just died — which is where a
+   stale timeline entry actually bites, because the recycled tab inherits the
+   dead row's stamp. Closing alone proves nothing about reuse.
 8. **Report what you did not exercise.** A race that did not reproduce is not a
    race that cannot happen; say so in those words.
 
