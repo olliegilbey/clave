@@ -77,16 +77,13 @@ pub enum Effect {
     /// resize_pane_with_id(Increase→Right, own) — C6 seek / overshoot
     /// recovery.
     GrowSelf,
-    /// set_timeout(DWELL_SECS) on the executor — §6.6 dormant dwell. `gen`
-    /// stamps the landing; expiry acts only if the cursor generation still
-    /// matches (walk-through safety).
-    ArmDwell { r#gen: u64 },
     /// set_timeout(PEEK_SINK_SECS) + pending_peeks bump — a dormant-row nav
     /// landing on a collapsed bar peeks like live nav does (no visited pipe
     /// exists for it, so the model asks explicitly).
     ArmPeek,
-    /// run_command(["clave","open",uuid]) — §6.3. Fired by dwell expiry and
-    /// explicit picks; the model has already marked the uuid in-flight (↻).
+    /// run_command(["clave","open",uuid]) — §6.3. Fired ONLY by the Alt+Enter
+    /// commit (#100 dwell-commit: selection and launch are separate acts);
+    /// the model has already marked the uuid in-flight (↻).
     OpenAgent { uuid: String },
     /// run_command(["clave","collapse",bool]) — issue #5 durability. Emitted
     /// by toggle() (the write we owe the store) and by apply_snapshot's
@@ -96,44 +93,10 @@ pub enum Effect {
     PersistCollapse { collapsed: bool },
 }
 
-/// §6.6 C8: user-tuned (approved 2026-07-17) — do not normalize with the
-/// 0.9s peek sink.
-pub const DWELL_SECS: f64 = 0.4;
+/// The ONLY timer the bar arms (#100 deleted the 0.4s dormant dwell, so
+/// Event::Timer carries peek sinks alone — no classification needed until
+/// #92's read timer joins the channel).
 pub const PEEK_SINK_SECS: f64 = 0.9;
-/// Event::Timer(f64) carries ELAPSED sleep seconds (server-side, v0.44.3
-/// zellij_exports.rs:2462) ≈ the requested duration — 0.4 vs 0.9 splits
-/// cleanly at 0.65.
-pub const TIMER_KIND_CUTOFF_SECS: f64 = 0.65;
-
-/// The two timer kinds sharing zellij's single Event::Timer channel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TimerKind {
-    Dwell,
-    Peek,
-}
-
-/// Which timer kind does an expiry belong to? Normally split by elapsed
-/// (dwell 0.4 vs peek 0.9 — Timer carries the server-side elapsed sleep).
-/// HARDENING: a dwell timer delayed past the cutoff would otherwise never
-/// pop its gen and the FIFO would be off-by-one for the life of the
-/// instance (every later dwell pops the PREVIOUS landing's gen — a
-/// latching failure). When no peeks are pending but dwells are, a
-/// long-elapsed expiry can only be a late dwell — classify it as one.
-/// The reverse misclassification is impossible: a 0.9s sleep never
-/// reports < 0.9 elapsed. The collapsed-walk case heals the same way: a
-/// dormant landing arms BOTH a dwell and a peek, so an orphaned peek timer
-/// is reclassified as the late dwell and the queue rebalances — delayed
-/// opens are deferred, never lost.
-pub fn classify_timer(elapsed: f64, pending_dwells: usize, pending_peeks: u32) -> TimerKind {
-    // Short elapsed is always a dwell; a long one is a dwell ONLY when it
-    // can't be a peek (none pending) yet a dwell is owed — a late dwell.
-    let late_dwell = pending_peeks == 0 && pending_dwells > 0;
-    if elapsed < TIMER_KIND_CUTOFF_SECS || late_dwell {
-        TimerKind::Dwell
-    } else {
-        TimerKind::Peek
-    }
-}
 
 /// Seek steps allowed per toggle (each is a real zellij layout action):
 /// enough for the widest transition at ~5%-of-viewport per step, small
@@ -400,9 +363,12 @@ pub struct BarModel {
     /// §6.6 C8 virtual selection cursor: Some(uuid) while nav sits on a
     /// dormant row (there is no tab to focus). Nav steps continue from it;
     /// it resolves back to the focused-tab row on any live-row landing.
+    /// Alt+Enter commits it (#100) — selection alone never launches.
     cursor: Option<String>,
-    /// Bumped on EVERY nav landing; ArmDwell carries it so a late timer for
-    /// an abandoned landing is provably stale.
+    /// Bumped on EVERY landing so a late timer for an abandoned landing is
+    /// provably stale. Its consumer (the dwell) died with #100; kept because
+    /// #92's read timer takes over the same invalidation role.
+    #[allow(dead_code)]
     cursor_gen: u64,
 }
 
@@ -453,7 +419,7 @@ impl BarModel {
         self.current_tab = Some(tab_id);
         self.organic_pending = false; // truth arrived; leftover flags are poison
         // Any real tab visit is live-focus truth, so the §6.6 selection must
-        // resolve back to the focused tab. Without this a dwell-open that
+        // resolve back to the focused tab. Without this a committed open that
         // FAILED (row goes ✗ stale but stays dormant, cursor pinned to it)
         // would keep the selection highlight — and suppress the real active
         // tab — through a NATIVE switch (Alt+o / zellij binds) that carries
@@ -560,10 +526,11 @@ impl BarModel {
         out
     }
 
-    /// Explicit-open path (click / Alt+N / dwell expiry): mark in-flight and
-    /// emit the run. The `opening` guard is double-fire protection #1
-    /// (clave open's liveness no-op is #2). Stale rows may retry — the user
-    /// might have restored the dir.
+    /// The commit path (Alt+Enter, #100): mark in-flight and emit the run.
+    /// The `opening` guard is double-fire protection #1 (clave open's
+    /// liveness no-op is #2). Stale rows may retry — the user might have
+    /// restored the dir (the ✗ gutter offers no launch, but an explicit
+    /// commit is the one retry path a healed cwd has).
     fn open_effects(&mut self, uuid: &str) -> Vec<Effect> {
         if self.opening.contains(uuid) {
             return Vec::new();
@@ -572,26 +539,6 @@ impl BarModel {
         vec![Effect::OpenAgent {
             uuid: uuid.to_string(),
         }]
-    }
-
-    /// The dwell timer for landing `gen` expired (main.rs). Opens iff the
-    /// cursor still sits on that same landing and the row is still dormant.
-    pub fn dwell_expired(&mut self, r#gen: u64) -> Vec<Effect> {
-        if r#gen != self.cursor_gen {
-            return Vec::new(); // cursor moved on — walk-through, not intent
-        }
-        let Some(uuid) = self.cursor.clone() else {
-            return Vec::new();
-        };
-        let still_dormant = self
-            .agents
-            .iter()
-            .find(|a| a.uuid == uuid)
-            .is_some_and(|a| self.is_dormant(a));
-        if !still_dormant {
-            return Vec::new();
-        }
-        self.open_effects(&uuid)
     }
 
     /// §6.6 C8 dormancy: no CURRENT tab carries the bind, and no REGISTERED
@@ -843,19 +790,31 @@ impl BarModel {
         self.prune_opening();
     }
 
-    /// The row content for a live-or-dormant agent (lock §2). `dormant` is the
-    /// caller's own classification rather than a re-derivation, because the two
-    /// loops below already know which list they are walking.
-    fn agent_content(&self, a: &Agent, dormant: bool, inks: &ProvisionalInks) -> RowContent {
+    /// The row content for a live-or-dormant agent (lock §2). `dormant` and
+    /// `selected` are the caller's own classification rather than a
+    /// re-derivation, because the two loops below already know which list
+    /// they are walking and where the cursor sits.
+    fn agent_content(
+        &self,
+        a: &Agent,
+        dormant: bool,
+        selected: bool,
+        inks: &ProvisionalInks,
+    ) -> RowContent {
         // Ordered, and the order is the behaviour: `stale` and `opening` are
         // model states that OUTRANK the store's `Status` (a stale row's status
         // is whatever it was when the cwd vanished), and the local unread
-        // override is the last thing between `Done` and the palette. Carried
-        // over unchanged from the (char, u8) glyph logic this replaces.
+        // override is the last thing between `Done` and the palette. The
+        // #100 tier — stale ✗ > opening ↻ > selected-dormant ⏎ > status —
+        // is self-truthful: a stale row shows ✗ and never offers a launch
+        // that would fail, and committing turns ⏎ into the ↻ already worn
+        // while a session spins up.
         let status = if a.stale {
             RowStatus::Stale
         } else if self.opening.contains(&a.uuid) {
             RowStatus::Opening
+        } else if dormant && selected {
+            RowStatus::DormantSelected
         } else if dormant {
             RowStatus::Dormant
         } else if a.status == Status::Done && self.read_locally.contains(&a.uuid) {
@@ -978,7 +937,7 @@ impl BarModel {
             // store — the tab name is clave's own rename echo and would be a
             // second, drifting copy of the label.
             let content = match self.agent_in_tab(t.tab_id) {
-                Some(a) => self.agent_content(a, false, &inks),
+                Some(a) => self.agent_content(a, false, false, &inks),
                 None => RowContent::Terminal {
                     name: t.name.clone(),
                 },
@@ -1008,7 +967,12 @@ impl BarModel {
                 (
                     RowKey::Dormant(a.uuid.clone()),
                     Row {
-                        content: self.agent_content(a, true, &inks),
+                        content: self.agent_content(
+                            a,
+                            true,
+                            selected_dormant == Some(a.uuid.as_str()),
+                            &inks,
+                        ),
                         selected: selected_dormant == Some(a.uuid.as_str()),
                     },
                 ),
@@ -1021,12 +985,16 @@ impl BarModel {
     /// Mouse click on rendered line N (0-based): jump to that row's tab.
     /// A click reaches exactly ONE instance (the visible bar), so the jump
     /// broadcasts a beacon for the other instances' executor election.
-    /// Focus is not a commitment — clicks never reorder. A click on a dormant
-    /// row opens it immediately (§6.6 — no dwell for explicit picks).
+    /// Focus is not a commitment — clicks never reorder. A click on a
+    /// dormant row SELECTS it (#100): with the mouse as the main path to
+    /// dormant rows past Alt+9, a click that launched would move the
+    /// accidental-spawn problem into the mouse channel — only Alt+Enter
+    /// wakes a dormant row.
     pub fn click(&mut self, line: usize) -> Vec<Effect> {
         let Some((key, _)) = self.rows().get(line).cloned() else {
             return Vec::new();
         };
+        self.cursor_gen += 1; // a click is a landing like any other
         match key {
             RowKey::Tab(tab_id) => {
                 let Some(position) = self
@@ -1037,14 +1005,16 @@ impl BarModel {
                 else {
                     return Vec::new();
                 };
-                self.beacon(tab_id);
+                self.beacon(tab_id); // clears any dormant selection too
                 vec![
                     Effect::SwitchTab { position },
                     Effect::AnnounceVisit { tab_id },
                 ]
             }
-            // Explicit pick: open immediately (§6.6 — no dwell for clicks).
-            RowKey::Dormant(uuid) => self.open_effects(&uuid),
+            RowKey::Dormant(uuid) => {
+                self.cursor = Some(uuid);
+                Vec::new()
+            }
         }
     }
 
@@ -1054,8 +1024,8 @@ impl BarModel {
         self.current_tab
     }
 
-    /// clave-nav payloads: {"row":N} | {"uuid":"…"}. (dir walks are native
-    /// clave-nav payloads: {"dir":"next"|"prev"} | {"row":N} | {"uuid":"…"}.
+    /// clave-nav payloads: {"dir":"next"|"prev"} | {"row":N} | {"uuid":"…"}
+    /// | {"commit":true} (Alt+Enter, #100).
     /// uuid → FocusPane on EVERY instance: the pane id is broadcast truth
     /// (clave-register), so duplicates target the same pane.
     /// row (1-based, Alt+1..9) and dir both act on DISPLAY rows and run on
@@ -1078,6 +1048,25 @@ impl BarModel {
         let Some(own) = executor_own_tab else {
             return Vec::new();
         };
+        // Alt+Enter (#100): commit the dormant selection — the ONLY thing
+        // that launches a dormant row. Executor-gated like row/dir (the
+        // cursor is executor-local state), a no-op unless a dormant row is
+        // selected. Not a landing: the selection is being spent, not moved,
+        // so cursor_gen holds.
+        if v.get("commit").and_then(|c| c.as_bool()) == Some(true) {
+            let Some(uuid) = self.cursor.clone() else {
+                return Vec::new();
+            };
+            let still_dormant = self
+                .agents
+                .iter()
+                .find(|a| a.uuid == uuid)
+                .is_some_and(|a| self.is_dormant(a));
+            if !still_dormant {
+                return Vec::new();
+            }
+            return self.open_effects(&uuid);
+        }
         let rows = self.rows();
         let line = if let Some(n) = v.get("row").and_then(|n| n.as_u64()) {
             (n as usize).checked_sub(1) // 1-based → display line
@@ -1105,7 +1094,6 @@ impl BarModel {
         } else {
             None
         };
-        let is_dir_walk = v.get("dir").is_some();
         let Some((key, _)) = line.and_then(|l| rows.get(l).cloned()) else {
             return Vec::new();
         };
@@ -1128,17 +1116,16 @@ impl BarModel {
                 ]
             }
             RowKey::Dormant(uuid) => {
-                if !is_dir_walk {
-                    // Alt+N explicit pick: open immediately (§6.6).
-                    return self.open_effects(&uuid);
-                }
+                // #100 dwell-commit: EVERY dormant landing — dir walk and
+                // Alt+N alike — selects and stops. The ⏎ affordance renders
+                // immediately; only Alt+Enter launches. (Alt+N used to open
+                // immediately; that just moved the accidental-spawn problem
+                // around, so explicit picks demote to selection too.)
                 self.cursor = Some(uuid);
-                let mut fx = vec![Effect::ArmDwell {
-                    r#gen: self.cursor_gen,
-                }];
-                // A collapsed bar peeks while walking dormant rows too — live
-                // nav peeks via the visited pipe; there is no pipe here, so
-                // arm locally on the executor (the one visible bar).
+                let mut fx = Vec::new();
+                // A collapsed bar peeks while sitting on dormant rows too —
+                // live nav peeks via the visited pipe; there is no pipe here,
+                // so arm locally on the executor (the one visible bar).
                 if self.collapsed {
                     self.peeking = true;
                     self.arm_seek();
@@ -2978,9 +2965,10 @@ mod tests {
     }
 
     #[test]
-    fn nav_onto_dormant_row_arms_dwell_not_open() {
-        // §6.6 C8: stepping onto a dormant row moves a virtual cursor and arms
-        // a 0.4s dwell — it must NOT switch tabs, announce, or open.
+    fn nav_onto_dormant_row_selects_without_opening() {
+        // #100 dwell-commit: stepping onto a dormant row moves the virtual
+        // cursor and STOPS — no timer, no open, no tab switch. The cursor is
+        // the walk position, so the next step continues from it.
         let mut m = BarModel::default();
         m.apply_tabs(vec![tab(1, 0, "live", true)]);
         let mut a = agent("u-d", Status::Idle, None);
@@ -2993,17 +2981,17 @@ mod tests {
         });
         m.beacon(1);
         let fx = m.nav("{\"dir\":\"next\"}", Some(1)); // from live row 1, wrap → row 0 (dormant)
-        assert_eq!(fx, vec![Effect::ArmDwell { r#gen: 1 }]);
+        assert!(fx.is_empty(), "a dormant landing is pure selection: {fx:?}");
+        assert!(selected(&m)[0], "the dormant row holds the selection");
         // Cursor moved; a second step continues FROM the cursor, back to live.
         let fx = m.nav("{\"dir\":\"next\"}", Some(1));
         assert!(fx.contains(&Effect::SwitchTab { position: 0 }));
     }
 
     #[test]
-    fn dwell_expiry_opens_only_if_cursor_still_there() {
-        // Walk-through safety: the gen stamps each landing; a stale gen (the
-        // cursor moved on) must be a no-op — this is what makes walking the
-        // unified list safe.
+    fn commit_opens_the_selected_dormant_row_exactly_once() {
+        // #100: Alt+Enter spends the selection — one open, marked ↻; a
+        // repeat commit while in flight must not double-fire.
         let mut m = BarModel::default();
         m.apply_tabs(vec![tab(1, 0, "live", true)]);
         let mut a = agent("u-d", Status::Idle, None);
@@ -3015,29 +3003,22 @@ mod tests {
             tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64)]),
         });
         m.beacon(1);
-        let fx = m.nav("{\"dir\":\"next\"}", Some(1));
-        let Effect::ArmDwell { r#gen } = fx[0] else {
-            panic!()
-        };
-        // Cursor moved away before expiry → stale gen, no open.
-        m.nav("{\"dir\":\"next\"}", Some(1));
-        assert!(m.dwell_expired(r#gen).is_empty());
-        // Land again and let it expire in place → exactly one open, marked ↻.
-        let fx = m.nav("{\"dir\":\"prev\"}", Some(1)); // back to dormant row 0
-        let Effect::ArmDwell { r#gen } = fx[0] else {
-            panic!()
-        };
+        m.nav("{\"dir\":\"next\"}", Some(1)); // select the dormant row
         assert_eq!(
-            m.dwell_expired(r#gen),
+            m.nav("{\"commit\":true}", Some(1)),
             vec![Effect::OpenAgent { uuid: "u-d".into() }]
         );
-        // In flight now: a repeat expiry (or landing) must not double-fire.
-        assert!(m.dwell_expired(r#gen).is_empty());
+        assert!(
+            m.nav("{\"commit\":true}", Some(1)).is_empty(),
+            "in-flight open must not double-fire"
+        );
     }
 
     #[test]
-    fn explicit_picks_open_immediately() {
-        // Click and Alt+N skip the dwell — explicit intent is unambiguous.
+    fn commit_without_a_dormant_selection_is_a_noop() {
+        // The bind is global; the model is the gate. No cursor → nothing to
+        // wake. Non-executor instances (no fresh tab set) also no-op — their
+        // cursor is never set, and the gate returns before any open.
         let mut m = BarModel::default();
         m.apply_tabs(vec![tab(1, 0, "live", true)]);
         let mut a = agent("u-d", Status::Idle, None);
@@ -3048,10 +3029,36 @@ mod tests {
             agents: vec![a],
             tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64)]),
         });
-        assert_eq!(
-            m.click(0), // dormant row is line 0
-            vec![Effect::OpenAgent { uuid: "u-d".into() }]
+        m.beacon(1);
+        assert!(
+            m.nav("{\"commit\":true}", Some(1)).is_empty(),
+            "no selection"
         );
+        m.nav("{\"dir\":\"next\"}", Some(1)); // select the dormant row
+        assert!(
+            m.nav("{\"commit\":true}", None).is_empty(),
+            "non-executor never commits"
+        );
+    }
+
+    #[test]
+    fn explicit_picks_select_without_opening() {
+        // #100 reverses the original proposal: click and Alt+N on a dormant
+        // row SELECT it. The mouse is the main path to dormant rows past
+        // Alt+9, so a click that launched would just move the accidental
+        // spawn from the keyboard channel into the mouse channel.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(1, 0, "live", true)]);
+        let mut a = agent("u-d", Status::Idle, None);
+        a.last_interacted = 999;
+        m.apply_snapshot(AgentSnapshot {
+            collapsed: false,
+            seq: 1,
+            agents: vec![a],
+            tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64)]),
+        });
+        assert!(m.click(0).is_empty(), "click selects, never opens"); // dormant row is line 0
+        assert!(selected(&m)[0], "clicked dormant row holds the selection");
         // Alt+1 (row payload) on a dormant row — new model, fresh state:
         let mut m = BarModel::default();
         m.apply_tabs(vec![tab(1, 0, "live", true)]);
@@ -3064,10 +3071,44 @@ mod tests {
             tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64)]),
         });
         m.beacon(1);
+        assert!(
+            m.nav("{\"row\":1}", Some(1)).is_empty(),
+            "Alt+N selects too"
+        );
+        assert!(selected(&m)[0]);
+        // A commit after either pick launches — selection and launch are two
+        // separate acts on every input path.
         assert_eq!(
-            m.nav("{\"row\":1}", Some(1)),
+            m.nav("{\"commit\":true}", Some(1)),
             vec![Effect::OpenAgent { uuid: "u-d".into() }]
         );
+    }
+
+    #[test]
+    fn click_on_a_live_tab_releases_the_dormant_selection() {
+        // Selection follows every input path: picking a live row (mouse or
+        // nav) resolves the highlight back to focus truth.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(1, 0, "live", true)]);
+        let mut a = agent("u-d", Status::Idle, None);
+        a.last_interacted = 999; // dormant sorts FIRST; live is line 1
+        m.apply_snapshot(AgentSnapshot {
+            collapsed: false,
+            seq: 1,
+            agents: vec![a],
+            tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64)]),
+        });
+        m.click(0); // select the dormant row
+        assert!(selected(&m)[0]);
+        m.click(1); // pick the live tab
+        assert_eq!(
+            selected(&m),
+            vec![false, true],
+            "live pick releases the dormant selection"
+        );
+        // The abandoned selection must not be committable.
+        m.beacon(1);
+        assert!(m.nav("{\"commit\":true}", Some(1)).is_empty());
     }
 
     #[test]
@@ -3091,8 +3132,8 @@ mod tests {
         });
         m.beacon(1);
         let fx = m.nav("{\"dir\":\"next\"}", Some(1));
-        assert!(fx.contains(&Effect::ArmPeek));
-        assert!(fx.iter().any(|e| matches!(e, Effect::ArmDwell { .. })));
+        // The peek is the landing's ONLY effect — the dwell died with #100.
+        assert_eq!(fx, vec![Effect::ArmPeek]);
     }
 
     #[test]
@@ -3200,29 +3241,12 @@ mod tests {
     }
 
     #[test]
-    fn classify_timer_splits_by_elapsed_and_reclassifies_late_dwells() {
-        // Normal split both ways.
-        assert_eq!(classify_timer(DWELL_SECS, 1, 0), TimerKind::Dwell);
-        assert_eq!(classify_timer(PEEK_SINK_SECS, 0, 1), TimerKind::Peek);
-        // HARDENING: a dwell delayed past the cutoff with NO peeks pending is
-        // still a dwell — else its gen never pops and the FIFO latches
-        // off-by-one for the life of the instance.
-        assert_eq!(classify_timer(0.7, 2, 0), TimerKind::Dwell);
-        // A late expiry WITH peeks pending stays Peek — a 0.9s sleep never
-        // reports < 0.9, so this can't be a mis-delayed dwell.
-        assert_eq!(classify_timer(0.7, 1, 1), TimerKind::Peek);
-        // Nothing pending, long elapsed → Peek (default; the pop_front guard
-        // no-ops harmlessly).
-        assert_eq!(classify_timer(0.7, 0, 0), TimerKind::Peek);
-    }
-
-    #[test]
     fn native_switch_beacon_clears_a_pinned_dormant_cursor() {
-        // Edge (Fix-1 heal): a dwell-open FAILS — the row stays dormant with
-        // the cursor pinned to it. A NATIVE tab switch (Alt+o / zellij binds)
-        // carries no clave-nav, only a visited-pipe beacon. That beacon must
-        // resolve the selection back to the focused tab, else the ✗ row keeps
-        // the highlight and the real active tab stays suppressed.
+        // Edge (Fix-1 heal): a committed open FAILS — the row stays dormant
+        // with the cursor pinned to it. A NATIVE tab switch (Alt+o / zellij
+        // binds) carries no clave-nav, only a visited-pipe beacon. That
+        // beacon must resolve the selection back to the focused tab, else the
+        // ✗ row keeps the highlight and the real active tab stays suppressed.
         let mut m = BarModel::default();
         m.apply_tabs(vec![tab(1, 0, "live", false), tab(2, 1, "other", true)]);
         let mut a = agent("u-d", Status::Idle, None);
@@ -3235,9 +3259,7 @@ mod tests {
         });
         m.beacon(1);
         let fx = m.nav("{\"dir\":\"prev\"}", Some(1)); // land on the dormant row
-        let Effect::ArmDwell { r#gen } = fx[0] else {
-            panic!()
-        };
+        assert!(fx.is_empty(), "the landing is pure selection");
         assert!(selected(&m)[0], "dormant selected before the native switch");
         // Native switch to tab 2 arrives as a visited-pipe beacon (no nav).
         m.beacon(2);
@@ -3249,76 +3271,47 @@ mod tests {
             .map(|(k, _)| k.clone())
             .collect();
         assert_eq!(active, vec![RowKey::Tab(2)], "focused tab reclaims it");
-        // The now-orphaned dwell must no-op (cursor cleared).
-        assert!(m.dwell_expired(r#gen).is_empty());
+        // The abandoned selection must not be committable.
+        assert!(m.nav("{\"commit\":true}", Some(2)).is_empty());
     }
 
     #[test]
-    fn late_dwell_with_sibling_peek_pending_defers_never_drops_the_open() {
-        // §6.6 collapsed-walk heal (model.rs ~86–107): a dormant landing on a
-        // collapsed bar arms BOTH a 0.4s dwell (gen) and a 0.9s peek from ONE
-        // landing. If the dwell's server-measured elapsed creeps past the
-        // 0.65 cutoff while its sibling peek is still pending, the FIRST
-        // expiry MUST classify as Peek (a 0.9s sleep can never report < 0.9,
-        // so late_dwell reclassification is DISABLED while peeks are pending)
-        // — the owed dwell is DEFERRED, not consumed. The peek's own later
-        // expiry, now with no peeks pending, reclassifies as the late dwell
-        // and the queue rebalances. Nothing tested the COMBINED path before;
-        // this pins that the delayed open is deferred, never lost.
-        let mut m = collapsed_model();
+    fn gutter_tier_selected_dormant_shows_the_commit_mark() {
+        // #100 §4: stale ✗ > opening ↻ > selected-dormant ⏎ > status. The
+        // chain is self-truthful — committing turns ⏎ into ↻, and a stale
+        // row never offers a launch that would fail.
+        let mut m = BarModel::default();
         m.apply_tabs(vec![tab(1, 0, "live", true)]);
         let mut a = agent("u-d", Status::Idle, None);
-        a.last_interacted = 999; // dormant sorts FIRST; live row is line 1
+        a.last_interacted = 999; // dormant sorts FIRST; live is line 1
         m.apply_snapshot(AgentSnapshot {
-            // Issue #5: matches collapsed_model()'s store-side truth — a
-            // `false` flag would (correctly) heal the bar expanded and void
-            // the collapsed-landing peek this test pins.
-            collapsed: true,
+            collapsed: false,
             seq: 1,
             agents: vec![a],
             tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64)]),
         });
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Dormant));
         m.beacon(1);
-        // (1) Walk onto the dormant row: one landing arms dwell + peek.
-        let fx = m.nav("{\"dir\":\"next\"}", Some(1)); // live row 1 → wrap → dormant row 0
-        let Effect::ArmDwell { r#gen } = *fx
-            .iter()
-            .find(|e| matches!(e, Effect::ArmDwell { .. }))
-            .expect("dormant landing arms a dwell")
-        else {
-            unreachable!()
-        };
-        assert!(
-            fx.contains(&Effect::ArmPeek),
-            "collapsed landing arms a peek"
-        );
-
-        // (2) The dwell's expiry arrives LATE (elapsed past the 0.65 cutoff)
-        // while the sibling peek is still pending — it MUST read as Peek, so
-        // the dwell is deferred, not spent on this expiry.
+        m.nav("{\"dir\":\"next\"}", Some(1)); // select it
+        assert_eq!(status_at(&m, 0), Some(RowStatus::DormantSelected));
+        m.nav("{\"commit\":true}", Some(1)); // launch it
         assert_eq!(
-            classify_timer(0.7, 1, 1),
-            TimerKind::Peek,
-            "late dwell defers to the pending peek — reclassification is off"
+            status_at(&m, 0),
+            Some(RowStatus::Opening),
+            "↻ outranks the still-selected cursor"
         );
-
-        // (3) main.rs decrements the peek bookkeeping for that expiry; the
-        // SECOND expiry (the peek's own ~0.9s pop) now has no peeks pending
-        // but a dwell still owed → reclassify as the late Dwell.
-        assert_eq!(
-            classify_timer(PEEK_SINK_SECS, 1, 0),
-            TimerKind::Dwell,
-            "the peek expiry rebalances into the owed late dwell"
-        );
-
-        // (4) That late-dwell classification drives dwell_expired(gen): the
-        // cursor still sits on the same dormant landing, so the open the
-        // first expiry deferred is now delivered — deferred, never dropped.
-        assert_eq!(
-            m.dwell_expired(r#gen),
-            vec![Effect::OpenAgent { uuid: "u-d".into() }],
-            "the deferred open self-heals through the sibling peek expiry"
-        );
+        // Stale outranks everything: the same selected row gone stale shows ✗
+        // (the open failed — apply_snapshot clears `opening`, cursor holds).
+        let mut a = agent("u-d", Status::Idle, None);
+        a.last_interacted = 999;
+        a.stale = true;
+        m.apply_snapshot(AgentSnapshot {
+            collapsed: false,
+            seq: 2,
+            agents: vec![a],
+            tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64)]),
+        });
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Stale));
     }
 
     // === Convergence harness (issue #10 item 2) ============================
@@ -4008,12 +4001,12 @@ mod tests {
             /// Property 6 — nav closure (§6.6 C8), scoped precisely (fugu
             /// review 2026-07-20): with the executor pinned to its birth tab
             /// (as below — a single-instance view), every nav bumps
-            /// cursor_gen exactly once, a cursor that lands dormant is always
-            /// a DISPLAYED dormant row, and a stale-gen dwell is a no-op.
-            /// Walk PROGRESSION across focus-following executors (the live
-            /// multi-instance behavior, where own_tab moves with focus) is
-            /// deliberately not modeled here — that is live-validation
-            /// territory (TESTING.md).
+            /// cursor_gen exactly once (its consumer is #92's read timer,
+            /// post-#100), and a cursor that lands dormant is always a
+            /// DISPLAYED dormant row. Walk PROGRESSION across
+            /// focus-following executors (the live multi-instance behavior,
+            /// where own_tab moves with focus) is deliberately not modeled
+            /// here — that is live-validation territory (TESTING.md).
             #[test]
             fn prop_nav_closure(
                 n in 1usize..=4,
@@ -4057,62 +4050,7 @@ mod tests {
                         );
                     }
                 }
-                // A dwell stamped before any landing (gen 0) is provably stale.
-                prop_assert!(m.dwell_expired(0).is_empty(), "stale-gen dwell fired");
             }
-
-            /// Property 7a — classify_timer, spec-phrased partial contract
-            /// (fugu review 2026-07-20: the original property re-derived the
-            /// function's own branch expression, so a logic bug could never
-            /// diverge from the test's expectation). This half states the
-            /// doc-comment's FIRST claim on its own terms: a short elapsed is
-            /// ALWAYS a dwell — a 0.9s peek sleep never reports < 0.9
-            /// (model.rs ~93), so whatever the pending counters say, a
-            /// sub-cutoff expiry can only be the dwell timer.
-            #[test]
-            fn prop_classify_timer_short_elapsed_is_always_dwell(
-                elapsed in 0.0f64..TIMER_KIND_CUTOFF_SECS,
-                dwells in 0usize..5,
-                peeks in 0u32..5,
-            ) {
-                prop_assert_eq!(classify_timer(elapsed, dwells, peeks), TimerKind::Dwell);
-            }
-
-            /// Property 7b — the doc-comment's second claim, independently
-            /// phrased: a long-elapsed expiry while a peek IS pending belongs
-            /// to that peek — the late-dwell rescue exists only for the
-            /// no-peek-pending case and must never steal an owned peek
-            /// (otherwise a collapsed bar's sink timer would be eaten and the
-            /// gutter never re-sunk). The rescue corner itself is a fixed
-            /// boundary, pinned in classify_timer_late_dwell_rescue_boundary.
-            #[test]
-            fn prop_classify_timer_pending_peek_owns_long_expiries(
-                over in 0.0f64..2.0,
-                dwells in 0usize..5,
-                peeks in 1u32..5,
-            ) {
-                prop_assert_eq!(
-                    classify_timer(TIMER_KIND_CUTOFF_SECS + over, dwells, peeks),
-                    TimerKind::Peek
-                );
-            }
-        }
-
-        /// The late-dwell rescue corner (companion to properties 7a/7b): a
-        /// long elapsed with NO peek pending but a dwell owed is reclassified
-        /// as that dwell (the FIFO off-by-one hardening, model.rs ~88-92);
-        /// with nothing owed at all it stays a peek (harmless default — an
-        /// unowned peek expiry is dropped by the caller).
-        #[test]
-        fn classify_timer_late_dwell_rescue_boundary() {
-            assert_eq!(
-                classify_timer(TIMER_KIND_CUTOFF_SECS, 1, 0),
-                TimerKind::Dwell
-            );
-            assert_eq!(
-                classify_timer(TIMER_KIND_CUTOFF_SECS, 0, 0),
-                TimerKind::Peek
-            );
         }
     }
 }

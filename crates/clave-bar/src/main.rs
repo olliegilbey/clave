@@ -7,9 +7,7 @@ use std::collections::BTreeMap;
 
 // The pure model lives in the LIB half of this crate (src/lib.rs → model.rs)
 // so it host-tests without linking this bin's wasm host-import shims.
-use clave_bar::model::{
-    BarModel, DWELL_SECS, Effect, PEEK_SINK_SECS, PaneMeta, TabMeta, TimerKind, classify_timer,
-};
+use clave_bar::model::{BarModel, Effect, PEEK_SINK_SECS, PaneMeta, TabMeta};
 use clave_bar::plugin_config::resolve_binary;
 use clave_bar::render::{Row, render_rows};
 use zellij_tile::prelude::*;
@@ -30,12 +28,9 @@ struct State {
     last_tabs: Vec<TabMeta>,
     /// Peek-on-nav timers in flight: each armed peek starts one
     /// set_timeout(1.0); only the LAST expiry sinks the bar, so a nav burst
-    /// keeps it expanded until ~1s after the final press.
+    /// keeps it expanded until ~1s after the final press. The ONLY timers
+    /// the bar arms (#100 deleted the dormant dwell).
     pending_peeks: u32,
-    /// Dwell timers in flight (§6.6 C8): each dormant-row landing arms one
-    /// set_timeout(DWELL_SECS). All share one duration, so they fire in arm
-    /// order — FIFO gen matching is exact.
-    pending_dwells: std::collections::VecDeque<u64>,
     /// The CLI this bar shells out to, from plugin configuration (#44).
     /// Assigned in `load()`, which zellij invokes as its own wasm export
     /// before delivering any event (`register_plugin!`, zellij-tile-0.44.3
@@ -201,10 +196,6 @@ impl State {
                 // instance, nav effects are executor-only by construction,
                 // and the model's `opening` guard + clave open's no-op make
                 // duplicates harmless).
-                Effect::ArmDwell { r#gen } => {
-                    self.pending_dwells.push_back(r#gen);
-                    set_timeout(DWELL_SECS);
-                }
                 Effect::ArmPeek => {
                     self.pending_peeks += 1;
                     set_timeout(PEEK_SINK_SECS);
@@ -355,12 +346,14 @@ impl State {
                 let executor = self
                     .own_tab_id()
                     .filter(|own| self.model.current_tab() == Some(*own));
+                let is_executor = executor.is_some();
                 let fx = self.model.nav(payload, executor);
-                if fx.is_empty() {
-                    return false; // non-executor, or unresolvable payload
-                }
+                let acted = !fx.is_empty();
                 self.run_effects(fx);
-                true // the beacon moved → active-row highlight repaint
+                // A dormant landing is now a pure selection (#100) — zero
+                // effects, but the ⏎ affordance and highlight must paint, so
+                // the executor (the visible bar) repaints unconditionally.
+                acted || is_executor
             }
             "clave-toggle" => {
                 self.toggle_collapsed();
@@ -546,38 +539,24 @@ impl ZellijPlugin for State {
                 self.fire_binds(); // fresh manifest → own-tab joins resolvable
                 true
             }
-            Event::Timer(elapsed) => {
-                // TWO timer kinds share this event; Timer carries the ELAPSED
-                // sleep (≈ requested duration, v0.44.3 zellij_exports.rs:2462)
-                // — 0.4s dwells and 0.9s peek sinks split cleanly at the
-                // cutoff. classify_timer also reclassifies a dwell delayed
-                // past the cutoff (else its gen never pops → FIFO latches
-                // off-by-one forever, dwell-to-open silently dies).
-                match classify_timer(elapsed, self.pending_dwells.len(), self.pending_peeks) {
-                    TimerKind::Dwell => {
-                        let Some(r#gen) = self.pending_dwells.pop_front() else {
-                            return false;
-                        };
-                        let fx = self.model.dwell_expired(r#gen);
-                        let fired = !fx.is_empty();
-                        self.run_effects(fx);
-                        fired // repaint: the row flips to ↻
-                    }
-                    TimerKind::Peek => {
-                        // One expiry per armed peek; only the LAST sinks (nav
-                        // burst = one visible expand, one sink). peek_expired()
-                        // is false when a toggle already cancelled the peek —
-                        // no repaint.
-                        self.pending_peeks = self.pending_peeks.saturating_sub(1);
-                        self.pending_peeks == 0 && self.model.peek_expired()
-                    }
-                }
+            Event::Timer(_elapsed) => {
+                // Peek sinks are the ONLY timers the bar arms (#100 deleted
+                // the dormant dwell, so the two-kind classify_timer split
+                // went with it). One expiry per armed peek; only the LAST
+                // sinks (nav burst = one visible expand, one sink).
+                // peek_expired() is false when a toggle already cancelled
+                // the peek — no repaint.
+                self.pending_peeks = self.pending_peeks.saturating_sub(1);
+                self.pending_peeks == 0 && self.model.peek_expired()
             }
             Event::Mouse(Mouse::LeftClick(line, _col)) => {
                 // §6.6: rows are mouse-clickable. line is the rendered row.
+                // Repaint: a dormant click is a pure selection (#100) — no
+                // effects, but the ⏎ affordance and highlight must paint.
                 if line >= 0 {
                     let fx = self.model.click(line as usize);
                     self.run_effects(fx);
+                    return true;
                 }
                 false
             }

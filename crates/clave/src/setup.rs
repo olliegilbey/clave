@@ -114,6 +114,14 @@ pub fn config_kdl(binary: &str, wasm: &str) -> String {
         "        bind \"Alt k\" \"Alt Up\" {{ {} }}\n",
         nav("{\\\"dir\\\":\\\"prev\\\"}")
     ));
+    // #100 dwell-commit: Alt+Enter is the ONLY act that wakes a dormant row —
+    // nav and clicks merely select (the model no-ops this without a dormant
+    // selection). Bare Enter must reach the terminal (you could not talk to
+    // Claude otherwise), and Alt+h/l stay stock (bar↔terminal focus).
+    binds.push_str(&format!(
+        "        bind \"Alt Enter\" {{ {} }}\n",
+        nav("{\\\"commit\\\":true}")
+    ));
     // True alt-tab (last two focused tabs) is NATIVE — server-side truth.
     // Alt+o = native ToggleTab PLUS a clave-organic pipe: the pipe arms the
     // bounded beacon announce (the newly-active instance's next TabUpdate
@@ -1139,7 +1147,15 @@ mod tests {
     fn generated_kdl_carries_the_wasm_path_and_alt_keys() {
         let cfg = config_kdl("clave", "/data/clave-bar.wasm");
         for key in [
-            "Alt a", "Alt c", "Alt t", "Alt w", "Alt j", "Alt k", "Alt 1", "Alt 9",
+            "Alt a",
+            "Alt c",
+            "Alt t",
+            "Alt w",
+            "Alt j",
+            "Alt k",
+            "Alt 1",
+            "Alt 9",
+            "Alt Enter",
         ] {
             assert!(
                 cfg.contains(&format!("bind \"{key}\"")) || cfg.contains(&format!("\"{key}\"")),
