@@ -772,7 +772,7 @@ pub fn launch_session() -> Result<()> {
     if !live {
         // §6.6 hygiene: tab_ids are SESSION-scoped — drop the previous
         // session's timeline + binds before a CREATE.
-        crate::store::clear_tab_timeline(&crate::store::store_paths()?)?;
+        crate::store::clear_session_order(&crate::store::store_paths()?)?;
         if session_exists(&list, &session) {
             // Dead-but-serialized (pre-C8 state, or zellij's own cache):
             // delete so attach --create builds from OUR layout. Best-effort —
@@ -985,6 +985,7 @@ mod tests {
             label: "repo · main".into(),
             status: clave_types::Status::Idle,
             last_interacted: 100,
+            commit_ord: 0,
             last_visited: 0,
             worktree: Some("/repo/.claude-worktrees/ab".into()),
             label_source: crate::store::LabelSource::FirstPrompt,
@@ -1025,6 +1026,7 @@ mod tests {
             label: uuid.into(),
             status: clave_types::Status::Idle,
             last_interacted: li,
+            commit_ord: 0,
             last_visited: 0,
             worktree: None,
             label_source: LabelSource::FirstPrompt,
@@ -1190,6 +1192,7 @@ mod tests {
             label: "l".into(),
             status: clave_types::Status::Idle,
             last_interacted: 0,
+            commit_ord: 0,
             last_visited: 0,
             worktree: None,
             label_source: crate::store::LabelSource::FirstPrompt,
@@ -1460,6 +1463,7 @@ mod tests {
             label: "l".into(),
             status: clave_types::Status::Idle,
             last_interacted: 0,
+            commit_ord: 0,
             last_visited: 0,
             worktree: None,
             label_source: crate::store::LabelSource::FirstPrompt,

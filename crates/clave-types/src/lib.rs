@@ -81,8 +81,17 @@ pub struct Agent {
     pub label: String,
     /// Per-agent status (latest-wins state machine, spec §6.5).
     pub status: Status,
-    /// unix seconds; bumped on UserPromptSubmit → drives recency sort.
+    /// unix seconds; bumped on UserPromptSubmit. DISPLAY and cross-session
+    /// policy only (`clave ls`, the picker, eager-launch selection) — it is
+    /// NOT the bar's sort key (S1/#39: whole seconds tie, and ties resolved
+    /// on tab position, so the wrong row won).
     pub last_interacted: u64,
+    /// §6.6 commitment ORDINAL: the store `seq` of this row's last user
+    /// commitment (a prompt, its creation, or the ordinal inherited from its
+    /// tab when that tab closed). Minted under the store flock, so it is a
+    /// total order with no clock and no ties. 0 = never committed → bottom.
+    #[serde(default)]
+    pub commit_ord: u64,
     /// unix seconds; bumped on focus → `unread = done && !visited`.
     pub last_visited: u64,
     /// Zellij tab id hosting this agent (§6.6 Design B): bound ONCE by the
@@ -145,13 +154,18 @@ pub struct Agent {
 pub struct AgentSnapshot {
     pub seq: u64,
     pub agents: Vec<Agent>,
-    /// tab_id → unix seconds of the last user commitment to that tab (§6.6).
-    /// Lives in the STORE and rides every snapshot as seq-gated full state:
-    /// per-instance pipe-delta merges diverged live (C5 round 5) — the bar
-    /// REPLACES its copy from this map, never merges. `default` keeps
+    /// tab_id → the commitment ORDINAL of the last user commitment to that tab
+    /// (§6.6 / S1). Lives in the STORE and rides every snapshot as seq-gated
+    /// full state: per-instance pipe-delta merges diverged live (C5 round 5) —
+    /// the bar REPLACES its copy from this map, never merges. `default` keeps
     /// pre-field payloads parseable.
+    ///
+    /// RENAMED from `tab_timeline`, whose values were unix seconds (S1 §3.6).
+    /// The rename is what makes the upgrade safe: an old store file's
+    /// `tab_timeline` is ignored rather than misread, so ~1.7e9-second values
+    /// can never leak into the ordinal space and outrank every real ordinal.
     #[serde(default)]
-    pub tab_timeline: std::collections::BTreeMap<usize, u64>,
+    pub tab_order: std::collections::BTreeMap<usize, u64>,
     /// Bar collapse mode (issue #5, C8 parity-desync family): per-instance
     /// memory synced only by the `clave-toggle` broadcast desynced live — a
     /// tab born after a toggle, a plugin reload, or one missed pipe flips an
@@ -511,6 +525,7 @@ mod tests {
             label: "x · main".into(),
             status: Status::Idle,
             last_interacted: 0,
+            commit_ord: 0,
             last_visited: 0,
             tab_id: None,
             stale: false,
@@ -526,7 +541,7 @@ mod tests {
     fn snapshot_roundtrips() {
         let snap = AgentSnapshot {
             seq: 7,
-            tab_timeline: Default::default(),
+            tab_order: Default::default(),
             collapsed: false,
             agents: vec![Agent {
                 uuid: "u1".into(),
@@ -536,6 +551,7 @@ mod tests {
                 label: "clave · main · hello".into(),
                 status: Status::Working,
                 last_interacted: 1000,
+                commit_ord: 0,
                 last_visited: 0,
                 tab_id: None,
                 stale: false,
@@ -564,6 +580,7 @@ mod tests {
             label: "x · main".into(),
             status: Status::Idle,
             last_interacted: 0,
+            commit_ord: 0,
             last_visited: 0,
             tab_id: Some(4),
             stale: false,
@@ -594,6 +611,7 @@ mod tests {
             label: "x · main".into(),
             status: Status::Idle,
             last_interacted: 0,
+            commit_ord: 0,
             last_visited: 0,
             tab_id: None,
             stale: true,
@@ -626,6 +644,7 @@ mod tests {
             label: "x \u{00b7} main".into(),
             status: Status::Idle,
             last_interacted: 0,
+            commit_ord: 0,
             last_visited: 0,
             tab_id: None,
             stale: false,
@@ -672,6 +691,7 @@ mod tests {
             label: "x \u{00b7} trunk".into(),
             status: Status::Idle,
             last_interacted: 0,
+            commit_ord: 0,
             last_visited: 0,
             tab_id: None,
             stale: false,
@@ -694,22 +714,67 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_carries_tab_timeline_and_defaults_empty() {
-        // §6.6 store-timeline: row order ships IN the snapshot — seq-gated
+    fn snapshot_carries_tab_order_and_defaults_empty() {
+        // §6.6 store tab order: row order ships IN the snapshot — seq-gated
         // full-state replace, the one channel that never diverged (C5 rd 5:
         // fire-and-forget pipe deltas diverged per instance).
         let snap = AgentSnapshot {
             seq: 1,
             agents: vec![],
-            tab_timeline: std::collections::BTreeMap::from([(4usize, 1700u64)]),
+            tab_order: std::collections::BTreeMap::from([(4usize, 12u64)]),
             collapsed: false,
         };
         let json = serde_json::to_string(&snap).unwrap();
         let back: AgentSnapshot = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.tab_timeline.get(&4), Some(&1700));
+        assert_eq!(back.tab_order.get(&4), Some(&12));
         // Pre-field payloads (old store hydration) must still parse.
         let old: AgentSnapshot = serde_json::from_str("{\"seq\":1,\"agents\":[]}").unwrap();
-        assert!(old.tab_timeline.is_empty());
+        assert!(old.tab_order.is_empty());
+
+        // MIXED-VERSION COMPAT (S1 §3.6). The field was RENAMED from
+        // `tab_timeline`, whose values were unix SECONDS. A payload from an old
+        // CLI must be IGNORED, not misread — this is the whole reason for
+        // renaming instead of repurposing. A ~1.7e9 second value read as an
+        // ordinal would outrank every ordinal ever minted, permanently, with no
+        // expiry: the list would freeze in the old order and no prompt could
+        // move anything. Degrading to "empty, so rows sort by tab position" is
+        // deterministic and self-heals on the first commitment.
+        let legacy: AgentSnapshot =
+            serde_json::from_str(r#"{"seq":1,"agents":[],"tab_timeline":{"4":1753000000}}"#)
+                .unwrap();
+        assert!(
+            legacy.tab_order.is_empty(),
+            "an old tab_timeline must be ignored, never adopted as ordinals"
+        );
+    }
+
+    #[test]
+    fn agent_commit_ord_defaults_for_pre_s1_payloads() {
+        // The other half of the mixed-version story: an old CLI's `Agent` has
+        // no `commit_ord` at all. It must parse and default to 0 — "never
+        // committed", which sorts to the bottom — rather than failing the whole
+        // snapshot parse and blanking the bar.
+        let a = Agent {
+            uuid: "u1".into(),
+            cwd: "/x".into(),
+            repo_root: "/x".into(),
+            branch: "main".into(),
+            label: "x".into(),
+            status: Status::Idle,
+            last_interacted: 0,
+            commit_ord: 7,
+            last_visited: 0,
+            tab_id: None,
+            stale: false,
+            title: None,
+            summary: String::new(),
+            worktree: None,
+            default_branch: None,
+        };
+        let mut v: serde_json::Value = serde_json::to_value(&a).unwrap();
+        v.as_object_mut().unwrap().remove("commit_ord");
+        let old: Agent = serde_json::from_value(v).unwrap();
+        assert_eq!(old.commit_ord, 0);
     }
 
     #[test]
@@ -721,7 +786,7 @@ mod tests {
         let snap = AgentSnapshot {
             seq: 2,
             agents: vec![],
-            tab_timeline: Default::default(),
+            tab_order: Default::default(),
             collapsed: true,
         };
         let back: AgentSnapshot =

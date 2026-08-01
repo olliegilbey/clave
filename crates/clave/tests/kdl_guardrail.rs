@@ -123,6 +123,7 @@ fn eager_record() -> AgentRecord {
         label: "clave · main · fix the KDL guardrail".into(),
         status: Status::Idle,
         last_interacted: 100,
+        commit_ord: 0,
         last_visited: 0,
         worktree: Some("/home/o/code/clave/.claude-worktrees/ab12cd34".into()),
         label_source: LabelSource::Summary,
