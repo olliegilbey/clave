@@ -74,6 +74,12 @@ pub struct Facts {
     pub bin_dir_exists: bool,
     /// Semver strings parsed from <data>/bin/clave-v* names.
     pub installed_releases: Vec<String>,
+    /// Does <data>/bin/clave — the unversioned launcher — exist? Cuts before
+    /// v0.1.2 installed only the versioned copy (#43a landed in v0.1.2), so
+    /// "a cut is installed" does NOT imply "a launcher is installed", and the
+    /// skew warning says opposite things in the two cases. Doctor cannot see
+    /// PATH (#48), but it can see this file.
+    pub launcher_exists: bool,
     /// None ⇒ not applicable (non-Linux); Some(false) ⇒ the SSH trap.
     pub xdg_runtime_dir: Option<bool>,
     pub version_line: String, // release::long_version()
@@ -268,10 +274,44 @@ pub fn diagnose(f: &Facts) -> Vec<Finding> {
             vec!["Run `clave setup` — this binary carries the wasm and will extract it.".into()],
         )
     } else {
+        // The path is IN the label, not just the Ok branch's (doctor spec
+        // §Check catalogue, wasm row as amended 2026-07-31): a dev build can
+        // be pointed at either data dir of split spec §1 Environments, and only
+        // the sandbox one is what the repair below fills. Seeing
+        // `~/.local/state/clave-dev/data` vs `~/.local/share/clave` is how the
+        // reader tells which case they are in.
         setup(
             Severity::Problem,
-            "clave-bar wasm not installed (dev build — no embedded copy)".into(),
-            vec!["Run `just dev-install` (builds the sandbox wasm).".into()],
+            format!(
+                "clave-bar wasm not installed (dev build — no embedded copy): {}",
+                tilde(&f.wasm_path, &f.home)
+            ),
+            // `just sandbox`, NOT `just dev-install`. The spec row this arm
+            // implements USED to say dev-install (doctor spec §Check catalogue,
+            // superseded text quoted under the table): it builds the same wasm
+            // but never regenerates config.kdl, so it leaves a new wasm beside a
+            // stale config — the false negative recorded against #44's own live
+            // validation (FOOTGUNS §PATH and version coherence) — and it
+            // rebuilds in place under a live clave-test session.
+            //
+            // The last two lines are load-bearing, not a footnote: `just
+            // sandbox` fills the SANDBOX data dir, so if this dev build is
+            // aimed at the stable one the advised command changes nothing and
+            // doctor repeats itself verbatim. The label above carries the path,
+            // so the reader can tell which case they are in without a fact
+            // doctor would have to guess (CLAVE_DATA_DIR is not the only way to
+            // end up there).
+            vec![
+                "Run `just sandbox` — it builds the working-tree wasm into the sandbox".into(),
+                "data dir (~/.local/state/clave-dev/data) and regenerates the config".into(),
+                "that references it. (`just dev-install` builds the same wasm but".into(),
+                "leaves config.kdl stale, and rebuilds in place under a live".into(),
+                "clave-test session.)".into(),
+                String::new(),
+                "If the path above is NOT that directory, this dev build is aimed at".into(),
+                "the stable data dir, which only a release cut fills — `just sandbox`".into(),
+                "will not change what you see here.".into(),
+            ],
         )
     });
     let missing: Vec<&str> = f
@@ -337,10 +377,62 @@ pub fn diagnose(f: &Facts) -> Vec<Finding> {
             (Some(c), Some((n, nv))) if c > n => out.push(setup(
                 Severity::Warn,
                 format!("this binary is ahead of the newest installed release (v{nv})"),
-                vec![
-                    "A stable launch will fall back to this dev binary — you are running".into(),
-                    "unreleased code (CONTRIBUTING: the binary split).".into(),
-                ],
+                // Doctor spec §Check catalogue (skew row, amended 2026-07-31)
+                // and split spec §2 Release mechanics, whose "binary split"
+                // paragraph is the one #43a rewrote — `release.rs::LAUNCHER_NAME`
+                // carries the current contract.
+                //
+                // The old copy said "a stable launch will fall back to this dev
+                // binary". True before #43a, when nothing owned the name `clave`
+                // and whatever PATH resolved won the cold start — that is the
+                // 2026-07-22 outage. #43a gave the cut its own launcher at
+                // <data>/bin/clave, so on a machine that HAS one the daily
+                // surface is not reaching for this binary at all.
+                //
+                // But #43a shipped in v0.1.2: a machine whose newest cut is
+                // older has installed releases and NO launcher, and there the
+                // old copy was right. Branch on the file, which doctor can
+                // see — never on the version, and never on PATH, which it
+                // cannot (#48). Both branches end at `command -v clave`,
+                // because even an installed launcher only wins if <data>/bin
+                // comes first on PATH — an operator step (release.rs:245),
+                // not something a cut can guarantee.
+                {
+                    let mut advice = vec![
+                        "You are running unreleased code (CONTRIBUTING: Two environments,".into(),
+                        "one code path).".into(),
+                    ];
+                    if f.launcher_exists {
+                        // "There IS a launcher", not "the v{nv} cut installed
+                        // one": the probe sees a file, not who wrote it, and a
+                        // hand-placed copy is exactly the case where the
+                        // attribution would be a lie told confidently.
+                        advice.push(
+                            "There is a launcher at <data>/bin/clave, so a cold start there".into(),
+                        );
+                        advice.push(format!(
+                            "runs the installed v{nv} rather than this binary —"
+                        ));
+                        advice.push("provided <data>/bin comes first on your PATH.".into());
+                    } else {
+                        advice.push(
+                            "There is NO launcher at <data>/bin/clave (cuts before v0.1.2".into(),
+                        );
+                        advice.push(
+                            "installed only the versioned copy), so whatever `clave` resolves"
+                                .into(),
+                        );
+                        advice.push("to on PATH wins the cold start — the #43 failure.".into());
+                    }
+                    advice.push(
+                        "doctor cannot see your PATH: `command -v clave` says which binary".into(),
+                    );
+                    advice.push(
+                        "actually wins (a pre-#43b ~/.cargo/bin/clave is the usual culprit)."
+                            .into(),
+                    );
+                    advice
+                },
             )),
             (_, Some((_, nv))) => out.push(setup(
                 Severity::Ok,
@@ -623,6 +715,7 @@ pub fn gather() -> anyhow::Result<Facts> {
         has_embedded_wasm: crate::release::embedded_wasm().is_some(),
         hook_counts: hook_entry_counts(&settings),
         bin_dir_exists: bin_dir.is_dir(),
+        launcher_exists: bin_dir.join(crate::release::LAUNCHER_NAME).is_file(),
         installed_releases,
         // Linux-only check (spec §Check): macOS zellij doesn't use it —
         // flagging there would be flutter#17781 noise.
@@ -814,6 +907,7 @@ mod tests {
                 .collect(),
             perms_seeded: true,
             bin_dir_exists: false,
+            launcher_exists: false,
             installed_releases: vec![],
             xdg_runtime_dir: None,
             version_line: "0.1.0 (dev)".into(),
@@ -839,13 +933,33 @@ mod tests {
         let cfg = f.iter().find(|x| x.label.contains("config.kdl")).unwrap();
         assert_eq!(cfg.severity, Severity::Problem);
         assert!(cfg.advice.iter().any(|l| l.contains("clave setup")));
-        // Embedded build → repair is `clave setup`; dev build → dev-install.
+        // Doctor spec §Check catalogue, wasm row: one check, two repairs, keyed
+        // on whether this binary carries an embedded copy (§Distribution).
+        // Embedded → `clave setup` extracts it; dev build → `just sandbox`, the
+        // only path that leaves a fresh wasm beside a config that names it.
         let wasm = f.iter().find(|x| x.label.contains("wasm")).unwrap();
         assert!(wasm.advice.iter().any(|l| l.contains("clave setup")));
         facts.has_embedded_wasm = false;
+        // A real dev build falls through to the UNVERSIONED name (setup.rs:30):
+        // the versioned artifact is a release's, and this arm is reached only
+        // when there is no release here to have installed one.
+        facts.wasm_path = PathBuf::from("/home/u/.local/share/clave/clave-bar.wasm");
         let f = diagnose(&facts);
         let wasm = f.iter().find(|x| x.label.contains("wasm")).unwrap();
-        assert!(wasm.advice.iter().any(|l| l.contains("just dev-install")));
+        // The FIRST line is the repair — `contains` anywhere would also pass on
+        // a revert to "Run `just dev-install`" that merely mentioned sandbox
+        // later in the block.
+        assert!(wasm.advice[0].contains("Run `just sandbox`"), "{wasm:#?}");
+        // The path is what tells a dev build WHICH data dir came up empty
+        // (spec §Check catalogue, wasm row as amended): `just sandbox` fills the
+        // sandbox dir, so against the stable one the advised command changes
+        // nothing. Compare the WHOLE rendered path, not a directory prefix —
+        // a label that dropped or mangled the filename would still pass a
+        // prefix check, and the filename is half of what distinguishes a
+        // release's versioned artifact from a dev build's.
+        let shown = tilde(&facts.wasm_path, &facts.home);
+        assert!(wasm.label.contains(&shown), "{} !~ {shown}", wasm.label);
+        assert!(wasm.advice.iter().any(|l| l.contains("stable data dir")));
     }
 
     #[test]
@@ -892,6 +1006,37 @@ mod tests {
         let s = f.iter().find(|x| x.label.contains("ahead")).unwrap();
         assert_eq!(s.severity, Severity::Warn);
         assert!(s.advice.iter().any(|l| l.contains("unreleased")));
+        // Spec §Check catalogue, skew row as amended: the copy branches on the
+        // launcher. No launcher is the state every pre-v0.1.2 cut leaves, and
+        // there the warning must say PATH decides the cold start (split spec §2
+        // Release mechanics, as rewritten by #43a). This is the case the old
+        // copy got RIGHT, and the case a launcher-blind rewrite inverts into
+        // false reassurance — the whole reason this probes a file.
+        let joined = s.advice.join(" ");
+        assert!(joined.contains("NO launcher"), "{joined}");
+        assert!(joined.contains("wins the cold start"), "{joined}");
+        // Launcher present: the daily surface reaches the release, not this
+        // binary — but only if <data>/bin is first on PATH, which doctor cannot
+        // see (#48), so BOTH branches must hand over `command -v clave`.
+        facts.launcher_exists = true;
+        let f = diagnose(&facts);
+        let s = f.iter().find(|x| x.label.contains("ahead")).unwrap();
+        let joined_l = s.advice.join(" ");
+        assert!(
+            joined_l.contains("There is a launcher at <data>/bin/clave"),
+            "{joined_l}"
+        );
+        assert!(joined_l.contains("runs the installed v0.1.0"), "{joined_l}");
+        assert!(joined_l.contains("comes first on your PATH"), "{joined_l}");
+        assert!(!joined_l.contains("NO launcher"), "{joined_l}");
+        for j in [&joined, &joined_l] {
+            assert!(j.contains("command -v clave"), "{j}");
+            // Name the file, not just the check. `~/.cargo/bin/clave` is the
+            // one concrete path a reader can go look for, and the pre-#43b
+            // install that put it there is the documented usual cause of a
+            // shadowed launcher (FOOTGUNS §PATH and version coherence).
+            assert!(j.contains("~/.cargo/bin/clave"), "{j}");
+        }
     }
 
     #[test]
