@@ -304,6 +304,52 @@ pub fn target_cols_for(collapsed: bool) -> usize {
     }
 }
 
+// ── floating pane geometry ──────────────────────────────────────────────────
+//
+// ONE geometry for every floating pane clave opens: the `Alt a` directory
+// picker today (#110), the row-detail helper pane when #7 lands. Two panes
+// that appear over the same fleet should appear at the same size.
+//
+// **The bar needs no clearing — zellij fences floating panes off it already.**
+// `clave-bar` calls `set_selectable(false)` at load, and zellij's
+// `offset_viewport` shrinks a tab's viewport by any full-height non-selectable
+// pane sitting on its edge, so the viewport BEGINS at the bar's right edge.
+// Every number below is a percent OF THAT REDUCED AREA, and `x` is floored at
+// its left edge (`zellij-utils/src/pane_size.rs:304`, `adjust_coordinates` —
+// the path a `Run { floating true; … }` keybind takes). A floating pane
+// therefore cannot cover the bar however it is sized or dragged; #110 was
+// raised believing it could, and the whole `x`-past-the-bar arithmetic that
+// implied was never needed. What IS needed is a size: with no geometry zellij
+// applies `half_size_middle_geom`, half of the already-reduced area, which is
+// the "tiny pane" the issue actually reports.
+
+/// Left edge: `0%` resolves below the viewport's own `x` and so is clamped up
+/// to it — flush against the bar, no gap to hand-derive. Written rather than
+/// omitted because omitting `x` centres the pane on `viewport.cols` measured
+/// from absolute zero, which lands inside the bar and gets clamped to the same
+/// place anyway, only after wasting the right-hand slack.
+pub const FLOATING_X_PERCENT: usize = 0;
+
+/// Full width of the non-bar area. `x + cols` lands exactly on the viewport's
+/// right edge, which the overflow test (`>`) does not trip, so nothing is
+/// shrunk. Wider than 100 would only be clipped back to this.
+pub const FLOATING_WIDTH_PERCENT: usize = 100;
+
+/// A row of breathing space above and below, so the pane reads as floating
+/// rather than as a second tiled pane.
+pub const FLOATING_Y_PERCENT: usize = 5;
+
+/// Paired with [`FLOATING_Y_PERCENT`]: the two must sum to at most 100 or the
+/// pane's height is silently shrunk to fit the viewport's bottom edge.
+pub const FLOATING_HEIGHT_PERCENT: usize = 90;
+
+const _: () = assert!(
+    FLOATING_X_PERCENT + FLOATING_WIDTH_PERCENT <= 100
+        && FLOATING_Y_PERCENT + FLOATING_HEIGHT_PERCENT <= 100,
+    "a floating pane overflowing its viewport is shrunk to fit, so the geometry \
+     would not be the one written here"
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
