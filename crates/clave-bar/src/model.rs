@@ -528,9 +528,8 @@ impl BarModel {
 
     /// The commit path (Alt+Enter, #100): mark in-flight and emit the run.
     /// The `opening` guard is double-fire protection #1 (clave open's
-    /// liveness no-op is #2). Stale rows may retry — the user might have
-    /// restored the dir (the ✗ gutter offers no launch, but an explicit
-    /// commit is the one retry path a healed cwd has).
+    /// liveness no-op is #2). The caller has already refused stale rows —
+    /// ✗ offers no launch, and a dead row is #112's retirement business.
     fn open_effects(&mut self, uuid: &str) -> Vec<Effect> {
         if self.opening.contains(uuid) {
             return Vec::new();
@@ -1052,17 +1051,19 @@ impl BarModel {
         // that launches a dormant row. Executor-gated like row/dir (the
         // cursor is executor-local state), a no-op unless a dormant row is
         // selected. Not a landing: the selection is being spent, not moved,
-        // so cursor_gen holds.
+        // so cursor_gen holds. STALE rows refuse the commit (ratified live,
+        // 2026-08-01): the ✗ gutter offers no launch, and the mark must not
+        // lie — a dead row is #112's retirement business, not a retry's.
         if v.get("commit").and_then(|c| c.as_bool()) == Some(true) {
             let Some(uuid) = self.cursor.clone() else {
                 return Vec::new();
             };
-            let still_dormant = self
+            let committable = self
                 .agents
                 .iter()
                 .find(|a| a.uuid == uuid)
-                .is_some_and(|a| self.is_dormant(a));
-            if !still_dormant {
+                .is_some_and(|a| self.is_dormant(a) && !a.stale);
+            if !committable {
                 return Vec::new();
             }
             return self.open_effects(&uuid);
@@ -3312,6 +3313,13 @@ mod tests {
             tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64)]),
         });
         assert_eq!(status_at(&m, 0), Some(RowStatus::Stale));
+        // And ✗ means it: the selected-but-stale row REFUSES the commit
+        // (ratified live 2026-08-01) — the gutter never offers a launch it
+        // won't perform.
+        assert!(
+            m.nav("{\"commit\":true}", Some(1)).is_empty(),
+            "a stale row must refuse the commit"
+        );
     }
 
     // === Convergence harness (issue #10 item 2) ============================
