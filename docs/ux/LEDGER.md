@@ -116,7 +116,7 @@ layout is exactly lock §2. Away from 44, cells 1–25 and the caps hold their
 widths and `summary` absorbs the difference, floored at 0. S6 §2.10's `cols - 7`
 text budget is superseded and is not to be adopted.
 
-### D10 — The bar owns its status palette; `Status::glyph()` is untouched (2026-07-29)
+### D10 — The bar owns its status palette; `Status::glyph()` is untouched (2026-07-29, `Dormant`'s ink amended 2026-08-01 · #123)
 
 `clave-types`' `Status::glyph()` returns `(char, u8)` with ANSI colours and is
 consumed by the host CLI. The bar needs 24-bit hues (D8) and needs three row

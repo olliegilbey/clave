@@ -799,7 +799,7 @@ mod tests {
         // reads its TRUE Status rather than demoting every row to
         // `RowStatus::Dormant` (model.rs's `is_dormant` is keyed on tab
         // liveness) — a freshly seeded, nobody's-opened-it-yet row rendering
-        // grey is correct sandbox behaviour, but this test's job is to prove
+        // dormant is correct sandbox behaviour, but this test's job is to prove
         // the FIELDS the scenario writes render well once opened, which is
         // the state the maintainer's fleet is in for the actual review.
         use clave_bar::model::{BarModel, TabMeta};
