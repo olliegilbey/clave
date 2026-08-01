@@ -462,6 +462,15 @@ impl BarModel {
     /// self-diagnosed announces storm; bounded triggers cannot).
     pub fn set_organic_pending(&mut self) {
         self.organic_pending = true;
+        // #100 commit-race guard (Codex P2 on #128): the native switch has
+        // ALREADY happened server-side, but this instance's beacon lags
+        // until the new active bar's TabUpdate announces and the visited
+        // pipe returns. Spend the dormant selection NOW — this pipe rides
+        // the same Alt+o keybind, so it lands synchronously on every
+        // instance — else a broadcast Alt+Enter inside that gap passes the
+        // stale executor gate on the DEPARTED bar and commits a selection
+        // the visible bar does not show.
+        self.cursor = None;
     }
 
     /// Should this instance fire `clave touch` for a newly-active tab it has
@@ -3274,6 +3283,35 @@ mod tests {
         assert_eq!(active, vec![RowKey::Tab(2)], "focused tab reclaims it");
         // The abandoned selection must not be committable.
         assert!(m.nav("{\"commit\":true}", Some(2)).is_empty());
+    }
+
+    #[test]
+    fn organic_switch_spends_the_selection_before_the_beacon_lands() {
+        // Codex P2 (#128): Alt+o's native switch happens server-side at
+        // once, but the departed instance keeps `current_tab == own` until
+        // the new bar's visited beacon round-trips. An Alt+Enter broadcast
+        // inside that gap reaches the departed bar with its stale executor
+        // view — the organic pipe (same keybind, synchronous) must have
+        // already spent the selection, or a hidden bar commits a row the
+        // visible bar does not show as selected.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(1, 0, "live", true)]);
+        let mut a = agent("u-d", Status::Idle, None);
+        a.last_interacted = 999;
+        m.apply_snapshot(AgentSnapshot {
+            collapsed: false,
+            seq: 1,
+            agents: vec![a],
+            tab_timeline: std::collections::BTreeMap::from([(1usize, 500u64)]),
+        });
+        m.beacon(1);
+        m.nav("{\"dir\":\"next\"}", Some(1)); // select the dormant row
+        assert!(selected(&m)[0]);
+        m.set_organic_pending(); // Alt+o pressed; beacon not yet returned
+        assert!(
+            m.nav("{\"commit\":true}", Some(1)).is_empty(),
+            "the beacon-gap commit must find no selection"
+        );
     }
 
     #[test]
