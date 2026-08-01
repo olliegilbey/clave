@@ -33,17 +33,25 @@ came from. Two routes, both fine, and the citation itself says which was taken:
   [SUBSYSTEM-VALIDATION.md](docs/superpowers/spikes/SUBSYSTEM-VALIDATION.md)
   that records it. This is the only route for anything the source cannot
   settle — timing, event ordering, what actually happened on screen.
-- **Read at the pinned tag** → fetch it and cite `zellij-server/<path>:<lines>`
-  the same way a vendored crate is cited. The tag is the one Cargo.lock pins,
-  which the `=` version pins hold at 0.44.3:
+- **Read at a tag** → fetch it and cite `zellij-server/<path>:<lines>` the same
+  way a vendored crate is cited, where `<path>` is the whole in-repo path,
+  `src/` included, exactly as it appears in the citation:
 
   ```
-  curl -sL https://raw.githubusercontent.com/zellij-org/zellij/v0.44.3/zellij-server/src/<path>
+  curl -sL https://raw.githubusercontent.com/zellij-org/zellij/v0.44.3/zellij-server/src/tab/layout_applier.rs
   ```
 
-  Read the tag, never `main` — `main` is not the code running on anyone's
+  Read a **tag**, never `main` — `main` is not the code running on anyone's
   machine, and a line number from it is worse than no citation, because it
   looks checkable and isn't.
+
+  Which tag is the live question, and Cargo.lock does not answer it: the `=`
+  pins fix the compile-time `zellij-tile`/`zellij-utils` crates, not the zellij
+  binary the user runs. `doctor::TESTED_ZELLIJ` (0.44.3) is the version the
+  ledger's behaviour is pinned to, and a mismatch there **warns, never halts**
+  — so a session can legitimately be running a different server than the one
+  every citation in this file was read at. Read the tag matching the server
+  whose behaviour you are explaining, and say so when it is not 0.44.3.
 
 A source citation says what the code *does*; a ledger citation says what clave
 *saw*. When an entry has both, give both — that pairing is the strongest form,
