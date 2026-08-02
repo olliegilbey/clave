@@ -117,6 +117,11 @@ the live→dormant boundary, so neighbours cannot move. One key change kills bot
 This table is the answer to #39 and should be pasted into the issue on close.
 It covers events we are **not** changing so it is complete.
 
+Row 17 was added on review (#124's author, PR #135): every other row reorders or
+not as a *consequence* of what the event does, but a failed open carries a
+guarantee precisely because it does **nothing** — and an absence is what a
+refactor deletes without noticing.
+
 **Definition.** A row's position is determined by its **commitment ordinal** — a
 strictly increasing integer minted by the store under the flock, once per user
 commitment. Higher ordinal = higher in the list. A row that has never received a
@@ -140,6 +145,7 @@ commitment has ordinal `0` and sits below every row that has.
 | 14 | **Tab closed** (`Alt+w`) | `PruneTabs` → `apply_prune_tabs` | **no reorder of survivors relative to each other**; the closed tab's agent becomes a dormant row carrying the tab's ordinal | the agent inherits the tab's ordinal (new). Under today's single merged list that lands it at the same index; under #112's live/dormant segregation it lands at the head of the dormant block. Either way nothing moves *relative to anything else* — see R2 |
 | 15 | Session (re)create | `clear_session_order` (`setup.rs:651`) | tab ordinals cleared; **agent ordinals survive** | dormant rows keep their cross-session recency order; live tabs sort at `0` until their birth touch lands |
 | 16 | **User interacts with a plain terminal tab** | **S2 — not in this workstream** | **will be YES** | S2 calls the *existing* `clave touch <tab_id>`; no new field, no comparator change. See §3.5 |
+| 17 | **`clave open` finds the row's `cwd` missing** | `open.rs` → `store::apply_open_result` | **no** | mints nothing; sets `stale` only. The row's ordinal freezes at its last real prompt, so it SINKS as other rows are used — this is #124's whole retention rule, and it exists only as an **absence**. Pinned by `a_failed_open_touches_no_ordering_field_so_stale_rows_sink` |
 
 Two rules follow that are worth stating in prose because they are what the
 maintainer will check:

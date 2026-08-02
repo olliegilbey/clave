@@ -1158,6 +1158,12 @@ mod tests {
         let mut row = rec("u1");
         row.last_interacted = 5_000; // non-zero: catches a clobber-to-0 too
         row.last_visited = 4_000;
+        // Same reasoning, applied to the field S1 added: `rec()` leaves this at
+        // 0, so a change that CLOBBERED it to 0 would be a no-op against the
+        // fixture and pass. Seeding it non-zero closes that half, while the
+        // whole-record assertion below already covers the half that matters
+        // more — a failed open MINTING an ordinal (#124's author, PR #135).
+        row.commit_ord = 7_000;
         with_store_mut(&p, |s| {
             s.agents.insert("u1".into(), row.clone());
         })
