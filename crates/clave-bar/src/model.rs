@@ -50,12 +50,14 @@ pub enum Effect {
     /// after a single-instance jump (mouse click).
     AnnounceVisit { tab_id: usize },
     /// run_command zellij pipe clave-visited — SAME beacon as AnnounceVisit,
-    /// but for the #23 stranded-beacon re-anchor after a tab close. A DISTINCT
-    /// variant so run_effects can gate it to the active instance: toggle bursts
-    /// deliver the fresh set to ALL instances (doc:371-394), so an ungated
-    /// re-anchor announce would revive the per-instance beacon war (round-13
-    /// EMFILE class). Birth/organic announces stay AnnounceVisit (ungated,
-    /// live-validated).
+    /// but for the #23 stranded-beacon re-anchor after a tab close AND the
+    /// Alt+o organic one-shot. A DISTINCT variant so run_effects can gate it
+    /// to the active instance: toggle bursts deliver the fresh set to ALL
+    /// instances (doc:371-394), so an ungated announce from either trigger
+    /// is a per-instance beacon war (round-13 EMFILE class for stranded;
+    /// N×~1s router stalls per Alt+o for organic, #128 2026-08-02). Only the
+    /// BIRTH announce stays AnnounceVisit (ungated) — it must fire before
+    /// the first PaneUpdate can satisfy the gate.
     ReanchorVisit { tab_id: usize },
     /// run_command(["clave","focus",uuid]) — persist the unread clear.
     MarkRead { uuid: String },
@@ -682,35 +684,42 @@ impl BarModel {
         let stranded = self.current_tab.is_some_and(|id| !live.contains(&id));
         // Bounded beacon announce (rounds 11–12). Two DISTINCT triggers, on
         // purpose:
-        //   birth/organic → AnnounceVisit (UNGATED): birth's first-TabUpdate
-        //     announce and Alt+o's organic one-shot are live-validated ungated;
-        //     left byte-identical.
-        //   stranded (#23) → ReanchorVisit (GATED in run_effects to the active
-        //     instance). It CANNOT ride the ungated path: TabUpdate normally
-        //     reaches only the active instance (C3), BUT toggle bursts deliver
-        //     the FRESH set to ALL instances (doc:371-394, main.rs apply_tabs
-        //     note) — so between the close and the reseed pipe landing, every
-        //     hidden bar whose beacon is still the closed tab would ALSO trip
-        //     `stranded` and pipe, reviving the per-instance beacon war that
-        //     EMFILE-crashed the server (round 13). Gating pipes it once.
+        //   birth → AnnounceVisit (UNGATED): a newborn announces its own tab
+        //     once, before its first PaneUpdate can satisfy the active gate —
+        //     live-validated ungated; left byte-identical.
+        //   organic (Alt+o) / stranded (#23) → ReanchorVisit (GATED in
+        //     run_effects to the active instance). Neither may ride the
+        //     ungated path: TabUpdate normally reaches only the active
+        //     instance (C3), BUT a TOGGLE delivers the FRESH set to ALL
+        //     instances (doc:371-394) — and the organic pipe is a broadcast,
+        //     so every hidden bar arrives here armed. Ungated, each fired its
+        //     own `zellij pipe` subprocess, and every CLI pipe blocks the
+        //     server router ~1s (#45): four tabs froze nav for ~2s per Alt+o
+        //     (#128 live check, 2026-08-02 — the storm was latent while the
+        //     organic pipe was dropped for its missing payload, and the old
+        //     "live-validated ungated" claim here predates that guard).
+        //     Gating pipes it once; the toggle's fresh set is exactly the
+        //     input the gate needs, so the C3 stale-claim poison isn't in
+        //     play.
         // All triggers self-clear: birth fires once, organic is one-shot, and
         // the local current_tab mutation makes `stranded` false next pass on
         // EVERY instance (so even a burst-tripped hidden bar arms at most once,
-        // and only the active one actually pipes). Accepted trade: if
-        // is_active_instance is transiently false on the close TabUpdate
-        // (PaneUpdate lag), the reseed is DROPPED and nav stays stranded until a
-        // click — the pre-fix symptom, but in a narrow window and strictly
-        // better than a storm.
-        let birth_or_organic = !self.birth_announced || self.organic_pending;
+        // and only the active one actually pipes). Accepted trade (organic now
+        // shares it): if is_active_instance is transiently false on that
+        // TabUpdate (PaneUpdate lag), the reseed is DROPPED and nav stays
+        // stranded until a click — a narrow window, strictly better than a
+        // storm.
+        let birth = !self.birth_announced;
         self.birth_announced = true;
+        let organic = self.organic_pending;
         self.organic_pending = false; // consumed either way
         if let Some(active_id) = self.tabs.iter().find(|t| t.active).map(|t| t.tab_id)
             && self.current_tab != Some(active_id)
         {
-            if birth_or_organic {
+            if birth {
                 self.current_tab = Some(active_id);
                 effects.push(Effect::AnnounceVisit { tab_id: active_id });
-            } else if stranded {
+            } else if organic || stranded {
                 self.current_tab = Some(active_id);
                 effects.push(Effect::ReanchorVisit { tab_id: active_id });
             }
@@ -1946,15 +1955,24 @@ mod tests {
             );
         }
         // Organic switch (Alt+o): the bind's MessagePlugin arms one
-        // announce; the next TabUpdate fires it and disarms.
+        // announce; the next TabUpdate fires it and disarms. GATED
+        // (ReanchorVisit, not AnnounceVisit): the organic pipe broadcasts
+        // and a toggle's TabUpdate reaches every instance, so an ungated
+        // announce here is one `zellij pipe` subprocess PER BAR — measured
+        // live as ~2s of frozen nav per Alt+o (#128, 2026-08-02).
         m.set_organic_pending();
         let fx = m.apply_tabs(vec![tab(10, 0, "a", true), tab(11, 1, "b", false)]);
-        assert!(fx.contains(&Effect::AnnounceVisit { tab_id: 10 }));
-        let fx = m.apply_tabs(vec![tab(10, 0, "a", true), tab(11, 1, "b", false)]);
+        assert!(fx.contains(&Effect::ReanchorVisit { tab_id: 10 }));
         assert!(
             fx.iter()
-                .all(|e| !matches!(e, Effect::AnnounceVisit { .. }))
+                .all(|e| !matches!(e, Effect::AnnounceVisit { .. })),
+            "the ungated announce must not fire for an organic switch"
         );
+        let fx = m.apply_tabs(vec![tab(10, 0, "a", true), tab(11, 1, "b", false)]);
+        assert!(fx.iter().all(|e| !matches!(
+            e,
+            Effect::AnnounceVisit { .. } | Effect::ReanchorVisit { .. }
+        )));
         // An incoming beacon DISARMS a pending organic announce: the truly
         // active instance already spoke — a stale instance must not answer
         // a leftover flag with poison at its next burst.
@@ -1962,19 +1980,19 @@ mod tests {
         m.beacon(10); // truth arrives (also matches our claim → no-op announce)
         m.beacon(11); // and moves on
         let fx = m.apply_tabs(vec![tab(10, 0, "a", true), tab(11, 1, "b", false)]);
-        assert!(
-            fx.iter()
-                .all(|e| !matches!(e, Effect::AnnounceVisit { .. }))
-        );
+        assert!(fx.iter().all(|e| !matches!(
+            e,
+            Effect::AnnounceVisit { .. } | Effect::ReanchorVisit { .. }
+        )));
         // A pending organic announce whose claim already MATCHES the beacon
         // stays quiet (nothing to correct).
         m.beacon(10);
         m.set_organic_pending();
         let fx = m.apply_tabs(vec![tab(10, 0, "a", true), tab(11, 1, "b", false)]);
-        assert!(
-            fx.iter()
-                .all(|e| !matches!(e, Effect::AnnounceVisit { .. }))
-        );
+        assert!(fx.iter().all(|e| !matches!(
+            e,
+            Effect::AnnounceVisit { .. } | Effect::ReanchorVisit { .. }
+        )));
     }
 
     /// A model toggled once (expanded → collapsed): seek armed toward the
