@@ -63,8 +63,8 @@ pub enum Effect {
     /// to the STORE (§6.6 Design B), fired by the agent tab's own bar.
     Bind { uuid: String, tab_id: usize },
     /// run_command(["clave","prune-tabs", stale_ids…]) — drop store binds and
-    /// tab_timeline entries for CLOSED tabs (#6/F3). Carries the OBSERVED-STALE
-    /// ids (bound-or-timelined ids ABSENT from the delivered live set), NOT the
+    /// tab_order entries for CLOSED tabs (#6/F3). Carries the OBSERVED-STALE
+    /// ids (bound-or-ordered ids ABSENT from the delivered live set), NOT the
     /// live set — removing specific dead ids is idempotent and commutes, so
     /// two out-of-order prunes can't clobber a tab neither observed die (the
     /// full-live-set "retain-only" payload could unbind a tab created after the
@@ -89,7 +89,7 @@ pub enum Effect {
     /// explicit picks; the model has already marked the uuid in-flight (↻).
     OpenAgent { uuid: String },
     /// run_command(["clave","touch",tab_id]) — the once-EVER birth stamp for a
-    /// tab the store timeline has never seen. Was an inline `run_command` in
+    /// tab the store's tab order has never seen. Was an inline `run_command` in
     /// the adapter, which put it out of reach of every test (`main.rs` is
     /// `test = false`) and gave it no retry trigger: the block lived only in
     /// the TabUpdate arm, and a close delivers exactly ONE TabUpdate to the
@@ -735,7 +735,7 @@ impl BarModel {
             return Vec::new();
         };
         let mut fx = Vec::new();
-        // Birth touch FIRST: a newly-created tab wants its timeline stamp
+        // Birth touch FIRST: a newly-created tab wants its ordinal stamp
         // before its bind. `needs_birth_touch` is once-EVER per (instance,
         // tab) and the latch is consumed here and only here — i.e. only when
         // we are actually emitting, so a false gate DEFERS rather than
@@ -1126,7 +1126,7 @@ impl BarModel {
         }
         // #6/F3 store hygiene: on ANY TabUpdate, tell the store which OBSERVED
         // ids just died (bound-or-timelined ids absent from this delivered live
-        // set) so it drops their binds + tab_timeline entries. Correctness, not
+        // set) so it drops their binds + tab_order entries. Correctness, not
         // just hygiene — zellij REUSES tab_ids (get_new_tab_id = max-key+1,
         // screen.rs:1617; a closed top tab's id returns on the next new tab), so
         // a survivor entry would let a reused-id tab inherit a dead agent's
@@ -1177,7 +1177,7 @@ impl BarModel {
     /// position above ours would then never prune at all — the next TabUpdate
     /// arrives when a tab is created, and zellij reuses ids, so by then the
     /// dead id is back in the live set and no longer reads as stale. The dead
-    /// agent's bind and timeline entry survive into the new tab: it inherits
+    /// agent's bind and tab_order entry survive into the new tab: it inherits
     /// the dead row's glyph and sort order, and the dead row reads live to
     /// `bound_live_uuids`. Emitting from `identity_effects` gives it the same
     /// retry `Touch` gets — the PaneUpdate that restores coherence.
@@ -1847,13 +1847,14 @@ mod tests {
         }
     }
 
-    /// Snapshot carrying only a tab timeline (the §6.6 store-timeline).
-    fn snap_t(seq: u64, timeline: &[(usize, u64)]) -> AgentSnapshot {
+    /// Snapshot carrying only a tab order (the §6.6 store tab order): pairs of
+    /// (tab_id, commitment ordinal).
+    fn snap_t(seq: u64, ords: &[(usize, u64)]) -> AgentSnapshot {
         AgentSnapshot {
             collapsed: false,
             seq,
             agents: vec![],
-            tab_order: timeline.iter().copied().collect(),
+            tab_order: ords.iter().copied().collect(),
         }
     }
 
@@ -1915,9 +1916,10 @@ mod tests {
 
     #[test]
     fn rows_order_by_last_user_commitment() {
-        // §6.6 (store-timeline): one timeline in unix seconds, owned by the
-        // STORE and replaced from each snapshot — tab commitments ∨ agent
-        // prompts (last_interacted). Focus moves NOTHING.
+        // §6.6 / S1: one list of commitment ORDINALS, owned by the STORE and
+        // replaced from each snapshot — tab commitments ∨ agent prompts. Focus
+        // moves NOTHING. (The values below are ordinals, not clock readings;
+        // the wall clock stopped being the key in S1/#39.)
         let mut m = BarModel::default();
         m.apply_tabs(vec![
             tab(10, 0, "a", false),
@@ -1926,30 +1928,30 @@ mod tests {
         ]);
         // Nothing committed yet → tab-position order, active flag irrelevant.
         assert_eq!(names(&m), vec!["a", "b", "c"]);
-        // Commitments arrive via snapshot and order by wall clock…
+        // Commitments arrive via snapshot and order by ordinal, descending…
         m.apply_snapshot(snap_t(1, &[(10, 1000), (11, 2000), (12, 1500)]));
         assert_eq!(names(&m), vec!["b", "c", "a"]);
         // …and focus (beacon) does not reorder.
         m.beacon(10);
         assert_eq!(names(&m)[0], "b");
-        // Agent prompts reorder ONLY through the store timeline (the hook
-        // stamps tab_timeline via the bind, §6.6 Design B) — an agent's
-        // last_interacted alone must NOT sort: render-time joins diverge
-        // per instance (round 6).
+        // Agent prompts reorder ONLY through the store's tab order (the hook
+        // stamps it via the bind, §6.6 Design B) — an agent's last_interacted
+        // alone must NOT sort: render-time joins diverge per instance
+        // (round 6).
         let mut s = snap(2, vec![agent("u1", Status::Working, Some(12))]);
         s.agents[0].last_interacted = 9999;
         s.tab_order = [(10, 1000), (11, 2000), (12, 1500)].into();
         m.apply_snapshot(s);
         // By KEY from here: tab 12 now hosts an agent, and an agent row does
         // not carry the zellij tab name (lock §7.1).
-        assert_eq!(keys(&m)[0], RowKey::Tab(11)); // "b" — li ignored, timeline rules
-        // The prompt's stamp arrives IN the timeline → c fronts everywhere.
+        assert_eq!(keys(&m)[0], RowKey::Tab(11)); // "b" — li ignored, ordinal rules
+        // The prompt's stamp arrives IN the tab order → c fronts everywhere.
         m.apply_snapshot(snap_t(3, &[(10, 1000), (11, 2000), (12, 3000)]));
         assert_eq!(keys(&m)[0], RowKey::Tab(12)); // "c"
     }
 
     #[test]
-    fn timeline_is_replaced_from_snapshots_never_merged() {
+    fn tab_order_is_replaced_from_snapshots_never_merged() {
         // C5 round 5: per-instance merged copies of pipe deltas DIVERGED
         // (missed echoes under spinup congestion) and walking oscillated.
         // The fix: the snapshot's map is authoritative — REPLACE, don't
@@ -2133,15 +2135,15 @@ mod tests {
 
     // --- #55 frame coherence & executor election (RC-A / RC-B) -------------
 
-    /// Snapshot carrying agents AND a tab timeline. The #55 tests need both:
-    /// a seeded timeline suppresses the birth touch so a test can assert on
+    /// Snapshot carrying agents AND a tab order. The #55 tests need both:
+    /// a seeded tab order suppresses the birth touch so a test can assert on
     /// binds alone.
-    fn snap_full(seq: u64, agents: Vec<Agent>, timeline: &[(usize, u64)]) -> AgentSnapshot {
+    fn snap_full(seq: u64, agents: Vec<Agent>, ords: &[(usize, u64)]) -> AgentSnapshot {
         AgentSnapshot {
             collapsed: false,
             seq,
             agents,
-            tab_order: timeline.iter().copied().collect(),
+            tab_order: ords.iter().copied().collect(),
         }
     }
 
@@ -4926,10 +4928,18 @@ mod tests {
                 let before: Vec<RowKey> = m.rows().into_iter().map(|(k, _)| k).collect();
                 let tl: std::collections::BTreeMap<usize, u64> =
                     ids.iter().enumerate().map(|(i, &id)| (id, timeline[i])).collect();
-                for status in [Status::Done, Status::Idle, Status::Failed] {
+                // Each push needs a STRICTLY newer seq or the §5 gate discards
+                // it — `build(0)` already applied seq 1, so a constant seq 2
+                // here would land only the first status and silently re-assert
+                // the same state twice (CodeRabbit, PR #135). A leg that cannot
+                // fail is worse than no leg: it reads as three statuses covered.
+                for (i, status) in [Status::Done, Status::Idle, Status::Failed]
+                    .into_iter()
+                    .enumerate()
+                {
                     m.apply_snapshot(AgentSnapshot {
                         collapsed: false,
-                        seq: 2,
+                        seq: 2 + i as u64,
                         agents: ids
                             .iter()
                             .map(|&id| agent(&format!("u{id}"), status, Some(id)))

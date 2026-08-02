@@ -661,14 +661,27 @@ self-hydrates on load via `RunCommands` — §6.6).
   sorts to the bottom. **Focus never reorders**; the list holds still while you
   look around and navigate (this is what makes walking the displayed order
   stable — no ping-pong).
-  The sort key is the STORE's `tab_order` map (tab_id → ordinal) and
-  NOTHING else — no render-time joins (revised 2026-07-14 twice: C5 rd 5
-  killed instance-local pipe-delta merges; rd 6 killed the render-time
-  `last_interacted` join — register pipes don't replay and hidden manifests
-  go stale, so per-instance joins diverge and walking alternated between the
-  two agent tabs). The map is written only under the store lock and carried
-  on EVERY `AgentSnapshot`; each bar REPLACES its copy from each seq-gated
-  snapshot — the one channel that has never diverged. Writers:
+  **One key, both row classes (S1).** A row ranks by the HIGHER of two
+  ordinals: the STORE's `tab_order` entry for its tab, and the row's own
+  `commit_ord`. That identity is load-bearing — a row must rank by the same
+  number whether it is live or dormant, or merely closing its tab would change
+  its rank. A plain terminal tab has no row and ranks on `tab_order` alone; a
+  dormant row's tab entry is gone once pruned and it ranks on `commit_ord`
+  alone. Consumers must therefore keep BOTH: dropping `commit_ord` loses
+  dormant order across a session recreate, since `tab_order` is cleared there.
+  (Corrected 2026-08-01 — this said `tab_order` "and NOTHING else", which was
+  never true of dormant rows and stopped being true of live ones. CodeRabbit
+  and Codex, PR #135.)
+
+  Both values ride the SAME seq-gated snapshot, so this is **not** a
+  render-time join (revised 2026-07-14 twice: C5 rd 5 killed instance-local
+  pipe-delta merges; rd 6 killed the render-time `last_interacted` join —
+  register pipes don't replay and hidden manifests go stale, so per-instance
+  joins diverge and walking alternated between the two agent tabs). What made
+  those hazards is TWO independent sources; this has one. The map is written
+  only under the store lock and carried on EVERY `AgentSnapshot`; each bar
+  REPLACES its copy from each seq-gated snapshot — the one channel that has
+  never diverged. Writers:
   - **Birth**: the active instance fires ONE `clave touch <tab_id>` per tab
     (first TabUpdate for a tab neither the snapshot tab order nor its local
     fired-set knows; guard is local and never echo-dependent — C5 rd 4).
