@@ -333,6 +333,7 @@ dependencies = [
  "dirs",
  "fs4",
  "kdl",
+ "proptest",
  "serde",
  "serde_json",
  "tempfile",

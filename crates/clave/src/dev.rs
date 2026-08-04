@@ -322,6 +322,14 @@ fn agent_record(
         label: format!("{scenario_name}-{} · seeded", a.slug),
         status: a.status,
         last_interacted: now.saturating_sub(a.ago_secs),
+        // Deliberately unminted (S1). Seeding runs BEFORE any session exists,
+        // and `launch_session` calls `clear_session_order` on the way into a
+        // create — whose backfill seeds ordinals from `last_interacted`, oldest
+        // first. So the scenario's staggered recency survives into the ordinal
+        // space, and the sandbox exercises the real upgrade path rather than a
+        // special-cased one. Minting here would instead follow SEEDING order,
+        // which has nothing to do with `ago_secs`.
+        commit_ord: 0,
         last_visited: 0,
         worktree: a.worktree.then(|| cwd_str.to_string()),
         label_source: crate::store::LabelSource::FirstPrompt,

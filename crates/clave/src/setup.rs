@@ -118,6 +118,15 @@ pub fn config_kdl(binary: &str, wasm: &str) -> String {
     // reorder on user commitments, never on focus — so walking the visible
     // order is stable, no ping-pong). Executor-gated in the plugin: only the
     // active instance (fresh tab set, the bar being read) computes the step.
+    //
+    // The two rules that make walking safe, stated for #39 (S1):
+    //   R1 — a prompt always moves its row to the top. No tie, no clock, no
+    //        dependence on where the tab happens to sit.
+    //   R2 — closing a tab reorders nothing relative to anything else. The
+    //        closed row changes glyph and keeps its rank; no untouched row
+    //        overtakes another.
+    // Everything else — Claude finishing, focus, clicks, these nav keys —
+    // changes status or selection and never the order.
     binds.push_str(&format!(
         "        bind \"Alt j\" \"Alt Down\" {{ {} }}\n",
         nav("{\\\"dir\\\":\\\"next\\\"}")
@@ -772,7 +781,7 @@ pub fn launch_session() -> Result<()> {
     if !live {
         // §6.6 hygiene: tab_ids are SESSION-scoped — drop the previous
         // session's timeline + binds before a CREATE.
-        crate::store::clear_tab_timeline(&crate::store::store_paths()?)?;
+        crate::store::clear_session_order(&crate::store::store_paths()?)?;
         if session_exists(&list, &session) {
             // Dead-but-serialized (pre-C8 state, or zellij's own cache):
             // delete so attach --create builds from OUR layout. Best-effort —
@@ -985,6 +994,7 @@ mod tests {
             label: "repo · main".into(),
             status: clave_types::Status::Idle,
             last_interacted: 100,
+            commit_ord: 0,
             last_visited: 0,
             worktree: Some("/repo/.claude-worktrees/ab".into()),
             label_source: crate::store::LabelSource::FirstPrompt,
@@ -1025,6 +1035,7 @@ mod tests {
             label: uuid.into(),
             status: clave_types::Status::Idle,
             last_interacted: li,
+            commit_ord: 0,
             last_visited: 0,
             worktree: None,
             label_source: LabelSource::FirstPrompt,
@@ -1190,6 +1201,7 @@ mod tests {
             label: "l".into(),
             status: clave_types::Status::Idle,
             last_interacted: 0,
+            commit_ord: 0,
             last_visited: 0,
             worktree: None,
             label_source: crate::store::LabelSource::FirstPrompt,
@@ -1460,6 +1472,7 @@ mod tests {
             label: "l".into(),
             status: clave_types::Status::Idle,
             last_interacted: 0,
+            commit_ord: 0,
             last_visited: 0,
             worktree: None,
             label_source: crate::store::LabelSource::FirstPrompt,
