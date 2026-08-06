@@ -198,6 +198,39 @@ fn last_tail_field(tail: &str, kind: &str, field: &str) -> Option<String> {
     })
 }
 
+/// The LAST `{"type":"system","subtype":<subtype>, <field>:<non-empty
+/// string>}` line in `tail` — [`last_tail_field`]'s discipline for the system
+/// channel, which multiplexes many record kinds behind one `type` and
+/// discriminates on `subtype` (the FOOTGUNS inventory one-liner buckets `type`
+/// only, which is exactly how these records went unnoticed until #111). Same
+/// skip-empty rule, so a blank value scans further back rather than winning.
+fn last_system_tail_field(tail: &str, subtype: &str, field: &str) -> Option<String> {
+    tail.lines().rev().find_map(|l| {
+        let v: serde_json::Value = serde_json::from_str(l).ok()?;
+        if v.get("type")?.as_str()? != "system" || v.get("subtype")?.as_str()? != subtype {
+            return None;
+        }
+        let s = v.get(field)?.as_str()?.trim();
+        (!s.is_empty()).then(|| s.to_string())
+    })
+}
+
+/// The session's freshest away-period recap —
+/// `{"type":"system","subtype":"away_summary","content":…}`, written when the
+/// user returns after being away: one to two sentences of session state plus
+/// next action, RE-GENERATED per away period, so unlike `ai-title` it
+/// actually narrates progress (measured 2026-08-01 on #111: 50 local
+/// transcripts carry at least one, fleet-born sessions included). The TOP
+/// tier for `rec.summary` (#131): the away/return pattern IS dormancy, so the
+/// rows whose summary matters most are exactly the ones that earn a recap —
+/// and per #111's discriminator finding, fleet-born rows never earn an
+/// `ai-title`, so this is the first signal that can upgrade them past the
+/// prompt seed. Newest wins by tail position: the lines are appended in
+/// order, and the reverse scan takes the last.
+pub fn away_summary_from_tail(tail: &str) -> Option<String> {
+    last_system_tail_field(tail, "away_summary", "content")
+}
+
 /// Claude's own auto-description — `{"type":"ai-title","aiTitle":…}`. NOT
 /// rolling, despite how often it is re-emitted: LEDGER D24 measured up to 85
 /// `ai-title` lines in one transcript and never more than one distinct VALUE
@@ -341,11 +374,12 @@ pub fn refresh_label(
 ///
 /// - `title`   ← `custom-title` — the user's own rename, and nothing else. A
 ///   wrong title is worse than the blank chip the design already renders.
-/// - `summary` ← `ai-title` (Claude's auto-description), falling back to the
-///   extinct `type:"summary"` line, and finally — only while `summary` is
-///   still EMPTY — to the current prompt, so a live row is never blank before
-///   Claude has written its first `ai-title`. Fill-only-when-empty on that
-///   last tier: an earned `ai-title` must never regress to prompt text.
+/// - `summary` ← `away_summary` (the freshest away-period recap, #131), then
+///   `ai-title` (Claude's auto-description), falling back to the extinct
+///   `type:"summary"` line, and finally — only while `summary` is still
+///   EMPTY — to the current prompt, so a live row is never blank before
+///   Claude has written anything. Fill-only-when-empty on that last tier: an
+///   earned recap or `ai-title` must never regress to prompt text.
 fn refresh_row_fields(
     rec: &mut AgentRecord,
     event: &str,
@@ -366,7 +400,11 @@ fn refresh_row_fields(
         }
     }
     let from_tail = jsonl_tail
-        .and_then(|t| ai_title_from_tail(t).or_else(|| summary_from_tail(t)))
+        .and_then(|t| {
+            away_summary_from_tail(t)
+                .or_else(|| ai_title_from_tail(t))
+                .or_else(|| summary_from_tail(t))
+        })
         .filter(|s| !is_harness_injected(s));
     let seed = (event == "UserPromptSubmit" && rec.summary.is_empty())
         .then_some(payload.prompt.as_deref())
@@ -1474,6 +1512,16 @@ mod tests {
         )
     }
 
+    /// One `away_summary` jsonl line — the shape measured on #111
+    /// (2026-08-01): a `type:"system"` line discriminated by `subtype`, with a
+    /// plain-string `content` inside the full conversation-line envelope.
+    fn away_summary_line(v: &str) -> String {
+        format!(
+            "{{\"type\":\"system\",\"subtype\":\"away_summary\",\"content\":{},\"timestamp\":\"2026-08-01T10:00:00.000Z\",\"sessionId\":\"u1\",\"uuid\":\"w1\"}}\n",
+            serde_json::to_string(v).unwrap()
+        )
+    }
+
     #[test]
     fn summary_is_written_structurally_not_only_into_the_label() {
         // Design-lock §7.1: the bar lays its own fixed-width columns and reads
@@ -1530,9 +1578,10 @@ mod tests {
             let mut r = rec("u1");
             let p = HookPayload::default();
             let tail = format!(
-                "{}{}",
+                "{}{}{}",
                 ai_title_line(&injected),
-                custom_title_line(&injected)
+                custom_title_line(&injected),
+                away_summary_line(&injected)
             );
             assert!(
                 !refresh_label(&mut r, "Stop", &p, Some(&tail)),
@@ -1615,6 +1664,103 @@ mod tests {
             Some(&ai_title_line("earned"))
         ));
         assert_eq!(r.summary, "earned");
+    }
+
+    #[test]
+    fn away_summary_outranks_ai_title_and_the_newest_recap_wins() {
+        // #131: the recap is the only signal that can upgrade a fleet-born
+        // row's summary — per #111 those never earn an ai-title — and it is
+        // re-generated per away period, so the LAST one in the tail is the
+        // current session state.
+        let p = HookPayload::default();
+        let mut r = rec("u1");
+        let tail = format!(
+            "{}{}{}",
+            away_summary_line("stale recap from the first away period"),
+            ai_title_line("the one auto-title"),
+            away_summary_line("fresh recap: gates green, next wire the tier")
+        );
+        assert!(refresh_label(&mut r, "Stop", &p, Some(&tail)));
+        assert_eq!(r.summary, "fresh recap: gates green, next wire the tier");
+
+        // The tier is AUTHORITY, not file position: an ai-title stamped after
+        // the recap (every reopen re-appends it) still loses to it.
+        let mut r = rec("u1");
+        let tail = format!(
+            "{}{}",
+            away_summary_line("the recap"),
+            ai_title_line("the one auto-title")
+        );
+        assert!(refresh_label(&mut r, "Stop", &p, Some(&tail)));
+        assert_eq!(r.summary, "the recap");
+
+        // …and an earned recap never regresses to prompt text: the seed tier
+        // stays fill-only-when-empty. (refresh_label still returns true here —
+        // the LABEL is still bare and legitimately earns the prompt; the
+        // property under test is the summary holding.)
+        let prompted = HookPayload {
+            session_id: Some("u1".into()),
+            prompt: Some("a prompt that must not win".into()),
+            message: None,
+            transcript_path: None,
+        };
+        refresh_label(&mut r, "UserPromptSubmit", &prompted, None);
+        assert_eq!(r.summary, "the recap");
+    }
+
+    #[test]
+    fn a_system_line_with_another_subtype_is_not_a_recap() {
+        // The system channel carries many subtypes; matching on `type` alone —
+        // what `last_tail_field` does for every other tier — would graft
+        // arbitrary system prose into the summary column.
+        let p = HookPayload::default();
+        let mut r = rec("u1");
+        let tail = format!(
+            "{}{}",
+            ai_title_line("the auto-title"),
+            "{\"type\":\"system\",\"subtype\":\"turn_duration\",\"content\":\"not a recap\"}\n"
+        );
+        assert!(refresh_label(&mut r, "Stop", &p, Some(&tail)));
+        assert_eq!(r.summary, "the auto-title");
+
+        // An EMPTY recap is skipped, not returned — the scan continues to the
+        // last real one, matching the /clear rule every other tier follows.
+        let mut r = rec("u1");
+        let tail = format!(
+            "{}{}",
+            away_summary_line("the real recap"),
+            away_summary_line("  ")
+        );
+        assert!(refresh_label(&mut r, "Stop", &p, Some(&tail)));
+        assert_eq!(r.summary, "the real recap");
+
+        // No recap at all: the existing tiers stand exactly as before.
+        let mut r = rec("u1");
+        assert!(refresh_label(
+            &mut r,
+            "Stop",
+            &p,
+            Some(&ai_title_line("the auto-title"))
+        ));
+        assert_eq!(r.summary, "the auto-title");
+    }
+
+    #[test]
+    fn a_long_recap_rides_the_same_summary_bound() {
+        // A recap is one-to-two SENTENCES, the longest prose this column has
+        // ever carried — it rides the existing SUMMARY_MAX_CHARS clamp, no
+        // new bound (the store holds prose; render.rs clamps cells).
+        let long = "charting the wayfinder map and wiring fourteen tickets ".repeat(8);
+        let mut r = rec("u1");
+        let p = HookPayload::default();
+        assert!(refresh_label(
+            &mut r,
+            "Stop",
+            &p,
+            Some(&away_summary_line(&long))
+        ));
+        assert_eq!(r.summary.chars().count(), SUMMARY_MAX_CHARS);
+        assert!(r.summary.starts_with("charting the wayfinder map"));
     }
 
     #[test]
