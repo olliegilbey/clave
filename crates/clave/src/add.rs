@@ -403,6 +403,41 @@ pub fn resume_candidates(
     list.into_iter().map(|(_, c)| c).collect()
 }
 
+/// #139: the Alt+a dir picker's candidate list — zoxide's ranked entries
+/// (order preserved, current dir first) unioned with every worktree of every
+/// repo the store already tracks. A worktree never `cd`'d into does not exist
+/// for zoxide, yet it is a first-class fleet location; visiting it first is an
+/// unreasonable precondition. Dedup by exact path keeps zoxide's ranking for
+/// dirs it knows; a zoxide-known LINKED worktree still gains the `(wt)` mark.
+/// Returns `(path, mark_wt)`.
+pub fn dir_candidates(zoxide: Vec<String>, worktrees: Vec<(String, bool)>) -> Vec<(String, bool)> {
+    let mut out: Vec<(String, bool)> = zoxide.into_iter().map(|d| (d, false)).collect();
+    for (path, linked) in worktrees {
+        match out.iter_mut().find(|(d, _)| *d == path) {
+            Some((_, mark)) => *mark |= linked,
+            None => out.push((path, linked)),
+        }
+    }
+    out
+}
+
+/// One dir-picker fzf line: the path, tab-suffixed with the `(wt)` marker for
+/// a linked worktree — the same marker convention the resume picker uses.
+/// `picked_dir` is the inverse; the tab keeps the marker out of path space
+/// (a literal tab in a path is already rejected by `validate_cwd`).
+pub fn dir_line(path: &str, wt: bool) -> String {
+    if wt {
+        format!("{path}\t(wt)")
+    } else {
+        path.to_string()
+    }
+}
+
+/// The path half of a picked dir line (drops the `(wt)` marker if present).
+pub fn picked_dir(line: &str) -> &str {
+    line.split('\t').next().unwrap_or(line)
+}
+
 /// What to store when (re)recording an agent (plan-review fix to §6.3 step 7).
 ///
 /// Resuming an agent that already has a store row must NOT clobber it: the
@@ -608,6 +643,41 @@ fn strip_origin_prefix(out: &str) -> Option<String> {
     (!b.is_empty()).then(|| b.to_string())
 }
 
+/// #139 (io half of `dir_candidates`): every worktree of every distinct
+/// `repo_root` the store tracks, canonicalized (S0b), vanished paths skipped,
+/// linked-vs-main decided per repo the same way the resume scan decides it
+/// (first porcelain entry is the main tree — see `main_worktree_path`).
+/// A repo_root that is gone or not a repo yields nothing (`cmd_stdout` fails
+/// → empty porcelain). BTreeSet roots keep the output deterministic.
+fn store_worktree_dirs(git: &Path, store: &Store) -> Vec<(String, bool)> {
+    let roots: std::collections::BTreeSet<&str> = store
+        .agents
+        .values()
+        .map(|r| r.repo_root.as_str())
+        .collect();
+    let mut seen: std::collections::BTreeSet<String> = Default::default();
+    let mut out = Vec::new();
+    for root in roots {
+        let porcelain =
+            cmd_stdout(git, &["-C", root, "worktree", "list", "--porcelain"]).unwrap_or_default();
+        let worktrees = parse_worktrees(&porcelain);
+        let main = main_worktree_path(&worktrees).and_then(|p| std::fs::canonicalize(p).ok());
+        for w in &worktrees {
+            let Ok(canon) = std::fs::canonicalize(&w.path) else {
+                continue; // vanished worktree — nothing to open there
+            };
+            let linked = main.as_deref().is_none_or(|m| canon != m);
+            let Some(path) = canon.to_str() else {
+                continue;
+            };
+            if seen.insert(path.to_string()) {
+                out.push((path.to_string(), linked));
+            }
+        }
+    }
+    out
+}
+
 pub fn run_add(worktree: bool) -> Result<()> {
     // Preflight (spec §Preflight): the fzf weave, git/claude, and zellij
     // itself are all needed before any tab exists — abort BEFORE creating
@@ -631,28 +701,41 @@ pub fn run_add(worktree: bool) -> Result<()> {
     }
 
     // 1) Pick a directory: fzf over zoxide's ranked list, current dir first
-    //    (§6.3 — fzf+zoxide are verified present on the target machine).
-    let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
-    let mut dirs: Vec<String> = vec![cwd.clone()];
-    dirs.extend(
-        cmd_stdout(tool_path(crate::discover::ToolId::Zoxide), &["query", "-l"])?
-            .lines()
-            .map(String::from),
-    );
-    dirs.dedup();
-    let Some(dir) = fzf_pick(&dirs, "agent dir> ")? else {
-        return Ok(());
-    };
-
-    // 2) Canonicalize FIRST (S0b) — everything downstream keys off the
-    //    physical path: repo_root, munged jsonl dir, the spawn command.
-    let physical = std::fs::canonicalize(&dir).with_context(|| format!("canonicalizing {dir}"))?;
-    let physical_str = physical.to_str().context("non-UTF8 dir")?.to_string();
+    //    (§6.3 — fzf+zoxide are verified present on the target machine),
+    //    UNIONED with every store-known repo's worktrees (#139): a worktree
+    //    zoxide has never seen is still a first-class fleet location. The
+    //    store read here is lock-free and only feeds the candidate list; the
+    //    authoritative read happens in step 3 as before.
     // Route every git/zellij invocation through discovery (review 2026-07-22,
     // Fix 2): doctor promises off-PATH tools are used by absolute path, so
     // add must not fall back to bare `git`/`zellij` — an off-PATH git (SSH,
     // ~/.local/bin) would break repo detection preflight already passed.
     let git = tool_path(crate::discover::ToolId::Git);
+    let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
+    let mut zx: Vec<String> = vec![cwd.clone()];
+    zx.extend(
+        cmd_stdout(tool_path(crate::discover::ToolId::Zoxide), &["query", "-l"])?
+            .lines()
+            .map(String::from),
+    );
+    zx.dedup();
+    let wt_dirs = store_paths()
+        .and_then(|p| crate::store::read_store(&p))
+        .map(|s| store_worktree_dirs(&git, &s))
+        .unwrap_or_default();
+    let lines: Vec<String> = dir_candidates(zx, wt_dirs)
+        .iter()
+        .map(|(d, wt)| dir_line(d, *wt))
+        .collect();
+    let Some(picked_line) = fzf_pick(&lines, "agent dir> ")? else {
+        return Ok(());
+    };
+    let dir = picked_dir(&picked_line).to_string();
+
+    // 2) Canonicalize FIRST (S0b) — everything downstream keys off the
+    //    physical path: repo_root, munged jsonl dir, the spawn command.
+    let physical = std::fs::canonicalize(&dir).with_context(|| format!("canonicalizing {dir}"))?;
+    let physical_str = physical.to_str().context("non-UTF8 dir")?.to_string();
     let repo_root = cmd_stdout(&git, &["-C", &physical_str, "rev-parse", "--show-toplevel"])
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| physical_str.clone()); // non-repo dirs are fine
@@ -1225,6 +1308,125 @@ mod tests {
         assert_eq!(c[2].uuid, "u-old");
         assert_eq!(c[2].label, "repo · main · old thing");
         assert!(!c[2].live);
+    }
+
+    /// #139: the dir picker must reach worktrees zoxide has never seen —
+    /// store-known repos' worktrees union in AFTER zoxide's ranked list
+    /// (ranking preserved), deduped by exact path, marked when linked.
+    #[test]
+    fn dir_candidates_unions_worktrees_after_zoxide_and_dedups() {
+        let zoxide = vec![
+            "/here".to_string(),                         // current dir, always first
+            "/repo".to_string(),                         // zoxide knows the main checkout
+            "/repo/.claude/worktrees/known".to_string(), // and ONE worktree
+        ];
+        let worktrees = vec![
+            ("/repo".to_string(), false), // main checkout: never marked
+            ("/repo/.claude/worktrees/known".to_string(), true),
+            ("/repo/.claude/worktrees/unseen".to_string(), true),
+        ];
+        let c = dir_candidates(zoxide, worktrees);
+        assert_eq!(
+            c,
+            vec![
+                ("/here".to_string(), false),
+                ("/repo".to_string(), false),
+                // zoxide's copy survives (its rank), but gains the mark:
+                ("/repo/.claude/worktrees/known".to_string(), true),
+                // the one zoxide never saw appends:
+                ("/repo/.claude/worktrees/unseen".to_string(), true),
+            ]
+        );
+        // No store repos → exactly the zoxide list, unmarked.
+        assert_eq!(
+            dir_candidates(vec!["/a".into()], vec![]),
+            vec![("/a".to_string(), false)]
+        );
+    }
+
+    #[test]
+    fn dir_lines_round_trip_through_the_picker() {
+        assert_eq!(dir_line("/repo/wt", true), "/repo/wt\t(wt)");
+        assert_eq!(dir_line("/plain", false), "/plain");
+        assert_eq!(picked_dir(&dir_line("/repo/wt", true)), "/repo/wt");
+        assert_eq!(picked_dir("/plain"), "/plain");
+        // Spaces in paths survive — only the TAB separates the marker.
+        assert_eq!(picked_dir("/a b/dir\t(wt)"), "/a b/dir");
+    }
+
+    /// #139 (io half of the union): a REAL repo with a linked worktree,
+    /// reached through a store row's repo_root — the main tree unions in
+    /// unmarked, the linked worktree marked, nothing else invented. Real
+    /// `git` via discovery, exactly like production; identity flags and
+    /// signing off so a dev machine's config cannot interfere.
+    #[test]
+    fn store_worktree_dirs_lists_main_and_linked_from_a_real_repo() {
+        let git = tool_path(crate::discover::ToolId::Git);
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_str().unwrap();
+        cmd_stdout(&git, &["-C", repo_s, "init", "-q"]).unwrap();
+        cmd_stdout(
+            &git,
+            &[
+                "-C",
+                repo_s,
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                "x",
+            ],
+        )
+        .unwrap();
+        let wt = tmp.path().join("wt");
+        cmd_stdout(
+            &git,
+            &[
+                "-C",
+                repo_s,
+                "worktree",
+                "add",
+                "-q",
+                wt.to_str().unwrap(),
+                "-b",
+                "t-wt",
+            ],
+        )
+        .unwrap();
+
+        // All store fields are serde(default) — an empty object is the
+        // canonical way to build one without naming every field.
+        let mut store: Store = serde_json::from_str("{}").unwrap();
+        let mut row = rec("u");
+        row.repo_root = repo_s.into();
+        store.agents.insert("u".into(), row);
+
+        let dirs = store_worktree_dirs(&git, &store);
+        let main_c = std::fs::canonicalize(&repo)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let wt_c = std::fs::canonicalize(&wt)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            dirs.contains(&(main_c, false)),
+            "main tree unmarked: {dirs:?}"
+        );
+        assert!(
+            dirs.contains(&(wt_c, true)),
+            "linked worktree marked: {dirs:?}"
+        );
+        assert_eq!(dirs.len(), 2);
     }
 
     #[test]
