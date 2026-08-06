@@ -433,9 +433,14 @@ pub fn dir_line(path: &str, wt: bool) -> String {
     }
 }
 
-/// The path half of a picked dir line (drops the `(wt)` marker if present).
+/// The path half of a picked dir line: strips exactly the generated
+/// `\t(wt)` suffix, nothing else. A zoxide path with a literal tab in it
+/// must pass through INTACT so `validate_cwd` rejects it loudly — splitting
+/// on the first tab silently truncated such a path, and a truncated prefix
+/// that happens to be a directory launches the agent in the wrong checkout
+/// (#143 review).
 pub fn picked_dir(line: &str) -> &str {
-    line.split('\t').next().unwrap_or(line)
+    line.strip_suffix("\t(wt)").unwrap_or(line)
 }
 
 /// What to store when (re)recording an agent (plan-review fix to §6.3 step 7).
@@ -1352,6 +1357,11 @@ mod tests {
         assert_eq!(picked_dir("/plain"), "/plain");
         // Spaces in paths survive — only the TAB separates the marker.
         assert_eq!(picked_dir("/a b/dir\t(wt)"), "/a b/dir");
+        // A zoxide path with a LITERAL tab passes through intact for
+        // validate_cwd to reject — truncating at the tab could land in a
+        // wrong-but-existing prefix directory (#143 review).
+        assert_eq!(picked_dir("/weird\tpath"), "/weird\tpath");
+        assert_eq!(picked_dir("/weird\tpath\t(wt)"), "/weird\tpath");
     }
 
     /// #139 (io half of the union): a REAL repo with a linked worktree,

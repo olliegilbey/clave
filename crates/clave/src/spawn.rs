@@ -200,6 +200,13 @@ pub fn conversation_evidenced(rec: &AgentRecord) -> bool {
 /// `physical_cwd` is `None` when the baked cwd no longer exists on disk (a
 /// removed worktree whose session moved out): the search still recovers 2/4,
 /// and 5 is always an error there — with no cwd there is nowhere to create.
+///
+/// A found-elsewhere transcript whose tail is malformed (unreadable, no cwd,
+/// or a vanished target dir) is a LOUD error even when a minted transcript
+/// still sits at the baked cwd. Deliberate, do not "fix" it into a fallback:
+/// degrading to the minted id would reopen the pre-`/clear` conversation —
+/// exactly the silent wrong-conversation attach #99 exists to forbid. The
+/// pane dying with a message naming the transcript is the cheaper failure.
 pub fn verified_site(
     claude_dir: &Path,
     physical_cwd: Option<&str>,
@@ -281,10 +288,41 @@ fn moved_site(transcript: &Path, session: &str) -> Result<SpawnSite> {
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("non-UTF8 relocated cwd"))?
         .to_string();
+    // `claude --resume` is project-dir-scoped: it looks under the munged dir
+    // of the cwd it runs in. The tail's cwd must therefore map back to the
+    // dir the transcript was FOUND in — they disagree when the tail lags the
+    // move (relocated file, no post-move lines yet). Resuming there would
+    // surface as Claude's opaque "No conversation found"; fail naming both
+    // dirs instead (#143 review).
+    let found_dir = transcript.parent().and_then(|p| p.file_name());
+    if found_dir != Some(std::ffi::OsStr::new(&munge_cwd(&cwd))) {
+        anyhow::bail!(
+            "transcript {} lives under project dir {:?} but its tail names cwd \
+             {cwd} (munged: {}) — the tail lags the move; resume from the \
+             transcript's own dir is not derivable (munge is lossy). Refusing \
+             rather than resuming where Claude would find nothing.",
+            transcript.display(),
+            found_dir.unwrap_or_default(),
+            munge_cwd(&cwd)
+        );
+    }
     Ok(SpawnSite::Moved {
         session: session.to_string(),
         cwd,
         branch: branch_from_tail(&tail),
+    })
+}
+
+/// #139 (review): can this session be recovered through relocation even
+/// though its baked cwd is gone? Open-time gate only — `run_open` must not
+/// reject a row as stale when the conversation demonstrably moved somewhere
+/// spawnable; the spawn re-runs the search and repoints the row.
+pub fn relocation_recoverable(claude_dir: &Path, uuid: &str, live_session: Option<&str>) -> bool {
+    let live = live_session.filter(|l| !l.starts_with('-'));
+    [live, Some(uuid)].into_iter().flatten().any(|id| {
+        locate_transcript(claude_dir, id)
+            .map(|t| moved_site(&t, id).is_ok())
+            .unwrap_or(false)
     })
 }
 
@@ -482,6 +520,40 @@ mod tests {
         assert_eq!(cwd_from_tail(""), None);
     }
 
+    /// A tail that LAGS the move (transcript found under the new munged dir,
+    /// last cwd lines still naming the old home — no post-move lines yet)
+    /// must refuse loudly: resuming at the tail's cwd is where Claude finds
+    /// no conversation. (#143 review)
+    #[test]
+    fn a_lagging_tail_refuses_rather_than_resuming_where_nothing_lives() {
+        let f = reloc_fixture();
+        let old_home = f.other_cwd("old-home");
+        // Found under "moved-here"'s dir, tail still says old_home.
+        let moved_here = f.other_cwd("moved-here");
+        f.plant(&moved_here, "u-lag", &tail_lines(&old_home, "main"));
+        let transcript = f
+            .claude
+            .join("projects")
+            .join(munge_cwd(&moved_here))
+            .join("u-lag.jsonl");
+        let err = moved_site(&transcript, "u-lag").unwrap_err().to_string();
+        assert!(err.contains("lags the move"), "unexpected error: {err}");
+        // And the open-time gate agrees: not recoverable through relocation.
+        assert!(!relocation_recoverable(&f.claude, "u-lag", None));
+    }
+
+    /// The open-time gate: a session whose transcript moved somewhere
+    /// spawnable IS recoverable; an unknown one is not. (#143 review)
+    #[test]
+    fn relocation_recoverable_follows_a_clean_move_only() {
+        let f = reloc_fixture();
+        let new_cwd = f.other_cwd("clean-move");
+        f.plant(&new_cwd, "u-moved", &tail_lines(&new_cwd, "feat/x"));
+        assert!(relocation_recoverable(&f.claude, "u-moved", None));
+        assert!(relocation_recoverable(&f.claude, "other", Some("u-moved")));
+        assert!(!relocation_recoverable(&f.claude, "u-nope", None));
+    }
+
     #[test]
     fn locate_transcript_matches_the_exact_uuid_only() {
         let f = reloc_fixture();
@@ -506,11 +578,11 @@ mod tests {
             vec![filler; 40].join("\n")
         );
         assert!(lines.len() > 1088 && lines.len() < 64 * 1024);
-        f.plant("/elsewhere", "u-deep", &lines);
+        f.plant(&target, "u-deep", &lines);
         let transcript = f
             .claude
             .join("projects")
-            .join(munge_cwd("/elsewhere"))
+            .join(munge_cwd(&target))
             .join("u-deep.jsonl");
         match moved_site(&transcript, "u-deep").unwrap() {
             SpawnSite::Moved { cwd, .. } => assert_eq!(cwd, target),

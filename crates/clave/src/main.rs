@@ -276,10 +276,18 @@ fn main() -> Result<()> {
                                     r.branch = b.clone();
                                 }
                             }
+                            s.seq += 1; // monotonic pipe contract (§5)
+                            clave::store::snapshot_from(s)
                         })
                     });
-                    if let Err(e) = repoint {
-                        eprintln!("clave spawn: could not repoint row cwd: {e:#}");
+                    // Broadcast like every other locked write here: without
+                    // the push, each bar keeps the pre-relocation cwd/branch
+                    // until an unrelated event refreshes it (#143 review).
+                    match repoint {
+                        Ok(snap) => clave::hook::push_snapshot(&snap),
+                        Err(e) => {
+                            eprintln!("clave spawn: could not repoint row cwd: {e:#}");
+                        }
                     }
                     clave::evlog::log_event(
                         "spawn",

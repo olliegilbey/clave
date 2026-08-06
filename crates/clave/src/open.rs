@@ -101,7 +101,15 @@ pub fn run_open(uuid: &str, display_cols: Option<usize>, collapsed: bool) -> Res
     // Issue #6: bind-first liveness (dump-layout scan is the additive
     // fallback) — `open_is_live` fixes the MCP-blind duplicate-tab spawn.
     let is_live = open_is_live(row, &dump);
-    let cwd_exists = std::path::Path::new(&row.cwd).is_dir();
+    // A missing baked cwd is not stale when the conversation demonstrably
+    // MOVED somewhere spawnable (#139, #143 review): the removed-worktree
+    // wake was otherwise rejected here before spawn's relocation recovery
+    // could ever run. Open only decides tab creation; spawn re-runs the
+    // search and repoints the row.
+    let cwd_exists = std::path::Path::new(&row.cwd).is_dir()
+        || crate::env::claude_config_dir().is_ok_and(|d| {
+            crate::spawn::relocation_recoverable(&d, &row.uuid, row.live_session.as_deref())
+        });
     match open_decision(row, is_live, cwd_exists) {
         OpenDecision::AlreadyLive => {
             crate::evlog::log_event("open", &format!("{uuid}: already live, no-op"));
