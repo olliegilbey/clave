@@ -181,9 +181,12 @@ fn bar(rows: &[Row], cols: usize, widths: Widths, label: &str) {
 /// this is a screenshot of the bar rather than of the graph paper it is drawn
 /// on. Used for the README until a real capture replaces it.
 ///
-/// `battery: None` throughout, deliberately. S7 has not landed, so the shipped
-/// bar renders that cell blank, and a promotional image is the last place to
-/// show a column the code does not fill yet.
+/// The battery levels span the ramp on purpose (S7, #62): the fleet shows a
+/// fresh row, a couple past halfway, one nearly out and one past its smart zone,
+/// because a promotional image of a meter that reads the same on every row sells
+/// the column short. The dormant row carries a real level too — a dormant
+/// conversation consumes nothing, so its reading is exactly current, which is
+/// the ruling that closed design-lock §7.2.
 ///
 /// The summaries copy the SHAPE of real `ai-title` values, sampled from the
 /// local transcript corpus 2026-07-31: sentence case, verb first, no trailing
@@ -196,7 +199,7 @@ fn showcase() -> Vec<Row> {
     let mut rows = vec![
         agent(
             RowStatus::NeedsYou,
-            None,
+            Some(3),
             Provenance::Branch,
             "api-svc",
             API_SVC,
@@ -205,7 +208,7 @@ fn showcase() -> Vec<Row> {
         ),
         agent(
             RowStatus::Working,
-            None,
+            Some(7),
             Provenance::Worktree,
             "clave",
             CLAVE,
@@ -214,7 +217,7 @@ fn showcase() -> Vec<Row> {
         ),
         agent(
             RowStatus::Done,
-            None,
+            Some(1),
             Provenance::Main,
             "webapp",
             WEBAPP,
@@ -229,7 +232,7 @@ fn showcase() -> Vec<Row> {
         },
         agent(
             RowStatus::Idle,
-            None,
+            Some(9),
             Provenance::Main,
             "clave",
             CLAVE,
@@ -238,7 +241,7 @@ fn showcase() -> Vec<Row> {
         ),
         agent(
             RowStatus::Failed,
-            None,
+            Some(5),
             Provenance::Branch,
             "infra",
             INFRA,
@@ -253,7 +256,7 @@ fn showcase() -> Vec<Row> {
         },
         agent(
             RowStatus::Stale,
-            None,
+            Some(10),
             Provenance::Worktree,
             "clave",
             CLAVE,
@@ -262,7 +265,7 @@ fn showcase() -> Vec<Row> {
         ),
         agent(
             RowStatus::Dormant,
-            None,
+            Some(6),
             Provenance::Main,
             "notes",
             DOTFILES,

@@ -188,14 +188,44 @@ const RULE: char = '\u{2502}'; // box drawings light vertical
 const ELLIPSIS: char = '\u{2026}';
 const CONSOLE: char = '\u{f018d}'; // nf-md-console — a terminal has no battery
 
-/// The S7 magnitude ramp, green through red. Index is the context level.
-const BATTERY: [(char, Rgb); 5] = [
-    ('\u{f0079}', Rgb(0x98, 0xBB, 0x6C)),
-    ('\u{f007e}', Rgb(0x98, 0xBB, 0x6C)),
-    ('\u{f007c}', Rgb(0xE6, 0xC3, 0x84)),
-    ('\u{f007b}', Rgb(0xFF, 0xA0, 0x66)),
-    ('\u{f007a}', Rgb(0xE4, 0x68, 0x76)),
+/// The S7 ramp (#62). Index is the context level: `0` is full, the last entry
+/// is empty and past the user's smart zone.
+///
+/// TWO AXES AT DIFFERENT RESOLUTIONS, deliberately. The GLYPH carries magnitude
+/// finely — one step per tenth of the zone, so the cell reads as a gauge you can
+/// watch descend. The INK carries risk coarsely — four bands, for the glance
+/// that never resolves a glyph at all. They cannot contradict each other because
+/// both are functions of the same index.
+///
+/// The ink bands are green below six tenths, yellow to eight, orange to the
+/// zone, and red AT it. The zone is where the battery turns red rather than
+/// where the ramp ends, so the last entry is also the clamp: four times over
+/// reads the same as one token over, and #105's token text carries the
+/// magnitude the glyph has stopped resolving.
+///
+/// Glyphs are the Material Design battery family, verified against the installed
+/// patched font's glyph-name table rather than assumed: `md-battery` (U+F0079),
+/// `md-battery_90`…`md-battery_10` (U+F0082 down to U+F007A — note they run
+/// BACKWARDS through the codepoints), `md-battery_outline` (U+F008E). Written as
+/// escapes, never literals: design-lock §5.4, load-bearing.
+const BATTERY: [(char, Rgb); clave_types::BATTERY_LEVELS as usize] = [
+    ('\u{f0079}', GREEN),  // full        · below a tenth spent
+    ('\u{f0082}', GREEN),  // nine tenths
+    ('\u{f0081}', GREEN),  // eight
+    ('\u{f0080}', GREEN),  // seven
+    ('\u{f007f}', GREEN),  // six
+    ('\u{f007e}', GREEN),  // five        · half the zone gone
+    ('\u{f007d}', YELLOW), // four
+    ('\u{f007c}', YELLOW), // three
+    ('\u{f007b}', ORANGE), // two
+    ('\u{f007a}', ORANGE), // one tenth
+    ('\u{f008e}', RED),    // empty       · at or past the zone
 ];
+
+const GREEN: Rgb = Rgb(0x98, 0xBB, 0x6C);
+const YELLOW: Rgb = Rgb(0xE6, 0xC3, 0x84);
+const ORANGE: Rgb = Rgb(0xFF, 0xA0, 0x66);
+const RED: Rgb = Rgb(0xE4, 0x68, 0x76);
 
 // ── the row ─────────────────────────────────────────────────────────────────
 
@@ -688,7 +718,12 @@ mod tests {
         Row {
             content: RowContent::Agent {
                 status,
-                battery: Some(2),
+                // Seven tenths spent: `md-battery_30` in yellow. Chosen so the
+                // golden exercises a row where glyph and ink DISAGREE about
+                // resolution — the ink has crossed one band, the glyph has moved
+                // seven steps — which is the whole point of the two-axis ramp
+                // (#62). A green row would assert nothing about the bands.
+                battery: Some(7),
                 provenance,
                 title: title.map(String::from),
                 title_ink: Some(5),

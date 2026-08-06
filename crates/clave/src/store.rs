@@ -101,6 +101,25 @@ pub struct AgentRecord {
     /// store files loading — a missing key is a whole-store parse failure.
     #[serde(default)]
     pub default_branch: Option<String>,
+    /// Tokens this row's conversation currently holds. Wire twin of
+    /// `clave_types::Agent::context_tokens`, which carries the rationale (#62).
+    /// Written by `hook::apply_hook_event` from the transcript tail; held when a
+    /// tail carries no usage line, so a missed read never blanks a good reading.
+    /// `default` keeps pre-field store files loading — a missing key is a
+    /// whole-store parse failure, not a blank field.
+    #[serde(default)]
+    pub context_tokens: Option<u32>,
+    /// Bucketed index into the bar's battery ramp. Wire twin of
+    /// `clave_types::Agent::context_level` (#62).
+    ///
+    /// Stored rather than derived at projection time, and that is the whole
+    /// point: `snapshot_from` runs inside whichever agent's hook just fired and
+    /// projects EVERY row, so bucketing there would judge every row against the
+    /// firing agent's environment. Stamping it here — in the row's own agent's
+    /// process — also makes a dormant row genuinely free: nothing reads, parses
+    /// or computes for it ever again.
+    #[serde(default)]
+    pub context_level: Option<u8>,
     /// The session id Claude is CURRENTLY using for this row, when it is no
     /// longer the minted `uuid` — see UBIQUITOUS_LANGUAGE, "minted uuid vs live
     /// session id".
@@ -287,6 +306,13 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
                 // The other half of provenance (#86): without it the bar can
                 // only guess the default branch by name.
                 default_branch: r.default_branch.clone(),
+                // S7 (#62). COPIED, never recomputed: this runs inside whichever
+                // agent's hook fired and projects every row, so bucketing here
+                // would judge each row against the firing agent's environment,
+                // and the whole column would shift as different agents reported.
+                // It is also what makes a dormant row free.
+                context_tokens: r.context_tokens,
+                context_level: r.context_level,
             })
             .collect(),
     }
@@ -666,6 +692,8 @@ mod tests {
             title: None,
             summary: String::new(),
             default_branch: None,
+            context_tokens: None,
+            context_level: None,
             live_session: None,
         }
     }

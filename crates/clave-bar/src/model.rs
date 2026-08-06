@@ -1379,10 +1379,12 @@ impl BarModel {
         let title = a.title.clone();
         RowContent::Agent {
             status,
-            // S7 has not landed. `None` renders a blank battery cell, which
-            // lock §2.1 requires it to do cleanly — inventing a level would be
-            // a lie in the one cell whose whole job is a measurement.
-            battery: None,
+            // S7 (#62). Bucketed host-side, where the smart zone is readable;
+            // the bar renders an index and holds no opinion about tokens. `None`
+            // is still a real answer — no reading yet — and renders a blank
+            // cell, which lock §2.1 requires it to do cleanly: inventing a level
+            // would be a lie in the one cell whose whole job is a measurement.
+            battery: a.context_level,
             provenance,
             title_ink: title
                 .as_ref()
@@ -2101,6 +2103,8 @@ mod tests {
             summary: String::new(),
             worktree: None,
             default_branch: None,
+            context_tokens: None,
+            context_level: None,
         }
     }
 
@@ -2122,6 +2126,8 @@ mod tests {
             summary: String::new(),
             worktree: None,
             default_branch: None,
+            context_tokens: None,
+            context_level: None,
         }
     }
 

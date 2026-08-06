@@ -412,6 +412,8 @@ fn agent_record(
         // guess — which is what makes `cold`'s blank provenance travel the
         // #86 known-default path rather than the `main`/`master` fallback.
         default_branch: Some("main".to_string()),
+        context_tokens: None,
+        context_level: None,
         // Seeded rows have no transcript at all, so there is no rotation to
         // model; the scenario's agents are always on their minted uuid.
         live_session: None,
