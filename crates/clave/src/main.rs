@@ -77,6 +77,19 @@ enum Command {
         json: bool,
     },
 
+    /// Retire dormant rows idle longer than N days (#149). Transcripts are
+    /// untouched — a pruned conversation stays resumable via the Alt+a
+    /// resume flow; only the sidebar row goes. `--idle-days` is REQUIRED and
+    /// must be at least 1, so a bare `clave prune` can never empty the store.
+    Prune {
+        /// Prune rows whose last interaction is older than this many days.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        idle_days: u64,
+        /// Print what would be pruned without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Print the current `AgentSnapshot` as JSON (plugin-internal hydration).
     ///
     /// Hidden from `--help`: the bar runs this on load to seed its state (spec
@@ -373,6 +386,41 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Some(Command::Prune { idle_days, dry_run }) => {
+            let paths = store::store_paths()?;
+            let now = store::now_unix();
+            let (removed, snap) = if dry_run {
+                let mut s = store::read_store(&paths)?;
+                (store::prune_idle(&mut s, now, idle_days), None)
+            } else {
+                store::with_store_mut(&paths, |s| {
+                    let removed = store::prune_idle(s, now, idle_days);
+                    let snap = (!removed.is_empty()).then(|| store::snapshot_from(s));
+                    (removed, snap)
+                })?
+            };
+            for r in &removed {
+                let days = now.saturating_sub(r.last_interacted) as f64 / 86_400.0;
+                let short = r.uuid.get(..8).unwrap_or(&r.uuid);
+                println!("prune {short}  {days:5.1}d  {}", r.label);
+            }
+            println!(
+                "{}{} row(s) idle over {idle_days}d",
+                if dry_run { "[dry-run] " } else { "" },
+                removed.len()
+            );
+            // Broadcast so the bar hot-reloads the shrunk fleet immediately
+            // (the #143 repoint lesson: a locked write without a push leaves
+            // every bar stale until an unrelated event).
+            if let Some(snap) = snap {
+                hook::push_snapshot(&snap);
+                clave::evlog::log_event(
+                    "prune",
+                    &format!("removed {} idle>{idle_days}d", removed.len()),
+                );
+            }
+            Ok(())
+        }
         Some(Command::Snapshot) => {
             // The bar hydrates on load by running `clave snapshot` via
             // run_command and parsing stdout (spec §6.2/§6.6, was spike S5).
@@ -493,6 +541,24 @@ mod tests {
                 assert_eq!(uuid, "u-1");
                 assert_eq!(name, "repo \u{00b7} main");
                 assert_eq!(cwd, "/x");
+            }
+            _ => panic!("parsed into the wrong command"),
+        }
+    }
+
+    /// #149: `--idle-days` is REQUIRED with a floor of 1 — a bare
+    /// `clave prune` or an `--idle-days 0` must die at the parse layer,
+    /// because either one would be a prune-everything.
+    #[test]
+    fn prune_requires_a_nonzero_idle_days() {
+        assert!(Cli::try_parse_from(["clave", "prune"]).is_err());
+        assert!(Cli::try_parse_from(["clave", "prune", "--idle-days", "0"]).is_err());
+        let cli = Cli::try_parse_from(["clave", "prune", "--idle-days", "10", "--dry-run"])
+            .expect("the real invocation parses");
+        match cli.command {
+            Some(Command::Prune { idle_days, dry_run }) => {
+                assert_eq!(idle_days, 10);
+                assert!(dry_run);
             }
             _ => panic!("parsed into the wrong command"),
         }

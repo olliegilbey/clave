@@ -573,6 +573,32 @@ pub fn clear_session_order(paths: &StorePaths) -> Result<()> {
     })
 }
 
+/// Retire dormant rows idle longer than the cutoff (#149). Pure — the caller
+/// owns the locked write. Only rows with NO bound tab are eligible: a row
+/// with a pane would just re-record itself through the hook's next event, so
+/// pruning it is churn, not cleanup. The transcript is untouched either way —
+/// a pruned conversation stays resumable through the Alt+a resume flow; only
+/// the sidebar row goes. Returns the removed rows, oldest-idle first, for
+/// the caller to print; bumps seq only when something actually went.
+pub fn prune_idle(store: &mut Store, now: u64, idle_days: u64) -> Vec<AgentRecord> {
+    let cutoff = now.saturating_sub(idle_days.saturating_mul(86_400));
+    let doomed: Vec<String> = store
+        .agents
+        .values()
+        .filter(|r| r.tab_id.is_none() && r.last_interacted < cutoff)
+        .map(|r| r.uuid.clone())
+        .collect();
+    let mut removed: Vec<AgentRecord> = doomed
+        .iter()
+        .filter_map(|u| store.agents.remove(u))
+        .collect();
+    removed.sort_by_key(|r| r.last_interacted);
+    if !removed.is_empty() {
+        store.seq += 1; // monotonic pipe contract (§5)
+    }
+    removed
+}
+
 /// Seconds since the epoch — the store's one timestamp format.
 pub fn now_unix() -> u64 {
     SystemTime::now()
@@ -613,6 +639,40 @@ mod tests {
             default_branch: None,
             live_session: None,
         }
+    }
+
+    /// #149: only unbound rows past the cutoff go; a bound row NEVER prunes
+    /// however old; exactly-at-cutoff stays; seq advances once per real
+    /// removal and not on a no-op; removed rows come back oldest-idle first.
+    #[test]
+    fn prune_idle_takes_only_unbound_rows_past_the_cutoff() {
+        let mut s: Store = serde_json::from_str("{}").unwrap();
+        let now = 100 * 86_400;
+        let mut older = rec("u-older");
+        older.last_interacted = now - 20 * 86_400;
+        let mut old = rec("u-old");
+        old.last_interacted = now - 11 * 86_400;
+        let mut fresh = rec("u-fresh");
+        fresh.last_interacted = now - 9 * 86_400;
+        let mut bound = rec("u-bound");
+        bound.last_interacted = now - 30 * 86_400;
+        bound.tab_id = Some(4);
+        let mut edge = rec("u-edge");
+        edge.last_interacted = now - 10 * 86_400;
+        for r in [older, old, fresh, bound, edge] {
+            s.agents.insert(r.uuid.clone(), r);
+        }
+        let seq0 = s.seq;
+        let removed = prune_idle(&mut s, now, 10);
+        let ids: Vec<&str> = removed.iter().map(|r| r.uuid.as_str()).collect();
+        assert_eq!(ids, ["u-older", "u-old"], "oldest-idle first");
+        assert!(s.agents.contains_key("u-fresh"));
+        assert!(s.agents.contains_key("u-bound"), "a bound row never prunes");
+        assert!(s.agents.contains_key("u-edge"), "exactly-at-cutoff stays");
+        assert_eq!(s.seq, seq0 + 1);
+        // A no-op prune must not advance seq.
+        assert!(prune_idle(&mut s, now, 10).is_empty());
+        assert_eq!(s.seq, seq0 + 1);
     }
 
     #[test]
