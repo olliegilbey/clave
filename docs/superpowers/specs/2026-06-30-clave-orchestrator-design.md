@@ -470,10 +470,13 @@ self-hydrates on load via `RunCommands` — §6.6).
     `--resume <live_session>` — the ROTATED id — so every scan must be
     translated back through the store: `add::live_uuid_union` maps a scanned id
     to the row whose `live_session` it is, and `open::open_is_live` accepts
-    either. Read literally, a rotated live agent looks DEAD: an unattached
-    resume candidate for a session already in a tab, and a commit-open
-    (`Alt+Enter`, #100) that spawns a SECOND tab on it. Note this blind spot is one the resurrection fix
-    itself created — before it, the pane ran `--resume <minted>`.)
+    either. WITHOUT that translation — the counterfactual these two guards
+    exist to prevent, not the shipped behaviour — a rotated live agent would
+    read as DEAD: an unattached resume candidate for a session already in a
+    tab, and a commit-open (`Alt+Enter`, #100) that spawns a SECOND tab on it.
+    With the guards in place the commit no-ops on a rotated-but-live row. Note
+    this blind spot is one the resurrection fix itself created — before it,
+    the pane ran `--resume <minted>`.)
   - *Rejected:* letting `claude --resume` show its own picker. It's tempting (no
     picker to build), but the UUID would only be known *after* launch (via the
     `SessionStart` hook), leaving the pane command as `claude --resume` — which
@@ -741,7 +744,10 @@ self-hydrates on load via `RunCommands` — §6.6).
     selection cursor** (bar highlight plus a ⏎ U+23CE gutter mark) WITHOUT
     switching tabs and WITHOUT launching anything. `Alt+Enter` is the single
     commit key: it spends the selection, the executor fires
-    `run_command(["clave","open",<uuid>])` and shows ↻. Switching to a live
+    `run_command([<clave_binary>,"open",<uuid>])` and shows ↻ — the CLI is the
+    `clave_binary` plugin-configuration value (#44: the versioned absolute
+    path in a release; bare `clave` only in the dev sandbox, where the PATH
+    shim owns the name — never PATH resolution in a normal launch). Switching to a live
     row is a glance; waking a dormant row is an act — the 0.4 s dwell and the
     immediate-open explicit picks both proved to be accidental-spawn channels
     (the dwell on the keyboard, click-open on the mouse once #112 made the
