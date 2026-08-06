@@ -581,6 +581,14 @@ real settings.json.
 - Second kill+relaunch: previously-opened rows dormant again except the most
   recent; no `<defunct>` panes anywhere (`dump-layout`).
 
+**SUPERSEDED 2026-08-01 (#116/#100):** the dwell-open, click-open and
+immediate `Alt+N` items above describe the deleted interaction — every
+dormant landing now SELECTS (⏎ gutter mark), `Alt+Enter` is the only launch,
+and a stale ✗ row refuses it. They stand as the record of what the 2026-07-20
+PASS validated; the current recipe is LIVE-INTERACTION-CHECKLIST §5, and the
+#100 drive record is on PR #128. Walk-through safety and the kill+relaunch
+items hold unchanged.
+
 **Findings (2026-07-18, Alt+c dead in the sandbox — root-caused to the
 LAYOUTS, not the wasm):** instrumented trace proved the whole toggle chain
 fired (pipe → toggle → width_seek → ShrinkSelf) and zellij silently ate the

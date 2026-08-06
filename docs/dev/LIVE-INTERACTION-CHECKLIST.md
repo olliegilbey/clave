@@ -283,7 +283,7 @@ clamps to 100 and D31's clip keeps the rows inside the pane. **Ragged** clipping
   correct for the width at launch; resizing changes the display area underneath
   it, so a later `Alt+t` is born against the old ratio. That is expected, and it
   is what item 6's drift re-arm exists to absorb.
-- **You opened the tab with `Alt+a` or by dwelling a dormant row.** Those go
+- **You opened the tab with `Alt+a` or by committing a dormant row.** Those go
   through `clave open`, which builds a one-shot layout that bypasses the
   template — and still uses the fiction (D35's named gap, task 7b′). Only
   `Alt+t` exercises the fixed path.
@@ -415,20 +415,32 @@ anything else; worktree beats both.
 - `Alt+Down` / `Alt+j` — next display row. `Alt+Up` / `Alt+k` — previous. Both
   wrap.
 - `Alt+1` … `Alt+9` — jump to display row N (1-based). On a **dormant** row this
-  is an explicit pick: it opens **immediately**, with no dwell.
-- **Dwell-to-open.** Walk onto a dormant row with `Alt+Down` and **stop**. After
-  0.4 s the row flips to the opening mark (U+21BB, carpYellow), a tab appears, the
-  row goes live and the selection reverts to the focused tab.
-- **Walk-through must not open.** Press `Alt+Down` three times quickly across
-  dormant rows. Exactly **one** tab opens — the row you came to rest on. Every
-  landing invalidates the previous dwell arm.
-- **The dead row.** Dwell the `KDL-GRD` row (its cwd was deleted). Expect the
-  opening mark, then the stale mark **U+2717** in red, **no tab**, and the session
-  otherwise unaffected. U+2717 is the stale flag; U+2716 is `Failed`. They render
-  the same red, so shape is the only discriminator — do not transpose them.
+  **selects** it — nothing opens (#100 reversed the old immediate-open;
+  selection and launch are two separate acts on every input path).
+- **Nothing wakes a dormant row except `Alt+Enter`** (#100/#116). Walk onto a
+  dormant row and **stop** — the gutter shows the commit mark **U+23CE**
+  (carpYellow), the row takes the highlight, and no matter how long you park,
+  **no tab appears**. The 0.4 s dwell is deleted.
+- **Commit-to-open.** With a dormant row selected, `Alt+Enter`. The mark goes
+  ⏎ → ↻ (U+21BB, carpYellow), a tab appears, the row goes live and the
+  selection reverts to the focused tab. A second `Alt+Enter` while ↻ is
+  in flight is a no-op. `Alt+Enter` with no dormant selection is a no-op and
+  the keypress is consumed — it must NOT reach the terminal (bare Enter must,
+  or you cannot talk to Claude).
+- **The dead row.** Select the `KDL-GRD` row (its cwd was deleted; it wears the
+  stale mark **U+2717** in red after any failed open). The ✗ **outranks** the ⏎
+  — a stale row never offers a launch — and `Alt+Enter` on it **refuses**: no
+  ↻, no tab, no store write (ratified live 2026-08-01; a dead row is #112's
+  retirement business). U+2717 is the stale flag; U+2716 is `Failed`. They
+  render the same red, so shape is the only discriminator — do not transpose
+  them.
 - **The virtual cursor.** While the cursor sits on a dormant row, **every live row
   loses its highlight** and the dormant row carries it — background waveBlue2 plus
   both powerline caps. Exactly one row is highlighted at all times.
+- **The selection dies with the context.** Select a dormant row, then `Alt+o`
+  (or click a live row): the highlight and ⏎ resolve back to the focused tab,
+  and an `Alt+Enter` pressed immediately after opens nothing — the organic
+  pipe spends the selection before the beacon returns (#128 review).
 - **The fade.** Unselected rows sit 25% toward the bar background. Compare a
   chip's colour on the selected row against the same chip unselected.
 - **Peek while collapsed.** `Alt+c`, then navigate — onto a dormant row, or to
@@ -440,21 +452,22 @@ anything else; worktree beats both.
 - **Nav after a close.** `Alt+w` on a tab, then `Alt+Up`/`Alt+Down`. Nav must keep
   working — this stranded until a mouse click before `Effect::ReanchorVisit`
   (#23), and only a live session can show it.
-- **Mouse.** Click a live row → switches to that tab. Click a dormant row → opens
-  it immediately (a click is an explicit pick). Click reaches only the visible
-  bar.
+- **Mouse.** Click a live row → switches to that tab. Click a dormant row →
+  **selects** it (#100: the mouse is the main path to dormant rows past
+  `Alt+9`, so a click that launched would just move the accidental spawn into
+  the mouse channel). Click reaches only the visible bar.
 
 **Vacuous if.**
 
-- You navigated in a bar that is not in the focused tab. Row-walk and row-jump are
-  **executor-gated**: only the instance whose own tab is the current tab computes
-  the step. Watching the wrong bar looks like dead nav.
-- You held the key down. Key repeat is a burst of landings; each one invalidates
-  the previous dwell, so nothing opens and that is correct.
+- You navigated in a bar that is not in the focused tab. Row-walk, row-jump and
+  the commit are **executor-gated**: only the instance whose own tab is the
+  current tab computes the step. Watching the wrong bar looks like dead nav.
+- You held the key down. Key repeat is a burst of landings; the selection just
+  follows the cursor, nothing opens, and that is correct.
 - Your terminal is not delivering mouse events to zellij. Verify by clicking a
   live row first — if a switch happens, the mouse path is alive.
-- You dwelt a row that is already live. `dwell_expired` opens only a row that is
-  still dormant.
+- You pressed `Alt+Enter` with the cursor on a live row (or no cursor at all).
+  The commit acts only on a selected, non-stale, still-dormant row.
 
 ## 6. Window resize — drift re-arm
 
@@ -750,7 +763,7 @@ Fill it in as you go; the numbers are the deliverable, not the ticks.
 | Summary tier observed at each step | |
 | Provenance: blank / branch / worktree all correct? | |
 | New row with a non-`main` discoverable default → blank? | |
-| Dwell opened; walk-through did not; dead row showed the stale mark | |
+| Selection never opened; `Alt+Enter` did; the ✗ row refused the commit | |
 | Resize healed unaided / healed on next event / parked | |
 | Terminal row: console mark, name, sort position | |
 | One bar per tab, one build tag | |

@@ -470,10 +470,13 @@ self-hydrates on load via `RunCommands` — §6.6).
     `--resume <live_session>` — the ROTATED id — so every scan must be
     translated back through the store: `add::live_uuid_union` maps a scanned id
     to the row whose `live_session` it is, and `open::open_is_live` accepts
-    either. Read literally, a rotated live agent looks DEAD: an unattached
-    resume candidate for a session already in a tab, and a dwell-open that
-    spawns a SECOND tab on it. Note this blind spot is one the resurrection fix
-    itself created — before it, the pane ran `--resume <minted>`.)
+    either. WITHOUT that translation — the counterfactual these two guards
+    exist to prevent, not the shipped behaviour — a rotated live agent would
+    read as DEAD: an unattached resume candidate for a session already in a
+    tab, and a commit-open (`Alt+Enter`, #100) that spawns a SECOND tab on it.
+    With the guards in place the commit no-ops on a rotated-but-live row. Note
+    this blind spot is one the resurrection fix itself created — before it,
+    the pane ran `--resume <minted>`.)
   - *Rejected:* letting `claude --resume` show its own picker. It's tempting (no
     picker to build), but the UUID would only be known *after* launch (via the
     `SessionStart` hook), leaving the pane command as `claude --resume` — which
@@ -493,10 +496,11 @@ self-hydrates on load via `RunCommands` — §6.6).
   (revised 2026-07-17; the old "survives resurrection" premise was false: zellij
   serializes the live discovered process, see §6.8/S4).
 - **`clave open <uuid>` (added 2026-07-17, C8):** the non-interactive sibling of
-  `add`, invoked by the bar (executor instance, `run_command`) when a dormant row's
-  focus settles, and by explicit picks. No picker — the row is the choice. Flow:
-  store row lookup → **liveness no-op guard** (uuid in `dump-layout` per
-  `live_uuids` → do nothing; protects against dwell-timer/click double-fires) →
+  `add`, invoked by the bar (executor instance, `run_command`) when the user
+  commits the selected dormant row (`Alt+Enter`, #100). No picker — the row is
+  the choice. Flow: store row lookup → **liveness no-op guard** (uuid in
+  `dump-layout` per `live_uuids` → do nothing; protects against commit
+  double-fires) →
   **staleness check** (row `cwd` missing on disk → no tab; set the row's `stale`
   flag (§5) and push the snapshot so the bar shows ✗; a later successful open
   clears it; recovery manual for now) → one-shot temp
@@ -734,23 +738,30 @@ self-hydrates on load via `RunCommands` — §6.6).
     longer swaps on focus.
   - **uuid jumps** keep `focus_pane_with_id` (S2): the pane id is broadcast
     truth, so every instance targets the same pane.
-  - **Dormant rows open on SETTLED focus, not on touch (2026-07-17, C8).**
-    Stepping onto a dormant row moves a **virtual selection cursor** (bar
-    highlight) WITHOUT switching tabs — there is no tab to switch to. Each
-    landing arms one `set_timeout(0.4)` (peek-timer pattern: only the last
-    expiry acts); if the cursor is still on that row at expiry, the executor
-    fires `run_command(["clave","open",<uuid>])` and shows ↻. Walking past a
-    dormant row therefore never spawns it — this is what makes the unified
-    list safe to walk. Subsequent nav steps continue from the cursor, which
-    resolves back to the focused-tab row when the opened tab takes focus
-    (`tab_layout` `focus=true`) or when nav lands on a live row. **Explicit
-    picks skip the dwell**: clicks and `Alt+1…9` on a dormant row open
-    immediately — explicit intent is unambiguous. The executor also keeps an
-    in-flight set: a row already ↻ accepts no further opens (first guard;
-    `clave open`'s liveness no-op is the second — belt and suspenders because
-    `live_uuids` can transiently miss a mid-tool-call agent, §10). The 0.4s
-    dwell is a named constant beside the 0.9s peek sink (both user-tuned;
-    don't normalize).
+  - **Dormant rows open on EXPLICIT COMMIT only (revised 2026-08-01, #116/#100
+    — supersedes the 2026-07-17 settled-focus dwell).** Stepping onto a
+    dormant row — nav walk, `Alt+1…9`, or click alike — moves a **virtual
+    selection cursor** (bar highlight plus a ⏎ U+23CE gutter mark) WITHOUT
+    switching tabs and WITHOUT launching anything. `Alt+Enter` is the single
+    commit key: it spends the selection, the executor fires
+    `run_command([<clave_binary>,"open",<uuid>])` and shows ↻ — the CLI is the
+    `clave_binary` plugin-configuration value (#44: the versioned absolute
+    path in a release; bare `clave` only in the dev sandbox, where the PATH
+    shim owns the name — never PATH resolution in a normal launch). Switching to a live
+    row is a glance; waking a dormant row is an act — the 0.4 s dwell and the
+    immediate-open explicit picks both proved to be accidental-spawn channels
+    (the dwell on the keyboard, click-open on the mouse once #112 made the
+    mouse the main path past `Alt+9`) and are deleted. The selection resolves
+    back to the focused-tab row on any live landing, any real visit beacon,
+    or an `Alt+o` organic switch (the pipe spends it synchronously — the
+    beacon lags the server-side switch, and a broadcast commit in that gap
+    must find nothing). A **stale (✗) row refuses the commit** — the gutter
+    never offers a launch it won't perform; dead-row retirement is #112's.
+    The executor also keeps an in-flight set: a row already ↻ accepts no
+    further opens (first guard; `clave open`'s liveness no-op is the second —
+    belt and suspenders because `live_uuids` can transiently miss a
+    mid-tool-call agent, §10). The 0.9s peek sink survives unchanged
+    (user-tuned).
     Nav ring caps (48h / max 10, numbered access to older rows) are DEFERRED
     to the jsonl-adoption phase (§10) — store-only row counts don't need them.
   - The bar pane is `set_selectable(false)` (stock tab-bar pattern): clicks
