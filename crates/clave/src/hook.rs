@@ -1666,6 +1666,26 @@ mod tests {
         assert_eq!(r.summary, "earned");
     }
 
+    /// TESTING.md's external-format row: the parser against a CAPTURED
+    /// record, not an invented one — the fixture is a verbatim 2026-07-15
+    /// field capture (Claude Code 2.1.209), home path scrubbed, byte order
+    /// preserved. Liveness measurement, dated: 50 local transcripts carried
+    /// the shape on 2026-08-01, newest stamp 2026-07-31 (#111, #131). If the
+    /// field stops appearing, re-measure before trusting this tier.
+    #[test]
+    fn the_captured_away_summary_record_parses_as_found_in_the_field() {
+        let captured = include_str!("../tests/fixtures/transcripts/away-summary-2026-07-15.jsonl");
+        assert_eq!(
+            away_summary_from_tail(captured).as_deref(),
+            Some(
+                "Validating clave's tab bar: the Alt+c toggle fix now works in a \
+                 single tab with no storms. Next: create 2\u{2013}3 tabs and retest \
+                 toggling, tab-switch behavior, per-tab healing, and nav before I \
+                 strip traces and we commit."
+            )
+        );
+    }
+
     #[test]
     fn away_summary_outranks_ai_title_and_the_newest_recap_wins() {
         // #131: the recap is the only signal that can upgrade a fleet-born
