@@ -123,6 +123,7 @@ fn eager_record() -> AgentRecord {
         label: "clave · main · fix the KDL guardrail".into(),
         status: Status::Idle,
         last_interacted: 100,
+        commit_ord: 0,
         last_visited: 0,
         worktree: Some("/home/o/code/clave/.claude-worktrees/ab12cd34".into()),
         label_source: LabelSource::Summary,
@@ -211,6 +212,62 @@ fn config_kdl_unbinds_claude_code_keys_in_every_mode() {
             .get_actions_for_key_in_mode(&InputMode::Normal, &alt_a)
             .is_some(),
         "clave's Alt+a add-bind must survive the merge (invariant #6)"
+    );
+}
+
+#[test]
+fn alt_a_carries_the_shared_floating_geometry() {
+    // #110. A substring check would pass on `x 0` as readily as on `x "0%"`,
+    // and only the second is read: x/y/width/height come out of
+    // `kdl_child_string_value_for_entry` (zellij-utils kdl/mod.rs:1981-1993),
+    // so an unquoted number parses fine and yields NO geometry — zellij then
+    // falls back to `half_size_middle_geom` and the bug is back with a green
+    // test. Assert the parsed ACTION instead: this is the same read zellij
+    // does at keypress, so it cannot spell the geometry away.
+    use zellij_utils::data::{BareKey, InputMode, KeyWithModifier};
+    use zellij_utils::input::actions::Action;
+    use zellij_utils::input::layout::PercentOrFixed;
+
+    let config =
+        Config::from_kdl(&setup::config_kdl("clave", WASM), None).expect("config.kdl must parse");
+    let alt_a = KeyWithModifier::new(BareKey::Char('a')).with_alt_modifier();
+    let actions = config
+        .keybinds
+        .get_actions_for_key_in_mode(&InputMode::Normal, &alt_a)
+        .expect("Alt+a must be bound in Normal");
+
+    let coordinates = actions
+        .iter()
+        .find_map(|action| match action {
+            // `floating true` is what routes Run to NewFloatingPane at all
+            // (kdl/mod.rs:1999) — matching this variant proves the pane still
+            // floats as well as proving its size.
+            Action::NewFloatingPane { coordinates, .. } => Some(coordinates.clone()),
+            _ => None,
+        })
+        .expect("Alt+a must open a FLOATING pane")
+        .expect("Alt+a's floating pane must carry explicit geometry (#110)");
+
+    // Percents, not fixed columns: they are resolved against the viewport the
+    // bar has already been subtracted from, so they follow a resize and a
+    // collapse without clave recomputing anything.
+    assert_eq!(
+        (
+            coordinates.x,
+            coordinates.y,
+            coordinates.width,
+            coordinates.height
+        ),
+        (
+            Some(PercentOrFixed::Percent(clave_types::FLOATING_X_PERCENT)),
+            Some(PercentOrFixed::Percent(clave_types::FLOATING_Y_PERCENT)),
+            Some(PercentOrFixed::Percent(clave_types::FLOATING_WIDTH_PERCENT)),
+            Some(PercentOrFixed::Percent(
+                clave_types::FLOATING_HEIGHT_PERCENT
+            )),
+        ),
+        "Alt+a's geometry must be clave-types' shared floating geometry — the \
+         one #7's helper pane will read too"
     );
 }
 

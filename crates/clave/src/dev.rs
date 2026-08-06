@@ -322,6 +322,14 @@ fn agent_record(
         label: format!("{scenario_name}-{} · seeded", a.slug),
         status: a.status,
         last_interacted: now.saturating_sub(a.ago_secs),
+        // Deliberately unminted (S1). Seeding runs BEFORE any session exists,
+        // and `launch_session` calls `clear_session_order` on the way into a
+        // create — whose backfill seeds ordinals from `last_interacted`, oldest
+        // first. So the scenario's staggered recency survives into the ordinal
+        // space, and the sandbox exercises the real upgrade path rather than a
+        // special-cased one. Minting here would instead follow SEEDING order,
+        // which has nothing to do with `ago_secs`.
+        commit_ord: 0,
         last_visited: 0,
         worktree: a.worktree.then(|| cwd_str.to_string()),
         label_source: crate::store::LabelSource::FirstPrompt,
@@ -799,7 +807,7 @@ mod tests {
         // reads its TRUE Status rather than demoting every row to
         // `RowStatus::Dormant` (model.rs's `is_dormant` is keyed on tab
         // liveness) — a freshly seeded, nobody's-opened-it-yet row rendering
-        // grey is correct sandbox behaviour, but this test's job is to prove
+        // dormant is correct sandbox behaviour, but this test's job is to prove
         // the FIELDS the scenario writes render well once opened, which is
         // the state the maintainer's fleet is in for the actual review.
         use clave_bar::model::{BarModel, TabMeta};

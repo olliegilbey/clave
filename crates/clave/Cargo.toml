@@ -30,6 +30,13 @@ clave-types = { path = "../clave-types" }
 [dev-dependencies]
 # Store tests write to throwaway dirs, never the real ~/.local/state/clave.
 tempfile.workspace = true
+# Property tests for the ordinal invariants (S1/#39): "every ordinal ever
+# minted is distinct and increasing" and "no event but a prompt changes the
+# order" are universally quantified claims, and a table of examples cannot
+# establish either. Same justification as clave-bar's manifest note — a
+# dev-dependency compiles only for `cargo test` on the host and never reaches a
+# shipped artifact. Not added to workspace deps: two crates, both host-test.
+proptest = "1"
 # Constructing AgentRecord for the launch-layout eager branch in the KDL
 # guardrail (Status lives in clave-types); the integration test crate can't
 # reach clave's own deps, so it needs its own handle.

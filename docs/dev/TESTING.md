@@ -636,24 +636,90 @@ observability, you do not drive the terminal.**
 
 There is a hard division of labor, and it is not negotiable:
 
-- **The human drives all live input.** Every keypress, every session launch and
-  kill, every visual observation — the human. They are the only one who can see
-  the screen and the only one who should touch it.
-- **The agent reads observability and never puppets the live session.** You read
-  logs, the store, and `dev status`. When a session needs to be launched or
-  killed, you **print the exact command for the human to run** — you do not run
-  it. clave's own `dev` subcommands follow this rule by construction: `dev
+- **The human owns his own session, and owns every visual observation.** Every
+   keypress into the daily fleet, every session launch and kill (including
+   `clave-test`'s), and every "does this look right" — his. He is the only one
+   who can see the screen. Nothing below widens this: the agent's licence is
+   scoped to the sandbox, and the sandbox has no screen worth trusting.
+- **The agent drives the SANDBOX and never touches the live session.** Against
+  `clave-test`, an agent may run `zellij action` freely — open tabs, close tabs,
+  list panes, dump layout. Against the maintainer's session it may run nothing
+  at all, not even a read: `list-panes` there is his to run and paste back.
+  Session **lifecycle** — launching or killing even `clave-test` — stays his
+  either way. clave's own `dev` subcommands follow this by construction: `dev
   reset` prints the kill-session command rather than executing it, and the
   module never launches or kills a Zellij session itself.
 
-Why so strict? Because the failure modes here are silent and expensive (see the
-hazard below), and because the human's screen is ground truth. An agent that
-"helpfully" runs a `zellij action` can hang the whole loop with no error.
+The asymmetry is the point. A sandbox is disposable and a mistake there costs a
+`dev reset`; the same mistake against the daily fleet costs the maintainer his
+working state, and `zellij` has more than one command that reads harmless and
+is not (see the hazard below, and FOOTGUNS on `zellij --config`). "Read-only"
+is a judgement an agent can get wrong, so the live session takes no agent
+commands and needs no judgement.
+
+### The sandbox drive loop
+
+The shape that works, learned driving the #55 frame-coherence fix (PR #120).
+Each step exists because skipping it produces a confident, wrong result.
+
+1. **Stage with `just sandbox [scenario]`.** Not by hand. It builds the tree,
+   drops the wasm, wires the PATH shim, regenerates `config.kdl` and
+   `launch.kdl` together, and self-checks the #44 identity pair. Hand-staging
+   the wasm looks equivalent and is not: `run_setup` rewrites the data dir, so a
+   wasm copied *before* it is silently replaced, and the sandbox bakes a bare
+   `clave` that resolves from PATH — so without the shim the bar shells out to
+   the *stable* binary and every CLI-side assertion silently measures the wrong
+   build.
+2. **The human launches.** The only step in the loop that is his.
+3. **Prove which build you are measuring.** Read the **last** loaded lines and
+   check the tag on them:
+
+   ```bash
+   grep 'clave-bar: loaded' "$TMPDIR/zellij-$(id -u)/zellij-log/zellij.log" | tail -5
+   ```
+
+   Do **not** `grep -c` for your tag. `just sandbox` derives the tag from `git
+   rev-parse --short HEAD` (`scripts/sandbox-setup.sh:89`), the zellij log is
+   shared across sessions and never truncated, and a re-run at the same HEAD —
+   which is exactly what testing an uncommitted fix looks like — leaves an
+   older line carrying the same tag. A presence check then passes on a stale
+   entry while the plugin you just staged failed to load. Match on the tail,
+   after launch, or override `CLAVE_BUILD_TAG` with something unique per run.
+   If the newest lines are not yours, stop: everything below is measuring
+   someone else's binary and will look like a pass.
+4. **Baseline before provoking.** Capture the store and the pane truth and join
+   them *before* touching anything. Without a baseline a clean reading proves
+   nothing, because you cannot tell "fixed" from "never fired".
+5. **Provoke, then re-join.** Drive the actual failure — `zellij action
+   close-tab` on a **non-last** tab is what renumbers positions — and re-join
+   after every provocation, not once at the end.
+6. **Measure quiescence.** Idle 60s and assert the event log and the store `seq`
+   both stay put. This is the anti-storm assertion, and it is the one that
+   catches the round-4 fd-exhaustion class. A functional pass with a growing
+   idle log is a failure.
+7. **Force what the script missed.** Scripted rounds drift into the easy case —
+   five tab closes in a row never recycled a tab id, because zellij hands out
+   `max+1`. Reuse takes **two** steps and the close is only the first: close the
+   **highest** tab, then **create one**, and join again. `max+1` over the
+   surviving tabs hands the new tab the id that just died — which is where a
+   stale timeline entry actually bites, because the recycled tab inherits the
+   dead row's stamp. Closing alone proves nothing about reuse.
+8. **Report what you did not exercise.** A race that did not reproduce is not a
+   race that cannot happen; say so in those words.
+
+**The join is not as easy as it looks.** `list-panes -t -j` reports a pane's
+*deepest child process*, so an agent pane routinely shows `rust-analyzer`, `uv
+… mcp` or `caffeinate` instead of `claude`. Only tabs where `claude` is directly
+visible are joinable; the rest are unknown, not mismatched. Reading them as
+mismatches invents a bug, and filtering them out silently hides one — print
+every pane and mark the unresolvable ones.
 
 ## Agent-side sanctioned commands
 
-An agent may run **exactly these**, and every one is scoped to the test session.
-Nothing else touching Zellij is yours — session lifecycle is always the human's.
+Anything `ZELLIJ_SESSION_NAME=clave-test` is yours, including tab actions. The
+commands below are the ones with a trap attached, so they are spelled out.
+Session lifecycle is always the human's, and the maintainer's own session is
+never yours.
 
 **Hot-reload the sandbox bar** (the one sanctioned live mutation an agent may
 make — see the instrumentation recipe):
@@ -680,6 +746,19 @@ ZELLIJ_SESSION_NAME=clave-test zellij action start-or-reload-plugin \
 > `PluginUserConfiguration`'s `FromStr`
 > (`zellij-utils/src/input/layout.rs:563-576`) is comma-separated `key=value`,
 > so a path containing a comma would not survive — none of ours do.
+
+**Drive the sandbox** (open, close, focus, inspect — the provocations step 5
+needs). Always env-scoped; a bare one of these hits the maintainer's fleet:
+
+```bash
+ZELLIJ_SESSION_NAME=clave-test zellij action list-panes -t -j
+ZELLIJ_SESSION_NAME=clave-test zellij action go-to-tab 1     # 1-based
+ZELLIJ_SESSION_NAME=clave-test zellij action close-tab       # closes the FOCUSED tab
+```
+
+> Never close the last tab — that ends the session, which is lifecycle and not
+> yours. Close a **non-last** tab to exercise position renumbering, and the
+> **highest** tab to exercise tab-id reuse (`get_new_tab_id = max+1`).
 
 **List sessions** (read-only, safe anywhere):
 

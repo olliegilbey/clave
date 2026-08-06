@@ -344,15 +344,23 @@ never serialises unrelated sessions' hooks.
 }
 ```
 
-Beside `seq` and the agent map, the store holds `tab_timeline` (tab_id →
-unix s of the last user commitment, §6.6): written only by `clave touch`
-(locked RMW, max-merge) and the hook's prompt stamp, carried on every
-`AgentSnapshot`, replaced wholesale by each bar instance. The agent `tab_id`
-bind (written by `clave bind`, reported once by the agent tab's own bar) is
-how prompts reach the timeline and how every bar joins glyphs — local
-register/manifest joins diverge per instance (round 6). tab_ids are
-session-scoped → bare `clave` clears both the timeline and all binds when it
-creates (not re-attaches) the session.
+Beside `seq` and the agent map, the store holds `tab_order` (tab_id → the
+commitment ORDINAL of the last user commitment, §6.6): written only by `clave
+touch` (locked RMW) and the hook's prompt stamp, carried on every
+`AgentSnapshot`, replaced wholesale by each bar instance. Each row also carries
+its own `commit_ord`. The agent `tab_id` bind (written by `clave bind`,
+reported once by the agent tab's own bar) is how prompts reach the tab order
+and how every bar joins glyphs — local register/manifest joins diverge per
+instance (round 6). tab_ids are session-scoped → bare `clave` clears both the
+tab order and all binds when it creates (not re-attaches) the session;
+`commit_ord` is agent-scoped and deliberately survives.
+
+**Superseded 2026-08-01 by S1 (#56).** This was `tab_timeline`, holding unix
+seconds and max-merged on write. Whole seconds tied, the tie broke on tab
+position, and closing a tab discarded the key entirely. The field was renamed
+rather than repurposed so an old store file's second-scale values cannot leak
+into the ordinal space. See
+`docs/superpowers/specs/2026-07-22-S1-ordering-semantics.md`.
 
 **`clave-types` (the pipe schema, shared by binary + plugin):** `clave` pushes the
 **full** (small) agent list to `clave-bar` on every change via
@@ -647,39 +655,68 @@ self-hydrates on load via `RunCommands` — §6.6).
   (open found the cwd missing). A dormant row that gains a tab becomes a live
   row with the same uuid key — no handoff state.
 - **Order = last USER COMMITMENT (revised 2026-07-08 after C4/C5 live rounds;
-  user-ratified "Claude-desktop" model):** rows sort by one unified timeline
-  in unix seconds — when did the user last commit input to that tab. **Focus
-  never reorders**; the list holds still while you look around and navigate
-  (this is what makes walking the displayed order stable — no ping-pong).
-  The sort key is the STORE's `tab_timeline` map (tab_id → unix s) and
-  NOTHING else — no render-time joins (revised 2026-07-14 twice: C5 rd 5
-  killed instance-local pipe-delta merges; rd 6 killed the render-time
-  `last_interacted` join — register pipes don't replay and hidden manifests
-  go stale, so per-instance joins diverge and walking alternated between the
-  two agent tabs). The map is written only under the store lock and carried
-  on EVERY `AgentSnapshot`; each bar REPLACES its copy from each seq-gated
-  snapshot — the one channel that has never diverged. Writers:
+  user-ratified "Claude-desktop" model; key replaced 2026-08-01 by S1/#56):**
+  rows sort by one unified list of **commitment ordinals** — a strictly
+  increasing integer minted by the store under the flock, once per user
+  commitment. Higher ordinal = higher in the list; 0 = never committed, which
+  sorts to the bottom. **Focus never reorders**; the list holds still while you
+  look around and navigate (this is what makes walking the displayed order
+  stable — no ping-pong).
+  **One key, both row classes (S1).** A row ranks by the HIGHER of two
+  ordinals: the STORE's `tab_order` entry for its tab, and the row's own
+  `commit_ord`. That identity is load-bearing — a row must rank by the same
+  number whether it is live or dormant, or merely closing its tab would change
+  its rank. A plain terminal tab has no row and ranks on `tab_order` alone; a
+  dormant row's tab entry is gone once pruned and it ranks on `commit_ord`
+  alone. Consumers must therefore keep BOTH: dropping `commit_ord` loses
+  dormant order across a session recreate, since `tab_order` is cleared there.
+  (Corrected 2026-08-01 — this said `tab_order` "and NOTHING else", which was
+  never true of dormant rows and stopped being true of live ones. CodeRabbit
+  and Codex, PR #135.)
+
+  Both values ride the SAME seq-gated snapshot, so this is **not** a
+  render-time join (revised 2026-07-14 twice: C5 rd 5 killed instance-local
+  pipe-delta merges; rd 6 killed the render-time `last_interacted` join —
+  register pipes don't replay and hidden manifests go stale, so per-instance
+  joins diverge and walking alternated between the two agent tabs). What made
+  those hazards is TWO independent sources; this has one. The map is written
+  only under the store lock and carried on EVERY `AgentSnapshot`; each bar
+  REPLACES its copy from each seq-gated snapshot — the one channel that has
+  never diverged. Writers:
   - **Birth**: the active instance fires ONE `clave touch <tab_id>` per tab
-    (first TabUpdate for a tab neither the snapshot timeline nor its local
+    (first TabUpdate for a tab neither the snapshot tab order nor its local
     fired-set knows; guard is local and never echo-dependent — C5 rd 4).
   - **Agent prompts (Design B)**: the store binds uuid→`tab_id`, reported
     ONCE by the agent tab's own bar (`clave bind`, active-instance-gated —
     the only fresh manifest; resume resets the bind, the new tab re-binds).
-    The `UserPromptSubmit` hook then stamps `tab_timeline[bind]` atomically
-    with the `last_interacted` bump — no bar round-trip, no switch-away
-    race. The bind also keys every bar's GLYPH/rename/unread joins off the
-    snapshot (fixes round 6's permanently-glyphless rows on late-loaded
+    The `UserPromptSubmit` hook then mints one ordinal and writes it to BOTH
+    `tab_order[bind]` and the row's own `commit_ord`, atomically with the
+    `last_interacted` bump — no bar round-trip, no switch-away race. Writing
+    the row's copy too is what lets an unbound agent still record its
+    commitment. The bind also keys every bar's GLYPH/rename/unread joins off
+    the snapshot (fixes round 6's permanently-glyphless rows on late-loaded
     instances).
-  tab_ids are session-scoped, so bare `clave` clears the timeline AND all
-  binds when it is about to CREATE (not re-attach) the session.
+  tab_ids are session-scoped, so bare `clave` clears the tab order AND all
+  binds when it is about to CREATE (not re-attach) the session; row ordinals
+  are agent-scoped and survive, or every dormant row would cold-start at 0.
   `InputReceived` is a DEAD END: it fires for every keystroke including nav
   keybinds (rd 4: focus-reorder + spawn storm + server fd exhaustion).
   Shell-command touches (`clave touch-pane` + preexec hook) are PARKED —
   user declined shell config; plain tabs order by birth only.
-  Tie-break: tab position. A separate `clave-visited` beacon pipe tracks the
-  focused tab purely for nav-executor election — it has NO ordering effect.
-  **Dormant rows** (2026-07-17) join the same timeline by the store row's
-  `last_interacted` (carried on the snapshot); they hold no tab commitment.
+  Tie-break: tab position — but since S1 this is a DETERMINISM RESIDUAL, not
+  the ordering mechanism. Ordinals are minted under the lock and are unique by
+  construction, so committed rows cannot tie at all; the tiebreak now covers
+  only rows at 0 and the transient window where an evicted tenant still shares
+  an ordinal with the tab that replaced it. A separate `clave-visited` beacon
+  pipe tracks the focused tab purely for nav-executor election — it has NO
+  ordering effect.
+  **Dormant rows** (2026-07-17) join the same list by their own `commit_ord`,
+  or — while the store has not yet pruned the tab they were bound to — that
+  tab's ordinal, whichever is higher. That second leg is what holds a
+  just-closed row's rank on the FIRST repaint, without waiting for the
+  fire-and-forget prune to echo back (S1 §3.3).
+  **Closing a tab reorders nothing relative to anything else**: the row
+  inherits its tab's ordinal before the entry dies, so no two rows swap.
 - **uuid→row join (spike S2 + `PaneManifest`):** `clave-register` gives
   `uuid → pane_id`; `PaneManifest` gives pane → tab position; `TabInfo` gives
   position → `tab_id`/name/active.

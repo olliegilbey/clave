@@ -15,4 +15,4 @@ Work directly and proportionately.
 - Run the relevant validation suite after changes, assessing where the validation suite can be quickly expanded or improved.
 - Keep progress concise; report changed files, tests run, and any unresolved risk at the end.
 - Stop when the acceptance criteria are met.
-- Keep the majority of message content for after you've made tool calls to avoid prose going unseen between calls. Short sentences between, consolidation in the final message of a tool-call stream.
+- Keep the majority of message content for after you've made tool calls to avoid prose going unseen between calls. Short sentences between, consolidation in the final message of a tool-call stream. That final message is a report, not a summary of everything you did — see OPUS.md § Response style for its shape and length.
