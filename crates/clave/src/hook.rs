@@ -1537,54 +1537,91 @@ mod tests {
 
     // ── S7, the context battery (#62) ───────────────────────────────────────
 
-    /// Shaped from a REAL transcript line, not invented: the decoys matter.
-    /// `iterations` repeats the usage keys per inference step, `cache_creation`
-    /// carries `ephemeral_*_input_tokens`, and `output_tokens` must not be
-    /// summed at all — occupancy is what went IN.
-    fn usage_line(input: u32, cache_read: u32, cache_creation: u32) -> String {
-        format!(
-            "{{\"type\":\"assistant\",\"message\":{{\"model\":\"claude-opus-5\",\"usage\":{{\
-             \"input_tokens\":{input},\"cache_creation_input_tokens\":{cache_creation},\
-             \"cache_read_input_tokens\":{cache_read},\"output_tokens\":478,\
-             \"cache_creation\":{{\"ephemeral_1h_input_tokens\":{cache_creation},\
-             \"ephemeral_5m_input_tokens\":0}},\
-             \"iterations\":[{{\"input_tokens\":9999,\"cache_read_input_tokens\":9999}}]}}}}}}"
-        )
+    /// A CAPTURE, not an invention — TESTING.md § "Fixtures captured from
+    /// reality". The `usage` and `compactMetadata` objects inside are verbatim
+    /// from the maintainer's own transcripts (2026-08-07), scrubbed of
+    /// everything that is not shape. Its header records the provenance, the
+    /// dated field measurement, and the re-measurement commands.
+    ///
+    /// This matters because `tokens_from_tail` is a SUBSTRING parser over an
+    /// external format nobody here controls. A fixture reconstructed from the
+    /// parser's own assumptions could only ever confirm them; this one can be
+    /// contradicted by the world (Codex review, #147).
+    const CAPTURE: &str = include_str!("../tests/fixtures/transcripts/compacted-session.jsonl");
+
+    /// The capture's data lines: `#` header lines dropped, `n` lines kept.
+    ///
+    /// Slicing by line is how one capture serves every case — a pre-compaction
+    /// tail, a tail ending AT the boundary, and a tail with a fresh turn past
+    /// it are all prefixes of the same real session.
+    fn capture(n: usize) -> String {
+        let body: Vec<&str> = CAPTURE.lines().filter(|l| !l.starts_with('#')).collect();
+        body[..n].join("\n") + "\n"
+    }
+
+    #[test]
+    fn s7_the_capture_still_carries_every_shape_the_parser_reads() {
+        // The hermetic half of TESTING.md's liveness assertion: every literal
+        // production greps for must appear in a real captured sample. This
+        // fails the day someone teaches the parser a shape no capture contains
+        // — which is escape record 5, a fixture pinning a shape reality
+        // abandoned. The field half is the dated measurement in the header.
+        for shape in [
+            "\"usage\":{",
+            "\"input_tokens\":",
+            "\"cache_read_input_tokens\":",
+            "\"cache_creation_input_tokens\":",
+            "\"subtype\":\"compact_boundary\"",
+            "\"postTokens\":",
+        ] {
+            assert!(CAPTURE.contains(shape), "no captured line carries {shape}");
+        }
     }
 
     #[test]
     fn s7_sums_the_newest_turns_three_input_counts() {
-        let tail = format!(
-            "{}\n{}\n",
-            usage_line(2, 100, 50),
-            usage_line(2, 211_125, 4_989)
+        // Two real assistant turns, no boundary yet. The newest wins: the
+        // measured reading of that session was 2 + 211125 + 4989.
+        assert_eq!(tokens_from_tail(&capture(2)), Some(216_116));
+        // Proven against the decoys the capture carries for free — `iterations`
+        // repeats every usage key per inference step, `cache_creation` nests
+        // `ephemeral_*_input_tokens`, and `output_tokens` sits between the two
+        // counts that ARE summed. Occupancy is what went IN.
+        assert!(
+            CAPTURE.contains("\"iterations\":["),
+            "the decoy must survive"
         );
-        // The real reading measured on a live transcript: 2 + 211125 + 4989.
-        assert_eq!(tokens_from_tail(&tail), Some(216_116));
+        assert!(CAPTURE.contains("\"output_tokens\":"));
         // No usage line anywhere is NOT zero — it is no reading, which holds.
         assert_eq!(tokens_from_tail("{\"type\":\"user\"}\n"), None);
     }
 
     #[test]
     fn s7_reads_past_a_compact_boundary_and_falls_back_to_its_post_tokens() {
-        let boundary = "{\"type\":\"system\",\"subtype\":\"compact_boundary\",\
-             \"compactMetadata\":{\"trigger\":\"manual\",\"preTokens\":435777,\
-             \"postTokens\":24456}}";
-        // Pre-compaction usage still sits in the file and names the OLD size.
-        // Reading it would paint a just-emptied session red.
-        let stale = usage_line(2, 435_000, 777);
+        // Ending AT the boundary is the real few-second window after a manual
+        // `/compact`: the pre-compaction lines still sit there naming 216k, and
+        // no fresh turn has landed. Take the boundary's own exact figure, or the
+        // battery paints a just-emptied session red.
+        assert_eq!(tokens_from_tail(&capture(3)), Some(24_456));
+        // One turn later, the fresh reading wins.
+        assert_eq!(tokens_from_tail(&capture(4)), Some(37_437));
+        // `preTokens` precedes `postTokens` on that same real line — a looser
+        // scan would report the PRE-compaction size, the exact inverse.
+        assert!(CAPTURE.contains("\"preTokens\":435777"));
+    }
 
-        let no_fresh_turn = format!("{stale}\n{boundary}\n");
-        assert_eq!(tokens_from_tail(&no_fresh_turn), Some(24_456));
-
-        let fresh = format!("{stale}\n{boundary}\n{}\n", usage_line(2, 24_000, 456));
-        assert_eq!(tokens_from_tail(&fresh), Some(24_458));
-
-        // Only the NEWEST boundary anchors — a session compacted twice. The two
-        // figures differ so that reading the earlier line would be visible.
-        let older = boundary.replace("24456", "99999");
-        let twice = format!("{stale}\n{older}\n{boundary}\n");
-        assert_eq!(tokens_from_tail(&twice), Some(24_456));
+    #[test]
+    fn s7_only_the_newest_boundary_anchors() {
+        // A session compacted twice. Built from the captured boundary rather
+        // than a written one; the figures differ so reading the earlier line
+        // would be visible rather than coincidentally right.
+        let lines: Vec<&str> = CAPTURE.lines().filter(|l| !l.starts_with('#')).collect();
+        let newest = lines[2];
+        let older = newest.replace("24456", "99999");
+        assert_eq!(
+            tokens_from_tail(&format!("{}\n{older}\n{newest}\n", lines[0])),
+            Some(24_456)
+        );
     }
 
     #[test]
@@ -1592,15 +1629,22 @@ mod tests {
         // Occupancy is never zero on a real turn, so an all-zero `usage` is a
         // malformed line, not a measurement. Taking it would paint a full
         // battery on a session that may be nearly out — the one failure a meter
-        // must not have.
-        assert_eq!(
-            tokens_from_tail(&format!("{}\n", usage_line(0, 0, 0))),
-            None
-        );
+        // must not have. Zeroed from the captured line so the shape stays real.
+        let lines: Vec<&str> = CAPTURE.lines().filter(|l| !l.starts_with('#')).collect();
+        let zeroed = |l: &str| {
+            l.replace("\"input_tokens\":2", "\"input_tokens\":0")
+                .replace(
+                    "\"cache_creation_input_tokens\":15884",
+                    "\"cache_creation_input_tokens\":0",
+                )
+                .replace(
+                    "\"cache_read_input_tokens\":21551",
+                    "\"cache_read_input_tokens\":0",
+                )
+        };
+        assert_eq!(tokens_from_tail(&format!("{}\n", zeroed(lines[0]))), None);
         // And it must not shadow a boundary's exact figure either.
-        let boundary = "{\"type\":\"system\",\"subtype\":\"compact_boundary\",\
-             \"compactMetadata\":{\"postTokens\":24456}}";
-        let tail = format!("{boundary}\n{}\n", usage_line(0, 0, 0));
+        let tail = format!("{}\n{}\n", lines[2], zeroed(lines[0]));
         assert_eq!(tokens_from_tail(&tail), Some(24_456));
     }
 

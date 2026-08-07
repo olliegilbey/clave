@@ -499,6 +499,15 @@ under `transcripts/`), with a header comment recording what it was captured from
 and on what date. An invented fixture encodes a belief; a capture encodes an
 observation, and only one of those can be contradicted by the world.
 
+The worked example is
+[`transcripts/compacted-session.jsonl`](../../crates/clave/tests/fixtures/transcripts/compacted-session.jsonl),
+captured for S7's token estimator (#62, #147) — a real pre-compaction session,
+its `compact_boundary`, and the turn after it. Copy its header: provenance and
+date, the dated field counts, the re-measurement commands, and an explicit list
+of the decoys the capture carries (`iterations` repeats every usage key,
+`preTokens` precedes `postTokens`). Its consumers slice it by line, so one
+capture serves every case rather than each test writing its own reality.
+
 **Assert liveness, in two halves.** A checked-in capture cannot itself go
 extinct — it is frozen — so the assertion has to straddle the repository
 boundary:
