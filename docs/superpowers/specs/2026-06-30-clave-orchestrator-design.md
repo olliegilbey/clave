@@ -725,8 +725,13 @@ self-hydrates on load via `RunCommands` — §6.6).
   position → `tab_id`/name/active.
 - **Nav (revised 2026-07-08, C5 rounds 1–3):** everything acts on the
   DISPLAYED list, which is safe to walk because focus never reorders it:
-  - `Alt+↑/↓`/`Alt+j/k` step ±1 through the visible rows (wrapping);
-    `Alt+1…9` = Nth visible row; clicks jump the clicked row. All use
+  - `Alt+↑/↓`/`Alt+j/k` step ±1 through the visible rows, wrapping **within
+    the live block** (#112 — the displayed list is live rows then dormant
+    rows, and a walk never crosses the join; with no live rows at all it
+    falls back to the whole list rather than going dead);
+    `Alt+1…9` = Nth visible row across both blocks, which is what keeps the
+    dormant block reachable from the keyboard; clicks jump the clicked row.
+    All use
     `switch_tab_to(position+1)` (the stock tab-bar's own mechanism; S2's
     `go_to_tab` dead end was an unchased indexing quirk) and run on the
     **executor only** — the instance whose own tab == the beacon

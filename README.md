@@ -86,8 +86,8 @@ Then `Alt+a`, pick a directory, choose `new`. That's your first agent.
 | | |
 |---|---|
 | `Alt+a` | add an agent — pick a directory, then new or resume |
-| `Alt+↑` `Alt+↓` (or `Alt+k` `Alt+j`) | walk the fleet |
-| `Alt+1`…`Alt+9` | jump straight to a row |
+| `Alt+↑` `Alt+↓` (or `Alt+k` `Alt+j`) | walk the running agents |
+| `Alt+1`…`Alt+9` | jump straight to a row, running or closed |
 | `Alt+o` | back to where you were |
 | `Alt+c` | collapse the bar to a strip, or expand it |
 | `Alt+t` `Alt+w` | new tab, close tab |
@@ -109,6 +109,10 @@ belong to Zellij ([#24](../../issues/24)).
   rest back as dormant rows — open one and it picks up where it left off,
   including the ones you've `/clear`ed, which start a fresh session id
   underneath.
+- **Running agents sit above closed ones**, in their own block, and `Alt+j`/
+  `Alt+k` walk that block alone — so the fleet you're actually working stays a
+  short cycle however many conversations you've accumulated. Closed rows are
+  still one number or one click away, and waking one takes `Alt+Enter`.
 - **Worktrees are first class.** `clave add --worktree` puts an agent on its own
   branch in its own directory, so two agents in one repo never fight over your
   working tree.

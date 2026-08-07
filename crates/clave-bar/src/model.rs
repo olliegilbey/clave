@@ -1410,10 +1410,7 @@ impl BarModel {
         // defect two reviewers caught on PR #135, arriving by a third route.
         live.sort_by(rank_desc);
         dormant.sort_by(rank_desc);
-        live.into_iter()
-            .chain(dormant)
-            .map(|(_, _, r)| r)
-            .collect()
+        live.into_iter().chain(dormant).map(|(_, _, r)| r).collect()
     }
 
     /// How many leading rows form the LIVE block (#112). [`Self::rows`] emits
@@ -4111,11 +4108,11 @@ mod tests {
         // is user-caused and visible.
         let a = m.agents.iter().find(|a| a.uuid == "u-A").unwrap();
         assert_eq!(m.dormant_ord(a), 30, "the rank survives the close");
-        let keys = keys(&m);
         assert_eq!(
-            keys.iter().position(|k| k == &closed),
-            Some(BarModel::live_block_len(&m.rows())),
-            "the closed row heads the dormant block"
+            keys(&m),
+            vec![RowKey::Tab(11), RowKey::Tab(12), closed],
+            "the survivors keep the live block; the closed row heads the \
+             dormant one below it"
         );
     }
 

@@ -142,7 +142,7 @@ commitment has ordinal `0` and sits below every row that has.
 | 11 | Bar collapse toggle (`Alt+c`) | `clave collapse` | **no** | unchanged |
 | 12 | **New tab created** (`Alt+t`, `clave open`, `clave add`) | birth touch, `clave touch <tab_id>` (`clave-bar/src/main.rs:434-445`) | **the new row enters at the top**; existing rows keep their relative order | mints an ordinal into `tab_order[tab_id]`. Unchanged from today |
 | 13 | **New store row created** (`clave add`, resume) | `add.rs:740-758` | **the new row enters at the top** | mints an ordinal into `agent.commit_ord` (new — today it inherits nothing and can sink) |
-| 14 | **Tab closed** (`Alt+w`) | `PruneTabs` → `apply_prune_tabs` | **no reorder of survivors relative to each other**; the closed tab's agent becomes a dormant row carrying the tab's ordinal | the agent inherits the tab's ordinal (new). Under today's single merged list that lands it at the same index; under #112's live/dormant segregation it lands at the head of the dormant block. Either way nothing moves *relative to anything else* — see R2 |
+| 14 | **Tab closed** (`Alt+w`) | `PruneTabs` → `apply_prune_tabs` | **no reorder of survivors relative to each other**; the closed tab's agent becomes a dormant row carrying the tab's ordinal | the agent inherits the tab's ordinal (new). Under S1's single merged list that landed it at the same index; under #112's live/dormant segregation, which now ships, it lands at the head of the dormant block. Either way nothing moves *relative to anything else* — see R2 |
 | 15 | Session (re)create | `clear_session_order` (`setup.rs:651`) | tab ordinals cleared; **agent ordinals survive** | dormant rows keep their cross-session recency order; live tabs sort at `0` until their birth touch lands |
 | 16 | **User interacts with a plain terminal tab** | **S2 — not in this workstream** | **will be YES** | S2 calls the *existing* `clave touch <tab_id>`; no new field, no comparator change. See §3.5 |
 | 17 | **`clave open` finds the row's `cwd` missing** | `open.rs` → `store::apply_open_result` | **no** | mints nothing; sets `stale` only. The row's ordinal freezes at its last real prompt, so it SINKS as other rows are used — this is #124's whole retention rule, and it exists only as an **absence**. Pinned by `a_failed_open_touches_no_ordering_field_so_stale_rows_sink` |
@@ -294,23 +294,35 @@ ordinals:
 store: tab_order = {10: 56, 11: 55};  u-A: tab_id = 10, commit_ord = 56
 tabs:  10 @ pos 0 (u-A),  11 @ pos 1 (plain terminal tab)
 
-BEFORE   rows = 0: Tab(10)  [56]   ← u-A, amber ●
-                1: Tab(11)  [55]
+BEFORE   live block   0: Tab(10)  [56]   ← u-A, amber ●
+                      1: Tab(11)  [55]
 
 Alt+w closes tab 10 → prune carries 56 onto u-A, drops tab_order[10].
 
-AFTER    rows = 0: Dormant u-A [56]  ← same index, glyph ● → ◌
-                1: Tab(11)     [55]  ← did not move
+AFTER    live block   0: Tab(11)     [55]  ← did not move relative to
+                                              anything; it is simply the
+                                              only live row left
+         dormant blk  1: Dormant u-A [56]  ← left the live block, glyph
+                                              ● → ◌, rank still 56
 ```
 
-And the touch-only variant (`u-A.commit_ord == 0`, born but never prompted):
-today it falls from row 0 to the bottom; with the carry it holds row 0 at
-ordinal `56`.
+The carry is what puts `u-A` at the **head of the dormant block** rather than
+at the bottom of it, and that is the whole point of it: `56` still ranks the
+row, so it outranks every dormant row prompted earlier. What the carry no
+longer does is hold the row's literal *index* — #112 moved it into the other
+block by design (see R2 below).
 
-**Coherence with `dormant_rows_sort_into_the_unified_recency_order`
-(`model.rs:2112`).** That test pins *one merged list* — a dormant row can outrank
-a live tab row. S1 keeps that list: the test keeps its shape and its assertion,
-and only its input key changes from `last_interacted` to `commit_ord`.
+And the touch-only variant (`u-A.commit_ord == 0`, born but never prompted):
+without the carry it falls to the bottom of the dormant block, beneath every
+row ever prompted; with it, it arrives at that block's head at ordinal `56`.
+
+**Coherence with `rows_render_as_two_blocks_live_above_dormant`.** That test
+(formerly `dormant_rows_sort_into_the_unified_recency_order`) pinned *one
+merged list*, in which a dormant row could outrank and out-position a live tab
+row. #112 replaced the merged list with two blocks and rewrote the test to
+match: a dormant row may still outrank a live one by ordinal, and it renders
+below it anyway. The ordinal itself is unchanged by that — one ranking rule
+still covers both row classes.
 
 **What changed here, 2026-08-01.** This section used to argue that the merged
 list was *load-bearing for R2* — that if dormant rows sank below live rows,
@@ -324,11 +336,12 @@ heads the dormant block *because it is the most recently closed*, which is
 user-caused and legible, whereas §1.2's jump moved a row the user never touched.
 
 The carry (below) is what makes **both** models work, so nothing in this section's
-implementation changes: it is what gives a freshly-closed row a rank at all,
-whether that rank places it in one merged list today or at the head of the
-dormant block after #112. S1 builds the merged list because that is what exists
-now; it must not *depend* on it, which is why the close tests below assert
-relative order rather than a literal index.
+implementation changed when segregation landed: it is what gives a freshly-closed
+row a rank at all, whether that rank places it in one merged list (as S1 shipped
+it) or at the head of the dormant block (as #112 ships it). S1 built the merged
+list because that is what existed then, and deliberately did not *depend* on it —
+which is why the close tests below assert relative order and ranking keys rather
+than a literal index, and why they survived #112 unchanged.
 
 ### 3.4 Rejected alternatives
 
@@ -919,7 +932,7 @@ here and to be restated in the PR dossier.
 | Test | file:line | Change | Intentional because |
 |---|---|---|---|
 | `rows_order_by_last_user_commitment` | `model.rs:1218` | **mechanical only** — `snap_t` values become ordinals; every assertion (`b, c, a`; focus doesn't reorder; `last_interacted` alone must not sort) stays byte-identical. Comment "order by wall clock" → "order by commitment ordinal" | the behaviour it pins is exactly what we are keeping; only the units change |
-| `dormant_rows_sort_into_the_unified_recency_order` | `model.rs:2112` | **behavioural** — dormant keys move from `last_interacted` to `commit_ord`; the asserted output order is unchanged | the merged list is what ships today, and a dormant row outranking a live one is how a closed row holds its rank without waiting on the prune. The test's shape is right; its key is not. **This test is #112's to change, not S1's** — segregation replaces the merged list, and this is the test that pins it |
+| `dormant_rows_sort_into_the_unified_recency_order` | `model.rs:2112` | **behavioural** — dormant keys move from `last_interacted` to `commit_ord`; the asserted output order is unchanged | the merged list was what shipped in S1, and a dormant row outranking a live one is how a closed row holds its rank without waiting on the prune. The test's shape was right; its key was not. **This test was #112's to change, not S1's** — and #112 did: it is now `rows_render_as_two_blocks_live_above_dormant`, asserting the live block above the dormant one with the same adversarial wall clock |
 | `prop_rows_deterministic_and_recency_desc` | `model.rs:2918` | **behavioural and strengthened** — `ts_of` maps `Dormant → commit_ord` (and the carry); the `>=` window assertion is joined by the new uniqueness property below | the old property could not distinguish "correctly ordered" from "tied and arbitrarily broken", which is precisely defect §1.1 |
 | `prompt_stamps_bound_tabs_timeline_atomically` | `hook.rs:321` | asserted values change from `1700` (the `now` argument) to the minted ordinal; the `Stop` leg at `:357-359` becomes the seed of `only_user_prompt_submit_moves_the_order` | the stamp is no longer a timestamp |
 | `touch_stamps_timeline_bumps_seq_and_never_regresses` | `store.rs:609` | rewritten — no `now` argument exists; "a late/duplicate OLDER stamp can't regress it" becomes "the mint is monotone by construction" | the max-merge defended against a pre-lock clock read that no longer happens (§4.2 step 7) |
@@ -1082,7 +1095,7 @@ clave ls --json | jq '{tab_order,
 
 | Report | Conclusion | Next |
 |---|---|---|
-| every surviving row kept its index; the closed tab's row is at the **same index**, now `◌` | **R2 holds, both legs** (render-side carry and store carry) | Step 5 |
+| the surviving live rows kept their order relative to each other; the closed tab's row left the live block for the **head of the dormant block**, now `◌` | **R2 holds, both legs** (render-side carry and store carry) | Step 5 |
 | correct immediately, wrong 2 s later | the **store carry** is wrong — `apply_prune_tabs` lowered `commit_ord` | report the JSON; look for `commit_ord` below the old `tab_order` value |
 | wrong immediately, correct 2 s later | the **render-side carry** is not firing — `dormant_ord` is not reading `tab_order[a.tab_id]` | report |
 | a neighbour jumped to the top in both readings | the fix did not take effect at all | confirm Step 0's versions again, then report |

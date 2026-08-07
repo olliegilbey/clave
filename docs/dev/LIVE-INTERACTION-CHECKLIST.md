@@ -412,15 +412,29 @@ anything else; worktree beats both.
 
 **Do, and check each.**
 
-- `Alt+Down` / `Alt+j` — next display row. `Alt+Up` / `Alt+k` — previous. Both
-  wrap.
-- `Alt+1` … `Alt+9` — jump to display row N (1-based). On a **dormant** row this
-  **selects** it — nothing opens (#100 reversed the old immediate-open;
-  selection and launch are two separate acts on every input path).
-- **Nothing wakes a dormant row except `Alt+Enter`** (#100/#116). Walk onto a
-  dormant row and **stop** — the gutter shows the commit mark **U+23CE**
-  (carpYellow), the row takes the highlight, and no matter how long you park,
-  **no tab appears**. The 0.4 s dwell is deleted.
+- **The list is two blocks** (#112). Every live row first, then every dormant
+  row, each block ordered by the commitment ordinal. Confirm the live block is
+  **contiguous and complete** — no dormant row above a live one, and no live
+  row stranded below the join. On the real store expect ~4 live above ~17
+  dormant.
+- `Alt+Down` / `Alt+j` — next display row **within the live block**. `Alt+Up` /
+  `Alt+k` — previous. Both wrap at the block's ends: walk forward off the last
+  live row and you arrive back at the first, **not** on the dormant row that is
+  sitting directly below it on screen. Cycle the whole live block twice in each
+  direction and confirm you never leave it (#112).
+- `Alt+1` … `Alt+9` — jump to display row N (1-based), counting across BOTH
+  blocks. This is the only keyboard route into the dormant block, so with 4 live
+  rows `Alt+5` is the most recently closed one. On a **dormant** row it
+  **selects** — nothing opens (#100 reversed the old immediate-open; selection
+  and launch are two separate acts on every input path).
+- **Nothing wakes a dormant row except `Alt+Enter`** (#100/#116). Pick a dormant
+  row with `Alt+N` or the mouse and **stop** — the gutter shows the commit mark
+  **U+23CE** (carpYellow), the row takes the highlight, and no matter how long
+  you park, **no tab appears**. The 0.4 s dwell is deleted.
+- **The excursion ends on a walk.** With a dormant row selected, press `Alt+j`:
+  focus resumes the live ring from the tab you are actually in, and the dormant
+  selection is released (#112). It does not continue downward from the dormant
+  row.
 - **Commit-to-open.** With a dormant row selected, `Alt+Enter`. The mark goes
   ⏎ → ↻ (U+21BB, carpYellow), a tab appears, the row goes live and the
   selection reverts to the focused tab. A second `Alt+Enter` while ↻ is
