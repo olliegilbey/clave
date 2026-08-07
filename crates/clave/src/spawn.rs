@@ -313,16 +313,19 @@ fn moved_site(transcript: &Path, session: &str) -> Result<SpawnSite> {
     })
 }
 
-/// #139 (review): can this session be recovered through relocation even
-/// though its baked cwd is gone? Open-time gate only — `run_open` must not
-/// reject a row as stale when the conversation demonstrably moved somewhere
-/// spawnable; the spawn re-runs the search and repoints the row.
-pub fn relocation_recoverable(claude_dir: &Path, uuid: &str, live_session: Option<&str>) -> bool {
+/// #139 (review): where has this session's conversation moved to, if
+/// anywhere spawnable? `Some(cwd)` when a relocated transcript resolves to
+/// an existing dir — the cwd `run_open` must BAKE into the pane instead of
+/// the missing one, or the opened pane runs from a dead dir (#143 review).
+/// `None` otherwise. Open-time gate only; the spawn re-runs the search and
+/// repoints the row.
+pub fn relocated_cwd(claude_dir: &Path, uuid: &str, live_session: Option<&str>) -> Option<String> {
     let live = live_session.filter(|l| !l.starts_with('-'));
-    [live, Some(uuid)].into_iter().flatten().any(|id| {
-        locate_transcript(claude_dir, id)
-            .map(|t| moved_site(&t, id).is_ok())
-            .unwrap_or(false)
+    [live, Some(uuid)].into_iter().flatten().find_map(|id| {
+        match locate_transcript(claude_dir, id).map(|t| moved_site(&t, id)) {
+            Some(Ok(SpawnSite::Moved { cwd, .. })) => Some(cwd),
+            _ => None,
+        }
     })
 }
 
@@ -539,19 +542,26 @@ mod tests {
         let err = moved_site(&transcript, "u-lag").unwrap_err().to_string();
         assert!(err.contains("lags the move"), "unexpected error: {err}");
         // And the open-time gate agrees: not recoverable through relocation.
-        assert!(!relocation_recoverable(&f.claude, "u-lag", None));
+        assert_eq!(relocated_cwd(&f.claude, "u-lag", None), None);
     }
 
-    /// The open-time gate: a session whose transcript moved somewhere
-    /// spawnable IS recoverable; an unknown one is not. (#143 review)
+    /// The open-time gate: a clean move yields the RELOCATED cwd — the one
+    /// `run_open` must bake into the pane — and an unknown session yields
+    /// nothing. (#143 review)
     #[test]
-    fn relocation_recoverable_follows_a_clean_move_only() {
+    fn relocated_cwd_follows_a_clean_move_only() {
         let f = reloc_fixture();
         let new_cwd = f.other_cwd("clean-move");
         f.plant(&new_cwd, "u-moved", &tail_lines(&new_cwd, "feat/x"));
-        assert!(relocation_recoverable(&f.claude, "u-moved", None));
-        assert!(relocation_recoverable(&f.claude, "other", Some("u-moved")));
-        assert!(!relocation_recoverable(&f.claude, "u-nope", None));
+        assert_eq!(
+            relocated_cwd(&f.claude, "u-moved", None).as_deref(),
+            Some(new_cwd.as_str())
+        );
+        assert_eq!(
+            relocated_cwd(&f.claude, "other", Some("u-moved")).as_deref(),
+            Some(new_cwd.as_str())
+        );
+        assert_eq!(relocated_cwd(&f.claude, "u-nope", None), None);
     }
 
     #[test]

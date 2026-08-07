@@ -245,12 +245,17 @@ fn main() -> Result<()> {
             // prose gates #139's fail-loudly. Read lock-free and best-effort:
             // a missing or unreadable store must never stop a pane from
             // launching, and `None` is precisely the pre-#99 behaviour.
-            let row = clave::store::store_paths()
-                .and_then(|p| clave::store::read_store(&p))
-                .ok()
-                .and_then(|s| s.agents.get(&uuid).cloned());
+            let store_read = clave::store::store_paths().and_then(|p| clave::store::read_store(&p));
+            // A CORRUPT store must not read as "never conversed" —
+            // evidenced=false would permit Create and silently shadow a real
+            // session, the exact miss #139 closes (#143 review). read_store
+            // defaults a MISSING file, so Err means present-but-unparseable:
+            // assume evidenced and let the zero-hit path fail loudly.
+            let store_corrupt = store_read.is_err();
+            let row = store_read.ok().and_then(|s| s.agents.get(&uuid).cloned());
             let live = row.as_ref().and_then(|r| r.live_session.clone());
-            let evidenced = row.as_ref().is_some_and(spawn::conversation_evidenced);
+            let evidenced =
+                store_corrupt || row.as_ref().is_some_and(spawn::conversation_evidenced);
             // #139: verify the transcript is where the row says before exec —
             // and FOLLOW it if it relocated (the #59/#69 move, e.g. into a
             // worktree). The pre-#139 miss path silently CREATED a fresh
@@ -268,23 +273,15 @@ fn main() -> Result<()> {
                     // next add/open bakes the right cwd. Locked write,
                     // best-effort: a store failure must never stop the pane —
                     // the next spawn simply searches again.
-                    let repoint = clave::store::store_paths().and_then(|p| {
-                        clave::store::with_store_mut(&p, |s| {
-                            if let Some(r) = s.agents.get_mut(&uuid) {
-                                r.cwd = cwd.clone();
-                                if let Some(b) = &branch {
-                                    r.branch = b.clone();
-                                }
-                            }
-                            s.seq += 1; // monotonic pipe contract (§5)
-                            clave::store::snapshot_from(s)
-                        })
-                    });
-                    // Broadcast like every other locked write here: without
-                    // the push, each bar keeps the pre-relocation cwd/branch
-                    // until an unrelated event refreshes it (#143 review).
-                    match repoint {
-                        Ok(snap) => clave::hook::push_snapshot(&snap),
+                    // Broadcast like every other locked write here (#143
+                    // review): the apply_* helper returns a snapshot only
+                    // when the row exists — no phantom seq bump or push for
+                    // an unknown uuid.
+                    match clave::store::store_paths().and_then(|p| {
+                        clave::store::apply_relocation(&p, &uuid, &cwd, branch.as_deref())
+                    }) {
+                        Ok(Some(snap)) => clave::hook::push_snapshot(&snap),
+                        Ok(None) => {}
                         Err(e) => {
                             eprintln!("clave spawn: could not repoint row cwd: {e:#}");
                         }

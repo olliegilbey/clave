@@ -1412,9 +1412,7 @@ mod tests {
         )
         .unwrap();
 
-        // All store fields are serde(default) — an empty object is the
-        // canonical way to build one without naming every field.
-        let mut store: Store = serde_json::from_str("{}").unwrap();
+        let mut store = Store::default();
         let mut row = rec("u");
         row.repo_root = repo_s.into();
         store.agents.insert("u".into(), row);
