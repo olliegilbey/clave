@@ -887,6 +887,10 @@ pub fn run_add(worktree: bool) -> Result<()> {
     //    existing-row lookup happens HERE, inside the lock (the step-4 copy
     //    was lock-free and only derived layout inputs).
     let snap = with_store_mut(&paths, |s| {
+        // S1: a new row is a user commitment, so it is minted an ordinal from
+        // this same locked write and enters at the top. Before S1 a new row
+        // inherited no order at all and could sink below every dormant row.
+        let ord = s.mint_ord(); // replaces the `s.seq += 1` this write used to do
         let fresh = AgentRecord {
             uuid: uuid.clone(),
             cwd: agent_cwd.clone(),
@@ -895,6 +899,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
             label: label.clone(),
             status: clave_types::Status::Idle,
             last_interacted: now_unix(),
+            commit_ord: ord,
             last_visited: 0,
             worktree: worktree_path.clone(),
             label_source: LabelSource::FirstPrompt,
@@ -915,9 +920,12 @@ pub fn run_add(worktree: bool) -> Result<()> {
         // the merge's whole contract is that a re-add means "it is on screen
         // again" and resets nothing but status, and the fallback already makes
         // that row no worse than it was.
-        let merged = merge_resume_record(s.agents.get(&uuid), fresh);
+        let mut merged = merge_resume_record(s.agents.get(&uuid), fresh);
+        // A resume opens a brand-new tab, which birth-touches to the top
+        // anyway; giving the ROW the same ordinal keeps the two consistent and
+        // stops the row plunging if that tab is closed before any prompt.
+        merged.commit_ord = ord;
         s.agents.insert(uuid.clone(), merged);
-        s.seq += 1;
         snapshot_from(s)
     })?;
     push_snapshot(&snap);
@@ -941,6 +949,7 @@ mod tests {
             label: "x · main".into(),
             status: Status::Idle,
             last_interacted: 0,
+            commit_ord: 0,
             last_visited: 0,
             worktree: None,
             label_source: LabelSource::FirstPrompt,
@@ -1158,10 +1167,16 @@ mod tests {
         row.status = Status::Working; // stale — the pane is gone
         row.last_interacted = 77;
         row.last_visited = 42;
+        row.commit_ord = 88;
         row.tab_id = Some(3); // the DEAD tab that hosted it last time
         let fresh = rec("u-wt"); // what the weave derives from the PICKED dir
         let merged = merge_resume_record(Some(&row), fresh.clone());
         assert_eq!(merged.status, Status::Idle);
+        // The merge preserves the row's ordinal like everything else. `add`
+        // then deliberately OVERRIDES it with a freshly minted one (S1 §4.6),
+        // because a resume opens a new tab that birth-touches to the top
+        // anyway; what must not happen is the merge silently dropping it to 0.
+        assert_eq!(merged.commit_ord, 88);
         // The resumed agent lands in a brand-new tab: the old bind is stale
         // by definition — reset, the new tab's bar re-binds on join (§6.6 B).
         assert_eq!(merged.tab_id, None);

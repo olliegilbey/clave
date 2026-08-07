@@ -455,24 +455,40 @@ pub fn apply_hook_event(
     if let Some(live) = payload.session_id.as_deref().filter(|_| own_claude) {
         rec.live_session = (live != uuid).then(|| live.to_string());
     }
-    let mut stamp = None;
-    if event == "UserPromptSubmit" {
-        rec.last_interacted = now; // recency (§6.6 order)
+    // §6.6 / S1 / #39: a PROMPT is the ONLY event that reorders. Stop,
+    // StopFailure, Notification, PermissionRequest and SessionEnd change the
+    // STATUS and nothing else — "claude finishing should not move it up"
+    // (maintainer ruling, 2026-07-22).
+    let commitment = event == "UserPromptSubmit";
+    let mut commit_tab = None;
+    if commitment {
+        rec.last_interacted = now; // wall clock: `clave ls`, picker, eager_row
         // §6.6 Design B: a prompt is a user COMMITMENT to the agent's TAB —
-        // stamp the store timeline through the bind, atomically with the
-        // bump (a bar-side stamp would race the user switching away).
-        stamp = rec.tab_id;
+        // stamp through the bind, atomically with the bump (a bar-side stamp
+        // would race the user switching away).
+        commit_tab = rec.tab_id;
         changed = true;
     }
     changed |= refresh_label(rec, event, payload, jsonl_tail);
-    if let Some(tab_id) = stamp {
-        let e = s.tab_timeline.entry(tab_id).or_insert(0);
-        *e = (*e).max(now);
+    if !changed {
+        return false;
     }
-    if changed {
-        s.seq += 1; // monotonic pipe contract (§5)
+    // The write's own seq IS the commitment ordinal — the §5 pipe contract and
+    // the §6.6 row order share one counter (see Store::mint_ord).
+    let ord = s.mint_ord();
+    if commitment {
+        if let Some(tab_id) = commit_tab {
+            s.tab_order.insert(tab_id, ord);
+        }
+        if let Some(rec) = s.agents.get_mut(uuid) {
+            // Set on the AGENT too, not only the tab: an unbound agent (RC-B,
+            // or a prompt landing before `clave bind`) still records its
+            // commitment, so the dormant row it becomes on close sorts right
+            // even if the prune never lands.
+            rec.commit_ord = ord;
+        }
     }
-    changed
+    true
 }
 
 /// Which store row does this hook event belong to? (#97)
@@ -750,6 +766,7 @@ mod tests {
             label: "x · main".into(),
             status: Status::Idle,
             last_interacted: 0,
+            commit_ord: 0,
             last_visited: 0,
             worktree: None,
             label_source: LabelSource::FirstPrompt,
@@ -1063,10 +1080,134 @@ mod tests {
     }
 
     #[test]
-    fn prompt_stamps_bound_tabs_timeline_atomically() {
+    fn only_user_prompt_submit_moves_the_order() {
+        // The executable form of the maintainer's ruling (2026-07-22): "only a
+        // user prompt to an agent reorders. Claude finishing does not."
+        //
+        // Every non-prompt event below DOES change the row — status, label —
+        // and therefore bumps seq and pushes. What none of them may do is move
+        // the row: the tab order and the row's ordinal must come out
+        // byte-identical. Asserting "nothing changed" would be a weaker and
+        // wrong test, since these events are supposed to change things.
+        let mut s = crate::store::Store::default();
+        let mut r = rec("u1");
+        r.tab_id = Some(4);
+        s.agents.insert("u1".into(), r);
+        let p = HookPayload {
+            session_id: Some("u1".into()),
+            prompt: None,
+            message: None,
+            transcript_path: None,
+        };
+        // One real commitment first, so there is a rank to preserve.
+        assert!(apply_hook_event(
+            &mut s,
+            "u1",
+            "UserPromptSubmit",
+            &p,
+            None,
+            1000,
+            true
+        ));
+        let order = s.tab_order.clone();
+        let ord = s.agents["u1"].commit_ord;
+        assert_eq!((ord, order.get(&4)), (1, Some(&1)));
+
+        // Events that DO drive status. Each must move the glyph and leave the
+        // rank alone — the pairing is the ruling.
+        let perm = HookPayload {
+            session_id: Some("u1".into()),
+            prompt: None,
+            message: Some("needs your permission".into()),
+            transcript_path: None,
+        };
+        for (event, payload, expected) in [
+            ("Stop", &p, Status::Done),
+            ("StopFailure", &p, Status::Failed),
+            ("PermissionRequest", &p, Status::NeedsYou),
+            ("Notification", &perm, Status::NeedsYou),
+            ("SessionEnd", &p, Status::Idle),
+        ] {
+            apply_hook_event(&mut s, "u1", event, payload, None, 9999, true);
+            assert_eq!(
+                s.agents["u1"].status, expected,
+                "{event} should still drive status"
+            );
+            assert_eq!(s.tab_order, order, "{event} must not move the tab");
+            assert_eq!(
+                s.agents["u1"].commit_ord, ord,
+                "{event} must not re-rank the row"
+            );
+        }
+        // A hook event that is not in the status map at all is a total no-op —
+        // it must not even mint an ordinal it then discards.
+        let seq = s.seq;
+        assert!(!apply_hook_event(
+            &mut s,
+            "u1",
+            "PreToolUse",
+            &p,
+            None,
+            9999,
+            true
+        ));
+        assert_eq!(s.seq, seq, "a no-op event must not consume an ordinal");
+        assert_eq!(s.tab_order, order);
+        assert_eq!(s.agents["u1"].commit_ord, ord);
+        // And the clock stayed put too — only a prompt writes it.
+        assert_eq!(s.agents["u1"].last_interacted, 1000);
+    }
+
+    #[test]
+    fn two_prompts_in_the_same_wall_second_get_distinct_ordinals() {
+        // The S1 §1.1 regression test. The old key was whole unix SECONDS, so
+        // two prompts landing in the same second tied — and the tie was broken
+        // by TAB POSITION, meaning the wrong row won and one prompt was
+        // silently swallowed. Same `now` for both here: the ordinals must still
+        // separate, because they come from the lock and not the clock.
+        let mut s = crate::store::Store::default();
+        let mut a = rec("u-a");
+        a.tab_id = Some(1);
+        s.agents.insert("u-a".into(), a);
+        let mut b = rec("u-b");
+        b.tab_id = Some(2);
+        s.agents.insert("u-b".into(), b);
+        let pa = HookPayload {
+            session_id: Some("u-a".into()),
+            prompt: None,
+            message: None,
+            transcript_path: None,
+        };
+        let pb = HookPayload {
+            session_id: Some("u-b".into()),
+            prompt: None,
+            message: None,
+            transcript_path: None,
+        };
+        apply_hook_event(&mut s, "u-a", "UserPromptSubmit", &pa, None, 1000, true);
+        apply_hook_event(&mut s, "u-b", "UserPromptSubmit", &pb, None, 1000, true);
+        assert_eq!(
+            s.agents["u-a"].last_interacted,
+            s.agents["u-b"].last_interacted
+        );
+        assert!(
+            s.tab_order[&2] > s.tab_order[&1],
+            "the later prompt must rank higher despite an identical clock"
+        );
+        assert!(s.agents["u-b"].commit_ord > s.agents["u-a"].commit_ord);
+    }
+
+    #[test]
+    fn prompt_stamps_bound_tabs_order_atomically() {
         // §6.6 Design B: a prompt is a USER COMMITMENT to the agent's TAB.
-        // The hook stamps tab_timeline[bind] in the SAME locked write as the
-        // last_interacted bump — no bar round-trip, no switch-away race.
+        // The hook stamps the tab order through the bind in the SAME locked
+        // write as the last_interacted bump — no bar round-trip, no
+        // switch-away race.
+        //
+        // S1: the stamped VALUE is now the write's own minted ordinal, not the
+        // `now` argument. `now` still lands on `last_interacted`, which stays a
+        // display clock, so the two are asserted separately below — that
+        // separation is the whole point of the change.
         let mut s = crate::store::Store::default();
         let mut r = rec("u1");
         r.tab_id = Some(4);
@@ -1087,8 +1228,9 @@ mod tests {
             1700,
             true
         ));
-        assert_eq!(s.agents["u1"].last_interacted, 1700);
-        assert_eq!(s.tab_timeline.get(&4), Some(&1700));
+        assert_eq!(s.agents["u1"].last_interacted, 1700); // the clock
+        assert_eq!(s.tab_order.get(&4), Some(&1)); // the ordinal — seq, not now
+        assert_eq!(s.agents["u1"].commit_ord, 1); // same value on both halves
         assert_eq!(s.seq, 1); // one bump for the whole atomic change
         // Unbound agent: interaction still recorded, no stamp to place.
         assert!(apply_hook_event(
@@ -1101,10 +1243,18 @@ mod tests {
             true
         ));
         assert_eq!(s.agents["u2"].last_interacted, 1800);
-        assert_eq!(s.tab_timeline.len(), 1);
-        // Non-commitment events don't stamp the timeline (Stop ≠ user input).
+        assert_eq!(s.tab_order.len(), 1);
+        // The RC-B case: unbound, so nothing to stamp on a tab — but the ROW
+        // still records its ordinal, so the dormant row it becomes sorts right
+        // even if no bind or prune ever lands.
+        assert_eq!(s.agents["u2"].commit_ord, 2);
+        // Non-commitment events don't touch the order (Stop ≠ user input).
         assert!(apply_hook_event(&mut s, "u1", "Stop", &p, None, 1900, true));
-        assert_eq!(s.tab_timeline.get(&4), Some(&1700));
+        assert_eq!(s.tab_order.get(&4), Some(&1));
+        assert_eq!(
+            s.agents["u1"].commit_ord, 1,
+            "Stop must not re-rank the row"
+        );
         // Unknown uuid / no-op event: unchanged, no seq bump.
         let seq = s.seq;
         assert!(!apply_hook_event(

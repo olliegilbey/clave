@@ -394,7 +394,7 @@ fn main() -> Result<()> {
             let paths = store::store_paths()?;
             // Locked RMW in the store (the ONE order writer), then broadcast
             // the seq-gated full state — the channel that never diverged.
-            let snap = store::apply_touch(&paths, tab_id, store::now_unix())?;
+            let snap = store::apply_touch(&paths, tab_id)?;
             hook::push_snapshot(&snap);
             Ok(())
         }

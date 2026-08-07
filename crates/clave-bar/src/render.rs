@@ -200,10 +200,10 @@ const BATTERY: [(char, Rgb); 5] = [
 // ── the row ─────────────────────────────────────────────────────────────────
 
 /// What the status cell says. Five of these are `clave_types::Status`; the
-/// other three are row states the model distinguishes without a `Status` —
-/// `Stale` is a `bool` flag (`clave open` found the cwd missing), `Dormant` and
-/// `Opening` are model states. The renderer stays total by owning all eight
-/// (LEDGER D10); `Status::glyph()` is untouched.
+/// other four are row states the model distinguishes without a `Status` —
+/// `Stale` is a `bool` flag (`clave open` found the cwd missing), `Dormant`,
+/// `DormantSelected` and `Opening` are model states. The renderer stays total
+/// by owning all nine (LEDGER D10); `Status::glyph()` is untouched.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowStatus {
     NeedsYou,
@@ -212,6 +212,7 @@ pub enum RowStatus {
     Idle,
     Failed,
     Dormant,
+    DormantSelected,
     Opening,
     Stale,
 }
@@ -220,7 +221,9 @@ impl RowStatus {
     /// The COLOUR is the state; the shape varies only where the state is not a
     /// conversation at all (lock §5). `Failed` is U+2716 HEAVY multiplication
     /// x and `Stale` is U+2717 BALLOT x — different glyphs for different
-    /// things, and easy to transpose (FOOTGUNS).
+    /// things, and easy to transpose (FOOTGUNS). `DormantSelected` is U+23CE
+    /// RETURN SYMBOL in the Opening tint — the ⏎ affordance IS the first
+    /// frame of the launch lifecycle it invites (⏎ → ↻ → status, #100).
     fn mark(self) -> (char, Rgb) {
         match self {
             RowStatus::NeedsYou => ('\u{25cf}', Rgb(0xE4, 0x68, 0x76)), // waveRed
@@ -231,8 +234,9 @@ impl RowStatus {
             // Hollow, not dim: sumiInk4 on the sumiInk3 bar was near-invisible
             // (#123). The SHAPE carries "not running"; the ink stays legible.
             RowStatus::Dormant => ('\u{25cc}', DEFAULT_INK),
-            RowStatus::Opening => ('\u{21bb}', Rgb(0xE6, 0xC3, 0x84)), // carpYellow
-            RowStatus::Stale => ('\u{2717}', Rgb(0xE8, 0x24, 0x24)),   // samuraiRed
+            RowStatus::DormantSelected => ('\u{23ce}', Rgb(0xE6, 0xC3, 0x84)), // carpYellow
+            RowStatus::Opening => ('\u{21bb}', Rgb(0xE6, 0xC3, 0x84)),         // carpYellow
+            RowStatus::Stale => ('\u{2717}', Rgb(0xE8, 0x24, 0x24)),           // samuraiRed
         }
     }
 }
@@ -1289,6 +1293,7 @@ mod tests {
             (RowStatus::Idle, '\u{25cf}', sumi_ink4),
             (RowStatus::Failed, '\u{2716}', samurai_red), // HEAVY multiplication x
             (RowStatus::Dormant, '\u{25cc}', fuji_white),
+            (RowStatus::DormantSelected, '\u{23ce}', carp_yellow), // ⏎ commit affordance (#100)
             (RowStatus::Opening, '\u{21bb}', carp_yellow),
             (RowStatus::Stale, '\u{2717}', samurai_red), // BALLOT x — a flag, not a Status
         ];

@@ -48,8 +48,18 @@ pub struct AgentRecord {
     /// `dir · branch · summary-or-first-prompt` (§6.4).
     pub label: String,
     pub status: Status,
-    /// unix s; bumped on UserPromptSubmit → drives the bar's recency order.
+    /// unix s; bumped on UserPromptSubmit. DISPLAY and cross-session policy
+    /// only (`clave ls`, the §6.3 picker, eager-launch selection) — NOT the
+    /// bar's sort key any more (S1/#39). Wire twin of
+    /// `clave_types::Agent::last_interacted`, which carries the rationale.
     pub last_interacted: u64,
+    /// The commitment ORDINAL that orders this row (S1/#39). Wire twin of
+    /// `clave_types::Agent::commit_ord`. Minted by [`Store::mint_ord`] under the
+    /// flock, so it is a total order with no clock and no ties; 0 = never
+    /// committed. `default` keeps pre-field store files loading, and
+    /// [`clear_session_order`] backfills those rows from `last_interacted` once.
+    #[serde(default)]
+    pub commit_ord: u64,
     /// unix s; bumped on focus (`clave focus`) → clears done-unread.
     pub last_visited: u64,
     /// Worktree path if `clave add --worktree` created one (§6.3), else None.
@@ -58,7 +68,7 @@ pub struct AgentRecord {
     /// Zellij tab id hosting this agent (§6.6 Design B), bound by the agent
     /// tab's own bar via `clave bind`. Keys the hook's prompt→timeline stamp
     /// and the bar's glyph join. Session-scoped: None until bound, reset on
-    /// session recreate (see clear_tab_timeline).
+    /// session recreate (see clear_session_order).
     #[serde(default)]
     pub tab_id: Option<usize>,
     /// §5 (2026-07-17): `clave open` found the row's cwd missing → the bar
@@ -138,21 +148,44 @@ pub struct Store {
     /// snapshots and `ls` output).
     #[serde(default)]
     pub agents: BTreeMap<String, AgentRecord>,
-    /// tab_id → unix seconds of the last user commitment (§6.6 row order).
-    /// Kept HERE, not per bar instance: instance-local copies fed by
-    /// fire-and-forget pipe deltas diverged live (C5 round 5) — the store
-    /// RMW is the one writer, and the map rides every snapshot push.
+    /// tab_id → the commitment ORDINAL of the last user commitment to that tab
+    /// (§6.6 row order / S1). Kept HERE, not per bar instance: instance-local
+    /// copies fed by fire-and-forget pipe deltas diverged live (C5 round 5) —
+    /// the store RMW is the one writer, and the map rides every snapshot push.
     /// tab_ids are session-scoped: cleared on session (re)create.
+    ///
+    /// RENAMED from `tab_timeline` (S1 §3.6), which held unix seconds. Renaming
+    /// rather than repurposing is what makes the upgrade safe: an old store
+    /// file's `tab_timeline` key is ignored, so second-scale values cannot leak
+    /// into the ordinal space and outrank every ordinal minted afterwards.
     #[serde(default)]
-    pub tab_timeline: BTreeMap<usize, u64>,
+    pub tab_order: BTreeMap<usize, u64>,
     /// Bar collapse mode (issue #5): plugin-side per-instance memory synced
     /// only by the toggle broadcast desynced live (C8 parity-desync — a
     /// reload or missed pipe flips one instance forever). Same doctrine as
-    /// tab_timeline above: the store RMW is the one writer and the flag
+    /// tab_order above: the store RMW is the one writer and the flag
     /// rides every snapshot push, so instances hydrate at birth and heal on
     /// every push. `default` (expanded) keeps pre-field store files loading.
     #[serde(default)]
     pub collapsed: bool,
+}
+
+impl Store {
+    /// Mint the next commitment ORDINAL (§6.6 / S1). The store's `seq` IS the
+    /// ordinal: it is persisted, monotonic, and bumped exactly once per locked
+    /// write, so two commitments can never collide and no wall clock is
+    /// involved. Callers MUST be inside [`with_store_mut`] — the flock is what
+    /// makes this a total order — and must NOT bump `seq` again afterwards.
+    ///
+    /// The shared counter is deliberate (S1 §3.4): a second counter would have
+    /// to be bumped in lockstep with `seq` forever, and the first write that
+    /// bumped one and forgot the other would corrupt the order invisibly, with
+    /// no test able to see it. The rule that keeps the two roles from being
+    /// conflated: NOTHING ever compares an ordinal to a snapshot `seq`.
+    pub(crate) fn mint_ord(&mut self) -> u64 {
+        self.seq += 1;
+        self.seq
+    }
 }
 
 pub struct StorePaths {
@@ -229,7 +262,7 @@ pub fn with_store_mut<T>(paths: &StorePaths, f: impl FnOnce(&mut Store) -> T) ->
 pub fn snapshot_from(store: &Store) -> AgentSnapshot {
     AgentSnapshot {
         seq: store.seq,
-        tab_timeline: store.tab_timeline.clone(),
+        tab_order: store.tab_order.clone(),
         collapsed: store.collapsed,
         agents: store
             .agents
@@ -242,6 +275,7 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
                 label: r.label.clone(),
                 status: r.status,
                 last_interacted: r.last_interacted,
+                commit_ord: r.commit_ord,
                 last_visited: r.last_visited,
                 tab_id: r.tab_id,
                 stale: r.stale,
@@ -276,17 +310,28 @@ pub fn apply_focus(paths: &StorePaths, uuid: &str, now: u64) -> Result<Option<Ag
     })
 }
 
-/// `clave touch <tab_id>` (§6.6): stamp a user commitment on the STORE's
-/// tab timeline and hand back a seq-bumped snapshot for the pipe push.
-/// Max-merge so a late/duplicate older stamp can never regress the order
-/// (concurrent birth touches from multiple bar instances are expected).
-pub fn apply_touch(paths: &StorePaths, tab_id: usize, now: u64) -> Result<AgentSnapshot> {
+/// `clave touch <tab_id>` (§6.6): stamp a user commitment on the STORE's tab
+/// order and hand back a seq-bumped snapshot for the pipe push.
+///
+/// The ordinal is minted INSIDE the lock, so it is strictly greater than every
+/// ordinal already in the map — a plain `insert` is therefore already a max.
+/// The old max-merge existed only because `now` was read BEFORE the lock (in
+/// `main.rs`) and two touches could serialize in the opposite order to their
+/// clock reads. That race is now impossible, not merely absorbed (S1 §3.1).
+pub fn apply_touch(paths: &StorePaths, tab_id: usize) -> Result<AgentSnapshot> {
     with_store_mut(paths, |s| {
-        let e = s.tab_timeline.entry(tab_id).or_insert(0);
-        *e = (*e).max(now);
-        s.seq += 1; // monotonic pipe contract (§5)
+        touch_in(s, tab_id);
         snapshot_from(s)
     })
+}
+
+/// The pure half of [`apply_touch`] — mint and stamp, no I/O. Returns the
+/// ordinal it minted. `mint_ord` bumps `seq` itself, so this IS the pipe
+/// contract's one bump for the write (§5); callers must not bump again.
+pub(crate) fn touch_in(s: &mut Store, tab_id: usize) -> u64 {
+    let ord = s.mint_ord();
+    s.tab_order.insert(tab_id, ord);
+    ord
 }
 
 /// `clave bind <uuid> <tab_id>` (§6.6 Design B): persist the uuid→tab join
@@ -342,10 +387,12 @@ pub fn apply_bind(paths: &StorePaths, uuid: &str, tab_id: usize) -> Result<Optio
     })
 }
 
-/// `clave prune-tabs <stale tab ids…>` (#6/F3): drop tab_timeline entries and
-/// clear agent tab_id binds for EXACTLY the ids listed — the ones the bar
-/// observed die on a close. Session recreate wiped these wholesale
-/// (clear_tab_timeline); mid-session tab CLOSE left them to grow unbounded —
+/// `clave prune-tabs <stale tab ids…>` (#6/F3): carry each dying tab's
+/// commitment ordinal onto the agent that was bound to it (S1), then drop the
+/// tab_order entries and clear agent tab_id binds for EXACTLY the ids listed —
+/// the ones the bar observed die on a close. Session recreate wiped these
+/// wholesale (clear_session_order); mid-session tab CLOSE left them to grow
+/// unbounded —
 /// and, since zellij REUSES tab_ids (get_new_tab_id = max-key+1, screen.rs:1617),
 /// a survivor entry would let a reused-id tab inherit a dead agent's glyph/order.
 ///
@@ -364,24 +411,42 @@ pub fn apply_bind(paths: &StorePaths, uuid: &str, tab_id: usize) -> Result<Optio
 /// None = no change.
 pub fn apply_prune_tabs(paths: &StorePaths, stale_ids: &[usize]) -> Result<Option<AgentSnapshot>> {
     with_store_mut(paths, |s| {
-        if stale_ids.is_empty() {
-            return None; // nothing observed dead
-        }
-        let before = s.tab_timeline.len();
-        s.tab_timeline.retain(|id, _| !stale_ids.contains(id));
-        let mut changed = s.tab_timeline.len() != before;
-        for r in s.agents.values_mut() {
-            if r.tab_id.is_some_and(|id| stale_ids.contains(&id)) {
-                r.tab_id = None;
-                changed = true;
-            }
-        }
-        if !changed {
-            return None; // §5: no no-op pushes
-        }
-        s.seq += 1; // monotonic pipe contract (§5)
-        Some(snapshot_from(s))
+        prune_in(s, stale_ids).then(|| {
+            s.seq += 1; // monotonic pipe contract (§5)
+            snapshot_from(s)
+        })
     })
+}
+
+/// The pure half of [`apply_prune_tabs`] — the state transition with no I/O and
+/// no `seq` bump, so the ordinal properties can quantify over it without a
+/// filesystem. Returns whether anything changed. Factored out exactly as
+/// `apply_hook_event` already was, for the same reason.
+pub(crate) fn prune_in(s: &mut Store, stale_ids: &[usize]) -> bool {
+    if stale_ids.is_empty() {
+        return false; // nothing observed dead
+    }
+    let mut changed = false;
+    // S1: the row INHERITS its tab's ordinal before the entry dies, so a
+    // close moves nothing RELATIVE to anything else (R2). Without this the
+    // row falls back to a different key in a different tiebreak class and
+    // every neighbour re-sorts — the "an unrelated tab jumped to the top"
+    // report. `max` keeps this idempotent and commuting with a second prune
+    // (the #6/F3 order-safety property): a re-run finds tab_id already None
+    // and carries nothing. Runs BEFORE the retain below, or there is no
+    // ordinal left to inherit.
+    for r in s.agents.values_mut() {
+        if let Some(id) = r.tab_id.filter(|id| stale_ids.contains(id)) {
+            let carried = s.tab_order.get(&id).copied().unwrap_or(0);
+            r.commit_ord = r.commit_ord.max(carried);
+            r.tab_id = None;
+            changed = true;
+        }
+    }
+    let before = s.tab_order.len();
+    s.tab_order.retain(|id, _| !stale_ids.contains(id));
+    changed |= s.tab_order.len() != before;
+    changed
 }
 
 /// `clave collapse <true|false>` (issue #5): persist the bar collapse mode
@@ -456,12 +521,23 @@ pub fn backfill_summaries(s: &mut Store) -> bool {
 /// session must inherit neither dead tabs' commitments (reused ids) nor
 /// stale uuid→tab binds. No push — no bar instance exists yet at launch
 /// time; hydration reads the store.
-pub fn clear_tab_timeline(paths: &StorePaths) -> Result<()> {
+///
+/// Agent ordinals (`commit_ord`) are agent-scoped and deliberately SURVIVE
+/// (S1 §3.1): clearing them would collapse every dormant row to 0 and
+/// cold-start the list in uuid order instead of recency order.
+///
+/// Also the S1 backfill point (§3.6). A store written by a pre-ordinal binary
+/// has `commit_ord == 0` everywhere, so without this the first launch after the
+/// upgrade would render the dormant list in uuid order — a visible regression
+/// on a real fleet. Seeding from the old wall-clock ranking converts it into
+/// the ordinal space exactly once; self-limiting, since after one launch
+/// nothing matches.
+pub fn clear_session_order(paths: &StorePaths) -> Result<()> {
     with_store_mut(paths, |s| {
         let bound = s.agents.values().any(|r| r.tab_id.is_some());
         let mut changed = false;
-        if !s.tab_timeline.is_empty() || bound {
-            s.tab_timeline.clear();
+        if !s.tab_order.is_empty() || bound {
+            s.tab_order.clear();
             s.agents.values_mut().for_each(|r| r.tab_id = None);
             changed = true;
         }
@@ -471,7 +547,27 @@ pub fn clear_tab_timeline(paths: &StorePaths) -> Result<()> {
         // launch. The alternative is a migration hook on every store open —
         // more machinery than a cosmetic gap on unused rows justifies.
         changed |= backfill_summaries(s);
-        if changed {
+        // S1 ordinal backfill, oldest first so the seeded ordinals preserve the
+        // old wall-clock ranking exactly.
+        let mut pre_ordinal: Vec<(u64, String)> = s
+            .agents
+            .values()
+            .filter(|r| r.commit_ord == 0 && r.last_interacted > 0)
+            .map(|r| (r.last_interacted, r.uuid.clone()))
+            .collect();
+        pre_ordinal.sort();
+        // `mint_ord` bumps `seq` itself, so a mint already satisfies the §5
+        // invariant ("content changed ⇒ seq advanced"). The trailing bump must
+        // therefore fire only when something changed WITHOUT minting, or a
+        // launch that both cleared and backfilled would advance `seq` twice.
+        let minted = !pre_ordinal.is_empty();
+        for (_, uuid) in pre_ordinal {
+            let ord = s.mint_ord();
+            if let Some(r) = s.agents.get_mut(&uuid) {
+                r.commit_ord = ord;
+            }
+        }
+        if changed && !minted {
             s.seq += 1; // content changed ⇒ seq changed (§5)
         }
     })
@@ -506,6 +602,7 @@ mod tests {
             label: "x · main".into(),
             status: Status::Idle,
             last_interacted: 0,
+            commit_ord: 0,
             last_visited: 0,
             worktree: None,
             label_source: LabelSource::FirstPrompt,
@@ -584,7 +681,7 @@ mod tests {
             ..Store::default()
         };
         s.agents.insert("u1".into(), rec("u1"));
-        s.tab_timeline.insert(4, 1700);
+        s.tab_order.insert(4, 1700);
         s.agents.get_mut("u1").unwrap().tab_id = Some(4);
         let snap = snapshot_from(&s);
         assert_eq!(snap.seq, 7);
@@ -592,7 +689,7 @@ mod tests {
         assert_eq!(snap.agents[0].uuid, "u1");
         assert_eq!(snap.agents[0].label, "x · main");
         // §6.6 store-timeline: order rides every snapshot.
-        assert_eq!(snap.tab_timeline.get(&4), Some(&1700));
+        assert_eq!(snap.tab_order.get(&4), Some(&1700));
         // §6.6 Design B: the uuid→tab bind rides it too (glyph join key).
         assert_eq!(snap.agents[0].tab_id, Some(4));
     }
@@ -697,16 +794,16 @@ mod tests {
             s.agents.insert("u-dead".into(), dead);
         })
         .unwrap();
-        apply_touch(&p, 10, 100).unwrap();
-        apply_touch(&p, 11, 200).unwrap(); // stale timeline entry
+        apply_touch(&p, 10).unwrap();
+        apply_touch(&p, 11).unwrap(); // stale timeline entry
         // Stale set is {11}: remove EXACTLY 11's bind + timeline entry; 10 (a
         // tab the prune never observed die) is untouched — the order-safety.
         let snap = apply_prune_tabs(&p, &[11]).unwrap().expect("pruned");
         let s = read_store(&p).unwrap();
         assert_eq!(s.agents["u-live"].tab_id, Some(10), "live bind untouched");
         assert_eq!(s.agents["u-dead"].tab_id, None, "dead bind cleared");
-        assert!(s.tab_timeline.contains_key(&10));
-        assert!(!s.tab_timeline.contains_key(&11), "stale timeline dropped");
+        assert!(s.tab_order.contains_key(&10));
+        assert!(!s.tab_order.contains_key(&11), "stale timeline dropped");
         assert!(snap.agents.iter().all(|a| a.tab_id != Some(11)));
         // Idempotent late arrival: re-removing an already-dead id → no change,
         // no push, no seq bump (this is what makes two out-of-order prunes safe).
@@ -716,6 +813,213 @@ mod tests {
         // Empty payload (nothing observed dead) → no-op.
         assert!(apply_prune_tabs(&p, &[]).unwrap().is_none());
         assert_eq!(read_store(&p).unwrap().agents["u-live"].tab_id, Some(10));
+    }
+
+    #[test]
+    fn ordinals_are_minted_strictly_increasing_under_the_lock() {
+        // S1 §3.1: the store's own `seq` IS the commitment ordinal — persisted,
+        // monotonic, bumped exactly once per locked write. Two commitments are
+        // two locked writes and therefore get two distinct ordered values BY
+        // CONSTRUCTION, with no clock read anywhere. There is no `now`
+        // parameter to pass, which is the point.
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        let mut seen = Vec::new();
+        for tab in [4usize, 4, 9, 4, 9] {
+            seen.push(apply_touch(&p, tab).unwrap().tab_order[&tab]);
+        }
+        assert_eq!(
+            seen,
+            vec![1, 2, 3, 4, 5],
+            "same tab and different tabs both advance"
+        );
+        for w in seen.windows(2) {
+            assert!(w[1] > w[0], "ordinals must strictly increase");
+        }
+        // The map never regresses: the last write for each tab is what stands.
+        let s = read_store(&p).unwrap();
+        assert_eq!(s.tab_order[&4], 4);
+        assert_eq!(s.tab_order[&9], 5);
+    }
+
+    #[test]
+    fn prune_carries_the_tabs_ordinal_onto_the_agent() {
+        // S1 §1.2, the headline defect: closing a tab used to throw its ordering
+        // key away, so the row fell back to a DIFFERENT key in a DIFFERENT
+        // tiebreak class and every neighbour re-sorted — reported as "an
+        // unrelated tab jumped to the top". The row now inherits the ordinal
+        // before the entry dies.
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            let mut a = rec("u-A");
+            a.tab_id = Some(10);
+            s.agents.insert("u-A".into(), a);
+        })
+        .unwrap();
+        apply_touch(&p, 11).unwrap(); // a neighbour, ordinal 1
+        let carried = apply_touch(&p, 10).unwrap().tab_order[&10]; // ordinal 2
+        apply_prune_tabs(&p, &[10]).unwrap().expect("pruned");
+        let s = read_store(&p).unwrap();
+        assert_eq!(
+            s.agents["u-A"].commit_ord, carried,
+            "row inherited its tab's rank"
+        );
+        assert_eq!(s.agents["u-A"].tab_id, None, "and was unbound");
+        assert!(!s.tab_order.contains_key(&10), "tab entry gone");
+        assert!(
+            s.agents["u-A"].commit_ord > s.tab_order[&11],
+            "the closed row still outranks the neighbour it outranked before"
+        );
+    }
+
+    #[test]
+    fn prune_pushes_when_only_a_bind_was_cleared() {
+        // A tab born and BOUND but never touched has no entry in the tab order
+        // at all. Pruning it changes exactly one thing — the bind — and that
+        // still has to reach the bar: the two change sources are independent,
+        // so the push gate must be an OR over them, not an AND.
+        //
+        // Caught by cargo-mutants (`|=` → `&=` survived): under the AND the
+        // store would clear the bind and stay silent, leaving every bar
+        // rendering the row as live until some unrelated write pushed.
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            let mut a = rec("u-A");
+            a.tab_id = Some(10); // bound…
+            s.agents.insert("u-A".into(), a);
+        })
+        .unwrap();
+        assert!(
+            read_store(&p).unwrap().tab_order.is_empty(),
+            "…but never touched, so it holds no ordinal"
+        );
+        let snap = apply_prune_tabs(&p, &[10])
+            .unwrap()
+            .expect("a cleared bind alone must still push");
+        assert!(snap.agents.iter().all(|a| a.tab_id.is_none()));
+        assert_eq!(read_store(&p).unwrap().agents["u-A"].tab_id, None);
+    }
+
+    #[test]
+    fn prune_carry_is_idempotent_and_commutes() {
+        // The #6/F3 order-safety property, extended to the new write: prunes are
+        // fire-and-forget with no arrival-order guarantee, so a second prune of
+        // the same id must change nothing at all.
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            let mut a = rec("u-A");
+            a.tab_id = Some(10);
+            s.agents.insert("u-A".into(), a);
+        })
+        .unwrap();
+        apply_touch(&p, 10).unwrap();
+        apply_prune_tabs(&p, &[10]).unwrap().expect("pruned");
+        let after_first = read_store(&p).unwrap();
+        // Re-run: tab_id is already None, so there is nothing to carry.
+        assert!(apply_prune_tabs(&p, &[10]).unwrap().is_none(), "no push");
+        let after_second = read_store(&p).unwrap();
+        assert_eq!(after_first, after_second, "second prune is a total no-op");
+    }
+
+    #[test]
+    fn prune_carry_never_lowers_an_agents_ordinal() {
+        // The carry is a `max`, not an assignment. An agent prompted AFTER its
+        // tab's last touch already outranks that tab; inheriting blindly would
+        // demote it on close — the very thing S1 exists to prevent.
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        apply_touch(&p, 10).unwrap(); // tab ordinal 1
+        with_store_mut(&p, |s| {
+            let mut a = rec("u-A");
+            a.tab_id = Some(10);
+            a.commit_ord = 99; // prompted later than its tab was touched
+            s.agents.insert("u-A".into(), a);
+        })
+        .unwrap();
+        apply_prune_tabs(&p, &[10]).unwrap().expect("pruned");
+        assert_eq!(read_store(&p).unwrap().agents["u-A"].commit_ord, 99);
+    }
+
+    #[test]
+    fn clear_session_order_backfills_pre_ordinal_rows() {
+        // S1 §3.6, the upgrade path. A store written by a pre-ordinal binary has
+        // `commit_ord == 0` everywhere; without a backfill the first launch
+        // after the upgrade would render the dormant list in UUID order, which
+        // is a visible regression on a real fleet. Seed from the old wall clock,
+        // oldest first, so the previous ranking survives into the ordinal space.
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            for (uuid, li) in [("u-mid", 200u64), ("u-old", 100), ("u-new", 300)] {
+                let mut a = rec(uuid);
+                a.last_interacted = li;
+                s.agents.insert(uuid.into(), a);
+            }
+            // Never interacted with: no clock to convert, so it stays at 0 and
+            // sorts to the bottom, which is exactly where it belongs.
+            s.agents.insert("u-never".into(), rec("u-never"));
+            // Already carries an ordinal: must NOT be touched.
+            let mut done = rec("u-done");
+            done.last_interacted = 50;
+            done.commit_ord = 7;
+            s.agents.insert("u-done".into(), done);
+        })
+        .unwrap();
+        clear_session_order(&p).unwrap();
+        let s = read_store(&p).unwrap();
+        assert_eq!(
+            s.agents["u-done"].commit_ord, 7,
+            "existing ordinal untouched"
+        );
+        assert_eq!(s.agents["u-never"].commit_ord, 0, "no clock ⇒ no seed");
+        let (old, mid, new) = (
+            s.agents["u-old"].commit_ord,
+            s.agents["u-mid"].commit_ord,
+            s.agents["u-new"].commit_ord,
+        );
+        assert!(
+            old > 0 && old < mid && mid < new,
+            "wall-clock ranking preserved: {old} < {mid} < {new}"
+        );
+        // Self-limiting: a second launch finds nothing to seed and changes none
+        // of the values it wrote.
+        let before = read_store(&p).unwrap();
+        clear_session_order(&p).unwrap();
+        let after = read_store(&p).unwrap();
+        assert_eq!(
+            before.agents, after.agents,
+            "backfill must run exactly once"
+        );
+    }
+
+    #[test]
+    fn clear_session_order_preserves_agent_ordinals() {
+        // Tab ids are SESSION-scoped, so the tab order and the binds go. Agent
+        // ordinals are AGENT-scoped and must survive: clearing them would
+        // collapse every dormant row to 0 and cold-start the list in uuid order
+        // (S1 §3.1).
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            let mut a = rec("u1");
+            a.tab_id = Some(4);
+            a.commit_ord = 42;
+            a.last_interacted = 900;
+            s.agents.insert("u1".into(), a);
+            s.tab_order.insert(4, 42);
+        })
+        .unwrap();
+        clear_session_order(&p).unwrap();
+        let s = read_store(&p).unwrap();
+        assert!(s.tab_order.is_empty(), "session-scoped tab order cleared");
+        assert_eq!(s.agents["u1"].tab_id, None, "session-scoped bind cleared");
+        assert_eq!(
+            s.agents["u1"].commit_ord, 42,
+            "agent-scoped ordinal SURVIVES"
+        );
     }
 
     #[test]
@@ -764,32 +1068,47 @@ mod tests {
             s.agents.insert("u1".into(), rec("u1"));
         })
         .unwrap();
-        apply_touch(&p, 4, 1700).unwrap();
+        apply_touch(&p, 4).unwrap();
         apply_bind(&p, "u1", 4).unwrap();
-        clear_tab_timeline(&p).unwrap();
+        clear_session_order(&p).unwrap();
         let s = read_store(&p).unwrap();
-        assert!(s.tab_timeline.is_empty());
+        assert!(s.tab_order.is_empty());
         assert_eq!(s.agents["u1"].tab_id, None);
     }
 
     #[test]
-    fn touch_stamps_timeline_bumps_seq_and_never_regresses() {
+    fn touch_mints_a_monotone_ordinal_and_bumps_seq() {
         // `clave touch <tab_id>` (§6.6): the ONE writer of tab order. Locked
         // RMW here — per-instance pipe-delta merges diverged live (C5 rd 5).
+        //
+        // REWRITTEN by S1. This test used to pin a max-merge against a `now`
+        // argument that no longer exists: the stamp was a wall clock read
+        // BEFORE the lock, so two touches could serialize in the opposite order
+        // to their clock reads and a late one had to be prevented from
+        // regressing the map. The ordinal is minted INSIDE the lock, so it is
+        // strictly greater than every ordinal already there — monotone by
+        // construction rather than by defence.
         let d = tempfile::tempdir().unwrap();
         let p = tmp_paths(d.path());
-        let snap = apply_touch(&p, 4, 1700).unwrap();
-        assert_eq!(snap.tab_timeline.get(&4), Some(&1700));
+        let snap = apply_touch(&p, 4).unwrap();
+        assert_eq!(snap.tab_order.get(&4), Some(&1));
         assert_eq!(snap.seq, 1); // §5: every push strictly newer
-        // Later commitment moves it forward…
-        let snap = apply_touch(&p, 4, 2000).unwrap();
-        assert_eq!(snap.tab_timeline.get(&4), Some(&2000));
-        // …but a late/duplicate OLDER stamp can't regress it (max-merge).
-        let snap = apply_touch(&p, 4, 100).unwrap();
-        assert_eq!(snap.tab_timeline.get(&4), Some(&2000));
+        // The write's own seq IS the ordinal, so they cannot drift apart.
+        let snap = apply_touch(&p, 4).unwrap();
+        assert_eq!(snap.tab_order.get(&4), Some(&2));
+        assert_eq!(snap.seq, 2);
+        // A different tab draws from the same counter — one ordinal space, so
+        // tabs and rows interleave correctly with no cross-space comparison.
+        let snap = apply_touch(&p, 9).unwrap();
+        assert_eq!(snap.tab_order.get(&9), Some(&3));
+        assert_eq!(
+            snap.tab_order.get(&4),
+            Some(&2),
+            "another tab's touch must not move this one"
+        );
         assert_eq!(snap.seq, 3);
         // Persisted: a fresh read sees the same map.
-        assert_eq!(read_store(&p).unwrap().tab_timeline.get(&4), Some(&2000));
+        assert_eq!(read_store(&p).unwrap().tab_order.get(&4), Some(&2));
     }
 
     #[test]
@@ -839,6 +1158,12 @@ mod tests {
         let mut row = rec("u1");
         row.last_interacted = 5_000; // non-zero: catches a clobber-to-0 too
         row.last_visited = 4_000;
+        // Same reasoning, applied to the field S1 added: `rec()` leaves this at
+        // 0, so a change that CLOBBERED it to 0 would be a no-op against the
+        // fixture and pass. Seeding it non-zero closes that half, while the
+        // whole-record assertion below already covers the half that matters
+        // more — a failed open MINTING an ordinal (#124's author, PR #135).
+        row.commit_ord = 7_000;
         with_store_mut(&p, |s| {
             s.agents.insert("u1".into(), row.clone());
         })
@@ -869,13 +1194,13 @@ mod tests {
         // stale timeline would order new tabs by dead tabs' commitments.
         let d = tempfile::tempdir().unwrap();
         let p = tmp_paths(d.path());
-        apply_touch(&p, 4, 1700).unwrap();
-        clear_tab_timeline(&p).unwrap();
+        apply_touch(&p, 4).unwrap();
+        clear_session_order(&p).unwrap();
         let s = read_store(&p).unwrap();
-        assert!(s.tab_timeline.is_empty());
+        assert!(s.tab_order.is_empty());
         assert_eq!(s.seq, 2); // content changed ⇒ seq changed (§5 invariant)
         // Idempotent: clearing an empty timeline changes nothing.
-        clear_tab_timeline(&p).unwrap();
+        clear_session_order(&p).unwrap();
         assert_eq!(read_store(&p).unwrap().seq, 2);
     }
 
@@ -985,7 +1310,7 @@ mod tests {
 
     #[test]
     fn clear_tab_timeline_backfills_summaries_and_bumps_seq_on_its_own() {
-        // `clear_tab_timeline` is the backfill's ONLY production caller
+        // `clear_session_order` is the backfill's ONLY production caller
         // (#69): the wiring, not the helper, is what a live upgrade runs.
         // Nothing here is CLEARABLE — empty timeline, no bind — so the seq
         // bump can only come from the backfill, which is exactly §5's
@@ -1002,10 +1327,10 @@ mod tests {
         // Assert the precondition rather than only documenting it: if `rec()`
         // ever gained a `tab_id`, the clearing branch would fire and the seq
         // assertion below would still pass while testing nothing.
-        assert!(before.tab_timeline.is_empty() && before.agents["u1"].tab_id.is_none());
+        assert!(before.tab_order.is_empty() && before.agents["u1"].tab_id.is_none());
         let before = before.seq;
 
-        clear_tab_timeline(&p).unwrap();
+        clear_session_order(&p).unwrap();
         let s = read_store(&p).unwrap();
         assert_eq!(
             s.agents["u1"].summary, "fix the flaky auth",
@@ -1014,11 +1339,153 @@ mod tests {
         assert_eq!(s.seq, before + 1, "backfill alone still bumps seq (§5)");
 
         // Self-limiting at the call site too: a second launch finds nothing.
-        clear_tab_timeline(&p).unwrap();
+        clear_session_order(&p).unwrap();
         assert_eq!(
             read_store(&p).unwrap().seq,
             before + 1,
             "§5 forbids no-op pushes"
         );
+    }
+
+    /// The ordinal invariants, quantified rather than exemplified (S1 §5.3).
+    /// Both claims below are universal — "every ordinal ever minted" and "no
+    /// event but a prompt" — and a table of examples cannot establish either.
+    /// These run against the PURE halves (`touch_in`, `prune_in`,
+    /// `apply_hook_event`), so no filesystem or lock is involved.
+    mod proptests {
+        use super::*;
+        use crate::hook::{HookPayload, apply_hook_event};
+        use proptest::prelude::*;
+
+        /// One arbitrary store mutation. Deliberately includes the events that
+        /// must NOT reorder, so a regression that stamped on `Stop` is
+        /// reachable by the generator rather than needing to be guessed.
+        #[derive(Debug, Clone)]
+        enum Op {
+            Touch(usize),
+            Prune(Vec<usize>),
+            Event(&'static str, usize),
+        }
+
+        const EVENTS: [&str; 7] = [
+            "UserPromptSubmit",
+            "Stop",
+            "StopFailure",
+            "SessionEnd",
+            "Notification",
+            "PermissionRequest",
+            "PreToolUse",
+        ];
+
+        fn op_strategy() -> impl Strategy<Value = Op> {
+            prop_oneof![
+                (0usize..6).prop_map(Op::Touch),
+                prop::collection::vec(0usize..6, 0..3).prop_map(Op::Prune),
+                (0usize..EVENTS.len(), 0usize..3).prop_map(|(e, a)| Op::Event(EVENTS[e], a)),
+            ]
+        }
+
+        /// A store with three agents, each bound to a tab, so every op has
+        /// something to act on.
+        fn seeded() -> Store {
+            let mut s = Store::default();
+            for i in 0..3usize {
+                let uuid = format!("u{i}");
+                let mut r = rec(&uuid);
+                r.tab_id = Some(i);
+                s.agents.insert(uuid, r);
+            }
+            s
+        }
+
+        fn run(s: &mut Store, op: &Op, minted: &mut Vec<u64>) {
+            match op {
+                Op::Touch(id) => minted.push(touch_in(s, *id)),
+                Op::Prune(ids) => {
+                    prune_in(s, ids);
+                }
+                Op::Event(event, agent) => {
+                    let uuid = format!("u{agent}");
+                    let p = HookPayload {
+                        session_id: Some(uuid.clone()),
+                        prompt: None,
+                        message: Some("needs your permission".into()),
+                        transcript_path: None,
+                    };
+                    if apply_hook_event(s, &uuid, event, &p, None, 1000, true) {
+                        // Any accepted write mints exactly one ordinal, which is
+                        // the write's own seq.
+                        minted.push(s.seq);
+                    }
+                }
+            }
+        }
+
+        proptest! {
+            /// Property — ordinals are a TOTAL ORDER. Every ordinal ever minted
+            /// is distinct and strictly increasing, and nothing in the store
+            /// ever holds an ordinal above `seq`. This is what makes ties
+            /// unreachable for committed rows, which is the whole §1.1 fix.
+            #[test]
+            fn prop_ordinals_are_a_total_order(
+                ops in prop::collection::vec(op_strategy(), 1..25)
+            ) {
+                let mut s = seeded();
+                let mut minted = Vec::new();
+                for op in &ops {
+                    run(&mut s, op, &mut minted);
+                }
+                for w in minted.windows(2) {
+                    prop_assert!(w[1] > w[0], "ordinals must strictly increase: {:?}", minted);
+                }
+                // No ordinal may exceed the counter that minted it. (The
+                // converse — comparing an ordinal TO a seq — is exactly what
+                // `mint_ord`'s doc forbids anywhere in production code.)
+                for v in s.tab_order.values() {
+                    prop_assert!(*v <= s.seq);
+                }
+                for r in s.agents.values() {
+                    prop_assert!(r.commit_ord <= s.seq);
+                }
+            }
+
+            /// Property — ONLY prompts change the order. The §2 table as an
+            /// invariant rather than a list of examples: for any sequence of
+            /// events containing no `UserPromptSubmit`, the pair (tab order,
+            /// every row's ordinal) comes out unchanged — even though statuses
+            /// and labels do change along the way.
+            #[test]
+            fn prop_only_prompts_change_the_order(
+                picks in prop::collection::vec((1usize..EVENTS.len(), 0usize..3), 1..20)
+            ) {
+                let mut s = seeded();
+                // Seed one real commitment so there is a non-trivial order to
+                // preserve, then never prompt again.
+                touch_in(&mut s, 0);
+                let mut minted = Vec::new();
+                run(&mut s, &Op::Event("UserPromptSubmit", 1), &mut minted);
+
+                let order_before = s.tab_order.clone();
+                let ords_before: Vec<(String, u64)> = s
+                    .agents
+                    .iter()
+                    .map(|(u, r)| (u.clone(), r.commit_ord))
+                    .collect();
+
+                for (e, a) in picks {
+                    // `1..` skips UserPromptSubmit — every other event is fair
+                    // game and none of them may re-rank anything.
+                    run(&mut s, &Op::Event(EVENTS[e], a), &mut minted);
+                }
+
+                prop_assert_eq!(&s.tab_order, &order_before, "a non-prompt event moved a tab");
+                let ords_after: Vec<(String, u64)> = s
+                    .agents
+                    .iter()
+                    .map(|(u, r)| (u.clone(), r.commit_ord))
+                    .collect();
+                prop_assert_eq!(ords_after, ords_before, "a non-prompt event re-ranked a row");
+            }
+        }
     }
 }
