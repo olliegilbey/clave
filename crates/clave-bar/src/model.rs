@@ -181,6 +181,18 @@ pub enum RowKey {
     Dormant(String),
 }
 
+/// The row comparator (S1): commitment ordinal DESCENDING, then the
+/// determinism tiebreak ascending. [`BarModel::rows`] applies it to the live
+/// block and the dormant block separately — one rule for both row classes, so
+/// segregation (#112) changes which block a row lands in and never what number
+/// ranks it.
+fn rank_desc(
+    a: &(u64, usize, (RowKey, Row)),
+    b: &(u64, usize, (RowKey, Row)),
+) -> std::cmp::Ordering {
+    b.0.cmp(&a.0).then(a.1.cmp(&b.1))
+}
+
 /// PROVISIONAL — delete when S5 lands. Design-lock §4 requires ink allocation
 /// to be **store-backed, round-robin, iterate-and-wrap**: one repo is one
 /// colour forever, and a title chip is unique within its repo. That is
@@ -1299,9 +1311,21 @@ impl BarModel {
         self.collapsed && !self.peeking
     }
 
-    /// Rows in display order (§6.6 C8 / S1): ONE unified list, ordered by the
-    /// commitment ORDINAL descending — live tabs keyed by the store's tab
-    /// order, dormant store rows by [`Model::dormant_ord`].
+    /// Rows in display order (§6.6 C8 / S1, as segregated by #112): TWO
+    /// contiguous blocks — every live row first, then every dormant row —
+    /// each ordered by the commitment ORDINAL descending, live tabs keyed by
+    /// the store's tab order and dormant store rows by [`Self::dormant_ord`].
+    ///
+    /// Segregation (#116 §5) overrules S1's R2 from "closing a tab moves
+    /// nothing" to "closing a tab reorders nothing RELATIVE to anything
+    /// else": the closed row leaves the live block for the head of the
+    /// dormant one, and every survivor holds its relative order.
+    ///
+    /// **The ordinal is untouched by any of this.** Both blocks sort on the
+    /// same key by the same comparator, which is what keeps `live_ord` and
+    /// `dormant_ord` the one ranking rule for both row classes — the identity
+    /// that stops a close from changing a row's rank. Segregation decides
+    /// which BLOCK a row renders in, never what number ranks it.
     ///
     /// The tiebreaks below (tab position for live rows, `usize::MAX - i` for
     /// dormant) are no longer the ordering mechanism: ordinals are minted under
@@ -1309,7 +1333,9 @@ impl BarModel {
     /// tie at all. They survive as a DETERMINISM RESIDUAL for the two shapes
     /// that can still collide (S1 §3.2): rows at [`NO_COMMITMENT`], and the
     /// transient window where an evicted tenant still shares its ordinal with
-    /// the tab that replaced it.
+    /// the tab that replaced it. Splitting the sort narrows their reach —
+    /// they now only ever break ties WITHIN a block — but does not retire
+    /// them: two dormant rows at `NO_COMMITMENT` still need a stable order.
     pub fn rows(&self) -> Vec<(RowKey, Row)> {
         // §6.6 C8 virtual cursor: `Row.selected` means "visually SELECTED".
         // While nav sits on a dormant row, the selection follows the walk
@@ -1324,11 +1350,13 @@ impl BarModel {
                 .iter()
                 .any(|a| &a.uuid == u && self.is_dormant(a))
         });
-        // (sort_ts desc, tiebreak asc) — tiebreak: live rows by position,
-        // dormant by a large offset + stable index so they never interleave
-        // nondeterministically with same-second live rows.
+        // (ordinal desc, tiebreak asc), applied to each block separately —
+        // tiebreak: live rows by position, dormant by a large offset + stable
+        // index. The dormant offset is now only ever compared against other
+        // dormant rows, but it costs nothing and keeps the two keys readable
+        // as the single scheme they are.
         let inks = ProvisionalInks::allocate(&self.agents);
-        let mut entries: Vec<(u64, usize, (RowKey, Row))> = Vec::new();
+        let mut live: Vec<(u64, usize, (RowKey, Row))> = Vec::new();
         for t in &self.tabs {
             // Lock §7.1: the zellij tab name is used ONLY for a terminal tab.
             // An agent row's identity is its title chip and repo, both from the
@@ -1340,7 +1368,7 @@ impl BarModel {
                     name: t.name.clone(),
                 },
             };
-            entries.push((
+            live.push((
                 self.live_ord(t),
                 t.position,
                 (
@@ -1353,14 +1381,15 @@ impl BarModel {
                 ),
             ));
         }
-        let mut dormant: Vec<&Agent> = self.agents.iter().filter(|a| self.is_dormant(a)).collect();
-        dormant.sort_by(|a, b| a.uuid.cmp(&b.uuid)); // stable tiebreak input
-        for (i, a) in dormant.into_iter().enumerate() {
-            entries.push((
+        let mut agents: Vec<&Agent> = self.agents.iter().filter(|a| self.is_dormant(a)).collect();
+        agents.sort_by(|a, b| a.uuid.cmp(&b.uuid)); // stable tiebreak input
+        let mut dormant: Vec<(u64, usize, (RowKey, Row))> = Vec::new();
+        for (i, a) in agents.into_iter().enumerate() {
+            dormant.push((
                 self.dormant_ord(a),
-                // After any live row on the same ordinal; among dormant rows
-                // sharing one this renders uuid-DESCENDING (uuid-asc sort, key
-                // inverted) — stable and deterministic, which is all we need.
+                // Among dormant rows sharing an ordinal this renders
+                // uuid-DESCENDING (uuid-asc sort, key inverted) — stable and
+                // deterministic, which is all we need.
                 usize::MAX - i,
                 (
                     RowKey::Dormant(a.uuid.clone()),
@@ -1376,8 +1405,26 @@ impl BarModel {
                 ),
             ));
         }
-        entries.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-        entries.into_iter().map(|(_, _, r)| r).collect()
+        // ONE comparator, applied twice. Sorting the blocks separately is the
+        // whole of segregation; giving either block its own rule would be the
+        // defect two reviewers caught on PR #135, arriving by a third route.
+        live.sort_by(rank_desc);
+        dormant.sort_by(rank_desc);
+        live.into_iter()
+            .chain(dormant)
+            .map(|(_, _, r)| r)
+            .collect()
+    }
+
+    /// How many leading rows form the LIVE block (#112). [`Self::rows`] emits
+    /// every live row before every dormant one, so the live block is exactly
+    /// the leading run of [`RowKey::Tab`] — derived from the rendered list
+    /// rather than from `self.tabs`, so the nav ring cannot drift out of step
+    /// with what the user is actually looking at.
+    fn live_block_len(rows: &[(RowKey, Row)]) -> usize {
+        rows.iter()
+            .take_while(|(k, _)| matches!(k, RowKey::Tab(_)))
+            .count()
     }
 
     /// Mouse click on rendered line N (0-based): jump to that row's tab.
@@ -1430,9 +1477,13 @@ impl BarModel {
     /// the EXECUTOR only (`executor_own_tab` = Some(own tab) on the active
     /// instance — fresh tab set, and the very bar the user is reading; a
     /// broadcast walk over stale sets raced six divergent targets live).
-    /// dir steps ±1 from the executor's own row, wrapping — safe to walk the
-    /// visible list now, because focus no longer reorders it (§6.6 revised:
-    /// only user commitments move rows, so there is no ping-pong).
+    /// dir steps ±1 from the executor's own row, wrapping WITHIN THE LIVE
+    /// BLOCK (#112) — safe to walk the visible list, because focus no longer
+    /// reorders it (§6.6 revised: only user commitments move rows, so there
+    /// is no ping-pong). row (Alt+1-9) still indexes the whole rendered list,
+    /// which is how the dormant block stays reachable from the keyboard at
+    /// all; putting the live block on top is what keeps the low numbers
+    /// pointed at the live fleet.
     pub fn nav(&mut self, payload: &str, executor_own_tab: Option<usize>) -> Vec<Effect> {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
             return Vec::new();
@@ -1474,21 +1525,43 @@ impl BarModel {
             if rows.is_empty() {
                 return Vec::new();
             }
-            // Walk base: the dormant cursor if set, else the executor's own
-            // tab row (§6.6 C8 — the cursor IS the position while walking
-            // through dormant rows).
-            let cur = self
-                .cursor
-                .as_ref()
-                .and_then(|u| {
-                    rows.iter()
-                        .position(|(k, _)| *k == RowKey::Dormant(u.clone()))
-                })
-                .or_else(|| rows.iter().position(|(k, _)| *k == RowKey::Tab(own)))
-                .unwrap_or(0);
+            // #112: the ring is the LIVE BLOCK, not the whole list. Dormant
+            // rows sit in their own block below and are reached by click or
+            // Alt+1-9 — a walk can never fall into them, which is the point:
+            // on the real store 17 of 21 rows are dormant, so an unsegregated
+            // ring is mostly rows with no process behind them.
+            let live_len = Self::live_block_len(&rows);
+            let (cur, ring) = if live_len == 0 {
+                // No live rows at all. Unreachable in a real session — every
+                // zellij tab carries a bar instance, so the tab list is never
+                // empty — but the model is pure and must answer anyway. Walk
+                // the dormant block rather than going dead: with the commit
+                // key the only launch path (#100), landing on a dormant row
+                // only selects it, so this cannot spawn anything.
+                let cur = self
+                    .cursor
+                    .as_ref()
+                    .and_then(|u| {
+                        rows.iter()
+                            .position(|(k, _)| *k == RowKey::Dormant(u.clone()))
+                    })
+                    .unwrap_or(0);
+                (cur, rows.len())
+            } else {
+                // The ring's position is where FOCUS is, and a live landing
+                // always switches tabs — so the executor's own row IS the
+                // walk base. A dormant selection is an excursion OFF the
+                // ring, not a position on it: walking resumes the ring from
+                // focus and the live landing spends the selection.
+                let cur = rows
+                    .iter()
+                    .position(|(k, _)| *k == RowKey::Tab(own))
+                    .unwrap_or(0);
+                (cur, live_len)
+            };
             match dir {
-                "next" => Some((cur + 1) % rows.len()),
-                "prev" => Some((cur + rows.len() - 1) % rows.len()),
+                "next" => Some((cur + 1) % ring),
+                "prev" => Some((cur + ring - 1) % ring),
                 _ => None,
             }
         } else {
@@ -1916,6 +1989,38 @@ mod tests {
             RowContent::Agent { status, .. } => Some(*status),
             RowContent::Terminal { .. } => None,
         }
+    }
+
+    /// The rendered line the dormant row sits on in [`live_plus_dormant`].
+    const DORMANT_LINE: usize = 1;
+
+    /// The dwell-commit fixture: one live tab (id 1, ordinal 500) and one
+    /// dormant row (`u-d`, ordinal 999), shared by the #100 selection tests.
+    ///
+    /// **The dormant row's ordinal is deliberately the HIGHER of the two.**
+    /// Before #112 that put it on line 0, above the live tab; segregation puts
+    /// it on line 1 regardless, because the block a row renders in outranks
+    /// the number that sorts it. So every caller's line indices double as a
+    /// guard: merge the two blocks back into one list and they all move.
+    fn live_plus_dormant() -> BarModel {
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(1, 0, "live", true)]);
+        let mut a = agent("u-d", Status::Idle, None);
+        a.commit_ord = 999;
+        m.apply_snapshot(AgentSnapshot {
+            collapsed: false,
+            seq: 1,
+            agents: vec![a],
+            tab_order: std::collections::BTreeMap::from([(1usize, 500u64)]),
+        });
+        m
+    }
+
+    /// Select the dormant row the way a user now can — Alt+N on its rendered
+    /// line. #112 confines the dir walk to the live block, so the walk that
+    /// these tests used to reach it with no longer arrives.
+    fn select_dormant(m: &mut BarModel) -> Vec<Effect> {
+        m.nav(&format!("{{\"row\":{}}}", DORMANT_LINE + 1), Some(1))
     }
 
     // --- tests -------------------------------------------------------------
@@ -3858,19 +3963,22 @@ mod tests {
     }
 
     #[test]
-    fn dormant_rows_sort_into_the_unified_recency_order() {
-        // One list, claude.ai-style: live tabs keyed by the store's tab order,
-        // dormant rows by their own commitment ordinal, merged desc.
+    fn rows_render_as_two_blocks_live_above_dormant() {
+        // #112, replacing `dormant_rows_sort_into_the_unified_recency_order`:
+        // the ONE merged list is gone. Live rows form a contiguous block at
+        // the top, dormant rows their own block below, and each block sorts by
+        // the commitment ordinal descending.
         //
-        // S1 moved the dormant key from `last_interacted` (a wall clock) to
-        // `commit_ord` (an ordinal). The asserted order below is UNCHANGED —
-        // what this test pins is that the two row classes share ONE list and a
-        // dormant row can outrank a live one, which is what lets a closed row
-        // hold its rank on the first repaint. Only the key changed.
+        // The ordinals below are chosen so a merged list and a segregated one
+        // give DIFFERENT answers: `u-new` at 900 outranks the live tab at 500
+        // and would have led a merged list. It renders below it now. That is
+        // the whole change, and this is the assertion that fails if the two
+        // blocks are ever merged back.
         //
         // `last_interacted` is set to the OPPOSITE ranking on purpose: if the
-        // comparator ever fell back to the clock, this test would fail loudly
-        // rather than keep passing for the wrong reason.
+        // comparator ever fell back to the wall clock, the within-block order
+        // would invert and this test would fail loudly rather than keep
+        // passing for the wrong reason.
         let mut m = BarModel::default();
         m.apply_tabs(vec![tab(1, 0, "live", true)]);
         let mut old = agent("u-old", Status::Idle, None);
@@ -3888,10 +3996,11 @@ mod tests {
         assert_eq!(
             keys(&m),
             vec![
-                RowKey::Dormant("u-new".into()), // 900
-                RowKey::Tab(1),                  // 500
-                RowKey::Dormant("u-old".into()), // 100
-            ]
+                RowKey::Tab(1),                  // the live block: 500
+                RowKey::Dormant("u-new".into()), // then dormant, 900 …
+                RowKey::Dormant("u-old".into()), // … desc … 100
+            ],
+            "live block first, each block ordinal-descending within itself"
         );
     }
 
@@ -3934,6 +4043,11 @@ mod tests {
             vec![RowKey::Tab(10), RowKey::Tab(11)],
             "our row ranks by its own ordinal 3, above the intervening prompt at 2"
         );
+        // The RANK is what this test is about, so assert the number itself
+        // rather than a position that stands in for it. Under #112 the
+        // position moves by design and the number must not.
+        let rank_when_live = m.live_ord(&tab(10, 0, "ours", true));
+        assert_eq!(rank_when_live, 3, "max(own 3, tab's 1)");
 
         // Close ours. The prune carries max(3, 1) = 3 — unchanged.
         m.apply_tabs(vec![tab(11, 0, "other", true)]);
@@ -3942,10 +4056,17 @@ mod tests {
         let mut other = agent("u-other", Status::Idle, Some(11));
         other.commit_ord = 2;
         m.apply_snapshot(snap_full(2, vec![dormant, other], &[(11, 2)]));
+        let ours = m.agents.iter().find(|a| a.uuid == "u-ours").unwrap();
+        assert_eq!(
+            m.dormant_ord(ours),
+            rank_when_live,
+            "going dormant must not change which number ranks the row"
+        );
+        // And the row is now in the dormant block, below the live one — the
+        // #112 segregation, which is a change of BLOCK and not of rank.
         assert_eq!(
             keys(&m),
-            vec![RowKey::Dormant("u-ours".into()), RowKey::Tab(11)],
-            "going dormant must not change which number ranks the row"
+            vec![RowKey::Tab(11), RowKey::Dormant("u-ours".into())],
         );
     }
 
@@ -3983,8 +4104,19 @@ mod tests {
             before,
             "survivors must keep their relative order"
         );
-        // And the closed row still outranks both, exactly as its tab did.
-        assert_eq!(keys(&m)[0], closed);
+        // The closed row still ranks 30, exactly as its tab did — but #112
+        // renders it in the dormant block, so it leads THAT block rather than
+        // the whole list. R2 as amended: a close reorders nothing relative to
+        // anything else; it moves the closed row out of the live block, which
+        // is user-caused and visible.
+        let a = m.agents.iter().find(|a| a.uuid == "u-A").unwrap();
+        assert_eq!(m.dormant_ord(a), 30, "the rank survives the close");
+        let keys = keys(&m);
+        assert_eq!(
+            keys.iter().position(|k| k == &closed),
+            Some(BarModel::live_block_len(&m.rows())),
+            "the closed row heads the dormant block"
+        );
     }
 
     #[test]
@@ -4004,10 +4136,19 @@ mod tests {
         // Tab gone from the tab list; NO new snapshot — the store still says
         // the agent is bound to 10 and that 10 has ordinal 30.
         m.apply_tabs(vec![tab(11, 0, "b", true)]);
+        let a = m.agents.iter().find(|a| a.uuid == "u-A").unwrap();
+        assert_eq!(
+            m.dormant_ord(a),
+            30,
+            "the row must hold its rank before the prune echo lands — the \
+             carry reads the tab's ordinal, not the row's own 0"
+        );
+        // #112: holding the RANK no longer means holding the POSITION. The
+        // row moves to the dormant block on the same repaint, and its rank is
+        // what orders it there.
         assert_eq!(
             keys(&m),
-            vec![RowKey::Dormant("u-A".into()), RowKey::Tab(11)],
-            "the row must hold its rank before the prune echo lands"
+            vec![RowKey::Tab(11), RowKey::Dormant("u-A".into())],
         );
     }
 
@@ -4092,46 +4233,182 @@ mod tests {
         assert!(!keys(&m).contains(&RowKey::Dormant("u2".into())));
     }
 
-    #[test]
-    fn nav_onto_dormant_row_selects_without_opening() {
-        // #100 dwell-commit: stepping onto a dormant row moves the virtual
-        // cursor and STOPS — no timer, no open, no tab switch. The cursor is
-        // the walk position, so the next step continues from it.
+    /// Two live tabs and three dormant rows, the dormant ones deliberately
+    /// out-ranking both tabs — the shape #112 exists for, in miniature. On the
+    /// real store it is 4 live and 17 dormant.
+    fn fleet_two_live_three_dormant() -> BarModel {
         let mut m = BarModel::default();
-        m.apply_tabs(vec![tab(1, 0, "live", true)]);
-        let mut a = agent("u-d", Status::Idle, None);
-        a.commit_ord = 999; // dormant row sorts FIRST; live row is line 1
+        m.apply_tabs(vec![tab(1, 0, "a", true), tab(2, 1, "b", false)]);
+        let mut agents = Vec::new();
+        for (j, ord) in [700u64, 800, 900].into_iter().enumerate() {
+            let mut a = agent(&format!("u-d{j}"), Status::Idle, None);
+            a.commit_ord = ord;
+            agents.push(a);
+        }
         m.apply_snapshot(AgentSnapshot {
             collapsed: false,
             seq: 1,
-            agents: vec![a],
-            tab_order: std::collections::BTreeMap::from([(1usize, 500u64)]),
+            agents,
+            tab_order: std::collections::BTreeMap::from([(1usize, 500u64), (2usize, 400u64)]),
         });
+        m
+    }
+
+    #[test]
+    fn the_nav_ring_wraps_inside_the_live_block() {
+        // #112, the headline: Alt+j/Alt+k cycle the LIVE block and wrap at its
+        // end. Every dormant row here outranks both tabs, so a merged list
+        // would have put three of them above the live pair and made them the
+        // first thing a walk hit.
+        let mut m = fleet_two_live_three_dormant();
+        assert_eq!(
+            keys(&m),
+            vec![
+                RowKey::Tab(1),
+                RowKey::Tab(2),
+                RowKey::Dormant("u-d2".into()), // 900
+                RowKey::Dormant("u-d1".into()), // 800
+                RowKey::Dormant("u-d0".into()), // 700
+            ]
+        );
         m.beacon(1);
-        let fx = m.nav("{\"dir\":\"next\"}", Some(1)); // from live row 1, wrap → row 0 (dormant)
+        // Forward off the end of the live block wraps to its head, NOT into
+        // the dormant block below.
+        assert!(
+            m.nav("{\"dir\":\"next\"}", Some(1))
+                .contains(&Effect::SwitchTab { position: 1 }),
+            "tab 1 → tab 2"
+        );
+        m.beacon(2);
+        assert!(
+            m.nav("{\"dir\":\"next\"}", Some(2))
+                .contains(&Effect::SwitchTab { position: 0 }),
+            "tab 2 wraps to tab 1, not down into the dormant block"
+        );
+        // And backward off the head wraps to the live block's TAIL — the
+        // nearest dormant row is directly below it on screen, which is the
+        // step this must not take.
+        m.beacon(1);
+        assert!(
+            m.nav("{\"dir\":\"prev\"}", Some(1))
+                .contains(&Effect::SwitchTab { position: 1 }),
+            "tab 1 wraps back to tab 2"
+        );
+        assert!(m.cursor.is_none(), "no walk may leave a dormant selection");
+    }
+
+    #[test]
+    fn a_single_live_row_wraps_onto_itself() {
+        // The one-live case. The ring has length 1, so both directions land
+        // back on the same tab — dormant rows below stay unreachable by walk.
+        let mut m = live_plus_dormant();
+        m.beacon(1);
+        for dir in ["next", "prev"] {
+            let fx = m.nav(&format!("{{\"dir\":\"{dir}\"}}"), Some(1));
+            assert!(
+                fx.contains(&Effect::SwitchTab { position: 0 }),
+                "{dir} must land back on the only live tab"
+            );
+            assert!(m.cursor.is_none(), "{dir} reached the dormant block");
+        }
+    }
+
+    #[test]
+    fn with_no_live_rows_the_walk_falls_back_to_the_dormant_block() {
+        // The zero-live edge case, decided rather than left to fall out: the
+        // ring becomes the whole list so the keyboard is never dead. It is
+        // unreachable in a real session — every zellij tab carries a bar, so
+        // the tab list is never empty — but the model is pure and must answer.
+        // Safe by construction: a dormant landing only ever selects (#100), so
+        // this cannot spawn anything.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![]);
+        let mut agents = Vec::new();
+        for (j, ord) in [10u64, 20].into_iter().enumerate() {
+            let mut a = agent(&format!("u-d{j}"), Status::Idle, None);
+            a.commit_ord = ord;
+            agents.push(a);
+        }
+        m.apply_snapshot(AgentSnapshot {
+            collapsed: false,
+            seq: 1,
+            agents,
+            tab_order: Default::default(),
+        });
+        assert_eq!(
+            keys(&m),
+            vec![
+                RowKey::Dormant("u-d1".into()), // 20
+                RowKey::Dormant("u-d0".into()), // 10
+            ]
+        );
+        // No cursor yet → the walk starts at row 0 and steps to row 1.
+        assert!(m.nav("{\"dir\":\"next\"}", Some(1)).is_empty());
+        assert_eq!(m.cursor.as_deref(), Some("u-d0"));
+        // And it wraps within the dormant block rather than running off it.
+        assert!(m.nav("{\"dir\":\"next\"}", Some(1)).is_empty());
+        assert_eq!(m.cursor.as_deref(), Some("u-d1"));
+    }
+
+    #[test]
+    fn alt_n_still_reaches_the_dormant_block() {
+        // The other half of the ring decision: taking dormant rows out of the
+        // walk is only tolerable because the numbers still reach them. Alt+N
+        // indexes the RENDERED list, so putting the live block on top is what
+        // keeps the low numbers pointed at the live fleet — Alt+1-2 here, with
+        // the dormant block starting at Alt+3.
+        let mut m = fleet_two_live_three_dormant();
+        m.beacon(1);
+        assert!(
+            m.nav("{\"row\":2}", Some(1))
+                .contains(&Effect::SwitchTab { position: 1 }),
+            "Alt+2 is the second LIVE row"
+        );
+        m.beacon(2);
+        assert!(
+            m.nav("{\"row\":3}", Some(2)).is_empty(),
+            "Alt+3 is the head of the dormant block, and selecting is silent"
+        );
+        assert_eq!(m.cursor.as_deref(), Some("u-d2"));
+        assert!(m.nav("{\"row\":5}", Some(2)).is_empty());
+        assert_eq!(m.cursor.as_deref(), Some("u-d0"), "Alt+5 reaches the last");
+        // A click reaches the same row — the mouse is the route past Alt+9.
+        m.click(3);
+        assert_eq!(m.cursor.as_deref(), Some("u-d1"));
+    }
+
+    #[test]
+    fn nav_onto_dormant_row_selects_without_opening() {
+        // #100 dwell-commit: landing on a dormant row moves the virtual cursor
+        // and STOPS — no timer, no open, no tab switch. #112 changed only HOW
+        // you land there: the dir walk is confined to the live block now, so
+        // Alt+N is the keyboard route (the mouse is the other).
+        let mut m = live_plus_dormant();
+        m.beacon(1);
+        let fx = m.nav("{\"row\":2}", Some(1)); // Alt+2 → the dormant row
         assert!(fx.is_empty(), "a dormant landing is pure selection: {fx:?}");
-        assert!(selected(&m)[0], "the dormant row holds the selection");
-        // Cursor moved; a second step continues FROM the cursor, back to live.
+        assert!(
+            selected(&m)[DORMANT_LINE],
+            "the dormant row holds the selection"
+        );
+        // A dir walk from a dormant selection resumes the LIVE ring rather
+        // than continuing from the cursor (#112): the selection is an
+        // excursion off the ring, and the live landing spends it.
         let fx = m.nav("{\"dir\":\"next\"}", Some(1));
         assert!(fx.contains(&Effect::SwitchTab { position: 0 }));
+        assert!(
+            !selected(&m)[DORMANT_LINE],
+            "the live landing released the selection"
+        );
     }
 
     #[test]
     fn commit_opens_the_selected_dormant_row_exactly_once() {
         // #100: Alt+Enter spends the selection — one open, marked ↻; a
         // repeat commit while in flight must not double-fire.
-        let mut m = BarModel::default();
-        m.apply_tabs(vec![tab(1, 0, "live", true)]);
-        let mut a = agent("u-d", Status::Idle, None);
-        a.commit_ord = 999;
-        m.apply_snapshot(AgentSnapshot {
-            collapsed: false,
-            seq: 1,
-            agents: vec![a],
-            tab_order: std::collections::BTreeMap::from([(1usize, 500u64)]),
-        });
+        let mut m = live_plus_dormant();
         m.beacon(1);
-        m.nav("{\"dir\":\"next\"}", Some(1)); // select the dormant row
+        select_dormant(&mut m);
         assert_eq!(
             m.nav("{\"commit\":true}", Some(1)),
             vec![Effect::OpenAgent { uuid: "u-d".into() }]
@@ -4147,22 +4424,17 @@ mod tests {
         // The bind is global; the model is the gate. No cursor → nothing to
         // wake. Non-executor instances (no fresh tab set) also no-op — their
         // cursor is never set, and the gate returns before any open.
-        let mut m = BarModel::default();
-        m.apply_tabs(vec![tab(1, 0, "live", true)]);
-        let mut a = agent("u-d", Status::Idle, None);
-        a.commit_ord = 999;
-        m.apply_snapshot(AgentSnapshot {
-            collapsed: false,
-            seq: 1,
-            agents: vec![a],
-            tab_order: std::collections::BTreeMap::from([(1usize, 500u64)]),
-        });
+        let mut m = live_plus_dormant();
         m.beacon(1);
         assert!(
             m.nav("{\"commit\":true}", Some(1)).is_empty(),
             "no selection"
         );
-        m.nav("{\"dir\":\"next\"}", Some(1)); // select the dormant row
+        select_dormant(&mut m);
+        assert!(
+            selected(&m)[DORMANT_LINE],
+            "a selection must exist, or the next assertion cannot fail"
+        );
         assert!(
             m.nav("{\"commit\":true}", None).is_empty(),
             "non-executor never commits"
@@ -4174,36 +4446,23 @@ mod tests {
         // #100 reverses the original proposal: click and Alt+N on a dormant
         // row SELECT it. The mouse is the main path to dormant rows past
         // Alt+9, so a click that launched would just move the accidental
-        // spawn from the keyboard channel into the mouse channel.
-        let mut m = BarModel::default();
-        m.apply_tabs(vec![tab(1, 0, "live", true)]);
-        let mut a = agent("u-d", Status::Idle, None);
-        a.commit_ord = 999;
-        m.apply_snapshot(AgentSnapshot {
-            collapsed: false,
-            seq: 1,
-            agents: vec![a],
-            tab_order: std::collections::BTreeMap::from([(1usize, 500u64)]),
-        });
-        assert!(m.click(0).is_empty(), "click selects, never opens"); // dormant row is line 0
-        assert!(selected(&m)[0], "clicked dormant row holds the selection");
-        // Alt+1 (row payload) on a dormant row — new model, fresh state:
-        let mut m = BarModel::default();
-        m.apply_tabs(vec![tab(1, 0, "live", true)]);
-        let mut a = agent("u-d", Status::Idle, None);
-        a.commit_ord = 999;
-        m.apply_snapshot(AgentSnapshot {
-            collapsed: false,
-            seq: 1,
-            agents: vec![a],
-            tab_order: std::collections::BTreeMap::from([(1usize, 500u64)]),
-        });
-        m.beacon(1);
+        // spawn from the keyboard channel into the mouse channel. Both are
+        // now the ONLY routes to a dormant row (#112 took the walk away), so
+        // this pair covers the whole reachable surface.
+        let mut m = live_plus_dormant();
         assert!(
-            m.nav("{\"row\":1}", Some(1)).is_empty(),
-            "Alt+N selects too"
+            m.click(DORMANT_LINE).is_empty(),
+            "click selects, never opens"
         );
-        assert!(selected(&m)[0]);
+        assert!(
+            selected(&m)[DORMANT_LINE],
+            "clicked dormant row holds the selection"
+        );
+        // Alt+N (row payload) on a dormant row — new model, fresh state:
+        let mut m = live_plus_dormant();
+        m.beacon(1);
+        assert!(select_dormant(&mut m).is_empty(), "Alt+N selects too");
+        assert!(selected(&m)[DORMANT_LINE]);
         // A commit after either pick launches — selection and launch are two
         // separate acts on every input path.
         assert_eq!(
@@ -4216,22 +4475,17 @@ mod tests {
     fn click_on_a_live_tab_releases_the_dormant_selection() {
         // Selection follows every input path: picking a live row (mouse or
         // nav) resolves the highlight back to focus truth.
-        let mut m = BarModel::default();
-        m.apply_tabs(vec![tab(1, 0, "live", true)]);
-        let mut a = agent("u-d", Status::Idle, None);
-        a.commit_ord = 999; // dormant sorts FIRST; live is line 1
-        m.apply_snapshot(AgentSnapshot {
-            collapsed: false,
-            seq: 1,
-            agents: vec![a],
-            tab_order: std::collections::BTreeMap::from([(1usize, 500u64)]),
-        });
-        m.click(0); // select the dormant row
-        assert!(selected(&m)[0]);
-        m.click(1); // pick the live tab
+        let mut m = live_plus_dormant();
+        m.click(DORMANT_LINE); // select the dormant row
         assert_eq!(
             selected(&m),
             vec![false, true],
+            "the dormant selection steals the highlight from the live tab"
+        );
+        m.click(0); // pick the live tab
+        assert_eq!(
+            selected(&m),
+            vec![true, false],
             "live pick releases the dormant selection"
         );
         // The abandoned selection must not be committable.
@@ -4241,9 +4495,10 @@ mod tests {
 
     #[test]
     fn dormant_landing_peeks_a_collapsed_bar() {
-        // §6.6: walking dormant rows must keep a collapsed bar peeked, same as
-        // live-row nav (whose peek rides the visited pipe — dormant landings
-        // have no pipe, so the model returns ArmPeek explicitly).
+        // §6.6: landing on a dormant row must keep a collapsed bar peeked,
+        // same as live-row nav (whose peek rides the visited pipe — dormant
+        // landings have no pipe, so the model returns ArmPeek explicitly).
+        // The landing is an Alt+N pick now that #112 keeps the walk live-only.
         let mut m = BarModel::default();
         m.toggle(); // collapsed
         m.apply_tabs(vec![tab(1, 0, "live", true)]);
@@ -4259,7 +4514,7 @@ mod tests {
             tab_order: std::collections::BTreeMap::from([(1usize, 500u64)]),
         });
         m.beacon(1);
-        let fx = m.nav("{\"dir\":\"next\"}", Some(1));
+        let fx = select_dormant(&mut m);
         // The peek is the landing's ONLY effect — the dwell died with #100.
         assert_eq!(fx, vec![Effect::ArmPeek]);
     }
@@ -4296,33 +4551,24 @@ mod tests {
 
     #[test]
     fn virtual_cursor_highlight_follows_the_dormant_walk() {
-        // §6.6 C8: nav onto a dormant row moves the SELECTION there — that
+        // §6.6 C8: landing on a dormant row moves the SELECTION there — that
         // row reads active and the previously-focused live tab drops its
         // highlight (else the stale live highlight lingers and misleads).
-        let mut m = BarModel::default();
-        m.apply_tabs(vec![tab(1, 0, "live", true)]);
-        let mut a = agent("u-d", Status::Idle, None);
-        a.commit_ord = 999; // dormant sorts FIRST; live is line 1
-        m.apply_snapshot(AgentSnapshot {
-            collapsed: false,
-            seq: 1,
-            agents: vec![a],
-            tab_order: std::collections::BTreeMap::from([(1usize, 500u64)]),
-        });
+        let mut m = live_plus_dormant();
         m.beacon(1);
-        // (a) walk onto the dormant row → it is active, the live tab is not.
-        m.nav("{\"dir\":\"next\"}", Some(1)); // live row 1 → wrap → dormant row 0
-        assert_eq!(keys(&m)[0], RowKey::Dormant("u-d".into()));
-        assert_eq!(
-            selected(&m),
-            vec![true, false],
-            "dormant selection holds it"
-        );
-        // (b) a live landing clears the cursor → the tab highlights again.
-        m.nav("{\"dir\":\"next\"}", Some(1)); // dormant → wrap → live tab
+        // (a) pick the dormant row → it is active, the live tab is not.
+        select_dormant(&mut m);
+        assert_eq!(keys(&m)[DORMANT_LINE], RowKey::Dormant("u-d".into()));
         assert_eq!(
             selected(&m),
             vec![false, true],
+            "dormant selection holds it"
+        );
+        // (b) a live landing clears the cursor → the tab highlights again.
+        m.nav("{\"dir\":\"next\"}", Some(1)); // the live ring, self-wrapping
+        assert_eq!(
+            selected(&m),
+            vec![true, false],
             "focused tab reclaims the highlight"
         );
     }
@@ -4332,19 +4578,10 @@ mod tests {
         // Review minor #7: a dwell-opened row goes LIVE while the cursor still
         // names its uuid. The dormant-key lookup misses, so the highlight
         // falls back to the focused tab — no explicit cursor clear needed.
-        let mut m = BarModel::default();
-        m.apply_tabs(vec![tab(1, 0, "live", true)]);
-        let mut a = agent("u-d", Status::Idle, None);
-        a.commit_ord = 999;
-        m.apply_snapshot(AgentSnapshot {
-            collapsed: false,
-            seq: 1,
-            agents: vec![a],
-            tab_order: std::collections::BTreeMap::from([(1usize, 500u64)]),
-        });
+        let mut m = live_plus_dormant();
         m.beacon(1);
-        m.nav("{\"dir\":\"next\"}", Some(1)); // cursor now on the dormant row
-        assert!(selected(&m)[0]); // dormant selected
+        select_dormant(&mut m); // cursor now on the dormant row
+        assert!(selected(&m)[DORMANT_LINE]); // dormant selected
         // The row goes LIVE: u-d binds to a new tab (2). Cursor still names
         // "u-d" but it no longer renders dormant.
         m.apply_tabs(vec![tab(1, 0, "live", false), tab(2, 1, "u-d", true)]);
@@ -4378,7 +4615,9 @@ mod tests {
         let mut m = BarModel::default();
         m.apply_tabs(vec![tab(1, 0, "live", false), tab(2, 1, "other", true)]);
         let mut a = agent("u-d", Status::Idle, None);
-        a.commit_ord = 999; // dormant sorts FIRST
+        // Outranks both tabs and still renders last — #112 puts it in the
+        // dormant block, below the two live rows.
+        a.commit_ord = 999;
         m.apply_snapshot(AgentSnapshot {
             collapsed: false,
             seq: 1,
@@ -4386,13 +4625,13 @@ mod tests {
             tab_order: std::collections::BTreeMap::from([(1usize, 500u64), (2usize, 400u64)]),
         });
         m.beacon(1);
-        let fx = m.nav("{\"dir\":\"prev\"}", Some(1)); // land on the dormant row
+        let fx = m.nav("{\"row\":3}", Some(1)); // Alt+3 → the dormant row
         assert!(fx.is_empty(), "the landing is pure selection");
-        assert!(selected(&m)[0], "dormant selected before the native switch");
+        assert!(selected(&m)[2], "dormant selected before the native switch");
         // Native switch to tab 2 arrives as a visited-pipe beacon (no nav).
         m.beacon(2);
         let rows = m.rows();
-        assert!(!rows[0].1.selected, "dormant row releases the highlight");
+        assert!(!rows[2].1.selected, "dormant row releases the highlight");
         let active: Vec<_> = rows
             .iter()
             .filter(|(_, r)| r.selected)
@@ -4412,19 +4651,10 @@ mod tests {
         // view — the organic pipe (same keybind, synchronous) must have
         // already spent the selection, or a hidden bar commits a row the
         // visible bar does not show as selected.
-        let mut m = BarModel::default();
-        m.apply_tabs(vec![tab(1, 0, "live", true)]);
-        let mut a = agent("u-d", Status::Idle, None);
-        a.commit_ord = 999; // dormant sorts FIRST; live row is line 1
-        m.apply_snapshot(AgentSnapshot {
-            collapsed: false,
-            seq: 1,
-            agents: vec![a],
-            tab_order: std::collections::BTreeMap::from([(1usize, 500u64)]),
-        });
+        let mut m = live_plus_dormant();
         m.beacon(1);
-        m.nav("{\"dir\":\"next\"}", Some(1)); // select the dormant row
-        assert!(selected(&m)[0]);
+        select_dormant(&mut m);
+        assert!(selected(&m)[DORMANT_LINE]);
         m.set_organic_pending(); // Alt+o pressed; beacon not yet returned
         assert!(
             m.nav("{\"commit\":true}", Some(1)).is_empty(),
@@ -4437,23 +4667,17 @@ mod tests {
         // #100 §4: stale ✗ > opening ↻ > selected-dormant ⏎ > status. The
         // chain is self-truthful — committing turns ⏎ into ↻, and a stale
         // row never offers a launch that would fail.
-        let mut m = BarModel::default();
-        m.apply_tabs(vec![tab(1, 0, "live", true)]);
-        let mut a = agent("u-d", Status::Idle, None);
-        a.commit_ord = 999; // dormant sorts FIRST; live is line 1
-        m.apply_snapshot(AgentSnapshot {
-            collapsed: false,
-            seq: 1,
-            agents: vec![a],
-            tab_order: std::collections::BTreeMap::from([(1usize, 500u64)]),
-        });
-        assert_eq!(status_at(&m, 0), Some(RowStatus::Dormant));
+        let mut m = live_plus_dormant();
+        assert_eq!(status_at(&m, DORMANT_LINE), Some(RowStatus::Dormant));
         m.beacon(1);
-        m.nav("{\"dir\":\"next\"}", Some(1)); // select it
-        assert_eq!(status_at(&m, 0), Some(RowStatus::DormantSelected));
+        select_dormant(&mut m);
+        assert_eq!(
+            status_at(&m, DORMANT_LINE),
+            Some(RowStatus::DormantSelected)
+        );
         m.nav("{\"commit\":true}", Some(1)); // launch it
         assert_eq!(
-            status_at(&m, 0),
+            status_at(&m, DORMANT_LINE),
             Some(RowStatus::Opening),
             "↻ outranks the still-selected cursor"
         );
@@ -4468,7 +4692,7 @@ mod tests {
             agents: vec![a],
             tab_order: std::collections::BTreeMap::from([(1usize, 500u64)]),
         });
-        assert_eq!(status_at(&m, 0), Some(RowStatus::Stale));
+        assert_eq!(status_at(&m, DORMANT_LINE), Some(RowStatus::Stale));
         // And ✗ means it: the selected-but-stale row REFUSES the commit
         // (ratified live 2026-08-01) — the gutter never offers a launch it
         // won't perform.
@@ -5008,10 +5232,16 @@ mod tests {
                 }
             }
 
-            /// Property 3 — rows() is deterministic and ordinal-ordered: live
-            /// tabs key on the STORE's tab order (NOT the bound agent's
-            /// last_interacted — the round-6 divergence), dormant rows on their
-            /// commitment ordinal, merged non-increasing.
+            /// Property 3 — rows() is deterministic and ordinal-ordered in TWO
+            /// BLOCKS (#112): every live row precedes every dormant one, and
+            /// within each block the ordinal is non-increasing. Live tabs key
+            /// on the STORE's tab order (NOT the bound agent's last_interacted
+            /// — the round-6 divergence), dormant rows on their commitment
+            /// ordinal.
+            ///
+            /// Non-increasing ACROSS the join is exactly what segregation
+            /// gives up: a dormant row may outrank the live row above it, and
+            /// the generators here produce that case freely.
             ///
             /// S1 retargeted both dormant legs from `last_interacted` to
             /// `commit_ord`. Every agent here carries a wall clock that
@@ -5064,9 +5294,6 @@ mod tests {
                 // Determinism: identical inputs → identical rows.
                 prop_assert_eq!(m.rows(), m.rows());
 
-                // Unified order: each row's ordinal (the store's tab order for
-                // live rows, the row's own for dormant) is non-increasing down
-                // the list.
                 let rows = m.rows();
                 let ts_of = |k: &RowKey| -> u64 {
                     match k {
@@ -5074,12 +5301,28 @@ mod tests {
                         RowKey::Dormant(u) => ord_by_uuid.get(u).copied().unwrap_or(0),
                     }
                 };
-                for w in rows.windows(2) {
-                    prop_assert!(
-                        ts_of(&w[0].0) >= ts_of(&w[1].0),
-                        "recency inverted between {:?} and {:?}",
-                        w[0].0, w[1].0
-                    );
+                // The blocks are contiguous, and the live one holds every tab.
+                let live_len = BarModel::live_block_len(&rows);
+                prop_assert_eq!(
+                    live_len, n,
+                    "every live tab belongs to the leading block"
+                );
+                prop_assert!(
+                    rows[live_len..]
+                        .iter()
+                        .all(|(k, _)| matches!(k, RowKey::Dormant(_))),
+                    "a live row rendered below a dormant one"
+                );
+                // Ordinal non-increasing WITHIN each block. Deliberately not
+                // asserted across the join — see the doc comment.
+                for block in [&rows[..live_len], &rows[live_len..]] {
+                    for w in block.windows(2) {
+                        prop_assert!(
+                            ts_of(&w[0].0) >= ts_of(&w[1].0),
+                            "recency inverted between {:?} and {:?}",
+                            w[0].0, w[1].0
+                        );
+                    }
                 }
             }
 
@@ -5441,11 +5684,19 @@ mod tests {
             /// review 2026-07-20): with the executor pinned to its birth tab
             /// (as below — a single-instance view), every nav bumps
             /// cursor_gen exactly once (its consumer is #92's read timer,
-            /// post-#100), and a cursor that lands dormant is always a
-            /// DISPLAYED dormant row. Walk PROGRESSION across
-            /// focus-following executors (the live multi-instance behavior,
-            /// where own_tab moves with focus) is deliberately not modeled
-            /// here — that is live-validation territory (TESTING.md).
+            /// post-#100), and — the #112 invariant — a dir walk NEVER
+            /// leaves the live block however long it runs.
+            ///
+            /// That last leg replaces "a dormant cursor names a displayed
+            /// row", which a live-only ring makes vacuous: the walk can no
+            /// longer set a cursor at all, so asserting about one would be a
+            /// test that cannot fail. Every generated case here has at least
+            /// one live tab; the zero-live fallback is a unit test.
+            ///
+            /// Walk PROGRESSION across focus-following executors (the live
+            /// multi-instance behavior, where own_tab moves with focus) is
+            /// deliberately not modeled here — that is live-validation
+            /// territory (TESTING.md).
             #[test]
             fn prop_nav_closure(
                 n in 1usize..=4,
@@ -5480,14 +5731,20 @@ mod tests {
                     m.nav(payload, Some(own));
                     // Rows are non-empty (≥1 live tab) → every dir lands once.
                     prop_assert_eq!(m.cursor_gen, before + 1, "gen did not bump once per nav");
-                    if let Some(u) = m.cursor.clone() {
-                        let rows = m.rows();
-                        prop_assert!(
-                            rows.iter().any(|(k, _)| *k == RowKey::Dormant(u.clone())),
-                            "cursor on a row that is not displayed: {}",
-                            u
-                        );
-                    }
+                    // #112: the ring is the live block. However many dormant
+                    // rows are rendered below it, a walk never reaches one —
+                    // so it never leaves a selection behind, and it always
+                    // ends on a live tab.
+                    prop_assert!(
+                        m.cursor.is_none(),
+                        "a dir walk fell into the dormant block: {:?}",
+                        m.cursor
+                    );
+                    prop_assert!(
+                        m.current_tab.is_some_and(|t| ids.contains(&t)),
+                        "the walk landed outside the live block: {:?}",
+                        m.current_tab
+                    );
                 }
             }
 
