@@ -68,6 +68,66 @@ Candidate fixes to design later: clave-nav jumps DON'T bump recency (only
 clicks/prompt-submits do), or Alt+j/k walk stable tab order while clicks/Alt+N
 use display order.
 
+**Config ownership — dead ends and the ruling (2026-08-01, #122; ticket #114).**
+clave passes `zellij --config <data_dir>/config.kdl` (`setup.rs:827-832`), and
+`Config::try_from` early-returns on `opts.config`, merging that file over
+zellij's BUILT-IN defaults and never reaching `find_default_config_dir()`
+(`zellij-utils/src/input/config.rs:170-186`). So a clave session **discards the
+user's `~/.config/zellij/config.kdl` entirely** — their keybinds, `default_mode`,
+`pane_frames`, `ui`. Confirmed live; recorded in FOOTGUNS.md. Hid for months
+because a terminal-level colourscheme masks it (zellij's default theme renders
+through the terminal ANSI palette), and it cost #110 part 2 a misdiagnosis —
+the maintainer's own `Ctrl h` bind was written off as user error.
+
+Ruled out, each with the reason:
+1. **Config-file layering does not exist.** One config file per run over
+   built-ins. `--config-dir` selects the same single `config.kdl` by another
+   route (`config.rs:182-197`); `ZELLIJ_CONFIG_FILE`/`_DIR` are clap `env =`
+   aliases for those same two flags (`cli.rs:73-79`); there is **no `include`
+   directive** — `Config::from_kdl` dispatches seven node names and opens no
+   file (`kdl/mod.rs:4855-4893`).
+2. **Text-concatenating the user's config with clave's is silently fatal.**
+   Every consumer is `kdl_config.get(<name>)`, and `KdlDocument::get` returns
+   the FIRST match only (kdl 4.7.1 `document.rs:79-82`) — a user config with
+   its own `keybinds` node means clave's appended block is never parsed: no Alt
+   binds, no unbinds, no error. Same trap as `setup.rs:144`, doubled. Real
+   KDL-node surgery would be required; the node-by-node rules and eight
+   guardrail failure modes are parked on #122 if ever needed.
+3. **Feeding clave's binds into zellij's status-bar tooltips is impossible.**
+   The bundled `status-bar.wasm` carries hardcoded English labels and no
+   generic-action rendering (`strings` on the binary; source not vendored,
+   ships pre-compiled at `zellij-utils/assets/plugins/status-bar.wasm`).
+   clave's binds ride in every `ModeUpdate` as data but would never render as
+   labelled hints. A DIFFERENT plugin may occupy that same `size=1` pane —
+   that is the only live variant. (#117)
+
+**Ruling — the layout file is the config layer.** A layout's root nodes are
+parsed a second time as config and merged over the resolved config:
+`Config::from_kdl(&raw_layout, Some(config))` (`input/layout.rs:1475`). So
+clave drops `--config`, emits `keybinds`/`unbind`/`session_serialization` as
+root nodes of the layout it already passes, and the user's config loads
+normally — **zellij performs the merge itself, with correct semantics; clave
+writes no merging code.** Verified in-process against the same pinned parser
+`kdl_guardrail.rs` uses, with a hostile user config (`clear-defaults=true`,
+`default_mode "locked"`, `pane_frames false`, per-mode `Ctrl h`): clave's bind
+landed, clave's unbind applied, `session_serialization false` landed, and all
+three user settings survived. Seven assertions, seven passes.
+
+Two things the implementation must carry:
+- **Emit explicit `normal {}`/`locked {}` blocks, not only `shared_among`** — a
+  user's per-mode block beats a shared block REGARDLESS of document order
+  (shared parses in phase 1, per-mode in phase 2, `kdl/mod.rs:4554-4599`).
+- **Accepted cost:** the config hot-reload watcher rebuilds from the watched
+  file with `CliArgs::default()` and **no layout** (`config.rs:495-500`), so a
+  user editing their own config mid-session silently drops clave's whole
+  overlay until relaunch — including the `Ctrl q` unbind, which returns stock
+  Quit to a live fleet. Documented limitation by maintainer decision; the
+  repair is `PluginCommand::RebindKeys { …, write_config_to_disk: false }`
+  (`data.rs:3504-3508`), which needs `Permission::Reconfigure` that clave-bar
+  does not hold. Note the hazard MOVES rather than accumulates: the watched
+  file stops being clave's own generated config, so FOOTGUNS' cold-restart
+  hazard disappears on this route.
+
 ## C2 — Agent lifecycle + live glyphs + renames
 - `Alt+a` → this repo → `new`. Expect: floating picker; new tab running Claude;
   `clave ls` shows the row.
