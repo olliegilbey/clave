@@ -389,12 +389,40 @@ fn main() -> Result<()> {
         Some(Command::Prune { idle_days, dry_run }) => {
             let paths = store::store_paths()?;
             let now = store::now_unix();
+            // A stored bind proves life only while its session is RUNNING:
+            // binds are session-scoped and cleared at the NEXT launch, so
+            // between a kill and a relaunch every row still carries a dead
+            // tab_id (#150 review). Session-scoped dump like `clave open`;
+            // a failed dump means no live session — nothing is protected.
+            let dump: Option<String> = {
+                let zellij = clave::discover::tool_path(clave::discover::ToolId::Zellij);
+                std::process::Command::new(&zellij)
+                    .env("ZELLIJ_SESSION_NAME", clave::env::session_name())
+                    .args(["action", "dump-layout"])
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            };
+            let protect = |s: &store::Store| -> std::collections::BTreeSet<String> {
+                match dump.as_deref() {
+                    None => Default::default(),
+                    Some(d) => s
+                        .agents
+                        .values()
+                        .filter(|r| open::open_is_live(r, d))
+                        .map(|r| r.uuid.clone())
+                        .collect(),
+                }
+            };
             let (removed, snap) = if dry_run {
                 let mut s = store::read_store(&paths)?;
-                (store::prune_idle(&mut s, now, idle_days), None)
+                let protected = protect(&s);
+                (store::prune_idle(&mut s, now, idle_days, &protected), None)
             } else {
                 store::with_store_mut(&paths, |s| {
-                    let removed = store::prune_idle(s, now, idle_days);
+                    let protected = protect(s);
+                    let removed = store::prune_idle(s, now, idle_days, &protected);
                     let snap = (!removed.is_empty()).then(|| store::snapshot_from(s));
                     (removed, snap)
                 })?
@@ -414,6 +442,10 @@ fn main() -> Result<()> {
             // every bar stale until an unrelated event).
             if let Some(snap) = snap {
                 hook::push_snapshot(&snap);
+            }
+            // Every PERSISTENT prune leaves an audit line, including a
+            // removed-0 no-op (#150 review); only dry-run stays log-free.
+            if !dry_run {
                 clave::evlog::log_event(
                     "prune",
                     &format!("removed {} idle>{idle_days}d", removed.len()),
