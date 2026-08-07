@@ -1474,13 +1474,14 @@ impl BarModel {
     /// the EXECUTOR only (`executor_own_tab` = Some(own tab) on the active
     /// instance — fresh tab set, and the very bar the user is reading; a
     /// broadcast walk over stale sets raced six divergent targets live).
-    /// dir steps ±1 from the executor's own row, wrapping WITHIN THE LIVE
-    /// BLOCK (#112) — safe to walk the visible list, because focus no longer
-    /// reorders it (§6.6 revised: only user commitments move rows, so there
-    /// is no ping-pong). row (Alt+1-9) still indexes the whole rendered list,
-    /// which is how the dormant block stays reachable from the keyboard at
-    /// all; putting the live block on top is what keeps the low numbers
-    /// pointed at the live fleet.
+    /// dir steps ±1 and wraps WITHIN ONE BLOCK (#112) — the live block by
+    /// default, the dormant block while a dormant row is selected. Picking a
+    /// row is what moves that focus between the blocks; a walk never does.
+    /// Safe to walk the visible list, because focus no longer reorders it
+    /// (§6.6 revised: only user commitments move rows, so there is no
+    /// ping-pong). row (Alt+1-9) indexes the whole rendered list, so it both
+    /// reaches the dormant block and hands the walk to it; putting the live
+    /// block on top is what keeps the low numbers pointed at the live fleet.
     pub fn nav(&mut self, payload: &str, executor_own_tab: Option<usize>) -> Vec<Effect> {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
             return Vec::new();
@@ -1522,43 +1523,52 @@ impl BarModel {
             if rows.is_empty() {
                 return Vec::new();
             }
-            // #112: the ring is the LIVE BLOCK, not the whole list. Dormant
-            // rows sit in their own block below and are reached by click or
-            // Alt+1-9 — a walk can never fall into them, which is the point:
-            // on the real store 17 of 21 rows are dormant, so an unsegregated
-            // ring is mostly rows with no process behind them.
+            // #112: there are TWO rings, one per block, and the walk never
+            // crosses between them. Which block the walk belongs to is a
+            // FOCUS, held by the cursor and changed only by an explicit pick
+            // (click or Alt+N):
+            //
+            //   no dormant selection  → the live block, based on the
+            //                           executor's own row (focus truth)
+            //   a dormant selection   → the dormant block, based on the
+            //                           selected row
+            //
+            // So clicking into the dormant list keeps `Alt+j`/`Alt+k` inside
+            // it until you pick a live row again, and a walk can never fall
+            // from one block into the other. That matters because on the real
+            // store 17 of 21 rows are dormant: one ring over both is mostly
+            // rows with no process behind them, and the live fleet is four
+            // steps of it.
+            //
+            // The cursor lookup is by DISPLAYED position, so a selection whose
+            // row has gone live (or vanished) silently returns the walk to the
+            // live block — the same self-heal `rows()` does for the highlight.
             let live_len = Self::live_block_len(&rows);
-            let (cur, ring) = if live_len == 0 {
-                // No live rows at all. Unreachable in a real session — every
-                // zellij tab carries a bar instance, so the tab list is never
-                // empty — but the model is pure and must answer anyway. Walk
-                // the dormant block rather than going dead: with the commit
-                // key the only launch path (#100), landing on a dormant row
-                // only selects it, so this cannot spawn anything.
-                let cur = self
-                    .cursor
-                    .as_ref()
-                    .and_then(|u| {
-                        rows.iter()
-                            .position(|(k, _)| *k == RowKey::Dormant(u.clone()))
-                    })
-                    .unwrap_or(0);
-                (cur, rows.len())
-            } else {
-                // The ring's position is where FOCUS is, and a live landing
-                // always switches tabs — so the executor's own row IS the
-                // walk base. A dormant selection is an excursion OFF the
-                // ring, not a position on it: walking resumes the ring from
-                // focus and the live landing spends the selection.
-                let cur = rows
-                    .iter()
-                    .position(|(k, _)| *k == RowKey::Tab(own))
-                    .unwrap_or(0);
-                (cur, live_len)
+            let selected = self.cursor.as_ref().and_then(|u| {
+                rows.iter()
+                    .position(|(k, _)| *k == RowKey::Dormant(u.clone()))
+            });
+            // (first line of the block, length of the block, position in it)
+            let (base, len, cur) = match selected {
+                Some(p) => (live_len, rows.len() - live_len, p),
+                // No live rows AND no selection: unreachable in a real session
+                // — every zellij tab carries a bar instance, so the tab list is
+                // never empty — but the model is pure and must answer. Walk the
+                // dormant block from its head rather than going dead; a dormant
+                // landing only ever selects (#100), so it cannot spawn.
+                None if live_len == 0 => (0, rows.len(), 0),
+                None => (
+                    0,
+                    live_len,
+                    rows.iter()
+                        .position(|(k, _)| *k == RowKey::Tab(own))
+                        .unwrap_or(0),
+                ),
             };
+            let offset = cur - base;
             match dir {
-                "next" => Some((cur + 1) % ring),
-                "prev" => Some((cur + ring - 1) % ring),
+                "next" => Some(base + (offset + 1) % len),
+                "prev" => Some(base + (offset + len - 1) % len),
                 _ => None,
             }
         } else {
@@ -4295,6 +4305,67 @@ mod tests {
     }
 
     #[test]
+    fn clicking_into_the_dormant_block_hands_it_the_walk() {
+        // The interaction Ollie specified, 2026-08-07: clicking a dormant row
+        // FOCUSES that list, and Alt+j/Alt+k then walk it; clicking back to
+        // the live list focuses the live list again. The walk itself never
+        // moves between the blocks — only a pick does.
+        let mut m = fleet_two_live_three_dormant();
+        m.beacon(1);
+        // Click the middle dormant row (line 3 = u-d1 at 800).
+        m.click(3);
+        assert_eq!(m.cursor.as_deref(), Some("u-d1"));
+        // Alt+j now walks the DORMANT block, and switches no tab.
+        let fx = m.nav("{\"dir\":\"next\"}", Some(1));
+        assert!(fx.is_empty(), "walking the dormant block switches nothing");
+        assert_eq!(m.cursor.as_deref(), Some("u-d0"), "down to the last row");
+        // …and wraps at that block's end rather than escaping into the live
+        // block above it.
+        m.nav("{\"dir\":\"next\"}", Some(1));
+        assert_eq!(
+            m.cursor.as_deref(),
+            Some("u-d2"),
+            "wraps to the head of the dormant block, not into the live one"
+        );
+        m.nav("{\"dir\":\"prev\"}", Some(1));
+        assert_eq!(m.cursor.as_deref(), Some("u-d0"), "and back the other way");
+        // Clicking a live row hands the walk back to the live block.
+        m.click(0);
+        assert!(m.cursor.is_none(), "the live pick released the selection");
+        assert!(
+            m.nav("{\"dir\":\"next\"}", Some(1))
+                .contains(&Effect::SwitchTab { position: 1 }),
+            "the live block has the walk again"
+        );
+    }
+
+    #[test]
+    fn a_selection_gone_live_returns_the_walk_to_the_live_block() {
+        // The self-heal: the walk's block is decided by where the cursor is
+        // DISPLAYED, so a selected row that gets opened (or disappears) hands
+        // the walk back on its own. Without this the ring would be stranded on
+        // a row that is no longer in the dormant block.
+        let mut m = live_plus_dormant();
+        m.beacon(1);
+        select_dormant(&mut m);
+        assert_eq!(m.cursor.as_deref(), Some("u-d"));
+        // u-d comes up as a tab of its own; the cursor still names it.
+        m.apply_tabs(vec![tab(1, 0, "live", false), tab(2, 1, "u-d", true)]);
+        m.apply_snapshot(AgentSnapshot {
+            collapsed: false,
+            seq: 2,
+            agents: vec![agent("u-d", Status::Working, Some(2))],
+            tab_order: std::collections::BTreeMap::from([(1usize, 500u64), (2usize, 600u64)]),
+        });
+        m.beacon(2);
+        assert!(
+            m.nav("{\"dir\":\"next\"}", Some(2))
+                .contains(&Effect::SwitchTab { position: 0 }),
+            "the walk is back on the live block"
+        );
+    }
+
+    #[test]
     fn a_single_live_row_wraps_onto_itself() {
         // The one-live case. The ring has length 1, so both directions land
         // back on the same tab — dormant rows below stay unreachable by walk.
@@ -4388,14 +4459,22 @@ mod tests {
             selected(&m)[DORMANT_LINE],
             "the dormant row holds the selection"
         );
-        // A dir walk from a dormant selection resumes the LIVE ring rather
-        // than continuing from the cursor (#112): the selection is an
-        // excursion off the ring, and the live landing spends it.
+        // The walk now belongs to the dormant block, so a dir step stays in
+        // it — with one dormant row that means landing back on itself, and
+        // still no tab switch.
         let fx = m.nav("{\"dir\":\"next\"}", Some(1));
-        assert!(fx.contains(&Effect::SwitchTab { position: 0 }));
+        assert!(fx.is_empty(), "still pure selection: {fx:?}");
         assert!(
-            !selected(&m)[DORMANT_LINE],
-            "the live landing released the selection"
+            selected(&m)[DORMANT_LINE],
+            "the walk stays in the dormant block until a live row is picked"
+        );
+        // Picking a live row is what hands the walk back.
+        m.click(0);
+        assert!(m.cursor.is_none());
+        assert!(
+            m.nav("{\"dir\":\"next\"}", Some(1))
+                .contains(&Effect::SwitchTab { position: 0 }),
+            "the live block has the walk again"
         );
     }
 
@@ -4561,8 +4640,9 @@ mod tests {
             vec![false, true],
             "dormant selection holds it"
         );
-        // (b) a live landing clears the cursor → the tab highlights again.
-        m.nav("{\"dir\":\"next\"}", Some(1)); // the live ring, self-wrapping
+        // (b) picking a live row clears the cursor → the tab highlights again.
+        // It must be a PICK: a dir walk would stay in the dormant block now.
+        m.nav("{\"row\":1}", Some(1));
         assert_eq!(
             selected(&m),
             vec![true, false],
