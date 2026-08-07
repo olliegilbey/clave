@@ -234,26 +234,70 @@ fn main() -> Result<()> {
             cwd,
         }) => {
             // S0b: canonicalize BEFORE munging — Claude keys the transcript
-            // dir off the PHYSICAL getcwd() path.
-            let physical = std::fs::canonicalize(&cwd)
-                .with_context(|| format!("canonicalizing --cwd {cwd}"))?;
-            let physical_str = physical.to_str().context("non-UTF8 cwd")?.to_string();
+            // dir off the PHYSICAL getcwd() path. `None` (rather than an
+            // error) when the baked dir is GONE — a removed worktree whose
+            // session relocated elsewhere is still recoverable through the
+            // transcript search below (#139).
+            let physical = std::fs::canonicalize(&cwd).ok();
+            let physical_str = physical.as_deref().and_then(std::path::Path::to_str);
             let claude_dir = clave::env::claude_config_dir()?;
-            // The row may be living in a ROTATED conversation (#99). Read
-            // lock-free and best-effort: a missing or unreadable store must
-            // never stop a pane from launching, and `None` is precisely the
-            // pre-#99 behaviour.
-            let live = clave::store::store_paths()
-                .and_then(|p| clave::store::read_store(&p))
-                .ok()
-                .and_then(|s| s.agents.get(&uuid).and_then(|r| r.live_session.clone()));
-            let (mode, session) =
-                spawn::resume_target(&claude_dir, &physical_str, &uuid, live.as_deref());
+            // The row may be living in a ROTATED conversation (#99), and its
+            // prose gates #139's fail-loudly. Read lock-free and best-effort:
+            // a missing or unreadable store must never stop a pane from
+            // launching, and `None` is precisely the pre-#99 behaviour.
+            let store_read = clave::store::store_paths().and_then(|p| clave::store::read_store(&p));
+            // A CORRUPT store must not read as "never conversed" —
+            // evidenced=false would permit Create and silently shadow a real
+            // session, the exact miss #139 closes (#143 review). read_store
+            // defaults a MISSING file, so Err means present-but-unparseable:
+            // assume evidenced and let the zero-hit path fail loudly.
+            let store_corrupt = store_read.is_err();
+            let row = store_read.ok().and_then(|s| s.agents.get(&uuid).cloned());
+            let live = row.as_ref().and_then(|r| r.live_session.clone());
+            let evidenced =
+                store_corrupt || row.as_ref().is_some_and(spawn::conversation_evidenced);
+            // #139: verify the transcript is where the row says before exec —
+            // and FOLLOW it if it relocated (the #59/#69 move, e.g. into a
+            // worktree). The pre-#139 miss path silently CREATED a fresh
+            // session shadowing the real one; verified_site never does.
+            let site =
+                spawn::verified_site(&claude_dir, physical_str, &uuid, live.as_deref(), evidenced)?;
+            let (mode, session, exec_cwd) = match site {
+                spawn::SpawnSite::Here { mode, session, cwd } => (mode, session, cwd),
+                spawn::SpawnSite::Moved {
+                    session,
+                    cwd,
+                    branch,
+                } => {
+                    // Repoint the row at the transcript's true home so the
+                    // next add/open bakes the right cwd. Locked write,
+                    // best-effort: a store failure must never stop the pane —
+                    // the next spawn simply searches again.
+                    // Broadcast like every other locked write here (#143
+                    // review): the apply_* helper returns a snapshot only
+                    // when the row exists — no phantom seq bump or push for
+                    // an unknown uuid.
+                    match clave::store::store_paths().and_then(|p| {
+                        clave::store::apply_relocation(&p, &uuid, &cwd, branch.as_deref())
+                    }) {
+                        Ok(Some(snap)) => clave::hook::push_snapshot(&snap),
+                        Ok(None) => {}
+                        Err(e) => {
+                            eprintln!("clave spawn: could not repoint row cwd: {e:#}");
+                        }
+                    }
+                    clave::evlog::log_event(
+                        "spawn",
+                        &format!("{uuid}: transcript relocated -> {cwd}"),
+                    );
+                    (spawn::SpawnMode::Resume, session, cwd)
+                }
+            };
             clave::evlog::log_event("spawn", &format!("{uuid}: {mode:?} {session}"));
             // Register uuid→pane BEFORE exec (this process is about to be
             // replaced; best-effort — see register_pane).
             spawn::register_pane(&uuid);
-            std::env::set_current_dir(&physical).context("entering --cwd")?;
+            std::env::set_current_dir(&exec_cwd).context("entering agent cwd")?;
             use std::os::unix::process::CommandExt;
             // Discovered claude (spec §Discovery): the pane env may lack the
             // interactive PATH (nvm/local-install), so exec the absolute
