@@ -439,6 +439,24 @@ pub struct BarModel {
     resumed_off_target: bool,
     /// The rest we are sitting at was NOT a place we chose — see `settle_at`.
     rest_incomplete: bool,
+    /// Does `ShrinkSelf` actually make this pane NARROWER? Normally yes — but
+    /// observed live on 2026-08-07, the same instance in the same session had it
+    /// both ways: one episode walked 79 → 72 → 65 on `ShrinkSelf`, an earlier one
+    /// walked 65 → 72 → 79 → … → 117 on the same effect, climbing until zellij
+    /// refused. `resize_pane_with_id(Decrease, Right)` resolves against whatever
+    /// neighbour the current layout puts on that edge, so its sense is a property
+    /// of the live layout, not of the effect.
+    ///
+    /// Learning it is the same move round 9 made for the step MAGNITUDE — take
+    /// the observed effect as truth rather than assuming — and it is what makes a
+    /// runaway impossible: one wrong step teaches the sign, where before the seek
+    /// would ask for the same wrong thing until its budget died. Re-learned every
+    /// time the observed effect disagrees, so a layout that flips back is also
+    /// followed.
+    seek_inverted: bool,
+    /// Which way the last emitted action was ASKING to go (`true` = narrower).
+    /// Without it the observed delta cannot be judged, only measured.
+    seek_wanted_smaller: Option<bool>,
     /// Distance from the target at the last incomplete rest. A resumption that
     /// closed the gap earns another hop; one that did not is the end of the
     /// road. Distance strictly decreases per hop, so this terminates — which is
@@ -527,6 +545,8 @@ impl Default for BarModel {
             storm_reported: false,
             resumed_off_target: false,
             rest_incomplete: false,
+            seek_inverted: false,
+            seek_wanted_smaller: None,
             last_rest_dist: None,
             current_tab: None,
             birth_announced: false,
@@ -1640,6 +1660,11 @@ impl BarModel {
         self.seek_rest = None;
         self.seek_stalled = false;
         self.seek_drift = None;
+        // `seek_wanted_smaller` is cleared with the compare base it is judged
+        // against — a delta measured across a re-arm teaches nothing. The learned
+        // POLARITY is kept, exactly as the learned step is: both describe the
+        // layout, not the episode.
+        self.seek_wanted_smaller = None;
     }
 
     /// Alt+c (round 20, collapse-in-place): flip between the template width
@@ -1888,6 +1913,18 @@ impl BarModel {
                 // step=60 accepted a 13-col bar).
                 if delta <= MAX_LEARNABLE_STEP {
                     self.seek_step = delta;
+                    // …and the SIGN, from the same evidence. Bounded by the same
+                    // plausibility test on purpose: an external jump must not be
+                    // allowed to teach a bogus polarity any more than a bogus
+                    // step. If a move we asked for went the other way, the
+                    // mapping from effect to direction is inverted for this pane
+                    // right now — believe the pane, not the effect's name.
+                    if let Some(wanted_smaller) = self.seek_wanted_smaller {
+                        let got_smaller = own_cols < prev;
+                        if got_smaller != wanted_smaller {
+                            self.seek_inverted = !self.seek_inverted;
+                        }
+                    }
                 }
             }
             None => {}
@@ -1939,7 +1976,15 @@ impl BarModel {
         // fleet-killing resize loop is an outage. Degrade the bar, never the
         // session.
         if self.storm_actions >= STORM_ACTION_CAP {
-            self.settle_at(own_cols, true);
+            // Stop the churn NOW, but do not adopt this width as somewhere we
+            // are willing to stay unless it is actually acceptable. Maintainer's
+            // call (2026-08-07), after the bar was seen occupying ~90% of his
+            // terminal: when the seek gives up it should end at the width it was
+            // aiming for, not wherever it happened to be standing. There is no
+            // absolute-resize API in zellij-tile 0.44.3 — only relative steps —
+            // so "snap" is spent as the quiet-period resumption walk below,
+            // which is bounded and always aimed at the target.
+            self.settle_at(own_cols, within_band);
             if !self.storm_reported {
                 self.storm_reported = true;
                 return vec![Effect::StormCapped {
@@ -1950,7 +1995,11 @@ impl BarModel {
             }
             return Vec::new();
         }
-        let action = if diff > 0 {
+        // Ask for a DIRECTION, and let the learned polarity pick the effect that
+        // actually achieves it on this pane.
+        let want_smaller = diff > 0;
+        self.seek_wanted_smaller = Some(want_smaller);
+        let action = if want_smaller != self.seek_inverted {
             Effect::ShrinkSelf
         } else {
             Effect::GrowSelf
@@ -4694,6 +4743,21 @@ mod tests {
         ceil: usize,
         latency: bool,
         pending: Option<Effect>,
+        /// #137 round 2: does `ShrinkSelf` actually narrow this pane? Observed
+        /// live going BOTH ways for the same instance in one session, because
+        /// `resize_pane_with_id(Decrease, Right)` resolves against whatever
+        /// neighbour the layout puts on that edge. The sim could not express it,
+        /// which is why no test caught the bar climbing to 90% of the terminal —
+        /// the same gap D26 records: the harness existed, the shape was never
+        /// generated.
+        inverted: bool,
+        /// The longest run of CONSECUTIVE applied resizes that each left the pane
+        /// FURTHER from its target. This is the invariant the runaway violated —
+        /// eight straight `ShrinkSelf` walking 65 → 117 — and none of the existing
+        /// assertions could see it, because a runaway terminates with its budget
+        /// spent and "budget spent mid-travel" is an accepted terminal state.
+        max_worsening_run: u32,
+        worsening_run: u32,
     }
 
     impl SimZellij {
@@ -4706,19 +4770,36 @@ mod tests {
                 ceil,
                 latency,
                 pending: None,
+                inverted: false,
+                max_worsening_run: 0,
+                worsening_run: 0,
             }
         }
 
         /// Apply one resize toward its direction, coarse and clamped. At the
         /// floor/ceil zellij REFUSES (cols unchanged) — the loop must cope.
-        fn apply(&mut self, fx: &Effect) {
-            match fx {
-                Effect::ShrinkSelf => {
-                    self.cols = self.cols.saturating_sub(self.step).max(self.floor)
-                }
-                Effect::GrowSelf => self.cols = (self.cols + self.step).min(self.ceil),
-                _ => {}
+        /// Did the resize just applied close the gap or widen it? A run of
+        /// widening moves is the runaway signature.
+        fn note_progress(&mut self, before: usize, target: usize) {
+            if self.cols.abs_diff(target) > before {
+                self.worsening_run += 1;
+                self.max_worsening_run = self.max_worsening_run.max(self.worsening_run);
+            } else {
+                self.worsening_run = 0;
             }
+        }
+
+        fn apply(&mut self, fx: &Effect) {
+            let narrower = match fx {
+                Effect::ShrinkSelf => !self.inverted,
+                Effect::GrowSelf => self.inverted,
+                _ => return,
+            };
+            self.cols = if narrower {
+                self.cols.saturating_sub(self.step).max(self.floor)
+            } else {
+                (self.cols + self.step).min(self.ceil)
+            };
         }
     }
 
@@ -4787,7 +4868,14 @@ mod tests {
                     // Model idle. Flush a deferred (latency) resize if queued;
                     // that is progress, not settling.
                     if let Some(p) = sim.pending.take() {
+                        let target = if model.showing_collapsed() {
+                            COLLAPSED_TARGET_COLS
+                        } else {
+                            BAR_TARGET_COLS
+                        };
+                        let before = sim.cols.abs_diff(target);
                         sim.apply(&p);
+                        sim.note_progress(before, target);
                         settle = 0;
                         continue;
                     }
@@ -4836,10 +4924,20 @@ mod tests {
                             }
                         }
                     }
+                    // Judge the move against the target the MODEL is chasing —
+                    // `showing_collapsed()` and never a copy of it, so this cannot
+                    // drift from the seek's own rule.
+                    let target = if model.showing_collapsed() {
+                        COLLAPSED_TARGET_COLS
+                    } else {
+                        BAR_TARGET_COLS
+                    };
+                    let before = sim.cols.abs_diff(target);
                     if sim.latency {
                         sim.pending = Some(only.clone());
                     } else {
                         sim.apply(only);
+                        sim.note_progress(before, target);
                     }
                 }
                 other => panic!("width_seek emitted a non-resize effect: {other:?}"),
@@ -5344,6 +5442,79 @@ mod tests {
         }
     }
 
+    /// Maintainer's call (2026-08-07): a brake that parks the bar wherever it
+    /// stood is the wrong degradation — he watched it park at ~90% of his
+    /// terminal, which is as unusable as the storm it was preventing. The brake
+    /// stops the churn immediately but leaves the rest INCOMPLETE unless the
+    /// width is genuinely acceptable, so the quiet-period walk finishes the
+    /// journey at the target.
+    #[test]
+    fn the_brake_does_not_adopt_a_bad_width_as_home() {
+        let mut m = BarModel::default();
+        m.apply_snapshot(collapse_snap(1, false)); // target 54
+        m.storm_actions = STORM_ACTION_CAP;
+        let fx = m.width_seek(300); // far from target, and out of allowance
+        assert!(matches!(fx.as_slice(), [Effect::StormCapped { .. }]));
+        assert!(
+            m.rest_incomplete,
+            "the brake adopted a 300-column rest as home"
+        );
+        // Quiet, then the walk resumes toward the target rather than staying.
+        for _ in 0..STORM_REST_RENDERS {
+            m.width_seek(300);
+        }
+        assert!(
+            !m.width_seek(300).is_empty(),
+            "the brake left the bar parked at a width it never chose"
+        );
+    }
+
+    /// And the converse: a brake trip at an ACCEPTABLE width is home, so it does
+    /// not generate a pointless resumption.
+    #[test]
+    fn the_brake_at_an_acceptable_width_is_content() {
+        let mut m = BarModel::default();
+        m.apply_snapshot(collapse_snap(1, false));
+        m.storm_actions = STORM_ACTION_CAP;
+        m.width_seek(BAR_TARGET_COLS);
+        assert!(!m.rest_incomplete, "an on-target rest is home");
+    }
+
+    /// #137 round 2, the runaway. `ShrinkSelf` does not reliably narrow the pane:
+    /// `resize_pane_with_id(Decrease, Right)` resolves against whatever neighbour
+    /// the layout puts on that edge, and live the same instance had it both ways
+    /// in one session — one episode walked 65 → 117 on eight straight shrink
+    /// requests, until zellij refused. The seek learns the SIGN from the observed
+    /// effect, exactly as it learns the step size, so one wrong step is the whole
+    /// cost.
+    #[test]
+    fn the_seek_learns_that_shrink_is_inverted_and_stops_running_away() {
+        let mut m = BarModel::default();
+        m.apply_snapshot(collapse_snap(1, true)); // collapsed: target is the gutter
+        let mut sim = SimZellij::new(65, 8, 0, 500, false);
+        sim.inverted = true; // ShrinkSelf makes it WIDER
+        let mut worst = 0usize;
+        for _ in 0..60 {
+            let fx = m.width_seek(sim.cols);
+            for f in &fx {
+                sim.apply(f);
+            }
+            worst = worst.max(sim.cols);
+            if fx.is_empty() {
+                break;
+            }
+        }
+        assert!(
+            worst <= 65 + 2 * 8,
+            "the bar ran away to {worst} columns before the polarity was learned"
+        );
+        assert!(
+            sim.cols.abs_diff(COLLAPSED_TARGET_COLS) <= band_half(sim.step),
+            "an inverted pane never converged: ended at {}",
+            sim.cols
+        );
+    }
+
     // === Property tests (issue #10 item 3) =================================
     // proptest generalizes the example-based tests over the model's
     // divergence-critical invariants. Each property cites the ledger finding
@@ -5368,6 +5539,7 @@ mod tests {
                 collapsed in any::<bool>(),
                 peeking in any::<bool>(),
                 latency in any::<bool>(),
+                inverted in any::<bool>(),
                 interrupt in prop_oneof![
                     Just(Option::<(u32, Interrupt)>::None),
                     (1u32..=6).prop_map(|n| Some((n, Interrupt::Toggle))),
@@ -5387,6 +5559,7 @@ mod tests {
                     ..BarModel::default()
                 };
                 let mut sim = SimZellij::new(start, step, floor, 500, latency);
+                sim.inverted = inverted;
                 let first = drive(&mut m, &mut sim, interrupt);
                 // #137: a rest reached by running OUT of allowance mid-travel is
                 // resumed once, so quiescence can take a second journey. Absorb
@@ -5396,6 +5569,18 @@ mod tests {
                 let second = drive(&mut m, &mut sim, None);
                 let max_seg = first.max(second);
 
+                // (e) #137 round 2 — the seek never WALKS AWAY from its target.
+                // One step past is the ordinary overshoot the pre-learning step
+                // buys and `GrowSelf` recovers (round 9); a second is the beat of
+                // latency behind it. A THIRD means the seek is asking for the same
+                // wrong direction repeatedly, which is what put the bar at 90% of
+                // the maintainer's terminal.
+                prop_assert!(
+                    sim.max_worsening_run <= 2,
+                    "the seek drove the pane away from its target {} times in a row \
+                     (inverted={}, step={}, start={})",
+                    sim.max_worsening_run, inverted, step, start
+                );
                 // (a) each budget segment terminates within SEEK_BUDGET emits.
                 prop_assert!(max_seg <= SEEK_BUDGET, "segment {} exceeded budget", max_seg);
                 // (d) an external jump is never learned as the step size.
