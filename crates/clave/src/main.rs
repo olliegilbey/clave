@@ -404,15 +404,24 @@ fn main() -> Result<()> {
                     .filter(|o| o.status.success())
                     .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
             };
+            // NOT open::open_is_live — its tab_id short-circuit would let a
+            // dead session's bind protect a row. Only presence in the live
+            // dump protects here.
             let protect = |s: &store::Store| -> std::collections::BTreeSet<String> {
                 match dump.as_deref() {
                     None => Default::default(),
-                    Some(d) => s
-                        .agents
-                        .values()
-                        .filter(|r| open::open_is_live(r, d))
-                        .map(|r| r.uuid.clone())
-                        .collect(),
+                    Some(d) => {
+                        let live = add::live_uuids(d);
+                        s.agents
+                            .values()
+                            .filter(|r| {
+                                live.iter().any(|u| {
+                                    *u == r.uuid || Some(u.as_str()) == r.live_session.as_deref()
+                                })
+                            })
+                            .map(|r| r.uuid.clone())
+                            .collect()
+                    }
                 }
             };
             let (removed, snap) = if dry_run {

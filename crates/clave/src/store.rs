@@ -656,7 +656,7 @@ mod tests {
     /// and not on a no-op; removed rows come back oldest-idle first.
     #[test]
     fn prune_idle_takes_only_unprotected_rows_past_the_cutoff() {
-        let mut s: Store = serde_json::from_str("{}").unwrap();
+        let mut s = Store::default();
         let now = 100 * 86_400;
         let mut older = rec("u-older");
         older.last_interacted = now - 20 * 86_400;
