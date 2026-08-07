@@ -298,6 +298,27 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
 /// exactly one instance repainted locally — the pipe push is how every other
 /// instance learns the flip. Unknown uuid returns None (no bump, no push):
 /// the plugin can race an agent whose tab just closed.
+/// #139: repoint a relocated row to its transcript's true home. Same
+/// contract as its apply_* neighbours (#143 review): seq advances and a
+/// snapshot returns only when the row EXISTS — an unknown uuid is a no-op
+/// that broadcasts nothing.
+pub fn apply_relocation(
+    paths: &StorePaths,
+    uuid: &str,
+    cwd: &str,
+    branch: Option<&str>,
+) -> Result<Option<AgentSnapshot>> {
+    with_store_mut(paths, |s| {
+        let r = s.agents.get_mut(uuid)?;
+        r.cwd = cwd.to_string();
+        if let Some(b) = branch {
+            r.branch = b.to_string();
+        }
+        s.seq += 1; // monotonic pipe contract (§5)
+        Some(snapshot_from(s))
+    })
+}
+
 pub fn apply_focus(paths: &StorePaths, uuid: &str, now: u64) -> Result<Option<AgentSnapshot>> {
     with_store_mut(paths, |s| {
         let r = s.agents.get_mut(uuid)?;
