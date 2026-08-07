@@ -161,6 +161,22 @@ impl State {
                     let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
                     run_command(&refs, BTreeMap::new());
                 }
+                // #137: UNGATED on purpose — every instance rate-limits its own
+                // pane, so every instance must be able to say so. Gating this to
+                // the executor would hide exactly the storms that only happen on
+                // the eleven bars nobody is looking at.
+                Effect::StormCapped {
+                    actions,
+                    cols,
+                    target,
+                } => {
+                    eprintln!(
+                        "clave-bar: WIDTH SEEK CAPPED after {actions} resizes without \
+                         settling — parking at cols={cols} (target {target}). This is the \
+                         storm brake (#137); something is re-arming the seek faster than \
+                         it can converge."
+                    );
+                }
                 // C6 width-seek effects are SELF-targeted (round 20: every
                 // instance drives only its own pane, with render feedback).
                 Effect::ShrinkSelf => {
