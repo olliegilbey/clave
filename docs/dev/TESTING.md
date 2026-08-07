@@ -716,7 +716,16 @@ every pane and mark the unresolvable ones.
 
 ## Agent-side sanctioned commands
 
-Anything `ZELLIJ_SESSION_NAME=clave-test` is yours, including tab actions. The
+**Drive through `scripts/ct.sh`, not through the env var.** `ZELLIJ_SESSION_NAME=clave-test zellij action …` reads like a boundary and is not one: an agent shell inside the maintainer's session also inherits `ZELLIJ` and `ZELLIJ_PANE_ID`, so overriding the name alone works right up until `clave-test` stops existing — at which point the CLI **falls back to the ambient session instead of erroring**, and the rest of the drive lands on the daily fleet. That happened on 2026-08-07: another agent's reset killed the sandbox mid-drive, a `start-or-reload-plugin` put a sandbox-built debug bar into the maintainer's live session as a real pane, and ten `clave-toggle` pipes went to his fleet. `ct.sh` fails **closed** — it proves the sandbox socket exists *and* has a live server behind it, clears the ambient session, and takes no session argument, so the mistake is no longer expressible. Re-check between rounds by construction: every command re-runs the guard.
+
+```bash
+scripts/ct.sh new-tab --name t1
+scripts/ct.sh go-to-tab 1
+```
+
+**A surprising instance count is a session-identity failure, not a curiosity.** The tell in that incident was a reload reporting ONE bar instance where twelve were expected, and it got explained away as "the reload created a new instance". If a reading names fewer instances than there are tabs, stop and prove which session you are talking to before anything else.
+
+Anything routed through `ct.sh` is yours, including tab actions. The
 commands below are the ones with a trap attached, so they are spelled out.
 Session lifecycle is always the human's, and the maintainer's own session is
 never yours.
@@ -725,7 +734,7 @@ never yours.
 make — see the instrumentation recipe):
 
 ```bash
-ZELLIJ_SESSION_NAME=clave-test zellij action start-or-reload-plugin \
+scripts/ct.sh start-or-reload-plugin \
   "file:$HOME/.local/state/clave-dev/data/clave-bar.wasm" -c clave_binary=clave
 ```
 
@@ -751,9 +760,9 @@ ZELLIJ_SESSION_NAME=clave-test zellij action start-or-reload-plugin \
 needs). Always env-scoped; a bare one of these hits the maintainer's fleet:
 
 ```bash
-ZELLIJ_SESSION_NAME=clave-test zellij action list-panes -t -j
-ZELLIJ_SESSION_NAME=clave-test zellij action go-to-tab 1     # 1-based
-ZELLIJ_SESSION_NAME=clave-test zellij action close-tab       # closes the FOCUSED tab
+scripts/ct.sh list-panes -t -j
+scripts/ct.sh go-to-tab 1     # 1-based
+scripts/ct.sh close-tab       # closes the FOCUSED tab
 ```
 
 > Never close the last tab — that ends the session, which is lifecycle and not
@@ -769,7 +778,7 @@ zellij list-sessions
 **Dump the sandbox layout** (env-scoped to `clave-test` — pane geometry truth):
 
 ```bash
-ZELLIJ_SESSION_NAME=clave-test zellij action dump-layout
+scripts/ct.sh dump-layout
 ```
 
 > **Hazard — this blocks forever.** A `zellij action` aimed at an absent or dead
@@ -885,9 +894,15 @@ Four windows into what actually happened. Learn all four.
 - **`clave dev status`** — the agent's primary probe. Emits JSON:
   `session_live` (bool), `live_uuids` (parsed from the layout dump), and the
   full `store`. Liveness-gated, so it is always safe to run.
-- **Env-scoped `dump-layout`** — `ZELLIJ_SESSION_NAME=clave-test zellij action
-  dump-layout` — the ground truth for pane geometry and the serialized spawn
-  commands. Gate on liveness first (see the hazard above).
+- **Guarded `dump-layout`** — `scripts/ct.sh dump-layout`, never the bare
+  env-var form (see the drive loop's preflight). It is the ground truth for the
+  **serialized spawn commands** and for tab/pane *structure*. It is **not** the
+  truth for pane WIDTH: it normalises a split to `size="33%"`/`67%` whatever the
+  live geometry is, so it reported a tidy 33% for a bar that was occupying ~90%
+  of the screen (2026-08-07). `dump-screen` is no help either — it returns
+  nothing at all for a plugin pane. For width, instrument the bar's own render
+  and corroborate with a screenshot; see FOOTGUNS on why the model's belief
+  about its width is not pane truth.
 
 ## The instrumentation recipe
 
