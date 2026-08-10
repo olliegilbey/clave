@@ -450,6 +450,13 @@ pub fn run_reap(dry_run: bool) -> Result<()> {
     Ok(())
 }
 
+/// Expected cargo-mutants survivors (recorded 2026-08-10: 57 mutants, 45
+/// caught, 8 missed, 4 unviable): every miss sits in `worktree_identity`,
+/// `git_stdout` or `run_reap` — the module's process boundary, exercisable
+/// only by spawning real git and zellij, which unit tests here deliberately
+/// do not (dev.rs's scenario tests hold the same line). The decisions those
+/// three feed — the key, the verdict, the delete authorisation — are the pure
+/// functions above, and the same run caught every mutant in them.
 #[cfg(test)]
 mod tests {
     use super::*;

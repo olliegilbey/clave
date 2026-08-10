@@ -114,3 +114,33 @@ the likely fix there is refusing to stage from inside any zellij session at all.
 two-ring nav. Complete and green but **not live-validated**; it is based on
 `960c8db`, before the prune merge, so it will want a rebase. Nothing it touches
 overlaps this branch.
+
+## Resolution (2026-08-10, later)
+
+The verification above is done and this branch became a PR.
+
+- **The whole diff was read** — one session, top to bottom, including the
+  staging script's self-check and both doc rewrites. One finding, no code
+  change: see the ct.sh point below.
+- **The tests were proven able to fail by mutation, not by hand**: two runs
+  (file-scoped over `sandbox.rs`: 57 mutants, 45 caught; diff-scoped over the
+  whole change: 77 mutants, 55 caught). Every miss in both runs sits in the
+  imperative shell — `main`, the `dev` entry points, `enter_sandbox`,
+  `worktree_identity`/`git_stdout`/`run_reap` — whose pure decision logic is
+  what the suite pins. Recorded as expected survivors on `sandbox.rs`'s test
+  module, same precedent as the width-seek survivors note.
+- **The zellij session-name rules were confirmed against the vendored source,
+  not assumed**: the 104-byte macOS socket cap, the socket-dir derivation and
+  its measured 78 bytes (a first re-measurement read 79 — `$TMPDIR` ends in a
+  slash and the check double-counted it; the module's number is right), the
+  join of dir and name, the near-absent name validation, and the fact that
+  only `--session` runs the length check. The 24-byte budget holds exactly,
+  with the one-byte margin the test asserts.
+- **ct.sh (#137 branch, unmerged) and this change collide by design**: it
+  hardcodes `clave-test` precisely so a session name is never expressible as
+  an argument. Whichever branch lands second must switch that constant to
+  `clave dev instance --field session` — cwd-keyed, still not an argument, so
+  the principle survives the rename. Stated in both PRs.
+- **Still not provable from an agent session**: two sandboxes genuinely
+  coexisting needs two launches, which are the maintainer's. The PR lists the
+  numbered live steps.
