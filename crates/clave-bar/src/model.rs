@@ -3823,7 +3823,10 @@ mod tests {
         // a path would render as ellipsis and identify nothing.
         assert_eq!(repo, "clave");
         assert_eq!(summary, "u1 is working");
-        // S7 has not landed: a blank cell, never an invented level.
+        // S7 HAS landed (#62) — this fixture just never sets `context_level`,
+        // which is the "no reading yet" case, and it must stay a blank cell
+        // rather than an invented level. A dormant row is a different thing
+        // entirely and renders in full ramp colour.
         assert_eq!(battery, None);
     }
 

@@ -330,6 +330,18 @@ fn usage_fields(line: &str) -> Option<String> {
     None // the tail cut mid-object; no complete reading here
 }
 
+/// Every literal this module greps for in the transcript. Named here, and used
+/// from the parser below, so the capture's liveness test can assert against the
+/// SAME strings rather than a hand-copied second list that drifts.
+pub const BOUNDARY: &str = "\"subtype\":\"compact_boundary\"";
+pub const POST_TOKENS: &str = "postTokens";
+pub const USAGE_KEY: &str = "\"usage\":{";
+pub const USAGE_SUMMED: [&str; 3] = [
+    "input_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+];
+
 /// Tokens the conversation is currently holding, scanned out of a jsonl tail
 /// (S7, #62). `None` = no reading available, which HOLDS whatever the row had.
 ///
@@ -348,18 +360,6 @@ fn usage_fields(line: &str) -> Option<String> {
 /// tool-call estimate because it must always produce a number to decide whether
 /// to nudge; the battery must not, because a fabricated reading is worse than a
 /// blank cell (§5.4 fail-closed, and `agent_content`'s never-invent rule).
-/// Every literal this module greps for in the transcript. Named here, and used
-/// from the parser below, so the capture's liveness test can assert against the
-/// SAME strings rather than a hand-copied second list that drifts.
-pub const BOUNDARY: &str = "\"subtype\":\"compact_boundary\"";
-pub const POST_TOKENS: &str = "postTokens";
-pub const USAGE_KEY: &str = "\"usage\":{";
-pub const USAGE_SUMMED: [&str; 3] = [
-    "input_tokens",
-    "cache_read_input_tokens",
-    "cache_creation_input_tokens",
-];
-
 pub fn tokens_from_tail(tail: &str) -> Option<u32> {
     let (after, post_tokens) = match tail.rfind(BOUNDARY) {
         Some(i) => {

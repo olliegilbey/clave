@@ -309,9 +309,12 @@ impl Provenance {
 pub enum RowContent {
     Agent {
         status: RowStatus,
-        /// Index into the S7 ramp; `None` renders a blank cell (a dormant
-        /// conversation's reading is last-known, not current — lock §7.2
-        /// leaves dim-vs-absent unsettled, so the renderer supports absent).
+        /// Index into the S7 ramp, saturating at its last entry. `None` renders
+        /// a blank cell, and that case is now narrow: **no reading yet**, not
+        /// "dormant". §7.2 is settled (#62) — a dormant conversation consumes
+        /// nothing, so its stored figure is EXACTLY its current occupancy and it
+        /// renders in full ramp colour like any other row. It is the live row
+        /// whose reading is a turn behind.
         battery: Option<u8>,
         provenance: Provenance,
         /// The chip; `None` when the session was never renamed.
