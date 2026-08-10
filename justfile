@@ -62,7 +62,14 @@ gates:
 # Still not a free action while daily-driving: it rebuilds the SANDBOX wasm
 # (~/.local/state/clave-dev/data/clave-bar.wasm) in place, so it must not run
 # against a live clave-test session — `just sandbox` refuses for you and is the
-# reviewed path for sandbox validation. If a pre-#43b ~/.cargo/bin/clave is
+# reviewed path for sandbox validation.
+#
+# AND that path is hardcoded to the MAIN checkout's sandbox. The sandbox is
+# per-worktree now (crates/clave/src/sandbox.rs), but this recipe predates it
+# and its steps are one-shell-each, so it cannot ask `clave dev instance`
+# before it has built the CLI. Run from a worktree, it therefore writes the
+# main checkout's data dir — the one `clave-test` uses — which is a second
+# reason `just sandbox` is the reviewed path (#31). If a pre-#43b ~/.cargo/bin/clave is
 # still on this machine it shadows the #43a launcher — check what it is
 # (`command -v clave; clave --version`) before removing it.
 #
@@ -87,6 +94,8 @@ dev-install:
     chmod 755 ~/.cargo/bin/.clave-dev.$$.tmp
     mv -f ~/.cargo/bin/.clave-dev.$$.tmp ~/.cargo/bin/clave-dev
     @echo "installed ~/.cargo/bin/clave-dev — the daily clave launcher is untouched (#43b)"
+    @echo "NOTE: the wasm went to the MAIN checkout's sandbox (~/.local/state/clave-dev/data),"
+    @echo "      not this worktree's. Use \`just sandbox\` to stage a worktree (#31)."
 
 # Cut a release (§2). `clave release` is the GATE: it refuses unless the tree
 # is clean AND HEAD carries the exact vX.Y.Z tag matching Cargo.toml — so a
@@ -147,10 +156,14 @@ mutants base="main" *args:
 mutants-file file *args:
     cargo mutants --workspace --file {{ file }} {{ args }}
 
-# Wire the SANDBOX to this working tree without touching the daily surface.
+# Wire THIS WORKING TREE's sandbox without touching the daily surface.
 # The safe alternative to `dev-install` for sandbox validation: nothing here
 # writes ~/.cargo/bin/clave (the name a LIVE session's plugin shells out to —
-# the 2026-07-22 outage), and it refuses to run against a live clave-test.
+# the 2026-07-22 outage), and it refuses to run against a live session of its
+# own. The instance is per-worktree (`clave dev instance`), so a sibling
+# agent's live sandbox no longer blocks this one and cannot be written by it;
+# the run also reaps sandboxes whose worktree is gone, and self-checks that it
+# left every other agent's root byte-identical.
 # Prints the launch command; never launches (session lifecycle is the human's).
 # Sandbox-validate this working tree WITHOUT installing to the daily surface.
 sandbox scenario="c8-cold-start":

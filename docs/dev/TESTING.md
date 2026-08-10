@@ -657,6 +657,29 @@ is not (see the hazard below, and FOOTGUNS on `zellij --config`). "Read-only"
 is a judgement an agent can get wrong, so the live session takes no agent
 commands and needs no judgement.
 
+### Your sandbox is not necessarily `clave-test`
+
+**The sandbox is per working tree.** From the main checkout it is still
+`clave-test` at `~/.local/state/clave-dev`; from a linked worktree the session
+name and the whole root are keyed on the worktree's directory name —
+`clave-test-prune-wt` at `~/.local/state/clave-dev-prune-wt`. That is what
+stops two agents staging over each other (FOOTGUNS, "PATH and version
+coherence").
+
+So every `clave-test` and `~/.local/state/clave-dev` written literally below
+means *your instance's* name and root. Ask the binary rather than guessing —
+one derivation, and the script uses the same one:
+
+```bash
+clave dev instance                  # session, root, key
+clave dev instance --field session  # one raw value, for scripting
+```
+
+`clave dev reap` deletes the per-worktree sandboxes whose worktree no longer
+exists (`--dry-run` to look first). It never kills a session: a sandbox whose
+worktree is gone but whose session is up is printed for the human with the
+kill command. `just sandbox` runs it on the way in.
+
 ### The sandbox drive loop
 
 The shape that works, learned driving the #55 frame-coherence fix (PR #120).
@@ -716,17 +739,25 @@ every pane and mark the unresolvable ones.
 
 ## Agent-side sanctioned commands
 
-Anything `ZELLIJ_SESSION_NAME=clave-test` is yours, including tab actions. The
-commands below are the ones with a trap attached, so they are spelled out.
-Session lifecycle is always the human's, and the maintainer's own session is
-never yours.
+Anything scoped to **your own sandbox session** is yours, including tab
+actions. The commands below are the ones with a trap attached, so they are
+spelled out. Session lifecycle is always the human's, and the maintainer's own
+session is never yours.
+
+Every `clave-test` / `clave-dev` written below is the *main checkout's* name.
+From a worktree, substitute your own — the two lines that produce them are:
+
+```bash
+SB_SESSION="$(clave dev instance --field session)"
+SB_DATA="$(clave dev instance --field data)"
+```
 
 **Hot-reload the sandbox bar** (the one sanctioned live mutation an agent may
 make — see the instrumentation recipe):
 
 ```bash
-ZELLIJ_SESSION_NAME=clave-test zellij action start-or-reload-plugin \
-  "file:$HOME/.local/state/clave-dev/data/clave-bar.wasm" -c clave_binary=clave
+ZELLIJ_SESSION_NAME="$SB_SESSION" zellij action start-or-reload-plugin \
+  "file:$SB_DATA/clave-bar.wasm" -c clave_binary=clave
 ```
 
 > The `-c` is load-bearing, not optional. A plugin's configuration is half of

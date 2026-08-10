@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Wire the clave-test SANDBOX to this working tree, without installing anything
-# onto the daily surface. The safe alternative to `just dev-install` for
-# sandbox validation.
+# Wire THIS WORKING TREE's SANDBOX to this working tree, without installing
+# anything onto the daily surface. The safe alternative to `just dev-install`
+# for sandbox validation.
 #
 # Why this exists (#43/#44, 2026-07-22): `just dev-install` runs `cargo install`,
 # which writes ~/.cargo/bin/clave — the SAME binary name a LIVE session's plugin
@@ -22,15 +22,24 @@
 # convincing: a pre-#44 `clave open` composes tab layouts with no `clave_binary`,
 # whose empty configuration is a DIFFERENT plugin identity from the template's
 # bar, so tabs sprout a second sidebar — the exact symptom #44 fixes.
+#
+# THE SANDBOX IS PER-WORKTREE, NOT PER-MACHINE. Session name, state dir, data
+# dir and shim dir are all keyed on the worktree directory name; the main
+# checkout keeps the familiar `clave-test` / ~/.local/state/clave-dev. This
+# script does not derive that itself — it asks the CLI it just built
+# (`clave dev instance`), so there is exactly one derivation and the shell can
+# never disagree with the binary about which sandbox it is staging.
 set -euo pipefail
 
 SCENARIO="${1:-c8-cold-start}"
 ROOT="$(git rev-parse --show-toplevel)"
-SANDBOX="$HOME/.local/state/clave-dev"
-SHIM="$SANDBOX/shim"
 CLI="$ROOT/target/release/clave"
+STATE_PARENT="$HOME/.local/state"
 
 cd "$ROOT"
+
+ok=1
+fail() { echo "    FAIL $*"; ok=0; }
 
 # File identity (or "absent") for a path, on BSD and GNU stat alike — clave
 # must eventually run over SSH onto Linux, so no macOS-only stat flags.
@@ -58,6 +67,20 @@ stamp() {
     gnu) stat -c '%i:%s:%Y' "$1" 2>/dev/null || echo unknown ;;
     *)   stat -f '%i:%z:%m' "$1" 2>/dev/null || echo unknown ;;
   esac
+}
+
+# Every path THIS script writes inside a sandbox root, as one string. A bare
+# directory stamp is not enough: a dir's mtime does not move when a file two
+# levels down is replaced, which is the same reason STABLE_LAUNCHER needs its
+# own stamp below — and replacing `data/clave-bar.wasm` under someone else's
+# root is exactly the clobbering this whole change removes.
+stamp_sandbox() {
+  local r="$1" p out=""
+  for p in "" /data /data/clave-bar.wasm /data/config.kdl /data/layout.kdl \
+           /data/launch.kdl /shim /shim/clave /origin; do
+    out="$out $(stamp "$r$p")"
+  done
+  echo "$out"
 }
 
 # Compare a before/after stamp and FAIL CLOSED. `unknown` means both stat
@@ -90,6 +113,34 @@ TAG="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
 CLAVE_BUILD_TAG="$TAG" cargo build -p clave-bar --release --target wasm32-wasip1
 CLAVE_BUILD_TAG="$TAG" cargo build -p clave --release
 
+# ONE derivation, and it lives in the binary (crates/clave/src/sandbox.rs).
+# `dev instance` also creates the root and stamps its `origin` marker, so the
+# root can never exist un-marked — an un-marked root is un-reapable by design,
+# and a permanently un-reapable root is the leak this change would otherwise
+# have swapped the clobbering for.
+SESSION="$("$CLI" dev instance --field session)"
+SANDBOX="$("$CLI" dev instance --field root)"
+SHIM="$SANDBOX/shim"
+echo "==> Sandbox instance: session '$SESSION' at $SANDBOX"
+
+# Per-worktree roots stop the clobbering but stop being self-cleaning: with one
+# machine-wide sandbox a stale one was obvious, because there was only ever
+# one. Sweep on the way IN — staging is the moment someone is already paying
+# attention, and it is the only step every sandbox user runs. Never kills a
+# session; a live one is printed for the human.
+echo "==> Reaping sandboxes whose worktree is gone"
+"$CLI" dev reap
+
+# Nothing below may touch another agent's sandbox. Stamped AFTER the reap (the
+# reap legitimately deletes roots) and BEFORE the first write.
+declare -a OTHER_ROOTS=() OTHER_BEFORE=()
+for r in "$STATE_PARENT"/clave-dev*; do
+  [ -d "$r" ] || continue
+  [ "$r" = "$SANDBOX" ] && continue
+  OTHER_ROOTS+=("$r")
+  OTHER_BEFORE+=("$(stamp_sandbox "$r")")
+done
+
 echo "==> Placing the bar wasm in the sandbox data dir"
 mkdir -p "$SANDBOX/data"
 cp target/wasm32-wasip1/release/clave-bar.wasm "$SANDBOX/data/"
@@ -102,21 +153,23 @@ ln -sf "$CLI" "$SHIM/clave"
 # of every running session and hot-swaps its keybinds in place (zellij-server
 # src/lib.rs:2175 -> ConfigWrittenToDisk :2298 -> ScreenInstruction::Reconfigure
 # screen.rs:717, ~1s poll), while the on-screen bar keeps the plugin identity it
-# loaded with. Rewriting config.kdl under a live clave-test therefore re-keys its
+# loaded with. Rewriting config.kdl under a live session therefore re-keys its
 # keybinds to an identity that bar does not have, and the next keypress STARTS A
 # SECOND BAR. Kill first, regenerate second.
 # `-n` (no formatting) is REQUIRED: a bare `list-sessions` wraps each name in
 # ANSI colour codes, so the line starts with an escape sequence and `^clave-test`
 # never matches — the guard would silently never fire. `setup.rs::session_exists`
 # uses `-n` for the same reason.
-if zellij list-sessions -n 2>/dev/null | awk '{print $1}' | grep -qx 'clave-test'; then
-  cat <<'DEAD' >&2
-FAILED: a clave-test session is live, and regenerating config.kdl under it
+# The name is now this WORKTREE's session, so a sibling agent's live sandbox no
+# longer blocks this one — which is half the point of the change.
+if zellij list-sessions -n 2>/dev/null | awk '{print $1}' | grep -qx "$SESSION"; then
+  cat <<DEAD >&2
+FAILED: the $SESSION session is live, and regenerating config.kdl under it
 would re-key its keybinds while the running bar keeps its load-time identity
 — the next keypress would spawn a second bar (#44). Kill it first, in a
 non-zellij terminal:
 
-  zellij kill-session clave-test && zellij delete-session --force clave-test
+  zellij kill-session $SESSION && zellij delete-session --force $SESSION
 
 DEAD
   exit 1
@@ -130,9 +183,6 @@ fi
 echo "==> Seeding scenario '$SCENARIO' (regenerates config.kdl + launch.kdl)"
 PATH="$SHIM:$PATH" "$CLI" dev reset
 PATH="$SHIM:$PATH" "$CLI" dev scenario "$SCENARIO"
-
-ok=1
-fail() { echo "    FAIL $*"; ok=0; }
 
 # Prove the generated pair agrees BEFORE a human spends time in a terminal.
 # This is the #44 invariant: config.kdl's MessagePlugin keybinds and the layout's
@@ -178,6 +228,21 @@ if [ "$ok" -eq 1 ]; then
 fi
 
 echo
+echo "==> Self-check: no OTHER agent's sandbox was touched"
+if [ "${#OTHER_ROOTS[@]}" -eq 0 ]; then
+  echo "    ok   no other sandbox roots on this machine"
+else
+  for i in "${!OTHER_ROOTS[@]}"; do
+    r="${OTHER_ROOTS[$i]}"
+    if [ "$(stamp_sandbox "$r")" = "${OTHER_BEFORE[$i]}" ]; then
+      echo "    ok   $r unchanged"
+    else
+      fail "$r CHANGED — this run staged into another agent's sandbox"
+    fi
+  done
+fi
+
+echo
 echo "==> Stable surfaces untouched"
 # `guard` (above) is if/else and fails closed, deliberately: this is a SAFETY
 # check, so an unprovable result must read as a breach, never as an ok.
@@ -192,11 +257,22 @@ guard "$STABLE_LAUNCHER CHANGED — only a release cut writes the launcher (#43a
 
 # Session lifecycle is the human's: print, never run. A `zellij action` against
 # a dead session blocks forever, and only the human can see the screen.
+#
+# The env prefix is required, not decoration: this line gets pasted into a
+# fresh terminal in whatever directory it opens in, and `dev launch` derives
+# its instance from the CURRENT directory. Without the prefix it would resolve
+# to the main checkout's sandbox rather than this worktree's.
 echo
 cat <<EOF
 ==> Ready. Launch it YOURSELF, in a NEW terminal window OUTSIDE zellij:
 
+    CLAVE_SESSION=$SESSION \\
+    CLAVE_STATE_DIR=$SANDBOX/state \\
+    CLAVE_DATA_DIR=$SANDBOX/data \\
     PATH="$SHIM:\$PATH" "$CLI" dev launch
+
+    This is the '$SESSION' session — yours alone. Another agent staging from
+    another worktree gets its own name and its own root, and cannot touch it.
 
     The PATH shim is required, not cosmetic — without it the sandbox bar
     shells out to the stable ~/.cargo/bin/clave (see the header comment).
