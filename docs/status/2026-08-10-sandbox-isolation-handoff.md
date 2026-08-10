@@ -80,12 +80,22 @@ implying end-to-end coverage.
 - **The sandbox session env var FAILS OPEN onto the live fleet** (#137) — set it
   wrong, or not at all, and a command aimed at the sandbox hits the maintainer's
   working session. The maintainer's standing instruction is that driving goes
-  through a wrapper (`ct.sh`) rather than bare env vars. **Verify this before
-  relying on it: no such script exists on this branch or on `origin/main`
-  (`scripts/` holds only `sandbox-setup.sh`), so it lives on an unmerged branch,
-  or is still to be built.** Do not assume the safe route exists — establish
-  what it actually is first. This correction matters because the fail-open
-  direction is toward his live fleet, not away from it.
+  through a wrapper (`ct.sh`) rather than bare env vars. **That wrapper exists
+  but is NOT merged**: added by `1971fee` (*"harness: driving the sandbox now
+  fails closed"*, #137) on branch `fix/137-width-seek-storm`. It is absent from
+  `origin/main` and from this branch, where `scripts/` holds only
+  `sandbox-setup.sh`.
+
+  So there is no safe driving route on this branch today. Before driving
+  anything, either work on top of the #137 branch, cherry-pick the harness, or
+  wait for it to land — and check first whether it has merged since. The
+  fail-open direction is toward the maintainer's live fleet, not away from it,
+  which is why this is worth a minute rather than an assumption.
+
+  **This also concerns your own change:** #137 makes sandbox driving fail
+  closed for a SINGLE shared sandbox. Per-agent roots move the ground under it,
+  so read `1971fee` before finalising the derivation and say in the PR whether
+  the two compose or collide.
 - Never write `~/.cargo/bin/clave`, `~/.local/share/clave/**`,
   `~/.config/zellij/**`. The staging script self-checks this; keep it working.
 - The #44 identity pair: generated `config.kdl` and `layout.kdl` must carry an
