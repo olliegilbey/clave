@@ -1,5 +1,21 @@
 {
   "enabledPlugins": {
     "superpowers@claude-plugins-official": true
+  },
+  "permissions": {
+    "deny": [
+      "Bash(zellij kill-session clave)",
+      "Bash(zellij kill-session \"clave\")",
+      "Bash(zellij kill-session 'clave')",
+      "Bash(zellij delete-session clave)",
+      "Bash(zellij delete-session --force clave)",
+      "Bash(zellij delete-session -f clave)",
+      "Bash(zellij delete-session \"clave\")",
+      "Bash(zellij kill-all-sessions)",
+      "Bash(zellij kill-all-sessions --yes)",
+      "Bash(zellij delete-all-sessions)",
+      "Bash(zellij delete-all-sessions --yes)",
+      "Bash(zellij delete-all-sessions --force)"
+    ]
   }
 }
