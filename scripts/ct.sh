@@ -10,6 +10,15 @@
 # a real pane in the maintainer's live session, and ten collapse toggles went to
 # his fleet.
 #
+# The mechanism, so the next reader can check it rather than trust it
+# (`src/commands.rs:407-452`, tag v0.44.3): with no `--session` flag,
+# `send_action_to_session` receives `requested_session_name = None`, and the
+# `ActiveSession::One` arm then serves the ONLY live session, whatever
+# `ZELLIJ_SESSION_NAME` says. The flag closes that: with a name supplied, both
+# the `One` and `Many` arms exit 1 when it does not match a live session. So
+# `exec` below passes `--session` and never relies on the env at all — the
+# `export` is belt to that brace.
+#
 # So this wrapper fails CLOSED. It proves the sandbox is live, clears the
 # ambient session, and only then runs. Use it for every drive command:
 #
@@ -22,19 +31,39 @@
 set -euo pipefail
 
 SESSION="clave-test"
-SOCKET="${TMPDIR:-/tmp}/zellij-$(id -u)/contract_version_1/${SESSION}"
+
+# `$TMPDIR` CARRIES A TRAILING SLASH on macOS, and zellij's own path does not:
+# the server's argv reads `…/T/zellij-501/…` while the naive interpolation here
+# gives `…/T//zellij-501/…`. The `-S` test does not care — the kernel folds the
+# double slash — but the `pgrep` below matches argv as TEXT, so it never
+# matched and this wrapper refused every command on every macOS machine. It
+# fails closed, so it looked exactly like "the sandbox is not running".
+# (Found reviewing PR #152, 2026-08-10.)
+TMP="${TMPDIR:-/tmp}"
+SOCKET_ROOT="${TMP%/}/zellij-$(id -u)"
 
 if [[ $# -eq 0 ]]; then
   echo "usage: $0 <zellij-action> [args…]   (runs against ${SESSION} only)" >&2
   exit 2
 fi
 
+# The socket directory is keyed on zellij's client/server contract version, so
+# glob rather than hard-code it: a contract bump must turn this into a wrapper
+# that says so, not one that silently refuses everything for a version reason.
+SOCKET=""
+for candidate in "${SOCKET_ROOT}"/contract_version_*/"${SESSION}"; do
+  if [[ -S "$candidate" ]]; then
+    SOCKET="$candidate"
+    break
+  fi
+done
+
 # 1. The socket must exist. A dead session leaves nothing here, which is
 #    precisely the case that used to fall through to the maintainer's fleet.
-if [[ ! -S "$SOCKET" ]]; then
+if [[ -z "$SOCKET" ]]; then
   cat >&2 <<EOF
-REFUSING: no ${SESSION} session socket at
-  ${SOCKET}
+REFUSING: no ${SESSION} session socket under
+  ${SOCKET_ROOT}/contract_version_*/${SESSION}
 
 The sandbox is not running, so this command would have been served by whatever
 session your shell is attached to — the maintainer's fleet. Ask him to launch

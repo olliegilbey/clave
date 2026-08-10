@@ -757,7 +757,7 @@ scripts/ct.sh start-or-reload-plugin \
 > so a path containing a comma would not survive — none of ours do.
 
 **Drive the sandbox** (open, close, focus, inspect — the provocations step 5
-needs). Always env-scoped; a bare one of these hits the maintainer's fleet:
+needs). Always through `ct.sh`; a bare one of these hits the maintainer's fleet:
 
 ```bash
 scripts/ct.sh list-panes -t -j
