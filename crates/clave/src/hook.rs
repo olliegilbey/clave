@@ -392,7 +392,7 @@ pub fn tokens_from_tail(tail: &str) -> Option<u32> {
 /// The agent's smart zone in tokens: [`clave_types::SMART_ZONE_ENV`], else the
 /// default. Junk, or zero, falls back rather than failing — a hook must never
 /// fail hard (§6.5), and a zero zone has no ramp to divide.
-fn smart_zone() -> u32 {
+pub fn smart_zone() -> u32 {
     smart_zone_from(std::env::var(clave_types::SMART_ZONE_ENV).ok().as_deref())
 }
 
