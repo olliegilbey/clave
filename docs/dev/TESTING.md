@@ -657,6 +657,29 @@ is not (see the hazard below, and FOOTGUNS on `zellij --config`). "Read-only"
 is a judgement an agent can get wrong, so the live session takes no agent
 commands and needs no judgement.
 
+### Your sandbox is not necessarily `clave-test`
+
+**The sandbox is per working tree.** From the main checkout it is still
+`clave-test` at `~/.local/state/clave-dev`; from a linked worktree the session
+name and the whole root are keyed on the worktree's directory name —
+`clave-test-prune-wt` at `~/.local/state/clave-dev-prune-wt`. That is what
+stops two agents staging over each other (FOOTGUNS, "PATH and version
+coherence").
+
+So every `clave-test` and `~/.local/state/clave-dev` written literally below
+means *your instance's* name and root. Ask the binary rather than guessing —
+one derivation, and the script uses the same one:
+
+```bash
+clave dev instance                  # session, root, key
+clave dev instance --field session  # one raw value, for scripting
+```
+
+`clave dev reap` deletes the per-worktree sandboxes whose worktree no longer
+exists (`--dry-run` to look first). It never kills a session: a sandbox whose
+worktree is gone but whose session is up is printed for the human with the
+kill command. `just sandbox` runs it on the way in.
+
 ### The sandbox drive loop
 
 The shape that works, learned driving the #55 frame-coherence fix (PR #120).
@@ -730,12 +753,26 @@ commands below are the ones with a trap attached, so they are spelled out.
 Session lifecycle is always the human's, and the maintainer's own session is
 never yours.
 
+**`ct.sh` resolves the per-agent session itself**, so driving takes no session
+name from you — that is the whole point, and it is why the sandbox instance
+work (#161) and this wrapper compose rather than collide. It asks the binary,
+exactly as the staging script does, so the shell and the CLI cannot disagree
+about which sandbox is yours:
+
+```bash
+SB_SESSION="$(clave dev instance --field session)"   # what ct.sh resolves for you
+SB_DATA="$(clave dev instance --field data)"         # you still need this for paths
+```
+
+Every `clave-test` / `clave-dev` written below is the *main checkout's* name;
+from a worktree both differ, and `$SB_DATA` is how you spell the difference.
+
 **Hot-reload the sandbox bar** (the one sanctioned live mutation an agent may
 make — see the instrumentation recipe):
 
 ```bash
 scripts/ct.sh start-or-reload-plugin \
-  "file:$HOME/.local/state/clave-dev/data/clave-bar.wasm" -c clave_binary=clave
+  "file:$SB_DATA/clave-bar.wasm" -c clave_binary=clave
 ```
 
 > The `-c` is load-bearing, not optional. A plugin's configuration is half of

@@ -30,7 +30,28 @@
 # expressible again.
 set -euo pipefail
 
-SESSION="clave-test"
+# ASKED, NEVER ASSUMED. This was `SESSION="clave-test"` — one name for one
+# machine-wide sandbox — and #161 replaced that with a per-agent instance keyed
+# on the worktree directory. A hardcoded name survives that change looking
+# perfectly fine from the main checkout and targets SOMEONE ELSE'S sandbox from
+# a worktree, which is the class of mistake this wrapper exists to make
+# unexpressible. The binary is the single source of the derivation, exactly as
+# `sandbox-setup.sh` treats it, so the shell and the CLI cannot disagree.
+#
+# Fails closed on its own terms: if `clave dev instance` cannot name a session
+# — no `clave` on PATH, an unkeyable worktree — there is no safe fallback,
+# because the fallback IS the bug. Refuse and say why.
+if ! SESSION="$(clave dev instance --field session 2>/dev/null)" || [[ -z "$SESSION" ]]; then
+  cat >&2 <<'EOF'
+REFUSING: could not resolve this checkout's sandbox session.
+
+`clave dev instance --field session` produced nothing. Either `clave` is not on
+PATH here, or this worktree's name cannot key an instance. There is deliberately
+no fallback: guessing a session name is how a drive reaches the maintainer's
+fleet. Fix the derivation, then retry.
+EOF
+  exit 1
+fi
 
 # `$TMPDIR` CARRIES A TRAILING SLASH on macOS, and zellij's own path does not:
 # the server's argv reads `…/T/zellij-501/…` while the naive interpolation here

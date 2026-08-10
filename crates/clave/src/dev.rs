@@ -8,7 +8,7 @@
 //! Session lifecycle stays Ollie's: this module NEVER launches or kills
 //! zellij sessions — it prints the commands.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result};
@@ -219,12 +219,6 @@ pub fn scenario_uuid(n: u32) -> String {
     format!("00000000-0000-4000-8000-c85c{n:08}")
 }
 
-pub fn sandbox_root() -> Result<PathBuf> {
-    Ok(dirs::home_dir()
-        .context("home")?
-        .join(".local/state/clave-dev"))
-}
-
 /// The ONE command printed for Ollie to launch the sandboxed session.
 ///
 /// Deliberately NO CLAUDE_CONFIG_DIR (revised 2026-07-18, live finding +
@@ -240,22 +234,65 @@ pub fn sandbox_root() -> Result<PathBuf> {
 /// daily surface — so bare `clave` here would either be `command not found` on
 /// a contributor's box or, worse, silently drive the sandbox with the STABLE
 /// release instead of the working tree under test.
-pub fn launch_command(root: &Path) -> String {
+///
+/// The env prefix is not decoration now that the instance is per-worktree
+/// (`sandbox.rs`): this line is meant to be pasted into a fresh terminal in
+/// an arbitrary directory, where `dev launch`'s own cwd-based derivation
+/// would resolve to the MAIN checkout's sandbox instead of the worktree that
+/// printed it. `enter_sandbox` therefore lets an explicit value win.
+pub fn launch_command(sb: &crate::sandbox::Sandbox) -> String {
     format!(
-        "CLAVE_SESSION=clave-test CLAVE_STATE_DIR={0}/state CLAVE_DATA_DIR={0}/data clave-dev",
-        root.display()
+        "CLAVE_SESSION={} CLAVE_STATE_DIR={} CLAVE_DATA_DIR={} clave-dev",
+        sb.session,
+        sb.state_dir().display(),
+        sb.data_dir().display()
     )
+}
+
+/// Should this variable be filled in from the derived instance? Only when
+/// the caller did not name one — same "override always wins, empty means
+/// unset" rule as `env::session_name_from` / `env::dir_from`. Pure because
+/// setting real env vars would race parallel tests (see `env.rs`).
+pub fn env_should_be_derived(current: Option<&str>) -> bool {
+    current.is_none_or(str::is_empty)
 }
 
 /// Point THIS process at the sandbox (children inherit — the seeding
 /// `claude -p` runs as the REAL user identity but its hook invocations
 /// inherit CLAVE_STATE_DIR and land in the sandbox store).
-fn enter_sandbox(root: &Path) {
+///
+/// An explicitly set variable WINS, so the env-prefixed `launch_command`
+/// stays truthful when it is pasted somewhere else on disk.
+fn enter_sandbox(sb: &crate::sandbox::Sandbox) {
+    let vars: [(&str, std::ffi::OsString); 3] = [
+        ("CLAVE_SESSION", sb.session.clone().into()),
+        ("CLAVE_STATE_DIR", sb.state_dir().into()),
+        ("CLAVE_DATA_DIR", sb.data_dir().into()),
+    ];
+    for (k, v) in vars {
+        if env_should_be_derived(std::env::var(k).ok().as_deref()) {
+            // SAFETY: single-threaded CLI entry point; set before any spawn.
+            unsafe { std::env::set_var(k, v) };
+        }
+    }
+}
+
+/// The unconditional form, for STAGING (`dev scenario`): staging's identity
+/// is the working tree it runs in, full stop. Under the respect-env form, a
+/// shell that inherited another sandbox's `CLAVE_*` — any pane inside a
+/// launched sandbox session qualifies — would seed repos under THIS root
+/// while every store write lands in the OTHER instance's state dir, a
+/// split-brain the setup script's self-check only reports after the foreign
+/// root is already written (#161 review). `dev launch` keeps respect-env:
+/// its pasted prefix is the caller naming an instance deliberately. Like
+/// `enter_sandbox`, an expected mutant survivor — env writes cannot be
+/// exercised by parallel tests (see `env.rs`).
+fn force_sandbox(sb: &crate::sandbox::Sandbox) {
     // SAFETY: single-threaded CLI entry point; set before any spawn.
     unsafe {
-        std::env::set_var("CLAVE_SESSION", "clave-test");
-        std::env::set_var("CLAVE_STATE_DIR", root.join("state"));
-        std::env::set_var("CLAVE_DATA_DIR", root.join("data"));
+        std::env::set_var("CLAVE_SESSION", &sb.session);
+        std::env::set_var("CLAVE_STATE_DIR", sb.state_dir());
+        std::env::set_var("CLAVE_DATA_DIR", sb.data_dir());
     }
 }
 
@@ -264,9 +301,42 @@ fn enter_sandbox(root: &Path) {
 /// Session lifecycle stays the user's: this exists to be typed BY the
 /// user in a non-zellij terminal, replacing the printed env-var wall.
 pub fn run_launch() -> Result<()> {
-    let root = sandbox_root()?;
-    enter_sandbox(&root);
+    let sb = crate::sandbox::Sandbox::resolve()?;
+    sb.ensure()?;
+    enter_sandbox(&sb);
     crate::setup::launch_session()
+}
+
+/// `clave dev instance`: which sandbox this working tree stages into.
+///
+/// Resolves AND materialises — it creates the root and stamps the `origin`
+/// marker — because `scripts/sandbox-setup.sh` calls it as its first CLI
+/// action and everything after that writes into the root. A root that exists
+/// with no marker is un-reapable by design (`sandbox::verdict`), so the
+/// marker must not lag behind the directory.
+///
+/// `--field` prints one raw value with no decoration, for the script.
+pub fn run_instance(field: Option<&str>) -> Result<()> {
+    let sb = crate::sandbox::Sandbox::resolve()?;
+    sb.ensure()?;
+    match field {
+        None => {
+            println!("session  {}", sb.session);
+            println!("root     {}", sb.root.display());
+            println!(
+                "key      {}",
+                sb.key.as_deref().unwrap_or("(main checkout — shared)")
+            );
+        }
+        Some("session") => println!("{}", sb.session),
+        Some("root") => println!("{}", sb.root.display()),
+        Some("state") => println!("{}", sb.state_dir().display()),
+        Some("data") => println!("{}", sb.data_dir().display()),
+        Some("shim") => println!("{}", sb.shim_dir().display()),
+        Some("key") => println!("{}", sb.key.as_deref().unwrap_or("")),
+        Some(other) => anyhow::bail!("unknown --field {other:?}"),
+    }
+    Ok(())
 }
 
 /// The per-agent tag for a worktree's branch/dir name — the LAST 8 hex
@@ -353,8 +423,10 @@ pub fn run_scenario(name: &str) -> Result<()> {
         let names: Vec<_> = SCENARIOS.iter().map(|s| s.name).collect();
         format!("unknown scenario {name}; have: {names:?}")
     })?;
-    let root = sandbox_root()?;
-    enter_sandbox(&root);
+    let sb = crate::sandbox::Sandbox::resolve()?;
+    sb.ensure()?;
+    let root = sb.root.clone();
+    force_sandbox(&sb);
     for d in ["state", "data", "repos"] {
         std::fs::create_dir_all(root.join(d))?;
     }
@@ -437,14 +509,14 @@ pub fn run_scenario(name: &str) -> Result<()> {
     crate::evlog::log_event("dev", &format!("scenario {name} seeded"));
     println!("\nScenario `{name}` ready. Launch (your command, in a NON-zellij terminal):\n");
     println!("  clave-dev dev launch");
-    println!("\n(equivalent env form: {})", launch_command(&root));
+    println!("\n(equivalent env form: {})", launch_command(&sb));
     println!("\nWhen done: `clave-dev dev reset` (prints the kill command first).");
     Ok(())
 }
 
 pub fn run_status() -> Result<()> {
-    let root = sandbox_root()?;
-    enter_sandbox(&root);
+    let sb = crate::sandbox::Sandbox::resolve()?;
+    enter_sandbox(&sb);
     let store = crate::store::read_store(&crate::store::store_paths()?)?;
     // Discovered zellij (2026-07-22): both reads below swallow failure with
     // unwrap_or_default, so an off-PATH zellij would report "no live session"
@@ -457,14 +529,14 @@ pub fn run_status() -> Result<()> {
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default();
-    let live_session = crate::setup::session_is_live(&list, "clave-test");
+    let live_session = crate::setup::session_is_live(&list, &sb.session);
     // Sanctioned §6.9 read: explicitly clave-test-scoped. GATED on
     // liveness (live finding, 2026-07-18): `zellij action` against an
     // absent/dead session BLOCKS indefinitely instead of erroring —
     // an ungated dump-layout hung `dev status` for minutes pre-launch.
     let dump = if live_session {
         Command::new(&zellij)
-            .env("ZELLIJ_SESSION_NAME", "clave-test")
+            .env("ZELLIJ_SESSION_NAME", &sb.session)
             .args(["action", "dump-layout"])
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
@@ -475,6 +547,11 @@ pub fn run_status() -> Result<()> {
     println!(
         "{}",
         serde_json::json!({
+            // Which instance this answer is ABOUT: with a sandbox per
+            // worktree, "session_live: false" is ambiguous until you know
+            // which session was asked after.
+            "session": sb.session,
+            "root": sb.root,
             "session_live": live_session,
             "live_uuids": crate::add::live_uuids(&dump),
             "store": store,
@@ -516,10 +593,86 @@ fn wipe_scenario_state(root: &Path) -> Result<Vec<&'static str>> {
     Ok(wiped)
 }
 
+/// The `~/.claude/projects/<munged-cwd>` directory names belonging to THIS
+/// sandbox instance — one per scenario cwd that exists under `root/repos`.
+///
+/// This exists because scenario uuids are deterministic and therefore
+/// IDENTICAL across instances (`scenario_uuid`), so `dev reset`'s old
+/// machine-wide `c85c-*.jsonl` sweep deleted every other agent's scenario
+/// transcripts as well as its own — and `scripts/sandbox-setup.sh` runs
+/// `dev reset` on every staging run, so per-worktree roots alone would have
+/// left that firing more often, not less.
+///
+/// EXACT names, never a prefix match on the munged root. Munging replaces
+/// every non-alphanumeric character with `-` (`munge.rs`), so the main
+/// checkout's `…-clave-dev` is also a prefix of a worktree's
+/// `…-clave-dev-wt-a` — a prefix rule would reinstate the very deletion it
+/// was written to stop.
+///
+/// Reset-twice-in-a-row leaks: the second call finds no `repos/` and so
+/// names no directories. The leaked files are inert one-turn transcripts and
+/// the next `dev scenario` reseeds over them; deleting by tag alone is the
+/// thing that cannot be made safe.
+fn scenario_project_dirs(root: &Path) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let mut note = |p: &Path| {
+        // Canonicalize to match seeding: `run_scenario` munges the PHYSICAL
+        // cwd (macOS /var -> /private/var), so an uncanonicalized path here
+        // would name a directory Claude never created (munge.rs header).
+        if let Some(s) = std::fs::canonicalize(p).ok().and_then(|c| {
+            c.to_str()
+                .map(crate::munge::munge_cwd)
+                .filter(|s| !s.is_empty())
+        }) {
+            out.insert(s);
+        }
+    };
+    let Ok(repos) = std::fs::read_dir(root.join("repos")) else {
+        return out;
+    };
+    for repo in repos.flatten() {
+        // A plain-checkout agent's cwd is the repo dir itself; a worktree
+        // agent's is `<repo>/.claude-worktrees/<tag>` (see `run_scenario`).
+        note(&repo.path());
+        if let Ok(wts) = std::fs::read_dir(repo.path().join(".claude-worktrees")) {
+            for wt in wts.flatten() {
+                note(&wt.path());
+            }
+        }
+    }
+    out
+}
+
+/// Delete the c85c-tagged transcripts under `projects`, restricted to the
+/// project directories `mine` names. Best-effort: a vanished directory or an
+/// unreadable entry only skips itself.
+fn sweep_scenario_transcripts(projects: &Path, mine: &std::collections::BTreeSet<String>) -> u32 {
+    let mut removed = 0u32;
+    for dir in mine {
+        let Ok(files) = std::fs::read_dir(projects.join(dir)) else {
+            continue;
+        };
+        for f in files.flatten() {
+            let name = f.file_name().to_string_lossy().into_owned();
+            if is_scenario_jsonl(&name) && std::fs::remove_file(f.path()).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    removed
+}
+
 pub fn run_reset() -> Result<()> {
-    let root = sandbox_root()?;
+    let sb = crate::sandbox::Sandbox::resolve()?;
+    let root = sb.root.clone();
     println!("If the session is running, kill it first (your command):\n");
-    println!("  zellij kill-session clave-test && zellij delete-session --force clave-test\n");
+    println!(
+        "  zellij kill-session {0} && zellij delete-session --force {0}\n",
+        sb.session
+    );
+    // Named BEFORE the wipe: `repos/` is what says which project directories
+    // are this instance's, and the wipe removes it.
+    let mine = scenario_project_dirs(&root);
     let wiped = wipe_scenario_state(&root)?;
     if wiped.is_empty() {
         println!("Scenario state already clean: {}", root.display());
@@ -531,25 +684,13 @@ pub fn run_reset() -> Result<()> {
         );
     }
     // Scenario transcripts in the real claude tree (c85c-tagged, see
-    // is_scenario_jsonl). Best-effort walk of projects/*/: a vanished dir
-    // or unreadable entry only skips itself.
+    // is_scenario_jsonl), scoped to this instance's own project dirs.
     let projects = crate::env::claude_config_dir()?.join("projects");
-    let mut removed = 0u32;
-    if let Ok(rd) = std::fs::read_dir(&projects) {
-        for proj in rd.flatten() {
-            if let Ok(files) = std::fs::read_dir(proj.path()) {
-                for f in files.flatten() {
-                    let name = f.file_name().to_string_lossy().into_owned();
-                    if is_scenario_jsonl(&name) && std::fs::remove_file(f.path()).is_ok() {
-                        removed += 1;
-                    }
-                }
-            }
-        }
-    }
+    let removed = sweep_scenario_transcripts(&projects, &mine);
     println!(
-        "Scenario transcripts removed from {}: {removed}",
-        projects.display()
+        "Scenario transcripts removed from {}: {removed} (in {} of this sandbox's project dirs)",
+        projects.display(),
+        mine.len()
     );
     Ok(())
 }
@@ -694,6 +835,68 @@ mod tests {
         assert_eq!(wipe_scenario_state(&root).unwrap(), Vec::<&str>::new());
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Both scenario cwd shapes are named, and only real directories are.
+    /// The worktree half is the one a "just list `repos/*`" implementation
+    /// would drop, and a worktree agent's transcript is exactly the one whose
+    /// loss is most visible in a live drive.
+    #[test]
+    fn scenario_project_dirs_names_both_plain_and_worktree_cwds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("clave-dev-wt-a");
+        let repo = root.join("repos").join("clave");
+        let wt = repo.join(".claude-worktrees").join("00000001");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::create_dir_all(root.join("repos").join("other")).unwrap();
+
+        let got = scenario_project_dirs(&root);
+
+        // Canonicalized then munged, exactly as `run_scenario` seeds them.
+        let want =
+            |p: &Path| crate::munge::munge_cwd(std::fs::canonicalize(p).unwrap().to_str().unwrap());
+        assert!(
+            got.contains(&want(&repo)),
+            "plain checkout missing: {got:?}"
+        );
+        assert!(got.contains(&want(&wt)), "worktree cwd missing: {got:?}");
+        assert_eq!(got.len(), 3, "{got:?}"); // clave, clave's worktree, other
+        // No `repos/` at all (a second `dev reset`) names nothing rather
+        // than falling back to a machine-wide tag sweep.
+        assert!(scenario_project_dirs(tmp.path()).is_empty());
+    }
+
+    /// The whole point: agent A's reset must not delete agent B's scenario
+    /// transcripts, even though the uuids are byte-identical by design. The
+    /// rival is the old tag-only sweep, which deletes all three files here.
+    #[test]
+    fn a_reset_sweeps_only_its_own_instances_transcripts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let jsonl = format!("{}.jsonl", scenario_uuid(1));
+
+        let mine = "-h--local-state-clave-dev-wt-a-repos-clave";
+        // The munged form of the MAIN checkout's root is a strict prefix of
+        // the worktree one, so a prefix rule reads this as ours.
+        let theirs = "-h--local-state-clave-dev-wt-b-repos-clave";
+        let real_work = "-h-code-someones-actual-project";
+        for d in [mine, theirs, real_work] {
+            std::fs::create_dir_all(projects.join(d)).unwrap();
+            std::fs::write(projects.join(d).join(&jsonl), b"{}").unwrap();
+            std::fs::write(projects.join(d).join("real-session.jsonl"), b"{}").unwrap();
+        }
+
+        let removed =
+            sweep_scenario_transcripts(&projects, &std::iter::once(mine.to_string()).collect());
+
+        assert_eq!(removed, 1);
+        assert!(!projects.join(mine).join(&jsonl).exists());
+        assert!(projects.join(theirs).join(&jsonl).exists(), "clobbered B");
+        assert!(projects.join(real_work).join(&jsonl).exists());
+        // And a non-scenario transcript is never touched, in any directory.
+        for d in [mine, theirs, real_work] {
+            assert!(projects.join(d).join("real-session.jsonl").exists());
+        }
     }
 
     #[test]
@@ -1074,14 +1277,48 @@ mod tests {
         // §6.9 revised 2026-07-18: CLAVE state is sandboxed; claude's
         // identity is deliberately NOT (thin-wrapper ruling — sandboxing
         // it dragged auth along and broke seeding).
-        let cmd = launch_command(std::path::Path::new("/sb"));
+        let main = crate::sandbox::Sandbox::new(std::path::Path::new("/h"), None, None);
+        let cmd = launch_command(&main);
         assert!(cmd.contains("CLAVE_SESSION=clave-test"));
-        assert!(cmd.contains("CLAVE_STATE_DIR=/sb/state"));
-        assert!(cmd.contains("CLAVE_DATA_DIR=/sb/data"));
+        assert!(cmd.contains("CLAVE_STATE_DIR=/h/.local/state/clave-dev/state"));
+        assert!(cmd.contains("CLAVE_DATA_DIR=/h/.local/state/clave-dev/data"));
         assert!(!cmd.contains("CLAUDE_CONFIG_DIR"));
         // clave-dev, not clave (#43b): dev-install stopped writing the
         // daily name, so the printed command must name what it installs.
         assert!(cmd.trim_end().ends_with("clave-dev"));
+    }
+
+    /// The printed command is meant to be pasted into a fresh terminal in an
+    /// unknown directory, so it must carry the WORKTREE's instance and not
+    /// the one `dev launch` would derive from wherever it is run. Witness:
+    /// every one of the three values differs from the main checkout's.
+    #[test]
+    fn launch_command_carries_this_worktrees_instance_not_the_shared_one() {
+        let wt = crate::sandbox::Sandbox::new(
+            std::path::Path::new("/h"),
+            Some("prune-wt".into()),
+            Some("/h/code/clave/wt/prune-wt".into()),
+        );
+        let cmd = launch_command(&wt);
+        assert!(cmd.contains("CLAVE_SESSION=clave-test-prune-wt"), "{cmd}");
+        assert!(
+            cmd.contains("CLAVE_STATE_DIR=/h/.local/state/clave-dev-prune-wt/state"),
+            "{cmd}"
+        );
+        assert!(
+            cmd.contains("CLAVE_DATA_DIR=/h/.local/state/clave-dev-prune-wt/data"),
+            "{cmd}"
+        );
+    }
+
+    /// An explicitly set variable wins, which is what makes the pasted
+    /// `launch_command` truthful. The rival is the old unconditional
+    /// `set_var`, under which the middle case would also be derived.
+    #[test]
+    fn an_explicit_env_value_wins_over_the_derived_instance() {
+        assert!(env_should_be_derived(None));
+        assert!(env_should_be_derived(Some(""))); // empty means unset, per env.rs
+        assert!(!env_should_be_derived(Some("clave-test-prune-wt")));
     }
 
     #[test]
