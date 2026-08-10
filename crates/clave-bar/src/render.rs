@@ -188,14 +188,51 @@ const RULE: char = '\u{2502}'; // box drawings light vertical
 const ELLIPSIS: char = '\u{2026}';
 const CONSOLE: char = '\u{f018d}'; // nf-md-console — a terminal has no battery
 
-/// The S7 magnitude ramp, green through red. Index is the context level.
-const BATTERY: [(char, Rgb); 5] = [
-    ('\u{f0079}', Rgb(0x98, 0xBB, 0x6C)),
-    ('\u{f007e}', Rgb(0x98, 0xBB, 0x6C)),
-    ('\u{f007c}', Rgb(0xE6, 0xC3, 0x84)),
-    ('\u{f007b}', Rgb(0xFF, 0xA0, 0x66)),
-    ('\u{f007a}', Rgb(0xE4, 0x68, 0x76)),
+/// The S7 ramp (#62). Index is the context level: `0` is full, the last entry
+/// is empty and past the user's smart zone.
+///
+/// TWO AXES AT DIFFERENT RESOLUTIONS, deliberately. The GLYPH carries magnitude
+/// finely — one step per tenth of the zone, so the cell reads as a gauge you can
+/// watch descend. The INK carries risk coarsely — four bands, for the glance
+/// that never resolves a glyph at all. They cannot contradict each other because
+/// both are functions of the same index.
+///
+/// The ink bands are green below six tenths, yellow to eight, orange to the
+/// zone, and red AT it. The zone is where the battery turns red rather than
+/// where the ramp ends, so the last entry is also the clamp: four times over
+/// reads the same as one token over, and #105's token text carries the
+/// magnitude the glyph has stopped resolving.
+///
+/// Glyphs are the Material Design battery family, verified against the installed
+/// patched font's glyph-name table rather than assumed: `md-battery` (U+F0079),
+/// `md-battery_90`…`md-battery_10` (U+F0082 down to U+F007A — note they run
+/// BACKWARDS through the codepoints), `md-battery_outline` (U+F008E). Written as
+/// escapes, never literals: design-lock §5.4, load-bearing.
+const BATTERY: [(char, Rgb); clave_types::BATTERY_LEVELS as usize] = [
+    ('\u{f0079}', GREEN),  // full        · below a tenth spent
+    ('\u{f0082}', GREEN),  // nine tenths
+    ('\u{f0081}', GREEN),  // eight
+    ('\u{f0080}', GREEN),  // seven
+    ('\u{f007f}', GREEN),  // six
+    ('\u{f007e}', GREEN),  // five        · half the zone gone
+    ('\u{f007d}', YELLOW), // four
+    ('\u{f007c}', YELLOW), // three
+    ('\u{f007b}', ORANGE), // two
+    ('\u{f007a}', ORANGE), // one tenth
+    ('\u{f008e}', RED),    // empty       · at or past the zone
 ];
+
+// These four are byte-identical to `PALETTE` entries 1, 2, 3 and 6
+// (springGreen, carpYellow, waveRed, surimiOrange), and the duplication is
+// deliberate rather than an oversight. `PALETTE` is the REPO ink table, keyed
+// by repo root and allocated round-robin; sharing an entry would mean
+// reordering the repo palette silently re-colours the battery, which is two
+// unrelated meanings on one constant. #145 is where every visual variable gets
+// one home — that is the right place to unify these, not here.
+const GREEN: Rgb = Rgb(0x98, 0xBB, 0x6C);
+const YELLOW: Rgb = Rgb(0xE6, 0xC3, 0x84);
+const ORANGE: Rgb = Rgb(0xFF, 0xA0, 0x66);
+const RED: Rgb = Rgb(0xE4, 0x68, 0x76);
 
 // ── the row ─────────────────────────────────────────────────────────────────
 
@@ -272,9 +309,12 @@ impl Provenance {
 pub enum RowContent {
     Agent {
         status: RowStatus,
-        /// Index into the S7 ramp; `None` renders a blank cell (a dormant
-        /// conversation's reading is last-known, not current — lock §7.2
-        /// leaves dim-vs-absent unsettled, so the renderer supports absent).
+        /// Index into the S7 ramp, saturating at its last entry. `None` renders
+        /// a blank cell, and that case is now narrow: **no reading yet**, not
+        /// "dormant". §7.2 is settled (#62) — a dormant conversation consumes
+        /// nothing, so its stored figure is EXACTLY its current occupancy and it
+        /// renders in full ramp colour like any other row. It is the live row
+        /// whose reading is a turn behind.
         battery: Option<u8>,
         provenance: Provenance,
         /// The chip; `None` when the session was never renamed.
@@ -557,10 +597,19 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
             out.push_str(&o);
             push_rule(&mut out, &o, &ink); // cols 3–5
             out.push_str(&o);
-            match battery.and_then(|i| BATTERY.get(usize::from(i))) {
+            // CLAMPED, not indexed. The host already clamps, so an
+            // out-of-range level cannot arise from this version — but the wire
+            // crosses a version boundary, and a newer host with a longer ramp
+            // would otherwise blank the cell on an old bar. Blank means "no
+            // reading" here, so the failure mode would be a full-looking row
+            // for a session that is out. Saturating to the last entry says
+            // "at least this bad", which is the safe direction to be wrong in.
+            // (CodeRabbit, #147)
+            let battery = battery.map(|i| usize::from(i).min(BATTERY.len() - 1));
+            match battery.map(|i| BATTERY[i]) {
                 Some((glyph, colour)) => {
-                    out.push_str(&ink(*colour));
-                    out.push(*glyph); // col 6
+                    out.push_str(&ink(colour));
+                    out.push(glyph); // col 6
                     out.push_str(&o);
                 }
                 None => out.push(' '),
@@ -688,7 +737,12 @@ mod tests {
         Row {
             content: RowContent::Agent {
                 status,
-                battery: Some(2),
+                // Seven tenths spent: `md-battery_30` in yellow. Chosen so the
+                // golden exercises a row where glyph and ink DISAGREE about
+                // resolution — the ink has crossed one band, the glyph has moved
+                // seven steps — which is the whole point of the two-axis ramp
+                // (#62). A green row would assert nothing about the bands.
+                battery: Some(7),
                 provenance,
                 title: title.map(String::from),
                 title_ink: Some(5),
@@ -801,6 +855,46 @@ mod tests {
                 let width = display_cells(&strip_sgr(&line));
                 assert_eq!(width, cols, "at cols={cols}: {line:?}");
             }
+        }
+    }
+
+    /// A level past the end of the ramp SATURATES to empty-and-red; it must
+    /// never fall through to the blank cell.
+    ///
+    /// Unreachable from this version — the host clamps before it sends — but
+    /// the snapshot crosses a version boundary, and a newer host with a longer
+    /// ramp is exactly how it becomes reachable. The direction matters: blank
+    /// means "no reading", so falling through would render a row that looks
+    /// FRESH for a session that is out of its zone. Saturating says "at least
+    /// this bad", which is the safe way to be wrong. (CodeRabbit, #147; the
+    /// arithmetic behind the clamp was surviving `just mutants` until this.)
+    #[test]
+    fn a_battery_level_past_the_ramp_saturates_to_empty_red() {
+        let render_at = |level: u8| {
+            let mut rows = fleet();
+            let RowContent::Agent { battery, .. } = &mut rows[0].content else {
+                panic!("fixture row 0 must be an agent");
+            };
+            *battery = Some(level);
+            render_rows(&rows, DESIGN_COLS, Widths::EXPANDED)[0].clone()
+        };
+
+        // Compared against the LAST VALID level rather than against a literal
+        // colour: unselected rows recede 25% toward the background (§6), so the
+        // emitted ink is a faded red, not `RED` itself. Asserting equality with
+        // the saturation target says exactly what "saturates" means and stays
+        // true whatever the fade does.
+        let saturated = render_at(clave_types::BATTERY_LEVELS - 1);
+        assert!(
+            saturated.contains(BATTERY[BATTERY.len() - 1].0),
+            "the reference row must carry the empty glyph"
+        );
+        for level in [
+            clave_types::BATTERY_LEVELS,
+            clave_types::BATTERY_LEVELS + 1,
+            u8::MAX,
+        ] {
+            assert_eq!(render_at(level), saturated, "level {level} must saturate");
         }
     }
 

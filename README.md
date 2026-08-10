@@ -34,9 +34,26 @@ Then, left to right across the row:
 | `󰘬` | on a branch |
 | `𖣂` | in its own git worktree |
 | `󰆍` | a terminal tab rather than an agent — the bar is the whole session |
+| `󰁹`→`󰂎` | the **battery** — how much context that session has spent |
 | **chip** | your `/rename`; blank until you rename |
 | **repo** | one colour per repo, wherever it appears |
 | **text** | Claude's own description of the session, not your prompt |
+
+**The battery reads against your smart zone, not the model's window.** The
+window is where Claude auto-compacts; the smart zone is how far *you* trust a
+model to stay sharp, and it's the same number whether that model advertises 200k
+or a million. It defaults to 150,000 tokens — set your own in your shell config:
+
+```bash
+export CLAVE_AGENT_SMART_ZONE_TOKENS=150000
+```
+
+The glyph empties a tenth at a time so you can watch it descend; the colour
+moves in four coarser bands so a glance tells you enough without resolving the
+shape. It turns red *at* your zone, and stays there — past that point the
+reading is "out", not "how far out". A row that just `/clear`ed reads full
+again, correctly: the battery measures the conversation the row is in, never its
+history.
 
 <sub>These marks may show as boxes here on GitHub — they render in your
 terminal. The branch and terminal marks are Nerd Font glyphs; the worktree mark

@@ -996,6 +996,8 @@ pub fn run_add(worktree: bool) -> Result<()> {
             title: None,
             summary: String::new(),
             default_branch: default_branch.clone(),
+            context_tokens: None,
+            context_level: None,
             // A fresh row is by definition still on its minted uuid. An
             // EXISTING row's live id survives this via `merge_resume_record`'s
             // `..row.clone()`, which is what keeps a re-added rotated agent
@@ -1046,6 +1048,8 @@ mod tests {
             title: None,
             summary: String::new(),
             default_branch: None,
+            context_tokens: None,
+            context_level: None,
             live_session: None,
         }
     }

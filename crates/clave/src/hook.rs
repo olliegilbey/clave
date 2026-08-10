@@ -280,6 +280,147 @@ pub fn summary_from_tail(tail: &str) -> Option<String> {
     last_tail_field(tail, "summary", "summary")
 }
 
+/// First unsigned integer following `"<key>":` in `s`. Deliberately literal:
+/// the leading quote is what keeps `"input_tokens":` from also matching
+/// `"cache_read_input_tokens":` and `"ephemeral_1h_input_tokens":`, which sit in
+/// the same object and would otherwise be summed twice over.
+fn json_u32(s: &str, key: &str) -> Option<u32> {
+    let pat = format!("\"{key}\":");
+    let rest = &s[s.find(&pat)? + pat.len()..];
+    rest.chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .ok()
+}
+
+/// The `"usage"` object's OWN keys, with every nested object and array elided.
+///
+/// A flat scan of the line cannot be trusted, and the capture proves why: the
+/// real `usage` object nests `cache_creation` (carrying
+/// `ephemeral_1h_input_tokens`) and an `iterations` array that repeats
+/// `input_tokens`, `cache_read_input_tokens` and `cache_creation_input_tokens`
+/// once per inference step. A key MISSING from the turn's own usage would then
+/// be answered by one inference step's copy of it — a wrong reading that looks
+/// entirely reasonable. Reading only depth 1 makes that unreachable rather than
+/// unlikely. (CodeRabbit, #147)
+///
+/// Assumes no `{`/`[` inside a string value, which holds for `usage`: every
+/// value is a number or a bare enum (`"standard"`, `"not_available"`).
+fn usage_fields(line: &str) -> Option<String> {
+    let start = line.find(USAGE_KEY)? + USAGE_KEY.len() - 1;
+    let mut depth = 0i32;
+    let mut out = String::new();
+    for c in line[start..].chars() {
+        // The brackets themselves are never collected — `json_u32` scans for
+        // `"key":` and digits, so punctuation carries nothing. Collecting them
+        // only bought two mutants that no test could ever distinguish.
+        match c {
+            '{' | '[' => depth += 1,
+            '}' | ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(out);
+                }
+            }
+            _ if depth == 1 => out.push(c),
+            _ => {}
+        }
+    }
+    None // the tail cut mid-object; no complete reading here
+}
+
+/// Every literal this module greps for in the transcript. Named here, and used
+/// from the parser below, so the capture's liveness test can assert against the
+/// SAME strings rather than a hand-copied second list that drifts.
+pub const BOUNDARY: &str = "\"subtype\":\"compact_boundary\"";
+pub const POST_TOKENS: &str = "postTokens";
+pub const USAGE_KEY: &str = "\"usage\":{";
+pub const USAGE_SUMMED: [&str; 3] = [
+    "input_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+];
+
+/// Tokens the conversation is currently holding, scanned out of a jsonl tail
+/// (S7, #62). `None` = no reading available, which HOLDS whatever the row had.
+///
+/// Ported from rot-reducer's `tokens_from_transcript`: the newest assistant
+/// turn's `usage` carries `input_tokens + cache_read_input_tokens +
+/// cache_creation_input_tokens`, and their sum is that turn's occupancy.
+///
+/// COMPACT-AWARE, and that is not decoration. `/compact` leaves the
+/// pre-compaction `usage` lines in place, so the newest one names the OLD size —
+/// the battery would read red on a session just emptied, and stay wrong until
+/// the next `Stop`. So: anchor on the last `compact_boundary`, sum only what
+/// follows it, and fall back to that line's own `compactMetadata.postTokens`,
+/// which is an EXACT figure rather than an estimate.
+///
+/// Note what is NOT here: no fallback tier. rot-reducer degrades to a
+/// tool-call estimate because it must always produce a number to decide whether
+/// to nudge; the battery must not, because a fabricated reading is worse than a
+/// blank cell (§5.4 fail-closed, and `agent_content`'s never-invent rule).
+pub fn tokens_from_tail(tail: &str) -> Option<u32> {
+    let (after, post_tokens) = match tail.rfind(BOUNDARY) {
+        Some(i) => {
+            // Searched from the MARKER, not from the start of its line:
+            // `compactMetadata` always follows `subtype` on the boundary line
+            // (verified against a real transcript), so there is nothing to the
+            // left of the marker worth reading, and reaching for it would only
+            // risk picking up an earlier boundary's figure.
+            let end = tail[i..].find('\n').map_or(tail.len(), |n| i + n);
+            (&tail[end..], json_u32(&tail[i..end], POST_TOKENS))
+        }
+        None => (tail, None),
+    };
+    after
+        .lines()
+        .rev()
+        .find_map(|line| {
+            // Depth 1 only — see `usage_fields`. Occupancy is what went IN, so
+            // `output_tokens` is deliberately not summed.
+            let usage = usage_fields(line)?;
+            let sum: u32 = USAGE_SUMMED
+                .iter()
+                .filter_map(|k| json_u32(&usage, k))
+                .sum();
+            (sum > 0).then_some(sum)
+        })
+        .or(post_tokens)
+}
+
+/// The agent's smart zone in tokens: [`clave_types::SMART_ZONE_ENV`], else the
+/// default. Junk, or zero, falls back rather than failing — a hook must never
+/// fail hard (§6.5), and a zero zone has no ramp to divide.
+pub fn smart_zone() -> u32 {
+    smart_zone_from(std::env::var(clave_types::SMART_ZONE_ENV).ok().as_deref())
+}
+
+/// [`smart_zone`]'s decision, split out from the environment read so it can be
+/// tested — env vars are process-global and two tests setting one race.
+fn smart_zone_from(raw: Option<&str>) -> u32 {
+    raw.and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|z| *z > 0)
+        .unwrap_or(clave_types::DEFAULT_SMART_ZONE_TOKENS)
+}
+
+/// Bucket a token count into the S7 ramp (#62): one step per tenth of the zone,
+/// floored, so a row reads full until it has actually spent a tenth.
+///
+/// The zone is where the battery turns RED — the last index — and not where the
+/// ramp ends, so anything past it CLAMPS there. A session at four times its
+/// zone reads the same as one a token over: both are out, and #105's token text
+/// carries the magnitude the glyph has stopped resolving.
+pub fn battery_level(tokens: u32, zone: u32) -> u8 {
+    if zone == 0 {
+        return 0;
+    }
+    // Widened before multiplying: a large count against a small zone overflows
+    // u32 well before the clamp would rescue it.
+    let tenths = u64::from(tokens) * 10 / u64::from(zone);
+    tenths.min(u64::from(clave_types::BATTERY_LEVELS - 1)) as u8
+}
+
 /// Last ≤`max_bytes` of `path` (lossy UTF-8; we only pattern-match). The
 /// jsonl grows unbounded — a full read every turn risks the hook timeout
 /// budget, so we read the tail only (§6.4).
@@ -490,9 +631,45 @@ pub fn apply_hook_event(
     // either way; `changed` gates only the SNAPSHOT PUSH, and the bar renders
     // nothing from this field — bumping `seq` for it would push a pipe message
     // that changes no pixel.
+    //
+    // S7 (#62) rides this same signal, and ORDER MATTERS — it compares against
+    // `rec.live_session` before the assignment below overwrites it.
+    //
+    // A rotation IS a `/clear`: Claude mints a new id AND starts a new
+    // transcript (FOOTGUNS, "ROTATES its session id on `/clear`"). The new
+    // conversation genuinely holds nothing, so the battery returns to full on
+    // this event rather than waiting for a usage line to exist. That is the
+    // design statement in code: **the battery measures the conversation the row
+    // is IN, never the row's history**, so a near-zero reading straight after a
+    // `/clear` is CORRECT and is not to be "fixed".
+    //
+    // `--resume` does NOT rotate (measured, same FOOTGUNS entry), so resuming a
+    // conversation correctly keeps its reading.
+    let tokens_before = rec.context_tokens;
     if let Some(live) = payload.session_id.as_deref().filter(|_| own_claude) {
+        if live != rec.live_session.as_deref().unwrap_or(uuid) {
+            rec.context_tokens = Some(0);
+        }
         rec.live_session = (live != uuid).then(|| live.to_string());
     }
+    // A tail reaches us only on Stop / UserPromptSubmit (`run_hook`'s event
+    // gate). No tail, or a tail carrying no usage line, HOLDS the previous
+    // reading — §5.4 fail-closed. Never invent a measurement.
+    if let Some(tokens) = jsonl_tail.and_then(tokens_from_tail) {
+        rec.context_tokens = Some(tokens);
+    }
+    // Bucketed HERE, in the row's own agent's process, for two reasons: this is
+    // where `SMART_ZONE_ENV` means the right thing, and stamping it makes a
+    // dormant row free forever after — `snapshot_from` only copies. The fleet's
+    // dormant list may eventually hold every conversation the user has ever had.
+    let level = rec.context_tokens.map(|t| battery_level(t, smart_zone()));
+    // BOTH fields gate the push, not just the level. The glyph only moves once
+    // per tenth of the zone, but #105 renders the raw count as text — gating on
+    // the level alone would leave that text stale for up to a tenth of the zone
+    // (15k tokens at the default), which is a bug shipped early rather than a
+    // bug avoided. (CodeRabbit and the spec review agreed here, #147.)
+    changed |= rec.context_level != level || rec.context_tokens != tokens_before;
+    rec.context_level = level;
     // §6.6 / S1 / #39: a PROMPT is the ONLY event that reorders. Stop,
     // StopFailure, Notification, PermissionRequest and SessionEnd change the
     // STATUS and nothing else — "claude finishing should not move it up"
@@ -813,6 +990,8 @@ mod tests {
             title: None,
             summary: String::new(),
             default_branch: None,
+            context_tokens: None,
+            context_level: None,
             live_session: None,
         }
     }
@@ -837,6 +1016,15 @@ mod tests {
         // `changed` reflects the live-id write alone. Using an event clave does
         // not register would prove the property on a path that never fires.
         let quiet = "Notification";
+        // Park the battery where a `/clear` would put it. S7 (#62) resets to
+        // full on rotation, which IS snapshot-worthy — so without this the
+        // assertion below would fail on the battery's change rather than the
+        // property under test. Pre-setting it isolates the live-id write, which
+        // is what this test is about; `s7_rotation_resets_the_battery_and_pushes`
+        // covers the reset itself.
+        let r = s.agents.get_mut("minted").unwrap();
+        r.context_tokens = Some(0);
+        r.context_level = Some(0);
 
         // A rotated id is recorded — and NOT as a snapshot-worthy change: the
         // bar renders nothing from this field, and `with_store_mut` persists
@@ -1400,6 +1588,326 @@ mod tests {
         );
         assert_eq!(summary_from_tail(tail).as_deref(), Some("Fix auth flow"));
         assert_eq!(summary_from_tail("{\"type\":\"user\"}\n"), None);
+    }
+
+    // ── S7, the context battery (#62) ───────────────────────────────────────
+
+    /// A CAPTURE, not an invention — TESTING.md § "Fixtures captured from
+    /// reality". The `usage` and `compactMetadata` objects inside are verbatim
+    /// from the maintainer's own transcripts (2026-08-07), scrubbed of
+    /// everything that is not shape. Its header records the provenance, the
+    /// dated field measurement, and the re-measurement commands.
+    ///
+    /// This matters because `tokens_from_tail` is a SUBSTRING parser over an
+    /// external format nobody here controls. A fixture reconstructed from the
+    /// parser's own assumptions could only ever confirm them; this one can be
+    /// contradicted by the world (Codex review, #147).
+    const CAPTURE: &str = include_str!("../tests/fixtures/transcripts/compacted-session.jsonl");
+
+    /// The capture's data lines: `#` header lines dropped, `n` lines kept.
+    ///
+    /// Slicing by line is how one capture serves every case — a pre-compaction
+    /// tail, a tail ending AT the boundary, and a tail with a fresh turn past
+    /// it are all prefixes of the same real session.
+    fn capture(n: usize) -> String {
+        let body: Vec<&str> = CAPTURE.lines().filter(|l| !l.starts_with('#')).collect();
+        body[..n].join("\n") + "\n"
+    }
+
+    #[test]
+    fn s7_the_capture_still_carries_every_shape_the_parser_reads() {
+        // The hermetic half of TESTING.md's liveness assertion. Asserted
+        // against the SAME consts production greps with, not a hand-copied
+        // second list — a copy drifts, and a drifted copy passes.
+        //
+        // Scope, stated honestly because escape record 5 is precisely a
+        // comment claiming more than its test proves: this catches a literal
+        // that no longer appears in any real sample. It does NOT catch a
+        // parser taught a shape via a fresh inline literal that was never
+        // added to these consts. Keeping every grepped string in `USAGE_*` /
+        // `BOUNDARY` / `POST_TOKENS` is what makes it worth anything, and that
+        // part is convention, not compiler-enforced.
+        for shape in USAGE_SUMMED {
+            let key = format!("\"{shape}\":");
+            assert!(CAPTURE.contains(&key), "no captured line carries {key}");
+        }
+        for shape in [USAGE_KEY, BOUNDARY, POST_TOKENS] {
+            assert!(CAPTURE.contains(shape), "no captured line carries {shape}");
+        }
+    }
+
+    #[test]
+    fn s7_sums_the_newest_turns_three_input_counts() {
+        // Two real assistant turns, no boundary yet. The newest wins: the
+        // measured reading of that session was 2 + 211125 + 4989.
+        assert_eq!(tokens_from_tail(&capture(2)), Some(216_116));
+        // Proven against the decoys the capture carries for free — `iterations`
+        // repeats every usage key per inference step, `cache_creation` nests
+        // `ephemeral_*_input_tokens`, and `output_tokens` sits between the two
+        // counts that ARE summed. Occupancy is what went IN.
+        assert!(
+            CAPTURE.contains("\"iterations\":["),
+            "the decoy must survive"
+        );
+        assert!(CAPTURE.contains("\"output_tokens\":"));
+        // No usage line anywhere is NOT zero — it is no reading, which holds.
+        assert_eq!(tokens_from_tail("{\"type\":\"user\"}\n"), None);
+    }
+
+    #[test]
+    fn s7_reads_past_a_compact_boundary_and_falls_back_to_its_post_tokens() {
+        // Ending AT the boundary is the real few-second window after a manual
+        // `/compact`: the pre-compaction lines still sit there naming 216k, and
+        // no fresh turn has landed. Take the boundary's own exact figure, or the
+        // battery paints a just-emptied session red.
+        assert_eq!(tokens_from_tail(&capture(3)), Some(24_456));
+        // One turn later, the fresh reading wins.
+        assert_eq!(tokens_from_tail(&capture(4)), Some(37_437));
+        // `preTokens` precedes `postTokens` on that same real line — a looser
+        // scan would report the PRE-compaction size, the exact inverse.
+        assert!(CAPTURE.contains("\"preTokens\":435777"));
+    }
+
+    #[test]
+    fn s7_a_missing_usage_key_is_not_answered_by_the_iterations_copy() {
+        // The turn's own `usage` nests an `iterations` array repeating every
+        // key once per inference step. Drop `cache_read_input_tokens` from the
+        // TOP level of a captured line and the flat scan this replaced would
+        // have answered from `iterations` — reporting one inference step as if
+        // it were the turn. Reading depth 1 only makes that unreachable.
+        // (CodeRabbit, #147)
+        let lines: Vec<&str> = CAPTURE.lines().filter(|l| !l.starts_with('#')).collect();
+        let holed = lines[1].replacen("\"cache_read_input_tokens\":211125,", "", 1);
+        assert!(
+            holed.contains("\"cache_read_input_tokens\":211125"),
+            "the iterations copy must still be there, or this proves nothing"
+        );
+        // 2 + 4989, with the 211125 inside `iterations` correctly ignored.
+        assert_eq!(tokens_from_tail(&format!("{holed}\n")), Some(4_991));
+    }
+
+    #[test]
+    fn s7_a_summed_key_after_a_nested_object_is_still_read() {
+        // Today all three summed keys precede the first nested object, so
+        // stopping at the first closing brace would happen to work. That is a
+        // property of Claude's current key ORDER, not of the format, and key
+        // order is exactly what a serializer reshuffles without telling anyone.
+        // Move one past the nesting and it must still be read. (Surfaced by
+        // `just mutants`: without this, ending the scan early survives.)
+        let lines: Vec<&str> = CAPTURE.lines().filter(|l| !l.starts_with('#')).collect();
+        let moved = lines[1]
+            .replacen("\"cache_read_input_tokens\":211125,", "", 1)
+            .replacen(
+                "\"iterations\":",
+                "\"cache_read_input_tokens\":211125,\"iterations\":",
+                1,
+            );
+        assert_eq!(tokens_from_tail(&format!("{moved}\n")), Some(216_116));
+    }
+
+    #[test]
+    fn s7_a_reading_that_moves_inside_one_bucket_still_pushes() {
+        // The glyph only moves once per tenth of the zone, but #105 renders the
+        // raw count as TEXT. Gating the push on the level alone would leave
+        // that text stale for up to 15k tokens at the default zone. Both
+        // fields have to gate it. (Surfaced by `just mutants`: without this,
+        // narrowing the condition to AND survives.)
+        let lines: Vec<&str> = CAPTURE.lines().filter(|l| !l.starts_with('#')).collect();
+        // 2 + 998 + 0 = 1000 — a real line shape, a different number. Both
+        // this and the parked value bucket to level 0 against the 150k default.
+        let small = lines[0]
+            .replacen(
+                "\"cache_creation_input_tokens\":15884",
+                "\"cache_creation_input_tokens\":998",
+                1,
+            )
+            .replacen(
+                "\"cache_read_input_tokens\":21551",
+                "\"cache_read_input_tokens\":0",
+                1,
+            );
+
+        let mut s = Store::default();
+        s.agents.insert("minted".into(), rec("minted"));
+        let r = s.agents.get_mut("minted").unwrap();
+        r.context_tokens = Some(0);
+        r.context_level = Some(0);
+        let payload = HookPayload {
+            session_id: Some("minted".into()),
+            ..Default::default()
+        };
+        // A QUIET event — an unmatched `Notification` maps to no status and
+        // reorders nothing — so `changed` reflects the battery alone. `Stop`
+        // would flip Idle→Done and push regardless, masking the very thing
+        // under test; that masking is why this survived a mutation round.
+        assert!(apply_hook_event(
+            &mut s,
+            "minted",
+            "Notification",
+            &payload,
+            Some(&format!("{small}\n")),
+            100,
+            true
+        ));
+        assert_eq!(s.agents["minted"].context_tokens, Some(1_000));
+        assert_eq!(
+            s.agents["minted"].context_level,
+            Some(0),
+            "the level must NOT have moved, or this proves nothing"
+        );
+    }
+
+    #[test]
+    fn s7_only_the_newest_boundary_anchors() {
+        // A session compacted twice. Built from the captured boundary rather
+        // than a written one; the figures differ so reading the earlier line
+        // would be visible rather than coincidentally right.
+        let lines: Vec<&str> = CAPTURE.lines().filter(|l| !l.starts_with('#')).collect();
+        let newest = lines[2];
+        let older = newest.replace("24456", "99999");
+        assert_eq!(
+            tokens_from_tail(&format!("{}\n{older}\n{newest}\n", lines[0])),
+            Some(24_456)
+        );
+    }
+
+    #[test]
+    fn s7_a_zero_sum_usage_line_is_not_a_reading() {
+        // Occupancy is never zero on a real turn, so an all-zero `usage` is a
+        // malformed line, not a measurement. Taking it would paint a full
+        // battery on a session that may be nearly out — the one failure a meter
+        // must not have. Zeroed from the captured line so the shape stays real.
+        let lines: Vec<&str> = CAPTURE.lines().filter(|l| !l.starts_with('#')).collect();
+        let zeroed = |l: &str| {
+            l.replace("\"input_tokens\":2", "\"input_tokens\":0")
+                .replace(
+                    "\"cache_creation_input_tokens\":15884",
+                    "\"cache_creation_input_tokens\":0",
+                )
+                .replace(
+                    "\"cache_read_input_tokens\":21551",
+                    "\"cache_read_input_tokens\":0",
+                )
+        };
+        assert_eq!(tokens_from_tail(&format!("{}\n", zeroed(lines[0]))), None);
+        // And it must not shadow a boundary's exact figure either.
+        let tail = format!("{}\n{}\n", lines[2], zeroed(lines[0]));
+        assert_eq!(tokens_from_tail(&tail), Some(24_456));
+    }
+
+    #[test]
+    fn s7_smart_zone_falls_back_rather_than_failing() {
+        let default = clave_types::DEFAULT_SMART_ZONE_TOKENS;
+        assert_eq!(smart_zone_from(Some("120000")), 120_000);
+        assert_eq!(
+            smart_zone_from(Some("  120000 \n")),
+            120_000,
+            "shell exports drag whitespace"
+        );
+        assert_eq!(smart_zone_from(None), default);
+        assert_eq!(smart_zone_from(Some("")), default);
+        assert_eq!(
+            smart_zone_from(Some("150k")),
+            default,
+            "junk falls back, never fails"
+        );
+        // Zero is the dangerous one: it parses, and a zero zone has no ramp to
+        // divide. A hook must never fail hard (§6.5).
+        assert_eq!(smart_zone_from(Some("0")), default);
+    }
+
+    #[test]
+    fn s7_ramp_puts_red_at_the_zone_and_clamps_beyond_it() {
+        let z = 150_000;
+        let top = clave_types::BATTERY_LEVELS - 1;
+        // Full until a tenth is actually spent; one step per tenth thereafter.
+        assert_eq!(battery_level(0, z), 0);
+        assert_eq!(battery_level(14_999, z), 0);
+        assert_eq!(battery_level(15_000, z), 1);
+        assert_eq!(battery_level(90_000, z), 6); // ink crosses to yellow here
+        assert_eq!(battery_level(120_000, z), 8); // and to orange here
+        // The zone is where it turns RED, not where the ramp ends.
+        assert_eq!(battery_level(149_999, z), 9);
+        assert_eq!(battery_level(z, z), top);
+        assert_eq!(
+            battery_level(216_116, z),
+            top,
+            "clamps rather than overflowing"
+        );
+        assert_eq!(
+            battery_level(u32::MAX, 1),
+            top,
+            "no overflow before the clamp"
+        );
+        // A zero zone would divide by nothing; a hook must never fail hard.
+        assert_eq!(battery_level(50_000, 0), 0);
+    }
+
+    #[test]
+    fn s7_rotation_resets_the_battery_and_pushes() {
+        let mut s = Store::default();
+        s.agents.insert("minted".into(), rec("minted"));
+        s.agents.get_mut("minted").unwrap().context_tokens = Some(216_116);
+        s.agents.get_mut("minted").unwrap().context_level = Some(10);
+        let ev = |session: &str| HookPayload {
+            session_id: Some(session.into()),
+            ..Default::default()
+        };
+
+        // `/clear` mints a new id and a new transcript. The conversation the row
+        // is now IN holds nothing, so the battery is full — and that IS a pixel,
+        // so it pushes.
+        assert!(apply_hook_event(
+            &mut s,
+            "minted",
+            "Notification",
+            &ev("cleared"),
+            None,
+            100,
+            true
+        ));
+        assert_eq!(s.agents["minted"].context_tokens, Some(0));
+        assert_eq!(s.agents["minted"].context_level, Some(0));
+
+        // A second event on the SAME conversation is not a rotation, and a
+        // tail-less event holds rather than re-reading.
+        s.agents.get_mut("minted").unwrap().context_tokens = Some(40_000);
+        s.agents.get_mut("minted").unwrap().context_level = Some(2);
+        apply_hook_event(
+            &mut s,
+            "minted",
+            "Notification",
+            &ev("cleared"),
+            None,
+            101,
+            true,
+        );
+        assert_eq!(s.agents["minted"].context_tokens, Some(40_000));
+    }
+
+    #[test]
+    fn s7_a_tail_without_usage_holds_the_previous_reading() {
+        let mut s = Store::default();
+        s.agents.insert("minted".into(), rec("minted"));
+        s.agents.get_mut("minted").unwrap().context_tokens = Some(90_000);
+        s.agents.get_mut("minted").unwrap().context_level = Some(6);
+        let payload = HookPayload {
+            session_id: Some("minted".into()),
+            ..Default::default()
+        };
+        // Never invent a measurement: a readable tail with nothing to read is
+        // not a reading of zero.
+        apply_hook_event(
+            &mut s,
+            "minted",
+            "Stop",
+            &payload,
+            Some("{\"type\":\"user\",\"message\":\"go on\"}\n"),
+            100,
+            true,
+        );
+        assert_eq!(s.agents["minted"].context_tokens, Some(90_000));
+        assert_eq!(s.agents["minted"].context_level, Some(6));
     }
 
     #[test]

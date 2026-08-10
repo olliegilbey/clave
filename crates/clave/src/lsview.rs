@@ -70,6 +70,8 @@ mod tests {
             title: None,
             summary: String::new(),
             default_branch: None,
+            context_tokens: None,
+            context_level: None,
             live_session: None,
         }
     }
