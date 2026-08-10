@@ -15,6 +15,7 @@ pub mod lsview;
 pub mod munge;
 pub mod open;
 pub mod release;
+pub mod sandbox;
 pub mod setup;
 pub mod spawn;
 pub mod store;
