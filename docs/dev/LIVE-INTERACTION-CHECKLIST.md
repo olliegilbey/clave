@@ -412,15 +412,37 @@ anything else; worktree beats both.
 
 **Do, and check each.**
 
-- `Alt+Down` / `Alt+j` — next display row. `Alt+Up` / `Alt+k` — previous. Both
-  wrap.
-- `Alt+1` … `Alt+9` — jump to display row N (1-based). On a **dormant** row this
-  **selects** it — nothing opens (#100 reversed the old immediate-open;
-  selection and launch are two separate acts on every input path).
-- **Nothing wakes a dormant row except `Alt+Enter`** (#100/#116). Walk onto a
-  dormant row and **stop** — the gutter shows the commit mark **U+23CE**
-  (carpYellow), the row takes the highlight, and no matter how long you park,
-  **no tab appears**. The 0.4 s dwell is deleted.
+- **The list is two blocks** (#112). Every live row first, then every dormant
+  row, each block ordered by the commitment ordinal. Confirm the live block is
+  **contiguous and complete** — no dormant row above a live one, and no live
+  row stranded below the join. On the real store expect ~4 live above ~17
+  dormant.
+- `Alt+Down` / `Alt+j` — next display row **within the focused block**. `Alt+Up`
+  / `Alt+k` — previous. Both wrap at that block's ends: walk forward off the
+  last live row and you arrive back at the first, **not** on the dormant row
+  sitting directly below it on screen. Cycle the whole live block twice in each
+  direction and confirm you never leave it (#112).
+- **Clicking a list focuses it.** Click any dormant row, then `Alt+j`/`Alt+k`:
+  the walk is now inside the **dormant** block, moving the selection row by row
+  and switching no tab, and it wraps at that block's ends without escaping into
+  the live block above. Click any live row and the walk returns to the live
+  block. **A walk never changes which block it is in — only a pick does**
+  (click, or `Alt+N`).
+- **The selection self-heals.** With a dormant row selected, `Alt+Enter` it. Once
+  it comes up as a tab, `Alt+j` should be walking the **live** block again — the
+  focus follows the row, and the row is no longer dormant.
+- `Alt+1` … `Alt+9` — jump to display row N (1-based), counting across BOTH
+  blocks. This is the only keyboard route into the dormant block, so with 4 live
+  rows `Alt+5` is the most recently closed one. On a **dormant** row it
+  **selects** — nothing opens (#100 reversed the old immediate-open; selection
+  and launch are two separate acts on every input path).
+- **Nothing wakes a dormant row except `Alt+Enter`** (#100/#116). Pick a dormant
+  row with `Alt+N` or the mouse and **stop** — the gutter shows the commit mark
+  **U+23CE** (carpYellow), the row takes the highlight, and no matter how long
+  you park, **no tab appears**. The 0.4 s dwell is deleted.
+- **A dormant selection survives a walk.** With a dormant row selected, press
+  `Alt+j`: the selection moves to the next dormant row and stays in that block
+  (#112). Only picking a live row hands the walk back.
 - **Commit-to-open.** With a dormant row selected, `Alt+Enter`. The mark goes
   ⏎ → ↻ (U+21BB, carpYellow), a tab appears, the row goes live and the
   selection reverts to the focused tab. A second `Alt+Enter` while ↻ is
