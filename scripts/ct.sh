@@ -41,14 +41,34 @@ set -euo pipefail
 # Fails closed on its own terms: if `clave dev instance` cannot name a session
 # — no `clave` on PATH, an unkeyable worktree — there is no safe fallback,
 # because the fallback IS the bug. Refuse and say why.
-if ! SESSION="$(clave dev instance --field session 2>/dev/null)" || [[ -z "$SESSION" ]]; then
-  cat >&2 <<'EOF'
+# ASK THIS CHECKOUT'S BINARY, NOT WHATEVER `clave` MEANS TODAY. Bare `clave` on
+# PATH is the maintainer's STABLE install — that is "the one leak" (#43/#44),
+# and it bit here immediately: the stable v0.1.2 has no `dev instance`
+# subcommand at all, so asking it produced an error, and a wrapper that treats
+# any failure as "refuse" then refuses forever for a reason that reads like "the
+# sandbox is down". The script ships inside a checkout; that checkout's build is
+# the authority on which sandbox the checkout owns, and it is the same binary
+# `just sandbox` staged from.
+CLAVE_BIN="${CLAVE_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/target/release/clave}"
+if [[ ! -x "$CLAVE_BIN" ]]; then
+  cat >&2 <<EOF
+REFUSING: no built clave at
+  ${CLAVE_BIN}
+
+The wrapper asks THIS checkout's binary which sandbox it owns, because bare
+\`clave\` on PATH is the stable install and answers for the wrong one. Build it
+(\`just sandbox\` does, on the way in), or set \$CLAVE_BIN.
+EOF
+  exit 1
+fi
+
+if ! SESSION="$("$CLAVE_BIN" dev instance --field session 2>/dev/null)" || [[ -z "$SESSION" ]]; then
+  cat >&2 <<EOF
 REFUSING: could not resolve this checkout's sandbox session.
 
-`clave dev instance --field session` produced nothing. Either `clave` is not on
-PATH here, or this worktree's name cannot key an instance. There is deliberately
-no fallback: guessing a session name is how a drive reaches the maintainer's
-fleet. Fix the derivation, then retry.
+\`${CLAVE_BIN} dev instance --field session\` produced nothing — this worktree's
+name cannot key an instance. There is deliberately no fallback: guessing a
+session name is how a drive reaches the maintainer's fleet.
 EOF
   exit 1
 fi
