@@ -95,10 +95,18 @@ fn fnv1a32(s: &str) -> u32 {
 /// makes the key safe in the shell (`scripts/sandbox-setup.sh` interpolates
 /// it) and in KDL.
 ///
-/// Over `KEY_MAX_BYTES`, the name is cut to `HEAD_BYTES` and given a 4-hex
-/// digest of the ORIGINAL directory name, so two worktrees sharing a long
-/// prefix stay separate instead of silently sharing a sandbox — which is the
-/// bug this module exists to remove.
+/// A name survives VERBATIM only when sanitization lost nothing and the
+/// budget holds. Any lossy pass gets a 4-hex digest of the ORIGINAL name
+/// appended, because a lossy result is shareable: `fix_auth`, `Fix-Auth` and
+/// `fix-auth` are three worktrees git will happily hold at once, and all
+/// three sanitize to `fix-auth` — un-digested, they would share one sandbox,
+/// which is the bug this module exists to remove (#161 review). Over
+/// `KEY_MAX_BYTES` the same digest rule applies with the head cut to
+/// `HEAD_BYTES`, so two long names sharing a prefix stay separate too.
+///
+/// Residual collision: two DISTINCT originals whose 16-bit digests tie on
+/// the same head (~1 in 65k), or a clean name spelled to look like another's
+/// digest form. Accepted — this is separation, not cryptography.
 ///
 /// `None` means nothing usable survived (a name with no ASCII letter or
 /// digit). Callers must fail rather than fall back to the shared instance.
@@ -115,11 +123,11 @@ pub fn sanitize_key(dir_name: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    if trimmed.len() <= KEY_MAX_BYTES {
+    if trimmed == dir_name && trimmed.len() <= KEY_MAX_BYTES {
         return Some(trimmed.to_string());
     }
     // ASCII by construction above, so byte slicing cannot split a char.
-    let head = trimmed[..HEAD_BYTES].trim_end_matches('-');
+    let head = trimmed[..trimmed.len().min(HEAD_BYTES)].trim_end_matches('-');
     Some(format!("{head}-{:04x}", fnv1a32(dir_name) & 0xffff))
 }
 
@@ -471,17 +479,33 @@ mod tests {
 
     /// Every character class zellij accepts verbatim and clave refuses to
     /// pass on: spaces, dots, slashes are impossible in a `file_name()` but
-    /// the rest are not. The witness is what the sanitizer produces, not
-    /// merely that it is non-empty — a pass-through implementation returns
-    /// the input unchanged and would fail every line here.
+    /// the rest are not. Each lossy result carries the digest of its OWN
+    /// original — the witness is the exact key, so a pass-through
+    /// implementation and a digest-less one both fail every line here.
     #[test]
     fn anything_outside_lowercase_alphanumerics_becomes_a_single_hyphen() {
-        assert_eq!(sanitize_key("Fix Auth").as_deref(), Some("fix-auth"));
-        assert_eq!(sanitize_key("a..b").as_deref(), Some("a-b"));
-        assert_eq!(sanitize_key("a\\b").as_deref(), Some("a-b"));
-        assert_eq!(sanitize_key("__lead__").as_deref(), Some("lead"));
-        assert_eq!(sanitize_key("a  \t b").as_deref(), Some("a-b"));
-        assert_eq!(sanitize_key("caf\u{e9}").as_deref(), Some("caf"));
+        assert_eq!(sanitize_key("Fix Auth").as_deref(), Some("fix-auth-b966"));
+        assert_eq!(sanitize_key("a..b").as_deref(), Some("a-b-ab8e"));
+        assert_eq!(sanitize_key("__lead__").as_deref(), Some("lead-ab3b"));
+        assert_eq!(sanitize_key("a  \t b").as_deref(), Some("a-b-881d"));
+        assert_eq!(sanitize_key("caf\u{e9}").as_deref(), Some("caf-5049"));
+    }
+
+    /// The Codex P1 (#161): distinct names that SANITIZE alike are worktrees
+    /// git will hold simultaneously, so they must never share a key. A clean
+    /// name stays verbatim; every lossy variant is separated by the digest
+    /// of its own original.
+    #[test]
+    fn names_that_sanitize_alike_still_get_distinct_keys() {
+        let clean = sanitize_key("fix-auth").unwrap();
+        let underscore = sanitize_key("fix_auth").unwrap();
+        let cased = sanitize_key("Fix Auth").unwrap();
+        assert_eq!(clean, "fix-auth");
+        assert_eq!(underscore, "fix-auth-11ef");
+        assert_ne!(underscore, cased);
+        let slashed = sanitize_key("a\\b").unwrap();
+        assert!(slashed.starts_with("a-b-"), "{slashed}");
+        assert_ne!(slashed, sanitize_key("a..b").unwrap());
     }
 
     #[test]

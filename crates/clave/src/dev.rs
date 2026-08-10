@@ -277,6 +277,25 @@ fn enter_sandbox(sb: &crate::sandbox::Sandbox) {
     }
 }
 
+/// The unconditional form, for STAGING (`dev scenario`): staging's identity
+/// is the working tree it runs in, full stop. Under the respect-env form, a
+/// shell that inherited another sandbox's `CLAVE_*` — any pane inside a
+/// launched sandbox session qualifies — would seed repos under THIS root
+/// while every store write lands in the OTHER instance's state dir, a
+/// split-brain the setup script's self-check only reports after the foreign
+/// root is already written (#161 review). `dev launch` keeps respect-env:
+/// its pasted prefix is the caller naming an instance deliberately. Like
+/// `enter_sandbox`, an expected mutant survivor — env writes cannot be
+/// exercised by parallel tests (see `env.rs`).
+fn force_sandbox(sb: &crate::sandbox::Sandbox) {
+    // SAFETY: single-threaded CLI entry point; set before any spawn.
+    unsafe {
+        std::env::set_var("CLAVE_SESSION", &sb.session);
+        std::env::set_var("CLAVE_STATE_DIR", sb.state_dir());
+        std::env::set_var("CLAVE_DATA_DIR", sb.data_dir());
+    }
+}
+
 /// `clave dev launch`: the sandbox session in one short command — sets the
 /// sandbox env (children inherit) and execs the NORMAL launch path.
 /// Session lifecycle stays the user's: this exists to be typed BY the
@@ -407,7 +426,7 @@ pub fn run_scenario(name: &str) -> Result<()> {
     let sb = crate::sandbox::Sandbox::resolve()?;
     sb.ensure()?;
     let root = sb.root.clone();
-    enter_sandbox(&sb);
+    force_sandbox(&sb);
     for d in ["state", "data", "repos"] {
         std::fs::create_dir_all(root.join(d))?;
     }
