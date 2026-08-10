@@ -26,7 +26,12 @@
 #   seek-trace.sh arms                    per-instance re-arm counts + trigger
 set -uo pipefail
 
-LOG="${TMPDIR:-/tmp}/zellij-$(id -u)/zellij-log/zellij.log"
+# `${TMPDIR%/}`: macOS ships $TMPDIR with a trailing slash and zellij's own
+# paths have none — see FOOTGUNS, "Process and tooling". Only a `-r` test and a
+# `grep -F` read this, so the double slash was harmless here; it is normalised
+# so the two scripts do not teach different habits.
+LOG="${TMPDIR:-/tmp}"
+LOG="${LOG%/}/zellij-$(id -u)/zellij-log/zellij.log"
 [[ -r "$LOG" ]] || { echo "no zellij log at $LOG" >&2; exit 1; }
 
 today="$(date +%Y-%m-%d)"

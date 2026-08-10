@@ -50,17 +50,22 @@ fi
 # The socket directory is keyed on zellij's client/server contract version, so
 # glob rather than hard-code it: a contract bump must turn this into a wrapper
 # that says so, not one that silently refuses everything for a version reason.
-SOCKET=""
+#
+# Collect ALL of them and demand exactly one (CodeRabbit, PR #152). What is
+# checked here is a socket PATH; what runs below is resolved by session NAME,
+# and two contract directories each holding a `clave-test` would make those two
+# different things. Zellij would pick for itself and this preflight would have
+# vouched for the other one. Refusing is right: a machine in that state has a
+# leftover from another zellij version, and the answer is to clean it up, not
+# to guess.
+SOCKETS=()
 for candidate in "${SOCKET_ROOT}"/contract_version_*/"${SESSION}"; do
-  if [[ -S "$candidate" ]]; then
-    SOCKET="$candidate"
-    break
-  fi
+  [[ -S "$candidate" ]] && SOCKETS+=("$candidate")
 done
 
 # 1. The socket must exist. A dead session leaves nothing here, which is
 #    precisely the case that used to fall through to the maintainer's fleet.
-if [[ -z "$SOCKET" ]]; then
+if [[ ${#SOCKETS[@]} -eq 0 ]]; then
   cat >&2 <<EOF
 REFUSING: no ${SESSION} session socket under
   ${SOCKET_ROOT}/contract_version_*/${SESSION}
@@ -71,6 +76,17 @@ the sandbox (staging is 'just sandbox'; launching is his), then retry.
 EOF
   exit 1
 fi
+
+if [[ ${#SOCKETS[@]} -gt 1 ]]; then
+  echo "REFUSING: ${#SOCKETS[@]} '${SESSION}' sockets exist, under different zellij" >&2
+  echo "contract versions. Which one a client picks is zellij's choice, not this" >&2
+  echo "script's, so the preflight below could vouch for the wrong server:" >&2
+  printf '  %s\n' "${SOCKETS[@]}" >&2
+  echo "Remove the stale contract directory, then retry." >&2
+  exit 1
+fi
+
+SOCKET="${SOCKETS[0]}"
 
 # 2. A stale socket file outlives its server. Require a live server process
 #    holding this exact path, so a leftover socket cannot green the check.
@@ -86,4 +102,25 @@ fi
 unset ZELLIJ ZELLIJ_PANE_ID
 export ZELLIJ_SESSION_NAME="$SESSION"
 
-exec zellij --session "$SESSION" action "$@"
+# 4. Bound it (CodeRabbit, PR #152). Every check above races with the session
+#    dying, and `zellij action` against a dead or wedged session BLOCKS
+#    INDEFINITELY AND NEVER ERRORS (FOOTGUNS) — which is the single worst thing
+#    to hand an autonomous loop, because the agent has no signal at all and the
+#    human sees a hang. A wall clock is the only guard against a race a preflight
+#    cannot win. `action` does not stream stdin, so unlike `zellij pipe` a killed
+#    client here leaves nothing half-open in the server's CLI lane.
+#
+#    Nothing normal takes seconds; override for a deliberately slow action.
+CT_TIMEOUT="${CLAVE_CT_TIMEOUT:-15}"
+
+if command -v timeout >/dev/null 2>&1; then
+  exec timeout "$CT_TIMEOUT" zellij --session "$SESSION" action "$@"
+elif command -v gtimeout >/dev/null 2>&1; then
+  exec gtimeout "$CT_TIMEOUT" zellij --session "$SESSION" action "$@"
+else
+  # No coreutils. `alarm` survives `exec` (POSIX: pending alarms are not reset
+  # by an exec), and SIGALRM's default action terminates — so this bounds the
+  # real client, not a wrapper. Exits 142 on expiry.
+  exec perl -e 'alarm shift @ARGV; exec @ARGV or die "exec failed: $!\n"' \
+    "$CT_TIMEOUT" zellij --session "$SESSION" action "$@"
+fi

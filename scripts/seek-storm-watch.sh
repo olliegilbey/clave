@@ -39,10 +39,18 @@ while :; do
   while IFS=, read -r pid session; do
     [[ -z "${pid:-}" ]] && continue
     # lsof on a process we do not own can fail; a blank reading must not be
-    # written as a zero, which would read as "fds dropped to nothing".
-    all="$(lsof -p "$pid" 2>/dev/null | tail -n +2 | wc -l | tr -d ' ')"
-    [[ -z "$all" || "$all" == "0" ]] && all="NA"
-    unix="$(lsof -p "$pid" 2>/dev/null | grep -c unix | tr -d ' ')"
+    # written as a zero, which would read as "fds dropped to nothing". ONE
+    # capture feeds both columns (CodeRabbit, PR #152): two calls are two
+    # different samples, and the unguarded one was `unix_sockets` — the column
+    # that actually tracks the EMFILE kill condition this script exists for.
+    snapshot="$(lsof -p "$pid" 2>/dev/null | tail -n +2)"
+    if [[ -z "$snapshot" ]]; then
+      all="NA"
+      unix="NA"
+    else
+      all="$(printf '%s\n' "$snapshot" | wc -l | tr -d ' ')"
+      unix="$(printf '%s\n' "$snapshot" | grep -c unix | tr -d ' ')"
+    fi
     printf '%s,%s,%s,%s,%s,%s\n' "$ts" "$pid" "$session" "$all" "$unix" "$pipes" >>"$out"
     printf '%s  %-8s %-14s fds=%-5s unix=%-4s pipes=%s\n' \
       "$ts" "$pid" "$session" "$all" "$unix" "$pipes" >&2

@@ -775,7 +775,7 @@ scripts/ct.sh close-tab       # closes the FOCUSED tab
 zellij list-sessions
 ```
 
-**Dump the sandbox layout** (env-scoped to `clave-test` — pane geometry truth):
+**Dump the sandbox layout** (guarded by `scripts/ct.sh` — pane geometry truth):
 
 ```bash
 scripts/ct.sh dump-layout
@@ -921,8 +921,7 @@ C8 fixed-pane resize bug). Follow it in order:
    cp target/wasm32-wasip1/release/clave-bar.wasm \
      ~/.local/state/clave-dev/data/clave-bar.wasm
    ```
-4. **Hot-reload** with the sanctioned command from above (env-scoped to
-   `clave-test`).
+4. **Hot-reload** with the sanctioned `scripts/ct.sh` command from above.
 5. **The human exercises the behavior** on screen.
 6. **Read the zellij log filtered by your marker AND the build tag** — both, so
    you are reading this run and not a ghost of an earlier one.
