@@ -1,7 +1,6 @@
 # CLAUDE.md — clave
 
 @AGENTS.md
-@OPUS.md
 
 Your Claude models have been upgraded massively since this project started, your additional skill and capability means you can reassess past work for refactors, simplification, and improvements to keep everything elegant and sensible for the forward momentum and to have a great codebase.
 Do this without allowing conversations and implementations to creep massively in scope.
@@ -16,3 +15,5 @@ Work directly and proportionately.
 - Keep progress concise; report changed files, tests run, and any unresolved risk at the end.
 - Stop when the acceptance criteria are met.
 - Keep the majority of message content for after you've made tool calls to avoid prose going unseen between calls. Short sentences between, consolidation in the final message of a tool-call stream. That final message is a report, not a summary of everything you did — see OPUS.md § Response style for its shape and length.
+
+If you are running on an Opus model, read `OPUS.md` as your very first tool call.
