@@ -1,0 +1,146 @@
+# Per-agent sandbox isolation — unfinished, pick up here
+
+## State
+
+Branch `fix/sandbox-segregation`, worktree
+`.claude/worktrees/sandbox-segregation`, pushed at `63345ea`. Based on
+`origin/main` (e3c2860, the `clave prune --idle-days` merge). **No PR — do not
+open one until the verification below is done.**
+
+Two agent sessions were stopped mid-task: the first by the user, the second by
+the account's monthly spend limit. The commit is a preservation commit, not a
+claim of completion. Its message lists the same gaps as this file; trust
+whichever you read second.
+
+## What the change does
+
+The dev sandbox was a singleton — one session name (`clave-test`) and one root
+(`~/.local/state/clave-dev/` holding `state/`, `data/`, `shim/`). Concurrent
+agents overwrote each other's plugin binary, generated KDL and PATH shim, so one
+agent would launch a "sandbox" running another's build. It bit several times,
+and once left a dev bar pane inside the maintainer's live fleet.
+
+The branch makes the whole instance per-agent — session name, state dir, data
+dir and shim dir all derived from one key, keyed on the worktree directory name
+so it is unique by construction and legible in a session list. Running from the
+main checkout keeps the familiar `clave-test` name and root. A reaper sweeps
+sandboxes whose originating worktree is gone.
+
+Changed: `crates/clave/src/sandbox.rs` (new, ~760 lines), `dev.rs`, `main.rs`,
+`lib.rs`, `scripts/sandbox-setup.sh`, `justfile`, `CONTRIBUTING.md`,
+`docs/dev/TESTING.md`, `FOOTGUNS.md`, `UBIQUITOUS_LANGUAGE.md`.
+
+## What is verified
+
+`just gates` passes — all four, workspace suite green at 210 + 130. The new
+module carries **20 tests** (`crates/clave/src/sandbox.rs`, `mod tests` at
+`:454`). Those 20 are the ones to attack first — see below.
+
+## First steps, concretely
+
+```bash
+cd .claude/worktrees/sandbox-segregation   # already on fix/sandbox-segregation
+git log --oneline -2                       # 54247bd, 63345ea
+just gates                                 # confirm the baseline is still green
+cargo mutants -p clave --file crates/clave/src/sandbox.rs --timeout 120
+```
+
+Then read the diff in full — `git show 63345ea` — before changing anything. It
+was written across two interrupted sessions and has never been reviewed.
+
+## What is NOT verified — do this before opening a PR
+
+1. **No test here has been proven able to fail.** This is the repo's recurring
+   failure mode (three near-misses on #56 alone; four more on #112, where tests
+   kept passing for the wrong reason after the behaviour under them changed).
+   Reinstate each defect deliberately, watch the test go red, restore it, and
+   say so in the PR. A green suite that never proved it can go red is not
+   evidence — treat the whole suite on this branch as unproven.
+2. **`cargo mutants` was never completed.** The full-file run over `dev.rs`
+   was drowning in pre-existing scenario tables; the diff-scoped run is the one
+   that was about to be tried and never was.
+3. **Nobody has read the whole diff** — not a human, not an agent. It is ~1260
+   lines written across two interrupted sessions.
+4. **The zellij session-name rules were to be established from the vendored
+   source** (`~/.cargo/registry/src/*/zellij-utils-0.44.3/`), not guessed.
+   Confirm that was actually done rather than assumed — length limits and
+   illegal characters both matter, and the derivation must be deterministic.
+
+## What cannot be verified from an agent session at all
+
+Proving two sandboxes genuinely coexist needs a session launch, and session
+lifecycle is the maintainer's. State that limit plainly in the PR rather than
+implying end-to-end coverage.
+
+## Hard constraints that applied and still apply
+
+- Never launch or kill a zellij session; never run a bare `zellij` command. The
+  agent runs inside the maintainer's live fleet, so a bare command targets it.
+  `zellij list-sessions -n` as a read-only guard is the only sanctioned call.
+- **The sandbox session env var FAILS OPEN onto the live fleet** (#137) — set it
+  wrong, or not at all, and a command aimed at the sandbox hits the maintainer's
+  working session. The maintainer's standing instruction is that driving goes
+  through a wrapper (`ct.sh`) rather than bare env vars. **That wrapper exists
+  but is NOT merged**: added by `1971fee` (*"harness: driving the sandbox now
+  fails closed"*, #137) on branch `fix/137-width-seek-storm`. It is absent from
+  `origin/main` and from this branch, where `scripts/` holds only
+  `sandbox-setup.sh`.
+
+  So there is no safe driving route on this branch today. Before driving
+  anything, either work on top of the #137 branch, cherry-pick the harness, or
+  wait for it to land — and check first whether it has merged since. The
+  fail-open direction is toward the maintainer's live fleet, not away from it,
+  which is why this is worth a minute rather than an assumption.
+
+  **This also concerns your own change:** #137 makes sandbox driving fail
+  closed for a SINGLE shared sandbox. Per-agent roots move the ground under it,
+  so read `1971fee` before finalising the derivation and say in the PR whether
+  the two compose or collide.
+- Never write `~/.cargo/bin/clave`, `~/.local/share/clave/**`,
+  `~/.config/zellij/**`. The staging script self-checks this; keep it working.
+- The #44 identity pair: generated `config.kdl` and `layout.kdl` must carry an
+  identical `clave_binary`, or the next keypress spawns a second bar.
+
+## Explicitly not this ticket
+
+**Issue #160** — an agent staging from inside the live fleet leaving a dev bar
+pane in it. Independent: per-agent roots stop agents clobbering *each other*;
+they do nothing about a stray pane in the *live* fleet. Filed separately, and
+the likely fix there is refusing to stage from inside any zellij session at all.
+
+## The other branch in flight
+
+`fix/112-dormant-segregation` — PR #151, live/dormant segregation and the
+two-ring nav. Complete and green but **not live-validated**; it is based on
+`960c8db`, before the prune merge, so it will want a rebase. Nothing it touches
+overlaps this branch.
+
+## Resolution (2026-08-10, later)
+
+The verification above is done and this branch became a PR.
+
+- **The whole diff was read** — one session, top to bottom, including the
+  staging script's self-check and both doc rewrites. One finding, no code
+  change: see the ct.sh point below.
+- **The tests were proven able to fail by mutation, not by hand**: two runs
+  (file-scoped over `sandbox.rs`: 57 mutants, 45 caught; diff-scoped over the
+  whole change: 77 mutants, 55 caught). Every miss in both runs sits in the
+  imperative shell — `main`, the `dev` entry points, `enter_sandbox`,
+  `worktree_identity`/`git_stdout`/`run_reap` — whose pure decision logic is
+  what the suite pins. Recorded as expected survivors on `sandbox.rs`'s test
+  module, same precedent as the width-seek survivors note.
+- **The zellij session-name rules were confirmed against the vendored source,
+  not assumed**: the 104-byte macOS socket cap, the socket-dir derivation and
+  its measured 78 bytes (a first re-measurement read 79 — `$TMPDIR` ends in a
+  slash and the check double-counted it; the module's number is right), the
+  join of dir and name, the near-absent name validation, and the fact that
+  only `--session` runs the length check. The 24-byte budget holds exactly,
+  with the one-byte margin the test asserts.
+- **ct.sh (#137 branch, unmerged) and this change collide by design**: it
+  hardcodes `clave-test` precisely so a session name is never expressible as
+  an argument. Whichever branch lands second must switch that constant to
+  `clave dev instance --field session` — cwd-keyed, still not an argument, so
+  the principle survives the rename. Stated in both PRs.
+- **Still not provable from an agent session**: two sandboxes genuinely
+  coexisting needs two launches, which are the maintainer's. The PR lists the
+  numbered live steps.

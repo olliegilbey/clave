@@ -55,6 +55,32 @@ artifacts, so it reproduces production by construction.
 | **Agents** | your real work | synthetic — `clave dev scenario <name>` |
 | **Teardown** | never | `clave dev reset` |
 
+### The sandbox column is per working tree
+
+Those sandbox names are the **main checkout's**. Work from a linked git
+worktree and the whole instance moves with it: a worktree directory named
+`prune-wt` gets the session `clave-test-prune-wt` and the root
+`~/.local/state/clave-dev-prune-wt`, session name and state, artifact and shim
+directories all derived from that one key.
+
+That exists because several agents work this repo at once, each in its own
+worktree, and a single shared root meant the second one to stage silently
+overwrote the first one's plugin binary and generated config — so an agent
+launched a "sandbox" running someone else's build and measured it for a full
+round. The worktree directory name is the key rather than a random id because
+it stays legible in `zellij list-sessions`.
+
+Ask rather than guess, and clean up abandoned ones:
+
+```bash
+clave dev instance             # this tree's session name and root
+clave dev reap --dry-run       # sandboxes whose worktree is gone
+```
+
+`reap` deletes only directories, never a session. A sandbox whose worktree is
+gone but whose session is still up is printed with the kill command for you to
+run.
+
 Two invariants:
 
 - **No beta channel.** Promotion is one-way: validate in the sandbox → cut a

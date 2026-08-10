@@ -192,8 +192,9 @@ enum Command {
     },
 
     /// Live-validation harness (§6.9): seed sandboxed scenarios, dump status,
-    /// reset. The sandbox (session `clave-test`, own store/data/claude dirs)
-    /// can never touch the real session or ~/.claude.
+    /// reset. The sandbox (its own session, store and data dirs) can never
+    /// touch the real session or ~/.claude — and since the instance is keyed
+    /// on the working tree, one agent's sandbox cannot touch another's.
     Dev {
         #[command(subcommand)]
         action: DevAction,
@@ -218,7 +219,7 @@ enum Command {
 enum DevAction {
     /// Seed a named scenario and print the launch command.
     Scenario { name: String },
-    /// Attach/create the sandboxed clave-test session (sandbox env set
+    /// Attach/create this working tree's sandbox session (sandbox env set
     /// internally — the short form of the env-prefixed launch). Run this
     /// yourself in a non-zellij terminal.
     Launch,
@@ -226,6 +227,19 @@ enum DevAction {
     Status,
     /// Wipe the sandbox (prints the kill-session command first).
     Reset,
+    /// Print this working tree's sandbox instance, creating its root and
+    /// origin marker if absent. `--field` prints one raw value, for scripts.
+    Instance {
+        #[arg(long, value_parser = ["session", "root", "state", "data", "shim", "key"])]
+        field: Option<String>,
+    },
+    /// Delete the per-agent sandboxes whose worktree no longer exists. Never
+    /// kills a session: a live one is printed for you to kill.
+    Reap {
+        /// Report what would be deleted, delete nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -573,6 +587,8 @@ fn main() -> Result<()> {
             DevAction::Launch => dev::run_launch(),
             DevAction::Status => dev::run_status(),
             DevAction::Reset => dev::run_reset(),
+            DevAction::Instance { field } => dev::run_instance(field.as_deref()),
+            DevAction::Reap { dry_run } => clave::sandbox::run_reap(dry_run),
         },
         Some(Command::Release { wasm_src, cli_src }) => {
             release::run_release(Path::new(&wasm_src), Path::new(&cli_src))
@@ -703,6 +719,44 @@ mod tests {
         match cli.command {
             Some(Command::PruneTabs { stale_ids }) => assert_eq!(stale_ids, vec![3, 1, 7]),
             _ => panic!("parsed into the wrong command"),
+        }
+    }
+
+    /// `scripts/sandbox-setup.sh` reads its session name and root out of
+    /// `clave dev instance --field …`, so the accepted field names are a
+    /// contract with the shell, not an internal detail. The rejection half is
+    /// the point: a typo'd field must die at the parse layer rather than
+    /// print nothing and leave the script staging into an empty path.
+    #[test]
+    fn dev_instance_pins_the_field_names_the_setup_script_asks_for() {
+        for f in ["session", "root", "state", "data", "shim", "key"] {
+            let cli = Cli::try_parse_from(["clave", "dev", "instance", "--field", f])
+                .unwrap_or_else(|e| panic!("--field {f} must parse: {e}"));
+            match cli.command {
+                Some(Command::Dev {
+                    action: DevAction::Instance { field },
+                }) => assert_eq!(field.as_deref(), Some(f)),
+                _ => panic!("parsed into the wrong command"),
+            }
+        }
+        assert!(Cli::try_parse_from(["clave", "dev", "instance", "--field", "sesion"]).is_err());
+        // Bare form is the human one and must stay valid.
+        assert!(Cli::try_parse_from(["clave", "dev", "instance"]).is_ok());
+    }
+
+    #[test]
+    fn dev_reap_defaults_to_deleting_and_opts_into_dry_run() {
+        for (args, want) in [
+            (vec!["clave", "dev", "reap"], false),
+            (vec!["clave", "dev", "reap", "--dry-run"], true),
+        ] {
+            let cli = Cli::try_parse_from(args).expect("must parse");
+            match cli.command {
+                Some(Command::Dev {
+                    action: DevAction::Reap { dry_run },
+                }) => assert_eq!(dry_run, want),
+                _ => panic!("parsed into the wrong command"),
+            }
         }
     }
 }
