@@ -298,6 +298,27 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
 /// exactly one instance repainted locally — the pipe push is how every other
 /// instance learns the flip. Unknown uuid returns None (no bump, no push):
 /// the plugin can race an agent whose tab just closed.
+/// #139: repoint a relocated row to its transcript's true home. Same
+/// contract as its apply_* neighbours (#143 review): seq advances and a
+/// snapshot returns only when the row EXISTS — an unknown uuid is a no-op
+/// that broadcasts nothing.
+pub fn apply_relocation(
+    paths: &StorePaths,
+    uuid: &str,
+    cwd: &str,
+    branch: Option<&str>,
+) -> Result<Option<AgentSnapshot>> {
+    with_store_mut(paths, |s| {
+        let r = s.agents.get_mut(uuid)?;
+        r.cwd = cwd.to_string();
+        if let Some(b) = branch {
+            r.branch = b.to_string();
+        }
+        s.seq += 1; // monotonic pipe contract (§5)
+        Some(snapshot_from(s))
+    })
+}
+
 pub fn apply_focus(paths: &StorePaths, uuid: &str, now: u64) -> Result<Option<AgentSnapshot>> {
     with_store_mut(paths, |s| {
         let r = s.agents.get_mut(uuid)?;
@@ -573,6 +594,40 @@ pub fn clear_session_order(paths: &StorePaths) -> Result<()> {
     })
 }
 
+/// Retire dormant rows idle longer than the cutoff (#149). Pure — the caller
+/// owns the locked write, and the caller supplies `protected`: the uuids that
+/// are live in the RUNNING zellij session. Protection is deliberately not
+/// read off `tab_id` here — binds are session-scoped and only cleared at the
+/// NEXT launch, so between a kill and a relaunch every row still carries its
+/// dead session's tab_id, and a bind-based guard would silently make the
+/// whole fleet unprunable (#150 review). The transcript is untouched either
+/// way — a pruned conversation stays resumable through the Alt+a resume
+/// flow; only the sidebar row goes. Returns the removed rows, oldest-idle
+/// first, for the caller to print; bumps seq only when something went.
+pub fn prune_idle(
+    store: &mut Store,
+    now: u64,
+    idle_days: u64,
+    protected: &std::collections::BTreeSet<String>,
+) -> Vec<AgentRecord> {
+    let cutoff = now.saturating_sub(idle_days.saturating_mul(86_400));
+    let doomed: Vec<String> = store
+        .agents
+        .values()
+        .filter(|r| !protected.contains(&r.uuid) && r.last_interacted < cutoff)
+        .map(|r| r.uuid.clone())
+        .collect();
+    let mut removed: Vec<AgentRecord> = doomed
+        .iter()
+        .filter_map(|u| store.agents.remove(u))
+        .collect();
+    removed.sort_by_key(|r| r.last_interacted);
+    if !removed.is_empty() {
+        store.seq += 1; // monotonic pipe contract (§5)
+    }
+    removed
+}
+
 /// Seconds since the epoch — the store's one timestamp format.
 pub fn now_unix() -> u64 {
     SystemTime::now()
@@ -613,6 +668,54 @@ mod tests {
             default_branch: None,
             live_session: None,
         }
+    }
+
+    /// #149: only unprotected rows past the cutoff go; a protected row NEVER
+    /// prunes however old; a DEAD session's bind protects nothing (#150
+    /// review: binds outlive their session until the next launch clears
+    /// them); exactly-at-cutoff stays; seq advances once per real removal
+    /// and not on a no-op; removed rows come back oldest-idle first.
+    #[test]
+    fn prune_idle_takes_only_unprotected_rows_past_the_cutoff() {
+        let mut s = Store::default();
+        let now = 100 * 86_400;
+        let mut older = rec("u-older");
+        older.last_interacted = now - 20 * 86_400;
+        let mut old = rec("u-old");
+        old.last_interacted = now - 11 * 86_400;
+        let mut fresh = rec("u-fresh");
+        fresh.last_interacted = now - 9 * 86_400;
+        let mut live = rec("u-live");
+        live.last_interacted = now - 30 * 86_400;
+        live.tab_id = Some(4);
+        // A bind from a session that is no longer running: NOT protected.
+        let mut deadbind = rec("u-deadbind");
+        deadbind.last_interacted = now - 30 * 86_400;
+        deadbind.tab_id = Some(9);
+        let mut edge = rec("u-edge");
+        edge.last_interacted = now - 10 * 86_400;
+        for r in [older, old, fresh, live, deadbind, edge] {
+            s.agents.insert(r.uuid.clone(), r);
+        }
+        let protected: std::collections::BTreeSet<String> = ["u-live".to_string()].into();
+        let seq0 = s.seq;
+        let removed = prune_idle(&mut s, now, 10, &protected);
+        let ids: Vec<&str> = removed.iter().map(|r| r.uuid.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["u-deadbind", "u-older", "u-old"],
+            "oldest-idle first, and a dead-session bind does not protect"
+        );
+        assert!(s.agents.contains_key("u-fresh"));
+        assert!(
+            s.agents.contains_key("u-live"),
+            "a protected row never prunes"
+        );
+        assert!(s.agents.contains_key("u-edge"), "exactly-at-cutoff stays");
+        assert_eq!(s.seq, seq0 + 1);
+        // A no-op prune must not advance seq.
+        assert!(prune_idle(&mut s, now, 10, &protected).is_empty());
+        assert_eq!(s.seq, seq0 + 1);
     }
 
     #[test]
