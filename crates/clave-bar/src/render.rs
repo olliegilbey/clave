@@ -222,6 +222,13 @@ const BATTERY: [(char, Rgb); clave_types::BATTERY_LEVELS as usize] = [
     ('\u{f008e}', RED),    // empty       · at or past the zone
 ];
 
+// These four are byte-identical to `PALETTE` entries 1, 2, 3 and 6
+// (springGreen, carpYellow, waveRed, surimiOrange), and the duplication is
+// deliberate rather than an oversight. `PALETTE` is the REPO ink table, keyed
+// by repo root and allocated round-robin; sharing an entry would mean
+// reordering the repo palette silently re-colours the battery, which is two
+// unrelated meanings on one constant. #145 is where every visual variable gets
+// one home — that is the right place to unify these, not here.
 const GREEN: Rgb = Rgb(0x98, 0xBB, 0x6C);
 const YELLOW: Rgb = Rgb(0xE6, 0xC3, 0x84);
 const ORANGE: Rgb = Rgb(0xFF, 0xA0, 0x66);
@@ -587,10 +594,19 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
             out.push_str(&o);
             push_rule(&mut out, &o, &ink); // cols 3–5
             out.push_str(&o);
-            match battery.and_then(|i| BATTERY.get(usize::from(i))) {
+            // CLAMPED, not indexed. The host already clamps, so an
+            // out-of-range level cannot arise from this version — but the wire
+            // crosses a version boundary, and a newer host with a longer ramp
+            // would otherwise blank the cell on an old bar. Blank means "no
+            // reading" here, so the failure mode would be a full-looking row
+            // for a session that is out. Saturating to the last entry says
+            // "at least this bad", which is the safe direction to be wrong in.
+            // (CodeRabbit, #147)
+            let battery = battery.map(|i| usize::from(i).min(BATTERY.len() - 1));
+            match battery.map(|i| BATTERY[i]) {
                 Some((glyph, colour)) => {
-                    out.push_str(&ink(*colour));
-                    out.push(*glyph); // col 6
+                    out.push_str(&ink(colour));
+                    out.push(glyph); // col 6
                     out.push_str(&o);
                 }
                 None => out.push(' '),

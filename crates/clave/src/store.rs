@@ -1374,11 +1374,20 @@ mod tests {
         // way: not "the ids agree" but "nothing has told us otherwise yet" —
         // resurrection falls back to the minted uuid until a hook reports.
         o.remove("live_session");
+        // S7's pair joins the set (#62). These ARE the keys Ollie's real store
+        // is missing on every row the day this ships, so the claim in their
+        // doc-comments — "`default` keeps pre-field store files loading" — is
+        // asserted here rather than only asserted in prose. (CodeRabbit, #147)
+        o.remove("context_tokens");
+        o.remove("context_level");
         let back: AgentRecord = serde_json::from_value(serde_json::Value::Object(o)).unwrap();
         assert_eq!(back.title, None);
         assert!(back.summary.is_empty());
         assert_eq!(back.default_branch, None);
         assert_eq!(back.live_session, None);
+        // None is a real answer: no reading yet, which renders a blank cell.
+        assert_eq!(back.context_tokens, None);
+        assert_eq!(back.context_level, None);
     }
 
     #[test]

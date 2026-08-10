@@ -210,7 +210,7 @@ adversarial reviewer.
 | status | `◌` | U+25CC | a dormant row |
 | status | `↻` | U+21BB | an open in flight (`opening`) |
 | rule | `│` | U+2502 | new — separates the status hue from the battery hue |
-| battery | nf-md-battery ramp | U+F0079… | S7 |
+| battery | nf-md-battery ramp | U+F0079, U+F0082…U+F007A, U+F008E | S7 (#62). **Eleven** fill steps, not five: `md-battery` full, `md-battery_90`…`md-battery_10` descending (note they run BACKWARDS through the codepoints), then `md-battery_outline` empty. Verified by parsing the installed patched font's glyph-name table, not assumed |
 | terminal | nf-md-console | U+F018D | replaces the terminal mark; a terminal has no context window, so it takes the battery cell |
 | worktree | bamum tree | U+168C2 | **invention** — no convention exists |
 | branch | nf-md-source_branch | U+F062C | **convention** — lazygit's default, and the Plane-15 carrier of the U+E0A0 powerline-branch shape used by starship, oh-my-posh and p10k |
@@ -340,9 +340,23 @@ flags `rows()`/`apply_tabs` as a multi-workstream collision zone.
 - **Terminal tabs need a real identity.** `Tab #16` is a placeholder. They
   should carry cwd and branch, with the same provenance glyphs as agent rows,
   and the console mark in place of the battery. Tracked as future work.
-- **Dormant rows and the battery.** Every Claude session row carries a battery,
-  but a dormant conversation has no *live* context — its reading is last-known,
-  not current. Whether that should render dim, or absent, is unsettled.
+- ~~**Dormant rows and the battery.**~~ **SETTLED (#62, 2026-08-01): full ramp
+  colour, same as a live row.** This entry's premise was backwards, which is why
+  it read as a hard call. A dormant conversation consumes nothing, so its stored
+  figure is *exactly* its current occupancy — it is the **live** row whose
+  reading is always a turn behind. There is nothing stale to mark. It is also
+  the reading that earns its column: "resuming this one starts you back at 140k"
+  is what the eye wants before choosing where to return.
+
+  Dimming was rejected on §4.1 grounds: it would put liveness into a cell whose
+  colour *is* the magnitude ramp, duplicating what the status glyph says one
+  column to its left. Absent was rejected for discarding a correct figure and
+  blanking most of the bar, since most rows in a fleet are dormant at any moment.
+
+  Carries a standing performance rule with it: **a dormant row costs nothing.**
+  The level is stamped when that row's own agent reports; projection copies it.
+  No dormant row triggers a read, a parse or a computation, because that list
+  grows toward every conversation the user has ever had.
 
 ---
 

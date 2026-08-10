@@ -173,10 +173,19 @@ pub fn branch_from_tail(tail: &str) -> Option<String> {
 /// `title`/`live_session` only ever come from a live transcript. A fresh
 /// `add` row has none of those. (`last_visited` is deliberately NOT
 /// evidence: the birth tab is focused before any prompt exists.)
+///
+/// `context_tokens` joins the set with S7 (#62). It is written only from a
+/// transcript's own `usage` line, so a row carrying one has demonstrably
+/// conversed — and it is reachable when nothing else here is: a session that
+/// ran, produced usage, never earned an `ai-title`, never rotated, and settled
+/// back to `Idle` would otherwise read as never-conversed and be CREATED over.
+/// That is exactly the silent shadowing #139 exists to refuse. (CodeRabbit,
+/// #147 — flagged as the one major of that round, and it was right.)
 pub fn conversation_evidenced(rec: &AgentRecord) -> bool {
     rec.live_session.is_some()
         || rec.title.is_some()
         || !rec.summary.is_empty()
+        || rec.context_tokens.is_some()
         || rec.status != clave_types::Status::Idle
 }
 
@@ -751,6 +760,16 @@ mod tests {
         assert!(conversation_evidenced(&rec(
             |r| r.live_session = Some("rot".into())
         )));
+        // S7 (#62): a reading comes only from a transcript's own `usage` line,
+        // so it is proof a conversation happened. This row is the reachable
+        // case — usage seen, but no ai-title, no rotation, settled back to
+        // Idle — and without this it would be CREATED over. (CodeRabbit, #147)
+        assert!(conversation_evidenced(&rec(
+            |r| r.context_tokens = Some(37_437)
+        )));
+        // A reading of ZERO still counts: that is a `/clear`ed row, which has
+        // conversed by definition — the clear is what emptied it.
+        assert!(conversation_evidenced(&rec(|r| r.context_tokens = Some(0))));
     }
 
     #[test]

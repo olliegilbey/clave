@@ -294,6 +294,47 @@ fn json_u32(s: &str, key: &str) -> Option<u32> {
         .ok()
 }
 
+/// The `"usage"` object's OWN keys, with every nested object and array elided.
+///
+/// A flat scan of the line cannot be trusted, and the capture proves why: the
+/// real `usage` object nests `cache_creation` (carrying
+/// `ephemeral_1h_input_tokens`) and an `iterations` array that repeats
+/// `input_tokens`, `cache_read_input_tokens` and `cache_creation_input_tokens`
+/// once per inference step. A key MISSING from the turn's own usage would then
+/// be answered by one inference step's copy of it — a wrong reading that looks
+/// entirely reasonable. Reading only depth 1 makes that unreachable rather than
+/// unlikely. (CodeRabbit, #147)
+///
+/// Assumes no `{`/`[` inside a string value, which holds for `usage`: every
+/// value is a number or a bare enum (`"standard"`, `"not_available"`).
+fn usage_fields(line: &str) -> Option<String> {
+    let start = line.find(USAGE_KEY)? + USAGE_KEY.len() - 1;
+    let mut depth = 0i32;
+    let mut out = String::new();
+    for c in line[start..].chars() {
+        match c {
+            '{' | '[' => {
+                depth += 1;
+                if depth == 1 {
+                    out.push(c);
+                }
+            }
+            '}' | ']' => {
+                if depth == 1 {
+                    out.push(c);
+                }
+                depth -= 1;
+                if depth == 0 {
+                    return Some(out);
+                }
+            }
+            _ if depth == 1 => out.push(c),
+            _ => {}
+        }
+    }
+    None // the tail cut mid-object; no complete reading here
+}
+
 /// Tokens the conversation is currently holding, scanned out of a jsonl tail
 /// (S7, #62). `None` = no reading available, which HOLDS whatever the row had.
 ///
@@ -312,8 +353,19 @@ fn json_u32(s: &str, key: &str) -> Option<u32> {
 /// tool-call estimate because it must always produce a number to decide whether
 /// to nudge; the battery must not, because a fabricated reading is worse than a
 /// blank cell (§5.4 fail-closed, and `agent_content`'s never-invent rule).
+/// Every literal this module greps for in the transcript. Named here, and used
+/// from the parser below, so the capture's liveness test can assert against the
+/// SAME strings rather than a hand-copied second list that drifts.
+pub const BOUNDARY: &str = "\"subtype\":\"compact_boundary\"";
+pub const POST_TOKENS: &str = "postTokens";
+pub const USAGE_KEY: &str = "\"usage\":{";
+pub const USAGE_SUMMED: [&str; 3] = [
+    "input_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+];
+
 pub fn tokens_from_tail(tail: &str) -> Option<u32> {
-    const BOUNDARY: &str = "\"subtype\":\"compact_boundary\"";
     let (after, post_tokens) = match tail.rfind(BOUNDARY) {
         Some(i) => {
             // Searched from the MARKER, not from the start of its line:
@@ -322,7 +374,7 @@ pub fn tokens_from_tail(tail: &str) -> Option<u32> {
             // left of the marker worth reading, and reaching for it would only
             // risk picking up an earlier boundary's figure.
             let end = tail[i..].find('\n').map_or(tail.len(), |n| i + n);
-            (&tail[end..], json_u32(&tail[i..end], "postTokens"))
+            (&tail[end..], json_u32(&tail[i..end], POST_TOKENS))
         }
         None => (tail, None),
     };
@@ -330,13 +382,13 @@ pub fn tokens_from_tail(tail: &str) -> Option<u32> {
         .lines()
         .rev()
         .find_map(|line| {
-            // Slice from `"usage":{` first. The same line also carries an
-            // `iterations` array whose entries repeat these keys, and reading
-            // those would report one inference step rather than the turn.
-            let usage = &line[line.find("\"usage\":{")?..];
-            let sum = json_u32(usage, "input_tokens").unwrap_or(0)
-                + json_u32(usage, "cache_read_input_tokens").unwrap_or(0)
-                + json_u32(usage, "cache_creation_input_tokens").unwrap_or(0);
+            // Depth 1 only — see `usage_fields`. Occupancy is what went IN, so
+            // `output_tokens` is deliberately not summed.
+            let usage = usage_fields(line)?;
+            let sum: u32 = USAGE_SUMMED
+                .iter()
+                .filter_map(|k| json_u32(&usage, k))
+                .sum();
             (sum > 0).then_some(sum)
         })
         .or(post_tokens)
@@ -598,6 +650,7 @@ pub fn apply_hook_event(
     //
     // `--resume` does NOT rotate (measured, same FOOTGUNS entry), so resuming a
     // conversation correctly keeps its reading.
+    let tokens_before = rec.context_tokens;
     if let Some(live) = payload.session_id.as_deref().filter(|_| own_claude) {
         if live != rec.live_session.as_deref().unwrap_or(uuid) {
             rec.context_tokens = Some(0);
@@ -615,7 +668,12 @@ pub fn apply_hook_event(
     // dormant row free forever after — `snapshot_from` only copies. The fleet's
     // dormant list may eventually hold every conversation the user has ever had.
     let level = rec.context_tokens.map(|t| battery_level(t, smart_zone()));
-    changed |= rec.context_level != level;
+    // BOTH fields gate the push, not just the level. The glyph only moves once
+    // per tenth of the zone, but #105 renders the raw count as text — gating on
+    // the level alone would leave that text stale for up to a tenth of the zone
+    // (15k tokens at the default), which is a bug shipped early rather than a
+    // bug avoided. (CodeRabbit and the spec review agreed here, #147.)
+    changed |= rec.context_level != level || rec.context_tokens != tokens_before;
     rec.context_level = level;
     // §6.6 / S1 / #39: a PROMPT is the ONLY event that reorders. Stop,
     // StopFailure, Notification, PermissionRequest and SessionEnd change the
@@ -969,7 +1027,9 @@ mod tests {
         // property under test. Pre-setting it isolates the live-id write, which
         // is what this test is about; `s7_rotation_resets_the_battery_and_pushes`
         // covers the reset itself.
-        s.agents.get_mut("minted").unwrap().context_level = Some(0);
+        let r = s.agents.get_mut("minted").unwrap();
+        r.context_tokens = Some(0);
+        r.context_level = Some(0);
 
         // A rotated id is recorded — and NOT as a snapshot-worthy change: the
         // bar renders nothing from this field, and `with_store_mut` persists
@@ -1561,19 +1621,22 @@ mod tests {
 
     #[test]
     fn s7_the_capture_still_carries_every_shape_the_parser_reads() {
-        // The hermetic half of TESTING.md's liveness assertion: every literal
-        // production greps for must appear in a real captured sample. This
-        // fails the day someone teaches the parser a shape no capture contains
-        // — which is escape record 5, a fixture pinning a shape reality
-        // abandoned. The field half is the dated measurement in the header.
-        for shape in [
-            "\"usage\":{",
-            "\"input_tokens\":",
-            "\"cache_read_input_tokens\":",
-            "\"cache_creation_input_tokens\":",
-            "\"subtype\":\"compact_boundary\"",
-            "\"postTokens\":",
-        ] {
+        // The hermetic half of TESTING.md's liveness assertion. Asserted
+        // against the SAME consts production greps with, not a hand-copied
+        // second list — a copy drifts, and a drifted copy passes.
+        //
+        // Scope, stated honestly because escape record 5 is precisely a
+        // comment claiming more than its test proves: this catches a literal
+        // that no longer appears in any real sample. It does NOT catch a
+        // parser taught a shape via a fresh inline literal that was never
+        // added to these consts. Keeping every grepped string in `USAGE_*` /
+        // `BOUNDARY` / `POST_TOKENS` is what makes it worth anything, and that
+        // part is convention, not compiler-enforced.
+        for shape in USAGE_SUMMED {
+            let key = format!("\"{shape}\":");
+            assert!(CAPTURE.contains(&key), "no captured line carries {key}");
+        }
+        for shape in [USAGE_KEY, BOUNDARY, POST_TOKENS] {
             assert!(CAPTURE.contains(shape), "no captured line carries {shape}");
         }
     }
@@ -1608,6 +1671,24 @@ mod tests {
         // `preTokens` precedes `postTokens` on that same real line — a looser
         // scan would report the PRE-compaction size, the exact inverse.
         assert!(CAPTURE.contains("\"preTokens\":435777"));
+    }
+
+    #[test]
+    fn s7_a_missing_usage_key_is_not_answered_by_the_iterations_copy() {
+        // The turn's own `usage` nests an `iterations` array repeating every
+        // key once per inference step. Drop `cache_read_input_tokens` from the
+        // TOP level of a captured line and the flat scan this replaced would
+        // have answered from `iterations` — reporting one inference step as if
+        // it were the turn. Reading depth 1 only makes that unreachable.
+        // (CodeRabbit, #147)
+        let lines: Vec<&str> = CAPTURE.lines().filter(|l| !l.starts_with('#')).collect();
+        let holed = lines[1].replacen("\"cache_read_input_tokens\":211125,", "", 1);
+        assert!(
+            holed.contains("\"cache_read_input_tokens\":211125"),
+            "the iterations copy must still be there, or this proves nothing"
+        );
+        // 2 + 4989, with the 211125 inside `iterations` correctly ignored.
+        assert_eq!(tokens_from_tail(&format!("{holed}\n")), Some(4_991));
     }
 
     #[test]
