@@ -689,6 +689,42 @@ exists (`--dry-run` to look first). It never kills a session: a sandbox whose
 worktree is gone but whose session is up is printed for the human with the
 kill command. `just sandbox` runs it on the way in.
 
+### Tear the sandbox down when you are done with it
+
+Per-worktree isolation stopped agents clobbering each other; it did **not** stop
+sandboxes accumulating. One per worktree is the ceiling, and worktrees are
+cheap, so the steady state without discipline is a session list where the
+maintainer's own fleet is one line among many — and picking the wrong line is
+how a drive reaches the live session. Sprawl is a safety problem before it is a
+tidiness one.
+
+**Look before you launch.** This reads socket names and touches no session:
+
+```bash
+ls "${TMPDIR%/}/zellij-$(id -u)"/contract_version_*/
+```
+
+Each name is a live session. `clave` (no suffix) is the maintainer's fleet —
+never yours. A `clave-test-*` suffix names the worktree that owns it, so you can
+tell your own from another agent's mid-flight validation at a glance.
+
+**A live sandbox belonging to another worktree is not litter.** `clave dev reap`
+deliberately reports those as `keep`: the worktree still exists, so somebody is
+probably mid-drive on another branch. Killing it destroys their in-flight
+evidence. Reap only claims the ones whose worktree is gone.
+
+**Teardown is the human's, like every other session lifecycle step.** Two
+commands, because the first ends the session and the second stops zellij
+offering to resurrect it — a resurrectable corpse still shows in the list and
+still gets picked by mistake:
+
+```bash
+zellij kill-session <name> && zellij delete-session --force <name>
+clave dev reap                 # then reclaim the roots of any deleted worktrees
+```
+
+`clave dev reset` prints that pair for your own instance rather than running it.
+
 ### The sandbox drive loop
 
 The shape that works, learned driving the #55 frame-coherence fix (PR #120).
@@ -738,6 +774,11 @@ Each step exists because skipping it produces a confident, wrong result.
    dead row's stamp. Closing alone proves nothing about reuse.
 8. **Report what you did not exercise.** A race that did not reproduce is not a
    race that cannot happen; say so in those words.
+9. **Hand back the teardown.** The loop is not finished when the evidence is
+   gathered — an abandoned sandbox outlives the branch that needed it and joins
+   the session list the next drive has to pick from. Print the kill pair for the
+   human with the report (see "Tear the sandbox down when you are done with it");
+   do not leave it for whoever notices the sprawl.
 
 **The join is not as easy as it looks.** `list-panes -t -j` reports a pane's
 *deepest child process*, so an agent pane routinely shows `rust-analyzer`, `uv
