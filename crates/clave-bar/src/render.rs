@@ -503,8 +503,10 @@ fn clamp(s: &str, w: usize) -> String {
 // ── the viewport ────────────────────────────────────────────────────────────
 
 /// Rows kept on screen BELOW the selection while the view is scrolled (#148) —
-/// the lookahead. Honoured only as far as rows exist below and the pane has
-/// room for them; the selection's own line is never spent on it.
+/// the lookahead. Honoured only as far as the pane has room for it (the
+/// selection's own line is never spent on it) and as far as rows exist below —
+/// that second limit is the end-of-list clamp in [`viewport_top`], not a
+/// separate cap.
 const LOOKAHEAD: usize = 2;
 
 /// The first row the viewport shows, given the row count, which row is selected
@@ -523,27 +525,29 @@ const LOOKAHEAD: usize = 2;
 /// above the selection moves the selection's index and this offset by exactly
 /// one, so the same rows stay under the reader's eye.
 pub fn viewport_top(len: usize, selected: Option<usize>, height: usize) -> usize {
-    // Nothing overflows, so nothing scrolls. Also the guard that makes the
-    // arithmetic below safe: past here `height >= 1` and `len > height`.
-    if height == 0 || len <= height {
+    // A pane with no lines shows no rows, and must not hand the click map an
+    // offset for a screen nobody can see.
+    if height == 0 {
         return 0;
     }
     // No selection (no focused tab) is a resting bar, not a scrolled one.
-    let Some(selected) = selected.filter(|s| *s < len) else {
+    let Some(selected) = selected else {
         return 0;
     };
-    // Lookahead is a courtesy, never a cost: capped by the rows that exist
-    // below the selection, and by the room left in the pane once the selection
-    // has its own line — without that second cap a one-line pane would scroll
-    // the selection itself off the screen it is meant to be pinning.
-    let lookahead = LOOKAHEAD.min(len - 1 - selected).min(height - 1);
-    // `saturating_sub` IS the "top-anchored whenever it fits" arm: while the
-    // selection and its lookahead land inside the first screenful, the wanted
-    // top is 0 or below it. The clamp stops the last screenful sliding past the
-    // end of the list and leaving blank lines under it.
+    // Lookahead is a courtesy, never a cost: it is capped by the room left in
+    // the pane once the selection has its own line, or a one-line pane would
+    // scroll away the very row it exists to pin.
+    let lookahead = LOOKAHEAD.min(height - 1);
+    // Two clamps, and between them the whole rule. `saturating_sub` IS the
+    // "top-anchored whenever it fits" arm: while the selection and its
+    // lookahead land inside the first screenful the wanted top is 0 or below
+    // it, and a list shorter than the pane can never want one. `min` is the
+    // end of the list: the view never slides past the last screenful, which is
+    // also what quietly shortens the lookahead as the selection reaches the
+    // final rows — there is nothing below them to look ahead at.
     (selected + lookahead + 1)
         .saturating_sub(height)
-        .min(len - height)
+        .min(len.saturating_sub(height))
 }
 
 // ── the renderer ────────────────────────────────────────────────────────────
@@ -1653,6 +1657,9 @@ mod tests {
         assert!(render_rows(&numbered(10, 3), DESIGN_COLS, 0, Widths::EXPANDED).is_empty());
         assert_eq!(on_screen(&numbered(10, 6), 1), vec![6]);
         assert_eq!(on_screen(&numbered(10, 9), 1), vec![9]);
+        // Two lines afford ONE row of lookahead, not two — the pane's room for
+        // it is what caps it.
+        assert_eq!(on_screen(&numbered(10, 5), 2), vec![5, 6]);
         assert!(render_rows(&[], DESIGN_COLS, 4, Widths::EXPANDED).is_empty());
     }
 
