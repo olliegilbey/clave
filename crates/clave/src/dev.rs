@@ -1143,7 +1143,11 @@ mod tests {
             // faded self. `mix` rounds ties to even (a ported Python detail) —
             // a fade that silently stopped applying would leave these
             // byte-identical.
-            for (faded, plain) in lines.iter().zip(render_rows(&unfaded, cols, unfaded.len(), widths)) {
+            for (faded, plain) in
+                lines
+                    .iter()
+                    .zip(render_rows(&unfaded, cols, unfaded.len(), widths))
+            {
                 assert_ne!(*faded, plain, "recession did not change this row at {cols}");
             }
         }

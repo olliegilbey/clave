@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 // generators size the newborn pane from them — one definition, three artifacts.
 use clave_types::{Agent, AgentSnapshot, BAR_TARGET_COLS, COLLAPSED_TARGET_COLS, Status};
 
-use crate::render::{PALETTE, Provenance, Row, RowContent, RowStatus, Widths};
+use crate::render::{PALETTE, Provenance, Row, RowContent, RowStatus, Widths, viewport_top};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TabMeta {
@@ -1549,8 +1549,20 @@ impl BarModel {
     /// dormant rows past Alt+9, a click that launched would move the
     /// accidental-spawn problem into the mouse channel — only Alt+Enter
     /// wakes a dormant row.
-    pub fn click(&mut self, line: usize) -> Vec<Effect> {
-        let Some((key, _)) = self.rows().get(line).cloned() else {
+    pub fn click(&mut self, line: usize, pane_height: usize) -> Vec<Effect> {
+        // #148: `line` is a line of the VIEWPORT — it counts from the first row
+        // on screen, not from row 0 of the list. It reads the offset off the
+        // SAME `viewport_top` the renderer draws with, because the 2026-08-06
+        // overflow had two symptoms (invisible rows, and clicks landing one or
+        // two rows above the pointer) and a second copy of this arithmetic
+        // would let them come apart again.
+        let rows = self.rows();
+        let top = viewport_top(
+            rows.len(),
+            rows.iter().position(|(_, r)| r.selected),
+            pane_height,
+        );
+        let Some((key, _)) = top.checked_add(line).and_then(|i| rows.get(i)).cloned() else {
             return Vec::new();
         };
         self.cursor_gen += 1; // a click is a landing like any other
@@ -2305,6 +2317,34 @@ mod tests {
             collapsed: false,
             seq: 1,
             agents: vec![a],
+            tab_order: std::collections::BTreeMap::from([(1usize, 500u64)]),
+        });
+        m
+    }
+
+    /// A pane taller than any fixture here. With nothing overflowing, the
+    /// viewport (#148) rests at the top and a rendered line IS its model row —
+    /// which is what every click assertion written before the viewport assumed.
+    const TALL_PANE: usize = 64;
+
+    /// One live tab (id 1, active) and `dormant` dormant rows, ordinals
+    /// descending so the dormant block's display order is `u-00`, `u-01`, …
+    /// A fleet built to OVERFLOW: the viewport tests below give it a pane that
+    /// cannot hold it.
+    fn overflowing_fleet(dormant: usize) -> BarModel {
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(1, 0, "live", true)]);
+        let agents = (0..dormant)
+            .map(|i| {
+                let mut a = agent(&format!("u-{i:02}"), Status::Idle, None);
+                a.commit_ord = 900 - i as u64;
+                a
+            })
+            .collect();
+        m.apply_snapshot(AgentSnapshot {
+            collapsed: false,
+            seq: 1,
+            agents,
             tab_order: std::collections::BTreeMap::from([(1usize, 500u64)]),
         });
         m
@@ -3091,7 +3131,7 @@ mod tests {
         assert_eq!(keys(&m)[0], RowKey::Tab(12));
         // Clicks land on ONE instance (the visible bar): same effect shape.
         assert_eq!(
-            m.click(1),
+            m.click(1, TALL_PANE),
             vec![
                 Effect::SwitchTab { position: 0 },
                 Effect::AnnounceVisit { tab_id: 10 }
@@ -3107,7 +3147,7 @@ mod tests {
         // Malformed / out-of-range → empty.
         assert_eq!(m.nav("not json", Some(10)), Vec::<Effect>::new());
         assert_eq!(m.nav("{\"row\":9}", Some(10)), Vec::<Effect>::new());
-        assert_eq!(m.click(9), Vec::<Effect>::new());
+        assert_eq!(m.click(9, TALL_PANE), Vec::<Effect>::new());
     }
 
     #[test]
@@ -4621,7 +4661,7 @@ mod tests {
         let mut m = fleet_two_live_three_dormant();
         m.beacon(1);
         // Click the middle dormant row (line 3 = u-d1 at 800).
-        m.click(3);
+        m.click(3, TALL_PANE);
         assert_eq!(m.cursor.as_deref(), Some("u-d1"));
         // Alt+j now walks the DORMANT block, and switches no tab.
         let fx = m.nav("{\"dir\":\"next\"}", Some(1));
@@ -4638,7 +4678,7 @@ mod tests {
         m.nav("{\"dir\":\"prev\"}", Some(1));
         assert_eq!(m.cursor.as_deref(), Some("u-d0"), "and back the other way");
         // Clicking a live row hands the walk back to the live block.
-        m.click(0);
+        m.click(0, TALL_PANE);
         assert!(m.cursor.is_none(), "the live pick released the selection");
         assert!(
             m.nav("{\"dir\":\"next\"}", Some(1))
@@ -4749,7 +4789,7 @@ mod tests {
         assert!(m.nav("{\"row\":5}", Some(2)).is_empty());
         assert_eq!(m.cursor.as_deref(), Some("u-d0"), "Alt+5 reaches the last");
         // A click reaches the same row — the mouse is the route past Alt+9.
-        m.click(3);
+        m.click(3, TALL_PANE);
         assert_eq!(m.cursor.as_deref(), Some("u-d1"));
     }
 
@@ -4777,7 +4817,7 @@ mod tests {
             "the walk stays in the dormant block until a live row is picked"
         );
         // Picking a live row is what hands the walk back.
-        m.click(0);
+        m.click(0, TALL_PANE);
         assert!(m.cursor.is_none());
         assert!(
             m.nav("{\"dir\":\"next\"}", Some(1))
@@ -4835,7 +4875,7 @@ mod tests {
         // this pair covers the whole reachable surface.
         let mut m = live_plus_dormant();
         assert!(
-            m.click(DORMANT_LINE).is_empty(),
+            m.click(DORMANT_LINE, TALL_PANE).is_empty(),
             "click selects, never opens"
         );
         assert!(
@@ -4855,18 +4895,87 @@ mod tests {
         );
     }
 
+    /// The overflow incident's SECOND symptom (#148): with the list scrolled,
+    /// clicks landed one or two rows above the row under the pointer, because
+    /// the hit test counted from model row 0 while the screen showed a window
+    /// starting further down. Draw and hit test now read the same offset, so
+    /// this fixes the visible bug and the invisible one together.
+    #[test]
+    fn a_click_lands_on_the_row_under_the_pointer_while_scrolled() {
+        // 12 rows (one live, eleven dormant) in a five-line pane. Selecting the
+        // last row slides the window to model rows 7..=11.
+        let mut m = overflowing_fleet(11);
+        assert_eq!(keys(&m).len(), 12);
+        m.nav("{\"row\":12}", Some(1));
+        assert!(selected(&m)[11], "the fixture must be scrolled to the end");
+
+        // Line 0 of that pane is model row 7 — the pre-viewport click map read
+        // it as row 0, the live tab, seven rows off.
+        m.click(0, 5);
+        let mut expected = vec![false; 12];
+        expected[7] = true;
+        assert_eq!(
+            selected(&m),
+            expected,
+            "the top visible line is model row 7"
+        );
+
+        // And the bottom line of that same pane is the last row of the list.
+        // A fresh model, because the click above MOVED the selection and the
+        // view follows the selection — see the next test.
+        let mut m = overflowing_fleet(11);
+        m.nav("{\"row\":12}", Some(1));
+        m.click(4, 5);
+        let mut expected = vec![false; 12];
+        expected[11] = true;
+        assert_eq!(selected(&m), expected, "the last visible line is row 11");
+    }
+
+    /// A click is a landing like any other, so the view follows it: picking the
+    /// top visible row gives that row its two rows of lookahead back, which
+    /// slides the window up under the pointer. Pinned because it is the visible
+    /// consequence of a viewport derived from the selection alone (#148) — the
+    /// clicked row stays on screen, which is the invariant that matters.
+    #[test]
+    fn the_view_follows_a_click_the_way_it_follows_a_walk() {
+        let mut m = overflowing_fleet(11);
+        m.nav("{\"row\":12}", Some(1)); // window 7..=11
+        m.click(0, 5); // model row 7
+        // The window is now 5..=9, so the row just clicked sits on line 2 —
+        // a second click on line 2 is the same row, not a new one.
+        m.click(2, 5);
+        let mut expected = vec![false; 12];
+        expected[7] = true;
+        assert_eq!(
+            selected(&m),
+            expected,
+            "the clicked row moved under the pointer"
+        );
+    }
+
+    /// A pane with room for the whole fleet keeps the identity mapping: line N
+    /// is row N. The offset is a consequence of overflow, never a constant.
+    #[test]
+    fn a_click_on_an_unscrolled_bar_still_lands_on_its_own_line() {
+        let mut m = overflowing_fleet(11);
+        m.click(9, TALL_PANE);
+        let mut expected = vec![false; 12];
+        expected[9] = true;
+        assert_eq!(selected(&m), expected);
+    }
+
     #[test]
     fn click_on_a_live_tab_releases_the_dormant_selection() {
         // Selection follows every input path: picking a live row (mouse or
         // nav) resolves the highlight back to focus truth.
         let mut m = live_plus_dormant();
-        m.click(DORMANT_LINE); // select the dormant row
+        m.click(DORMANT_LINE, TALL_PANE); // select the dormant row
         assert_eq!(
             selected(&m),
             vec![false, true],
             "the dormant selection steals the highlight from the live tab"
         );
-        m.click(0); // pick the live tab
+        m.click(0, TALL_PANE); // pick the live tab
         assert_eq!(
             selected(&m),
             vec![true, false],

@@ -26,6 +26,11 @@ struct State {
     /// keeps it expanded until ~1s after the final press. The ONLY timers
     /// the bar arms (#100 deleted the dormant dwell).
     pending_peeks: u32,
+    /// The pane height in lines, as of the last `render` — the only place
+    /// zellij tells us (#148). A click carries a line of the VIEWPORT, so
+    /// mapping it back to a row needs the height the viewport was sliced at.
+    /// `Default`'s 0 stands for "never rendered", which no click can precede.
+    pane_height: usize,
     /// The CLI this bar shells out to, from plugin configuration (#44).
     /// Assigned in `load()`, which zellij invokes as its own wasm export
     /// before delivering any event (`register_plugin!`, zellij-tile-0.44.3
@@ -588,7 +593,7 @@ impl ZellijPlugin for State {
                 // Repaint: a dormant click is a pure selection (#100) — no
                 // effects, but the ⏎ affordance and highlight must paint.
                 if line >= 0 {
-                    let fx = self.model.click(line as usize);
+                    let fx = self.model.click(line as usize, self.pane_height);
                     self.run_effects(fx);
                     return true;
                 }
@@ -633,7 +638,10 @@ impl ZellijPlugin for State {
         // zellij actually gave us rather than the target.
         // #148: `rows` is the pane HEIGHT in lines. The renderer slices the row
         // list to it (the viewport); a bar that printed past the bottom drew
-        // rows the user could reach with nav keys and never see.
+        // rows the user could reach with nav keys and never see. Remembered
+        // because the mouse-click map needs the same height, and Mouse events
+        // do not carry it.
+        self.pane_height = rows;
         let list: Vec<Row> = self.model.rows().into_iter().map(|(_, row)| row).collect();
         for line in render_rows(&list, cols, rows, self.model.widths()) {
             println!("{line}");

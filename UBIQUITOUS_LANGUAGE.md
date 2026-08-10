@@ -138,6 +138,17 @@ These three are constantly confused. They are not interchangeable.
 `Status` — the enum — has exactly five variants and they are spelled this way:
 **Idle, Working, NeedsYou, Done, Failed**.
 
+### 3.6 The viewport
+
+| Term | Means |
+|---|---|
+| **viewport** | The window of rows the pane can actually hold — the slice of the row list that reaches the screen. Rows overflow off the **bottom** only, so the live block never scrolls away. Derived from the selection and the pane height on every draw, never remembered, which is what stops an arriving snapshot yanking the view. |
+| **lookahead** | The rows kept on screen **below** the selection while the viewport is scrolled: two, honoured only as far as rows exist below and the pane has room for them. The selection's own line is never spent on it. |
+
+> The viewport rests at the top. It slides only when the selection walks past
+> the bottom edge, and it **snaps home** — back to the top — as soon as the
+> selection fits the first screenful again.
+
 ---
 
 ## 4. Environments and artifacts
