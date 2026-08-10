@@ -91,7 +91,8 @@ status rule battery │     title    repo         summary
 | **cap** | The powerline half-circle at each end of the **selected row**. Its column is reserved on every row so nothing shifts. |
 | **text area** | Everything right of the gutter: title, repo, summary. |
 | **status glyph** | The dot. Its **colour** is the state — the shape barely varies. |
-| **battery** | The context-window level of that agent session. A terminal tab shows the console mark in this cell instead, because a terminal has no context window. |
+| **battery** | How much of its **smart zone** that agent session has spent. A terminal tab shows the console mark in this cell instead, because a terminal has no context window. |
+| **smart zone** | How many tokens of context *this user* trusts a model to stay sharp within — set once, globally, in `CLAVE_AGENT_SMART_ZONE_TOKENS` (default 150,000). Explicitly **not** the model's context window: the window is where Claude auto-compacts, which is not a thing anyone steers by, and the same smart zone holds across a 200k model, a 1M model, or a future non-Claude agent. It is where the battery turns **red** — not where the ramp ends. |
 | **provenance** | Whether the row's checkout is a **worktree**, on a **branch**, or a **main checkout**. Rendered as a glyph tinted with the repo ink; a main checkout shows nothing. |
 
 ### 3.3 The three text fields

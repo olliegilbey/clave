@@ -103,6 +103,18 @@ pub enum Effect {
     /// every instance; main.rs gates EXECUTION to the active one, same as
     /// MarkRead/Bind (one writer, round 11).
     PersistCollapse { collapsed: bool },
+    /// #137: the storm ceiling refused a resize. The breadcrumb the 2026-08-01
+    /// incident did not leave — that storm ran for a minute and wrote nothing
+    /// anywhere, which is why it took a live re-run under instrumentation to
+    /// diagnose. Emitted at most once per capped episode; main.rs prints it to
+    /// the zellij log (the bar's own diagnostic channel) rather than shelling
+    /// out to the CLI, because a subprocess on the path we are rate-limiting
+    /// would be the same mistake in a smaller font.
+    StormCapped {
+        actions: u32,
+        cols: usize,
+        target: usize,
+    },
 }
 
 /// The ONLY timer the bar arms (#100 deleted the 0.4s dormant dwell, so
@@ -123,6 +135,40 @@ const MAX_LEARNABLE_STEP: usize = 20;
 /// increment: ±4 cols of slack, so a bar born near the target is accepted
 /// rather than nudged into an overshoot dance.
 const PRE_LEARNING_STEP: usize = 8;
+
+/// #137 storm ceiling: resizes this bar may spend between one settled rest and
+/// the next, across ALL re-arms. Deliberately cause-agnostic — the 2026-08-01
+/// incident was a collapse-mode flip-flop, and the fix for that lives in
+/// `toggle`/`apply_snapshot`, but a churn path that can only be correct is one
+/// bad interaction away from a fleet-killer.
+///
+/// Four full budgets. The number is a compromise with a known edge, stated
+/// rather than hidden: a seek crossing a very wide pane on a very fine resize
+/// lattice can legitimately want more actions than this, and `width_seek`'s own
+/// property test generates exactly that shape (a 500-column start with a
+/// 1-column step). Real zellij resizes by ~5% of the viewport, so a real bar
+/// crossing a real terminal needs ~20-45 — under the cap. The residual is a bar
+/// parked at the wrong width on a lattice zellij does not produce, which is a
+/// cosmetic fault, and the brake announces itself when it engages. A
+/// distance-proportional allowance would remove the edge entirely and is the
+/// obvious refinement if it ever bites.
+const STORM_ACTION_CAP: u32 = 64;
+/// Renders the pane must sit unmoved at its rest width before an *incomplete*
+/// rest is resumed (see `rest_incomplete`).
+///
+/// **This is a laziness knob, never a liveness one, and the distinction cost a
+/// review round (Codex P2 on PR #152).** Zellij calls a plugin's `render` when a
+/// delivered event made it ask for a repaint, or when a resize actually changed
+/// its size — and never otherwise
+/// (`zellij-server/src/plugins/wasm_bridge.rs:2165` and `:838`, v0.44.3). There
+/// is no idle repaint at any cadence, so a bar on a hidden or quiet tab may get
+/// no renders at all for minutes. Anything whose CORRECTNESS depends on renders
+/// arriving is therefore starved by construction; the storm ceiling used to
+/// refill here and became a lifetime budget that 33 clean toggles exhausted.
+/// What may live here is work that is merely nicer done sooner: a pane parked
+/// off-target is cosmetic, and its next visit or fleet event delivers the
+/// render that finishes the walk.
+const QUIET_REST_RENDERS: u32 = 3;
 
 /// A row that has never received a user commitment (S1). Sorts below every row
 /// that has. Reachable for a LIVE tab only when its birth touch never landed —
@@ -395,6 +441,54 @@ pub struct BarModel {
     /// a flicker — so a thrashing layout and a user mid-drag never trigger a
     /// perpetual re-seek (the "must not fight forever" bound).
     seek_drift: Option<usize>,
+    /// #137 storm ceiling: resizes spent since the seek last ARRIVED somewhere
+    /// it was willing to stay. A clockless rate limiter — the model has no wall
+    /// time — whose unit of "period" is a completed journey rather than a
+    /// second. Arrival is the only quiet signal the model is guaranteed to
+    /// receive, because it generates it itself; see `QUIET_REST_RENDERS` for why
+    /// counting renders cannot do this job.
+    storm_actions: u32,
+    /// Consecutive renders spent unmoved at the rest width. Drives the
+    /// off-target resumption ONLY — never the ceiling above.
+    rest_renders: u32,
+    /// Latched so a capped episode reports itself ONCE. A breadcrumb that
+    /// repeated per render would be the storm it is describing.
+    storm_reported: bool,
+    /// #137: this bar has already spent one extra journey trying to finish an
+    /// off-target rest, so it will not spend another until a real trigger. The
+    /// non-refunding budget made "ran out of allowance mid-travel" genuinely
+    /// reachable — live driving parked bars at 139 and 20 columns against a
+    /// 54-column target — and a bar that has come to REST off-target is
+    /// otherwise silent forever, because gate (A) makes its own rest width a
+    /// no-op. One bounded resumption converges those bars; the latch is what
+    /// stops a layout that simply refuses from being fought in a slow loop.
+    resumed_off_target: bool,
+    /// The rest we are sitting at was NOT a place we chose — see `settle_at`.
+    rest_incomplete: bool,
+    /// Does `ShrinkSelf` actually make this pane NARROWER? Normally yes — but
+    /// observed live on 2026-08-07, the same instance in the same session had it
+    /// both ways: one episode walked 79 → 72 → 65 on `ShrinkSelf`, an earlier one
+    /// walked 65 → 72 → 79 → … → 117 on the same effect, climbing until zellij
+    /// refused. `resize_pane_with_id(Decrease, Right)` resolves against whatever
+    /// neighbour the current layout puts on that edge, so its sense is a property
+    /// of the live layout, not of the effect.
+    ///
+    /// Learning it is the same move round 9 made for the step MAGNITUDE — take
+    /// the observed effect as truth rather than assuming — and it is what makes a
+    /// runaway impossible: one wrong step teaches the sign, where before the seek
+    /// would ask for the same wrong thing until its budget died. Re-learned every
+    /// time the observed effect disagrees, so a layout that flips back is also
+    /// followed.
+    seek_inverted: bool,
+    /// Which way the last emitted action was ASKING to go (`true` = narrower).
+    /// Without it the observed delta cannot be judged, only measured.
+    seek_wanted_smaller: Option<bool>,
+    /// Distance from the target at the last incomplete rest. A resumption that
+    /// closed the gap earns another hop; one that did not is the end of the
+    /// road. Distance strictly decreases per hop, so this terminates — which is
+    /// why a single fixed resumption count is not needed, and why a layout that
+    /// refuses to move is still only fought once.
+    last_rest_dist: Option<usize>,
     /// tab_id of the last visited (focused) tab — replicated on every
     /// instance from the visited-pipe/nav broadcast streams. This is the nav
     /// walk base: the local TabInfo.active flag is stale everywhere except
@@ -472,6 +566,14 @@ impl Default for BarModel {
             seek_rest: None,
             seek_stalled: false,
             seek_drift: None,
+            storm_actions: 0,
+            rest_renders: 0,
+            storm_reported: false,
+            resumed_off_target: false,
+            rest_incomplete: false,
+            seek_inverted: false,
+            seek_wanted_smaller: None,
+            last_rest_dist: None,
             current_tab: None,
             birth_announced: false,
             organic_pending: false,
@@ -980,11 +1082,13 @@ impl BarModel {
         // heal nothing. A snapshot CONTRADICTING the debt means our write
         // was swallowed by an out-of-order sibling (two rapid toggles: the
         // late-arriving stale value re-wrote the store) — keep USER truth
-        // and re-assert, exactly once; a second contradiction means someone
-        // else is authoritative after all, and wrong-but-consistent beats a
-        // two-instance re-assert ping-pong (round 11). Accepted transient
-        // (unchanged): an unrelated push between broadcast and write-landing
-        // briefly disagrees; the write's own push heals it.
+        // and re-assert, exactly once per press. Further contradictions while
+        // the debt stands change nothing at all — and THAT is what bounds the
+        // writes (#137: yielding to them let a ten-press burst buy ~26 store
+        // writes, each one broadcasting another contradicting snapshot).
+        // Accepted transient (unchanged): an unrelated
+        // push between broadcast and write-landing briefly disagrees; the
+        // write's own push heals it.
         match self.pending_collapse {
             Some(want) if snap.collapsed == want => {
                 self.pending_collapse = None; // debt settled; local == want already
@@ -993,10 +1097,21 @@ impl BarModel {
                 self.collapse_reasserted = true;
                 effects.push(Effect::PersistCollapse { collapsed: want });
             }
-            Some(_) => {
-                self.pending_collapse = None; // retry spent: store wins
-                self.heal_collapse(snap.collapsed);
-            }
+            // #137: while we still OWE the store a write, its flag is not
+            // evidence about the user's intent — it is evidence about how far
+            // behind the store is. The old arm gave up here and healed, which
+            // is what let a snapshot one burst old overrule a press the user
+            // had just made; combined with the per-press re-assert reset, that
+            // was the flip-flop the storm rode on.
+            //
+            // Stated trade: an instance whose write AND its one re-assert are
+            // both swallowed now keeps its own mode until its next press or a
+            // reload, where before it would eventually converge on the store.
+            // Collapse is a display mode that every instance flips on the same
+            // broadcast, so the cost is one bar briefly disagreeing about its
+            // own width — against a fleet-killing resize loop, which is what
+            // the give-up arm was buying.
+            Some(_) => {}
             None => self.heal_collapse(snap.collapsed),
         }
         // Borrow-friendly pass: snapshot views first, then mutate the guards.
@@ -1276,10 +1391,12 @@ impl BarModel {
         let title = a.title.clone();
         RowContent::Agent {
             status,
-            // S7 has not landed. `None` renders a blank battery cell, which
-            // lock §2.1 requires it to do cleanly — inventing a level would be
-            // a lie in the one cell whose whole job is a measurement.
-            battery: None,
+            // S7 (#62). Bucketed host-side, where the smart zone is readable;
+            // the bar renders an index and holds no opinion about tokens. `None`
+            // is still a real answer — no reading yet — and renders a blank
+            // cell, which lock §2.1 requires it to do cleanly: inventing a level
+            // would be a lie in the one cell whose whole job is a measurement.
+            battery: a.context_level,
             provenance,
             title_ink: title
                 .as_ref()
@@ -1624,11 +1741,27 @@ impl BarModel {
     /// nor by a stale drift candidate. The learned step is deliberately KEPT:
     /// zellij's resize increment is an environment property, not per-episode.
     fn arm_seek(&mut self) {
-        self.seek_budget = SEEK_BUDGET;
+        // #137: RETARGET, don't re-fund. A fresh budget belongs to a seek that
+        // starts from rest; handing one to a seek already in flight is how a
+        // burst bought unbounded resizes — the measured storm re-armed 14 times
+        // from 10 keypresses and drew a full 16-step budget every time, so the
+        // bar restarted its animation instead of finishing one. In flight, the
+        // new target simply replaces the old and the remaining budget carries
+        // over: the destination moves, the animation does not begin again.
+        // (The distance between the two targets is ~3 steps, so a carried-over
+        // budget reaches either of them comfortably.)
+        if self.seek_budget == 0 {
+            self.seek_budget = SEEK_BUDGET;
+        }
         self.seek_last_cols = None;
         self.seek_rest = None;
         self.seek_stalled = false;
         self.seek_drift = None;
+        // `seek_wanted_smaller` is cleared with the compare base it is judged
+        // against — a delta measured across a re-arm teaches nothing. The learned
+        // POLARITY is kept, exactly as the learned step is: both describe the
+        // layout, not the episode.
+        self.seek_wanted_smaller = None;
     }
 
     /// Alt+c (round 20, collapse-in-place): flip between the template width
@@ -1656,11 +1789,34 @@ impl BarModel {
     pub fn toggle(&mut self) -> Vec<Effect> {
         self.collapsed = !self.collapsed;
         self.peeking = false; // an explicit toggle outranks a pending peek
+        // #137: a keypress always gets its journey. The storm ceiling exists for
+        // churn NOTHING asked for — a press is rate-limited by the human and
+        // already bounded to one allowance by `seek_budget` (which `arm_seek`
+        // refunds only from rest), so refunding here permits nothing the seek
+        // budget did not already permit. Refunding only on the *quiet* path
+        // meant a brake-parked bar swallowed `Alt+c`, and pressing again cleared
+        // the rest anchor the quiet path counts against — so reacting to a
+        // frozen bar by pressing harder kept it frozen. NOT done for
+        // `heal_collapse`: that arms from a store snapshot, which is the churn
+        // source the ceiling is actually for.
+        self.refill_storm_allowance();
         self.arm_seek();
         // Issue #5 durability: record the ABSOLUTE mode we owe the store and
         // emit the persist effect (executor-gated in main.rs — every
         // instance flips + books, exactly one writes). A fresh toggle
         // resets the re-assert budget: it is a new user intent.
+        // #137 kept the write count bounded by REFUSING to yield to a
+        // contradicting snapshot at all (see `apply_snapshot`), which is what
+        // closed the amplification loop: a press books one write, its first
+        // contradiction books one repair, every later contradiction books
+        // nothing. Two writes per press, whatever the store does.
+        //
+        // A tighter "one per burst" bound was tried here and withdrawn (Codex P2
+        // on PR #152). It used the outstanding debt as the burst boundary — and
+        // an unresolved debt never clears, so one burst that ended with the
+        // store holding the wrong value made every later press part of that dead
+        // burst, and the bar could never write the correction. Nine fewer writes
+        // across a ten-press burst is not worth a ledger that can wedge.
         self.pending_collapse = Some(self.collapsed);
         self.collapse_reasserted = false;
         vec![Effect::PersistCollapse {
@@ -1677,11 +1833,37 @@ impl BarModel {
     /// parking the bar off-target, the F1 corner reborn. Every settle path
     /// (convergence, gate-B accept, floor-accept) routes through here so the
     /// anchor is always the true rest width.
-    fn settle_at(&mut self, cols: usize) {
+    /// `complete` says whether this rest is somewhere we are willing to STAY.
+    /// Convergence, zellij's refusal wall (the granularity floor, C8) and a
+    /// deliberate storm park are all complete — the bar is done, whatever the
+    /// arithmetic says about the target. Running out of allowance mid-travel is
+    /// NOT: since #137 the budget is not re-funded on a retarget, so a burst can
+    /// leave the pane stranded far from either target (139 and 20 columns
+    /// observed live against a 54-column target), and gate (A) would otherwise
+    /// keep it there in silence forever.
+    fn settle_at(&mut self, cols: usize, complete: bool) {
+        self.rest_incomplete = !complete;
+        if complete {
+            // #137, second round (Codex P2 on PR #152): ARRIVING is what refunds
+            // the storm ceiling. It is the one quiet signal the model cannot be
+            // starved of, because the model produces it — where the render count
+            // this used to key off is supplied by the host and, on a hidden or
+            // idle tab, is never supplied at all. With that refill, an ordinary
+            // Alt+c that converges costs nothing lasting; without it the ceiling
+            // was a lifetime budget and 33 clean toggles parked the sidebar.
+            self.refill_storm_allowance();
+        }
         self.seek_budget = 0;
         self.seek_rest = Some(cols);
         self.seek_last_cols = Some(cols);
         self.seek_drift = None;
+    }
+
+    /// The seek is entitled to a fresh ceiling: it either arrived, or it is
+    /// starting a bounded, progress-guarded walk toward the target.
+    fn refill_storm_allowance(&mut self) {
+        self.storm_actions = 0;
+        self.storm_reported = false;
     }
 
     /// Mark this model as awaiting its first snapshot — `main.rs` calls it at
@@ -1753,8 +1935,33 @@ impl BarModel {
         // rest in between, so it still confirms and re-arms as intended (#4).
         if self.seek_rest == Some(own_cols) {
             self.seek_drift = None;
+            // #137: renders spent unmoved here are the model's only evidence
+            // that nothing is currently throwing the pane around. They drive the
+            // off-target resumption and NOTHING ELSE — a render is not a clock
+            // (`QUIET_REST_RENDERS`), so a bar on a quiet tab may sit here
+            // forever without accumulating any, and a correctness property hung
+            // off this counter would simply never fire.
+            self.rest_renders = self.rest_renders.saturating_add(1);
+            // Quiet, but parked somewhere we never wanted to be: finish the
+            // journey. Only once per off-target rest — see the field's note. A
+            // hidden instance simply gets here on its next visit, which is the
+            // subsystem's existing lazy per-tab healing (C6 round 10), not a new
+            // deferral. The walk is aimed at the target and progress-guarded, so
+            // it also earns back the allowance the brake may have spent getting
+            // here — otherwise a capped bar could never fund the very journey
+            // that un-parks it.
+            if self.rest_renders >= QUIET_REST_RENDERS
+                && self.rest_incomplete
+                && !self.resumed_off_target
+            {
+                self.resumed_off_target = true;
+                self.refill_storm_allowance();
+                self.arm_seek();
+                return Vec::new(); // act on the next render, with the anchor cleared
+            }
             return Vec::new();
         }
+        self.rest_renders = 0;
 
         // (B) Dormant (budget spent). Decide between settling here and
         // re-arming toward the target because an external relayout drifted us.
@@ -1771,7 +1978,21 @@ impl BarModel {
                 .seek_last_cols
                 .is_some_and(|last| own_cols.abs_diff(last) <= step as usize);
             if within_band || ours {
-                self.settle_at(own_cols);
+                // `ours` off-band means the allowance ran out mid-travel — a rest
+                // we want to finish once things are quiet, not one to keep.
+                if !within_band {
+                    let dist = own_cols.abs_diff(target);
+                    // Closer than the last stranding? The resumption is working;
+                    // let it have another hop. This is what carries a bar that
+                    // was thrown a long way home in several bounded journeys —
+                    // live driving left two hidden bars at 109 and 12 columns
+                    // against a 54-column target with a single hop allowed.
+                    if self.last_rest_dist.is_some_and(|prev| dist < prev) {
+                        self.resumed_off_target = false;
+                    }
+                    self.last_rest_dist = Some(dist);
+                }
+                self.settle_at(own_cols, within_band);
                 return Vec::new();
             }
             // cols jumped FAR from where we last acted while dormant — a window
@@ -1810,7 +2031,7 @@ impl BarModel {
                     // step above it, C8 2026-07-18). Accept and stay silent —
                     // this keeps the collapsed floor benign, as the old
                     // in-flight guard did, with no burst of refused resizes.
-                    self.settle_at(own_cols);
+                    self.settle_at(own_cols, true); // zellij's wall: accepted in place
                     return Vec::new();
                 }
                 // FAR from the target and still not moving: a relayout CLOBBERED
@@ -1824,6 +2045,23 @@ impl BarModel {
                 // step=60 accepted a 13-col bar).
                 if delta <= MAX_LEARNABLE_STEP {
                     self.seek_step = delta;
+                    // …and the SIGN, from the same evidence. Bounded by the same
+                    // plausibility test on purpose: an external jump must not be
+                    // allowed to teach a bogus polarity any more than a bogus
+                    // step. If a move we asked for went the other way, the
+                    // mapping from effect to direction is inverted for this pane
+                    // right now — believe the pane, not the effect's name.
+                    if let Some(wanted_smaller) = self.seek_wanted_smaller {
+                        // EXPECTED MUTATION SURVIVOR (`<` → `<=`): equivalent,
+                        // not a coverage gap. The `prev == own_cols` arm above
+                        // takes every equal case, so `prev != own_cols` holds
+                        // here and the two forms cannot differ. No test can kill
+                        // it; weakening one to try would be the wrong move.
+                        let got_smaller = own_cols < prev;
+                        if got_smaller != wanted_smaller {
+                            self.seek_inverted = !self.seek_inverted;
+                        }
+                    }
                 }
             }
             None => {}
@@ -1833,8 +2071,11 @@ impl BarModel {
         // (D) Act. Re-read the step in case (C) just learned it.
         let step = self.seek_step.max(PRE_LEARNING_STEP) as i64;
         if converged(own_cols, target, other, step) {
-            // Converged: settle and stay done at exactly this width.
-            self.settle_at(own_cols);
+            // Converged: settle and stay done at exactly this width. Arriving is
+            // what earns back the right to resume a future off-target rest.
+            self.resumed_off_target = false;
+            self.last_rest_dist = None;
+            self.settle_at(own_cols, true);
             return Vec::new();
         }
         // The lattice can be COARSER than the gap between the two targets, and
@@ -1861,15 +2102,57 @@ impl BarModel {
             && prev.abs_diff(own_cols) <= MAX_LEARNABLE_STEP
             && !converged(prev, target, other, step)
         {
-            self.settle_at(own_cols);
+            self.settle_at(own_cols, true);
             return Vec::new();
         }
-        let action = if diff > 0 {
+        // (E) #137 storm ceiling, checked LAST — after every path that would
+        // have settled or stayed silent anyway, so the cap only ever refuses a
+        // resize the seek genuinely wanted. Park where we are rather than going
+        // quiet mid-flight: an unsettled seek would keep re-deciding on every
+        // render, and a bar parked at a wrong width is a cosmetic fault where a
+        // fleet-killing resize loop is an outage. Degrade the bar, never the
+        // session.
+        if self.storm_actions >= STORM_ACTION_CAP {
+            // Stop the churn NOW, but do not adopt this width as somewhere we
+            // are willing to stay unless it is actually acceptable. Maintainer's
+            // call (2026-08-07), after the bar was seen occupying ~90% of his
+            // terminal: when the seek gives up it should end at the width it was
+            // aiming for, not wherever it happened to be standing. There is no
+            // absolute-resize API in zellij-tile 0.44.3 — only relative steps —
+            // so "snap" is spent as the quiet-period resumption walk below,
+            // which is bounded and always aimed at the target.
+            // Read the tally BEFORE settling: a settle at an acceptable width
+            // refunds the ceiling, and a breadcrumb reporting `after 0 resizes`
+            // would be the one line in the log that had to be believed.
+            let spent = self.storm_actions;
+            self.settle_at(own_cols, within_band);
+            if !self.storm_reported {
+                self.storm_reported = true;
+                return vec![Effect::StormCapped {
+                    actions: spent,
+                    cols: own_cols,
+                    target,
+                }];
+            }
+            return Vec::new();
+        }
+        // Ask for a DIRECTION, and let the learned polarity pick the effect that
+        // actually achieves it on this pane.
+        //
+        // EXPECTED MUTATION SURVIVOR (`>` → `>=`): equivalent. The two forms
+        // differ only at `diff == 0`, and a render exactly ON the target settles
+        // at the `converged` check above and never reaches here — pinned by the
+        // `width_seek(BAR_TARGET_COLS)` / `width_seek(COLLAPSED_TARGET_COLS)`
+        // tests, which assert that render emits nothing.
+        let want_smaller = diff > 0;
+        self.seek_wanted_smaller = Some(want_smaller);
+        let action = if want_smaller != self.seek_inverted {
             Effect::ShrinkSelf
         } else {
             Effect::GrowSelf
         };
         self.seek_budget -= 1;
+        self.storm_actions = self.storm_actions.saturating_add(1);
         self.seek_last_cols = Some(own_cols);
         vec![action]
     }
@@ -1900,6 +2183,8 @@ mod tests {
             summary: String::new(),
             worktree: None,
             default_branch: None,
+            context_tokens: None,
+            context_level: None,
         }
     }
 
@@ -1921,6 +2206,8 @@ mod tests {
             summary: String::new(),
             worktree: None,
             default_branch: None,
+            context_tokens: None,
+            context_level: None,
         }
     }
 
@@ -3499,11 +3786,21 @@ mod tests {
 
     /// Fix-review MAJOR (issue #5): two rapid toggles spawn two writes with
     /// no arrival-order guarantee — the stale one can win and the store's
-    /// push then contradicts the user. The pending ledger keeps USER truth
-    /// and re-asserts exactly once; a second contradiction yields to the
-    /// store (wrong-but-consistent beats a two-instance ping-pong, rd 11).
+    /// push then contradicts the user. The pending ledger keeps USER truth and
+    /// re-asserts exactly once.
+    ///
+    /// **Rule changed by #137.** This test used to assert that a SECOND
+    /// contradiction yields to the store — "wrong-but-consistent beats a
+    /// ping-pong". Live driving showed that yielding is what let a store one
+    /// burst behind overrule a press the user had just made, and the resulting
+    /// mode flip-flop re-armed the width seek fast enough to storm the session.
+    /// While a write is owed, the store's flag is now ignored outright: the
+    /// user's last press stands until the store catches up. The ping-pong the
+    /// old rule feared is prevented instead by contradictions being INERT: they
+    /// neither flip the mode nor buy a write, so the amplification loop that
+    /// fed the storm has nothing to feed on.
     #[test]
-    fn out_of_order_write_is_reasserted_once_then_store_wins() {
+    fn a_contradicting_store_never_overrules_an_owed_press() {
         let mut m = BarModel::default();
         m.apply_snapshot(snap(1, vec![]));
         m.toggle(); // → collapsed, owes true
@@ -3517,22 +3814,30 @@ mod tests {
             fx.contains(&Effect::PersistCollapse { collapsed: false }),
             "the owed value must be re-asserted"
         );
-        // The re-assert was lost too (pathological): a second contradicting
-        // push spends the retry and the store becomes authoritative.
+        // The re-assert was lost too (pathological): further contradicting
+        // pushes change NOTHING — no flip, and no second write.
         let mut bad2 = snap(3, vec![]);
         bad2.collapsed = true;
         let fx = m.apply_snapshot(bad2);
-        assert!(m.collapsed, "retry spent: consistency over intent");
+        assert!(
+            !m.collapsed,
+            "the store overruled a press it had not caught up to"
+        );
         assert!(
             !fx.iter()
                 .any(|e| matches!(e, Effect::PersistCollapse { .. })),
-            "no further re-asserts — the ledger is closed"
+            "no further re-asserts — one per burst"
         );
-        // Ledger clean again: a later store flip heals normally.
-        let mut heal = snap(4, vec![]);
-        heal.collapsed = false;
-        m.apply_snapshot(heal);
+        // The debt settles the moment the store agrees, and healing resumes:
+        // an instance with nothing owed follows the store as it always did.
+        let mut caught_up = snap(4, vec![]);
+        caught_up.collapsed = false;
+        m.apply_snapshot(caught_up);
         assert!(!m.collapsed);
+        let mut heal = snap(5, vec![]);
+        heal.collapsed = true;
+        m.apply_snapshot(heal);
+        assert!(m.collapsed, "a settled ledger must still follow the store");
     }
 
     /// Issue #5 seq-gate interplay: a STALE snapshot (seq <=) is discarded
@@ -3630,7 +3935,10 @@ mod tests {
         // a path would render as ellipsis and identify nothing.
         assert_eq!(repo, "clave");
         assert_eq!(summary, "u1 is working");
-        // S7 has not landed: a blank cell, never an invented level.
+        // S7 HAS landed (#62) — this fixture just never sets `context_level`,
+        // which is the "no reading yet" case, and it must stay a blank cell
+        // rather than an invented level. A dormant row is a different thing
+        // entirely and renders in full ramp colour.
         assert_eq!(battery, None);
     }
 
@@ -4811,6 +5119,21 @@ mod tests {
         ceil: usize,
         latency: bool,
         pending: Option<Effect>,
+        /// #137 round 2: does `ShrinkSelf` actually narrow this pane? Observed
+        /// live going BOTH ways for the same instance in one session, because
+        /// `resize_pane_with_id(Decrease, Right)` resolves against whatever
+        /// neighbour the layout puts on that edge. The sim could not express it,
+        /// which is why no test caught the bar climbing to 90% of the terminal —
+        /// the same gap D26 records: the harness existed, the shape was never
+        /// generated.
+        inverted: bool,
+        /// The longest run of CONSECUTIVE applied resizes that each left the pane
+        /// FURTHER from its target. This is the invariant the runaway violated —
+        /// eight straight `ShrinkSelf` walking 65 → 117 — and none of the existing
+        /// assertions could see it, because a runaway terminates with its budget
+        /// spent and "budget spent mid-travel" is an accepted terminal state.
+        max_worsening_run: u32,
+        worsening_run: u32,
     }
 
     impl SimZellij {
@@ -4823,19 +5146,36 @@ mod tests {
                 ceil,
                 latency,
                 pending: None,
+                inverted: false,
+                max_worsening_run: 0,
+                worsening_run: 0,
             }
         }
 
         /// Apply one resize toward its direction, coarse and clamped. At the
         /// floor/ceil zellij REFUSES (cols unchanged) — the loop must cope.
-        fn apply(&mut self, fx: &Effect) {
-            match fx {
-                Effect::ShrinkSelf => {
-                    self.cols = self.cols.saturating_sub(self.step).max(self.floor)
-                }
-                Effect::GrowSelf => self.cols = (self.cols + self.step).min(self.ceil),
-                _ => {}
+        /// Did the resize just applied close the gap or widen it? A run of
+        /// widening moves is the runaway signature.
+        fn note_progress(&mut self, before: usize, target: usize) {
+            if self.cols.abs_diff(target) > before {
+                self.worsening_run += 1;
+                self.max_worsening_run = self.max_worsening_run.max(self.worsening_run);
+            } else {
+                self.worsening_run = 0;
             }
+        }
+
+        fn apply(&mut self, fx: &Effect) {
+            let narrower = match fx {
+                Effect::ShrinkSelf => !self.inverted,
+                Effect::GrowSelf => self.inverted,
+                _ => return,
+            };
+            self.cols = if narrower {
+                self.cols.saturating_sub(self.step).max(self.floor)
+            } else {
+                (self.cols + self.step).min(self.ceil)
+            };
         }
     }
 
@@ -4856,7 +5196,12 @@ mod tests {
     /// opposed to being one render away from noticing a clobber-drift (issue
     /// #4). Two suffices: the seek's own recovery (grace + drift confirmation)
     /// never needs more than one silent render before it acts again.
-    const SETTLE_RENDERS: u32 = 2;
+    // #137: at least as patient as the MODEL's own notion of "quiet". The seek
+    // resumes an incomplete rest after QUIET_REST_RENDERS still renders, so a
+    // harness that gave up sooner declared the bar settled while the model had
+    // not finished deciding — and every seek property then measured a state the
+    // real bar passes straight through.
+    const SETTLE_RENDERS: u32 = QUIET_REST_RENDERS + 2;
 
     /// Drive width_seek in the render-feedback loop until the model goes SILENT
     /// at stable cols (converged, floored, or budget-exhausted), returning the
@@ -4876,7 +5221,15 @@ mod tests {
         let mut settle = 0u32; // consecutive idle re-renders at stable cols
         loop {
             iters += 1;
-            assert!(iters < 1024, "width_seek livelocked at {} cols", sim.cols);
+            // #137: raised from 1024. A bar stranded far from target now walks
+            // home over several bounded journeys instead of parking there
+            // forever (the old F1 corner), and the generator produces lattices
+            // as fine as one column per resize — 400 columns of travel at that
+            // granularity is ~24 journeys with quiet gaps between. Real zellij
+            // steps by ~5% of the viewport, so a real bar takes two or three.
+            // The cap still catches a true livelock: the resumption is
+            // progress-guarded, so distance strictly decreases per journey.
+            assert!(iters < 16_384, "width_seek livelocked at {} cols", sim.cols);
             let budget_before = model.seek_budget;
             let fx = model.width_seek(sim.cols);
             // A drift re-arm (issue #4) hands the seek a fresh budget — hence a
@@ -4891,7 +5244,14 @@ mod tests {
                     // Model idle. Flush a deferred (latency) resize if queued;
                     // that is progress, not settling.
                     if let Some(p) = sim.pending.take() {
+                        let target = if model.showing_collapsed() {
+                            COLLAPSED_TARGET_COLS
+                        } else {
+                            BAR_TARGET_COLS
+                        };
+                        let before = sim.cols.abs_diff(target);
                         sim.apply(&p);
+                        sim.note_progress(before, target);
                         settle = 0;
                         continue;
                     }
@@ -4917,12 +5277,18 @@ mod tests {
                         fired = true;
                         match kind {
                             // Supersede the just-emitted resize: the user's
-                            // toggle re-aims the seek and re-arms the budget, so
-                            // a new segment begins.
+                            // toggle re-aims the seek. Since #137 it does NOT
+                            // re-arm the budget mid-flight — the remaining
+                            // allowance carries over — so the segment continues
+                            // rather than restarting. Resetting `seg` here made
+                            // the harness under-count a journey by exactly the
+                            // superseded emit, which then stopped assertion (b)
+                            // recognising its own "budget spent" terminal state.
+                            // Genuine re-arms (from rest) are still caught by the
+                            // budget-increase reset above.
                             Interrupt::Toggle => {
                                 model.toggle();
                                 sim.pending = None;
-                                seg = 0;
                                 continue;
                             }
                             // The reflow overrides our resize outright.
@@ -4934,10 +5300,20 @@ mod tests {
                             }
                         }
                     }
+                    // Judge the move against the target the MODEL is chasing —
+                    // `showing_collapsed()` and never a copy of it, so this cannot
+                    // drift from the seek's own rule.
+                    let target = if model.showing_collapsed() {
+                        COLLAPSED_TARGET_COLS
+                    } else {
+                        BAR_TARGET_COLS
+                    };
+                    let before = sim.cols.abs_diff(target);
                     if sim.latency {
                         sim.pending = Some(only.clone());
                     } else {
                         sim.apply(only);
+                        sim.note_progress(before, target);
                     }
                 }
                 other => panic!("width_seek emitted a non-resize effect: {other:?}"),
@@ -5129,6 +5505,543 @@ mod tests {
         );
     }
 
+    // === #137: the width-seek repair storm ================================
+    // The 2026-08-01 incident: ~12 tabs, repeated Alt+c, and the bar cycled a
+    // full-width reheal for about a minute. Reproduced under instrumentation on
+    // 2026-08-07 — 1,413 renders and 634 resizes in three seconds across twelve
+    // instances, from ten keypresses. The cause was never the seek's
+    // convergence: the collapse TARGET kept moving, because a store round-trip
+    // is slower than a keypress and every lagging snapshot contradicted newer
+    // local state. Each contradiction bought a re-assert write (another
+    // snapshot) and each flip bought a fresh 16-step budget.
+
+    /// A snapshot carrying `collapsed`, at `seq`. Nothing else moves, so any
+    /// behaviour these tests see is the collapse ledger's alone.
+    fn collapse_snap(seq: u64, collapsed: bool) -> AgentSnapshot {
+        AgentSnapshot {
+            collapsed,
+            seq,
+            agents: vec![],
+            tab_order: Default::default(),
+        }
+    }
+
+    /// Render until the seek goes quiet, returning the resizes it spent.
+    /// Deliberately NOT `drive`: this counts the whole burst, across settles.
+    fn run_to_quiet(m: &mut BarModel, sim: &mut SimZellij, max_renders: u32) -> u32 {
+        let mut resizes = 0;
+        let mut quiet = 0;
+        for _ in 0..max_renders {
+            let fx = m.width_seek(sim.cols);
+            if fx.is_empty() {
+                quiet += 1;
+                if quiet >= 4 {
+                    break;
+                }
+                continue;
+            }
+            quiet = 0;
+            for f in &fx {
+                if matches!(f, Effect::ShrinkSelf | Effect::GrowSelf) {
+                    resizes += 1;
+                    sim.apply(f);
+                }
+            }
+        }
+        resizes
+    }
+
+    /// THE regression test for the incident. Ten toggles, each chased by the
+    /// snapshot the store was about to broadcast for the PREVIOUS mode — the
+    /// lagging-store shape, measured live. The bar must not resize more than a
+    /// bounded handful of journeys' worth.
+    ///
+    /// Against the pre-fix model this explodes: every stale snapshot healed the
+    /// mode back and re-funded a full 16-step budget, so the count scaled with
+    /// the burst instead of staying flat.
+    #[test]
+    fn a_toggle_burst_against_a_lagging_store_does_not_storm() {
+        let mut m = BarModel {
+            seek_budget: 0,
+            seek_rest: Some(BAR_TARGET_COLS),
+            ..BarModel::default()
+        };
+        // Hydrated: the mode is authoritative, so the seek may act (D37).
+        m.apply_snapshot(collapse_snap(1, false));
+        let mut sim = SimZellij::new(BAR_TARGET_COLS, 8, 0, 200, false);
+        let mut seq = 1u64;
+        let mut total = 0u32;
+        for _ in 0..10 {
+            let before = m.collapsed;
+            m.toggle();
+            // One render, so the seek is genuinely IN FLIGHT when the stale
+            // snapshot lands — the mid-heal condition the maintainer hit.
+            total += run_to_quiet(&mut m, &mut sim, 2);
+            seq += 1;
+            m.apply_snapshot(collapse_snap(seq, before)); // the store, one press behind
+            total += run_to_quiet(&mut m, &mut sim, 6);
+        }
+        total += run_to_quiet(&mut m, &mut sim, 40);
+        // Ten presses over a distance of ~3 steps each. Pre-fix this ran to
+        // several hundred; the bound is deliberately loose enough not to pin
+        // animation detail and tight enough that a re-funding regression fails.
+        assert!(
+            total <= 3 * SEEK_BUDGET,
+            "toggle burst spent {total} resizes — the storm is back"
+        );
+    }
+
+    /// The store-write half of the same defect: writes must scale with presses,
+    /// not with snapshots. The amplification the incident measured — ten presses
+    /// driving the store seq from ~14 to 40 — came from contradicting snapshots
+    /// each buying a write AND each write broadcasting another snapshot. That
+    /// loop is closed by the ledger no longer yielding to a contradiction at
+    /// all: a press books one write, its first contradiction books one repair,
+    /// and every later contradiction while the debt stands books nothing.
+    ///
+    /// Two per press, not one per snapshot. The tighter "one per burst" bound
+    /// was tried and withdrawn (Codex P2 on PR #152): it made the re-assert
+    /// unreachable for the whole life of an unresolved debt, so a burst that
+    /// ended with the store holding the wrong value could never repair itself.
+    #[test]
+    fn a_toggle_burst_books_two_writes_per_press_not_one_per_snapshot() {
+        let mut m = BarModel::default();
+        m.apply_snapshot(collapse_snap(1, false));
+        let mut writes = 0;
+        let mut seq = 1u64;
+        const PRESSES: usize = 10;
+        for _ in 0..PRESSES {
+            let before = m.collapsed;
+            writes += m
+                .toggle()
+                .iter()
+                .filter(|e| matches!(e, Effect::PersistCollapse { .. }))
+                .count();
+            // Contradicting snapshots: our write has not landed yet, and the
+            // store keeps pushing. Three per press, so a per-snapshot budget
+            // shows up as 4x rather than 2x.
+            for _ in 0..3 {
+                seq += 1;
+                writes += m
+                    .apply_snapshot(collapse_snap(seq, before))
+                    .iter()
+                    .filter(|e| matches!(e, Effect::PersistCollapse { .. }))
+                    .count();
+            }
+        }
+        assert!(
+            writes <= 2 * PRESSES,
+            "{PRESSES} presses booked {writes} store writes; the re-assert budget is per-snapshot again"
+        );
+    }
+
+    /// Codex P2 on PR #152. A press must always be able to repair a store that
+    /// disagrees with it, however the previous burst ended. Bounding the
+    /// re-assert to one per BURST used the outstanding debt as the burst
+    /// boundary — and an unresolved debt never clears, so once one burst ended
+    /// with the store holding the wrong value, every later press was classified
+    /// as part of that dead burst and the bar could never write the correction.
+    /// Store and bar then disagreed for the life of the plugin instance.
+    #[test]
+    fn a_press_arriving_on_an_unresolved_debt_can_still_repair_the_store() {
+        let mut m = BarModel::default();
+        m.apply_snapshot(collapse_snap(1, false));
+        m.toggle(); // owes `true`
+        assert!(
+            m.apply_snapshot(collapse_snap(2, false))
+                .iter()
+                .any(|e| matches!(e, Effect::PersistCollapse { collapsed: true })),
+            "the first contradiction must book the repair"
+        );
+        assert!(
+            !m.apply_snapshot(collapse_snap(3, false))
+                .iter()
+                .any(|e| matches!(e, Effect::PersistCollapse { .. })),
+            "the repair is once per press, not once per snapshot"
+        );
+        // That debt is never settled — the store ended the burst holding the
+        // wrong value, which is exactly the out-of-order landing #5 exists for.
+        // A NEW press is a new intent and owes the store a new write.
+        m.toggle(); // owes `false`
+        assert!(
+            m.apply_snapshot(collapse_snap(4, true))
+                .iter()
+                .any(|e| matches!(e, Effect::PersistCollapse { collapsed: false })),
+            "a press arriving on an unresolved debt could never repair the store"
+        );
+    }
+
+    /// Last press wins: a burst leaves the bar in the mode the final press
+    /// asked for, and a snapshot that is merely BEHIND cannot overrule it.
+    #[test]
+    fn the_last_press_wins_over_a_lagging_snapshot() {
+        let mut m = BarModel::default();
+        m.apply_snapshot(collapse_snap(1, false));
+        m.toggle(); // -> collapsed
+        m.toggle(); // -> expanded
+        m.toggle(); // -> collapsed, and this is the press that must stand
+        assert!(m.collapsed);
+        // Two snapshots still carrying the pre-burst value.
+        m.apply_snapshot(collapse_snap(2, false));
+        m.apply_snapshot(collapse_snap(3, false));
+        assert!(
+            m.collapsed,
+            "a store one burst behind overruled the user's last press"
+        );
+        // Once the store catches up, the debt settles and nothing moves.
+        m.apply_snapshot(collapse_snap(4, true));
+        assert!(m.collapsed);
+    }
+
+    /// A mid-flight retarget spends the REMAINING allowance, it does not draw a
+    /// fresh one. This is the bound that makes a burst cost one animation.
+    #[test]
+    fn a_midflight_retarget_carries_the_budget_it_has_left() {
+        let mut m = BarModel::default();
+        m.apply_snapshot(collapse_snap(1, false));
+        let mut sim = SimZellij::new(120, 8, 0, 200, false);
+        // Spend part of the budget travelling toward the expanded target.
+        for _ in 0..3 {
+            for f in &m.width_seek(sim.cols) {
+                sim.apply(f);
+            }
+        }
+        let mid = m.seek_budget;
+        assert!(mid < SEEK_BUDGET && mid > 0, "budget mid-flight was {mid}");
+        m.toggle(); // retarget to the gutter, mid-flight
+        assert_eq!(
+            m.seek_budget, mid,
+            "a mid-flight retarget re-funded the budget — a burst can buy unlimited resizes again"
+        );
+        // From REST, by contrast, a toggle is a new journey and gets a full one.
+        m.settle_at(sim.cols, true);
+        m.toggle();
+        assert_eq!(m.seek_budget, SEEK_BUDGET);
+    }
+
+    /// The cause-agnostic brake. Whatever re-arms the seek, a bar that cannot
+    /// settle stops resizing, says so exactly once, and parks where it stands.
+    #[test]
+    fn the_storm_brake_parks_the_pane_and_reports_once() {
+        let mut m = BarModel::default();
+        m.apply_snapshot(collapse_snap(1, false));
+        // A layout that never lets the pane arrive: every render presents a
+        // width far from either target, and each re-arm keeps the seek hungry.
+        let mut reports = 0;
+        let mut resizes = 0;
+        let mut cols = 300;
+        for i in 0..600 {
+            let fx = m.width_seek(cols);
+            for f in &fx {
+                match f {
+                    Effect::StormCapped { .. } => reports += 1,
+                    Effect::ShrinkSelf | Effect::GrowSelf => resizes += 1,
+                    _ => {}
+                }
+            }
+            // Clobber the pane back out to a hostile width, and re-arm — the
+            // shape of a relayout fighting the seek.
+            cols = if i % 2 == 0 { 300 } else { 290 };
+            m.arm_seek();
+        }
+        assert_eq!(reports, 1, "the brake reported {reports} times, not once");
+        assert!(
+            resizes <= STORM_ACTION_CAP,
+            "the brake let {resizes} resizes through a cap of {STORM_ACTION_CAP}"
+        );
+    }
+
+    /// The brake must not be a one-way door. This covers the SECOND of the two
+    /// refill paths — the one that un-parks a bar the brake stopped at a width
+    /// it never chose. Without it the pane is wedged: the ceiling is spent, so
+    /// the very walk that would carry it home cannot be funded, and no toggle
+    /// can shift it either. The first path — arriving refunds — is covered by
+    /// `an_ordinary_toggle_refills_the_allowance_with_no_idle_repaints`.
+    ///
+    /// Note the renders below are the model's own laziness gate, not a clock:
+    /// zellij sends none of its own accord (`QUIET_REST_RENDERS`).
+    #[test]
+    fn the_storm_brake_refills_once_the_pane_is_quiet() {
+        let mut m = BarModel::default();
+        m.apply_snapshot(collapse_snap(1, false));
+        m.storm_actions = STORM_ACTION_CAP;
+        // Park it, then sit still at the rest width.
+        let capped = m.width_seek(300);
+        assert!(matches!(capped.as_slice(), [Effect::StormCapped { .. }]));
+        for _ in 0..QUIET_REST_RENDERS {
+            assert!(m.width_seek(300).is_empty());
+        }
+        assert_eq!(m.storm_actions, 0, "the allowance never came back");
+        // And it acts again on the next genuine trigger.
+        m.arm_seek();
+        assert!(!m.width_seek(300).is_empty(), "the bar stayed frozen");
+    }
+
+    /// A burst can strand the pane: the allowance is no longer re-funded on a
+    /// retarget, so the seek can run out mid-travel. Live driving parked bars at
+    /// 139 and 20 columns against a 54-column target, and gate (A) makes a bar's
+    /// own rest width a no-op — so without this it stays wrong in silence.
+    /// One quiet resumption finishes the journey; a second is refused.
+    #[test]
+    fn a_rest_the_seek_never_chose_is_resumed_once_when_quiet() {
+        let mut m = BarModel::default();
+        m.apply_snapshot(collapse_snap(1, false));
+        // Strand it: budget spent, resting far from the expanded target.
+        m.seek_budget = 0;
+        m.seek_last_cols = Some(139);
+        let stranded = m.width_seek(139); // gate (B): `ours`, off-band → incomplete
+        assert!(
+            stranded.is_empty(),
+            "the stranded render should not act yet"
+        );
+        assert_eq!(m.seek_rest, Some(139));
+        assert!(
+            m.rest_incomplete,
+            "an off-band allowance-exhausted rest is incomplete"
+        );
+        // Sitting still is what earns the resumption.
+        for _ in 0..QUIET_REST_RENDERS - 1 {
+            assert!(m.width_seek(139).is_empty());
+        }
+        assert!(
+            m.width_seek(139).is_empty(),
+            "the resuming render only re-arms"
+        );
+        assert!(m.resumed_off_target, "the resumption latch must be spent");
+        // And now it travels again, toward the target it never reached.
+        let resumed = m.width_seek(139);
+        assert_eq!(
+            resumed,
+            vec![Effect::ShrinkSelf],
+            "a stranded bar never resumed its journey"
+        );
+    }
+
+    /// The resumption is progress-guarded, and that guard is what bounds it: a
+    /// hop that closed the gap earns another, a hop that did not ends the walk.
+    /// Distance strictly decreases, so a bar thrown a long way home converges in
+    /// several bounded journeys while a layout that simply refuses is fought
+    /// once and then left alone.
+    #[test]
+    fn only_a_resumption_that_gained_ground_earns_another() {
+        let mut m = BarModel::default();
+        m.apply_snapshot(collapse_snap(1, false)); // target: expanded (54)
+        // First stranding, a long way out.
+        m.seek_budget = 0;
+        m.seek_last_cols = Some(200);
+        m.width_seek(200);
+        assert!(m.rest_incomplete);
+        m.resumed_off_target = true; // the hop has been spent
+        // Strand it again, CLOSER: the walk is working, so it earns another hop.
+        m.seek_budget = 0;
+        m.seek_last_cols = Some(150);
+        m.width_seek(150);
+        assert!(
+            !m.resumed_off_target,
+            "a resumption that gained ground must earn another"
+        );
+        // Strand it again, no closer: the walk is over.
+        m.resumed_off_target = true;
+        m.seek_budget = 0;
+        m.seek_last_cols = Some(150);
+        m.width_seek(150);
+        assert!(
+            m.resumed_off_target,
+            "a resumption that gained nothing must not earn another"
+        );
+    }
+
+    /// The refusal wall is NOT a stranding. Zellij declining to shrink below its
+    /// minimum pane width is a rest the seek deliberately accepts (C8), and it
+    /// must stay silent there however long it sits — otherwise the granularity
+    /// floor becomes a permanent slow resize loop.
+    #[test]
+    fn the_granularity_floor_is_never_resumed() {
+        let mut m = BarModel::default();
+        m.apply_snapshot(collapse_snap(1, true)); // collapsed: target is the gutter
+        // Zellij refuses to move: the same cols twice, near the target.
+        let cols = COLLAPSED_TARGET_COLS + 6;
+        m.width_seek(cols); // acts
+        m.width_seek(cols); // unchanged → one-render grace
+        assert!(m.width_seek(cols).is_empty(), "the wall should be accepted");
+        assert!(!m.rest_incomplete, "a refusal wall is a rest we chose");
+        for _ in 0..QUIET_REST_RENDERS + 4 {
+            assert!(
+                m.width_seek(cols).is_empty(),
+                "the floor was resumed — it must stay silent"
+            );
+        }
+    }
+
+    /// Maintainer's call (2026-08-07): a brake that parks the bar wherever it
+    /// stood is the wrong degradation — he watched it park at ~90% of his
+    /// terminal, which is as unusable as the storm it was preventing. The brake
+    /// stops the churn immediately but leaves the rest INCOMPLETE unless the
+    /// width is genuinely acceptable, so the quiet-period walk finishes the
+    /// journey at the target.
+    #[test]
+    fn the_brake_does_not_adopt_a_bad_width_as_home() {
+        let mut m = BarModel::default();
+        m.apply_snapshot(collapse_snap(1, false)); // target 54
+        m.storm_actions = STORM_ACTION_CAP;
+        let fx = m.width_seek(300); // far from target, and out of allowance
+        assert!(matches!(fx.as_slice(), [Effect::StormCapped { .. }]));
+        assert!(
+            m.rest_incomplete,
+            "the brake adopted a 300-column rest as home"
+        );
+        // Quiet, then the walk resumes toward the target rather than staying.
+        for _ in 0..QUIET_REST_RENDERS {
+            m.width_seek(300);
+        }
+        assert!(
+            !m.width_seek(300).is_empty(),
+            "the brake left the bar parked at a width it never chose"
+        );
+    }
+
+    /// The brake must never eat a keypress. A press is rate-limited by the human
+    /// and already capped at one journey's allowance by `seek_budget`, so the
+    /// storm ceiling adds nothing on top of it for user-driven arming — while a
+    /// brake that ignores `Alt+c` presents as exactly the dead sidebar it exists
+    /// to prevent. Worse, pressing again is what *sustains* it: a toggle clears
+    /// the rest anchor, so the quiet counter the resumption waits on restarts on
+    /// every press, and a user who reacts to a frozen bar by pressing harder
+    /// freezes it indefinitely.
+    #[test]
+    fn a_press_still_moves_a_bar_the_brake_has_parked() {
+        let mut m = BarModel::default();
+        m.apply_snapshot(collapse_snap(1, false));
+        m.storm_actions = STORM_ACTION_CAP;
+        assert!(
+            matches!(m.width_seek(300).as_slice(), [Effect::StormCapped { .. }]),
+            "the brake should have tripped"
+        );
+        // Mash it, the way someone does at a bar that has stopped responding.
+        for press in 1..=3 {
+            m.toggle();
+            assert!(
+                !m.width_seek(300).is_empty(),
+                "press {press} was swallowed by the brake"
+            );
+        }
+    }
+
+    /// And the converse: a brake trip at an ACCEPTABLE width is home, so it does
+    /// not generate a pointless resumption.
+    #[test]
+    fn the_brake_at_an_acceptable_width_is_content() {
+        let mut m = BarModel::default();
+        m.apply_snapshot(collapse_snap(1, false));
+        m.storm_actions = STORM_ACTION_CAP;
+        m.width_seek(BAR_TARGET_COLS);
+        assert!(!m.rest_incomplete, "an on-target rest is home");
+    }
+
+    /// Drive one toggle to quiet, rendering ONLY when the seek asked for
+    /// something. That is the honest model of the host: zellij calls a plugin's
+    /// `render` when an event made it ask for a repaint, or when a resize
+    /// actually changed its size — never on a clock
+    /// (`zellij-server/src/plugins/wasm_bridge.rs:2165` and `:838`, v0.44.3).
+    /// So a bar on a hidden or quiet tab gets NO free repaints, and anything the
+    /// seek needs "once things go idle" may simply never arrive.
+    fn toggle_and_settle(m: &mut BarModel, sim: &mut SimZellij) -> u32 {
+        m.toggle();
+        let mut renders = 0;
+        loop {
+            let fx = m.width_seek(sim.cols);
+            renders += 1;
+            if fx.is_empty() {
+                return renders;
+            }
+            for f in &fx {
+                sim.apply(f);
+            }
+        }
+    }
+
+    /// Codex P2 on PR #152, confirmed against the zellij source. The storm
+    /// allowance used to refill only after three renders at the rest width, on
+    /// the belief that "the bar renders at least twice a second when idle".
+    /// It does not: there is no idle repaint anywhere in zellij 0.44.3. The
+    /// allowance therefore has to be refilled by something the model is
+    /// GUARANTEED to see, and the only such thing is its own arrival.
+    #[test]
+    fn an_ordinary_toggle_refills_the_allowance_with_no_idle_repaints() {
+        let mut m = BarModel::default();
+        m.apply_snapshot(collapse_snap(1, false));
+        let mut sim = SimZellij::new(BAR_TARGET_COLS, 10, 0, 200, false);
+        let spent_renders = toggle_and_settle(&mut m, &mut sim);
+        // Assert the PATH as well as the outcome (TESTING.md shape 3): if this
+        // ever converges in one render the assertion below stops meaning
+        // anything, because nothing was ever spent to refund.
+        assert!(
+            spent_renders >= 2,
+            "the toggle converged in {spent_renders} render(s) — it never spent any allowance"
+        );
+        assert!(!m.rest_incomplete, "the toggle should have arrived");
+        assert_eq!(
+            m.storm_actions, 0,
+            "arriving did not refund the allowance, so it can only ever run down"
+        );
+    }
+
+    /// The consequence, stated as the user sees it: press Alt+c enough times on
+    /// a quiet fleet and the sidebar stops moving. Each toggle is a clean
+    /// convergence — no storm, no contradiction, nothing wrong — and with a
+    /// refill that depends on repaints nobody sends, the allowance is a
+    /// LIFETIME budget rather than a rate limit.
+    #[test]
+    fn a_long_run_of_clean_toggles_never_trips_the_brake() {
+        let mut m = BarModel::default();
+        m.apply_snapshot(collapse_snap(1, false));
+        let mut sim = SimZellij::new(BAR_TARGET_COLS, 10, 0, 200, false);
+        // Comfortably more presses than the cap divided by the cost of one
+        // journey, so a lifetime-budget regression cannot squeak through.
+        for press in 0..60 {
+            toggle_and_settle(&mut m, &mut sim);
+            assert!(
+                !m.storm_reported,
+                "the brake engaged on clean toggle {press} — the allowance never refills"
+            );
+        }
+    }
+
+    /// #137 round 2, the runaway. `ShrinkSelf` does not reliably narrow the pane:
+    /// `resize_pane_with_id(Decrease, Right)` resolves against whatever neighbour
+    /// the layout puts on that edge, and live the same instance had it both ways
+    /// in one session — one episode walked 65 → 117 on eight straight shrink
+    /// requests, until zellij refused. The seek learns the SIGN from the observed
+    /// effect, exactly as it learns the step size, so one wrong step is the whole
+    /// cost.
+    #[test]
+    fn the_seek_learns_that_shrink_is_inverted_and_stops_running_away() {
+        let mut m = BarModel::default();
+        m.apply_snapshot(collapse_snap(1, true)); // collapsed: target is the gutter
+        let mut sim = SimZellij::new(65, 8, 0, 500, false);
+        sim.inverted = true; // ShrinkSelf makes it WIDER
+        let mut worst = 0usize;
+        for _ in 0..60 {
+            let fx = m.width_seek(sim.cols);
+            for f in &fx {
+                sim.apply(f);
+            }
+            worst = worst.max(sim.cols);
+            if fx.is_empty() {
+                break;
+            }
+        }
+        assert!(
+            worst <= 65 + 2 * 8,
+            "the bar ran away to {worst} columns before the polarity was learned"
+        );
+        assert!(
+            sim.cols.abs_diff(COLLAPSED_TARGET_COLS) <= band_half(sim.step),
+            "an inverted pane never converged: ended at {}",
+            sim.cols
+        );
+    }
+
     // === Property tests (issue #10 item 3) =================================
     // proptest generalizes the example-based tests over the model's
     // divergence-critical invariants. Each property cites the ledger finding
@@ -5153,6 +6066,7 @@ mod tests {
                 collapsed in any::<bool>(),
                 peeking in any::<bool>(),
                 latency in any::<bool>(),
+                inverted in any::<bool>(),
                 interrupt in prop_oneof![
                     Just(Option::<(u32, Interrupt)>::None),
                     (1u32..=6).prop_map(|n| Some((n, Interrupt::Toggle))),
@@ -5172,8 +6086,28 @@ mod tests {
                     ..BarModel::default()
                 };
                 let mut sim = SimZellij::new(start, step, floor, 500, latency);
-                let max_seg = drive(&mut m, &mut sim, interrupt);
+                sim.inverted = inverted;
+                let first = drive(&mut m, &mut sim, interrupt);
+                // #137: a rest reached by running OUT of allowance mid-travel is
+                // resumed once, so quiescence can take a second journey. Absorb
+                // it here, before (c) demands silence — the bound that makes this
+                // terminate rather than loop is `resumed_off_target`, and (c)
+                // below is what proves it holds.
+                let second = drive(&mut m, &mut sim, None);
+                let max_seg = first.max(second);
 
+                // (e) #137 round 2 — the seek never WALKS AWAY from its target.
+                // One step past is the ordinary overshoot the pre-learning step
+                // buys and `GrowSelf` recovers (round 9); a second is the beat of
+                // latency behind it. A THIRD means the seek is asking for the same
+                // wrong direction repeatedly, which is what put the bar at 90% of
+                // the maintainer's terminal.
+                prop_assert!(
+                    sim.max_worsening_run <= 2,
+                    "the seek drove the pane away from its target {} times in a row \
+                     (inverted={}, step={}, start={})",
+                    sim.max_worsening_run, inverted, step, start
+                );
                 // (a) each budget segment terminates within SEEK_BUDGET emits.
                 prop_assert!(max_seg <= SEEK_BUDGET, "segment {} exceeded budget", max_seg);
                 // (d) an external jump is never learned as the step size.
@@ -5182,8 +6116,9 @@ mod tests {
                     "learned an over-size step: {}",
                     m.seek_step
                 );
-                // (c) silent forever at the resting width — no oscillation.
-                for _ in 0..4 {
+                // (c) silent forever at the resting width — no oscillation, and
+                // the off-target resumption above is spent, not repeating.
+                for _ in 0..8 {
                     prop_assert!(
                         m.width_seek(sim.cols).is_empty(),
                         "storm at {} cols",
@@ -5232,11 +6167,19 @@ mod tests {
                 };
                 let within = sim.cols.abs_diff(target) <= bound;
                 let at_floor = sim.cols == floor;
+                // The budget was spent mid-travel. Still measured per segment —
+                // but since #137 a mid-flight retarget continues the segment
+                // instead of starting a new one, so a segment now spans the whole
+                // journey a single allowance paid for (see `drive`).
                 let exhausted = max_seg == SEEK_BUDGET;
+                // The storm brake is a legitimate terminal state too: it parks
+                // the pane deliberately. It cannot green a lazy seek — tripping
+                // it costs STORM_ACTION_CAP resizes first.
+                let capped = m.storm_reported;
                 prop_assert!(
-                    within || at_floor || exhausted,
-                    "ended at {} (target {}, floor {}, seg {})",
-                    sim.cols, target, floor, max_seg
+                    within || at_floor || exhausted || capped,
+                    "ended at {} (target {}, floor {}, seg {}, capped {})",
+                    sim.cols, target, floor, max_seg, capped
                 );
             }
 
@@ -5728,10 +6671,9 @@ mod tests {
                             match pending {
                                 Some(w) if *flag == w => pending = None,
                                 Some(_) if !reasserted => reasserted = true,
-                                Some(_) => {
-                                    pending = None;
-                                    expected = *flag;
-                                }
+                                // #137: no give-up arm. While a write is owed,
+                                // the store's flag is ignored — the press stands.
+                                Some(_) => {}
                                 None => expected = *flag,
                             }
                         }
@@ -5739,6 +6681,12 @@ mod tests {
                             m.toggle();
                             expected = !expected;
                             pending = Some(expected);
+                            // One re-assert per press: a press is always allowed
+                            // to repair a store that disagrees with it, however
+                            // the previous burst ended. Writes stay bounded
+                            // because the give-up arm above is gone, not because
+                            // the repair is rationed across presses (Codex P2 on
+                            // PR #152 — rationing it wedged the ledger).
                             reasserted = false;
                         }
                     }

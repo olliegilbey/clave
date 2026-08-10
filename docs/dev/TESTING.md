@@ -499,6 +499,15 @@ under `transcripts/`), with a header comment recording what it was captured from
 and on what date. An invented fixture encodes a belief; a capture encodes an
 observation, and only one of those can be contradicted by the world.
 
+The worked example is
+[`transcripts/compacted-session.jsonl`](../../crates/clave/tests/fixtures/transcripts/compacted-session.jsonl),
+captured for S7's token estimator (#62, #147) — a real pre-compaction session,
+its `compact_boundary`, and the turn after it. Copy its header: provenance and
+date, the dated field counts, the re-measurement commands, and an explicit list
+of the decoys the capture carries (`iterations` repeats every usage key,
+`preTokens` precedes `postTokens`). Its consumers slice it by line, so one
+capture serves every case rather than each test writing its own reality.
+
 **Assert liveness, in two halves.** A checked-in capture cannot itself go
 extinct — it is frozen — so the assertion has to straddle the repository
 boundary:
@@ -680,6 +689,42 @@ exists (`--dry-run` to look first). It never kills a session: a sandbox whose
 worktree is gone but whose session is up is printed for the human with the
 kill command. `just sandbox` runs it on the way in.
 
+### Tear the sandbox down when you are done with it
+
+Per-worktree isolation stopped agents clobbering each other; it did **not** stop
+sandboxes accumulating. One per worktree is the ceiling, and worktrees are
+cheap, so the steady state without discipline is a session list where the
+maintainer's own fleet is one line among many — and picking the wrong line is
+how a drive reaches the live session. Sprawl is a safety problem before it is a
+tidiness one.
+
+**Look before you launch.** This reads socket names and touches no session:
+
+```bash
+ls "${TMPDIR%/}/zellij-$(id -u)"/contract_version_*/
+```
+
+Each name is a live session. `clave` (no suffix) is the maintainer's fleet —
+never yours. A `clave-test-*` suffix names the worktree that owns it, so you can
+tell your own from another agent's mid-flight validation at a glance.
+
+**A live sandbox belonging to another worktree is not litter.** `clave dev reap`
+deliberately reports those as `keep`: the worktree still exists, so somebody is
+probably mid-drive on another branch. Killing it destroys their in-flight
+evidence. Reap only claims the ones whose worktree is gone.
+
+**Teardown is the human's, like every other session lifecycle step.** Two
+commands, because the first ends the session and the second stops zellij
+offering to resurrect it — a resurrectable corpse still shows in the list and
+still gets picked by mistake:
+
+```bash
+zellij kill-session <name> && zellij delete-session --force <name>
+clave dev reap                 # then reclaim the roots of any deleted worktrees
+```
+
+`clave dev reset` prints that pair for your own instance rather than running it.
+
 ### The sandbox drive loop
 
 The shape that works, learned driving the #55 frame-coherence fix (PR #120).
@@ -729,6 +774,11 @@ Each step exists because skipping it produces a confident, wrong result.
    dead row's stamp. Closing alone proves nothing about reuse.
 8. **Report what you did not exercise.** A race that did not reproduce is not a
    race that cannot happen; say so in those words.
+9. **Hand back the teardown.** The loop is not finished when the evidence is
+   gathered — an abandoned sandbox outlives the branch that needed it and joins
+   the session list the next drive has to pick from. Print the kill pair for the
+   human with the report (see "Tear the sandbox down when you are done with it");
+   do not leave it for whoever notices the sprawl.
 
 **The join is not as easy as it looks.** `list-panes -t -j` reports a pane's
 *deepest child process*, so an agent pane routinely shows `rust-analyzer`, `uv
@@ -739,24 +789,39 @@ every pane and mark the unresolvable ones.
 
 ## Agent-side sanctioned commands
 
-Anything scoped to **your own sandbox session** is yours, including tab
-actions. The commands below are the ones with a trap attached, so they are
-spelled out. Session lifecycle is always the human's, and the maintainer's own
-session is never yours.
-
-Every `clave-test` / `clave-dev` written below is the *main checkout's* name.
-From a worktree, substitute your own — the two lines that produce them are:
+**Drive through `scripts/ct.sh`, not through the env var.** `ZELLIJ_SESSION_NAME=clave-test zellij action …` reads like a boundary and is not one: an agent shell inside the maintainer's session also inherits `ZELLIJ` and `ZELLIJ_PANE_ID`, so overriding the name alone works right up until `clave-test` stops existing — at which point the CLI **falls back to the ambient session instead of erroring**, and the rest of the drive lands on the daily fleet. That happened on 2026-08-07: another agent's reset killed the sandbox mid-drive, a `start-or-reload-plugin` put a sandbox-built debug bar into the maintainer's live session as a real pane, and ten `clave-toggle` pipes went to his fleet. `ct.sh` fails **closed** — it proves the sandbox socket exists *and* has a live server behind it, clears the ambient session, and takes no session argument, so the mistake is no longer expressible. Re-check between rounds by construction: every command re-runs the guard.
 
 ```bash
-SB_SESSION="$(clave dev instance --field session)"
-SB_DATA="$(clave dev instance --field data)"
+scripts/ct.sh new-tab --name t1
+scripts/ct.sh go-to-tab 1
 ```
+
+**A surprising instance count is a session-identity failure, not a curiosity.** The tell in that incident was a reload reporting ONE bar instance where twelve were expected, and it got explained away as "the reload created a new instance". If a reading names fewer instances than there are tabs, stop and prove which session you are talking to before anything else.
+
+Anything routed through `ct.sh` is yours, including tab actions. The
+commands below are the ones with a trap attached, so they are spelled out.
+Session lifecycle is always the human's, and the maintainer's own session is
+never yours.
+
+**`ct.sh` resolves the per-agent session itself**, so driving takes no session
+name from you — that is the whole point, and it is why the sandbox instance
+work (#161) and this wrapper compose rather than collide. It asks the binary,
+exactly as the staging script does, so the shell and the CLI cannot disagree
+about which sandbox is yours:
+
+```bash
+SB_SESSION="$(clave dev instance --field session)"   # what ct.sh resolves for you
+SB_DATA="$(clave dev instance --field data)"         # you still need this for paths
+```
+
+Every `clave-test` / `clave-dev` written below is the *main checkout's* name;
+from a worktree both differ, and `$SB_DATA` is how you spell the difference.
 
 **Hot-reload the sandbox bar** (the one sanctioned live mutation an agent may
 make — see the instrumentation recipe):
 
 ```bash
-ZELLIJ_SESSION_NAME="$SB_SESSION" zellij action start-or-reload-plugin \
+scripts/ct.sh start-or-reload-plugin \
   "file:$SB_DATA/clave-bar.wasm" -c clave_binary=clave
 ```
 
@@ -779,12 +844,12 @@ ZELLIJ_SESSION_NAME="$SB_SESSION" zellij action start-or-reload-plugin \
 > so a path containing a comma would not survive — none of ours do.
 
 **Drive the sandbox** (open, close, focus, inspect — the provocations step 5
-needs). Always env-scoped; a bare one of these hits the maintainer's fleet:
+needs). Always through `ct.sh`; a bare one of these hits the maintainer's fleet:
 
 ```bash
-ZELLIJ_SESSION_NAME=clave-test zellij action list-panes -t -j
-ZELLIJ_SESSION_NAME=clave-test zellij action go-to-tab 1     # 1-based
-ZELLIJ_SESSION_NAME=clave-test zellij action close-tab       # closes the FOCUSED tab
+scripts/ct.sh list-panes -t -j
+scripts/ct.sh go-to-tab 1     # 1-based
+scripts/ct.sh close-tab       # closes the FOCUSED tab
 ```
 
 > Never close the last tab — that ends the session, which is lifecycle and not
@@ -797,10 +862,10 @@ ZELLIJ_SESSION_NAME=clave-test zellij action close-tab       # closes the FOCUSE
 zellij list-sessions
 ```
 
-**Dump the sandbox layout** (env-scoped to `clave-test` — pane geometry truth):
+**Dump the sandbox layout** (guarded by `scripts/ct.sh` — pane geometry truth):
 
 ```bash
-ZELLIJ_SESSION_NAME=clave-test zellij action dump-layout
+scripts/ct.sh dump-layout
 ```
 
 > **Hazard — this blocks forever.** A `zellij action` aimed at an absent or dead
@@ -916,9 +981,15 @@ Four windows into what actually happened. Learn all four.
 - **`clave dev status`** — the agent's primary probe. Emits JSON:
   `session_live` (bool), `live_uuids` (parsed from the layout dump), and the
   full `store`. Liveness-gated, so it is always safe to run.
-- **Env-scoped `dump-layout`** — `ZELLIJ_SESSION_NAME=clave-test zellij action
-  dump-layout` — the ground truth for pane geometry and the serialized spawn
-  commands. Gate on liveness first (see the hazard above).
+- **Guarded `dump-layout`** — `scripts/ct.sh dump-layout`, never the bare
+  env-var form (see the drive loop's preflight). It is the ground truth for the
+  **serialized spawn commands** and for tab/pane *structure*. It is **not** the
+  truth for pane WIDTH: it normalises a split to `size="33%"`/`67%` whatever the
+  live geometry is, so it reported a tidy 33% for a bar that was occupying ~90%
+  of the screen (2026-08-07). `dump-screen` is no help either — it returns
+  nothing at all for a plugin pane. For width, instrument the bar's own render
+  and corroborate with a screenshot; see FOOTGUNS on why the model's belief
+  about its width is not pane truth.
 
 ## The instrumentation recipe
 
@@ -937,8 +1008,7 @@ C8 fixed-pane resize bug). Follow it in order:
    cp target/wasm32-wasip1/release/clave-bar.wasm \
      ~/.local/state/clave-dev/data/clave-bar.wasm
    ```
-4. **Hot-reload** with the sanctioned command from above (env-scoped to
-   `clave-test`).
+4. **Hot-reload** with the sanctioned `scripts/ct.sh` command from above.
 5. **The human exercises the behavior** on screen.
 6. **Read the zellij log filtered by your marker AND the build tag** — both, so
    you are reading this run and not a ghost of an earlier one.

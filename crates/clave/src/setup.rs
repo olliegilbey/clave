@@ -1011,6 +1011,8 @@ mod tests {
             title: None,
             summary: String::new(),
             default_branch: None,
+            context_tokens: None,
+            context_level: None,
             live_session: None,
         };
         let kdl = launch_layout_kdl_for("clave", "/w.wasm", Some(&r), None, false);
@@ -1052,6 +1054,8 @@ mod tests {
             title: None,
             summary: String::new(),
             default_branch: None,
+            context_tokens: None,
+            context_level: None,
             live_session: None,
         };
         // Most-recent row's cwd is GONE; the older row's cwd exists.
@@ -1226,6 +1230,8 @@ mod tests {
             title: None,
             summary: String::new(),
             default_branch: None,
+            context_tokens: None,
+            context_level: None,
             live_session: None,
         };
         let lay = launch_layout_kdl_for(abs, "/w.wasm", Some(&r), None, false);
@@ -1497,6 +1503,8 @@ mod tests {
             title: None,
             summary: String::new(),
             default_branch: None,
+            context_tokens: None,
+            context_level: None,
             live_session: None,
         };
         let cfg = config_kdl(binary, wasm);

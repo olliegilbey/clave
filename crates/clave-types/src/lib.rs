@@ -37,6 +37,35 @@ pub const AGENT_UUID_ENV: &str = "CLAVE_AGENT_UUID";
 /// and prose into another agent's row.
 pub const AGENT_PID_ENV: &str = "CLAVE_AGENT_PID";
 
+/// Env var naming the agent's SMART ZONE: how many tokens of context this user
+/// trusts a model to stay sharp within (S7, #62). ONE global number — it is a
+/// property of the user, not of the model, and the same figure holds across a
+/// 200k window, a 1M window, or a future non-Claude agent.
+///
+/// Deliberately NOT the model's real context window, and #62 rejected detecting
+/// that outright — `CLAUDE_CODE_DISABLE_1M_CONTEXT`, the 200k/1m threshold
+/// tables, the lot. The real ceiling is where Claude auto-compacts, which is not
+/// a thing anyone steers by; inferring it would be a guess in service of a
+/// number the user does not care about.
+///
+/// This is the point at which the battery turns RED, not the point at which its
+/// ramp ends: past it the reading clamps.
+pub const SMART_ZONE_ENV: &str = "CLAVE_AGENT_SMART_ZONE_TOKENS";
+
+/// Default for [`SMART_ZONE_ENV`] — the cap people settle on regardless of the
+/// window their model advertises (maintainer, #62).
+pub const DEFAULT_SMART_ZONE_TOKENS: u32 = 150_000;
+
+/// Fill steps in the S7 battery ramp: full, nine tenths … one tenth, empty.
+///
+/// Eleven because that is what a patched Nerd Font's Material Design battery
+/// family actually provides — `md-battery`, `md-battery_10` … `md-battery_90`,
+/// `md-battery_outline` — verified by parsing the installed font's glyph-name
+/// table rather than assumed (#62). Shared here for the same reason as
+/// [`BAR_TARGET_COLS`]: the host buckets against it and the renderer's table
+/// must be exactly this long, and nothing else links the two numbers.
+pub const BATTERY_LEVELS: u8 = 11;
+
 /// Per-agent status. This is a *latest-wins state machine* (spec §6.5), not a
 /// priority-max: a later event can downgrade an earlier one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,6 +174,26 @@ pub struct Agent {
     /// existed. `default` keeps pre-field payloads parseable.
     #[serde(default)]
     pub default_branch: Option<String>,
+    /// Tokens the row's conversation is currently holding — the newest assistant
+    /// turn's input, cache-read and cache-creation counts summed, read from the
+    /// transcript tail the hook already takes for `title`/`summary` (S7, #62).
+    ///
+    /// The RAW figure rides the wire alongside the bucketed level because the
+    /// expanded view renders it as text (#105); eleven glyphs can only ever
+    /// approximate it. `None` = no reading yet, which renders blank — the bar
+    /// never invents a measurement. `default` keeps pre-field payloads parseable.
+    #[serde(default)]
+    pub context_tokens: Option<u32>,
+    /// Index into the bar's battery ramp: `0` is full, [`BATTERY_LEVELS`]` - 1`
+    /// is empty and past the smart zone (S7, #62).
+    ///
+    /// Bucketed HOST-side, where [`SMART_ZONE_ENV`] is readable and where a
+    /// future non-Claude agent can bring its own thresholds without touching the
+    /// wasm; the bar renders an index and holds no opinion about tokens. Stamped
+    /// when the row's own agent reports, so a dormant row costs nothing to
+    /// project. `default` keeps pre-field payloads parseable.
+    #[serde(default)]
+    pub context_level: Option<u8>,
 }
 
 /// The full-replace snapshot `clave` pushes to `clave-bar` on every change
@@ -533,6 +582,8 @@ mod tests {
             summary: String::new(),
             worktree: None,
             default_branch: None,
+            context_tokens: None,
+            context_level: None,
         };
         assert!(!serde_json::to_string(&a).unwrap().contains("archived"));
     }
@@ -559,6 +610,8 @@ mod tests {
                 summary: String::new(),
                 worktree: None,
                 default_branch: None,
+                context_tokens: None,
+                context_level: None,
             }],
         };
         let json = serde_json::to_string(&snap).unwrap();
@@ -588,6 +641,8 @@ mod tests {
             summary: String::new(),
             worktree: None,
             default_branch: None,
+            context_tokens: None,
+            context_level: None,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert_eq!(back.tab_id, Some(4));
@@ -619,6 +674,8 @@ mod tests {
             summary: String::new(),
             worktree: None,
             default_branch: None,
+            context_tokens: None,
+            context_level: None,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert!(back.stale);
@@ -652,6 +709,8 @@ mod tests {
             summary: "fix the flaky auth".into(),
             worktree: Some("/x/.claude/worktrees/wt".into()),
             default_branch: None,
+            context_tokens: None,
+            context_level: None,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert_eq!(back.title.as_deref(), Some("CLA-MAIN"));
@@ -699,6 +758,8 @@ mod tests {
             summary: String::new(),
             worktree: None,
             default_branch: Some("trunk".into()),
+            context_tokens: None,
+            context_level: None,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert_eq!(back.default_branch.as_deref(), Some("trunk"));
@@ -770,6 +831,8 @@ mod tests {
             summary: String::new(),
             worktree: None,
             default_branch: None,
+            context_tokens: None,
+            context_level: None,
         };
         let mut v: serde_json::Value = serde_json::to_value(&a).unwrap();
         v.as_object_mut().unwrap().remove("commit_ord");

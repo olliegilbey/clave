@@ -43,6 +43,18 @@ pub struct ScenarioAgent {
     /// original default and renders a blank summary cell.
     pub summary: &'static str,
     pub status: clave_types::Status,
+    /// A seeded context reading (S7, #62), in tokens. Seeded rows are dormant
+    /// and dormant rows fire no hooks, so without this the battery column is
+    /// blank across the whole sandbox and a visual check of the ramp validates
+    /// nothing — which is the one tier this change class cannot get from tests.
+    ///
+    /// Seeding it is also faithful rather than a fixture cheat: the ruling that
+    /// closed the design lock's open question is precisely that a dormant row
+    /// carries a real last reading, because a dormant conversation consumes
+    /// nothing and its stored figure IS its current occupancy. `None` renders a
+    /// blank cell, which is the distinct "no reading yet" case and worth having
+    /// on screen beside the others.
+    pub context_tokens: Option<u32>,
 }
 
 impl ScenarioAgent {
@@ -61,6 +73,7 @@ impl ScenarioAgent {
         title: None,
         summary: "",
         status: clave_types::Status::Idle,
+        context_tokens: None,
     };
 }
 
@@ -137,6 +150,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 repo: Some("clave"),
                 summary: "ready for the next prompt",
                 status: clave_types::Status::Idle,
+                context_tokens: Some(12_000),
                 ..ScenarioAgent::DEFAULT
             },
             // Same repo, a worktree this time — same ink as `cold` above,
@@ -149,6 +163,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 title: Some("UX-GATE"),
                 summary: "wiring the new status column into render_rows before the review",
                 status: clave_types::Status::Working,
+                context_tokens: Some(61_000),
                 ..ScenarioAgent::DEFAULT
             },
             // A plain branch checkout (no worktree) — the third provenance.
@@ -160,6 +175,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 title: Some("SYNC-T9"),
                 summary: "two tests disagree about the debounce window, need a read",
                 status: clave_types::Status::NeedsYou,
+                context_tokens: Some(96_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -170,6 +186,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 title: Some("DNS-TTL"),
                 summary: "the staging rollout keeps timing out against the new zone",
                 status: clave_types::Status::Failed,
+                context_tokens: Some(128_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -179,6 +196,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 title: Some("CART-99"),
                 summary: "cart totals now round the same way on server and client",
                 status: clave_types::Status::Done,
+                context_tokens: Some(158_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -407,6 +425,15 @@ fn agent_record(
         stale: false,
         title: a.title.map(String::from),
         summary: a.summary.to_string(),
+        // S7 (#62). The LEVEL is not seeded — it is derived here from the same
+        // bucketing the hook uses, against this machine's own smart zone, so a
+        // sandbox run measures the real arithmetic rather than a number someone
+        // typed. Change the zone and the seeded fleet re-colours accordingly,
+        // which is itself the cheapest check that the env var is wired.
+        context_tokens: a.context_tokens,
+        context_level: a
+            .context_tokens
+            .map(|t| crate::hook::battery_level(t, crate::hook::smart_zone())),
         // `run_scenario` pins every seeded repo with `git init -q -b main`
         // (see the comment there), so this is the repo's REAL default, not a
         // guess — which is what makes `cold`'s blank provenance travel the
