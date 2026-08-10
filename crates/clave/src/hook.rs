@@ -312,17 +312,12 @@ fn usage_fields(line: &str) -> Option<String> {
     let mut depth = 0i32;
     let mut out = String::new();
     for c in line[start..].chars() {
+        // The brackets themselves are never collected — `json_u32` scans for
+        // `"key":` and digits, so punctuation carries nothing. Collecting them
+        // only bought two mutants that no test could ever distinguish.
         match c {
-            '{' | '[' => {
-                depth += 1;
-                if depth == 1 {
-                    out.push(c);
-                }
-            }
+            '{' | '[' => depth += 1,
             '}' | ']' => {
-                if depth == 1 {
-                    out.push(c);
-                }
                 depth -= 1;
                 if depth == 0 {
                     return Some(out);
@@ -1689,6 +1684,77 @@ mod tests {
         );
         // 2 + 4989, with the 211125 inside `iterations` correctly ignored.
         assert_eq!(tokens_from_tail(&format!("{holed}\n")), Some(4_991));
+    }
+
+    #[test]
+    fn s7_a_summed_key_after_a_nested_object_is_still_read() {
+        // Today all three summed keys precede the first nested object, so
+        // stopping at the first closing brace would happen to work. That is a
+        // property of Claude's current key ORDER, not of the format, and key
+        // order is exactly what a serializer reshuffles without telling anyone.
+        // Move one past the nesting and it must still be read. (Surfaced by
+        // `just mutants`: without this, ending the scan early survives.)
+        let lines: Vec<&str> = CAPTURE.lines().filter(|l| !l.starts_with('#')).collect();
+        let moved = lines[1]
+            .replacen("\"cache_read_input_tokens\":211125,", "", 1)
+            .replacen(
+                "\"iterations\":",
+                "\"cache_read_input_tokens\":211125,\"iterations\":",
+                1,
+            );
+        assert_eq!(tokens_from_tail(&format!("{moved}\n")), Some(216_116));
+    }
+
+    #[test]
+    fn s7_a_reading_that_moves_inside_one_bucket_still_pushes() {
+        // The glyph only moves once per tenth of the zone, but #105 renders the
+        // raw count as TEXT. Gating the push on the level alone would leave
+        // that text stale for up to 15k tokens at the default zone. Both
+        // fields have to gate it. (Surfaced by `just mutants`: without this,
+        // narrowing the condition to AND survives.)
+        let lines: Vec<&str> = CAPTURE.lines().filter(|l| !l.starts_with('#')).collect();
+        // 2 + 998 + 0 = 1000 — a real line shape, a different number. Both
+        // this and the parked value bucket to level 0 against the 150k default.
+        let small = lines[0]
+            .replacen(
+                "\"cache_creation_input_tokens\":15884",
+                "\"cache_creation_input_tokens\":998",
+                1,
+            )
+            .replacen(
+                "\"cache_read_input_tokens\":21551",
+                "\"cache_read_input_tokens\":0",
+                1,
+            );
+
+        let mut s = Store::default();
+        s.agents.insert("minted".into(), rec("minted"));
+        let r = s.agents.get_mut("minted").unwrap();
+        r.context_tokens = Some(0);
+        r.context_level = Some(0);
+        let payload = HookPayload {
+            session_id: Some("minted".into()),
+            ..Default::default()
+        };
+        // A QUIET event — an unmatched `Notification` maps to no status and
+        // reorders nothing — so `changed` reflects the battery alone. `Stop`
+        // would flip Idle→Done and push regardless, masking the very thing
+        // under test; that masking is why this survived a mutation round.
+        assert!(apply_hook_event(
+            &mut s,
+            "minted",
+            "Notification",
+            &payload,
+            Some(&format!("{small}\n")),
+            100,
+            true
+        ));
+        assert_eq!(s.agents["minted"].context_tokens, Some(1_000));
+        assert_eq!(
+            s.agents["minted"].context_level,
+            Some(0),
+            "the level must NOT have moved, or this proves nothing"
+        );
     }
 
     #[test]

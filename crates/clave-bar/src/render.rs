@@ -855,6 +855,46 @@ mod tests {
         }
     }
 
+    /// A level past the end of the ramp SATURATES to empty-and-red; it must
+    /// never fall through to the blank cell.
+    ///
+    /// Unreachable from this version — the host clamps before it sends — but
+    /// the snapshot crosses a version boundary, and a newer host with a longer
+    /// ramp is exactly how it becomes reachable. The direction matters: blank
+    /// means "no reading", so falling through would render a row that looks
+    /// FRESH for a session that is out of its zone. Saturating says "at least
+    /// this bad", which is the safe way to be wrong. (CodeRabbit, #147; the
+    /// arithmetic behind the clamp was surviving `just mutants` until this.)
+    #[test]
+    fn a_battery_level_past_the_ramp_saturates_to_empty_red() {
+        let render_at = |level: u8| {
+            let mut rows = fleet();
+            let RowContent::Agent { battery, .. } = &mut rows[0].content else {
+                panic!("fixture row 0 must be an agent");
+            };
+            *battery = Some(level);
+            render_rows(&rows, DESIGN_COLS, Widths::EXPANDED)[0].clone()
+        };
+
+        // Compared against the LAST VALID level rather than against a literal
+        // colour: unselected rows recede 25% toward the background (§6), so the
+        // emitted ink is a faded red, not `RED` itself. Asserting equality with
+        // the saturation target says exactly what "saturates" means and stays
+        // true whatever the fade does.
+        let saturated = render_at(clave_types::BATTERY_LEVELS - 1);
+        assert!(
+            saturated.contains(BATTERY[BATTERY.len() - 1].0),
+            "the reference row must carry the empty glyph"
+        );
+        for level in [
+            clave_types::BATTERY_LEVELS,
+            clave_types::BATTERY_LEVELS + 1,
+            u8::MAX,
+        ] {
+            assert_eq!(render_at(level), saturated, "level {level} must saturate");
+        }
+    }
+
     /// The clip's boundary is inclusive on the PASS-THROUGH side: a pane at
     /// exactly the floor is already `cols` cells, so it must not be re-walked.
     ///
