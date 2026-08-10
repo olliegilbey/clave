@@ -101,7 +101,15 @@ pub fn run_open(uuid: &str, display_cols: Option<usize>, collapsed: bool) -> Res
     // Issue #6: bind-first liveness (dump-layout scan is the additive
     // fallback) — `open_is_live` fixes the MCP-blind duplicate-tab spawn.
     let is_live = open_is_live(row, &dump);
-    let cwd_exists = std::path::Path::new(&row.cwd).is_dir();
+    // A missing baked cwd is not stale when the conversation demonstrably
+    // MOVED somewhere spawnable (#139, #143 review): the removed-worktree
+    // wake was otherwise rejected here before spawn's relocation recovery
+    // could ever run. Open only decides tab creation; spawn re-runs the
+    // search and repoints the row.
+    let relocated = crate::env::claude_config_dir()
+        .ok()
+        .and_then(|d| crate::spawn::relocated_cwd(&d, &row.uuid, row.live_session.as_deref()));
+    let cwd_exists = std::path::Path::new(&row.cwd).is_dir() || relocated.is_some();
     match open_decision(row, is_live, cwd_exists) {
         OpenDecision::AlreadyLive => {
             crate::evlog::log_event("open", &format!("{uuid}: already live, no-op"));
@@ -115,9 +123,14 @@ pub fn run_open(uuid: &str, display_cols: Option<usize>, collapsed: bool) -> Res
             Ok(())
         }
         OpenDecision::Open => {
-            // Guard the stored cwd before baking it into KDL (see
+            // Bake the cwd the pane can actually RUN from (#143 review): a
+            // recovered relocation must not bake the missing row.cwd — the
+            // pane would be born in a dead dir before `clave spawn` could
+            // ever follow the move.
+            let open_cwd = relocated.as_deref().unwrap_or(&row.cwd);
+            // Guard the baked cwd before it reaches KDL (see
             // add::validate_cwd) — a `"`/control char breaks the layout.
-            crate::add::validate_cwd(&row.cwd)?;
+            crate::add::validate_cwd(open_cwd)?;
             let wasm = crate::setup::wasm_path()?;
             let binary = crate::release::runtime_binary();
             let label = crate::add::sanitize_label(&row.label);
@@ -126,7 +139,7 @@ pub fn run_open(uuid: &str, display_cols: Option<usize>, collapsed: bool) -> Res
                 wasm.to_str().context("wasm path")?,
                 &label,
                 uuid,
-                &row.cwd,
+                open_cwd,
                 display_cols,
                 collapsed,
             );

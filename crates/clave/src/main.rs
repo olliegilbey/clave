@@ -77,6 +77,19 @@ enum Command {
         json: bool,
     },
 
+    /// Retire dormant rows idle longer than N days (#149). Transcripts are
+    /// untouched — a pruned conversation stays resumable via the Alt+a
+    /// resume flow; only the sidebar row goes. `--idle-days` is REQUIRED and
+    /// must be at least 1, so a bare `clave prune` can never empty the store.
+    Prune {
+        /// Prune rows whose last interaction is older than this many days.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        idle_days: u64,
+        /// Print what would be pruned without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Print the current `AgentSnapshot` as JSON (plugin-internal hydration).
     ///
     /// Hidden from `--help`: the bar runs this on load to seed its state (spec
@@ -234,26 +247,70 @@ fn main() -> Result<()> {
             cwd,
         }) => {
             // S0b: canonicalize BEFORE munging — Claude keys the transcript
-            // dir off the PHYSICAL getcwd() path.
-            let physical = std::fs::canonicalize(&cwd)
-                .with_context(|| format!("canonicalizing --cwd {cwd}"))?;
-            let physical_str = physical.to_str().context("non-UTF8 cwd")?.to_string();
+            // dir off the PHYSICAL getcwd() path. `None` (rather than an
+            // error) when the baked dir is GONE — a removed worktree whose
+            // session relocated elsewhere is still recoverable through the
+            // transcript search below (#139).
+            let physical = std::fs::canonicalize(&cwd).ok();
+            let physical_str = physical.as_deref().and_then(std::path::Path::to_str);
             let claude_dir = clave::env::claude_config_dir()?;
-            // The row may be living in a ROTATED conversation (#99). Read
-            // lock-free and best-effort: a missing or unreadable store must
-            // never stop a pane from launching, and `None` is precisely the
-            // pre-#99 behaviour.
-            let live = clave::store::store_paths()
-                .and_then(|p| clave::store::read_store(&p))
-                .ok()
-                .and_then(|s| s.agents.get(&uuid).and_then(|r| r.live_session.clone()));
-            let (mode, session) =
-                spawn::resume_target(&claude_dir, &physical_str, &uuid, live.as_deref());
+            // The row may be living in a ROTATED conversation (#99), and its
+            // prose gates #139's fail-loudly. Read lock-free and best-effort:
+            // a missing or unreadable store must never stop a pane from
+            // launching, and `None` is precisely the pre-#99 behaviour.
+            let store_read = clave::store::store_paths().and_then(|p| clave::store::read_store(&p));
+            // A CORRUPT store must not read as "never conversed" —
+            // evidenced=false would permit Create and silently shadow a real
+            // session, the exact miss #139 closes (#143 review). read_store
+            // defaults a MISSING file, so Err means present-but-unparseable:
+            // assume evidenced and let the zero-hit path fail loudly.
+            let store_corrupt = store_read.is_err();
+            let row = store_read.ok().and_then(|s| s.agents.get(&uuid).cloned());
+            let live = row.as_ref().and_then(|r| r.live_session.clone());
+            let evidenced =
+                store_corrupt || row.as_ref().is_some_and(spawn::conversation_evidenced);
+            // #139: verify the transcript is where the row says before exec —
+            // and FOLLOW it if it relocated (the #59/#69 move, e.g. into a
+            // worktree). The pre-#139 miss path silently CREATED a fresh
+            // session shadowing the real one; verified_site never does.
+            let site =
+                spawn::verified_site(&claude_dir, physical_str, &uuid, live.as_deref(), evidenced)?;
+            let (mode, session, exec_cwd) = match site {
+                spawn::SpawnSite::Here { mode, session, cwd } => (mode, session, cwd),
+                spawn::SpawnSite::Moved {
+                    session,
+                    cwd,
+                    branch,
+                } => {
+                    // Repoint the row at the transcript's true home so the
+                    // next add/open bakes the right cwd. Locked write,
+                    // best-effort: a store failure must never stop the pane —
+                    // the next spawn simply searches again.
+                    // Broadcast like every other locked write here (#143
+                    // review): the apply_* helper returns a snapshot only
+                    // when the row exists — no phantom seq bump or push for
+                    // an unknown uuid.
+                    match clave::store::store_paths().and_then(|p| {
+                        clave::store::apply_relocation(&p, &uuid, &cwd, branch.as_deref())
+                    }) {
+                        Ok(Some(snap)) => clave::hook::push_snapshot(&snap),
+                        Ok(None) => {}
+                        Err(e) => {
+                            eprintln!("clave spawn: could not repoint row cwd: {e:#}");
+                        }
+                    }
+                    clave::evlog::log_event(
+                        "spawn",
+                        &format!("{uuid}: transcript relocated -> {cwd}"),
+                    );
+                    (spawn::SpawnMode::Resume, session, cwd)
+                }
+            };
             clave::evlog::log_event("spawn", &format!("{uuid}: {mode:?} {session}"));
             // Register uuid→pane BEFORE exec (this process is about to be
             // replaced; best-effort — see register_pane).
             spawn::register_pane(&uuid);
-            std::env::set_current_dir(&physical).context("entering --cwd")?;
+            std::env::set_current_dir(&exec_cwd).context("entering agent cwd")?;
             use std::os::unix::process::CommandExt;
             // Discovered claude (spec §Discovery): the pane env may lack the
             // interactive PATH (nvm/local-install), so exec the absolute
@@ -370,6 +427,82 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string(&store::snapshot_from(&s))?);
             } else {
                 print!("{}", lsview::render_ls(&s));
+            }
+            Ok(())
+        }
+        Some(Command::Prune { idle_days, dry_run }) => {
+            let paths = store::store_paths()?;
+            let now = store::now_unix();
+            // A stored bind proves life only while its session is RUNNING:
+            // binds are session-scoped and cleared at the NEXT launch, so
+            // between a kill and a relaunch every row still carries a dead
+            // tab_id (#150 review). Session-scoped dump like `clave open`;
+            // a failed dump means no live session — nothing is protected.
+            let dump: Option<String> = {
+                let zellij = clave::discover::tool_path(clave::discover::ToolId::Zellij);
+                std::process::Command::new(&zellij)
+                    .env("ZELLIJ_SESSION_NAME", clave::env::session_name())
+                    .args(["action", "dump-layout"])
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            };
+            // NOT open::open_is_live — its tab_id short-circuit would let a
+            // dead session's bind protect a row. Only presence in the live
+            // dump protects here.
+            let protect = |s: &store::Store| -> std::collections::BTreeSet<String> {
+                match dump.as_deref() {
+                    None => Default::default(),
+                    Some(d) => {
+                        let live = add::live_uuids(d);
+                        s.agents
+                            .values()
+                            .filter(|r| {
+                                live.iter().any(|u| {
+                                    *u == r.uuid || Some(u.as_str()) == r.live_session.as_deref()
+                                })
+                            })
+                            .map(|r| r.uuid.clone())
+                            .collect()
+                    }
+                }
+            };
+            let (removed, snap) = if dry_run {
+                let mut s = store::read_store(&paths)?;
+                let protected = protect(&s);
+                (store::prune_idle(&mut s, now, idle_days, &protected), None)
+            } else {
+                store::with_store_mut(&paths, |s| {
+                    let protected = protect(s);
+                    let removed = store::prune_idle(s, now, idle_days, &protected);
+                    let snap = (!removed.is_empty()).then(|| store::snapshot_from(s));
+                    (removed, snap)
+                })?
+            };
+            for r in &removed {
+                let days = now.saturating_sub(r.last_interacted) as f64 / 86_400.0;
+                let short = r.uuid.get(..8).unwrap_or(&r.uuid);
+                println!("prune {short}  {days:5.1}d  {}", r.label);
+            }
+            println!(
+                "{}{} row(s) idle over {idle_days}d",
+                if dry_run { "[dry-run] " } else { "" },
+                removed.len()
+            );
+            // Broadcast so the bar hot-reloads the shrunk fleet immediately
+            // (the #143 repoint lesson: a locked write without a push leaves
+            // every bar stale until an unrelated event).
+            if let Some(snap) = snap {
+                hook::push_snapshot(&snap);
+            }
+            // Every PERSISTENT prune leaves an audit line, including a
+            // removed-0 no-op (#150 review); only dry-run stays log-free.
+            if !dry_run {
+                clave::evlog::log_event(
+                    "prune",
+                    &format!("removed {} idle>{idle_days}d", removed.len()),
+                );
             }
             Ok(())
         }
@@ -493,6 +626,24 @@ mod tests {
                 assert_eq!(uuid, "u-1");
                 assert_eq!(name, "repo \u{00b7} main");
                 assert_eq!(cwd, "/x");
+            }
+            _ => panic!("parsed into the wrong command"),
+        }
+    }
+
+    /// #149: `--idle-days` is REQUIRED with a floor of 1 — a bare
+    /// `clave prune` or an `--idle-days 0` must die at the parse layer,
+    /// because either one would be a prune-everything.
+    #[test]
+    fn prune_requires_a_nonzero_idle_days() {
+        assert!(Cli::try_parse_from(["clave", "prune"]).is_err());
+        assert!(Cli::try_parse_from(["clave", "prune", "--idle-days", "0"]).is_err());
+        let cli = Cli::try_parse_from(["clave", "prune", "--idle-days", "10", "--dry-run"])
+            .expect("the real invocation parses");
+        match cli.command {
+            Some(Command::Prune { idle_days, dry_run }) => {
+                assert_eq!(idle_days, 10);
+                assert!(dry_run);
             }
             _ => panic!("parsed into the wrong command"),
         }
