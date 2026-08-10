@@ -88,6 +88,7 @@ Then `Alt+a`, pick a directory, choose `new`. That's your first agent.
 | `Alt+a` | add an agent — pick a directory, then new or resume |
 | `Alt+↑` `Alt+↓` (or `Alt+k` `Alt+j`) | walk the running agents |
 | `Alt+1`…`Alt+9` | jump straight to a row, running or closed |
+| `Alt+Enter` | wake the selected closed row |
 | `Alt+o` | back to where you were |
 | `Alt+c` | collapse the bar to a strip, or expand it |
 | `Alt+t` `Alt+w` | new tab, close tab |
