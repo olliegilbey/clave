@@ -164,7 +164,7 @@ fn bar(rows: &[Row], cols: usize, widths: Widths, label: &str) {
     let rule = "\u{2500}".repeat(cols);
     println!("\n  {BOLD}{label}{RESET}");
     println!("  {dim}{ruler}\n  \u{250c}{rule}\u{2510}{RESET}");
-    for (line, row) in render_rows(rows, cols, widths).iter().zip(rows) {
+    for (line, row) in render_rows(rows, cols, rows.len(), widths).iter().zip(rows) {
         // The lock CLAIMS every row is exactly `cols` cells. Prove it rather
         // than asserting it in prose: strip the SGR sequences and measure the
         // remainder in display cells. A miscounted glyph fails the preview
@@ -281,7 +281,7 @@ fn showcase() -> Vec<Row> {
 /// screenshot of a ragged bar would be worse than no screenshot.
 fn print_showcase() {
     let rows = showcase();
-    for (line, row) in render_rows(&rows, DESIGN_COLS, Widths::EXPANDED)
+    for (line, row) in render_rows(&rows, DESIGN_COLS, rows.len(), Widths::EXPANDED)
         .iter()
         .zip(&rows)
     {

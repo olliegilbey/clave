@@ -500,6 +500,52 @@ fn clamp(s: &str, w: usize) -> String {
     out
 }
 
+// ── the viewport ────────────────────────────────────────────────────────────
+
+/// Rows kept on screen BELOW the selection while the view is scrolled (#148) —
+/// the lookahead. Honoured only as far as rows exist below and the pane has
+/// room for them; the selection's own line is never spent on it.
+const LOOKAHEAD: usize = 2;
+
+/// The first row the viewport shows, given the row count, which row is selected
+/// and the pane height in lines (#148).
+///
+/// ONE function for both the draw and the click map, on purpose: the 2026-08-06
+/// incident had two symptoms, invisible rows *and* clicks landing one or two
+/// rows above the pointer, and a fix that scrolled the picture while the hit
+/// test kept counting from row 0 would have cured the first and hidden the
+/// second until the next overflow.
+///
+/// The rule (#148 spec, "follow rule") is derived, not remembered: top-anchored
+/// whenever that keeps the selection on screen, otherwise the MINIMAL slide
+/// that shows the selection plus its lookahead. Holding no scroll position of
+/// its own is what makes a snapshot unable to yank the view — a row spawning
+/// above the selection moves the selection's index and this offset by exactly
+/// one, so the same rows stay under the reader's eye.
+pub fn viewport_top(len: usize, selected: Option<usize>, height: usize) -> usize {
+    // Nothing overflows, so nothing scrolls. Also the guard that makes the
+    // arithmetic below safe: past here `height >= 1` and `len > height`.
+    if height == 0 || len <= height {
+        return 0;
+    }
+    // No selection (no focused tab) is a resting bar, not a scrolled one.
+    let Some(selected) = selected.filter(|s| *s < len) else {
+        return 0;
+    };
+    // Lookahead is a courtesy, never a cost: capped by the rows that exist
+    // below the selection, and by the room left in the pane once the selection
+    // has its own line — without that second cap a one-line pane would scroll
+    // the selection itself off the screen it is meant to be pinning.
+    let lookahead = LOOKAHEAD.min(len - 1 - selected).min(height - 1);
+    // `saturating_sub` IS the "top-anchored whenever it fits" arm: while the
+    // selection and its lookahead land inside the first screenful, the wanted
+    // top is 0 or below it. The clamp stops the last screenful sliding past the
+    // end of the list and leaving blank lines under it.
+    (selected + lookahead + 1)
+        .saturating_sub(height)
+        .min(len - height)
+}
+
 // ── the renderer ────────────────────────────────────────────────────────────
 
 /// The whole bar, one `String` per row.
@@ -509,7 +555,11 @@ fn clamp(s: &str, w: usize) -> String {
 /// per-row function cannot know that without a parameter that re-states what
 /// the slice already knows. It is also the unit a golden test should assert —
 /// the picture, not a fragment.
-pub fn render_rows(rows: &[Row], cols: usize, widths: Widths) -> Vec<String> {
+pub fn render_rows(rows: &[Row], cols: usize, height: usize, widths: Widths) -> Vec<String> {
+    // The viewport (#148): the pane height is a hard budget, and a bar that
+    // printed past it drew rows zellij clipped away — nav-reachable, invisible.
+    let top = viewport_top(rows.len(), rows.iter().position(|r| r.selected), height);
+    let rows = &rows[top..top.saturating_add(height).min(rows.len())];
     let any_selected = rows.iter().any(|r| r.selected);
     rows.iter()
         .map(|row| render_row(row, cols, widths, any_selected))
@@ -732,6 +782,14 @@ fn push_rule(out: &mut String, o: &str, ink: &impl Fn(Rgb) -> String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    /// The pre-viewport call: a pane tall enough for every row, which is the
+    /// regime every golden below was written against. Viewport behaviour is
+    /// asserted by the `on_screen` tests, which pass a real pane height.
+    fn render_all(rows: &[Row], cols: usize, widths: Widths) -> Vec<String> {
+        render_rows(rows, cols, rows.len(), widths)
+    }
 
     fn agent(status: RowStatus, provenance: Provenance, title: Option<&str>, summary: &str) -> Row {
         Row {
@@ -813,7 +871,7 @@ mod tests {
             80,
             200,
         ] {
-            for line in render_rows(&fleet(), cols, Widths::EXPANDED) {
+            for line in render_all(&fleet(), cols, Widths::EXPANDED) {
                 let width = display_cells(&strip_sgr(&line));
                 assert_eq!(width, cols, "at cols={cols}: {line:?}");
             }
@@ -835,7 +893,7 @@ mod tests {
             // test used to PIN. `clip_to_cells` now truncates it back, so the
             // guarantee is unconditional: a row is `cols` cells at every width,
             // including the pathological ones.
-            for line in render_rows(&fleet(), cols, Widths::COLLAPSED) {
+            for line in render_all(&fleet(), cols, Widths::COLLAPSED) {
                 let width = display_cells(&strip_sgr(&line));
                 assert_eq!(width, cols, "at cols={cols}: {line:?}");
             }
@@ -851,7 +909,7 @@ mod tests {
     #[test]
     fn a_sub_floor_pane_never_receives_a_row_wider_than_itself() {
         for cols in 1..Widths::EXPANDED.min_intact_cols() {
-            for line in render_rows(&fleet(), cols, Widths::EXPANDED) {
+            for line in render_all(&fleet(), cols, Widths::EXPANDED) {
                 let width = display_cells(&strip_sgr(&line));
                 assert_eq!(width, cols, "at cols={cols}: {line:?}");
             }
@@ -876,7 +934,7 @@ mod tests {
                 panic!("fixture row 0 must be an agent");
             };
             *battery = Some(level);
-            render_rows(&rows, DESIGN_COLS, Widths::EXPANDED)[0].clone()
+            render_all(&rows, DESIGN_COLS, Widths::EXPANDED)[0].clone()
         };
 
         // Compared against the LAST VALID level rather than against a literal
@@ -912,7 +970,7 @@ mod tests {
         let rows = fleet();
         let any = rows.iter().any(|r| r.selected);
 
-        for (clipped, direct) in render_rows(&rows, floor, Widths::EXPANDED).iter().zip(
+        for (clipped, direct) in render_all(&rows, floor, Widths::EXPANDED).iter().zip(
             rows.iter()
                 .map(|r| render_row(r, floor, Widths::EXPANDED, any)),
         ) {
@@ -920,7 +978,7 @@ mod tests {
         }
 
         let under = floor - 1;
-        let clipped = &render_rows(&rows, under, Widths::EXPANDED)[0];
+        let clipped = &render_all(&rows, under, Widths::EXPANDED)[0];
         let direct = render_row(&rows[0], under, Widths::EXPANDED, any);
         assert_ne!(
             *clipped, direct,
@@ -977,7 +1035,7 @@ mod tests {
             let chip = clamp("S6-GUT", widths.title);
             for row in [unselected, selected] {
                 let bare =
-                    strip_sgr(&render_rows(std::slice::from_ref(&row), DESIGN_COLS, widths)[0]);
+                    strip_sgr(&render_all(std::slice::from_ref(&row), DESIGN_COLS, widths)[0]);
                 assert_eq!(
                     cell_slice(&bare, GUTTER_W, GUTTER_W + widths.title),
                     chip,
@@ -1008,7 +1066,7 @@ mod tests {
         let main = agent(RowStatus::Idle, Provenance::Main, Some("TITLE"), "s");
         let worktree = agent(RowStatus::Idle, Provenance::Worktree, Some("TITLE"), "s");
         let [main, worktree] = [main, worktree]
-            .map(|r| strip_sgr(&render_rows(&[r], DESIGN_COLS, Widths::EXPANDED)[0]));
+            .map(|r| strip_sgr(&render_all(&[r], DESIGN_COLS, Widths::EXPANDED)[0]));
 
         // Cell 8, indexed in CELLS — the provenance column is only the eighth
         // `char` while every glyph before it is one cell wide.
@@ -1062,7 +1120,7 @@ mod tests {
     fn a_selected_rows_background_spans_every_column() {
         let mut row = agent(RowStatus::Working, Provenance::Worktree, Some("T"), "short");
         row.selected = true;
-        let line = &render_rows(&[row], DESIGN_COLS, Widths::EXPANDED)[0];
+        let line = &render_all(&[row], DESIGN_COLS, Widths::EXPANDED)[0];
         let bgs = cell_backgrounds(line);
         assert_eq!(bgs.len(), DESIGN_COLS);
 
@@ -1148,7 +1206,7 @@ mod tests {
             DESIGN_COLS,
             200,
         ] {
-            for (i, line) in render_rows(&fleet(), cols, Widths::EXPANDED)
+            for (i, line) in render_all(&fleet(), cols, Widths::EXPANDED)
                 .iter()
                 .enumerate()
             {
@@ -1210,7 +1268,7 @@ mod tests {
             "\u{1b}[38;2;45;79;103m\u{e0b6}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m\u{1b}[38;2;255;158;59m\u{25cf}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;220;215;186m\u{2502}\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;230;195;132m\u{f007c}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;126;156;216m\u{168c2}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;122;168;159m\u{1b}[38;2;22;22;29mS6-GUT   \u{1b}[0m\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;126;156;216mclave  \u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m picking the gutter set   \u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[0m\u{1b}[38;2;45;79;103m\u{e0b4}\u{1b}[0m",
             "   \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;92;101;103m\u{f018d}   \u{1b}[38;2;92;101;103mTab #16                                     \u{1b}[0m ",
         ];
-        assert_eq!(render_rows(&rows, DESIGN_COLS, Widths::EXPANDED), expected);
+        assert_eq!(render_all(&rows, DESIGN_COLS, Widths::EXPANDED), expected);
         // The same derived self-checks the COLLAPSED golden carries. A golden
         // is only as good as its regeneration ritual, and this is the more
         // load-bearing of the two — everything in the design was chosen at this width.
@@ -1301,7 +1359,7 @@ mod tests {
             "   \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;92;101;103m\u{f018d}   \u{1b}[38;2;92;101;103mTab #16             \u{1b}[0m ",
         ];
         assert_eq!(
-            render_rows(&rows, COLLAPSED_DESIGN_COLS, Widths::COLLAPSED),
+            render_all(&rows, COLLAPSED_DESIGN_COLS, Widths::COLLAPSED),
             expected
         );
         for line in &expected {
@@ -1332,10 +1390,10 @@ mod tests {
     fn nothing_selected_means_nothing_faded() {
         let row = agent(RowStatus::Done, Provenance::Branch, None, "s");
         let unfocused =
-            render_rows(std::slice::from_ref(&row), DESIGN_COLS, Widths::EXPANDED).remove(0);
+            render_all(std::slice::from_ref(&row), DESIGN_COLS, Widths::EXPANDED).remove(0);
         let mut other = agent(RowStatus::Idle, Provenance::Main, None, "s");
         other.selected = true;
-        let faded = &render_rows(&[row, other], DESIGN_COLS, Widths::EXPANDED)[0];
+        let faded = &render_all(&[row, other], DESIGN_COLS, Widths::EXPANDED)[0];
 
         // springGreen at full strength, then faded 25% toward sumiInk3.
         assert!(unfocused.contains("\u{1b}[38;2;152;187;108m"));
@@ -1395,7 +1453,7 @@ mod tests {
             assert_eq!(status.mark(), (glyph, colour), "{status:?}");
             // And it reaches the row: col 2 is the status cell (lock §2.1).
             let row = agent(status, Provenance::Main, None, "s");
-            let bare = strip_sgr(&render_rows(&[row], DESIGN_COLS, Widths::EXPANDED)[0]);
+            let bare = strip_sgr(&render_all(&[row], DESIGN_COLS, Widths::EXPANDED)[0]);
             assert_eq!(cell_slice(&bare, 1, 2), glyph.to_string(), "{status:?}");
         }
         // The two easy to transpose are genuinely different glyphs.
@@ -1414,7 +1472,7 @@ mod tests {
     #[test]
     fn an_unselected_summary_is_fujiwhite_even_when_nothing_is_selected() {
         let row = agent(RowStatus::Done, Provenance::Main, Some("T"), "summary text");
-        let line = &render_rows(std::slice::from_ref(&row), DESIGN_COLS, Widths::EXPANDED)[0];
+        let line = &render_all(std::slice::from_ref(&row), DESIGN_COLS, Widths::EXPANDED)[0];
         // Unfaded fujiWhite: nothing is selected, so the fade is 0.
         let (before, after) = line.split_once("summary text").expect("the summary");
         assert!(
@@ -1429,7 +1487,7 @@ mod tests {
             selected: true,
             ..row
         };
-        let line = &render_rows(&[selected], DESIGN_COLS, Widths::EXPANDED)[0];
+        let line = &render_all(&[selected], DESIGN_COLS, Widths::EXPANDED)[0];
         let (before, _) = line.split_once("summary text").expect("the summary");
         assert!(!before.ends_with(&DEFAULT_INK.fg()));
         assert!(
@@ -1449,7 +1507,7 @@ mod tests {
             *summary = String::from("one\ntwo");
             *repo = String::from("re\u{1b}po");
         }
-        let line = &render_rows(std::slice::from_ref(&row), DESIGN_COLS, Widths::EXPANDED)[0];
+        let line = &render_all(std::slice::from_ref(&row), DESIGN_COLS, Widths::EXPANDED)[0];
         let bare = strip_sgr(line);
         assert_eq!(display_cells(&bare), DESIGN_COLS);
         assert!(
@@ -1474,9 +1532,230 @@ mod tests {
             None,
             "\u{1b}[31mred\u{7f}\u{9b}!",
         );
-        let line = &render_rows(std::slice::from_ref(&row), DESIGN_COLS, Widths::EXPANDED)[0];
+        let line = &render_all(std::slice::from_ref(&row), DESIGN_COLS, Widths::EXPANDED)[0];
         let bare = strip_sgr(line);
         assert!(!bare.chars().any(char::is_control), "{bare:?}");
         assert!(bare.contains(" [31mred  !"), "{bare:?}");
+    }
+
+    // ── the viewport (#148) ─────────────────────────────────────────────────
+
+    /// `n` terminal rows named `t00`, `t01`, … with `sel` selected. The
+    /// viewport decides only WHICH rows reach the screen, so the cheapest
+    /// row shape that carries a legible identity is the right fixture.
+    fn numbered(n: usize, sel: usize) -> Vec<Row> {
+        (0..n)
+            .map(|i| Row {
+                content: RowContent::Terminal {
+                    name: format!("t{i:02}"),
+                },
+                selected: i == sel,
+            })
+            .collect()
+    }
+
+    /// The model indices the pane actually SHOWS, top-down, recovered from the
+    /// rendered lines. Every viewport assertion below reads the picture back
+    /// this way rather than the offset behind it — zero-padded names so `t01`
+    /// is never a substring of `t12`.
+    fn on_screen_at(rows: &[Row], height: usize, cols: usize, widths: Widths) -> Vec<usize> {
+        render_rows(rows, cols, height, widths)
+            .iter()
+            .map(|line| {
+                let bare = strip_sgr(line);
+                (0..rows.len())
+                    .find(|i| bare.contains(&format!("t{i:02}")))
+                    .unwrap_or_else(|| panic!("no row name in rendered line {bare:?}"))
+            })
+            .collect()
+    }
+
+    fn on_screen(rows: &[Row], height: usize) -> Vec<usize> {
+        on_screen_at(rows, height, DESIGN_COLS, Widths::EXPANDED)
+    }
+
+    /// The resting state: the list is anchored at the top and overflows off the
+    /// BOTTOM only, so the live block is always the first thing on screen.
+    /// This is the 2026-08-06 incident in miniature — before the viewport the
+    /// bar printed all ten rows into a four-line pane, and zellij clipped the
+    /// surplus into rows that nav could reach and the eye could not see.
+    #[test]
+    fn a_pane_shorter_than_the_fleet_rests_at_the_top() {
+        assert_eq!(on_screen(&numbered(10, 0), 4), vec![0, 1, 2, 3]);
+    }
+
+    /// Nothing is selected when no tab is focused — the view still rests home.
+    #[test]
+    fn a_list_with_no_selection_rests_at_the_top() {
+        let rows = numbered(10, usize::MAX); // `sel` matches no index
+        assert_eq!(on_screen(&rows, 3), vec![0, 1, 2]);
+    }
+
+    /// The follow rule, walked down one row at a time in a five-line pane over
+    /// ten rows. Top-anchored while the selection plus its two rows of
+    /// LOOKAHEAD still fit the first screenful (rows 0–2); from row 3 the
+    /// window makes the minimal slide that keeps both on screen.
+    #[test]
+    fn the_window_slides_only_when_the_selection_outruns_its_lookahead() {
+        let windows: Vec<Vec<usize>> = (0..10).map(|s| on_screen(&numbered(10, s), 5)).collect();
+        assert_eq!(
+            windows,
+            vec![
+                vec![0, 1, 2, 3, 4], // rest
+                vec![0, 1, 2, 3, 4],
+                vec![0, 1, 2, 3, 4], // two rows of lookahead, still home
+                vec![1, 2, 3, 4, 5], // the first slide
+                vec![2, 3, 4, 5, 6],
+                vec![3, 4, 5, 6, 7],
+                vec![4, 5, 6, 7, 8],
+                vec![5, 6, 7, 8, 9], // the end of the list stops the slide
+                vec![5, 6, 7, 8, 9], // lookahead shrinks to the rows that exist
+                vec![5, 6, 7, 8, 9], // the last row rides the bottom edge
+            ]
+        );
+    }
+
+    /// Walking back up returns the view, and it SNAPS HOME the moment the
+    /// selection fits the first screenful again — the resting state is always
+    /// the same one. Asserted as the descending walk so the direction is a
+    /// real claim and not the previous test read backwards.
+    #[test]
+    fn walking_back_up_returns_the_view_and_snaps_home() {
+        let up: Vec<Vec<usize>> = (0..10)
+            .rev()
+            .map(|s| on_screen(&numbered(10, s), 5))
+            .collect();
+        assert_eq!(up.first().unwrap(), &vec![5, 6, 7, 8, 9]);
+        assert_eq!(up.last().unwrap(), &vec![0, 1, 2, 3, 4]);
+        // Monotone all the way home: the view never jumps down while the
+        // selection walks up.
+        for pair in up.windows(2) {
+            assert!(
+                pair[1][0] <= pair[0][0],
+                "the window slid the wrong way: {pair:?}"
+            );
+        }
+    }
+
+    /// A pane exactly as tall as the list, and one taller: no slice, no gap.
+    #[test]
+    fn a_pane_that_fits_the_list_draws_all_of_it() {
+        for height in [5, 6, 40] {
+            assert_eq!(on_screen(&numbered(5, 4), height), vec![0, 1, 2, 3, 4]);
+        }
+    }
+
+    /// Degenerate heights. A zero-line pane draws nothing (zellij hands out
+    /// 0 mid-layout); a one-line pane spends its only line on the selection,
+    /// because lookahead never costs the selection its own place.
+    #[test]
+    fn degenerate_pane_heights_stay_total() {
+        assert!(render_rows(&numbered(10, 3), DESIGN_COLS, 0, Widths::EXPANDED).is_empty());
+        assert_eq!(on_screen(&numbered(10, 6), 1), vec![6]);
+        assert_eq!(on_screen(&numbered(10, 9), 1), vec![9]);
+        assert!(render_rows(&[], DESIGN_COLS, 4, Widths::EXPANDED).is_empty());
+    }
+
+    /// Collapsed is a WIDTH profile (LEDGER D16): narrowing the bar must not
+    /// change which rows exist. Same height, same slice, both profiles.
+    #[test]
+    fn collapsed_mode_windows_the_identical_rows() {
+        for sel in [0, 3, 7, 9] {
+            let rows = numbered(10, sel);
+            assert_eq!(
+                on_screen_at(&rows, 5, COLLAPSED_DESIGN_COLS, Widths::COLLAPSED),
+                on_screen_at(&rows, 5, DESIGN_COLS, Widths::EXPANDED),
+                "profiles disagreed at sel={sel}"
+            );
+        }
+    }
+
+    /// A tab spawning while the view is scrolled deep must not yank it. Growth
+    /// arrives at either end: a new LIVE row lands above the dormant block and
+    /// shifts every index below it, a new dormant row lands below. Neither
+    /// changes the rows under the reader's eye.
+    #[test]
+    fn a_snapshot_arriving_while_scrolled_leaves_the_view_alone() {
+        let before = on_screen(&numbered(10, 7), 5);
+        assert_eq!(before, vec![5, 6, 7, 8, 9]);
+
+        // Two rows appended below the selection.
+        let grown = numbered(12, 7);
+        assert_eq!(on_screen(&grown, 5), before);
+
+        // A row spawning ABOVE it: the selection is now index 8, and the
+        // window shows the same five rows it did before (old 5..9).
+        let mut above = numbered(10, 7);
+        above.insert(
+            0,
+            Row {
+                content: RowContent::Terminal {
+                    name: String::from("fresh"),
+                },
+                selected: false,
+            },
+        );
+        let shifted: Vec<usize> = on_screen_at(&above, 5, DESIGN_COLS, Widths::EXPANDED);
+        assert_eq!(shifted, before, "growth above the selection moved the view");
+    }
+
+    proptest! {
+        /// The invariant the whole ticket exists for: whatever the fleet size,
+        /// pane height and selection, the selected row is ON SCREEN — never
+        /// reachable-but-invisible. Plus the shape rules around it: the pane is
+        /// filled if there are rows to fill it, the window is contiguous and
+        /// top-down, and the lookahead below the selection is honoured as far
+        /// as the rows and the pane allow.
+        #[test]
+        fn the_selection_is_always_inside_the_viewport(
+            n in 1usize..40,
+            sel_seed in 0usize..40,
+            height in 0usize..24,
+        ) {
+            let sel = sel_seed % n;
+            let rows = numbered(n, sel);
+            let seen = on_screen(&rows, height);
+
+            prop_assert_eq!(seen.len(), n.min(height), "the pane is not full");
+            for pair in seen.windows(2) {
+                prop_assert_eq!(pair[1], pair[0] + 1, "the window is not contiguous");
+            }
+            if height == 0 {
+                return Ok(());
+            }
+            prop_assert!(seen.contains(&sel), "selection {} off screen: {:?}", sel, seen);
+
+            // Lookahead: two rows below the selection, capped by the rows that
+            // actually exist below it and by the room the pane has for them.
+            let want = LOOKAHEAD.min(n - 1 - sel).min(height - 1);
+            let below = seen.iter().filter(|&&i| i > sel).count();
+            prop_assert!(below >= want, "lookahead {} < {}: {:?}", below, want, seen);
+
+            // Rests at the top unless the selection and that lookahead force
+            // the slide, and never slides further than it must.
+            let forced = sel + want + 1 > height;
+            prop_assert_eq!(seen[0] == 0, !forced, "anchoring wrong: {:?}", seen);
+            if forced {
+                prop_assert_eq!(seen[0], sel + want + 1 - height, "over-slid: {:?}", seen);
+            }
+        }
+
+        /// Walking the selection down never moves the window UP, and walking
+        /// up never moves it down: one selection step slides the view by at
+        /// most one row, monotonically. That is what makes the bar feel stable
+        /// under a nav burst.
+        #[test]
+        fn one_step_of_the_selection_slides_the_view_by_at_most_one(
+            n in 1usize..40,
+            height in 1usize..24,
+        ) {
+            let mut previous_top = 0usize;
+            for sel in 0..n {
+                let top = on_screen(&numbered(n, sel), height)[0];
+                prop_assert!(top >= previous_top, "the view slid up while walking down");
+                prop_assert!(top - previous_top <= 1, "the view jumped {} rows", top - previous_top);
+                previous_top = top;
+            }
+        }
     }
 }

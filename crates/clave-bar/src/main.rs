@@ -614,7 +614,7 @@ impl ZellijPlugin for State {
         repaint
     }
 
-    fn render(&mut self, _rows: usize, cols: usize) {
+    fn render(&mut self, rows: usize, cols: usize) {
         // NO announce here (round 12): render is NOT visibility-gated
         // either (every instance renders at least once after load) — the
         // render announce EMFILE-crashed the server. Announces now fire
@@ -631,8 +631,11 @@ impl ZellijPlugin for State {
         // plumbing: the profile comes from the model so it cannot drift from
         // the width the seek above is chasing (D16), and `cols` is whatever
         // zellij actually gave us rather than the target.
-        let rows: Vec<Row> = self.model.rows().into_iter().map(|(_, row)| row).collect();
-        for line in render_rows(&rows, cols, self.model.widths()) {
+        // #148: `rows` is the pane HEIGHT in lines. The renderer slices the row
+        // list to it (the viewport); a bar that printed past the bottom drew
+        // rows the user could reach with nav keys and never see.
+        let list: Vec<Row> = self.model.rows().into_iter().map(|(_, row)| row).collect();
+        for line in render_rows(&list, cols, rows, self.model.widths()) {
             println!("{line}");
         }
     }
