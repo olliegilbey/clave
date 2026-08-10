@@ -694,7 +694,7 @@ pub fn run_reset() -> Result<()> {
     let root = sb.root.clone();
     println!("If the session is running, kill it first (your command):\n");
     println!(
-        "  zellij kill-session {0} && zellij delete-session --force {0}\n",
+        "  zellij kill-session {0} ; zellij delete-session --force {0}\n",
         sb.session
     );
     // Named BEFORE the wipe: `repos/` is what says which project directories
