@@ -1920,6 +1920,11 @@ impl BarModel {
                     // mapping from effect to direction is inverted for this pane
                     // right now — believe the pane, not the effect's name.
                     if let Some(wanted_smaller) = self.seek_wanted_smaller {
+                        // EXPECTED MUTATION SURVIVOR (`<` → `<=`): equivalent,
+                        // not a coverage gap. The `prev == own_cols` arm above
+                        // takes every equal case, so `prev != own_cols` holds
+                        // here and the two forms cannot differ. No test can kill
+                        // it; weakening one to try would be the wrong move.
                         let got_smaller = own_cols < prev;
                         if got_smaller != wanted_smaller {
                             self.seek_inverted = !self.seek_inverted;
@@ -1997,6 +2002,12 @@ impl BarModel {
         }
         // Ask for a DIRECTION, and let the learned polarity pick the effect that
         // actually achieves it on this pane.
+        //
+        // EXPECTED MUTATION SURVIVOR (`>` → `>=`): equivalent. The two forms
+        // differ only at `diff == 0`, and a render exactly ON the target settles
+        // at the `converged` check above and never reaches here — pinned by the
+        // `width_seek(BAR_TARGET_COLS)` / `width_seek(COLLAPSED_TARGET_COLS)`
+        // tests, which assert that render emits nothing.
         let want_smaller = diff > 0;
         self.seek_wanted_smaller = Some(want_smaller);
         let action = if want_smaller != self.seek_inverted {
