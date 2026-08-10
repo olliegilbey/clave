@@ -32,7 +32,21 @@ Changed: `crates/clave/src/sandbox.rs` (new, ~760 lines), `dev.rs`, `main.rs`,
 
 ## What is verified
 
-`just gates` passes — all four, workspace suite green at 210 + 130.
+`just gates` passes — all four, workspace suite green at 210 + 130. The new
+module carries **20 tests** (`crates/clave/src/sandbox.rs`, `mod tests` at
+`:454`). Those 20 are the ones to attack first — see below.
+
+## First steps, concretely
+
+```bash
+cd .claude/worktrees/sandbox-segregation   # already on fix/sandbox-segregation
+git log --oneline -2                       # 54247bd, 63345ea
+just gates                                 # confirm the baseline is still green
+cargo mutants -p clave --file crates/clave/src/sandbox.rs --timeout 120
+```
+
+Then read the diff in full — `git show 63345ea` — before changing anything. It
+was written across two interrupted sessions and has never been reviewed.
 
 ## What is NOT verified — do this before opening a PR
 
@@ -63,8 +77,15 @@ implying end-to-end coverage.
 - Never launch or kill a zellij session; never run a bare `zellij` command. The
   agent runs inside the maintainer's live fleet, so a bare command targets it.
   `zellij list-sessions -n` as a read-only guard is the only sanctioned call.
-- **Sandbox driving goes through `ct.sh`, never bare env vars — the session env
-  var fails open onto the live fleet** (#137).
+- **The sandbox session env var FAILS OPEN onto the live fleet** (#137) — set it
+  wrong, or not at all, and a command aimed at the sandbox hits the maintainer's
+  working session. The maintainer's standing instruction is that driving goes
+  through a wrapper (`ct.sh`) rather than bare env vars. **Verify this before
+  relying on it: no such script exists on this branch or on `origin/main`
+  (`scripts/` holds only `sandbox-setup.sh`), so it lives on an unmerged branch,
+  or is still to be built.** Do not assume the safe route exists — establish
+  what it actually is first. This correction matters because the fail-open
+  direction is toward his live fleet, not away from it.
 - Never write `~/.cargo/bin/clave`, `~/.local/share/clave/**`,
   `~/.config/zellij/**`. The staging script self-checks this; keep it working.
 - The #44 identity pair: generated `config.kdl` and `layout.kdl` must carry an
