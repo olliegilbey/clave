@@ -719,9 +719,17 @@ offering to resurrect it — a resurrectable corpse still shows in the list and
 still gets picked by mistake:
 
 ```bash
-zellij kill-session <name> && zellij delete-session --force <name>
+zellij kill-session <name> ; zellij delete-session --force <name>
 clave dev reap                 # then reclaim the roots of any deleted worktrees
 ```
+
+**`;` between them, not `&&`** — measured 2026-08-10, on the first teardown
+after this section was written. A sandbox whose terminal window was closed has
+already exited, so `kill-session` reports `Session: "…" not found` and a `&&`
+chain then skips the delete. That is the exact case where the delete still
+matters: the session is dead but resurrectable, so it stays in the list and
+stays available to be picked by mistake. Chaining on success makes the pair work
+only when it was least needed.
 
 `clave dev reset` prints that pair for your own instance rather than running it.
 
@@ -900,7 +908,7 @@ the human's to run in a **non-zellij terminal**; the rest an agent may run.
 
 1. **Kill the running session (human):**
    ```bash
-   zellij kill-session clave-test && zellij delete-session --force clave-test
+   zellij kill-session clave-test ; zellij delete-session --force clave-test
    ```
    (`clave dev reset` prints this line for you before it wipes anything.)
 2. **Reset the sandbox:** `clave dev reset` — wipes the sandbox root and removes
