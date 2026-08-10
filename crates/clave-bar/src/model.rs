@@ -1541,7 +1541,9 @@ impl BarModel {
             .count()
     }
 
-    /// Mouse click on rendered line N (0-based): jump to that row's tab.
+    /// Mouse click on rendered line N of a pane `pane_height` lines tall
+    /// (0-based, counted from the TOP OF THE SCREEN, not the top of the list —
+    /// see #148 below): jump to that row's tab.
     /// A click reaches exactly ONE instance (the visible bar), so the jump
     /// broadcasts a beacon for the other instances' executor election.
     /// Focus is not a commitment — clicks never reorder. A click on a

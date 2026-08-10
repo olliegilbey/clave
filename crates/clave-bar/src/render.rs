@@ -552,7 +552,9 @@ pub fn viewport_top(len: usize, selected: Option<usize>, height: usize) -> usize
 
 // ── the renderer ────────────────────────────────────────────────────────────
 
-/// The whole bar, one `String` per row.
+/// The whole bar, one `String` per row the pane can hold — `height` lines at
+/// most, sliced to the viewport (#148), so the caller prints what it is given
+/// and never has to know which rows those are.
 ///
 /// Whole-bar rather than per-row (LEDGER D5) because the fade is RELATIVE:
 /// lock §6 recedes every *unselected* row only when some row is selected, and a
