@@ -66,10 +66,14 @@ impl State {
         // TabUpdate and the last PaneUpdate to describe the same tab set — it
         // gates the effects that retry or do lasting damage from the wrong
         // instance. `presumed` is the pre-#55 position join, byte-for-byte,
-        // kept for the four effects that latch at emit and so cannot survive a
+        // kept for the three effects that latch at emit and so cannot survive a
         // fail-closed gate: tightening them would convert a wrong-action bug
         // into a missed-action bug. DO NOT "tidy" a presumed arm into
         // confirmed without first giving that effect a retry trigger.
+        // `ReanchorVisit` was the fourth; #162 gave it that trigger by moving
+        // its election into the model, which is the template for the rest —
+        // decide in `model.rs`, where a test can reach the decision, and
+        // consume the latch only on the branch that emits.
         // confirmed ⇒ presumed.
         let confirmed = self.model.elects_confirmed();
         let presumed = self.model.elects_presumed();
@@ -89,29 +93,24 @@ impl State {
                     // with the SAME position — idempotent duplicates.
                     switch_tab_to(position as u32 + 1);
                 }
-                Effect::AnnounceVisit { tab_id } => {
-                    // Single-instance jumps (clicks) converge the other
-                    // instances over the pipe channel.
-                    run_command(
-                        &[
-                            "zellij",
-                            "pipe",
-                            "--name",
-                            "clave-visited",
-                            "--",
-                            &tab_id.to_string(),
-                        ],
-                        BTreeMap::new(),
-                    );
-                }
-                Effect::ReanchorVisit { tab_id } if presumed => {
-                    // #23: same clave-visited beacon as AnnounceVisit, but
-                    // GATED to the active instance — a toggle burst delivers the
-                    // fresh set to every bar (doc:371-394), so an ungated
-                    // re-anchor would be a per-instance beacon war (round-13
-                    // EMFILE class). Accepted trade (see model apply_tabs): a
-                    // transiently-false active check drops the reseed and nav
-                    // stays stranded until a click — narrow, and storm-free.
+                // The beacon. Single-instance jumps (clicks, nav) converge the
+                // other instances over this pipe channel.
+                //
+                // BOTH variants run unconditionally here. `AnnounceVisit` is
+                // ungated by design (birth must announce before its first
+                // PaneUpdate). `ReanchorVisit` is gated too — but since #162 the
+                // gate is at emit time, inside the model: it elects itself
+                // before producing the effect, and consumes the trigger on the
+                // same branch. Re-gating it here would put the decision back
+                // where no test can reach it, and a second evaluation could only
+                // ever drop a beacon whose trigger has already been spent.
+                // Load-bearing: `apply_tabs` and `apply_panes` are
+                // `ReanchorVisit`'s ONLY emitters — the two delivered frames,
+                // each electing before it emits — so this arm's safety depends
+                // entirely on every emission having already passed the
+                // election. An un-elected emitter anywhere else, or an arm that
+                // drops what these two return, would bypass it completely.
+                Effect::AnnounceVisit { tab_id } | Effect::ReanchorVisit { tab_id } => {
                     run_command(
                         &[
                             "zellij",
@@ -385,18 +384,16 @@ impl State {
             // INSIDE clave-status snapshots (store tab_timeline, §6.6) —
             // fire-and-forget pipe deltas diverged per instance (C5 rd 5).
             "clave-nav" => {
-                // Row jumps and dir walks need a FRESH tab set — only the
-                // active instance has one. Executor = the instance whose own
-                // tab is the replicated beacon (converged via visited pipes).
-                // Fail-closed since #55: `own_tab()` is None while the two
-                // zellij frames disagree, so a nav processed inside the
-                // renumbering window no longer resolves SwitchTab's position
-                // off a mismatched pair. A dropped Alt+j is a repeatable
-                // keypress; a jump to the wrong tab is not.
-                let executor = self
-                    .model
-                    .own_tab()
-                    .filter(|own| self.model.current_tab() == Some(*own));
+                // Exactly one instance may act on the press. The rule lives in
+                // the model (`nav_executor`) and is the beacon alone: the
+                // instance whose own tab is the one the last broadcast named.
+                // Nothing local qualifies anyone, because a frozen instance's
+                // own frames claim it is active (FOOTGUNS.md:64) — #162's
+                // stranded beacon is answered by re-seeding it from either
+                // delivered frame, not by letting the stranded instance nav on
+                // local truth. Fail-closed: a dropped Alt+j is a repeatable
+                // keypress, a jump to the wrong tab is not.
+                let executor = self.model.nav_executor();
                 let is_executor = executor.is_some();
                 let fx = self.model.nav(payload, executor);
                 let acted = !fx.is_empty();
@@ -578,7 +575,14 @@ impl ZellijPlugin for State {
                         });
                     }
                 }
-                self.model.apply_panes(metas);
+                // The pane frame is the second retry for a stranded beacon
+                // (#162): a close's TabUpdate arriving first refuses the
+                // re-anchor off the still-stale manifest, and THIS frame is the
+                // one that ends that disagreement. Dropping what it returns
+                // would restore the bug — nav dead for the session whenever the
+                // tab that closed was the one holding the beacon.
+                let fx = self.model.apply_panes(metas);
+                self.run_effects(fx);
                 self.settle_identity(); // fresh manifest → own-tab joins resolvable
                 true
             }
@@ -626,8 +630,10 @@ impl ZellijPlugin for State {
     fn render(&mut self, rows: usize, cols: usize) {
         // NO announce here (round 12): render is NOT visibility-gated
         // either (every instance renders at least once after load) — the
-        // render announce EMFILE-crashed the server. Announces now fire
-        // only from apply_tabs on bounded triggers (birth / clave-organic).
+        // render announce EMFILE-crashed the server. No beacon originates in
+        // render: they fire from apply_tabs (birth / clave-organic) and
+        // apply_panes (the #162 reanchor debt) — both frame-witnessed — and
+        // from the click/nav landings, which still emit AnnounceVisit.
         // C6 width seek (round 20, collapse-in-place): each of our resizes
         // triggers a repaint with the new cols (round 10) — this render
         // chain is the seek's feedback loop. SELF-targeted and ungated:
