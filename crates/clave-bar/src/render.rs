@@ -466,7 +466,7 @@ pub fn strip_sgr(s: &str) -> String {
 /// it**, and a wrapped row makes every bar row double-height with a blank
 /// second line. Observed live 2026-07-29: on a monitor change, and on every
 /// tab spawn below ~123 columns where the birth percent lands the pane under
-/// `EXPANDED`'s 29-cell floor.
+/// `EXPANDED`'s `min_intact_cols()` floor (32 as of #105).
 ///
 /// So the clip happens here instead of being assumed. Only truncation changes:
 /// the row is still BUILT at the floor, so no column reflows and every row
@@ -923,6 +923,12 @@ fn token_text(tokens: u32) -> String {
     if millions < 10 && tenth != 0 {
         return format!("{millions}.{tenth}m");
     }
+    // The decimal gave way, but the dropped tenth still says which whole
+    // million is nearer: floor here would under-report (10,940,000 → `10m`
+    // rather than the nearer `11m`), the one direction this cell must not be
+    // wrong in. Saturate AFTER rounding, not before, so a round-up at 999
+    // still lands on the four-cell cap rather than a five-cell `1000m`.
+    let millions = millions + u64::from(tenth >= 5);
     format!("{}m", millions.min(999))
 }
 
@@ -1021,11 +1027,13 @@ mod tests {
     #[test]
     fn every_row_is_exactly_cols_cells() {
         for cols in [
-            // BELOW `EXPANDED`'s 29-cell floor: the row is built at the floor
-            // and clipped back, which is the regime a spawning tab lands in on
-            // any window under ~123 columns. Before `clip_to_cells` these
-            // widths produced full-floor rows in a narrower pane, and the
-            // terminal wrapped them.
+            // BELOW `EXPANDED`'s `min_intact_cols()` floor (32 as of #105): the
+            // row is built at the floor and clipped back, which is the regime a
+            // spawning tab lands in on any window under ~123 columns. Before
+            // `clip_to_cells` these widths produced full-floor rows in a
+            // narrower pane, and the terminal wrapped them. `COLLAPSED_DESIGN_COLS`
+            // (30) belongs to the same sub-floor regime now that the floor moved
+            // 29 → 32 (#105) — it is no longer only 1/20/26 that exercise the clip.
             1,
             20,
             26,
@@ -1047,7 +1055,7 @@ mod tests {
     /// BOTH profiles hold the width guarantee at the same set of pathological
     /// `cols`, not just the profile that shipped first. `13` and `23` are
     /// `COLLAPSED`'s own floor arithmetic (`13 + 7 + 3`, see
-    /// `min_intact_cols_is_thirteen_plus_title_plus_repo`) and `30` is D17's
+    /// `min_intact_cols_is_the_gutter_plus_four_plus_title_plus_repo`) and `30` is D17's
     /// chosen target; the rest are shared reference points with the
     /// `EXPANDED` test above.
     #[test]
@@ -1187,6 +1195,10 @@ mod tests {
         assert_eq!(token_text(9_949_999), "9.9m");
         assert_eq!(token_text(9_950_000), "10m");
         assert_eq!(token_text(10_100_000), "10m");
+        // Past ten million the digit that gave way still decides which whole
+        // million is nearer: floor here under-reports (10,940,000 is nearer
+        // 11m than 10m), the one direction the doc forbids.
+        assert_eq!(token_text(10_940_000), "11m");
         // And the whole figure saturates rather than overflowing the cell — the
         // ramp's own "at least this bad" direction.
         assert_eq!(token_text(u32::MAX), "999m");

@@ -268,7 +268,7 @@ the terminal. Record the birth width and the number of steps.
 `Alt+t`.
 
 **Correct (b).** `birth_percent_for(115)` = 47%, which floors to **54** — still
-at target, still above `EXPANDED`'s 29-cell floor, so no over-run at all. The old
+at target, still above `EXPANDED`'s `min_intact_cols()` floor (32 as of #105), so no over-run at all. The old
 expectation here was a deliberately clipped newborn healing upward; that regime
 is now only reachable on a display too narrow to hold 54, where the percent
 clamps to 100 and D31's clip keeps the rows inside the pane. **Ragged** clipping
@@ -500,8 +500,8 @@ a mid-drag flicker or a thrashing layout.
 **Do.** With the bar settled and expanded, resize the terminal window **by a
 lot** — halve its width, from ≈280 to ≈140 — then leave it alone and watch.
 
-**Correct.** The bar's cols fall proportionally (≈47 → ≈23, which is under the
-29-cell floor, so expect a transient uniform CLIP — D31, not an over-run), the
+**Correct.** The bar's cols fall proportionally (≈47 → ≈23, which is under
+`EXPANDED`'s `min_intact_cols()` floor (32 as of #105), so expect a transient uniform CLIP — D31, not an over-run), the
 same off-target width is observed twice, the seek re-arms, and the bar grows back
 to ≈54 and stops. Then
 widen the window again and watch it come back down. No thrashing, no parking

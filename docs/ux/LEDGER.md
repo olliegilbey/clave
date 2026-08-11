@@ -241,6 +241,12 @@ gap. Trust a derivation over a restatement — and check which one you are holdi
 
 ### D16 — Collapsed is a WIDTH PROFILE, not a second layout (2026-07-29)
 
+> D16's gutter and overhead numbers are narrowed by D38 (#105). "The gutter
+> stays identical" and "fixed overhead is 13" hold only for collapsed now —
+> expanded's battery cell went from one column to four, so expanded's gutter is
+> 12 and its fixed overhead is 16. The one-layout-two-profiles claim below
+> stands; read its arithmetic as collapsed's, not both profiles'.
+
 Supersedes D12's conclusion, keeps its arithmetic. Ollie's directive: the gutter
 stays identical, each text section shows fewer characters, repo drops to three
 (`cla`, `nal` — collisions are rare, and the repo *ink* still disambiguates),
@@ -527,8 +533,9 @@ half the field on a digit that carries nothing, and mixing the two shapes leaves
 the column jittering. An unknown count renders **blank**, as it did before, and
 stays blank even when a level came through: the ramp index is a bucket, not a
 token figure, and printing one from it would be inventing a measurement. And the
-colour ramp keeps its five bands — the colour is for glancing, the digits for
-reading.
+colour ramp is unchanged — four bands (green, yellow, orange, red) over eleven
+glyph steps, as it was before #105; the ticket's "five bands" was a miscount,
+not a design change. The colour is for glancing, the digits for reading.
 
 ### D37 — The plugin seeks before it knows its own mode. Reduced, not fixed (2026-07-30)
 
