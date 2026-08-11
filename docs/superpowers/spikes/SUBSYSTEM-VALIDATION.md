@@ -389,19 +389,42 @@ close whose TabUpdate beat its PaneUpdate refused the gate AND cleared the
 trigger. With the announcing bar dead in the tab that closed there was no trigger
 left, so the documented "narrow window" was terminal. Fix: the election moves into
 the model at emit time (triggers consumed only on the emitting branch, so the next
-tab frame re-derives and retries), and a nav press falls back to local truth
-(`elects_confirmed`) while the beacon is provably wrong. **Provably means
-frame-witnessed, and that qualifier is the load-bearing half** (added in review,
-2026-08-11): "the beacon names a tab not in my set" is a question about a set that
-is FROZEN on every starved instance, so re-derived it cannot tell a dead tab from
-one born since that instance's last frame. Every new tab broadcasts a birth
-beacon, so re-deriving armed the fallback on every once-focused hidden bar on the
-commonest gesture in the product — and each also satisfies `elects_confirmed`
-off its frozen frame, which is round 2's divergent-SwitchTab race exactly (a probe
-with three such bars produced three different targets and three ungated pipes).
-The licence is therefore a flag set inside `apply_tabs` from the frame it just
-stored, cleared by any incoming beacon: a bar that receives no frames cannot grant
-it to itself.
+frame re-derives and retries), and the retry trigger is **either delivered frame**
+— `apply_panes` pays the re-anchor a refusing `apply_tabs` recorded as owed. The
+pane frame is the one a close always sends (it is what ends the position
+disagreement) and it was always a precondition of acting anyway, since
+`elects_confirmed` is false until the manifest agrees.
+
+**The nav fallback that was written instead, and removed (review, 2026-08-11).**
+The first two rounds let the refusing instance navigate on LOCAL truth
+(`elects_confirmed`) while the beacon was provably wrong. Round 2 established
+that "provably" has to mean frame-witnessed — "the beacon names a tab not in my
+set" is a question about a set that is FROZEN on every starved instance, so
+re-derived it cannot tell a dead tab from one born since that instance's last
+frame, and since every new tab broadcasts a birth beacon, re-deriving armed the
+fallback on every once-focused hidden bar on the commonest gesture in the product
+(a probe with three such bars produced three different SwitchTab targets and three
+ungated pipes — round 2's race exactly). Round 3 established that frame-witnessing
+is not enough either, and that the shape itself is unsound: **the licence is armed
+by one frame and can only be spent after a LATER frame restores coherence, so it
+necessarily outlives the focus that earned it.** A beaconless native tab switch
+(mouse on zellij's tab bar) delivers frames only to the newly active bar, so the
+former one sits frozen with an armed licence and a frame pair that still claims it
+is active, while the new one arms a licence the same way its predecessor did —
+two executors, two targets, one keypress. Verified as a red test before the fix:
+
+```
+one press may move focus once: [11, 12] both claim it
+PROBE own=Some(11) executor=Some(11) nav=[SwitchTab { position: 1 }, AnnounceVisit { tab_id: 12 }]
+PROBE own=Some(12) executor=Some(12) nav=[SwitchTab { position: 0 }, AnnounceVisit { tab_id: 11 }]
+```
+
+So `nav_executor` is the beacon and nothing else, which is what makes it
+exclusive: one live tab was named by the last broadcast, so one instance answers,
+and no instance can deliver itself a beacon. The refusal record survives only as a
+one-pipe debt (`reanchor_owed`), written by `apply_tabs` from the frame it just
+stored, cleared by any incoming beacon and by its own payment — a bar that
+receives no frames can neither incur it nor pay it.
 
 Rejected in the same round: routing the beacon through the STORE, seq-stamped
 like snapshots. It changes the wrong layer (delivery was never broken, and
@@ -409,24 +432,33 @@ snapshots reach the bars over the same CLI-pipe channel) and puts a store write
 on the hottest gesture in the product, on the channel that blocks the server
 router ~1s per pipe. Also rejected: "a lone surviving instance elects itself" —
 correct for the reported repro, wrong for three-of-five tabs dying, and a second
-election rule to reason about where the stranded fallback is one predicate.
+election rule to reason about. Rejected in round 3, when the fallback's own
+window was found: consuming the licence on first use, which bounds a wrong
+executor to one press but leaves BOTH armed bars acting on that press — it
+answers repetition, not exclusivity, and exclusivity is the whole property.
 
 Residual: tier 3 unrun. The scenario to drive is two agent tabs → `Alt+j` onto
 tab 2 → close tab 2 → `Alt+j`, and the signal is whether the press moves focus —
-ignore the empty-payload log lines entirely. A second residual: a bar that arms
-the licence while active (refused re-anchor, stale panes) and then loses focus
-through a native tab switch that emits no beacon keeps the licence with a frozen
-frame until the newly-active bar's next TabUpdate re-anchors — worst case one
-press walking from the previous base, single instance, no divergence; the same
-one-dropped-keypress class the counterfactual above accepts.
+ignore the empty-payload log lines entirely. A second residual, now the accepted
+cost rather than a bug: after ANY beaconless focus change the beacon still names
+the tab the user left, so the first press walks from that tab and re-anchors on
+landing. One stale press, one executor, never two targets — and it is a property
+of native switches in general, not of a stranding. A third, narrower one: a bar
+that owes a re-anchor and loses focus before its pane frame arrives keeps the debt
+until it is focused again, and pays it on the pane frame it receives then — which
+is a frame it only gets while it IS active, so the beacon it announces is true
+when it announces it.
 
 Counterfactual, for whoever revisits this if beacon delivery ever DOES starve:
 consuming the re-anchor only on execution degrades safely — a missed re-anchor is
-one dropped keypress until the next tab frame re-derives it — whereas a fallback
-to local truth that no frame witnessed degrades into the beacon war of rounds
-11–13, because starvation is precisely the condition under which every instance's
-frozen frame claims it is the active one. The frame-witnessed flag is what keeps
-the fallback on the safe side of that line: no frames, no licence.
+one dropped keypress until the next frame re-derives it — whereas ANY fallback to
+local truth degrades into the beacon war of rounds 11–13, because starvation is
+precisely the condition under which every instance's frozen frame claims it is
+the active one. Round 3 is why there is no licence left to keep on the safe side
+of that line, frame-witnessed or not: `nav_executor` answers the beacon alone, so
+real delivery starvation leaves nav dead until a beacon arrives rather than armed
+on the wrong bar — the FOOTGUNS.md:64 boundary this design stays inside a second
+time, by not trying to cross it with a subtler licence.
 
 **Verdict:** **PASS** (2026-07-14, round 7 — TEMP traces removed after)
 
