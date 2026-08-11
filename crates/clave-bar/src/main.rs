@@ -4,6 +4,7 @@
 //! glyphs, or renames, it belongs in model.rs where it can be unit-tested.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 
 // The pure model lives in the LIB half of this crate (src/lib.rs → model.rs)
 // so it host-tests without linking this bin's wasm host-import shims.
@@ -26,6 +27,14 @@ struct State {
     /// keeps it expanded until ~1s after the final press. The ONLY timers
     /// the bar arms (#100 deleted the dormant dwell).
     pending_peeks: u32,
+    /// The pane height in lines, as of the last `render` — the only place
+    /// zellij tells us (#148). A click carries a line of the VIEWPORT, so
+    /// mapping it back to a row needs the height the viewport was sliced at.
+    /// `Default`'s 0 stands for "never rendered". If a click ever did precede
+    /// the first render, `pane_height == 0` degrades `viewport_top` to 0, so
+    /// the click map falls back to the pre-viewport identity mapping (line N
+    /// selects row N) rather than misbehaving.
+    pane_height: usize,
     /// The CLI this bar shells out to, from plugin configuration (#44).
     /// Assigned in `load()`, which zellij invokes as its own wasm export
     /// before delivering any event (`register_plugin!`, zellij-tile-0.44.3
@@ -588,7 +597,7 @@ impl ZellijPlugin for State {
                 // Repaint: a dormant click is a pure selection (#100) — no
                 // effects, but the ⏎ affordance and highlight must paint.
                 if line >= 0 {
-                    let fx = self.model.click(line as usize);
+                    let fx = self.model.click(line as usize, self.pane_height);
                     self.run_effects(fx);
                     return true;
                 }
@@ -614,7 +623,7 @@ impl ZellijPlugin for State {
         repaint
     }
 
-    fn render(&mut self, _rows: usize, cols: usize) {
+    fn render(&mut self, rows: usize, cols: usize) {
         // NO announce here (round 12): render is NOT visibility-gated
         // either (every instance renders at least once after load) — the
         // render announce EMFILE-crashed the server. Announces now fire
@@ -631,10 +640,23 @@ impl ZellijPlugin for State {
         // plumbing: the profile comes from the model so it cannot drift from
         // the width the seek above is chasing (D16), and `cols` is whatever
         // zellij actually gave us rather than the target.
-        let rows: Vec<Row> = self.model.rows().into_iter().map(|(_, row)| row).collect();
-        for line in render_rows(&rows, cols, self.model.widths()) {
-            println!("{line}");
-        }
+        // #148: `rows` is the pane HEIGHT in lines. The renderer slices the row
+        // list to it (the viewport); a bar that printed past the bottom drew
+        // rows the user could reach with nav keys and never see. Remembered
+        // because the mouse-click map needs the same height, and Mouse events
+        // do not carry it.
+        self.pane_height = rows;
+        let list: Vec<Row> = self.model.rows().into_iter().map(|(_, row)| row).collect();
+        let lines = render_rows(&list, cols, rows, self.model.widths());
+        // Final review 2026-08-11: emit the frame WITHOUT a trailing newline.
+        // Once the viewport (#148) slices to exactly `rows` lines, the pane is
+        // full at steady state; a trailing newline after the bottom row would
+        // scroll the pane's own grid by one, eating the top row and shifting
+        // every click map by one line. `std::io::Stdout` line-buffers on `\n`
+        // regardless of tty-ness, so the last (newline-less) line needs an
+        // explicit flush to reach the host.
+        print!("{}", lines.join("\n"));
+        let _ = std::io::stdout().flush();
     }
 }
 
