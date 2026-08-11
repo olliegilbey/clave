@@ -293,7 +293,7 @@ not just the deduplicated version.
 
 | What you see | Conclusion | Next |
 |---|---|---|
-| one sidebar, one version in the log, == the tag, and `build=` is a real tag (a commit-ish or the release tag itself — never the literal word `dev`) | **the cut is coherent** | Step 4 |
+| one sidebar, one version in the log, == the tag, and `build=` is **exactly the tag being cut** (`vX.Y.Z` — never `dev`, and never a bare commit SHA: a short SHA is a `dev-install` artifact from the working tree, the same stray-wasm case as `dev`) | **the cut is coherent** | Step 4 |
 | one sidebar but **two versions** in the log | two instances, one may be zero-width or off-screen. Still a failure | **STOP**, report |
 | two sidebars | the #43/#44 failure mode, live | **STOP**, go to Rollback |
 | `build=dev` on an otherwise-correct line | **STOP.** A released bar reporting `dev` means the wasm that loaded was built without `CLAVE_BUILD_TAG` — either `just release` did not run the fixed recipe (#109), or something copied a stray working-tree wasm into the stable install. The version count alone cannot see this: version matches, tag does not, and this is exactly the "two builds of the same version" case the `build=` field exists to catch (FOOTGUNS.md) | report; do not go |
