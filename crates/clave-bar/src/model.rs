@@ -1397,6 +1397,11 @@ impl BarModel {
             // cell, which lock §2.1 requires it to do cleanly: inventing a level
             // would be a lie in the one cell whose whole job is a measurement.
             battery: a.context_level,
+            // The raw count rides alongside the level for the expanded profile,
+            // which renders it as text (#105) — eleven glyphs can only
+            // approximate it. Bucketing stays host-side; the bar picks the ramp's
+            // INK by level and prints the figure it was bucketed from.
+            tokens: a.context_tokens,
             provenance,
             title_ink: title
                 .as_ref()
