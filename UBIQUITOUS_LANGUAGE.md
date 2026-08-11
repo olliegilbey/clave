@@ -123,7 +123,7 @@ These three are constantly confused. They are not interchangeable.
 
 | Term | Means |
 |---|---|
-| **viewport** | The slice of the row list the pane actually shows. It rests at the top of the list and scrolls **only** when the selection walks past the bottom edge — overflow accumulates at the bottom, and **at rest** the live block is always in view (chat-app scrolling). While a walk holds the selection deep, earlier rows — the live block included — legitimately slide out of view and return when the walk does; that is the scroll, not a defect. **Derived, never remembered**: recomputed each draw from list, selection and pane height. No overflow markers: a list reaching the pane's bottom edge is itself the signal that more rows exist. |
+| **viewport** | The slice of the row list the pane actually shows. It rests at the top of the list and scrolls when the selection and its lookahead would exceed the bottom edge — overflow accumulates at the bottom, and while the selection sits in the live block the live rows stay in view (chat-app scrolling). A dormant selection held deep keeps the viewport scrolled — earlier rows, the live block included, legitimately slide out of view and return when a pick lands back in the live block; that is the scroll, not a defect. **Derived, never remembered**: recomputed each draw from list, selection and pane height. No overflow markers: a list reaching the pane's bottom edge is itself the signal that more rows exist. |
 | **lookahead** | The couple of rows kept visible *below* the selection while the viewport scrolls, so you can see what you are walking into. |
 
 ### 3.6 Row states
