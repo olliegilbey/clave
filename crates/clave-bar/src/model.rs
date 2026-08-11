@@ -3515,9 +3515,10 @@ mod tests {
 
     #[test]
     fn a_stranded_beacon_elects_only_the_active_instance() {
-        // The fallback is LOCAL TRUTH, not "anyone may act": a hidden bar
-        // reading a stranded beacon must stay silent, or a broadcast nav is
-        // back to racing divergent targets off stale tab sets (C5 round 2).
+        // There is no fallback: a stranded beacon elects nobody at all. This
+        // pins that plus who may still act — a hidden bar reading a stranded
+        // beacon must stay silent, or a broadcast nav is back to racing
+        // divergent targets off stale tab sets (C5 round 2).
         let mut m = BarModel::default();
         m.set_own_pane(102); // we are the bar in tab 12, position 2
         m.apply_panes(panes_at(&FLEET_PANES));
@@ -3543,8 +3544,10 @@ mod tests {
 
     #[test]
     fn a_new_tabs_birth_beacon_elects_no_executor_among_starved_bars() {
-        // The #162 fallback's hard case, and the reason stranding must be
-        // FRAME-WITNESSED rather than re-derived. `beacon_stranded()` asks
+        // This was the fallback's hard case (C5 round 2) and is now held with
+        // no licence at all: beacon-only election refuses starved bars by
+        // construction. The reason stranding must be FRAME-WITNESSED rather
+        // than re-derived stays live: `beacon_stranded()` asks
         // "does the beacon name a tab outside MY tab set" — and a starved
         // bar's tab set is frozen (FOOTGUNS.md:63), so for it that question
         // cannot tell DEAD from CREATED-SINCE-MY-LAST-FRAME. Creating a tab is
