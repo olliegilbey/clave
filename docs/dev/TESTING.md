@@ -772,7 +772,11 @@ Each step exists because skipping it produces a confident, wrong result.
    nothing, because you cannot tell "fixed" from "never fired".
 5. **Provoke, then re-join.** Drive the actual failure — `zellij action
    close-tab` on a **non-last** tab is what renumbers positions — and re-join
-   after every provocation, not once at the end.
+   after every provocation, not once at the end. Know the gesture's semantics
+   before scripting the provocation: `dir` wraps within one block, so a walk
+   from a single live tab bounces in place and the scripted drive measures
+   nothing — pick into the dormant block first (#148, 2026-08-11: 160 pipes
+   measured a bounce while the store read as "expected").
 6. **Measure quiescence.** Idle 60s and assert the event log and the store `seq`
    both stay put. This is the anti-storm assertion, and it is the one that
    catches the round-4 fd-exhaustion class. A functional pass with a growing
@@ -791,6 +795,16 @@ Each step exists because skipping it produces a confident, wrong result.
    the session list the next drive has to pick from. Print the kill pair for the
    human with the report (see "Tear the sandbox down when you are done with it");
    do not leave it for whoever notices the sprawl.
+
+**Never discard the drive's output — and the output is not the delivery
+evidence.** `>/dev/null 2>&1` on a drive loop hides the wrapper refusals, which
+are the only thing the client ever prints — a delivered pipe prints nothing.
+Delivery is proved separately, by the plugin's EOF-twin drop lines in
+`zellij.log` (payload arrivals do not log; the twins do). So a dead or bouncing
+drive with discarded output reads as green: keep the output visible for
+refusals, and corroborate the twins in the log after every phase, not once at
+the end. Both rules were violated on the #148 drive (2026-08-11) — the screen's
+owner saw "nothing moved at all"; the script said done.
 
 **The join is not as easy as it looks.** `list-panes -t -j` reports a pane's
 *deepest child process*, so an agent pane routinely shows `rust-analyzer`, `uv
