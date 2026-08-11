@@ -413,7 +413,12 @@ election rule to reason about where the stranded fallback is one predicate.
 
 Residual: tier 3 unrun. The scenario to drive is two agent tabs → `Alt+j` onto
 tab 2 → close tab 2 → `Alt+j`, and the signal is whether the press moves focus —
-ignore the empty-payload log lines entirely.
+ignore the empty-payload log lines entirely. A second residual: a bar that arms
+the licence while active (refused re-anchor, stale panes) and then loses focus
+through a native tab switch that emits no beacon keeps the licence with a frozen
+frame until the newly-active bar's next TabUpdate re-anchors — worst case one
+press walking from the previous base, single instance, no divergence; the same
+one-dropped-keypress class the counterfactual above accepts.
 
 Counterfactual, for whoever revisits this if beacon delivery ever DOES starve:
 consuming the re-anchor only on execution degrades safely — a missed re-anchor is

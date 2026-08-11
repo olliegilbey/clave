@@ -385,10 +385,13 @@ impl State {
                 // Exactly one instance may act on the press. The rule lives in
                 // the model (`nav_executor`): normally the instance whose own
                 // tab is the replicated beacon, and local truth instead while
-                // that beacon names a tab that no longer exists (#162 — a
-                // close used to kill the announcing bar and take nav with it).
-                // Fail-closed either way: a dropped Alt+j is a repeatable
-                // keypress, a jump to the wrong tab is not.
+                // that beacon names a tab a just-delivered frame witnessed
+                // gone (#162 — a close used to kill the announcing bar and
+                // take nav with it). A hidden bar's frozen frame can never
+                // arm that fallback itself — the licence is cleared by any
+                // beacon and only `apply_tabs` grants it. Fail-closed either
+                // way: a dropped Alt+j is a repeatable keypress, a jump to
+                // the wrong tab is not.
                 let executor = self.model.nav_executor();
                 let is_executor = executor.is_some();
                 let fx = self.model.nav(payload, executor);
