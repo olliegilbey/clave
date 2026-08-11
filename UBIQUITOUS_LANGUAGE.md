@@ -119,7 +119,14 @@ These three are constantly confused. They are not interchangeable.
 | **tint** | Foreground colour on text or a glyph, no background. |
 | **fade** | Rendering a row blended toward the bar background. Unselected rows are faded; **selection is by recession**, not by ornament. |
 
-### 3.5 Row states
+### 3.5 The viewport
+
+| Term | Means |
+|---|---|
+| **viewport** | The slice of the row list the pane actually shows. It rests at the top of the list and scrolls **only** when the selection walks past the bottom edge — rows overflow off the bottom, never off the top, so the live block stays in view (chat-app scrolling). **Derived, never remembered**: recomputed each draw from list, selection and pane height. No overflow markers: a list reaching the pane's bottom edge is itself the signal that more rows exist. |
+| **lookahead** | The couple of rows kept visible *below* the selection while the viewport scrolls, so you can see what you are walking into. |
+
+### 3.6 Row states
 
 | Term | Means |
 |---|---|
