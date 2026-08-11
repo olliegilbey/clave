@@ -76,22 +76,22 @@ the design lock §7.1.
 ### 3.2 A row's parts
 
 ```text
- ●  │  󰁻  𖣂   S6-GUT   clave    picking the gutter set
-└┬┘ └┬┘ └┬┘ └┬┘  └──┬─┘  └──┬─┘  └────────┬─────────┘
-status rule battery │     title    repo         summary
+ ●  │  105k 𖣂   S6-GUT   clave    picking the gutter
+└┬┘ └┬┘ └─┬┘ └┬┘  └──┬─┘  └──┬─┘  └───────┬────────┘
+status rule battery │     title    repo        summary
                 provenance
-└──────── gutter ────────┘└─────── text area ───────────┘
+└───────── gutter ─────────┘└────── text area ────────┘
 ```
 
 | Term | Means |
 |---|---|
-| **gutter** | The fixed-width glyph region at the left of every row. **Position-locked**: each cell is exactly one column and renders a space when its glyph is absent, so nothing ever reflows. |
-| **cell** | One column of the gutter, referred to by its role — the *status cell*, the *battery cell*, the *provenance cell*. Not by number. |
+| **gutter** | The fixed-width region at the left of every row. **Position-locked**: each cell holds its column and renders a space when its glyph is absent, so nothing ever reflows. Every cell is one column except the **battery** in the expanded view, which is four — so the gutter is 12 columns expanded, 9 collapsed. |
+| **cell** | One fixed slot of the gutter, referred to by its role — the *status cell*, the *battery cell*, the *provenance cell*. Not by number, and not necessarily one column: the battery cell is four in the expanded view. |
 | **rule** | The vertical line separating the status cell from the rest, so the status hue is not read against the battery hue. |
 | **cap** | The powerline half-circle at each end of the **selected row**. Its column is reserved on every row so nothing shifts. |
 | **text area** | Everything right of the gutter: title, repo, summary. |
 | **status glyph** | The dot. Its **colour** is the state — the shape barely varies. |
-| **battery** | How much of its **smart zone** that agent session has spent. A terminal tab shows the console mark in this cell instead, because a terminal has no context window. |
+| **battery** | How much of its **smart zone** that agent session has spent. Two readings of one number: the expanded view prints the **count** — thousands of tokens, right-aligned, inked with the ramp's band (`105k`, `1.1m`) — and the collapsed view shows the **ramp glyph**, which empties a tenth at a time. A terminal tab shows the console mark in this cell instead, because a terminal has no context window. |
 | **smart zone** | How many tokens of context *this user* trusts a model to stay sharp within — set once, globally, in `CLAVE_AGENT_SMART_ZONE_TOKENS` (default 150,000). Explicitly **not** the model's context window: the window is where Claude auto-compacts, which is not a thing anyone steers by, and the same smart zone holds across a 200k model, a 1M model, or a future non-Claude agent. It is where the battery turns **red** — not where the ramp ends. |
 | **provenance** | Whether the row's checkout is a **worktree**, on a **branch**, or a **main checkout**. Rendered as a glyph tinted with the repo ink; a main checkout shows nothing. |
 
