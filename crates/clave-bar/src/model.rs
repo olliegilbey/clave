@@ -1171,8 +1171,10 @@ impl BarModel {
         //   birth → AnnounceVisit (UNGATED): a newborn announces its own tab
         //     once, before its first PaneUpdate can satisfy the active gate —
         //     live-validated ungated; left byte-identical.
-        //   organic (Alt+o) / stranded (#23) → ReanchorVisit (GATED in
-        //     run_effects to the active instance). Neither may ride the
+        //   organic (Alt+o) / stranded (#23) → ReanchorVisit (GATED HERE, at
+        //     emit time, to the active instance — #162 moved the election out
+        //     of run_effects into apply_tabs itself; see below). Neither may
+        //     ride the
         //     ungated path: TabUpdate normally reaches only the active
         //     instance (C3), BUT a TOGGLE delivers the FRESH set to ALL
         //     instances (doc:371-394) — and the organic pipe is a broadcast,
@@ -3252,9 +3254,10 @@ mod tests {
         // Tab 11 (the user's focused tab) closes; zellij focuses the survivor
         // (10) and delivers THIS now-active bar a TabUpdate lacking 11. The
         // stranded re-anchor emits a DISTINCT effect (ReanchorVisit) that
-        // run_effects gates to the active instance — toggle bursts deliver the
-        // fresh set to ALL instances (doc:371-394), so an ungated announce here
-        // would be a beacon war (round-13 EMFILE class).
+        // apply_tabs itself gates to the elected instance (#162: the election
+        // moved out of run_effects) — toggle bursts deliver the fresh set to
+        // ALL instances (doc:371-394), so an ungated announce here would be a
+        // beacon war (round-13 EMFILE class).
         let fx = m.apply_tabs(vec![tab(10, 0, "a", true)]);
         assert!(
             fx.contains(&Effect::ReanchorVisit { tab_id: 10 }),
@@ -3398,10 +3401,10 @@ mod tests {
         // freshly created tab could not heal a stranded session.
         let mut m = BarModel::default();
         let fx = m.apply_tabs(vec![tab(10, 0, "a", false)]);
-        assert!(
-            fx.iter()
-                .all(|e| !matches!(e, Effect::AnnounceVisit { .. }))
-        );
+        assert!(fx.iter().all(|e| !matches!(
+            e,
+            Effect::AnnounceVisit { .. } | Effect::ReanchorVisit { .. }
+        )));
         let fx = m.apply_tabs(vec![tab(10, 0, "a", true)]);
         assert!(
             fx.contains(&Effect::AnnounceVisit { tab_id: 10 }),
@@ -3409,10 +3412,10 @@ mod tests {
         );
         // Still once-EVER: spent by the announce it made...
         let fx = m.apply_tabs(vec![tab(10, 0, "a", false), tab(11, 1, "b", true)]);
-        assert!(
-            fx.iter()
-                .all(|e| !matches!(e, Effect::AnnounceVisit { .. }))
-        );
+        assert!(fx.iter().all(|e| !matches!(
+            e,
+            Effect::AnnounceVisit { .. } | Effect::ReanchorVisit { .. }
+        )));
         // ...and equally spent by an active tab the beacon ALREADY names. A
         // bar whose beacon arrived before its first frame has nothing to
         // announce, and must not save the UNGATED announce up for a later
@@ -3420,14 +3423,16 @@ mod tests {
         let mut m = BarModel::default();
         m.beacon(10);
         let fx = m.apply_tabs(vec![tab(10, 0, "a", true), tab(11, 1, "b", false)]);
-        assert!(
-            fx.iter()
-                .all(|e| !matches!(e, Effect::AnnounceVisit { .. }))
-        );
+        assert!(fx.iter().all(|e| !matches!(
+            e,
+            Effect::AnnounceVisit { .. } | Effect::ReanchorVisit { .. }
+        )));
         let fx = m.apply_tabs(vec![tab(10, 0, "a", false), tab(11, 1, "b", true)]);
         assert!(
-            fx.iter()
-                .all(|e| !matches!(e, Effect::AnnounceVisit { .. })),
+            fx.iter().all(|e| !matches!(
+                e,
+                Effect::AnnounceVisit { .. } | Effect::ReanchorVisit { .. }
+            )),
             "a satisfied birth claim must stay spent when the active tab moves"
         );
     }

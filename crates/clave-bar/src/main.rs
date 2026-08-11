@@ -104,6 +104,10 @@ impl State {
                 // same branch. Re-gating it here would put the decision back
                 // where no test can reach it, and a second evaluation could only
                 // ever drop a beacon whose trigger has already been spent.
+                // Load-bearing: `apply_tabs` is `ReanchorVisit`'s ONLY emitter,
+                // so this arm's safety depends entirely on every emission
+                // having already passed the election — an un-elected emitter
+                // anywhere else would bypass it completely.
                 Effect::AnnounceVisit { tab_id } | Effect::ReanchorVisit { tab_id } => {
                     run_command(
                         &[
