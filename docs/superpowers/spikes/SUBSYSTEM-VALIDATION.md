@@ -389,9 +389,19 @@ close whose TabUpdate beat its PaneUpdate refused the gate AND cleared the
 trigger. With the announcing bar dead in the tab that closed there was no trigger
 left, so the documented "narrow window" was terminal. Fix: the election moves into
 the model at emit time (triggers consumed only on the emitting branch, so the next
-tab frame re-derives and retries), and while the beacon names a dead tab the nav
-election falls back to `elects_confirmed` — local truth, consulted only while the
-beacon is provably wrong.
+tab frame re-derives and retries), and a nav press falls back to local truth
+(`elects_confirmed`) while the beacon is provably wrong. **Provably means
+frame-witnessed, and that qualifier is the load-bearing half** (added in review,
+2026-08-11): "the beacon names a tab not in my set" is a question about a set that
+is FROZEN on every starved instance, so re-derived it cannot tell a dead tab from
+one born since that instance's last frame. Every new tab broadcasts a birth
+beacon, so re-deriving armed the fallback on every once-focused hidden bar on the
+commonest gesture in the product — and each also satisfies `elects_confirmed`
+off its frozen frame, which is round 2's divergent-SwitchTab race exactly (a probe
+with three such bars produced three different targets and three ungated pipes).
+The licence is therefore a flag set inside `apply_tabs` from the frame it just
+stored, cleared by any incoming beacon: a bar that receives no frames cannot grant
+it to itself.
 
 Rejected in the same round: routing the beacon through the STORE, seq-stamped
 like snapshots. It changes the wrong layer (delivery was never broken, and
@@ -404,6 +414,14 @@ election rule to reason about where the stranded fallback is one predicate.
 Residual: tier 3 unrun. The scenario to drive is two agent tabs → `Alt+j` onto
 tab 2 → close tab 2 → `Alt+j`, and the signal is whether the press moves focus —
 ignore the empty-payload log lines entirely.
+
+Counterfactual, for whoever revisits this if beacon delivery ever DOES starve:
+consuming the re-anchor only on execution degrades safely — a missed re-anchor is
+one dropped keypress until the next tab frame re-derives it — whereas a fallback
+to local truth that no frame witnessed degrades into the beacon war of rounds
+11–13, because starvation is precisely the condition under which every instance's
+frozen frame claims it is the active one. The frame-witnessed flag is what keeps
+the fallback on the safe side of that line: no frames, no licence.
 
 **Verdict:** **PASS** (2026-07-14, round 7 — TEMP traces removed after)
 
