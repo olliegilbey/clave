@@ -241,6 +241,12 @@ gap. Trust a derivation over a restatement — and check which one you are holdi
 
 ### D16 — Collapsed is a WIDTH PROFILE, not a second layout (2026-07-29)
 
+> D16's gutter and overhead numbers are narrowed by D38 (#105). "The gutter
+> stays identical" and "fixed overhead is 13" hold only for collapsed now —
+> expanded's battery cell went from one column to four, so expanded's gutter is
+> 12 and its fixed overhead is 16. The one-layout-two-profiles claim below
+> stands; read its arithmetic as collapsed's, not both profiles'.
+
 Supersedes D12's conclusion, keeps its arithmetic. Ollie's directive: the gutter
 stays identical, each text section shows fewer characters, repo drops to three
 (`cla`, `nal` — collisions are rare, and the repo *ink* still disambiguates),
@@ -501,6 +507,35 @@ resting-width costs become dead paths:
   on `main`, 111,788 here. The proptest generator stops at 20, so nothing would
   ever catch it. Needs a display area around 400 columns; Ollie runs ~280, so it
   is out of reach today. **Not out of reach forever.**
+
+### D38 — The battery cell's width belongs to the profile, not the gutter (2026-08-11)
+
+Ollie's design call of 2026-07-31, built at #105: in the expanded view the
+battery cell renders the **token count** as right-aligned text in the ramp's ink;
+collapsed keeps the glyph. So the cell is **four columns expanded, one
+collapsed** — every reading in the real range fits four characters (`1k`, `400k`,
+`999k`, `1m`, `1.1m`), and 30 columns has no room for any of them.
+
+That makes the gutter a property of the profile: `Widths::gutter()` is the eight
+position-locked columns plus whatever the battery cell costs — **12 expanded, 9
+collapsed** — and `min_intact_cols()` derives from it, so `EXPANDED`'s floor
+moves 29 → 32 and `COLLAPSED`'s stays at 23. **D16 is narrowed, not overturned:**
+one `render_row` body still serves both profiles, and everything left of the
+battery still holds the same column in both. What is retired is D16's stronger
+claim that every gutter cell is one column and the gutter is identical between
+states.
+
+Summary pays for the three columns, because summary is the only flexible cell
+there is (D9): 25 cells → 22 at the design width.
+
+Three formatting rulings settled with it. `1m`, never `1.0m` — the `.0` spends
+half the field on a digit that carries nothing, and mixing the two shapes leaves
+the column jittering. An unknown count renders **blank**, as it did before, and
+stays blank even when a level came through: the ramp index is a bucket, not a
+token figure, and printing one from it would be inventing a measurement. And the
+colour ramp is unchanged — four bands (green, yellow, orange, red) over eleven
+glyph steps, as it was before #105; the ticket's "five bands" was a miscount,
+not a design change. The colour is for glancing, the digits for reading.
 
 ### D37 — The plugin seeks before it knows its own mode. Reduced, not fixed (2026-07-30)
 

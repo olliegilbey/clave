@@ -34,9 +34,13 @@ const BOLD: &str = "\u{1b}[1m";
 /// design; it is the graph paper the design is drawn on.
 const DIM: Rgb = Rgb(0x71, 0x7C, 0x7C);
 
+/// `battery` is the ramp level AND the count it was bucketed from, together, the
+/// way a real snapshot carries them (#105): the expanded profile prints the
+/// figure and inks it with the level's band, so a fixture that set them
+/// independently could show a preview no live row could ever produce.
 fn agent(
     status: RowStatus,
-    battery: Option<u8>,
+    battery: Option<(u8, u32)>,
     provenance: Provenance,
     repo: &str,
     repo_ink: u8,
@@ -46,7 +50,8 @@ fn agent(
     Row {
         content: RowContent::Agent {
             status,
-            battery,
+            battery: battery.map(|(level, _)| level),
+            tokens: battery.map(|(_, tokens)| tokens),
             provenance,
             title: title.map(|(t, _)| String::from(t)),
             title_ink: title.map(|(_, i)| i),
@@ -70,7 +75,7 @@ fn fleet() -> Vec<Row> {
     let mut rows = vec![
         agent(
             RowStatus::NeedsYou,
-            Some(1),
+            Some((1, 15_000)),
             Provenance::Main,
             "dotfiles",
             DOTFILES,
@@ -79,7 +84,7 @@ fn fleet() -> Vec<Row> {
         ),
         agent(
             RowStatus::Working,
-            Some(3),
+            Some((3, 45_000)),
             Provenance::Worktree,
             "clave",
             CLAVE,
@@ -88,7 +93,7 @@ fn fleet() -> Vec<Row> {
         ),
         agent(
             RowStatus::Working,
-            Some(2),
+            Some((2, 30_000)),
             Provenance::Branch,
             "api-svc",
             API_SVC,
@@ -97,7 +102,7 @@ fn fleet() -> Vec<Row> {
         ),
         agent(
             RowStatus::Done,
-            Some(0),
+            Some((0, 4_000)),
             Provenance::Main,
             "clave",
             CLAVE,
@@ -112,7 +117,7 @@ fn fleet() -> Vec<Row> {
         },
         agent(
             RowStatus::Stale,
-            Some(4),
+            Some((4, 66_000)),
             Provenance::Worktree,
             "clave",
             CLAVE,
@@ -121,7 +126,7 @@ fn fleet() -> Vec<Row> {
         ),
         agent(
             RowStatus::Dormant,
-            Some(0),
+            Some((0, 9_000)),
             Provenance::Worktree,
             "clave",
             CLAVE,
@@ -130,7 +135,7 @@ fn fleet() -> Vec<Row> {
         ),
         agent(
             RowStatus::Dormant,
-            Some(1),
+            Some((1, 22_000)),
             Provenance::Branch,
             "infra",
             INFRA,
@@ -139,7 +144,7 @@ fn fleet() -> Vec<Row> {
         ),
         agent(
             RowStatus::Idle,
-            Some(2),
+            Some((2, 38_000)),
             Provenance::Branch,
             "webapp",
             WEBAPP,
@@ -184,22 +189,25 @@ fn bar(rows: &[Row], cols: usize, widths: Widths, label: &str) {
 /// The battery levels span the ramp on purpose (S7, #62): the fleet shows a
 /// fresh row, a couple past halfway, one nearly out and one past its smart zone,
 /// because a promotional image of a meter that reads the same on every row sells
-/// the column short. The dormant row carries a real level too — a dormant
-/// conversation consumes nothing, so its reading is exactly current, which is
-/// the ruling that closed design-lock §7.2.
+/// the column short. Each count is a plausible tenth of the default 150k zone
+/// for the level beside it (#105) — and the row past its zone reads `412k`
+/// against a glyph that has run out of levels, which is the case the count
+/// exists for. The dormant row carries a real level too — a dormant conversation
+/// consumes nothing, so its reading is exactly current, which is the ruling that
+/// closed design-lock §7.2.
 ///
 /// The summaries copy the SHAPE of real `ai-title` values, sampled from the
 /// local transcript corpus 2026-07-31: sentence case, verb first, no trailing
 /// period, 13-60 characters. They are invented rather than copied — the corpus
 /// is the maintainer's own work and this repo is public — but a fixture that
 /// invents the format too would misrepresent the column in the one image most
-/// people will ever see. Several run past the 25-cell summary column and
+/// people will ever see. Several run past the 22-cell summary column and
 /// truncate, which is the honest common case.
 fn showcase() -> Vec<Row> {
     let mut rows = vec![
         agent(
             RowStatus::NeedsYou,
-            Some(3),
+            Some((3, 52_000)),
             Provenance::Branch,
             "api-svc",
             API_SVC,
@@ -208,7 +216,7 @@ fn showcase() -> Vec<Row> {
         ),
         agent(
             RowStatus::Working,
-            Some(7),
+            Some((7, 108_000)),
             Provenance::Worktree,
             "clave",
             CLAVE,
@@ -217,7 +225,7 @@ fn showcase() -> Vec<Row> {
         ),
         agent(
             RowStatus::Done,
-            Some(1),
+            Some((1, 18_000)),
             Provenance::Main,
             "webapp",
             WEBAPP,
@@ -232,7 +240,7 @@ fn showcase() -> Vec<Row> {
         },
         agent(
             RowStatus::Idle,
-            Some(9),
+            Some((9, 141_000)),
             Provenance::Main,
             "clave",
             CLAVE,
@@ -241,7 +249,7 @@ fn showcase() -> Vec<Row> {
         ),
         agent(
             RowStatus::Failed,
-            Some(5),
+            Some((5, 79_000)),
             Provenance::Branch,
             "infra",
             INFRA,
@@ -256,7 +264,7 @@ fn showcase() -> Vec<Row> {
         },
         agent(
             RowStatus::Stale,
-            Some(10),
+            Some((10, 412_000)),
             Provenance::Worktree,
             "clave",
             CLAVE,
@@ -265,7 +273,7 @@ fn showcase() -> Vec<Row> {
         ),
         agent(
             RowStatus::Dormant,
-            Some(6),
+            Some((6, 93_000)),
             Provenance::Main,
             "notes",
             DOTFILES,
@@ -330,11 +338,14 @@ fn main() {
 /// Where each field starts and ends, for a profile at a given width — the same
 /// arithmetic `render_row` lays the row out with, so the map below cannot
 /// describe a layout the renderer does not produce.
-fn field_spans(w: Widths, cols: usize) -> [(usize, usize); 3] {
-    let title = (10, 9 + w.title);
+fn field_spans(w: Widths, cols: usize) -> [(usize, usize); 4] {
+    // The battery cell opens at column 6 in both profiles and runs as wide as
+    // the profile gives it — one column for the glyph, four for the count (#105).
+    let battery = (6, 5 + w.battery.width());
+    let title = (w.gutter() + 1, w.gutter() + w.title);
     let repo = (title.1 + 2, title.1 + 1 + w.repo);
     let summary = (repo.1 + 2, cols - 2);
-    [title, repo, summary]
+    [battery, title, repo, summary]
 }
 
 fn span(s: (usize, usize)) -> String {
@@ -358,9 +369,11 @@ fn column_map() {
     );
 
     println!(
-        "\n  {dim}COLUMN MAP \u{2014} the 9-cell gutter is IDENTICAL in both states (D16);
-  only title, repo and summary move. summary = cols \u{2212} 13 \u{2212} title \u{2212} repo,
-  and it is the ONLY flexible column (D9). Odd cells 3, 5, 7 and 9 are spaces."
+        "\n  {dim}COLUMN MAP \u{2014} everything left of the battery is IDENTICAL in both
+  states (D16); the battery cell is 4 cells expanded and 1 collapsed (#105), and
+  title, repo and summary follow it. summary = cols \u{2212} gutter \u{2212} 4 \u{2212} title \u{2212} repo,
+  and it is the ONLY flexible column (D9), so the wider battery cell was paid for
+  out of it. The cells between the named ones are single spaces."
     );
     println!(
         "\n  {:<13}{:<11}{:<12}what it carries",
@@ -387,32 +400,32 @@ fn column_map() {
         ),
         (
             "battery",
-            span((6, 6)),
-            span((6, 6)),
-            "context level (S7); console mark on a terminal tab",
+            span(xs[0]),
+            span(cs[0]),
+            "token count expanded, ramp glyph collapsed (S7, #105)",
         ),
         (
             "provenance",
-            span((8, 8)),
-            span((8, 8)),
+            span((x.gutter() - 1, x.gutter() - 1)),
+            span((c.gutter() - 1, c.gutter() - 1)),
             "the repo ink; BLANK for a main checkout",
         ),
         (
             "title",
-            span(xs[0]),
-            span(cs[0]),
+            span(xs[1]),
+            span(cs[1]),
             "filled chip, dark text; blank when never renamed",
         ),
         (
             "repo",
-            span(xs[1]),
-            span(cs[1]),
+            span(xs[2]),
+            span(cs[2]),
             "tinted text, one colour per repo forever",
         ),
         (
             "summary",
-            span(xs[2]),
-            span(cs[2]),
+            span(xs[3]),
+            span(cs[3]),
             "flexes; no ellipsis at \u{2264}4 cells (D18)",
         ),
         (
@@ -436,8 +449,8 @@ fn column_map() {
     println!(
         "
   Cap columns are reserved on EVERY row so the selected row does not shift one
-  column right of its neighbours. Verified: title starts at column 10 whether
-  or not the row is selected, and in either state.{RESET}"
+  column right of its neighbours. Verified: the chip starts at its profile's
+  first text column whether or not the row is selected.{RESET}"
     );
 }
 
@@ -451,10 +464,11 @@ fn collapsed() {
 
     let widths = Widths::COLLAPSED;
     let cols = COLLAPSED_DESIGN_COLS;
-    // Derived, not hard-coded: the same arithmetic `render_row` uses
-    // internally once `cols` clears the floor (`13 + title + repo` — LEDGER
-    // D12's arithmetic, generalised to a profile by D16), so this number is
-    // guaranteed to match what the box below actually shows.
+    // Derived, not hard-coded: the same arithmetic `render_row` uses internally
+    // once `cols` clears the floor (`gutter + 4 + title + repo` — LEDGER D12's
+    // arithmetic, generalised to a profile by D16 and to a variable-width battery
+    // cell by #105), so this number is guaranteed to match what the box below
+    // actually shows.
     let summary_w = cols.saturating_sub(widths.min_intact_cols());
     bar(
         &fleet(),

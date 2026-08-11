@@ -34,7 +34,7 @@ Then, left to right across the row:
 | `󰘬` | on a branch |
 | `𖣂` | in its own git worktree |
 | `󰆍` | a terminal tab rather than an agent — the bar is the whole session |
-| `󰁹`→`󰂎` | the **battery** — how much context that session has spent |
+| `105k` | the **battery** — how much context that session has spent, in tokens |
 | **chip** | your `/rename`; blank until you rename |
 | **repo** | one colour per repo, wherever it appears |
 | **text** | Claude's own description of the session, not your prompt |
@@ -48,12 +48,18 @@ or a million. It defaults to 150,000 tokens — set your own in your shell confi
 export CLAVE_AGENT_SMART_ZONE_TOKENS=150000
 ```
 
-The glyph empties a tenth at a time so you can watch it descend; the colour
-moves in four coarser bands so a glance tells you enough without resolving the
-shape. It turns red *at* your zone, and stays there — past that point the
-reading is "out", not "how far out". A row that just `/clear`ed reads full
+The expanded bar prints the figure; collapse the bar and it becomes a glyph
+(`󰁹`→`󰂎`) that empties a tenth at a time so you can watch it descend.
+Either way the colour moves in four coarser bands, so a glance tells you enough
+without reading the number. It turns red *at* your zone, and stays there — past
+that point the glyph's reading is "out", not "how far out", which is the other
+reason the expanded bar spells the count. A row that just `/clear`ed reads full
 again, correctly: the battery measures the conversation the row is in, never its
 history.
+
+The count refreshes per turn (`Stop` / prompt-submit hooks), so a row mid-turn
+shows the *previous* turn's figure — four digits expose that lag in a way the
+glyph's coarser bands mostly hid.
 
 <sub>These marks may show as boxes here on GitHub — they render in your
 terminal. The branch and terminal marks are Nerd Font glyphs; the worktree mark

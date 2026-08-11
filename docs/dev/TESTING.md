@@ -565,12 +565,14 @@ Three parts, all present in
 
    The `13` is every fixed cell that is neither title nor repo, and it is worth
    spelling out because it is where this arithmetic goes wrong: the **left cap
-   lives inside the gutter**. `GUTTER_W = 9` spans cols 1–9 as *cap, status,
-   space, rule, space, battery, space, provenance, space* — so `13` is `9`
-   gutter `+ 1` space after title `+ 1` space after repo `+ 1` right margin
-   `+ 1` right cap, and `Widths::min_intact_cols()` is that `13 + title + repo`
-   (`23` collapsed, `29` expanded — D33 took `EXPANDED` to `(9, 7)`). Adding a
-   cap **on top of** the 9 counts it twice and totals 31.
+   lives inside the gutter**. `Widths::gutter()` spans cols 1 to the last gutter
+   space as *cap, status, space, rule, space, battery, space, provenance, space*
+   — `9` collapsed, and `12` expanded since #105 gave the expanded battery cell
+   four columns for the token count. So the collapsed `13` is `9` gutter `+ 1`
+   space after title `+ 1` space after repo `+ 1` right margin `+ 1` right cap,
+   and `Widths::min_intact_cols()` is `gutter() + 4 + title + repo` (`23`
+   collapsed, `32` expanded — D33 took `EXPANDED` to `(9, 7)`, #105 widened its
+   gutter). Adding a cap **on top of** the gutter counts it twice.
 
    The full collapsed row at `cols = 30`, checkable a line at a time against
    `render_row`:
@@ -588,9 +590,11 @@ Three parts, all present in
                                             30
    ```
 
-   The same map at `EXPANDED`/54 is `9 + 9 + 1 + 7 + 1 + 25 + 1 + 1 = 54`
-   (`title = 9, repo = 7` per D33): only `title`, `repo` and `summary` moved,
-   which is what makes collapsed a width profile and not a second layout (D16).
+   The same map at `EXPANDED`/54 is `12 + 9 + 1 + 7 + 1 + 22 + 1 + 1 = 54`
+   (`title = 9, repo = 7` per D33, and a 12-cell gutter per #105): the gutter, the
+   two fixed text columns and `summary` are all a profile's to set, and one
+   `render_row` body still draws both — which is what makes collapsed a width
+   profile and not a second layout (D16, narrowed by D38).
 
 2. **The citation.** Every choice names the lock section or LEDGER decision it
    comes from — D17 for the collapsed `title` of 7 (D33 retired its
@@ -601,7 +605,7 @@ Three parts, all present in
    `golden_bar_at_fifty_four_columns` (`render.rs:907`) was the weaker of the two
    and was strengthened to match: it now recomputes the title, repo and summary
    spans from `Widths::EXPANDED` and asserts `DESIGN_COLS - 2 - summary_start ==
-   25`, so a golden regenerated from a renderer that moved a column fails **here**,
+   22`, so a golden regenerated from a renderer that moved a column fails **here**,
    in arithmetic traceable to lock §2, instead of being accepted as the new
    picture.
 

@@ -39,13 +39,43 @@ pub const DESIGN_COLS: usize = clave_types::BAR_TARGET_COLS;
 /// collapsed target, linked rather than mirrored.
 pub const COLLAPSED_DESIGN_COLS: usize = clave_types::COLLAPSED_TARGET_COLS;
 
-/// Cols 1–9: cap, status, space, rule, space, battery, space, provenance,
-/// space. Position-locked — every cell is one column and renders a space when
-/// its glyph is absent, so a dropped glyph degrades to a blank cell rather than
-/// a shifted row (lock §2.1). Never parameterised: D16 keeps the gutter
-/// IDENTICAL between profiles — that is the whole point of it being a width
-/// profile and not a second layout.
-const GUTTER_W: usize = 9;
+/// The gutter's position-locked columns: cap, status, space, rule, space —
+/// then, after the battery cell — space, provenance, space. Eight columns that
+/// hold their width in EVERY profile, each rendering a space when its glyph is
+/// absent, so a dropped glyph degrades to a blank cell rather than a shifted row
+/// (lock §2.1).
+///
+/// The gutter itself is [`Widths::gutter`], because the BATTERY cell between
+/// these two halves is the one column count that varies by profile (#105). D16's
+/// rule — one layout, parameterised by width — is intact; what it no longer
+/// implies is that every gutter cell is one column wide.
+const GUTTER_FIXED_W: usize = 8;
+
+/// What the battery cell SHOWS, and therefore how wide it is (#105).
+///
+/// The ramp resolves magnitude to eleven steps and risk to four bands: the right
+/// reading for a glance, the wrong one when the question is "how much". Expanded
+/// has the columns to answer it and prints the number; collapsed does not, and at
+/// 30 columns the eleven-step glyph IS the right resolution. (Ollie's design
+/// call, 2026-07-31.)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BatteryCell {
+    /// The ramp glyph, one column.
+    Glyph,
+    /// The token count as right-aligned text in the ramp's ink — FOUR columns,
+    /// because every value in the real range fits four characters: `1k`, `400k`,
+    /// `999k`, `1m`, `1.1m`.
+    Count,
+}
+
+impl BatteryCell {
+    pub fn width(self) -> usize {
+        match self {
+            BatteryCell::Glyph => 1,
+            BatteryCell::Count => 4,
+        }
+    }
+}
 
 /// Collapsed is a WIDTH PROFILE, not a second layout (LEDGER D16, supersedes
 /// D12): one `render_row` body, parameterised by how wide the title and repo
@@ -55,6 +85,9 @@ const GUTTER_W: usize = 9;
 pub struct Widths {
     pub title: usize,
     pub repo: usize,
+    /// The battery cell — a glyph in one column, or the token count in four
+    /// (#105). The only gutter cell whose width is a profile's to choose.
+    pub battery: BatteryCell,
 }
 
 impl Widths {
@@ -67,7 +100,16 @@ impl Widths {
     /// stood while the target was 44: the design width moved, so the golden
     /// moves with it. `min_intact_cols()` rises 27 → 29 as a consequence, which
     /// slightly widens the sub-floor regime D31's clip now covers.
-    pub const EXPANDED: Widths = Widths { title: 9, repo: 7 };
+    ///
+    /// #105 then takes the battery cell to four columns here — the token count,
+    /// which eleven glyphs can only approximate — and the three columns come out
+    /// of `summary`, the only flexible cell there is (D9): 25 → 22 at the design
+    /// width, and the floor rises again, 29 → 32.
+    pub const EXPANDED: Widths = Widths {
+        title: 9,
+        repo: 7,
+        battery: BatteryCell::Count,
+    };
 
     /// LEDGER D17: chosen by Ollie from three rendered candidates. Repo drops
     /// to three (`cla`, `nal` — collisions are rare and the repo ink still
@@ -84,20 +126,37 @@ impl Widths {
     /// both profiles (collapsed summary 7 → 5) and leaving title at 7 to give
     /// the summary all ten new columns — and he took the reflow. Titles of 7
     /// cells or fewer are unaffected; only longer ones truncate on collapse.
-    pub const COLLAPSED: Widths = Widths { title: 7, repo: 3 };
+    ///
+    /// The battery cell stays a GLYPH here (#105): there is no room for four
+    /// columns of digits at 30, and the eleven-step glyph is the right reading at
+    /// this width anyway.
+    pub const COLLAPSED: Widths = Widths {
+        title: 7,
+        repo: 3,
+        battery: BatteryCell::Glyph,
+    };
+
+    /// Cols 1 to the last gutter space: the eight position-locked columns plus
+    /// whatever the battery cell costs this profile (#105) — 12 for `EXPANDED`,
+    /// 9 for `COLLAPSED`, which is what it used to be for both. The text area
+    /// starts at the next column.
+    pub fn gutter(self) -> usize {
+        GUTTER_FIXED_W + self.battery.width()
+    }
 
     /// Fixed columns everywhere; `summary` is the only flex cell (LEDGER D9).
     /// Everything else — gutter, title, repo, the two separating spaces, the
     /// right margin and both caps — holds its width at any `cols`, so below
-    /// this floor a row is wider than the pane rather than misaligned. `13` is
-    /// the 9-column gutter plus the space after title, the space after repo,
-    /// the right margin and the right cap (D12's arithmetic, generalised by
-    /// D16 to any profile): `29` for `EXPANDED` (D33 took it to (9, 7)), `23` for `COLLAPSED` (D17). That is
-    /// deliberate, not a compromise: a row that silently reflowed its columns
-    /// to fit would be the one failure mode §2.1 exists to forbid. S6 §2.10's
-    /// `cols - 7` text budget is superseded.
+    /// this floor a row is wider than the pane rather than misaligned. The `4`
+    /// is the space after title, the space after repo, the right margin and the
+    /// right cap (D12's arithmetic, generalised by D16 to any profile): `32` for
+    /// `EXPANDED` (29 until #105 widened its battery cell; 27 before D33 took it
+    /// to (9, 7)), `23` for `COLLAPSED` (D17, unmoved). That is deliberate, not a
+    /// compromise: a row that silently reflowed its columns to fit would be the
+    /// one failure mode §2.1 exists to forbid. S6 §2.10's `cols - 7` text budget
+    /// is superseded.
     pub fn min_intact_cols(self) -> usize {
-        13 + self.title + self.repo
+        self.gutter() + 4 + self.title + self.repo
     }
 }
 
@@ -316,6 +375,12 @@ pub enum RowContent {
         /// renders in full ramp colour like any other row. It is the live row
         /// whose reading is a turn behind.
         battery: Option<u8>,
+        /// The raw count the level was bucketed from, rendered as text where the
+        /// profile has four columns for it (#105). Rides alongside `battery`
+        /// rather than replacing it: the ink is the ramp's coarse risk band and
+        /// the text is the exact magnitude, and the two axes are the whole point.
+        /// `None` renders a blank cell — the bar never invents a measurement.
+        tokens: Option<u32>,
         provenance: Provenance,
         /// The chip; `None` when the session was never renamed.
         title: Option<String>,
@@ -401,7 +466,7 @@ pub fn strip_sgr(s: &str) -> String {
 /// it**, and a wrapped row makes every bar row double-height with a blank
 /// second line. Observed live 2026-07-29: on a monitor change, and on every
 /// tab spawn below ~123 columns where the birth percent lands the pane under
-/// `EXPANDED`'s 29-cell floor.
+/// `EXPANDED`'s `min_intact_cols()` floor (32 as of #105).
 ///
 /// So the clip happens here instead of being assumed. Only truncation changes:
 /// the row is still BUILT at the floor, so no column reflows and every row
@@ -634,7 +699,9 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
         out.push(' ');
     }
 
-    // Cols 2–8, the gutter proper.
+    // The gutter proper: status, rule, battery, provenance. Every cell but the
+    // battery is one column in either profile (#105).
+    let battery_w = widths.battery.width();
     match &row.content {
         RowContent::Terminal { .. } => {
             out.push_str(&o); // col 2 — no status; a terminal has no turn
@@ -647,14 +714,19 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
             // 2026-07-31). katanaGray is the same ink the tab's NAME already
             // uses on this row, so the row now reads as one thing.
             out.push_str(&ink(TERMINAL_INK));
-            out.push(CONSOLE); // col 6
+            // Right-aligned like the count it stands in for, so the battery
+            // cell has ONE alignment rule and a terminal row's mark lands on
+            // the same edge the digits do (#105). Identical to a bare `push`
+            // under `Glyph`, where the cell is one column.
+            out.push_str(&rjust(&CONSOLE.to_string(), battery_w));
             out.push_str(&o);
             out.push_str(&o);
-            out.push_str("  "); // cols 7–8 — no provenance yet (lock §7.2)
+            out.push_str("  "); // no provenance yet (lock §7.2)
         }
         RowContent::Agent {
             status,
             battery,
+            tokens,
             provenance,
             repo_ink,
             ..
@@ -675,20 +747,38 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
             // "at least this bad", which is the safe direction to be wrong in.
             // (CodeRabbit, #147)
             let battery = battery.map(|i| usize::from(i).min(BATTERY.len() - 1));
-            match battery.map(|i| BATTERY[i]) {
-                Some((glyph, colour)) => {
-                    out.push_str(&ink(colour));
-                    out.push(glyph); // col 6
-                    out.push_str(&o);
-                }
-                None => out.push(' '),
+            match widths.battery {
+                BatteryCell::Glyph => match battery.map(|i| BATTERY[i]) {
+                    Some((glyph, colour)) => {
+                        out.push_str(&ink(colour));
+                        out.push(glyph);
+                        out.push_str(&o);
+                    }
+                    None => out.push(' '),
+                },
+                // The INK is the ramp's band, the TEXT is the exact count
+                // (#105). Each half stays independently total: a count with no
+                // level cannot arise from any host — the level is bucketed FROM
+                // the count — but the wire crosses a version boundary, and
+                // fujiWhite is the honest ink for a number with no band behind
+                // it. An absent count blanks the cell, whatever the level says:
+                // the ramp index is not a token figure and rendering one from it
+                // would be inventing a measurement.
+                BatteryCell::Count => match tokens {
+                    Some(t) => {
+                        out.push_str(&ink(battery.map_or(DEFAULT_INK, |i| BATTERY[i].1)));
+                        out.push_str(&rjust(&token_text(*t), battery_w));
+                        out.push_str(&o);
+                    }
+                    None => out.push_str(&" ".repeat(battery_w)),
+                },
             }
             out.push_str(&o);
-            out.push(' '); // col 7
+            out.push(' '); // the space after the battery cell
             out.push_str(&o);
-            // Col 8. The one gutter cell permitted an arbitrary RGB: it takes
-            // the repo ink, making repo identity a shape in the gutter as well
-            // as a colour in the text (lock §4.1).
+            // The one gutter cell permitted an arbitrary RGB: it takes the repo
+            // ink, making repo identity a shape in the gutter as well as a
+            // colour in the text (lock §4.1).
             match provenance.mark() {
                 Some(glyph) => {
                     out.push_str(&ink(hue(*repo_ink)));
@@ -700,7 +790,7 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
         }
     }
     out.push_str(&o);
-    out.push(' '); // col 9
+    out.push(' '); // the last gutter column
 
     // Only `summary` flexes (LEDGER D9), in EITHER profile (D16). Below
     // `widths.min_intact_cols()` the fixed columns cannot all fit, and the row
@@ -708,15 +798,22 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
     // kind over-runs to the same width, or the bar goes ragged instead of
     // merely clipped, which is the alignment loss lock §2.1 exists to forbid.
     // A terminal row used to shrink to `cols` while an agent row held at the
-    // floor. D16 makes this a guard against pathological widths, not the
-    // mechanism a user ever sees: the caller picks the profile by STATE, so
-    // the seek never crosses this floor mid-animation (D16's "consequence
-    // that matters"). D12's "collapsed is a second layout" conclusion is
-    // superseded; this comment's job is the same one D13 gave it.
+    // floor. D16 makes this a guard against pathological widths, but NOT one
+    // a user never sees: the collapsed resting width (30) sits two below the
+    // EXPANDED floor (32), and both peek-on-nav (main.rs's `clave-visited`
+    // arm) and Alt+c's expand routinely draw the EXPANDED profile at 30-31
+    // cols — the row still holds exactly `cols` cells, but has already lost
+    // its right margin, and (for the selected row) its right cap, until the
+    // seek reaches 32. The visible effect is a cosmetic one-frame blink
+    // during the grow animation, not a wrap or a misalignment: every row is
+    // still uniform and still exactly `cols` cells, which is the property
+    // this comment's job is to state. D12's "collapsed is a second layout"
+    // conclusion is superseded; this comment's job is the same one D13 gave
+    // it.
     let intact = cols.max(widths.min_intact_cols());
     // `saturating_sub` rather than a floor check: a 0-width budget must render
     // nothing, not panic, if these constants ever move.
-    let body = intact.saturating_sub(GUTTER_W + 2); // minus right margin and cap
+    let body = intact.saturating_sub(widths.gutter() + 2); // minus right margin and cap
     let summary_w = body.saturating_sub(widths.title + widths.repo + 2);
 
     match &row.content {
@@ -734,9 +831,9 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
             summary,
             ..
         } => {
-            // Cols 10–16. The title is a filled CHIP with dark text, keyed per
-            // title WITHIN a repo, so two tabs of one repo never share one
-            // (lock §4). Blank when the session was never renamed.
+            // The text area opens with the title: a filled CHIP with dark text,
+            // keyed per title WITHIN a repo, so two tabs of one repo never share
+            // one (lock §4). Blank when the session was never renamed.
             match title {
                 Some(title) => {
                     out.push_str(&hue(*title_ink).mix(BASE, fade).bg());
@@ -751,15 +848,15 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
                 }
             }
             out.push_str(&o);
-            out.push(' '); // col 17
-            // Cols 18–24. Tinted TEXT, keyed by repo root — one repo is one
-            // colour everywhere, forever (lock §4).
+            out.push(' '); // the space after the chip
+            // Tinted TEXT, keyed by repo root — one repo is one colour
+            // everywhere, forever (lock §4).
             out.push_str(&ink(hue(*repo_ink)));
             out.push_str(&clamp(repo, widths.repo));
             out.push_str(&o);
             out.push_str(&o);
-            out.push(' '); // col 25
-            // Cols 26–42. The selected row leaves the summary at the repo ink
+            out.push(' '); // the space after the repo
+            // The selected row leaves the summary at the repo ink
             // set on the line above — deliberate and ratified, it is visible in
             // the preview's selected row. Every OTHER row is fujiWhite, faded
             // or not: gating this on `fade > 0.0` conflated "unselected" with
@@ -775,7 +872,7 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
     }
 
     out.push_str(&o);
-    out.push(' '); // col 43 — right margin
+    out.push(' '); // the right margin
     out.push_str(RESET);
     if row.selected {
         out.push_str(&SEL_BG.fg());
@@ -785,6 +882,61 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
         out.push(' ');
     }
     out
+}
+
+/// Right-aligned in `w` cells. The eye compares magnitudes on the RIGHT edge, so
+/// that is the edge the battery cell aligns to (#105).
+///
+/// Never truncates, and does not need to: `token_text` is bounded at four cells
+/// by construction (pinned over every `u32` by
+/// `a_token_count_never_outgrows_its_cell`) and the console mark is one. A
+/// caller that broke that bound would show up as a ragged row in the width
+/// invariants rather than as a silently halved number.
+fn rjust(s: &str, w: usize) -> String {
+    let mut out = " ".repeat(w.saturating_sub(display_cells(s)));
+    out.push_str(s);
+    out
+}
+
+/// A token count in at most four cells (#105): thousands below a million, tenths
+/// of a million above it, and a BARE `1m` rather than `1.0m` — the `.0` spends
+/// half the field on a digit that carries nothing, and mixing the two shapes
+/// makes the column jitter (Ollie's ruling).
+///
+/// ROUNDED to the nearest step, not floored: the cell is a measurement, and a
+/// battery that reads `999k` at 999,600 tokens is wrong in the one direction a
+/// battery must not be wrong in. Above 9.95m the decimal is dropped rather than
+/// overflowing the cell (`10m`), and the whole figure saturates at `999m` — the
+/// same "at least this bad" direction the ramp's own clamp takes.
+fn token_text(tokens: u32) -> String {
+    // Widened before the arithmetic: `u32::MAX + 500` is not a `u32`, and the
+    // rounding is the whole point of doing it in the wider type.
+    let tokens = u64::from(tokens);
+    let thousands = (tokens + 500) / 1_000;
+    if thousands < 1_000 {
+        return format!("{thousands}k");
+    }
+    // Tenths of a million, rounded. `999_500` lands here rather than rendering a
+    // five-cell `1000k`, and reads `1m`.
+    let tenths = (tokens + 50_000) / 100_000;
+    let (millions, tenth) = (tenths / 10, tenths % 10);
+    // The decimal survives only while it fits: `9.9m` is four cells, `10.1m` is
+    // five, so from ten million on the tenth is what gives way. Written against
+    // `millions` rather than `tenths` so both halves of the condition are
+    // load-bearing — `tenths < 100` reads the same and is unfalsifiable at its
+    // own boundary, where the tenth is zero anyway (a survivor `just mutants`
+    // found, and the FOOTGUNS rule: drop the redundant guard, do not test around
+    // it).
+    if millions < 10 && tenth != 0 {
+        return format!("{millions}.{tenth}m");
+    }
+    // The decimal gave way, but the dropped tenth still says which whole
+    // million is nearer: floor here would under-report (10,940,000 → `10m`
+    // rather than the nearer `11m`), the one direction this cell must not be
+    // wrong in. Saturate AFTER rounding, not before, so a round-up at 999
+    // still lands on the four-cell cap rather than a five-cell `1000m`.
+    let millions = millions + u64::from(tenth >= 5);
+    format!("{}m", millions.min(999))
 }
 
 /// Cols 3–5: space, rule, space. The rule separates the status hue from the
@@ -820,6 +972,11 @@ mod tests {
                 // seven steps — which is the whole point of the two-axis ramp
                 // (#62). A green row would assert nothing about the bands.
                 battery: Some(7),
+                // The count the level was bucketed from at the default 150k
+                // smart zone: seven tenths of it, so the two halves of the cell
+                // agree the way a real snapshot's do. Four cells wide, which is
+                // the case #105 chose the column for.
+                tokens: Some(105_000),
                 provenance,
                 title: title.map(String::from),
                 title_ink: Some(5),
@@ -857,6 +1014,7 @@ mod tests {
                 content: RowContent::Agent {
                     status: RowStatus::Dormant,
                     battery: None,
+                    tokens: None,
                     provenance: Provenance::Main,
                     title: None,
                     title_ink: None,
@@ -876,11 +1034,13 @@ mod tests {
     #[test]
     fn every_row_is_exactly_cols_cells() {
         for cols in [
-            // BELOW `EXPANDED`'s 29-cell floor: the row is built at the floor
-            // and clipped back, which is the regime a spawning tab lands in on
-            // any window under ~123 columns. Before `clip_to_cells` these
-            // widths produced full-floor rows in a narrower pane, and the
-            // terminal wrapped them.
+            // BELOW `EXPANDED`'s `min_intact_cols()` floor (32 as of #105): the
+            // row is built at the floor and clipped back, which is the regime a
+            // spawning tab lands in on any window under ~123 columns. Before
+            // `clip_to_cells` these widths produced full-floor rows in a
+            // narrower pane, and the terminal wrapped them. `COLLAPSED_DESIGN_COLS`
+            // (30) belongs to the same sub-floor regime now that the floor moved
+            // 29 → 32 (#105) — it is no longer only 1/20/26 that exercise the clip.
             1,
             20,
             26,
@@ -902,7 +1062,7 @@ mod tests {
     /// BOTH profiles hold the width guarantee at the same set of pathological
     /// `cols`, not just the profile that shipped first. `13` and `23` are
     /// `COLLAPSED`'s own floor arithmetic (`13 + 7 + 3`, see
-    /// `min_intact_cols_is_thirteen_plus_title_plus_repo`) and `30` is D17's
+    /// `min_intact_cols_is_the_gutter_plus_four_plus_title_plus_repo`) and `30` is D17's
     /// chosen target; the rest are shared reference points with the
     /// `EXPANDED` test above.
     #[test]
@@ -936,7 +1096,9 @@ mod tests {
     }
 
     /// A level past the end of the ramp SATURATES to empty-and-red; it must
-    /// never fall through to the blank cell.
+    /// never fall through to the blank cell. Asserted under COLLAPSED, where the
+    /// level IS the cell's content; `a_level_past_the_ramp_saturates_the_counts_ink`
+    /// covers the expanded profile, where the level is only the ink (#105).
     ///
     /// Unreachable from this version — the host clamps before it sends — but
     /// the snapshot crosses a version boundary, and a newer host with a longer
@@ -953,7 +1115,7 @@ mod tests {
                 panic!("fixture row 0 must be an agent");
             };
             *battery = Some(level);
-            render_all(&rows, DESIGN_COLS, Widths::EXPANDED)[0].clone()
+            render_all(&rows, COLLAPSED_DESIGN_COLS, Widths::COLLAPSED)[0].clone()
         };
 
         // Compared against the LAST VALID level rather than against a literal
@@ -973,6 +1135,231 @@ mod tests {
         ] {
             assert_eq!(render_at(level), saturated, "level {level} must saturate");
         }
+    }
+
+    // ── the battery as a count (#105) ───────────────────────────────────────
+
+    /// The same clamp, on the other side of the profile split: under EXPANDED an
+    /// out-of-range level reaches the INK rather than a glyph, so it must
+    /// saturate to the ramp's red instead of falling back to fujiWhite — which
+    /// is what a number with no band means, and would read as "no reading" on a
+    /// row that is out of its zone. (The #147 argument, moved to where the level
+    /// now lands.)
+    #[test]
+    fn a_level_past_the_ramp_saturates_the_counts_ink() {
+        let inked = |level: u8| {
+            let mut row = agent(RowStatus::Working, Provenance::Main, Some("T"), "s");
+            let RowContent::Agent { battery, .. } = &mut row.content else {
+                panic!("fixture must be an agent");
+            };
+            *battery = Some(level);
+            render_all(&[row], DESIGN_COLS, Widths::EXPANDED).remove(0)
+        };
+        let saturated = inked(clave_types::BATTERY_LEVELS - 1);
+        assert!(saturated.contains(&format!("{}105k", RED.fg())));
+        for level in [clave_types::BATTERY_LEVELS, u8::MAX] {
+            assert_eq!(inked(level), saturated, "level {level} must saturate");
+        }
+    }
+
+    /// The four-character range from the ticket, which is the whole reason four
+    /// columns is the right size: every reading a real conversation produces
+    /// fits it. `1.0m` is deliberately NOT one of the shapes — mixing it with
+    /// `400k` would leave the field jittering between two widths of million.
+    #[test]
+    fn a_token_count_reads_as_thousands_or_millions() {
+        for (tokens, want) in [
+            // A row that just `/clear`ed is genuinely near zero, and says so
+            // rather than rounding itself up into a reading it has not spent.
+            (0, "0k"),
+            (1_000, "1k"),
+            (105_000, "105k"),
+            (400_000, "400k"),
+            (999_000, "999k"),
+            (1_000_000, "1m"),
+            (1_100_000, "1.1m"),
+        ] {
+            assert_eq!(token_text(tokens), want, "{tokens} tokens");
+        }
+    }
+
+    /// Rounding, and the two boundaries the branches meet at. Floored counts
+    /// under-report, and under-reporting is the one direction a battery must not
+    /// be wrong in.
+    #[test]
+    fn a_token_count_rounds_to_its_nearest_step() {
+        assert_eq!(token_text(1_499), "1k");
+        assert_eq!(token_text(1_500), "2k");
+        // A hair under a million rounds INTO millions rather than rendering a
+        // five-cell `1000k` that would break the row.
+        assert_eq!(token_text(999_499), "999k");
+        assert_eq!(token_text(999_500), "1m");
+        // A whole million reads bare from either side of it.
+        assert_eq!(token_text(1_049_999), "1m");
+        assert_eq!(token_text(1_050_000), "1.1m");
+        // Past 9.95m the DECIMAL gives way, not the cell: `10.1m` would be five
+        // columns, so double-digit millions round to whole ones.
+        assert_eq!(token_text(9_949_999), "9.9m");
+        assert_eq!(token_text(9_950_000), "10m");
+        assert_eq!(token_text(10_100_000), "10m");
+        // Past ten million the digit that gave way still decides which whole
+        // million is nearer: floor here under-reports (10,940,000 is nearer
+        // 11m than 10m), the one direction the doc forbids.
+        assert_eq!(token_text(10_940_000), "11m");
+        // And the whole figure saturates rather than overflowing the cell — the
+        // ramp's own "at least this bad" direction.
+        assert_eq!(token_text(u32::MAX), "999m");
+    }
+
+    /// #105's deliverable, both halves of it: expanded prints the count in the
+    /// ramp's ink, collapsed keeps the glyph. One row, two profiles, so the
+    /// profile is the only thing that differs.
+    #[test]
+    fn expanded_renders_the_count_and_collapsed_keeps_the_glyph() {
+        let row = agent(RowStatus::Working, Provenance::Main, Some("T"), "s");
+        let cell = |widths: Widths, cols| {
+            let bare = strip_sgr(&render_all(std::slice::from_ref(&row), cols, widths)[0]);
+            cell_slice(&bare, 5, 5 + widths.battery.width())
+        };
+        assert_eq!(cell(Widths::EXPANDED, DESIGN_COLS), "105k");
+        assert_eq!(
+            cell(Widths::COLLAPSED, COLLAPSED_DESIGN_COLS),
+            BATTERY[7].0.to_string()
+        );
+    }
+
+    /// Right-aligned: the eye compares magnitudes on the right edge, so a short
+    /// reading pads on the LEFT and the units character never moves column.
+    #[test]
+    fn a_short_count_pads_on_the_left() {
+        let mut row = agent(RowStatus::Working, Provenance::Main, Some("T"), "s");
+        let RowContent::Agent { tokens, .. } = &mut row.content else {
+            panic!("fixture must be an agent");
+        };
+        *tokens = Some(1_000);
+        let bare = strip_sgr(&render_all(&[row], DESIGN_COLS, Widths::EXPANDED)[0]);
+        assert_eq!(cell_slice(&bare, 5, 9), "  1k");
+    }
+
+    /// The INK is the ramp's, tracked per level rather than fixed: the digits
+    /// carry the magnitude and the colour carries the risk band, which is the
+    /// two-axis reading #62 built and #105 keeps.
+    #[test]
+    fn the_count_is_inked_by_the_ramp_band() {
+        let inked = |level: u8| {
+            let mut row = agent(RowStatus::Working, Provenance::Main, Some("T"), "s");
+            let RowContent::Agent {
+                battery, tokens, ..
+            } = &mut row.content
+            else {
+                panic!("fixture must be an agent");
+            };
+            *battery = Some(level);
+            *tokens = Some(45_000);
+            render_all(&[row], DESIGN_COLS, Widths::EXPANDED).remove(0)
+        };
+        // Nothing is selected, so the fade is zero and the band's own hue is
+        // what reaches the row, immediately before the digits.
+        for (level, band) in [(1, GREEN), (7, YELLOW), (9, ORANGE), (10, RED)] {
+            let want = format!("{} 45k", band.fg());
+            assert!(inked(level).contains(&want), "level {level} lost its band");
+        }
+    }
+
+    /// An unknown count renders BLANK, and stays blank even when a level came
+    /// through: the ramp index is a bucket, not a token figure, and printing a
+    /// number derived from it would be inventing a measurement (#105's ruling,
+    /// and `agent_content`'s rule).
+    #[test]
+    fn an_unknown_count_blanks_the_cell_whatever_the_level_says() {
+        for level in [None, Some(0), Some(7)] {
+            let mut row = agent(RowStatus::Working, Provenance::Main, Some("T"), "s");
+            let RowContent::Agent {
+                battery, tokens, ..
+            } = &mut row.content
+            else {
+                panic!("fixture must be an agent");
+            };
+            *battery = level;
+            *tokens = None;
+            let bare = strip_sgr(&render_all(&[row], DESIGN_COLS, Widths::EXPANDED)[0]);
+            assert_eq!(cell_slice(&bare, 5, 9), "    ", "level {level:?}");
+        }
+    }
+
+    /// A count with no level is unreachable from any host — the level is
+    /// bucketed FROM the count — but the wire crosses a version boundary, so the
+    /// two halves of the cell stay independently total: the figure still prints,
+    /// in fujiWhite, which claims no risk band it does not have.
+    #[test]
+    fn a_count_with_no_level_still_prints_in_the_default_ink() {
+        let mut row = agent(RowStatus::Working, Provenance::Main, Some("T"), "s");
+        let RowContent::Agent {
+            battery, tokens, ..
+        } = &mut row.content
+        else {
+            panic!("fixture must be an agent");
+        };
+        *battery = None;
+        *tokens = Some(45_000);
+        let line = &render_all(std::slice::from_ref(&row), DESIGN_COLS, Widths::EXPANDED)[0];
+        assert_eq!(cell_slice(&strip_sgr(line), 5, 9), " 45k");
+        assert!(
+            line.contains(&format!("{} 45k", DEFAULT_INK.fg())),
+            "{line:?}"
+        );
+    }
+
+    /// The gutter is the eight position-locked columns plus the battery cell, so
+    /// #105 moves the text area three columns right under `EXPANDED` and leaves
+    /// `COLLAPSED` exactly where D16 put it. What D16 still guarantees is
+    /// everything LEFT of the battery: cap, status, rule — identical columns in
+    /// both profiles, which is why the two are one layout and not two.
+    #[test]
+    fn the_gutter_widens_with_the_battery_cell() {
+        assert_eq!(BatteryCell::Glyph.width(), 1);
+        assert_eq!(BatteryCell::Count.width(), 4);
+        assert_eq!(Widths::EXPANDED.gutter(), 8 + 4);
+        assert_eq!(Widths::COLLAPSED.gutter(), 8 + 1);
+        assert_eq!(
+            Widths::COLLAPSED.gutter(),
+            9,
+            "the pre-#105 gutter, unmoved"
+        );
+
+        let row = agent(RowStatus::Working, Provenance::Branch, Some("T"), "s");
+        let head = |widths: Widths, cols| {
+            let bare = strip_sgr(&render_all(std::slice::from_ref(&row), cols, widths)[0]);
+            cell_slice(&bare, 0, 5)
+        };
+        assert_eq!(
+            head(Widths::EXPANDED, DESIGN_COLS),
+            head(Widths::COLLAPSED, COLLAPSED_DESIGN_COLS)
+        );
+    }
+
+    /// A terminal row's console mark takes the battery cell (lock §7.1) and
+    /// aligns to the same right edge the digits do, so the cell has one
+    /// alignment rule rather than one per row kind.
+    #[test]
+    fn a_terminal_marks_the_right_edge_of_the_battery_cell() {
+        let row = Row {
+            content: RowContent::Terminal {
+                name: String::from("Tab #16"),
+            },
+            selected: false,
+        };
+        let bare =
+            strip_sgr(&render_all(std::slice::from_ref(&row), DESIGN_COLS, Widths::EXPANDED)[0]);
+        assert_eq!(cell_slice(&bare, 5, 9), format!("   {CONSOLE}"));
+        let bare = strip_sgr(
+            &render_all(
+                std::slice::from_ref(&row),
+                COLLAPSED_DESIGN_COLS,
+                Widths::COLLAPSED,
+            )[0],
+        );
+        assert_eq!(cell_slice(&bare, 5, 6), CONSOLE.to_string());
     }
 
     /// The clip's boundary is inclusive on the PASS-THROUGH side: a pane at
@@ -1036,11 +1423,16 @@ mod tests {
 
     /// Selection must not move a single column (lock §2.2) — the cap columns
     /// are reserved on every row precisely so the eye scans one edge. Checked
-    /// under BOTH width profiles (LEDGER D16): the gutter is identical between
-    /// them, which is the entire point of a width profile rather than a second
-    /// layout, so column 10 cannot move when the profile changes either.
+    /// under BOTH width profiles (LEDGER D16): one `render_row` body serves
+    /// both, so the chip must start at its profile's first text column whether
+    /// or not the row is selected.
+    ///
+    /// That column used to be 10 in both, and #105 moved `EXPANDED`'s to 13 by
+    /// widening the battery cell — so the assertion is derived from
+    /// `widths.gutter()` rather than pinned at a number, which is what makes it
+    /// a claim about selection rather than about the width of the day.
     #[test]
-    fn title_starts_at_column_ten_under_both_profiles() {
+    fn the_chip_starts_at_the_first_text_column_under_both_profiles() {
         for widths in [Widths::EXPANDED, Widths::COLLAPSED] {
             let unselected = agent(RowStatus::Working, Provenance::Branch, Some("S6-GUT"), "x");
             let selected = Row {
@@ -1056,7 +1448,7 @@ mod tests {
                 let bare =
                     strip_sgr(&render_all(std::slice::from_ref(&row), DESIGN_COLS, widths)[0]);
                 assert_eq!(
-                    cell_slice(&bare, GUTTER_W, GUTTER_W + widths.title),
+                    cell_slice(&bare, widths.gutter(), widths.gutter() + widths.title),
                     chip,
                     "selected={} widths={widths:?}",
                     row.selected
@@ -1066,15 +1458,17 @@ mod tests {
     }
 
     /// LEDGER D16's own arithmetic, pinned by equality rather than trusted from
-    /// prose: `13` is the 9-column gutter plus the space after title, the space
-    /// after repo, the right margin and the right cap — everything fixed that
-    /// is not title or repo itself (D12, generalised to a profile by D16).
+    /// prose: the gutter, plus the space after title, the space after repo, the
+    /// right margin and the right cap — everything fixed that is not title or
+    /// repo itself (D12, generalised to a profile by D16). The `13` this test
+    /// used to spell is now `gutter() + 4`, because #105 made the gutter a
+    /// property of the profile rather than a constant.
     #[test]
-    fn min_intact_cols_is_thirteen_plus_title_plus_repo() {
-        assert_eq!(Widths::EXPANDED.min_intact_cols(), 13 + 9 + 7);
-        assert_eq!(Widths::EXPANDED.min_intact_cols(), 29); // 27 before D19
-        assert_eq!(Widths::COLLAPSED.min_intact_cols(), 13 + 7 + 3);
-        assert_eq!(Widths::COLLAPSED.min_intact_cols(), 23); // D17, unchanged
+    fn min_intact_cols_is_the_gutter_plus_four_plus_title_plus_repo() {
+        assert_eq!(Widths::EXPANDED.min_intact_cols(), 12 + 4 + 9 + 7);
+        assert_eq!(Widths::EXPANDED.min_intact_cols(), 32); // 29 before #105, 27 before D19
+        assert_eq!(Widths::COLLAPSED.min_intact_cols(), 9 + 4 + 7 + 3);
+        assert_eq!(Widths::COLLAPSED.min_intact_cols(), 23); // D17, unchanged by #105
     }
 
     /// A missing glyph renders a blank cell and does not reflow the row (lock
@@ -1087,15 +1481,26 @@ mod tests {
         let [main, worktree] = [main, worktree]
             .map(|r| strip_sgr(&render_all(&[r], DESIGN_COLS, Widths::EXPANDED)[0]));
 
-        // Cell 8, indexed in CELLS — the provenance column is only the eighth
-        // `char` while every glyph before it is one cell wide.
-        assert_eq!(cell_slice(&main, 7, 8), " ", "col 8 is blank for a main");
-        assert_eq!(cell_slice(&worktree, 7, 8), "\u{168c2}");
+        // Indexed in CELLS, and DERIVED: the provenance cell is the second-last
+        // column of the gutter, whatever the battery cell before it costs (#105).
+        // A `chars()` index only agrees while every glyph to its left is one cell
+        // wide, which is exactly the assumption this module exists to drop.
+        let provenance = Widths::EXPANDED.gutter() - 2;
+        assert_eq!(
+            cell_slice(&main, provenance, provenance + 1),
+            " ",
+            "the provenance cell is blank for a main checkout"
+        );
+        assert_eq!(
+            cell_slice(&worktree, provenance, provenance + 1),
+            "\u{168c2}"
+        );
         // Same width, same text origin: the blank cost exactly one column.
         assert_eq!(display_cells(&main), display_cells(&worktree));
+        let text = Widths::EXPANDED.gutter();
         assert_eq!(
-            cell_slice(&main, GUTTER_W, DESIGN_COLS),
-            cell_slice(&worktree, GUTTER_W, DESIGN_COLS)
+            cell_slice(&main, text, DESIGN_COLS),
+            cell_slice(&worktree, text, DESIGN_COLS)
         );
     }
 
@@ -1151,10 +1556,11 @@ mod tests {
         for (i, bg) in bgs.iter().enumerate().take(DESIGN_COLS - 1).skip(1) {
             assert!(bg.is_some(), "col {} lost its background", i + 1);
         }
-        // Everything but the chip (cols 10–16) is the selection colour, and the
-        // trailing pad after a 5-cell summary is included.
+        // Everything but the chip is the selection colour, and the trailing pad
+        // after a 5-cell summary is included.
+        let chip = Widths::EXPANDED.gutter()..Widths::EXPANDED.gutter() + Widths::EXPANDED.title;
         for (i, bg) in bgs.iter().enumerate().take(DESIGN_COLS - 1).skip(1) {
-            if (GUTTER_W..GUTTER_W + Widths::EXPANDED.title).contains(&i) {
+            if chip.contains(&i) {
                 continue;
             }
             assert_eq!(bg, &sel, "col {}", i + 1);
@@ -1243,11 +1649,15 @@ mod tests {
     /// — check it against design-lock §2 rather than against `render_rows`:
     ///
     /// - Stripped of SGR, each row is
-    ///   `1+1+1+1+1+1+1+1+1 + 9 + 1 + 7 + 1 + 25 + 1 + 1 = 54` cells: the
-    ///   nine-cell gutter (§2.1), title, space, repo, space, summary, right
-    ///   margin, right cap. (`7 + 1 + 7 + 1 + 17` = 44 before D19.)
-    /// - Row 1 has no title, so cols 10–18 are blank; `clave` is padded to 7 at
-    ///   cols 20–26. Row 3 is a terminal, so its name runs the whole body.
+    ///   `1+1+1+1+1+4+1+1+1 + 9 + 1 + 7 + 1 + 22 + 1 + 1 = 54` cells: the
+    ///   twelve-cell gutter (§2.1, with #105's four-column battery cell), title,
+    ///   space, repo, space, summary, right margin, right cap. (`9 + 1 + 7 + 1 +
+    ///   25` behind a nine-cell gutter before #105; `7 + 1 + 7 + 1 + 17` = 44
+    ///   before D19.)
+    /// - Row 1 has no title, so cols 13–21 are blank; `clave` is padded to 7 at
+    ///   cols 23–29. Row 3 is a terminal, so its name runs the whole body.
+    /// - The battery cell is cols 6–9, right-aligned: `105k`, seven tenths of the
+    ///   default smart zone, in the ramp's yellow band (#105).
     /// - The hues are crystalBlue `#7E9CD8`, waveRed `#E46876`, carpYellow
     ///   `#E6C384` and fujiWhite `#DCD7BA` (§4), each mixed 25% toward sumiInk3
     ///   `#1F1F28` on the unselected rows (§6) — e.g. waveRed's red is
@@ -1283,9 +1693,9 @@ mod tests {
             },
         ];
         let expected = [
-            " \u{1b}[38;2;179;86;98m\u{25cf} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;180;154;109m\u{f007c}             \u{1b}[38;2;102;125;172mclave   \u{1b}[38;2;173;169;150mI just passed the spec o\u{2026} \u{1b}[0m ",
-            "\u{1b}[38;2;45;79;103m\u{e0b6}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m\u{1b}[38;2;255;158;59m\u{25cf}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;220;215;186m\u{2502}\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;230;195;132m\u{f007c}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;126;156;216m\u{168c2}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;122;168;159m\u{1b}[38;2;22;22;29mS6-GUT   \u{1b}[0m\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;126;156;216mclave  \u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m picking the gutter set   \u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[0m\u{1b}[38;2;45;79;103m\u{e0b4}\u{1b}[0m",
-            "   \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;92;101;103m\u{f018d}   \u{1b}[38;2;92;101;103mTab #16                                     \u{1b}[0m ",
+            " \u{1b}[38;2;179;86;98m\u{25cf} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;180;154;109m105k             \u{1b}[38;2;102;125;172mclave   \u{1b}[38;2;173;169;150mI just passed the spe\u{2026} \u{1b}[0m ",
+            "\u{1b}[38;2;45;79;103m\u{e0b6}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m\u{1b}[38;2;255;158;59m\u{25cf}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;220;215;186m\u{2502}\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;230;195;132m105k\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;126;156;216m\u{168c2}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;122;168;159m\u{1b}[38;2;22;22;29mS6-GUT   \u{1b}[0m\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;126;156;216mclave  \u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m picking the gutter set\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[0m\u{1b}[38;2;45;79;103m\u{e0b4}\u{1b}[0m",
+            "   \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;92;101;103m   \u{f018d}   \u{1b}[38;2;92;101;103mTab #16                                  \u{1b}[0m ",
         ];
         assert_eq!(render_all(&rows, DESIGN_COLS, Widths::EXPANDED), expected);
         // The same derived self-checks the COLLAPSED golden carries. A golden
@@ -1299,14 +1709,19 @@ mod tests {
             assert_eq!(display_cells(&strip_sgr(line)), DESIGN_COLS);
         }
         let w = Widths::EXPANDED;
-        let title = |line: &str| cell_slice(&strip_sgr(line), GUTTER_W, GUTTER_W + w.title);
+        let battery = |line: &str| cell_slice(&strip_sgr(line), 5, 5 + w.battery.width());
+        let title = |line: &str| cell_slice(&strip_sgr(line), w.gutter(), w.gutter() + w.title);
         let repo = |line: &str| {
             cell_slice(
                 &strip_sgr(line),
-                GUTTER_W + w.title + 1,
-                GUTTER_W + w.title + 1 + w.repo,
+                w.gutter() + w.title + 1,
+                w.gutter() + w.title + 1 + w.repo,
             )
         };
+        // The count, not the glyph, and it starts where the glyph used to (#105).
+        assert_eq!(battery(expected[0]), "105k");
+        assert_eq!(battery(expected[1]), "105k");
+        assert_eq!(battery(expected[2]), format!("   {CONSOLE}"));
         // Row 1 has no title: nine blank cells, and the repo still starts
         // exactly one space later (an absent chip must not pull the row left).
         assert_eq!(title(expected[0]), " ".repeat(w.title));
@@ -1317,14 +1732,16 @@ mod tests {
         // — see `Widths::COLLAPSED`. Its repo is the full 7-cell field.
         assert_eq!(title(expected[1]), "S6-GUT   ");
         assert_eq!(repo(expected[1]), "clave  ");
-        // Summary runs from after the repo to the right margin: `cols - 13 -
-        // title - repo` = 25 cells (D16's formula), ellipsis included.
-        let summary_start = GUTTER_W + w.title + 1 + w.repo + 1;
+        // Summary runs from after the repo to the right margin: `cols - gutter -
+        // 4 - title - repo` = 22 cells (D16's formula, with #105's wider gutter —
+        // 25 before it, and the three columns came from here because summary is
+        // the only flexible cell there is, D9), ellipsis included.
+        let summary_start = w.gutter() + w.title + 1 + w.repo + 1;
         assert_eq!(
             cell_slice(&strip_sgr(expected[0]), summary_start, DESIGN_COLS - 2),
-            "I just passed the spec o\u{2026}"
+            "I just passed the spe\u{2026}"
         );
-        assert_eq!(DESIGN_COLS - 2 - summary_start, 25);
+        assert_eq!(DESIGN_COLS - 2 - summary_start, 22);
     }
 
     /// The same picture, one layout, the other profile (LEDGER D16, D17):
@@ -1384,16 +1801,21 @@ mod tests {
         for line in &expected {
             assert_eq!(display_cells(&strip_sgr(line)), COLLAPSED_DESIGN_COLS);
         }
-        // Title still starts at column 10 (cell index GUTTER_W = 9) — the
-        // gutter did not move, and D17 holds title at 7, so the chip itself
-        // is untouched by the profile; only repo and summary narrowed.
+        // Title still starts at column 10 (cell index 9) — this profile's gutter
+        // did not move, and D17 holds title at 7, so the chip itself is untouched
+        // by the profile; only repo and summary narrowed. #105 widened the
+        // EXPANDED gutter alone, which is why this is now the profile whose text
+        // area starts where BOTH used to.
+        let w = Widths::COLLAPSED;
+        assert_eq!(w.gutter(), 9);
         assert_eq!(
-            cell_slice(
-                &strip_sgr(expected[1]),
-                GUTTER_W,
-                GUTTER_W + Widths::COLLAPSED.title
-            ),
+            cell_slice(&strip_sgr(expected[1]), w.gutter(), w.gutter() + w.title),
             "S6-GUT "
+        );
+        // The glyph, not the count: the battery cell is one column here (#105).
+        assert_eq!(
+            cell_slice(&strip_sgr(expected[1]), 5, 6),
+            BATTERY[7].0.to_string()
         );
     }
 
@@ -1743,6 +2165,20 @@ mod tests {
     }
 
     proptest! {
+        /// `rjust` does not truncate, so the four-cell bound is `token_text`'s to
+        /// hold — over EVERY `u32`, not just the plausible range. Four billion
+        /// tokens is not a real reading, but it is a reachable `u32`, and a
+        /// fifth cell would push the whole row's text one column right.
+        #[test]
+        fn a_token_count_never_outgrows_its_cell(tokens: u32) {
+            let text = token_text(tokens);
+            prop_assert!(
+                display_cells(&text) <= BatteryCell::Count.width(),
+                "{tokens} rendered {text:?}"
+            );
+            prop_assert!(!text.is_empty(), "{tokens} rendered nothing");
+        }
+
         /// The invariant the whole ticket exists for: whatever the fleet size,
         /// pane height and selection, the selected row is ON SCREEN — never
         /// reachable-but-invisible. Plus the shape rules around it: the pane is
