@@ -524,6 +524,16 @@ const LOOKAHEAD: usize = 2;
 /// its own is what makes a snapshot unable to yank the view — a row spawning
 /// above the selection moves the selection's index and this offset by exactly
 /// one, so the same rows stay under the reader's eye.
+///
+/// The one place that costs something, ruled acceptable by the maintainer on
+/// 2026-08-11: while the selection sits on the last row, the end-of-list clamp
+/// is holding the view above where the follow rule wants it, so rows arriving
+/// BELOW release that clamp and the suppressed lookahead reasserts itself — the
+/// view slides down by at most [`LOOKAHEAD`] rows with no navigation. That is
+/// the accepted trade for a viewport that is derived and never remembered:
+/// remembering a scroll position is the only way to refuse the slide, and a
+/// remembered position is one an arriving snapshot can leave the selection
+/// outside of.
 pub fn viewport_top(len: usize, selected: Option<usize>, height: usize) -> usize {
     // A pane with no lines shows no rows, and must not hand the click map an
     // offset for a screen nobody can see.
@@ -1682,7 +1692,11 @@ mod tests {
     /// A tab spawning while the view is scrolled deep must not yank it. Growth
     /// arrives at either end: a new LIVE row lands above the dormant block and
     /// shifts every index below it, a new dormant row lands below. Neither
-    /// changes the rows under the reader's eye.
+    /// changes the rows under the reader's eye — with one bounded exception,
+    /// ruled acceptable and pinned at the end of this test: growth below a
+    /// selection sitting on the LAST row slides the view down by up to LOOKAHEAD
+    /// rows, because that is where the end-of-list clamp releases. See
+    /// [`viewport_top`].
     #[test]
     fn a_snapshot_arriving_while_scrolled_leaves_the_view_alone() {
         let before = on_screen(&numbered(10, 7), 5);
@@ -1706,6 +1720,23 @@ mod tests {
         );
         let shifted: Vec<usize> = on_screen_at(&above, 5, DESIGN_COLS, Widths::EXPANDED);
         assert_eq!(shifted, before, "growth above the selection moved the view");
+
+        // The one corner where growth below DOES move the view, and the
+        // maintainer's 2026-08-11 ruling accepts it: the selection sits on the
+        // LAST row, so the end-of-list clamp has been holding the view two rows
+        // higher than the follow rule wants. Appending rows releases that clamp
+        // and the lookahead it was suppressing reasserts itself — the view
+        // slides down by LOOKAHEAD, at most, with no navigation. Restoring the
+        // lookahead beats strict never-yank here, because the alternative is a
+        // remembered scroll position, and a viewport that remembers is a
+        // viewport that can hide the selection.
+        let tail = on_screen(&numbered(10, 9), 5);
+        assert_eq!(tail, vec![5, 6, 7, 8, 9], "the clamp holds the tail view");
+        assert_eq!(
+            on_screen(&numbered(12, 9), 5),
+            vec![7, 8, 9, 10, 11],
+            "the released clamp slid the view by other than LOOKAHEAD rows"
+        );
     }
 
     proptest! {
