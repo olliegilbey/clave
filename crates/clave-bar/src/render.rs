@@ -798,11 +798,18 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
     // kind over-runs to the same width, or the bar goes ragged instead of
     // merely clipped, which is the alignment loss lock §2.1 exists to forbid.
     // A terminal row used to shrink to `cols` while an agent row held at the
-    // floor. D16 makes this a guard against pathological widths, not the
-    // mechanism a user ever sees: the caller picks the profile by STATE, so
-    // the seek never crosses this floor mid-animation (D16's "consequence
-    // that matters"). D12's "collapsed is a second layout" conclusion is
-    // superseded; this comment's job is the same one D13 gave it.
+    // floor. D16 makes this a guard against pathological widths, but NOT one
+    // a user never sees: the collapsed resting width (30) sits two below the
+    // EXPANDED floor (32), and both peek-on-nav (main.rs's `clave-visited`
+    // arm) and Alt+c's expand routinely draw the EXPANDED profile at 30-31
+    // cols — the row still holds exactly `cols` cells, but has already lost
+    // its right margin, and (for the selected row) its right cap, until the
+    // seek reaches 32. The visible effect is a cosmetic one-frame blink
+    // during the grow animation, not a wrap or a misalignment: every row is
+    // still uniform and still exactly `cols` cells, which is the property
+    // this comment's job is to state. D12's "collapsed is a second layout"
+    // conclusion is superseded; this comment's job is the same one D13 gave
+    // it.
     let intact = cols.max(widths.min_intact_cols());
     // `saturating_sub` rather than a floor check: a 0-width budget must render
     // nothing, not panic, if these constants ever move.

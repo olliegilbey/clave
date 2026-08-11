@@ -48,14 +48,18 @@ or a million. It defaults to 150,000 tokens — set your own in your shell confi
 export CLAVE_AGENT_SMART_ZONE_TOKENS=150000
 ```
 
-The wide bar prints the figure; narrow the bar and it becomes a glyph
+The expanded bar prints the figure; collapse the bar and it becomes a glyph
 (`󰁹`→`󰂎`) that empties a tenth at a time so you can watch it descend.
 Either way the colour moves in four coarser bands, so a glance tells you enough
 without reading the number. It turns red *at* your zone, and stays there — past
 that point the glyph's reading is "out", not "how far out", which is the other
-reason the wide bar spells the count. A row that just `/clear`ed reads full
+reason the expanded bar spells the count. A row that just `/clear`ed reads full
 again, correctly: the battery measures the conversation the row is in, never its
 history.
+
+The count refreshes per turn (`Stop` / prompt-submit hooks), so a row mid-turn
+shows the *previous* turn's figure — four digits expose that lag in a way the
+glyph's coarser bands mostly hid.
 
 <sub>These marks may show as boxes here on GitHub — they render in your
 terminal. The branch and terminal marks are Nerd Font glyphs; the worktree mark

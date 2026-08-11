@@ -263,8 +263,8 @@ pub const LABEL_SEP: &str = " \u{00b7} ";
 // is the #43/#44 mixed-artifact shape).
 
 /// The expanded width the bar is drawn at and the width seek converges to
-/// (LEDGER D2, then D19): `1 cap + 8 gutter + 9 title + 1 + 7 repo + 1 +
-/// 25 summary + 1 margin + 1 cap`. The renderer takes `cols` as a parameter —
+/// (LEDGER D2, then D19, then #105): `12 gutter + 9 title + 1 + 7 repo + 1 +
+/// 22 summary + 1 margin + 1 cap`. The renderer takes `cols` as a parameter —
 /// zellij hands the plugin whatever the pane actually is — but every number in
 /// the ratified design was chosen against this one.
 ///
@@ -274,14 +274,20 @@ pub const LABEL_SEP: &str = " \u{00b7} ";
 /// which widens the separation from 14 to 24 — see the separation test below,
 /// where that change retires a whole class of seek behaviour.
 ///
+/// **#105 then takes the gutter's battery cell to four columns** — the token
+/// count, which the eleven-glyph ramp can only approximate — spent out of
+/// `summary`, the only flex cell there is (D9): gutter 8 → 12, summary 25 →
+/// 22. Collapsed keeps the one-column glyph, so its gutter is unchanged at 9.
+///
 /// At a genuinely 80-column session this leaves the agent pane 26 columns.
 /// Accepted (D32): few sessions are that narrow, and collapsed still leaves 50.
 pub const BAR_TARGET_COLS: usize = 54;
 
 /// The collapsed width (Alt+c), LEDGER D17: `30 - 13 - 7 title - 3 repo`
 /// leaves the summary 7. Collapsed is a width PROFILE, not a squeezed layout
-/// (D16) — the gutter is identical and only repo and summary narrow, through
-/// the same `render_rows`.
+/// (D16) — the gutter is identical to what BOTH profiles used before #105 (9),
+/// and only repo and summary narrow relative to EXPANDED's post-#105 numbers,
+/// through the same `render_rows`.
 ///
 /// Its distance from `BAR_TARGET_COLS` is load-bearing beyond the two renders:
 /// the seek's acceptance bands must not overlap, or a collapse is accepted as

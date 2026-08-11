@@ -54,10 +54,13 @@ cheapest first:
 
 1. **Count the summary cell.** Only `summary` flexes (D9/D16), so for any row
    whose summary text is *longer* than its cell, the rendered summary occupies
-   exactly the cell: `cols = 13 + title_w + repo_w + summary_cells` — i.e.
-   **`29 + summary_cells` expanded `(9, 7)`** since D33, and `23 +
-   summary_cells` collapsed `(7, 3)`, unchanged. `ux-gate1`'s summaries are all
-   long enough. No rebuild, no reload.
+   exactly the cell — but the base now differs by profile, because #105 took
+   the expanded gutter's battery cell to four columns while collapsed kept its
+   one-column glyph: `cols = 16 + title_w + repo_w + summary_cells`, i.e.
+   **`32 + summary_cells` expanded `(9, 7)`**, and `cols = 13 + title_w +
+   repo_w + summary_cells`, i.e. **`23 + summary_cells` collapsed `(7, 3)`**,
+   unchanged. `ux-gate1`'s summaries are all long enough. No rebuild, no
+   reload.
 2. **Percent × display, from the layout dump** (agent-side, liveness-gated,
    ±2 columns because the serialized constraint is an integer percent):
    `ZELLIJ_SESSION_NAME=clave-test zellij action dump-layout`. The bar pane is

@@ -605,7 +605,7 @@ Three parts, all present in
    `golden_bar_at_fifty_four_columns` (`render.rs:907`) was the weaker of the two
    and was strengthened to match: it now recomputes the title, repo and summary
    spans from `Widths::EXPANDED` and asserts `DESIGN_COLS - 2 - summary_start ==
-   25`, so a golden regenerated from a renderer that moved a column fails **here**,
+   22`, so a golden regenerated from a renderer that moved a column fails **here**,
    in arithmetic traceable to lock §2, instead of being accepted as the new
    picture.
 
