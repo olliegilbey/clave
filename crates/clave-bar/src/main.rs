@@ -4,6 +4,7 @@
 //! glyphs, or renames, it belongs in model.rs where it can be unit-tested.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 
 // The pure model lives in the LIB half of this crate (src/lib.rs → model.rs)
 // so it host-tests without linking this bin's wasm host-import shims.
@@ -29,7 +30,10 @@ struct State {
     /// The pane height in lines, as of the last `render` — the only place
     /// zellij tells us (#148). A click carries a line of the VIEWPORT, so
     /// mapping it back to a row needs the height the viewport was sliced at.
-    /// `Default`'s 0 stands for "never rendered", which no click can precede.
+    /// `Default`'s 0 stands for "never rendered". If a click ever did precede
+    /// the first render, `pane_height == 0` degrades `viewport_top` to 0, so
+    /// the click map falls back to the pre-viewport identity mapping (line N
+    /// selects row N) rather than misbehaving.
     pane_height: usize,
     /// The CLI this bar shells out to, from plugin configuration (#44).
     /// Assigned in `load()`, which zellij invokes as its own wasm export
@@ -643,9 +647,16 @@ impl ZellijPlugin for State {
         // do not carry it.
         self.pane_height = rows;
         let list: Vec<Row> = self.model.rows().into_iter().map(|(_, row)| row).collect();
-        for line in render_rows(&list, cols, rows, self.model.widths()) {
-            println!("{line}");
-        }
+        let lines = render_rows(&list, cols, rows, self.model.widths());
+        // Final review 2026-08-11: emit the frame WITHOUT a trailing newline.
+        // Once the viewport (#148) slices to exactly `rows` lines, the pane is
+        // full at steady state; a trailing newline after the bottom row would
+        // scroll the pane's own grid by one, eating the top row and shifting
+        // every click map by one line. `std::io::Stdout` line-buffers on `\n`
+        // regardless of tty-ness, so the last (newline-less) line needs an
+        // explicit flush to reach the host.
+        print!("{}", lines.join("\n"));
+        let _ = std::io::stdout().flush();
     }
 }
 

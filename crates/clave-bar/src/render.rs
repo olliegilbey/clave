@@ -576,6 +576,9 @@ pub fn render_rows(rows: &[Row], cols: usize, height: usize, widths: Widths) -> 
     // printed past it drew rows zellij clipped away — nav-reachable, invisible.
     let top = viewport_top(rows.len(), rows.iter().position(|r| r.selected), height);
     let rows = &rows[top..top.saturating_add(height).min(rows.len())];
+    // `viewport_top` guarantees the selected row (if any) is inside this
+    // slice — pinned by the proptest — so the fade computed over the slice
+    // is equivalent to computing it over the whole list.
     let any_selected = rows.iter().any(|r| r.selected);
     rows.iter()
         .map(|row| render_row(row, cols, widths, any_selected))

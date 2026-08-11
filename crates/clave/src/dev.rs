@@ -230,6 +230,255 @@ pub const SCENARIOS: &[Scenario] = &[
             },
         ],
     },
+    // #148: rows far past any normal pane height, to drive the viewport
+    // live. Nothing here is exercised in isolation the way c8-* / ux-gate1
+    // are — its only job is overflow.
+    Scenario {
+        name: "tall",
+        agents: &[
+            // A handful of live-style rows: recent, active statuses, on top.
+            ScenarioAgent {
+                slug: "live-a",
+                ago_secs: 60,
+                repo: Some("clave"),
+                status: clave_types::Status::Working,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "live-b",
+                ago_secs: 120,
+                repo: Some("clave"),
+                status: clave_types::Status::NeedsYou,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "live-c",
+                ago_secs: 180,
+                repo: Some("clave"),
+                status: clave_types::Status::Working,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "live-d",
+                ago_secs: 240,
+                repo: Some("clave"),
+                status: clave_types::Status::Idle,
+                ..ScenarioAgent::DEFAULT
+            },
+            // ~30 dormant rows, varied statuses/repos, staggered recency —
+            // enough to overflow any normal pane.
+            ScenarioAgent {
+                slug: "d01",
+                ago_secs: 3600,
+                repo: Some("clave"),
+                status: clave_types::Status::Idle,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "d02",
+                ago_secs: 5400,
+                repo: Some("nalu"),
+                status: clave_types::Status::Working,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "d03",
+                ago_secs: 7200,
+                repo: Some("infra"),
+                status: clave_types::Status::NeedsYou,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "d04",
+                ago_secs: 9000,
+                repo: Some("webapp"),
+                status: clave_types::Status::Failed,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "d05",
+                ago_secs: 10800,
+                repo: Some("docs"),
+                status: clave_types::Status::Done,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "d06",
+                ago_secs: 12600,
+                repo: Some("api"),
+                status: clave_types::Status::Idle,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "d07",
+                ago_secs: 14400,
+                repo: Some("mobile"),
+                status: clave_types::Status::Working,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "d08",
+                ago_secs: 16200,
+                repo: Some("cli"),
+                status: clave_types::Status::NeedsYou,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "d09",
+                ago_secs: 18000,
+                repo: Some("edge"),
+                status: clave_types::Status::Failed,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "d10",
+                ago_secs: 19800,
+                repo: Some("auth"),
+                status: clave_types::Status::Done,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "d11",
+                ago_secs: 21600,
+                repo: Some("clave"),
+                status: clave_types::Status::Idle,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "d12",
+                ago_secs: 23400,
+                repo: Some("nalu"),
+                status: clave_types::Status::Working,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "d13",
+                ago_secs: 25200,
+                repo: Some("infra"),
+                status: clave_types::Status::NeedsYou,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "d14",
+                ago_secs: 27000,
+                repo: Some("webapp"),
+                status: clave_types::Status::Failed,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "d15",
+                ago_secs: 28800,
+                repo: Some("docs"),
+                status: clave_types::Status::Done,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "d16",
+                ago_secs: 30600,
+                repo: Some("api"),
+                status: clave_types::Status::Idle,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "d17",
+                ago_secs: 32400,
+                repo: Some("mobile"),
+                status: clave_types::Status::Working,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "d18",
+                ago_secs: 34200,
+                repo: Some("cli"),
+                status: clave_types::Status::NeedsYou,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "d19",
+                ago_secs: 36000,
+                repo: Some("edge"),
+                status: clave_types::Status::Failed,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "d20",
+                ago_secs: 37800,
+                repo: Some("auth"),
+                status: clave_types::Status::Done,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "d21",
+                ago_secs: 39600,
+                repo: Some("clave"),
+                status: clave_types::Status::Idle,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "d22",
+                ago_secs: 41400,
+                repo: Some("nalu"),
+                status: clave_types::Status::Working,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "d23",
+                ago_secs: 43200,
+                repo: Some("infra"),
+                status: clave_types::Status::NeedsYou,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "d24",
+                ago_secs: 45000,
+                repo: Some("webapp"),
+                status: clave_types::Status::Failed,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "d25",
+                ago_secs: 46800,
+                repo: Some("docs"),
+                status: clave_types::Status::Done,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "d26",
+                ago_secs: 48600,
+                repo: Some("api"),
+                status: clave_types::Status::Idle,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "d27",
+                ago_secs: 50400,
+                repo: Some("mobile"),
+                status: clave_types::Status::Working,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "d28",
+                ago_secs: 52200,
+                repo: Some("cli"),
+                status: clave_types::Status::NeedsYou,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "d29",
+                ago_secs: 54000,
+                repo: Some("edge"),
+                status: clave_types::Status::Failed,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "d30",
+                ago_secs: 55800,
+                repo: Some("auth"),
+                status: clave_types::Status::Done,
+                ..ScenarioAgent::DEFAULT
+            },
+        ],
+    },
 ];
 
 /// Valid v4-shaped, deterministic, self-identifying (`c85c` ≈ c8 scenario).
@@ -929,13 +1178,19 @@ mod tests {
     #[test]
     fn scenario_table_covers_the_c8_checklist() {
         // Names map 1:1 to SUBSYSTEM-VALIDATION.md C8 steps, plus ux-gate1
-        // (the visual-design decision fixture, #85 follow-up). Exact list on
-        // purpose (task instruction): a `contains` would let a scenario go
-        // missing silently.
+        // (the visual-design decision fixture, #85 follow-up) and tall (the
+        // #148 viewport overflow fixture). Exact list on purpose (task
+        // instruction): a `contains` would let a scenario go missing silently.
         let names: Vec<&str> = SCENARIOS.iter().map(|s| s.name).collect();
         assert_eq!(
             names,
-            vec!["c8-cold-start", "c8-worktree", "c8-stale", "ux-gate1"]
+            vec![
+                "c8-cold-start",
+                "c8-worktree",
+                "c8-stale",
+                "ux-gate1",
+                "tall"
+            ]
         );
         // cold-start: 3 agents, staggered recency, none worktree.
         let cs = &SCENARIOS[0];

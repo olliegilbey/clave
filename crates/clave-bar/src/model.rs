@@ -1564,6 +1564,10 @@ impl BarModel {
             rows.iter().position(|(_, r)| r.selected),
             pane_height,
         );
+        // `rows.get` bounds-checks against the LIST, not the window: a `line`
+        // at or past `pane_height` (reachable only in the one-frame-stale
+        // `pane_height` window below) selects a row off screen harmlessly,
+        // rather than panicking.
         let Some((key, _)) = top.checked_add(line).and_then(|i| rows.get(i)).cloned() else {
             return Vec::new();
         };
