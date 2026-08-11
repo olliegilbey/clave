@@ -3993,6 +3993,29 @@ mod tests {
         assert_eq!(battery, None);
     }
 
+    /// Both halves of the battery reach the row, from one snapshot: the bucketed
+    /// level the collapsed profile draws its glyph from, and the raw count the
+    /// expanded profile prints (#105). Bucketing stays host-side — the bar must
+    /// not re-derive either from the other, which is why this asserts the pair
+    /// rather than one of them.
+    #[test]
+    fn a_row_carries_both_the_battery_level_and_the_token_count() {
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "whatever", false)]);
+        let mut a = agent("u1", Status::Working, Some(10));
+        a.context_tokens = Some(105_000);
+        a.context_level = Some(7);
+        m.apply_snapshot(snap(1, vec![a]));
+        let RowContent::Agent {
+            battery, tokens, ..
+        } = content_at(&m, 0)
+        else {
+            panic!("a bound tab renders as an agent row");
+        };
+        assert_eq!(battery, Some(7));
+        assert_eq!(tokens, Some(105_000));
+    }
+
     #[test]
     fn provenance_is_three_state_worktree_branch_and_blank_main() {
         let mut m = BarModel::default();

@@ -189,16 +189,19 @@ fn bar(rows: &[Row], cols: usize, widths: Widths, label: &str) {
 /// The battery levels span the ramp on purpose (S7, #62): the fleet shows a
 /// fresh row, a couple past halfway, one nearly out and one past its smart zone,
 /// because a promotional image of a meter that reads the same on every row sells
-/// the column short. The dormant row carries a real level too — a dormant
-/// conversation consumes nothing, so its reading is exactly current, which is
-/// the ruling that closed design-lock §7.2.
+/// the column short. Each count is a plausible tenth of the default 150k zone
+/// for the level beside it (#105) — and the row past its zone reads `412k`
+/// against a glyph that has run out of levels, which is the case the count
+/// exists for. The dormant row carries a real level too — a dormant conversation
+/// consumes nothing, so its reading is exactly current, which is the ruling that
+/// closed design-lock §7.2.
 ///
 /// The summaries copy the SHAPE of real `ai-title` values, sampled from the
 /// local transcript corpus 2026-07-31: sentence case, verb first, no trailing
 /// period, 13-60 characters. They are invented rather than copied — the corpus
 /// is the maintainer's own work and this repo is public — but a fixture that
 /// invents the format too would misrepresent the column in the one image most
-/// people will ever see. Several run past the 25-cell summary column and
+/// people will ever see. Several run past the 22-cell summary column and
 /// truncate, which is the honest common case.
 fn showcase() -> Vec<Row> {
     let mut rows = vec![
@@ -213,7 +216,7 @@ fn showcase() -> Vec<Row> {
         ),
         agent(
             RowStatus::Working,
-            Some((7, 104_000)),
+            Some((7, 108_000)),
             Provenance::Worktree,
             "clave",
             CLAVE,
