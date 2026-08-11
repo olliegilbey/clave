@@ -377,6 +377,34 @@ second bar pane, the very symptom of #44. If a reload looks like it did
 nothing, grep `zellij.log` for `not found, starting it instead`. See
 `docs/dev/TESTING.md` for the current live SOP.
 
+**Findings (2026-08-11, #162 — election starvation, host-tested only):** the
+session-wide "nav dead, only `Alt+c` alive" failure was NOT pipe starvation.
+0.44.3 clones a broadcast payload per live recipient and filters it against the
+running plugin set at delivery, so the `dropped … pipe with empty payload` lines
+in the report are the benign EOF twin (#45) and appear in the healthy state too
+— a control, not a symptom. The real fault was the executor election refusing to
+act: a close stranded the `clave-visited` beacon, and `apply_tabs` moved its own
+`current_tab` at emit time while `run_effects` decided whether the pipe ran, so a
+close whose TabUpdate beat its PaneUpdate refused the gate AND cleared the
+trigger. With the announcing bar dead in the tab that closed there was no trigger
+left, so the documented "narrow window" was terminal. Fix: the election moves into
+the model at emit time (triggers consumed only on the emitting branch, so the next
+tab frame re-derives and retries), and while the beacon names a dead tab the nav
+election falls back to `elects_confirmed` — local truth, consulted only while the
+beacon is provably wrong.
+
+Rejected in the same round: routing the beacon through the STORE, seq-stamped
+like snapshots. It changes the wrong layer (delivery was never broken, and
+snapshots reach the bars over the same CLI-pipe channel) and puts a store write
+on the hottest gesture in the product, on the channel that blocks the server
+router ~1s per pipe. Also rejected: "a lone surviving instance elects itself" —
+correct for the reported repro, wrong for three-of-five tabs dying, and a second
+election rule to reason about where the stranded fallback is one predicate.
+
+Residual: tier 3 unrun. The scenario to drive is two agent tabs → `Alt+j` onto
+tab 2 → close tab 2 → `Alt+j`, and the signal is whether the press moves focus —
+ignore the empty-payload log lines entirely.
+
 **Verdict:** **PASS** (2026-07-14, round 7 — TEMP traces removed after)
 
 ## C6 — Toggle (`hide_self` reflow)

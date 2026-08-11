@@ -1158,7 +1158,8 @@ impl BarModel {
     pub fn apply_tabs(&mut self, tabs: Vec<TabMeta>) -> Vec<Effect> {
         self.tabs = tabs;
         let mut effects = Vec::new();
-        // #23 (2026-07-21): a tab CLOSE (Ctrl+D) can STRAND the nav beacon —
+        // #23 (2026-07-21): a tab CLOSE (`Alt+w`; `Ctrl+D` closes a plain shell
+        // tab but never an agent pane, FOOTGUNS.md) can STRAND the nav beacon —
         // current_tab still names the closed tab, so executor election (which
         // wants current_tab == some instance's own live tab, main.rs
         // handle_pipe clave-nav) matches nobody and dir-nav goes dead until a
@@ -3228,11 +3229,11 @@ mod tests {
 
     #[test]
     fn tab_close_reanchors_the_stranded_beacon() {
-        // #23 live finding (day one of v0.1.0, 2026-07-21): Ctrl+D closes the
-        // focused tab; zellij focuses a survivor and sends ITS bar a TabUpdate,
-        // but the replicated beacon (current_tab) still names the CLOSED tab.
-        // Executor election keys on current_tab == own live tab (main.rs
-        // handle_pipe clave-nav), so a stranded beacon matches NO instance and
+        // #23 live finding (day one of v0.1.0, 2026-07-21): closing the focused
+        // tab makes zellij focus a survivor and send ITS bar a TabUpdate, while
+        // the replicated beacon (current_tab) still names the CLOSED tab.
+        // Executor election keys on current_tab == own live tab
+        // (`nav_executor`), so a stranded beacon matches NO instance and
         // Alt+↑/↓ goes dead until a mouse click reseeds it. apply_tabs must
         // re-anchor to the post-close active tab — via a DISTINCT effect the
         // model elects itself to send (#162; birth stays ungated).
@@ -3634,6 +3635,23 @@ mod tests {
             fx.iter()
                 .all(|e| !matches!(e, Effect::ReanchorVisit { .. })),
             "an agreeing beacon spends the armed one-shot too"
+        );
+        // And the SEND spends it. The ordinary path hides this, because a
+        // re-anchor moves the beacon onto the active tab and the frame after it
+        // therefore takes the agreeing exit above — so these are the frames that
+        // would let a saved one-shot buy a SECOND pipe: emit once, then a
+        // renumber that leaves us elected under a different active tab with the
+        // old beacon still live, so the stranded trigger is not in play either.
+        // One Alt+o must buy one pipe, burst or no burst.
+        m.beacon(10);
+        m.set_organic_pending();
+        let fx = m.apply_tabs(vec![tab(10, 0, "a", false), tab(11, 1, "b", true)]);
+        assert!(fx.contains(&Effect::ReanchorVisit { tab_id: 11 }));
+        let fx = m.apply_tabs(vec![tab(11, 0, "b", false), tab(14, 1, "e", true)]);
+        assert!(
+            fx.iter()
+                .all(|e| !matches!(e, Effect::ReanchorVisit { .. })),
+            "the one-shot is spent by the pipe it bought, not by the next frame"
         );
     }
 
