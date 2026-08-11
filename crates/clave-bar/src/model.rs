@@ -51,13 +51,19 @@ pub enum Effect {
     AnnounceVisit { tab_id: usize },
     /// run_command zellij pipe clave-visited — SAME beacon as AnnounceVisit,
     /// but for the #23 stranded-beacon re-anchor after a tab close AND the
-    /// Alt+o organic one-shot. A DISTINCT variant so run_effects can gate it
-    /// to the active instance: toggle bursts deliver the fresh set to ALL
-    /// instances (doc:371-394), so an ungated announce from either trigger
-    /// is a per-instance beacon war (round-13 EMFILE class for stranded;
-    /// N×~1s router stalls per Alt+o for organic, #128 2026-08-02). Only the
-    /// BIRTH announce stays AnnounceVisit (ungated) — it must fire before
-    /// the first PaneUpdate can satisfy the gate.
+    /// Alt+o organic one-shot. Only ONE instance may send either: toggle
+    /// bursts deliver the fresh tab set to ALL instances (doc:371-394), so an
+    /// ungated announce from either trigger is a per-instance beacon war
+    /// (round-13 EMFILE class for stranded; N×~1s router stalls per Alt+o for
+    /// organic, #128 2026-08-02).
+    ///
+    /// Since #162 the ELECTION happens at emit time, inside `apply_tabs`: this
+    /// variant is produced only by an instance that has already elected itself
+    /// to send it, so the beacon and the trigger it consumes move together and
+    /// an un-elected instance keeps its trigger for the next tab frame. It
+    /// stays a distinct variant because that provenance is the whole contract —
+    /// AnnounceVisit is the UNGATED birth/click/nav beacon, which must be able
+    /// to fire before the first PaneUpdate can satisfy any gate.
     ReanchorVisit { tab_id: usize },
     /// run_command(["clave","focus",uuid]) — persist the unread clear.
     MarkRead { uuid: String },
@@ -494,15 +500,19 @@ pub struct BarModel {
     /// walk base: the local TabInfo.active flag is stale everywhere except
     /// the active instance (zellij delivery finding, C3–C5).
     current_tab: Option<usize>,
-    /// Consumed by the first apply_tabs: a fresh instance announces its
-    /// own-active claim once (new tab / plugin (re)load) — the only
-    /// self-initiated announce an instance ever gets (rounds 11–12).
+    /// A fresh instance announces its own-active claim once (new tab / plugin
+    /// (re)load) — the only self-initiated announce an instance ever gets
+    /// (rounds 11–12). Spent when the claim is either MADE or already true of
+    /// the beacon, never merely because a tab frame arrived: a first TabUpdate
+    /// carrying no active tab used to burn it on nothing, which is why a fresh
+    /// tab could not heal a session with a stranded beacon (#162).
     birth_announced: bool,
     /// Armed by the Alt+o bind's `clave-organic` pipe: the NEXT TabUpdate
     /// may announce (steady-state TabUpdates reach only the truly active
     /// instance, C3). Disarmed by any incoming beacon — the active
     /// instance spoke; a stale instance must not answer a leftover flag
-    /// with poison during a later event burst.
+    /// with poison during a later event burst — and, since #162, disarmed by
+    /// the announce itself rather than by the frame that refused to send it.
     organic_pending: bool,
     /// Bar collapsed to the glyph gutter (Alt+c)? Round 20: purely a width
     /// state — the pane itself is never hidden or suppressed.
@@ -794,12 +804,13 @@ impl BarModel {
 
     /// The PRE-#55 computation, byte-for-byte: join the two frames on position
     /// and ask whether that tab is active, with no coherence witness. Kept for
-    /// the four effects that latch at emit and therefore CANNOT survive a
-    /// fail-closed gate — `RenameTab`, `MarkRead`, `ReanchorVisit`,
-    /// `PersistCollapse` all drop silently under a false gate with no trigger
-    /// to re-evaluate them, so tightening them converts a wrong-action bug
-    /// into a missed-action bug. Their emit-time latch is the real defect and
-    /// is deliberately out of scope for #55.
+    /// the effects that latch at emit and therefore CANNOT survive a
+    /// fail-closed gate — `RenameTab`, `MarkRead` and `PersistCollapse` all
+    /// drop silently under a false gate with no trigger to re-evaluate them, so
+    /// tightening them converts a wrong-action bug into a missed-action bug.
+    /// Their emit-time latch is the real defect and is out of scope for #55.
+    /// `ReanchorVisit` was the fourth until #162 gave it a retry trigger; it
+    /// asks this same question, but from `apply_tabs`, at emit time.
     pub fn elects_presumed(&self) -> bool {
         self.own_tab_position()
             .and_then(|pos| self.tabs.iter().find(|t| t.position == pos))
@@ -1147,14 +1158,13 @@ impl BarModel {
     pub fn apply_tabs(&mut self, tabs: Vec<TabMeta>) -> Vec<Effect> {
         self.tabs = tabs;
         let mut effects = Vec::new();
-        let live: BTreeSet<usize> = self.tabs.iter().map(|t| t.tab_id).collect();
         // #23 (2026-07-21): a tab CLOSE (Ctrl+D) can STRAND the nav beacon —
         // current_tab still names the closed tab, so executor election (which
         // wants current_tab == some instance's own live tab, main.rs
         // handle_pipe clave-nav) matches nobody and dir-nav goes dead until a
         // mouse click reseeds it. The beacon is stranded exactly when it points
         // outside the live set.
-        let stranded = self.current_tab.is_some_and(|id| !live.contains(&id));
+        let stranded = self.beacon_stranded();
         // Bounded beacon announce (rounds 11–12). Two DISTINCT triggers, on
         // purpose:
         //   birth → AnnounceVisit (UNGATED): a newborn announces its own tab
@@ -1174,25 +1184,46 @@ impl BarModel {
         //     Gating pipes it once; the toggle's fresh set is exactly the
         //     input the gate needs, so the C3 stale-claim poison isn't in
         //     play.
-        // All triggers self-clear: birth fires once, organic is one-shot, and
-        // the local current_tab mutation makes `stranded` false next pass on
-        // EVERY instance (so even a burst-tripped hidden bar arms at most once,
-        // and only the active one actually pipes). Accepted trade (organic now
-        // shares it): if is_active_instance is transiently false on that
-        // TabUpdate (PaneUpdate lag), the reseed is DROPPED and nav stays
-        // stranded until a click — a narrow window, strictly better than a
-        // storm.
+        //
+        // #162 — the election is HERE, not in run_effects, and every trigger is
+        // consumed only when it actually emits. The gate used to live in the
+        // adapter while the local `current_tab` moved unconditionally, so a
+        // refused re-anchor cleared `stranded` anyway: with the announcing bar
+        // dead (it was the tab that closed) no trigger was left and nav was
+        // dead for the rest of the session. Leaving the beacon stranded is what
+        // makes the NEXT tab frame re-derive and re-emit — the same
+        // detection-driven retry the prune below relies on, and the retry
+        // trigger the adapter's "do not tighten an emit-time latch" warning
+        // asks for. The gate stays `elects_presumed` (the pre-#55 position
+        // join), so the emit decision is byte-identical to the one run_effects
+        // used to make; tightening it to `elects_confirmed` is now SAFE for the
+        // first time, and deliberately not done here.
+        //
+        // Bounded still: birth fires once per instance, organic is one-shot per
+        // Alt+o, and a re-anchor that emits also moves the beacon — so a
+        // burst-tripped hidden bar that is not the active one emits nothing and
+        // simply keeps looking stranded until the real active bar's beacon
+        // arrives.
         let birth = !self.birth_announced;
-        self.birth_announced = true;
         let organic = self.organic_pending;
-        self.organic_pending = false; // consumed either way
-        if let Some(active_id) = self.tabs.iter().find(|t| t.active).map(|t| t.tab_id)
-            && self.current_tab != Some(active_id)
-        {
-            if birth {
+        if let Some(active_id) = self.tabs.iter().find(|t| t.active).map(|t| t.tab_id) {
+            if self.current_tab == Some(active_id) {
+                // The beacon ALREADY names the active tab: both claims are
+                // satisfied, not lost, so spend them. Retaining an ungated
+                // birth announce here would let every instance fire one at a
+                // later burst — the round-11 storm shape.
+                self.birth_announced = true;
+                self.organic_pending = false;
+            } else if birth {
+                // UNGATED (live-validated): a newborn must announce its own
+                // tab before its first PaneUpdate can satisfy any gate. The
+                // birth announce carries everything an armed organic wanted.
+                self.birth_announced = true;
+                self.organic_pending = false;
                 self.current_tab = Some(active_id);
                 effects.push(Effect::AnnounceVisit { tab_id: active_id });
-            } else if organic || stranded {
+            } else if (organic || stranded) && self.elects_presumed() {
+                self.organic_pending = false;
                 self.current_tab = Some(active_id);
                 effects.push(Effect::ReanchorVisit { tab_id: active_id });
             }
@@ -1600,10 +1631,44 @@ impl BarModel {
         }
     }
 
-    /// The replicated focus truth — main.rs uses it as the row-jump executor
-    /// gate (own tab == current_tab ⇒ this instance is the active one).
+    /// The replicated focus truth — the beacon the nav election reads.
     pub fn current_tab(&self) -> Option<usize> {
         self.current_tab
+    }
+
+    /// The `clave-nav` executor: `Some(own tab)` on the ONE instance allowed to
+    /// act on a nav press, `None` everywhere else. Row jumps and dir walks need
+    /// a FRESH tab set, and only the active instance has one (C3).
+    ///
+    /// Normally the instance whose own tab IS the replicated beacon — the
+    /// channel that cannot be stale, which is why local active flags were
+    /// abandoned (C5 round 2 raced six divergent SwitchTab targets).
+    /// `own_tab()` is None while the two zellij frames disagree, so a press
+    /// inside the renumbering window resolves no position off a mismatched
+    /// pair (#55).
+    ///
+    /// While the beacon is STRANDED — it names a tab that no longer exists —
+    /// it is known-invalid, and asking it elects nobody: that is #162, where a
+    /// close killed the announcing bar and nav died for the session. There the
+    /// election falls back to LOCAL truth: the frames agree and my tab is the
+    /// active one. The same predicate already gates the bind, the birth touch
+    /// and the prune, and it is consulted only while the beacon is provably
+    /// wrong, so it cannot reintroduce the stale-claim war the beacon exists
+    /// to prevent.
+    pub fn nav_executor(&self) -> Option<usize> {
+        let own = self.own_tab()?;
+        if self.current_tab == Some(own) {
+            return Some(own);
+        }
+        (self.beacon_stranded() && self.elects_confirmed()).then_some(own)
+    }
+
+    /// Does the beacon name a tab that is not in the last delivered tab set?
+    /// A beacon that never landed (`None`) is not stranded — it is simply
+    /// unset, and birth is the trigger that answers for it.
+    fn beacon_stranded(&self) -> bool {
+        self.current_tab
+            .is_some_and(|id| !self.tabs.iter().any(|t| t.tab_id == id))
     }
 
     /// clave-nav payloads: {"dir":"next"|"prev"} | {"row":N} | {"uuid":"…"}
@@ -3169,9 +3234,15 @@ mod tests {
         // Executor election keys on current_tab == own live tab (main.rs
         // handle_pipe clave-nav), so a stranded beacon matches NO instance and
         // Alt+↑/↓ goes dead until a mouse click reseeds it. apply_tabs must
-        // re-anchor to the post-close active tab — via a DISTINCT, gated
-        // effect (birth/organic stay ungated + byte-identical).
+        // re-anchor to the post-close active tab — via a DISTINCT effect the
+        // model elects itself to send (#162; birth stays ungated).
+        //
+        // The frame pair matters since #162: we are the bar in tab 10 at
+        // position 0 and the tab that closes sits BELOW us, so the manifest is
+        // still true of us and the election passes on the close's own frame.
         let mut m = BarModel::default();
+        m.set_own_pane(100);
+        m.apply_panes(panes_at(&[(0, 100, 5), (1, 101, 6)]));
         // Birth on tab 11 (active): announces once via the PLAIN (ungated)
         // AnnounceVisit — birth's ungated announce is live-validated. c_tab=11.
         let fx = m.apply_tabs(vec![tab(10, 0, "a", false), tab(11, 1, "b", true)]);
@@ -3206,6 +3277,157 @@ mod tests {
                 Effect::AnnounceVisit { .. } | Effect::ReanchorVisit { .. }
             )),
             "re-anchor must not re-fire once the beacon is live again"
+        );
+    }
+
+    #[test]
+    fn a_refused_reanchor_keeps_its_trigger_and_re_emits_on_the_next_tab_frame() {
+        // #162: the re-anchor may only be emitted by an instance that has
+        // ALREADY elected itself to send it, because the beacon it consumes
+        // moves at the same moment. Before that, the close's TabUpdate spent
+        // `stranded` locally whether or not the pipe ran — and with the
+        // announcing bar dead there was no other trigger left, so nav stayed
+        // dead for the life of the session (the "narrow window" the old
+        // comment here promised is terminal once the announcer is the tab that
+        // died).
+        //
+        // The repro is the dossier fleet: we are the bar in tab 11 (position
+        // 1), the user is on tab 10 (position 0), and closing tab 10
+        // renumbers us — so the still-stale manifest joins us to tab 12, the
+        // election refuses, and the pipe would never have run.
+        let mut m = fleet_of_three(10);
+        assert_eq!(m.current_tab(), Some(10)); // birth announced the focused tab
+        let fx = m.apply_tabs(vec![tab(11, 0, "b", true), tab(12, 1, "c", false)]);
+        assert!(
+            fx.iter().all(|e| !matches!(
+                e,
+                Effect::AnnounceVisit { .. } | Effect::ReanchorVisit { .. }
+            )),
+            "an un-elected instance must not emit a beacon it cannot send"
+        );
+        assert_eq!(
+            m.current_tab(),
+            Some(10),
+            "a refused re-anchor must leave the beacon stranded — that IS the retry trigger"
+        );
+        // The PaneUpdate restores coherence; the next tab frame re-derives
+        // `stranded` and now elects, exactly as the prune's retry does.
+        m.apply_panes(panes_at(&FLEET_PANES_AFTER_CLOSE));
+        let fx = m.apply_tabs(vec![tab(11, 0, "b", true), tab(12, 1, "c", false)]);
+        assert!(
+            fx.contains(&Effect::ReanchorVisit { tab_id: 11 }),
+            "the frame that restores coherence must re-emit the re-anchor"
+        );
+        assert_eq!(m.current_tab(), Some(11));
+        // Consumed ON EXECUTION is still consumed: no re-fire, no storm.
+        let fx = m.apply_tabs(vec![tab(11, 0, "b", true), tab(12, 1, "c", false)]);
+        assert!(fx.iter().all(|e| !matches!(
+            e,
+            Effect::AnnounceVisit { .. } | Effect::ReanchorVisit { .. }
+        )));
+    }
+
+    #[test]
+    fn nav_falls_back_to_local_truth_while_the_beacon_is_stranded() {
+        // #162, second half: the re-anchor's retry needs a NEXT tab frame and
+        // zellij owes us none (a quiet session may deliver no further
+        // TabUpdate at all). So while the beacon names a DEAD tab the nav
+        // election stops asking it and asks local truth instead — the frames
+        // agree and my tab is the active one, the same predicate that already
+        // gates the bind, the birth touch and the prune.
+        let mut m = fleet_of_three(10);
+        m.apply_tabs(vec![tab(11, 0, "b", true), tab(12, 1, "c", false)]);
+        m.apply_panes(panes_at(&FLEET_PANES_AFTER_CLOSE));
+        assert_eq!(m.current_tab(), Some(10), "the beacon names the closed tab");
+        assert_eq!(
+            m.nav_executor(),
+            Some(11),
+            "the surviving active bar must elect itself"
+        );
+        let executor = m.nav_executor();
+        assert_eq!(
+            m.nav("{\"dir\":\"next\"}", executor),
+            vec![
+                Effect::SwitchTab { position: 1 },
+                Effect::AnnounceVisit { tab_id: 12 }
+            ],
+            "nav must not be dead while the beacon is stranded"
+        );
+        // The landing re-anchored the beacon onto tab 12, which is LIVE and is
+        // not ours — so the fallback closes again and the press belongs to the
+        // instance the beacon names. A live beacon always outranks local truth
+        // (C5 round 2: local active flags raced six divergent targets).
+        assert_eq!(m.current_tab(), Some(12));
+        assert_eq!(m.nav_executor(), None);
+    }
+
+    #[test]
+    fn a_stranded_beacon_elects_only_the_active_instance() {
+        // The fallback is LOCAL TRUTH, not "anyone may act": a hidden bar
+        // reading a stranded beacon must stay silent, or a broadcast nav is
+        // back to racing divergent targets off stale tab sets (C5 round 2).
+        let mut m = BarModel::default();
+        m.set_own_pane(102); // we are the bar in tab 12, position 2
+        m.apply_panes(panes_at(&FLEET_PANES));
+        m.apply_tabs(vec![
+            tab(10, 0, "a", true),
+            tab(11, 1, "b", false),
+            tab(12, 2, "c", false),
+        ]);
+        // Tab 10 closes: the survivor 11 is focused, we are still hidden.
+        m.apply_panes(panes_at(&FLEET_PANES_AFTER_CLOSE));
+        m.apply_tabs(vec![tab(11, 0, "b", true), tab(12, 1, "c", false)]);
+        assert_eq!(m.current_tab(), Some(10), "the beacon is stranded here too");
+        assert_eq!(
+            m.nav_executor(),
+            None,
+            "a hidden bar must not elect itself off a stranded beacon"
+        );
+        // And a LIVE beacon naming someone else's tab stays authoritative:
+        // the press belongs to that instance, not to us.
+        m.beacon(11);
+        assert_eq!(m.nav_executor(), None);
+    }
+
+    #[test]
+    fn a_tab_frame_with_no_active_tab_does_not_spend_the_birth_announce() {
+        // #162: `birth_announced` was set BEFORE the decision to announce, so
+        // a first TabUpdate carrying no active tab — reachable during a close
+        // — spent a newborn's one and only announce on nothing. That is why a
+        // freshly created tab could not heal a stranded session.
+        let mut m = BarModel::default();
+        let fx = m.apply_tabs(vec![tab(10, 0, "a", false)]);
+        assert!(
+            fx.iter()
+                .all(|e| !matches!(e, Effect::AnnounceVisit { .. }))
+        );
+        let fx = m.apply_tabs(vec![tab(10, 0, "a", true)]);
+        assert!(
+            fx.contains(&Effect::AnnounceVisit { tab_id: 10 }),
+            "the newborn's announce must survive an active-less frame"
+        );
+        // Still once-EVER: spent by the announce it made...
+        let fx = m.apply_tabs(vec![tab(10, 0, "a", false), tab(11, 1, "b", true)]);
+        assert!(
+            fx.iter()
+                .all(|e| !matches!(e, Effect::AnnounceVisit { .. }))
+        );
+        // ...and equally spent by an active tab the beacon ALREADY names. A
+        // bar whose beacon arrived before its first frame has nothing to
+        // announce, and must not save the UNGATED announce up for a later
+        // burst — every instance firing one is the round-11 storm shape.
+        let mut m = BarModel::default();
+        m.beacon(10);
+        let fx = m.apply_tabs(vec![tab(10, 0, "a", true), tab(11, 1, "b", false)]);
+        assert!(
+            fx.iter()
+                .all(|e| !matches!(e, Effect::AnnounceVisit { .. }))
+        );
+        let fx = m.apply_tabs(vec![tab(10, 0, "a", false), tab(11, 1, "b", true)]);
+        assert!(
+            fx.iter()
+                .all(|e| !matches!(e, Effect::AnnounceVisit { .. })),
+            "a satisfied birth claim must stay spent when the active tab moves"
         );
     }
 
@@ -3308,7 +3530,12 @@ mod tests {
         //   birth   — an instance's first-ever TabUpdate (once per life);
         //   organic — Alt+o's bind pipes clave-organic, arming ONE
         //             announce on the next TabUpdate.
+        // We are the bar in tab 10, position 0, with a coherent manifest: since
+        // #162 the organic re-anchor elects itself before emitting, so a test
+        // that gives it no pane frame is testing a bar that cannot send.
         let mut m = BarModel::default();
+        m.set_own_pane(100);
+        m.apply_panes(panes_at(&[(0, 100, 5), (1, 101, 6)]));
         // Birth: first TabUpdate announces own-active claim, exactly once.
         let fx = m.apply_tabs(vec![tab(10, 0, "a", true), tab(11, 1, "b", false)]);
         assert!(fx.contains(&Effect::AnnounceVisit { tab_id: 10 }));
@@ -3319,8 +3546,12 @@ mod tests {
         for _ in 0..50 {
             let fx = m.apply_tabs(vec![tab(10, 0, "a", true), tab(11, 1, "b", false)]);
             assert!(
-                fx.iter()
-                    .all(|e| !matches!(e, Effect::AnnounceVisit { .. }))
+                fx.iter().all(|e| !matches!(
+                    e,
+                    Effect::AnnounceVisit { .. } | Effect::ReanchorVisit { .. }
+                )),
+                "a disagreeing beacon is not a trigger — only birth, organic and \
+                 stranded are"
             );
         }
         // Organic switch (Alt+o): the bind's MessagePlugin arms one
@@ -3362,6 +3593,48 @@ mod tests {
             e,
             Effect::AnnounceVisit { .. } | Effect::ReanchorVisit { .. }
         )));
+    }
+
+    #[test]
+    fn an_answered_organic_one_shot_is_spent_not_saved() {
+        // #162 moves the one-shot's clear onto the branch that emits, so the
+        // other exits have to say WHY they may still spend it: a beacon that
+        // already names the active tab has nothing to correct, and a birth
+        // announce says everything the one-shot wanted said. Saving it instead
+        // hands the instance a free announce to spend at some later switch it
+        // was never asked about — an unbounded trigger, which is the round-11
+        // storm shape.
+        //
+        // We are the bar in tab 11 (position 1), so the frames elect us exactly
+        // when tab 11 is the active one.
+        let mut m = BarModel::default();
+        m.set_own_pane(101);
+        m.apply_panes(panes_at(&[(0, 100, 5), (1, 101, 6)]));
+        m.set_organic_pending();
+        let fx = m.apply_tabs(vec![tab(10, 0, "a", true), tab(11, 1, "b", false)]);
+        assert!(
+            fx.contains(&Effect::AnnounceVisit { tab_id: 10 }),
+            "birth answers first, and ungated"
+        );
+        // A native switch onto OUR tab with the beacon still on 10. We are the
+        // elected instance here, so a saved one-shot WOULD fire.
+        let fx = m.apply_tabs(vec![tab(10, 0, "a", false), tab(11, 1, "b", true)]);
+        assert!(
+            fx.iter()
+                .all(|e| !matches!(e, Effect::ReanchorVisit { .. })),
+            "the birth announce spends the armed one-shot"
+        );
+        // Now the satisfied exit: armed while the beacon already names the
+        // active tab.
+        m.beacon(10);
+        m.set_organic_pending();
+        m.apply_tabs(vec![tab(10, 0, "a", true), tab(11, 1, "b", false)]);
+        let fx = m.apply_tabs(vec![tab(10, 0, "a", false), tab(11, 1, "b", true)]);
+        assert!(
+            fx.iter()
+                .all(|e| !matches!(e, Effect::ReanchorVisit { .. })),
+            "an agreeing beacon spends the armed one-shot too"
+        );
     }
 
     /// A model toggled once (expanded → collapsed): seek armed toward the
