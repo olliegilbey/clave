@@ -105,10 +105,18 @@ dev-install:
 # paths. A running session, pinned to the files baked at its launch, is
 # untouched until its next cold start (running-session immunity). The build
 # tag is the exact tag when HEAD is tagged, else `untagged` (the gate then
-# refuses, cleanly). build-bar-release + the `-p clave` release build produce
-# the two artifacts the subcommand installs.
+# refuses, cleanly).
+#
+# The wasm build is inlined here rather than depending on `build-bar-release`
+# (#109): a `just` dependency runs as its own recipe invocation with its own
+# shell, so `CLAVE_BUILD_TAG` set in THIS recipe's body never reached it — the
+# wasm always built untagged and every released bar logged `build=dev`, even
+# though the log line exists precisely to catch two builds of the same version
+# (FOOTGUNS.md). Both artifacts now carry the same tag, matching the pattern
+# `dev-install` already uses.
 # Gate on a clean, vX.Y.Z-tagged HEAD, then install versioned artifacts (§2).
-release: build-bar-release
+release:
+    CLAVE_BUILD_TAG=$(git describe --tags --exact-match HEAD 2>/dev/null || echo untagged) cargo build -p clave-bar --release --target wasm32-wasip1
     CLAVE_BUILD_TAG=$(git describe --tags --exact-match HEAD 2>/dev/null || echo untagged) cargo build --release -p clave
     ./target/release/clave release \
         --wasm-src target/wasm32-wasip1/release/clave-bar.wasm \
