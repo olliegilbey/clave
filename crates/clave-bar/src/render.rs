@@ -912,10 +912,18 @@ fn token_text(tokens: u32) -> String {
     // Tenths of a million, rounded. `999_500` lands here rather than rendering a
     // five-cell `1000k`, and reads `1m`.
     let tenths = (tokens + 50_000) / 100_000;
-    if tenths < 100 && !tenths.is_multiple_of(10) {
-        return format!("{}.{}m", tenths / 10, tenths % 10);
+    let (millions, tenth) = (tenths / 10, tenths % 10);
+    // The decimal survives only while it fits: `9.9m` is four cells, `10.1m` is
+    // five, so from ten million on the tenth is what gives way. Written against
+    // `millions` rather than `tenths` so both halves of the condition are
+    // load-bearing — `tenths < 100` reads the same and is unfalsifiable at its
+    // own boundary, where the tenth is zero anyway (a survivor `just mutants`
+    // found, and the FOOTGUNS rule: drop the redundant guard, do not test around
+    // it).
+    if millions < 10 && tenth != 0 {
+        return format!("{millions}.{tenth}m");
     }
-    format!("{}m", (tenths / 10).min(999))
+    format!("{}m", millions.min(999))
 }
 
 /// Cols 3–5: space, rule, space. The rule separates the status hue from the
@@ -1174,9 +1182,14 @@ mod tests {
         // A whole million reads bare from either side of it.
         assert_eq!(token_text(1_049_999), "1m");
         assert_eq!(token_text(1_050_000), "1.1m");
-        // Past 9.95m the DECIMAL gives way, not the cell.
+        // Past 9.95m the DECIMAL gives way, not the cell: `10.1m` would be five
+        // columns, so double-digit millions round to whole ones.
         assert_eq!(token_text(9_949_999), "9.9m");
         assert_eq!(token_text(9_950_000), "10m");
+        assert_eq!(token_text(10_100_000), "10m");
+        // And the whole figure saturates rather than overflowing the cell — the
+        // ramp's own "at least this bad" direction.
+        assert_eq!(token_text(u32::MAX), "999m");
     }
 
     /// #105's deliverable, both halves of it: expanded prints the count in the
