@@ -1070,3 +1070,11 @@ reaches only the active tab; `resize_pane_with_id` silently refuses fixed panes;
 findings were confirmed against it. Read the source before you build on a
 behavior, and record what you find in the ledger in the same commit as the
 change.
+
+**Two rules from the #148 drive (2026-08-11), both cheap and both violated that
+day:** know the gesture's semantics before scripting it — `dir` wraps within
+one block, so a walk from a single live tab bounces in place and the scripted
+drive measures nothing; and never `>/dev/null` a drive loop — the refusals and
+EOF-twin log lines it hides are the only delivery control, so a dead drive
+reads as a pass. The screen's owner saw "nothing moved at all"; the script said
+done.
