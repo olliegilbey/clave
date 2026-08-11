@@ -57,10 +57,12 @@ pub enum Effect {
     /// (round-13 EMFILE class for stranded; N×~1s router stalls per Alt+o for
     /// organic, #128 2026-08-02).
     ///
-    /// Since #162 the ELECTION happens at emit time, inside `apply_tabs`: this
-    /// variant is produced only by an instance that has already elected itself
+    /// Since #162 the ELECTION happens at emit time, in the TWO emitters this
+    /// variant has: `apply_tabs` (under `elects_presumed()`) and `apply_panes`
+    /// (the debt payment, under the stricter `elects_confirmed()`). Either way
+    /// it is produced only by an instance that has already elected itself
     /// to send it, so the beacon and the trigger it consumes move together and
-    /// an un-elected instance keeps its trigger for the next tab frame. It
+    /// an un-elected instance keeps its trigger for the next frame. It
     /// stays a distinct variant because that provenance is the whole contract —
     /// AnnounceVisit is the UNGATED birth/click/nav beacon, which must be able
     /// to fire before the first PaneUpdate can satisfy any gate.

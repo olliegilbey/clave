@@ -630,9 +630,10 @@ impl ZellijPlugin for State {
     fn render(&mut self, rows: usize, cols: usize) {
         // NO announce here (round 12): render is NOT visibility-gated
         // either (every instance renders at least once after load) — the
-        // render announce EMFILE-crashed the server. Beacon effects now fire
-        // only from apply_tabs (birth / clave-organic) and apply_panes (the
-        // #162 reanchor debt) — both frame-witnessed, never from render.
+        // render announce EMFILE-crashed the server. No beacon originates in
+        // render: they fire from apply_tabs (birth / clave-organic) and
+        // apply_panes (the #162 reanchor debt) — both frame-witnessed — and
+        // from the click/nav landings, which still emit AnnounceVisit.
         // C6 width seek (round 20, collapse-in-place): each of our resizes
         // triggers a repaint with the new cols (round 10) — this render
         // chain is the seek's feedback loop. SELF-targeted and ungated:
