@@ -772,6 +772,31 @@ mod tests {
         assert!(conversation_evidenced(&rec(|r| r.context_tokens = Some(0))));
     }
 
+    /// #182 spawn-seam fidelity: a `qa-fleet` rotated row is seeded with
+    /// BOTH transcripts on disk (`dev::run_scenario`'s `seed_transcript`
+    /// pair) — the frozen minted one and the rotated one `agent_record`
+    /// points `live_session` at. `resume_target` must resolve the rotated
+    /// mint, not the minted uuid, or the sandbox drive would resume the
+    /// pre-rotation conversation exactly like the #99 incident this
+    /// mechanism exists to prevent.
+    #[test]
+    fn a_rotated_scenario_row_resumes_on_its_rotated_mint() {
+        let d = tempfile::tempdir().unwrap();
+        let claude = d.path().join(".claude");
+        let cwd = "/Users/x/code/clave";
+        let dir = claude.join("projects/-Users-x-code-clave");
+        std::fs::create_dir_all(&dir).unwrap();
+        let minted = crate::dev::scenario_uuid(6);
+        let rotated = crate::dev::scenario_rotated_uuid(6);
+        std::fs::write(dir.join(format!("{minted}.jsonl")), b"{}").unwrap();
+        std::fs::write(dir.join(format!("{rotated}.jsonl")), b"{}").unwrap();
+
+        assert_eq!(
+            resume_target(&claude, cwd, &minted, Some(&rotated)),
+            (SpawnMode::Resume, rotated)
+        );
+    }
+
     #[test]
     fn spawn_mode_is_resume_iff_jsonl_exists() {
         let d = tempfile::tempdir().unwrap();
