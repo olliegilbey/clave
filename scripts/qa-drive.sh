@@ -253,15 +253,20 @@ dev_status() { "$CLAVE_BIN" dev status 2>/dev/null; }
 # deliberately NOT redirected to /dev/null: it flows to this script's fd2,
 # which is already teed into DRIVE_LOG by the top-level `exec` redirect, so
 # a refusal is never discarded. Every caller MUST check the return code.
+# `-c` (final review BLOCKER 1): `pane_command` is
+# `#[serde(skip_serializing_if = "Option::is_none")]` on zellij's
+# `PaneListEntry` and is only populated when `list-panes` is asked for
+# running-command info — without it every join below reads `pane_command`
+# as absent and resolves UNRESOLVED unconditionally.
 ct_list_panes() {
   local out
-  if ! out="$("$CT" list-panes -t -j)"; then
-    printf '[%s %s] ct.sh list-panes -t -j FAILED (stderr above)\n' "$CURRENT_PHASE" "$(ts)" >&2
+  if ! out="$("$CT" list-panes -t -c -j)"; then
+    printf '[%s %s] ct.sh list-panes -t -c -j FAILED (stderr above)\n' "$CURRENT_PHASE" "$(ts)" >&2
     echo "[]"
     return 1
   fi
   if ! jq -e . >/dev/null 2>&1 <<<"$out"; then
-    printf '[%s %s] ct.sh list-panes -t -j returned non-JSON: %s\n' "$CURRENT_PHASE" "$(ts)" "$out" >&2
+    printf '[%s %s] ct.sh list-panes -t -c -j returned non-JSON: %s\n' "$CURRENT_PHASE" "$(ts)" "$out" >&2
     echo "[]"
     return 1
   fi
@@ -392,8 +397,13 @@ check_nonempty "eager-launch row tab_id bound" "$EAGER_TID"
 # window size is not programmable; the `tall` scenario's job, not this one's).
 PANES_JSON="$(ct_list_panes)"
 PANES_RC=$?
-check "ct.sh list-panes -t -j (join/viewport)" "$([[ $PANES_RC -eq 0 ]] && echo ok || echo failed)" "ok"
-VIEWPORT="$(jq -c '[.[] | select(.pane_info.is_plugin == true) | {tab_id, columns: .pane_info.pane_content_columns, rows: .pane_info.pane_content_rows}]' <<<"$PANES_JSON" 2>/dev/null)"
+check "ct.sh list-panes -t -c -j (join/viewport)" "$([[ $PANES_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+# Selectors are FLAT (final review BLOCKER 1): zellij's `PaneListEntry`
+# declares `#[serde(flatten)] pane_info: PaneInfo` (zellij-utils 0.44.3
+# data.rs ~2350) — the JSON `ct.sh list-panes` emits has no `pane_info` key;
+# `is_plugin`/`plugin_url`/`pane_content_columns`/etc sit directly on the
+# pane object.
+VIEWPORT="$(jq -c '[.[] | select(.is_plugin == true) | {tab_id, columns: .pane_content_columns, rows: .pane_content_rows}]' <<<"$PANES_JSON" 2>/dev/null)"
 measure "viewport geometry (bar panes, via ct.sh)" "$VIEWPORT"
 
 # Store <-> layout join, unresolvables MARKED, never filtered (TESTING.md,
@@ -403,7 +413,7 @@ measure "viewport geometry (bar panes, via ct.sh)" "$VIEWPORT"
 JOIN="$(jq -c --argjson panes "$PANES_JSON" '
   [ .store.agents | to_entries[] | select(.value.tab_id != null) |
     . as $e |
-    ($panes | map(select(.tab_id == ($e.value.tab_id) and (.pane_info.is_plugin | not)))) as $cands |
+    ($panes | map(select(.tab_id == ($e.value.tab_id) and (.is_plugin | not)))) as $cands |
     { uuid: $e.key, tab_id: $e.value.tab_id,
       resolution:
         (if ($cands | length) == 0 then "UNRESOLVED no-terminal-pane-in-tab"
@@ -427,10 +437,24 @@ phase "P2-bind-ladder"
 # empty-JSON "[]" so jq itself succeeds) would leave the pipeline's exit
 # status 0 — the exact swallowed-refusal trap this rewrite exists to close.
 # Capture the panes read and its status separately instead.
+#
+# Selectors are FLAT (final review BLOCKER 1) — see the comment on
+# `ct_list_panes` above.
 count_live_instances() {
   local panes
   panes="$(ct_list_panes)" || return 1
-  jq '[.[] | select(.pane_info.is_plugin == true and ((.pane_info.plugin_url // "") | test("clave-bar")))] | length' <<<"$panes" 2>/dev/null
+  jq '[.[] | select(.is_plugin == true and ((.plugin_url // "") | test("clave-bar")))] | length' <<<"$panes" 2>/dev/null
+}
+
+# The live block's TRUE size, for ROW arithmetic (BLOCKER 2 finding 2):
+# counting store rows with `tab_id != null` undercounts it the moment the
+# sandbox also carries a plain terminal tab with no agent behind it, since
+# model.rs's live block is one row per zellij TAB, not per bound agent. The
+# unique tab_id count across every pane is what the bar actually renders.
+count_live_tabs() {
+  local panes
+  panes="$(ct_list_panes)" || return 1
+  jq '[.[] | .tab_id] | unique | length' <<<"$panes" 2>/dev/null
 }
 
 count_dormant() {
@@ -441,129 +465,273 @@ count_eof_twins() {
   zlog_tail | grep -c -F 'clave-bar: dropped' 2>/dev/null || true
 }
 
+# uuid<TAB>cwd for every dormant row — the shared read behind the stale-row
+# SKIP disclosure and the wakeable filter below.
+dormant_rows() {
+  jq -r '.store.agents | to_entries[] | select(.value.tab_id == null) | "\(.key)\t\(.value.cwd)"' <<<"$1" 2>/dev/null
+}
+
+dormant_uuids() {
+  dormant_rows "$1" | cut -f1
+}
+
+# Dormant AND its cwd still exists on disk (final review BLOCKER 3): a
+# scenario's cwd-deleted row (qa-fleet's `ghost`) takes `OpenDecision::Stale`
+# the moment anything tries to open it (open.rs), and the bar's own commit
+# gate then refuses it PERMANENTLY (model.rs, "STALE rows refuse the
+# commit") — it can never leave the dormant set, so the ladder must never
+# target it. Identified from the store, not the scenario name — honest and
+# self-maintaining if the scenario ever changes.
+wakeable_uuids() {
+  dormant_rows "$1" | while IFS=$'\t' read -r u c; do
+    [[ -n "$u" && -d "$c" ]] && printf '%s\n' "$u"
+  done
+}
+
+log_stale_skips() {
+  local status="$1" u c
+  while IFS=$'\t' read -r u c; do
+    [[ -z "$u" ]] && continue
+    if [[ ! -d "$c" ]]; then
+      printf '[%s %s] SKIP uuid=%s cwd=%s: cwd no longer exists on disk — the bar refuses this row'"'"'s commit by design (model.rs "STALE rows refuse the commit"), so the ladder never targets it; not #178\n' \
+        "$CURRENT_PHASE" "$(ts)" "${u:0:13}" "$c"
+    fi
+  done < <(dormant_rows "$status")
+}
+
+# Seek-trace resting width — model BELIEF, not pane truth (the eyeball
+# stays the oracle; QA-DRIVE.md phase-2: "seek-trace resting width ==
+# target, labelled belief"). MAJOR 4: the old check compared a literal to
+# itself ("recorded"=="recorded") and could never fail. The trace needs
+# instrumentation NOT present in the shipped bar right now — seek-trace.sh's
+# own header says the `CLAVE_DBG_seek` emitter was temporary and was
+# removed, confirmed by grep: crates/clave-bar/src carries no such eprintln
+# today. With nothing to compare, this is a single honest NOTE, never a
+# tautological PASS. If the instrumentation is ever restored, this compares
+# the seek's reported `cols=` against the model's real target (clave-types
+# BAR_TARGET_COLS=54 / COLLAPSED_TARGET_COLS=30 — keep these two literals in
+# sync with that file if they ever move).
+width_belief() {
+  local rung="$1" seek_line width_target seek_width
+  if [[ -x "$SCRIPT_DIR/seek-trace.sh" ]]; then
+    seek_line="$("$SCRIPT_DIR/seek-trace.sh" tail 1 2>/dev/null | tail -1)"
+  fi
+  if [[ -n "${seek_line:-}" ]]; then
+    measure "rung $rung width belief (seek-trace)" "$seek_line"
+    width_target=54
+    [[ "$(jq -r '.store.collapsed // false' <<<"$(dev_status)" 2>/dev/null)" == "true" ]] && width_target=30
+    seek_width="$(printf '%s' "$seek_line" | grep -oE 'cols=[0-9]+' | head -1 | cut -d= -f2)"
+    check "rung $rung width belief" "$seek_width" "$width_target"
+  else
+    printf '[%s %s] NOTE rung %s width belief: measured=unavailable — seek-trace instrumentation is not in the shipped bar (scripts/seek-trace.sh header); not a check, not a PASS\n' \
+      "$CURRENT_PHASE" "$(ts)" "$rung"
+  fi
+}
+
+BASE_STATUS="$(dev_status)"
+log_stale_skips "$BASE_STATUS"
+
 RUNG=0
 ATTEMPTED=0
 LANDED=0
 
+# LIVE_NOW (live-block length, for the wake rungs' ROW arithmetic) starts
+# from ONE real pane-list read and advances by the observed store delta
+# thereafter — each CONFIRMED bind below (create or wake) is exactly one
+# more live-block row — rather than re-deriving it via a row-count query
+# every rung (BLOCKER 2 finding 2).
+LIVE_START="$(count_live_tabs)" || LIVE_START=0
+[[ "$LIVE_START" =~ ^[0-9]+$ ]] || LIVE_START=0
+
+# ---------------------------------------------------------------------------
+# Rung 1 — the scripted CREATE leg (MAJOR 5): `clave add`'s CLI path. The
+# nav-commit legs below and `clave open` both only ever reach an EXISTING
+# row (model.rs Effect::OpenAgent → the same `run_open` leg `clave open`
+# exercises) — neither one MINTS a row. `clave add` is the only leg that
+# does, which is what stories 9/21's "at least one scripted create" asked
+# for.
+#
+# `add::run_add` drives real `fzf` for two picks (dir, then new/resume) and
+# there is no TTY here, so `CLAVE_FZF_BIN` (discover.rs's sanctioned
+# override — the same "override always wins" contract CLAVE_SESSION uses)
+# points it at a stub that echoes stdin's FIRST line: the dir picker's
+# first candidate is always the current directory (add.rs's own
+# `zx[0] = cwd`), and the new/resume picker's first entry is "new" — both
+# deterministic, no interaction needed. Real zoxide/git/zellij/claude still
+# run underneath; only the interactive PICK is stubbed.
+# ---------------------------------------------------------------------------
+RUNG=$((RUNG + 1))
+ATTEMPTED=$((ATTEMPTED + 1))
+METHOD="scripted-create"
+
+FZF_STUB="$QA_DIR/fzf-stub-$$.sh"
+cat >"$FZF_STUB" <<'EOS'
+#!/usr/bin/env bash
+# Scripted stand-in for fzf (qa-drive.sh's scripted-create rung, MAJOR 5):
+# always resolves the FIRST candidate on stdin — no interaction, no TTY.
+head -n1
+EOS
+chmod +x "$FZF_STUB"
+
+# `add.rs`'s own `zellij action new-tab` call is NOT session-scoped the way
+# open.rs's calls are (open.rs pins `ZELLIJ_SESSION_NAME` on every zellij
+# invocation it makes, §6.9; `clave add` inherits whatever the caller's
+# shell already has) — so this script has to close that gap itself, the
+# same belt-and-braces discipline ct.sh applies to every zellij touch
+# (AGENTS.md: never even a read against the maintainer's session).
+PRECREATE_LIVE="$(jq -r '.session_live // false' <<<"$(dev_status)" 2>/dev/null)"
+check "session live immediately before scripted-create" "$PRECREATE_LIVE" "true"
+
+TOTAL_BEFORE_CREATE="$(jq '.store.agents | length' <<<"$(dev_status)" 2>/dev/null)"
+DORMANT_BEFORE_CREATE="$(count_dormant)"
+UUIDS_BEFORE_CREATE="$(jq -r '.store.agents | keys[]' <<<"$(dev_status)" 2>/dev/null | sort)"
+TWINS_BEFORE="$(count_eof_twins)"
+LIVE_BEFORE="$(count_live_instances)"
+LIVE_RC=$?
+check "ct.sh list-panes -t -c -j (rung $RUNG live-instance count)" "$([[ $LIVE_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+
+# Bound the call externally, since add.rs cannot bound itself (its
+# dump-layout read and new-tab spawn both call `.output()`/`.status()` with
+# no timeout, the same class of risk open.rs has): prefer coreutils
+# `timeout`/`gtimeout` (same idiom as ct.sh); fall back to a bash-native
+# watchdog when neither is on PATH.
+CREATE_TIMEOUT="${CLAVE_OPEN_TIMEOUT:-30}"
+if command -v timeout >/dev/null 2>&1; then
+  ( cd "$ROOT" && unset ZELLIJ ZELLIJ_PANE_ID && \
+    ZELLIJ_SESSION_NAME="$SESSION" CLAVE_SESSION="$SESSION" CLAVE_STATE_DIR="$STATE_DIR" CLAVE_DATA_DIR="$DATA_DIR" CLAVE_FZF_BIN="$FZF_STUB" \
+    timeout "$CREATE_TIMEOUT" "$CLAVE_BIN" add )
+  CREATE_RC=$?
+elif command -v gtimeout >/dev/null 2>&1; then
+  ( cd "$ROOT" && unset ZELLIJ ZELLIJ_PANE_ID && \
+    ZELLIJ_SESSION_NAME="$SESSION" CLAVE_SESSION="$SESSION" CLAVE_STATE_DIR="$STATE_DIR" CLAVE_DATA_DIR="$DATA_DIR" CLAVE_FZF_BIN="$FZF_STUB" \
+    gtimeout "$CREATE_TIMEOUT" "$CLAVE_BIN" add )
+  CREATE_RC=$?
+else
+  ( cd "$ROOT" && unset ZELLIJ ZELLIJ_PANE_ID && \
+    ZELLIJ_SESSION_NAME="$SESSION" CLAVE_SESSION="$SESSION" CLAVE_STATE_DIR="$STATE_DIR" CLAVE_DATA_DIR="$DATA_DIR" CLAVE_FZF_BIN="$FZF_STUB" \
+    "$CLAVE_BIN" add ) &
+  CREATE_PID=$!
+  ( sleep "$CREATE_TIMEOUT"; kill -TERM "$CREATE_PID" 2>/dev/null ) &
+  WATCHDOG_PID=$!
+  wait "$CREATE_PID"
+  CREATE_RC=$?
+  kill "$WATCHDOG_PID" 2>/dev/null
+  wait "$WATCHDOG_PID" 2>/dev/null
+fi
+rm -f "$FZF_STUB"
+
+if ((CREATE_RC == 0)); then
+  CREATE_RESULT="ok"
+elif ((CREATE_RC == 124)) || ((CREATE_RC == 143)); then
+  CREATE_RESULT="timeout=${CREATE_TIMEOUT}s"
+else
+  CREATE_RESULT="exit=${CREATE_RC}"
+fi
+measure "rung $RUNG ($METHOD) result" "$CREATE_RESULT"
+if [[ "$CREATE_RESULT" == timeout=* ]]; then
+  printf '\n[%s %s] WEDGE: clave add did not return within %ss — add.rs'"'"'s internal zellij/fzf calls are unbounded; this external timeout is the only bound this drive has.\n' \
+    "$CURRENT_PHASE" "$(ts)" "$CREATE_TIMEOUT"
+  fail_phase
+fi
+
+UUIDS_AFTER_CREATE="$(jq -r '.store.agents | keys[]' <<<"$(dev_status)" 2>/dev/null | sort)"
+NEW_UUIDS="$(comm -13 <(printf '%s\n' "$UUIDS_BEFORE_CREATE") <(printf '%s\n' "$UUIDS_AFTER_CREATE"))"
+NEW_COUNT="$(printf '%s\n' "$NEW_UUIDS" | grep -c .)"
+check "rung $RUNG exactly one new store row minted" "$NEW_COUNT" "1"
+CREATE_UUID="$(printf '%s\n' "$NEW_UUIDS" | head -n1)"
+measure "rung $RUNG ($METHOD) minted uuid" "$CREATE_UUID"
+
+TOTAL_AFTER_CREATE="$(jq '.store.agents | length' <<<"$(dev_status)" 2>/dev/null)"
+check "rung $RUNG total rows incremented by exactly one" "$TOTAL_AFTER_CREATE" "$((TOTAL_BEFORE_CREATE + 1))"
+DORMANT_AFTER_CREATE="$(count_dormant)"
+check "rung $RUNG dormant count unchanged (create mints fresh, never wakes dormant)" "$DORMANT_AFTER_CREATE" "$DORMANT_BEFORE_CREATE"
+
+# Bounded wait (10s poll): the minted row's tab_id lands in store, the same
+# async `clave bind` proxy every other rung waits on.
+BOUND_TID=""
+for _ in $(seq 1 10); do
+  BOUND_TID="$(jq -r --arg u "$CREATE_UUID" '.store.agents[$u].tab_id // empty' < <(dev_status) 2>/dev/null)"
+  [[ -n "$BOUND_TID" ]] && break
+  sleep 1
+done
+check_nonempty "rung $RUNG tab_id bound uuid=${CREATE_UUID:0:13}" "$BOUND_TID"
+[[ -n "$BOUND_TID" ]] && LANDED=$((LANDED + 1))
+
+# `clave add` runs `zellij action new-tab`, not `zellij pipe` — no CliPipe
+# broadcast, so no EOF-twin traffic is attributable to it.
+TWINS_AFTER="$(count_eof_twins)"
+TWIN_DELTA=$((TWINS_AFTER - TWINS_BEFORE))
+check "rung $RUNG EOF-twin delta" "$TWIN_DELTA" "0"
+
+width_belief "$RUNG"
+
+printf '[%s %s] BUDGET rung %d: attempted=%d landed=%d (the "2 then never again" signature is #178'"'"'s tell)\n' \
+  "$CURRENT_PHASE" "$(ts)" "$RUNG" "$ATTEMPTED" "$LANDED"
+
+# ---------------------------------------------------------------------------
+# Remaining rungs — wake ladder, mixed paths continued (BLOCKER 2 + 3): nav
+# pipes over every WAKEABLE dormant row, prediction-free. Target the BOTTOM
+# of the rendered dormant block (the lowest uuid among the tied ordinal —
+# every qa-fleet row seeds commit_ord 0): model.rs's rank_desc sorts the
+# dormant block uuid-DESCENDING on a tie, so the stale row — the scenario's
+# own last-minted, highest-uuid non-live row — sorts to the TOP and would
+# sit there forever if targeted (BLOCKER 3's exact forgery: nothing ever
+# leaves that position). Bottom-up drains every wakeable row first and
+# leaves the stale row stranded alone; `wakeable_uuids` then reports empty
+# and the loop stops before ever clicking it. Which uuid each click
+# actually landed on is OBSERVED, never predicted (BLOCKER 2): snapshot the
+# dormant set, wait, and read back whichever single uuid left it.
+# ---------------------------------------------------------------------------
 while :; do
   CUR_STATUS="$(dev_status)"
-  DORMANT_LIST="$(jq -r '.store.agents | to_entries[] | select(.value.tab_id == null) | .key' <<<"$CUR_STATUS" 2>/dev/null)"
-  [[ -z "$DORMANT_LIST" ]] && break
+  WAKEABLE_NOW="$(wakeable_uuids "$CUR_STATUS")"
+  [[ -z "$WAKEABLE_NOW" ]] && break
   RUNG=$((RUNG + 1))
-  UUID_TARGET="$(printf '%s\n' "$DORMANT_LIST" | head -n1)"
-  DORMANT_BEFORE="$(printf '%s\n' "$DORMANT_LIST" | grep -c .)"
+  ATTEMPTED=$((ATTEMPTED + 1))
+  METHOD="nav-pick-commit"
+
+  DORMANT_BEFORE_SET="$(dormant_uuids "$CUR_STATUS")"
+  DORMANT_BEFORE_COUNT="$(printf '%s\n' "$DORMANT_BEFORE_SET" | grep -c .)"
   LIVE_BEFORE="$(count_live_instances)"
   LIVE_RC=$?
-  check "ct.sh list-panes -t -j (rung $RUNG live-instance count)" "$([[ $LIVE_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+  check "ct.sh list-panes -t -c -j (rung $RUNG live-instance count)" "$([[ $LIVE_RC -eq 0 ]] && echo ok || echo failed)" "ok"
   TWINS_BEFORE="$(count_eof_twins)"
-  ATTEMPTED=$((ATTEMPTED + 1))
 
-  if ((RUNG == 1)); then
-    # The scripted-create leg of the mixed-path ladder: the CLI open path
-    # directly, bypassing nav pipes entirely. Explicit instance env,
-    # mirroring ct.sh's scoping discipline for `zellij action` — `clave
-    # open` reads CLAVE_SESSION/CLAVE_STATE_DIR/CLAVE_DATA_DIR, and unset
-    # they default to the MAINTAINER's real session and store (env.rs).
-    METHOD="scripted-open"
+  LIVE_NOW=$((LIVE_START + LANDED))
+  ROW=$((LIVE_NOW + DORMANT_BEFORE_COUNT))
+  "$CT" pipe --name clave-nav -- "{\"row\":${ROW}}"
+  "$CT" pipe --name clave-nav -- '{"commit":true}'
+  measure "rung $RUNG ($METHOD) row picked (bottom of dormant block)" "$ROW"
+  EXPECTED_TWINS=$((LIVE_BEFORE * 2))
 
-    # Re-verify liveness immediately before this call, not just once at
-    # script start: `clave open`'s internal zellij invocations are
-    # UNBOUNDED (open.rs — the dump-layout read at :74-78 and the new-tab
-    # spawn at :148-158 both call `.output()`/`.status()` with no timeout),
-    # so a session that died between phase start and here would wedge this
-    # call forever with no signal at all.
-    PREOPEN_LIVE="$(jq -r '.session_live // false' <<<"$(dev_status)" 2>/dev/null)"
-    check "session live immediately before scripted-open" "$PREOPEN_LIVE" "true"
-
-    # Bound the call externally, since open.rs cannot bound itself: prefer
-    # coreutils `timeout`/`gtimeout` (same idiom as ct.sh); fall back to a
-    # bash-native watchdog (background killer racing the foreground call)
-    # when neither is on PATH.
-    OPEN_TIMEOUT="${CLAVE_OPEN_TIMEOUT:-30}"
-    if command -v timeout >/dev/null 2>&1; then
-      CLAVE_SESSION="$SESSION" CLAVE_STATE_DIR="$STATE_DIR" CLAVE_DATA_DIR="$DATA_DIR" \
-        timeout "$OPEN_TIMEOUT" "$CLAVE_BIN" open "$UUID_TARGET"
-      OPEN_RC=$?
-    elif command -v gtimeout >/dev/null 2>&1; then
-      CLAVE_SESSION="$SESSION" CLAVE_STATE_DIR="$STATE_DIR" CLAVE_DATA_DIR="$DATA_DIR" \
-        gtimeout "$OPEN_TIMEOUT" "$CLAVE_BIN" open "$UUID_TARGET"
-      OPEN_RC=$?
-    else
-      ( CLAVE_SESSION="$SESSION" CLAVE_STATE_DIR="$STATE_DIR" CLAVE_DATA_DIR="$DATA_DIR" \
-        "$CLAVE_BIN" open "$UUID_TARGET" ) &
-      OPEN_PID=$!
-      ( sleep "$OPEN_TIMEOUT"; kill -TERM "$OPEN_PID" 2>/dev/null ) &
-      WATCHDOG_PID=$!
-      wait "$OPEN_PID"
-      OPEN_RC=$?
-      kill "$WATCHDOG_PID" 2>/dev/null
-      wait "$WATCHDOG_PID" 2>/dev/null
-    fi
-
-    if ((OPEN_RC == 0)); then
-      OPEN_RESULT="ok"
-    elif ((OPEN_RC == 124)) || ((OPEN_RC == 143)); then
-      # 124: GNU `timeout`'s own exit code on expiry. 143 (128+SIGTERM):
-      # the bash-native watchdog's kill signal reaching the child.
-      OPEN_RESULT="timeout=${OPEN_TIMEOUT}s"
-    else
-      OPEN_RESULT="exit=${OPEN_RC}"
-    fi
-    measure "rung $RUNG ($METHOD) result" "$OPEN_RESULT"
-    if [[ "$OPEN_RESULT" == timeout=* ]]; then
-      printf '\n[%s %s] WEDGE: clave open %s did not return within %ss — open.rs'"'"'s internal zellij calls are unbounded; this external timeout is the only bound this drive has.\n' \
-        "$CURRENT_PHASE" "$(ts)" "$UUID_TARGET" "$OPEN_TIMEOUT"
-      fail_phase
-    fi
-    # `clave open` runs `zellij action new-tab`, not `zellij pipe` — no
-    # CliPipe broadcast, so no EOF-twin traffic is attributable to it.
-    EXPECTED_TWINS=0
-  else
-    METHOD="nav-pick-commit"
-    # Rows render live block first (low numbers), dormant block after
-    # (model.rs nav() doc comment) — so live_count+1 always addresses the
-    # topmost REMAINING dormant row regardless of within-block order.
-    LIVE_NOW="$(jq '[.store.agents[] | select(.tab_id != null)] | length' <<<"$CUR_STATUS" 2>/dev/null)"
-    ROW=$((LIVE_NOW + 1))
-    "$CT" pipe --name clave-nav -- "{\"row\":${ROW}}"
-    "$CT" pipe --name clave-nav -- '{"commit":true}'
-    measure "rung $RUNG ($METHOD) row picked" "$ROW"
-    EXPECTED_TWINS=$((LIVE_BEFORE * 2))
-  fi
-
-  # Bounded wait (10s poll): tab_id lands in store.
-  BOUND_TID=""
+  # Bounded wait (10s poll): which uuid left the dormant SET — not a
+  # predicted one (BLOCKER 2).
+  BOUND_UUID=""
   for _ in $(seq 1 10); do
-    BOUND_TID="$(jq -r --arg u "$UUID_TARGET" '.store.agents[$u].tab_id // empty' < <(dev_status) 2>/dev/null)"
-    [[ -n "$BOUND_TID" ]] && break
+    AFTER_SET="$(dormant_uuids "$(dev_status)")"
+    BOUND_UUID="$(comm -23 <(printf '%s\n' "$DORMANT_BEFORE_SET" | sort) <(printf '%s\n' "$AFTER_SET" | sort))"
+    [[ -n "$BOUND_UUID" ]] && break
     sleep 1
   done
-  check_nonempty "rung $RUNG tab_id bound uuid=${UUID_TARGET:0:13}" "$BOUND_TID"
+  BOUND_COUNT="$(printf '%s\n' "$BOUND_UUID" | grep -c .)"
+  check "rung $RUNG exactly one row left the dormant set" "$BOUND_COUNT" "1"
+  BOUND_UUID="$(printf '%s\n' "$BOUND_UUID" | head -n1)"
+  measure "rung $RUNG ($METHOD) observed uuid" "$BOUND_UUID"
+
+  BOUND_TID="$(jq -r --arg u "$BOUND_UUID" '.store.agents[$u].tab_id // empty' < <(dev_status) 2>/dev/null)"
+  check_nonempty "rung $RUNG tab_id bound uuid=${BOUND_UUID:0:13}" "$BOUND_TID"
   [[ -n "$BOUND_TID" ]] && LANDED=$((LANDED + 1))
 
   # Dormant count decremented on the next snapshot.
   DORMANT_AFTER="$(count_dormant)"
-  check "rung $RUNG dormant count decremented" "$DORMANT_AFTER" "$((DORMANT_BEFORE - 1))"
+  check "rung $RUNG dormant count decremented" "$DORMANT_AFTER" "$((DORMANT_BEFORE_COUNT - 1))"
 
   # EOF-twin delta exact: pipes-sent x live-instances.
   TWINS_AFTER="$(count_eof_twins)"
   TWIN_DELTA=$((TWINS_AFTER - TWINS_BEFORE))
   check "rung $RUNG EOF-twin delta" "$TWIN_DELTA" "$EXPECTED_TWINS"
 
-  # Seek-trace resting width — model BELIEF, not pane truth (the eyeball
-  # stays the oracle). The trace needs instrumentation not present in the
-  # shipped bar (seek-trace.sh's own header): on an uninstrumented build
-  # this is legitimately unavailable, which is a PASS-with-note, not a FAIL.
-  SEEK_LINE=""
-  if [[ -x "$SCRIPT_DIR/seek-trace.sh" ]]; then
-    SEEK_LINE="$("$SCRIPT_DIR/seek-trace.sh" tail 1 2>/dev/null | tail -1)"
-  fi
-  if [[ -n "$SEEK_LINE" ]]; then
-    measure "rung $RUNG width belief (seek-trace, uninstrumented builds will not see this)" "$SEEK_LINE"
-    check "rung $RUNG width belief recorded" "recorded" "recorded"
-  else
-    check "rung $RUNG width belief" "unavailable" "unavailable"
-  fi
+  width_belief "$RUNG"
 
   printf '[%s %s] BUDGET rung %d: attempted=%d landed=%d (the "2 then never again" signature is #178'"'"'s tell)\n' \
     "$CURRENT_PHASE" "$(ts)" "$RUNG" "$ATTEMPTED" "$LANDED"
