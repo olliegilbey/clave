@@ -231,7 +231,7 @@ with a pre-marked line count is the log-read idiom throughout.
 **Seam:** the width seek vs a bar whose identity never resolves — first ~90% runaway sighted since B2's fix, on a build where `frames_coherent()` gating (PR #120) holds `own_tab()` at `None` and #178's binds never land.
 **Preconditions:** daily-driver-shaped fleet on v0.1.3; the affected tab was one whose bind never landed (#178). Whether the unbound state is causal or coincidental is THE open question.
 **Reproduce:** `Repro unknown — detection only:` not yet isolated. The #178 wake-ladder harness is the natural trap: after each wake, read the seek trace for the new tab's bar and get the human width check on the visible instance.
-**Healthy:** bar rests at target width (44 expanded / 30 collapsed) on every tab, bound or not.
+**Healthy:** bar rests at target width (54 expanded / 30 collapsed — clave-types BAR_TARGET_COLS/COLLAPSED_TARGET_COLS) on every tab, bound or not.
 **Broken:** sidebar at ~90% of the terminal, agent pane squeezed to a sliver; all three known liars report normality (`dump-layout` 33/67, `dump-screen` empty, model `cols` belief ≠ pane truth).
 **Drive assertion:** QA drive phase 2 (wake ladder) gains a width assertion per wake: seek trace `cols` at rest == `tgt` for the affected bar, bounded wait ~10s; final truth `HUMAN-ONLY: screenshot`.
 **Guard today:** nothing for this recurrence — B2's learned-sign fix and B3's journey assertion are in place and did not prevent it, which is what makes it a new class rather than a B2 re-run.
