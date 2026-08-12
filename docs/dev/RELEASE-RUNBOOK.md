@@ -33,14 +33,16 @@ Nothing here touches a live session. All of it must pass before a tag exists.
    gh run list --branch main --limit 1
    ```
 
-2. **The pre-tag blocker set is closed.** As of 2026-07-25 that is **#43a**
+2. **`qa-drive` (all built phases) is green on the release candidate.** See
+   `docs/dev/QA-DRIVE.md`.
+3. **The pre-tag blocker set is closed.** As of 2026-07-25 that is **#43a**
    (the release owns an unversioned launcher), **#44** (landed in #66), **#48**
    (doctor version-coherence), **#43b** (`dev-install` no longer writes the
    daily launcher name). Cutting without #43a **deterministically reproduces the
    double-sidebar incident** — see Part C step 3 for why.
-3. **The version in `Cargo.toml` matches the tag you are about to push.** The
+4. **The version in `Cargo.toml` matches the tag you are about to push.** The
    `clave release` gate enforces this, but finding out here is cheaper.
-4. **Record the *current* state, so Part C has a baseline to compare against:**
+5. **Record the *current* state, so Part C has a baseline to compare against:**
 
    ```bash
    clave --version; command -v clave

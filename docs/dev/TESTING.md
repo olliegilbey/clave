@@ -813,6 +813,13 @@ visible are joinable; the rest are unknown, not mismatched. Reading them as
 mismatches invents a bug, and filtering them out silently hides one — print
 every pane and mark the unresolvable ones.
 
+**QA-DRIVE.md and `scripts/qa-drive.sh` are this loop's phases 0–2, scripted.**
+After the human stages and launches, the script proves the build, joins the
+baseline, and drives the bind ladder in one traced run, with the same
+never-discard-output discipline as above. The manual steps here remain the
+fallback, and are still the source for phases 3–7, which are not yet
+scripted.
+
 ## Agent-side sanctioned commands
 
 **Drive through `scripts/ct.sh`, not through the env var.** `ZELLIJ_SESSION_NAME=clave-test zellij action …` reads like a boundary and is not one: an agent shell inside the maintainer's session also inherits `ZELLIJ` and `ZELLIJ_PANE_ID`, so overriding the name alone works right up until `clave-test` stops existing — at which point the CLI **falls back to the ambient session instead of erroring**, and the rest of the drive lands on the daily fleet. That happened on 2026-08-07: another agent's reset killed the sandbox mid-drive, a `start-or-reload-plugin` put a sandbox-built debug bar into the maintainer's live session as a real pane, and ten `clave-toggle` pipes went to his fleet. `ct.sh` fails **closed** — it proves the sandbox socket exists *and* has a live server behind it, clears the ambient session, and takes no session argument, so the mistake is no longer expressible. Re-check between rounds by construction: every command re-runs the guard.
