@@ -245,14 +245,23 @@ dev_status() { "$CLAVE_BIN" dev status 2>/dev/null; }
 # Guarded list-panes read. Never the bare env-var form (TESTING.md, "the
 # sandbox drive loop" step — a dead/absent session hangs `zellij action`
 # forever; ct.sh bounds it). Returns "[]" and a non-zero status on any
-# failure so callers can jq it unconditionally.
+# failure so callers can jq it unconditionally — but "[]" is a VALID empty
+# panes list too, so a caller that only looks at the JSON and not the
+# return code cannot tell a genuine empty read from a ct.sh refusal
+# (FOOTGUNS, "the wrapper's refusal is the only thing it prints" — a
+# swallowed stderr here is exactly that trap). ct.sh's own stderr is
+# deliberately NOT redirected to /dev/null: it flows to this script's fd2,
+# which is already teed into DRIVE_LOG by the top-level `exec` redirect, so
+# a refusal is never discarded. Every caller MUST check the return code.
 ct_list_panes() {
   local out
-  if ! out="$("$CT" list-panes -t -j 2>/dev/null)"; then
+  if ! out="$("$CT" list-panes -t -j)"; then
+    printf '[%s %s] ct.sh list-panes -t -j FAILED (stderr above)\n' "$CURRENT_PHASE" "$(ts)" >&2
     echo "[]"
     return 1
   fi
   if ! jq -e . >/dev/null 2>&1 <<<"$out"; then
+    printf '[%s %s] ct.sh list-panes -t -j returned non-JSON: %s\n' "$CURRENT_PHASE" "$(ts)" "$out" >&2
     echo "[]"
     return 1
   fi
@@ -265,17 +274,30 @@ ct_list_panes() {
 phase "P0-preflight"
 
 # Build tag on the loaded wasm tail. Deliberately UNMARKED — same reasoning
-# as RELEASE-RUNBOOK Part C Step 3: the human's launch (and the load it
-# caused) happened BEFORE this script's own mark, since the script assumes
-# launch already happened, so a mark-filtered read here would see nothing.
-# The proven mechanism is the TAIL of "clave-bar: loaded" lines, not a mark
-# — see the runbook's "Do NOT grep -c for your tag" note.
+# as TESTING.md's sandbox-drive-loop step 3: the human's launch (and the
+# load it caused) happened BEFORE this script's own mark, since the script
+# assumes launch already happened, so a mark-filtered read here would see
+# nothing. The proven mechanism is the TAIL of "clave-bar: loaded" lines,
+# not a mark — see that step's "Do NOT grep -c for your tag" note.
+#
+# Undisclosed-until-now residual: the zellij log is shared across sessions
+# and never truncated, so a re-run at the SAME HEAD — exactly what testing
+# an uncommitted fix looks like — can leave an OLDER line carrying the same
+# build tag on the tail if the newest load actually failed. A tag-string
+# match alone cannot tell "fresh load, same tag" from "stale line, same
+# tag, load silently failed". TESTING.md's human loop defuses this by
+# eyeballing timestamps; teaching this check to parse them is out of scope
+# (KISS). Mitigation: print the matched line verbatim plus its tail
+# context every run, and disclose the gap explicitly via the NOTE below —
+# never claim a certainty this check cannot back.
 LOADED_LINES="$(grep -F 'clave-bar: loaded' "$ZLOG" 2>/dev/null || true)"
 LOADED_TAIL="$(printf '%s\n' "$LOADED_LINES" | tail -5)"
 measure "loaded-tail (last 5)" "$LOADED_TAIL"
 LAST_LOADED="$(printf '%s\n' "$LOADED_LINES" | tail -1)"
+measure "loaded-tail matched line (verbatim)" "$LAST_LOADED"
 LAST_BUILD="$(printf '%s' "$LAST_LOADED" | grep -oE 'build=[^ ]+' | cut -d= -f2)"
 check "build tag on loaded tail" "$LAST_BUILD" "$BUILD_TAG"
+printf '[%s %s] NOTE same-HEAD re-runs cannot distinguish a stale load here — eyeball the tail timestamps\n' "$CURRENT_PHASE" "$(ts)"
 
 # config.kdl <-> layout.kdl identity pair (the #44 self-check `just sandbox`
 # already runs at stage time — re-asserted here because config coherence can
@@ -283,9 +305,18 @@ check "build tag on loaded tail" "$LAST_BUILD" "$BUILD_TAG"
 CFG="$DATA_DIR/config.kdl"
 LAY="$DATA_DIR/layout.kdl"
 LAUNCH="$DATA_DIR/launch.kdl"
+# Existence AND content are separate failures — an extraction that comes
+# back empty must FAIL on its own, never silently become an operand of the
+# identity check below. Otherwise a `clave_binary` pattern that matches in
+# NEITHER file leaves both sides "empty" and the comparison false-PASSES
+# (same mechanism sandbox-setup.sh's own #44 self-check guards against,
+# scripts/sandbox-setup.sh:212-213 — `grep -q 'clave_binary'` per file,
+# failed closed, before any cross-file comparison is attempted).
 for f in "$CFG" "$LAY"; do
   if [[ ! -f "$f" ]]; then
     check "present: $(basename "$f")" "missing" "present"
+  elif ! grep -q 'clave_binary' "$f" 2>/dev/null; then
+    check "carries clave_binary: $(basename "$f")" "missing" "present"
   fi
 done
 CFGVAL="$(grep -o 'clave_binary "[^"]*"' "$CFG" 2>/dev/null | sort -u | tr '\n' ',')"
@@ -297,6 +328,9 @@ check "identity pair config.kdl<->layout.kdl" "$CFGVAL" "$LAYVAL"
 # does, so pre-launch it is either absent or a leftover from a PREVIOUS run
 # and asserting on it then would fail a perfectly healthy sandbox).
 if [[ -f "$LAUNCH" ]]; then
+  if ! grep -q 'clave_binary' "$LAUNCH" 2>/dev/null; then
+    check "carries clave_binary: $(basename "$LAUNCH")" "missing" "present"
+  fi
   LAUNCHVAL="$(grep -o 'clave_binary "[^"]*"' "$LAUNCH" 2>/dev/null | sort -u | tr '\n' ',')"
   check "identity pair config.kdl<->launch.kdl (post-launch)" "$LAUNCHVAL" "$CFGVAL"
 else
@@ -357,6 +391,8 @@ check_nonempty "eager-launch row tab_id bound" "$EAGER_TID"
 # Viewport geometry — measured via ct.sh dump, RECORDED, not asserted (host
 # window size is not programmable; the `tall` scenario's job, not this one's).
 PANES_JSON="$(ct_list_panes)"
+PANES_RC=$?
+check "ct.sh list-panes -t -j (join/viewport)" "$([[ $PANES_RC -eq 0 ]] && echo ok || echo failed)" "ok"
 VIEWPORT="$(jq -c '[.[] | select(.pane_info.is_plugin == true) | {tab_id, columns: .pane_info.pane_content_columns, rows: .pane_info.pane_content_rows}]' <<<"$PANES_JSON" 2>/dev/null)"
 measure "viewport geometry (bar panes, via ct.sh)" "$VIEWPORT"
 
@@ -385,10 +421,16 @@ measure "store seq" "$SEQ"
 # ===========================================================================
 phase "P2-bind-ladder"
 
+# Live clave-bar plugin panes = live bar instances, the EOF-twin multiplier
+# (one twin per instance per pipe, P8). NOT a `ct_list_panes | jq …` pipe:
+# with `pipefail` set, a failed ct_list_panes (which still prints valid
+# empty-JSON "[]" so jq itself succeeds) would leave the pipeline's exit
+# status 0 — the exact swallowed-refusal trap this rewrite exists to close.
+# Capture the panes read and its status separately instead.
 count_live_instances() {
-  # Live clave-bar plugin panes = live bar instances, the EOF-twin
-  # multiplier (one twin per instance per pipe, P8).
-  ct_list_panes | jq '[.[] | select(.pane_info.is_plugin == true and ((.pane_info.plugin_url // "") | test("clave-bar")))] | length' 2>/dev/null
+  local panes
+  panes="$(ct_list_panes)" || return 1
+  jq '[.[] | select(.pane_info.is_plugin == true and ((.pane_info.plugin_url // "") | test("clave-bar")))] | length' <<<"$panes" 2>/dev/null
 }
 
 count_dormant() {
@@ -411,6 +453,8 @@ while :; do
   UUID_TARGET="$(printf '%s\n' "$DORMANT_LIST" | head -n1)"
   DORMANT_BEFORE="$(printf '%s\n' "$DORMANT_LIST" | grep -c .)"
   LIVE_BEFORE="$(count_live_instances)"
+  LIVE_RC=$?
+  check "ct.sh list-panes -t -j (rung $RUNG live-instance count)" "$([[ $LIVE_RC -eq 0 ]] && echo ok || echo failed)" "ok"
   TWINS_BEFORE="$(count_eof_twins)"
   ATTEMPTED=$((ATTEMPTED + 1))
 
@@ -421,13 +465,56 @@ while :; do
     # open` reads CLAVE_SESSION/CLAVE_STATE_DIR/CLAVE_DATA_DIR, and unset
     # they default to the MAINTAINER's real session and store (env.rs).
     METHOD="scripted-open"
-    if CLAVE_SESSION="$SESSION" CLAVE_STATE_DIR="$STATE_DIR" CLAVE_DATA_DIR="$DATA_DIR" \
-      "$CLAVE_BIN" open "$UUID_TARGET"; then
-      OPEN_RESULT="ok"
+
+    # Re-verify liveness immediately before this call, not just once at
+    # script start: `clave open`'s internal zellij invocations are
+    # UNBOUNDED (open.rs — the dump-layout read at :74-78 and the new-tab
+    # spawn at :148-158 both call `.output()`/`.status()` with no timeout),
+    # so a session that died between phase start and here would wedge this
+    # call forever with no signal at all.
+    PREOPEN_LIVE="$(jq -r '.session_live // false' <<<"$(dev_status)" 2>/dev/null)"
+    check "session live immediately before scripted-open" "$PREOPEN_LIVE" "true"
+
+    # Bound the call externally, since open.rs cannot bound itself: prefer
+    # coreutils `timeout`/`gtimeout` (same idiom as ct.sh); fall back to a
+    # bash-native watchdog (background killer racing the foreground call)
+    # when neither is on PATH.
+    OPEN_TIMEOUT="${CLAVE_OPEN_TIMEOUT:-30}"
+    if command -v timeout >/dev/null 2>&1; then
+      CLAVE_SESSION="$SESSION" CLAVE_STATE_DIR="$STATE_DIR" CLAVE_DATA_DIR="$DATA_DIR" \
+        timeout "$OPEN_TIMEOUT" "$CLAVE_BIN" open "$UUID_TARGET"
+      OPEN_RC=$?
+    elif command -v gtimeout >/dev/null 2>&1; then
+      CLAVE_SESSION="$SESSION" CLAVE_STATE_DIR="$STATE_DIR" CLAVE_DATA_DIR="$DATA_DIR" \
+        gtimeout "$OPEN_TIMEOUT" "$CLAVE_BIN" open "$UUID_TARGET"
+      OPEN_RC=$?
     else
-      OPEN_RESULT="exit=$?"
+      ( CLAVE_SESSION="$SESSION" CLAVE_STATE_DIR="$STATE_DIR" CLAVE_DATA_DIR="$DATA_DIR" \
+        "$CLAVE_BIN" open "$UUID_TARGET" ) &
+      OPEN_PID=$!
+      ( sleep "$OPEN_TIMEOUT"; kill -TERM "$OPEN_PID" 2>/dev/null ) &
+      WATCHDOG_PID=$!
+      wait "$OPEN_PID"
+      OPEN_RC=$?
+      kill "$WATCHDOG_PID" 2>/dev/null
+      wait "$WATCHDOG_PID" 2>/dev/null
+    fi
+
+    if ((OPEN_RC == 0)); then
+      OPEN_RESULT="ok"
+    elif ((OPEN_RC == 124)) || ((OPEN_RC == 143)); then
+      # 124: GNU `timeout`'s own exit code on expiry. 143 (128+SIGTERM):
+      # the bash-native watchdog's kill signal reaching the child.
+      OPEN_RESULT="timeout=${OPEN_TIMEOUT}s"
+    else
+      OPEN_RESULT="exit=${OPEN_RC}"
     fi
     measure "rung $RUNG ($METHOD) result" "$OPEN_RESULT"
+    if [[ "$OPEN_RESULT" == timeout=* ]]; then
+      printf '\n[%s %s] WEDGE: clave open %s did not return within %ss — open.rs'"'"'s internal zellij calls are unbounded; this external timeout is the only bound this drive has.\n' \
+        "$CURRENT_PHASE" "$(ts)" "$UUID_TARGET" "$OPEN_TIMEOUT"
+      fail_phase
+    fi
     # `clave open` runs `zellij action new-tab`, not `zellij pipe` — no
     # CliPipe broadcast, so no EOF-twin traffic is attributable to it.
     EXPECTED_TWINS=0
