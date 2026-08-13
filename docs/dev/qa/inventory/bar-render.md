@@ -10,7 +10,8 @@ election (own tab == replicated beacon) that picks the ONE instance allowed to
 act on a broadcast; the **evlog** is the JSON event log `clave.log` (sandbox:
 `~/.local/state/clave-dev*/state/clave.log`); **EOF twins** are the benign
 per-instance `dropped … pipe with empty payload` lines every CLI pipe leaves in
-`zellij.log` — the only delivery proof there is. Width claims have known liars:
+`zellij.log` — corroborating telemetry only, since the log is user-global and a
+twin carries no session identity; delivery itself is read from the store. Width claims have known liars:
 `dump-layout` normalises to 33%/67%, `dump-screen` is empty for plugin panes,
 and the model's own `cols` is belief, not pane truth — a maintainer screenshot
 is the only reliable width oracle. Drive commands go through `scripts/ct.sh`

@@ -122,7 +122,7 @@ truncated. Many items here are maintainer-machine live checks by construction
 **Seam:** artifact lifecycle — only a cold start writes `launch.kdl` (`setup.rs:720`; path helper `setup.rs:50`); `just release` writes `config.kdl` + `layout.kdl` only (`write_generated`, `setup.rs:498`). Any pre-launch check including `launch.kdl` STOPs a healthy upgrade.
 **Preconditions:** a version-coherence check with a `*.kdl` glob run between the cut and the cold start.
 **Reproduce:** run `clave_versions` over all four KDLs right after `just release` — `launch.kdl` still names the previous version and the set reads as skew. Bitten twice: the runbook's original glob, and `scripts/sandbox-setup.sh`'s #44 identity check reading a six-day-old `launch.kdl`.
-**Healthy:** Step 2 checks `$STABLE` (excludes `launch.kdl`); Step 3 asserts `$LAUNCH` only AFTER the cold start, with both checks including the zero-versions row (empty = never written, not a pass).
+**Healthy:** Step 2 checks `$STABLE` (excludes `launch.kdl`); Step 3 asserts `$LAUNCH` only AFTER the cold start, with both checks including the zero-versions row — for `clave_versions`, empty means never written, which is a STOP (for `clave_unversioned` the opposite holds: empty is the pass).
 **Broken:** ordered STOP on a healthy cut — or, inverted, a stale pre-launch file blessed as current.
 **Drive assertion:** pre-launch `clave_versions "${STABLE[@]}"` → one line == tag; post-cold-start `clave_versions "${LAUNCH[@]}"` → one line == tag, `clave_unversioned "${LAUNCH[@]}"` → empty. Cold start itself: HUMAN.
 **Guard today:** Step 2/Step 3 split in the runbook; the checks live in one sourced file so the two copies cannot drift.
@@ -135,7 +135,7 @@ truncated. Many items here are maintainer-machine live checks by construction
 **Healthy:** `clave_unversioned` (runbook Step 0) targets those three sites explicitly and prints NOTHING; reports must say the word "empty" so a silent failure and a clean pass cannot look alike.
 **Broken:** any `clave_unversioned` output — as fatal in `launch.kdl` as in `config.kdl`.
 **Drive assertion:** `clave_unversioned "${STABLE[@]}"` and (post-launch) `"${LAUNCH[@]}"` → both empty. Fully scriptable given the check file.
-**Guard today:** the `clave_unversioned` probe + the empty-is-never-a-pass reporting rule.
+**Guard today:** the `clave_unversioned` probe + the say-the-word-"empty" reporting rule — the two probes read empty in OPPOSITE directions (nothing from `clave_unversioned` is the pass; nothing from `clave_versions` is a STOP), so the report has to name which probe was silent.
 **Refs:** FOOTGUNS:115; RELEASE-RUNBOOK Step 0/2/3 tables.
 
 ### V13 — `start-or-reload-plugin` without `-c clave_binary` starts a second bar

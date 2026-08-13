@@ -799,13 +799,16 @@ Each step exists because skipping it produces a confident, wrong result.
 **Never discard the drive's output — and the output is not the delivery
 evidence.** `>/dev/null 2>&1` on a drive loop hides the wrapper refusals, which
 are the only thing the client ever prints — a delivered pipe prints nothing.
-Delivery is proved separately, by the plugin's EOF-twin drop lines in
-`zellij.log` (payload arrivals do not log; the twins do). So a dead or bouncing
-drive with discarded output reads as green: keep the output visible for
-refusals, and corroborate the twins in the log after every phase, not once at
-the end — remembering the twins are attributable only while the maintainer's
-fleet is dark (the log is user-global; FOOTGUNS "The zellij log is
-USER-GLOBAL"). Both rules were violated on the #148 drive (2026-08-11) — the screen's
+Delivery has to be read somewhere else: from the payload's own effect — the
+store bind the drive already polls — because payload arrivals do not log at all.
+The plugin's EOF-twin drop lines in `zellij.log` corroborate, and never more
+than that: they are empty-payload control drops with no session identity in a
+user-global log, so a dark maintainer fleet reduces the interference without
+ever conferring attribution (FOOTGUNS "The zellij log is USER-GLOBAL"). So a
+dead or bouncing drive with discarded output reads as green: keep the output
+visible for refusals, and record the twin delta after every phase, not once at
+the end — as forensics, never as the pass.
+Both rules were violated on the #148 drive (2026-08-11) — the screen's
 owner saw "nothing moved at all"; the script said done.
 
 **The join is not as easy as it looks.** `list-panes -t -j` reports a pane's

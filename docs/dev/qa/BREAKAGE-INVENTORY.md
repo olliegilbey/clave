@@ -54,9 +54,12 @@ in review/CI.
   so a `dev status | jq` recency probe machine-checks it.
 - **P15**'s field renamed: `tab_timeline` → `tab_order` (ordinals).
 - "#128" in P3/P5 is a **PR** (for issue #100), not an issue.
-- The twins ambiguity is resolved in the specs: EOF-twins prove *delivery*
-  (count arithmetic), never *failure* — P1's discriminator is no focus
-  change AND no log line, twins present either way.
+- The twins ambiguity is resolved in the specs: EOF-twins are corroborating
+  telemetry, never *failure* evidence — and, since #182, never *delivery*
+  evidence either. They are empty-payload control drops carrying no session
+  identity in a user-global log, so the count arithmetic corroborates at best;
+  delivery is gated on the payload's own observable (the store bind). P1's
+  discriminator is no focus change AND no log line, twins present either way.
 
 ## Known-liar detectors (never trust these alone)
 
@@ -65,6 +68,9 @@ in review/CI.
 - The model's own `cols` belief — not pane truth. A maintainer screenshot is
   the only reliable width oracle.
 - "pass / Review rate limited" (CodeRabbit) — reviewed nothing.
-- Empty grep output — meaning depends on which probe (empty is never a pass).
+- Empty grep output — meaning is the probe's, not the emptiness's: nothing
+  from `clave_unversioned` is the expected PASS, nothing from `clave_versions`
+  is a STOP. Same blank line, opposite verdicts, which is why a report has to
+  say which probe printed nothing.
 - `dropped … pipe with empty payload` — a control present in health, not
   evidence of failure (#162's day-long misdiagnosis).

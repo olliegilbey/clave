@@ -17,8 +17,8 @@ map and the sanctioned-command list are binding here and are not repeated.
 
 | Who | Does |
 |---|---|
-| **agent** | Part A and Part D. Reads logs, the store, `clave dev status`. **Prints** every zellij command; runs none of them. Never runs `just release`. |
-| **maintainer** | The tag, `just release`, every keypress in Part C, killing a session, and the go/no-go. **The tag is pushed only after the go** — Part B. |
+| **agent** | Part A, the QA-drive gate (once the maintainer has launched its sandbox session), and Part D. Reads logs, the store, `clave dev status`. **Prints** every zellij command; runs none of them. Never runs `just release`. |
+| **maintainer** | The tag, `just release`, launching the QA drive's sandbox session, every keypress in Part C, killing a session, and the go/no-go. **The tag is pushed only after the go** — Part B. |
 
 ---
 
@@ -33,16 +33,14 @@ Nothing here touches a live session. All of it must pass before a tag exists.
    gh run list --branch main --limit 1
    ```
 
-2. **`qa-drive` (all built phases) is green on the release candidate.** See
-   `docs/dev/QA-DRIVE.md`.
-3. **The pre-tag blocker set is closed.** As of 2026-07-25 that is **#43a**
+2. **The pre-tag blocker set is closed.** As of 2026-07-25 that is **#43a**
    (the release owns an unversioned launcher), **#44** (landed in #66), **#48**
    (doctor version-coherence), **#43b** (`dev-install` no longer writes the
    daily launcher name). Cutting without #43a **deterministically reproduces the
    double-sidebar incident** — see Part C step 3 for why.
-4. **The version in `Cargo.toml` matches the tag you are about to push.** The
+3. **The version in `Cargo.toml` matches the tag you are about to push.** The
    `clave release` gate enforces this, but finding out here is cheaper.
-5. **Record the *current* state, so Part C has a baseline to compare against:**
+4. **Record the *current* state, so Part C has a baseline to compare against:**
 
    ```bash
    clave --version; command -v clave
@@ -51,6 +49,22 @@ Nothing here touches a live session. All of it must pass before a tag exists.
    ```
 
    Paste that into the release issue. A live test with no "before" is guesswork.
+
+---
+
+## The QA-drive gate — after Part A, before the tag (agent drives, maintainer launches)
+
+This one cannot live in Part A, because Part A is unattended and the drive needs
+a live sandbox session — and session lifecycle is never the agent's. It is still
+a **pre-tag** gate: a red drive means there is nothing worth tagging.
+
+**`qa-drive` (all built phases) is green on the release candidate.** The agent
+stages the sandbox and prints the launch line; **the maintainer launches the
+session** and hands it back; the agent then runs the drive and reports the
+per-phase table with measured values, plus the two eyeball checkpoints and the
+kill pair. The protocol and the phase spine are in
+[QA-DRIVE.md](QA-DRIVE.md); the loop it scripts is TESTING.md's sandbox drive
+loop.
 
 ---
 

@@ -77,7 +77,8 @@ known-red.
 
 1. `just sandbox qa-fleet` (per-worktree instance), take the log mark.
 2. Hand the launch line to the human; wait.
-3. `scripts/qa-drive.sh qa-fleet` — phases 0–6; stop on first failure.
+3. `scripts/qa-drive.sh qa-fleet` — all built phases (currently 0–2; the
+   spine below runs to 7 as the later slices land); stop on first failure.
 4. On failure: capture the drive log tail + the joins BEFORE any teardown,
    grep FOOTGUNS, then debug systematically. A failed phase is evidence,
    not an excuse to re-run until green.
@@ -86,8 +87,9 @@ known-red.
 
 ## When it runs
 
-- Before every release cut (runbook Part A gains one line: "qa-drive (all
-  built phases) green on the release candidate").
+- Before every release cut — the runbook's QA-drive gate, which sits after
+  Part A and before the tag because it needs a maintainer-launched sandbox
+  session and Part A is unattended by definition.
 - After any change classed pipe-delivery / zellij-truth / spawn / identity
   in TESTING.md's risk taxonomy.
 - On demand when a field sighting matches an inventory class.

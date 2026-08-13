@@ -1,5 +1,12 @@
 # Plan — QA drive slice 1: `qa-fleet` + `qa-drive.sh` phases 0–2 (#182)
 
+> **Historical record, dated 2026-08-12 — not the current contract.** This is
+> what the slice was planned to be, kept unedited. Where it differs from
+> `scripts/qa-drive.sh` and `docs/dev/QA-DRIVE.md`, those are authoritative.
+> Known divergence: Task 3's exact EOF-twin comparison was demoted to a
+> recorded measurement once the zellij log proved user-global and its drop
+> lines unattributable to a session.
+
 Spec: GitHub issue #182 (ratified via the 2026-08-12 grill). Design:
 docs/dev/QA-DRIVE.md (ratified). Evidence base: docs/dev/qa/ (101 classes).
 This slice is the executable #178 harness; it lands with the drive

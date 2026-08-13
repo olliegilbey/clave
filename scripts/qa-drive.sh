@@ -408,8 +408,29 @@ check "ct.sh list-panes -t -c -j (join/viewport)" "$([[ $PANES_RC -eq 0 ]] && ec
 # data.rs ~2350) — the JSON `ct.sh list-panes` emits has no `pane_info` key;
 # `is_plugin`/`plugin_url`/`pane_content_columns`/etc sit directly on the
 # pane object.
+# NOT bar geometry: list-panes omits the bar's panes entirely (FOOTGUNS,
+# "list-panes does not show the clave-bar at all") — what this records is
+# whatever plugin panes zellij DOES list (its own built-ins), kept as a
+# viewport-shaped forensic. Bar width truth stays with the eyeball
+# checkpoint; the `tall` scenario owns programmable geometry.
 VIEWPORT="$(jq -c '[.[] | select(.is_plugin == true) | {tab_id, columns: .pane_content_columns, rows: .pane_content_rows}]' <<<"$PANES_JSON" 2>/dev/null)"
-measure "viewport geometry (bar panes, via ct.sh)" "$VIEWPORT"
+measure "plugin panes visible to list-panes (bar panes are NOT listed — geometry is the eyeball's)" "$VIEWPORT"
+
+# Resume IDENTITY, not just bind (#183 review): the rotated row must resume
+# its live_session — the second, rotated transcript — not its minted uuid
+# (the pre-rotation conversation, the exact drift this scenario seeds to
+# catch). The claude process's argv is read from pane_command; when no pane
+# in the tab names claude that is UNKNOWN, not a mismatch (deepest-child
+# trap, FOOTGUNS), so it demotes to a measure instead of failing.
+EAGER_LS="$(jq -r --arg u "$EAGER_UUID" '.store.agents[$u].live_session // empty' <<<"$STATUS_JSON" 2>/dev/null)"
+check_nonempty "eager row live_session (rotated transcript seeded)" "$EAGER_LS"
+EAGER_CMD="$(jq -r --argjson t "${EAGER_TID:-null}" '[.[] | select(.tab_id == $t and ((.pane_command // "") | test("claude")))] | .[0].pane_command // empty' <<<"$PANES_JSON" 2>/dev/null)"
+if [[ -n "$EAGER_CMD" ]]; then
+  check "eager resume targets live_session, not the minted uuid" \
+    "$([[ "$EAGER_CMD" == *"--resume ${EAGER_LS}"* ]] && echo ok || echo "mismatch: $EAGER_CMD")" "ok"
+else
+  measure "eager resume identity" "unresolvable — no pane_command in tab $EAGER_TID names claude (deepest-child, unknown not mismatched)"
+fi
 
 # Store <-> layout join, unresolvables MARKED, never filtered (TESTING.md,
 # "the join is not as easy as it looks" — `pane_command` is the pane's
@@ -703,8 +724,8 @@ printf '[%s %s] BUDGET rung %d: attempted=%d landed=%d (the "2 then never again"
 
 # ---------------------------------------------------------------------------
 # Remaining rungs — wake ladder, mixed paths continued (BLOCKER 2 + 3): nav
-# pipes over every WAKEABLE dormant row, prediction-free. Target the TOP of
-# the rendered dormant block (row LIVE_NOW+1). The earlier bottom-targeting
+# pipes over every WAKEABLE dormant row, prediction-free. Target the first
+# WAKEABLE row of the rendered dormant block. The earlier bottom-targeting
 # was built on a false premise ("qa-fleet seeds commit_ord 0, ties sort
 # uuid-desc, stale row at top"): the scenario actually seeds DISTINCT
 # ordinals and the ghost row is deliberately the OLDEST (lowest ordinal),
@@ -737,7 +758,21 @@ while :; do
   TWINS_BEFORE="$(count_eof_twins)"
 
   LIVE_NOW=$((LIVE_START + LANDED))
-  ROW=$((LIVE_NOW + 1))
+  # Rendered rank of the first WAKEABLE dormant row (#183 review): the block
+  # head is not guaranteed wakeable in every scenario — ux-gate1 renders its
+  # stale row ABOVE a wakeable one, so a bare head pick would no-op on it and
+  # forge a bind regression. Dormant rows render by dormant_ord DESCENDING
+  # (model.rs `dormant_ord`: commit_ord.max(carried), and carried is
+  # NO_COMMITMENT=0 while tab_id is null — so for store-dormant rows the key
+  # is commit_ord alone); walk that order and take the first uuid the
+  # wakeable filter admits. In qa-fleet the ghost is the oldest and this
+  # degenerates to the head, as before.
+  TARGET_RANK=0
+  while IFS= read -r u; do
+    TARGET_RANK=$((TARGET_RANK + 1))
+    printf '%s\n' "$WAKEABLE_NOW" | grep -qx -F "$u" && break
+  done <<<"$(jq -r '.store.agents | to_entries | map(select(.value.tab_id == null)) | sort_by(-.value.commit_ord) | .[].key' <<<"$CUR_STATUS" 2>/dev/null)"
+  ROW=$((LIVE_NOW + TARGET_RANK))
   # rc-gate both pipe legs (same discipline as ct_list_panes): a ct.sh
   # refusal here (session died mid-drive) would otherwise surface as "no
   # row left the dormant set" — a forged #178 signature. The refusal text
@@ -747,7 +782,7 @@ while :; do
   "$CT" pipe --name clave-nav -- '{"commit":true}'
   PIPE2_RC=$?
   check "rung $RUNG ct.sh pipe legs accepted (row+commit)" "$([[ $PIPE1_RC -eq 0 && $PIPE2_RC -eq 0 ]] && echo ok || echo failed)" "ok"
-  measure "rung $RUNG ($METHOD) row picked (top of dormant block)" "$ROW"
+  measure "rung $RUNG ($METHOD) row picked (first wakeable rank in dormant block)" "$ROW"
   EXPECTED_TWINS=$((LIVE_BEFORE * 2))
 
   # Bounded wait (10s poll): which uuid left the dormant SET — not a
