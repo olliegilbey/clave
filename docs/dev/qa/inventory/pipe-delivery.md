@@ -94,7 +94,7 @@ status | jq '.store'`; every zellij touch goes through `scripts/ct.sh`
 **Reproduce:** send any CLI pipe; grep `$ZLOG` for `Action CliPipe did not complete within 1s timeout` and `dropped <name> pipe with empty payload`.
 **Healthy:** exactly one drop line per live instance per delivery, plus the timeout ERROR — this IS the healthy signature. Volume reference: 53 timeouts / 131 drops in a 200-line window of normal use.
 **Broken:** the class's damage is diagnostic, not functional: ERROR-level noise buried the real evidence twice (the v0.1.1 incident; #162's day-long misdiagnosis).
-**Drive assertion:** repurpose, don't suppress: after k pipes with N live instances, drop-line delta == k×N exactly — the standing delivery-accounting check (QA-DRIVE tracing spec). A shortfall means a delivery genuinely missed; an excess means an unaccounted emitter.
+**Drive assertion:** repurpose, don't suppress: after k pipes with N live instances, drop-line delta == k×N — recorded, not asserted (the log is user-global and a drop line is unattributable to a session; FOOTGUNS "The zellij log is USER-GLOBAL"), so the delta is delivery forensics unless the maintainer's fleet is dark. A shortfall means a delivery genuinely missed; an excess means an unaccounted emitter.
 **Guard today:** none (issue open; drop log still unconditional, latency never measured) — the twins are now load-bearing as delivery proof, so never "fix" them silently.
 **Refs:** #45; FOOTGUNS.md "Every `zellij pipe` also delivers…"; drop line at `crates/clave-bar/src/main.rs:331`.
 
@@ -104,7 +104,7 @@ status | jq '.store'`; every zellij touch goes through `scripts/ct.sh`
 **Reproduce:** 1. `just sandbox` with a ≥4-dormant-row scenario (QA-DRIVE's `qa-fleet`). 2. Wake rows sequentially: `scripts/ct.sh pipe --name clave-nav -- '{"row":N}'` then `… -- '{"commit":true}'`. 3. After each, probe the store.
 **Healthy:** within a bounded wait per wake: `clave dev status | jq '.store.agents["<uuid>"].tab_id'` non-null; the row renders as an agent chip; dormant count drops on every instance's next snapshot.
 **Broken:** `tab_id: null` while the transcript appends; the tab renders as a plain terminal row; the dormant row stays suppressed per instance (`is_dormant`'s `pane_live` suppression, `crates/clave-bar/src/model.rs:1064-1072`, turned permanent); no `bind-evict` evlog lines; register twin counts exact. Side-finding: re-waking claims the conversation off Claude remote control (`--resume` behaviour, R4).
-**Drive assertion:** QA-DRIVE phase 2 wake ladder: after EACH wake, `tab_id` bound within 5s, else FAIL; register twin delta exact per wake.
+**Drive assertion:** QA-DRIVE phase 2 wake ladder: after EACH wake, `tab_id` bound within 5s, else FAIL; register twin delta recorded per wake (not asserted — user-global log, see P8).
 **Guard today:** **nothing** — the v0.1.3 no-go; the cut is held on it.
 **Refs:** #178; docs/status/2026-08-11-1830-v013-part-c-drive.md; `model.rs:923` (`bind_effects`), `:800` (`frames_coherent`), `:409` (`bind_sent`).
 

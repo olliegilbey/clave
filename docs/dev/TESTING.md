@@ -803,7 +803,9 @@ Delivery is proved separately, by the plugin's EOF-twin drop lines in
 `zellij.log` (payload arrivals do not log; the twins do). So a dead or bouncing
 drive with discarded output reads as green: keep the output visible for
 refusals, and corroborate the twins in the log after every phase, not once at
-the end. Both rules were violated on the #148 drive (2026-08-11) — the screen's
+the end — remembering the twins are attributable only while the maintainer's
+fleet is dark (the log is user-global; FOOTGUNS "The zellij log is
+USER-GLOBAL"). Both rules were violated on the #148 drive (2026-08-11) — the screen's
 owner saw "nothing moved at all"; the script said done.
 
 **The join is not as easy as it looks.** `list-panes -t -j` reports a pane's

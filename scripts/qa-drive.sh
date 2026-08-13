@@ -295,13 +295,18 @@ phase "P0-preflight"
 # (KISS). Mitigation: print the matched line verbatim plus its tail
 # context every run, and disclose the gap explicitly via the NOTE below —
 # never claim a certainty this check cannot back.
+#
+# And the log is CROSS-SESSION (see count_eof_twins / FOOTGUNS): a tab
+# opened in the maintainer's live fleet DURING this preflight appends a
+# release-tagged loaded line, so "the very last line is ours" is a race.
+# The check therefore accepts the tag anywhere in the 5-line tail — still
+# tail-bounded, never the forbidden whole-file grep -c.
 LOADED_LINES="$(grep -F 'clave-bar: loaded' "$ZLOG" 2>/dev/null || true)"
 LOADED_TAIL="$(printf '%s\n' "$LOADED_LINES" | tail -5)"
 measure "loaded-tail (last 5)" "$LOADED_TAIL"
-LAST_LOADED="$(printf '%s\n' "$LOADED_LINES" | tail -1)"
-measure "loaded-tail matched line (verbatim)" "$LAST_LOADED"
-LAST_BUILD="$(printf '%s' "$LAST_LOADED" | grep -oE 'build=[^ ]+' | cut -d= -f2)"
-check "build tag on loaded tail" "$LAST_BUILD" "$BUILD_TAG"
+TAIL_MATCH="$(printf '%s\n' "$LOADED_TAIL" | grep -F "build=$BUILD_TAG" | tail -1)"
+measure "loaded-tail matched line (verbatim)" "$TAIL_MATCH"
+check "build tag on loaded tail (any of last 5)" "$([[ -n "$TAIL_MATCH" ]] && echo present || echo absent)" "present"
 printf '[%s %s] NOTE same-HEAD re-runs cannot distinguish a stale load here — eyeball the tail timestamps\n' "$CURRENT_PHASE" "$(ts)"
 
 # config.kdl <-> layout.kdl identity pair (the #44 self-check `just sandbox`
@@ -431,21 +436,27 @@ measure "store seq" "$SEQ"
 # ===========================================================================
 phase "P2-bind-ladder"
 
-# Live clave-bar plugin panes = live bar instances, the EOF-twin multiplier
-# (one twin per instance per pipe, P8). NOT a `ct_list_panes | jq …` pipe:
-# with `pipefail` set, a failed ct_list_panes (which still prints valid
-# empty-JSON "[]" so jq itself succeeds) would leave the pipeline's exit
-# status 0 — the exact swallowed-refusal trap this rewrite exists to close.
-# Capture the panes read and its status separately instead.
+# There is NO count_live_instances: the bar's panes are invisible to
+# `list-panes`. Measured on the 2026-08-13 run: two instances provably
+# loaded (fresh `clave-bar: loaded` lines, ids 1 and 2), zero clave-bar
+# panes in the list — the only plugin pane it showed was zellij's own
+# built-in `zellij:link`. Likely mechanism: the bar sets
+# `set_selectable(false)` (FOOTGUNS "cannot be focused by clicking") and
+# list-panes appears to serialize selectable panes only — unverified,
+# zellij-server is not vendored. Live bar instances are therefore counted
+# as live TABS (`count_live_tabs`): one bar per tab is the layout's design,
+# and the loaded-line evidence above confirmed it (tab 1's bar loaded the
+# instant `clave add` created the tab).
+#
+# NOT a `ct_list_panes | jq …` pipe: with `pipefail` set, a failed
+# ct_list_panes (which still prints valid empty-JSON "[]" so jq itself
+# succeeds) would leave the pipeline's exit status 0 — the exact
+# swallowed-refusal trap this rewrite exists to close. Capture the panes
+# read and its status separately instead.
 #
 # Selectors are FLAT (final review BLOCKER 1) — see the comment on
 # `ct_list_panes` above.
-count_live_instances() {
-  local panes
-  panes="$(ct_list_panes)" || return 1
-  jq '[.[] | select(.is_plugin == true and ((.plugin_url // "") | test("clave-bar")))] | length' <<<"$panes" 2>/dev/null
-}
-
+#
 # The live block's TRUE size, for ROW arithmetic (BLOCKER 2 finding 2):
 # counting store rows with `tab_id != null` undercounts it the moment the
 # sandbox also carries a plain terminal tab with no agent behind it, since
@@ -461,6 +472,14 @@ count_dormant() {
   jq '[.store.agents[] | select(.tab_id == null)] | length' < <(dev_status) 2>/dev/null
 }
 
+# CAUTION — this count is USER-GLOBAL, not sandbox-scoped. The zellij log is
+# one file for every session the user runs, and its 25-char source column
+# truncates BOTH the stable wasm (~/.local/share/clave/…) and the sandbox
+# wasm (~/.local/state/clave-dev-…/…) to the identical
+# "/Users/<user>/.local"; plugin ids overlap across servers too. A dropped
+# line is therefore unattributable to a session (first red run: rung 1
+# measured a delta of 10, all of it the maintainer's live fleet). Twin
+# deltas are RECORDED for forensics, never asserted — see FOOTGUNS.
 count_eof_twins() {
   zlog_tail | grep -c -F 'clave-bar: dropped' 2>/dev/null || true
 }
@@ -586,9 +605,10 @@ TOTAL_BEFORE_CREATE="$(jq '.store.agents | length' <<<"$(dev_status)" 2>/dev/nul
 DORMANT_BEFORE_CREATE="$(count_dormant)"
 UUIDS_BEFORE_CREATE="$(jq -r '.store.agents | keys[]' <<<"$(dev_status)" 2>/dev/null | sort)"
 TWINS_BEFORE="$(count_eof_twins)"
-LIVE_BEFORE="$(count_live_instances)"
+LIVE_BEFORE="$(count_live_tabs)"
 LIVE_RC=$?
-check "ct.sh list-panes -t -c -j (rung $RUNG live-instance count)" "$([[ $LIVE_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+check "ct.sh list-panes -t -c -j (rung $RUNG live-tab count)" "$([[ $LIVE_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+measure "rung $RUNG live tabs (= bar instances by design) before create" "$LIVE_BEFORE"
 
 # Bound the call externally, since add.rs cannot bound itself (its
 # dump-layout read and new-tab spawn both call `.output()`/`.status()` with
@@ -596,6 +616,12 @@ check "ct.sh list-panes -t -c -j (rung $RUNG live-instance count)" "$([[ $LIVE_R
 # `timeout`/`gtimeout` (same idiom as ct.sh); fall back to a bash-native
 # watchdog when neither is on PATH.
 CREATE_TIMEOUT="${CLAVE_OPEN_TIMEOUT:-30}"
+# `clave add`'s stdout/stderr are inherited on purpose (tracing spec: never
+# discarded) — zellij CLI chatter from its internal `zellij action` calls
+# lands in this log between here and the result line below. The first red
+# run's bare "1" was exactly that; this label keeps it attributable.
+printf '[%s %s] rung %d (%s): clave add output follows (inherited, unprefixed)\n' \
+  "$CURRENT_PHASE" "$(ts)" "$RUNG" "$METHOD"
 if command -v timeout >/dev/null 2>&1; then
   ( cd "$ROOT" && unset ZELLIJ ZELLIJ_PANE_ID && \
     ZELLIJ_SESSION_NAME="$SESSION" CLAVE_SESSION="$SESSION" CLAVE_STATE_DIR="$STATE_DIR" CLAVE_DATA_DIR="$DATA_DIR" CLAVE_FZF_BIN="$FZF_STUB" \
@@ -643,8 +669,14 @@ measure "rung $RUNG ($METHOD) minted uuid" "$CREATE_UUID"
 
 TOTAL_AFTER_CREATE="$(jq '.store.agents | length' <<<"$(dev_status)" 2>/dev/null)"
 check "rung $RUNG total rows incremented by exactly one" "$TOTAL_AFTER_CREATE" "$((TOTAL_BEFORE_CREATE + 1))"
-DORMANT_AFTER_CREATE="$(count_dormant)"
-check "rung $RUNG dormant count unchanged (create mints fresh, never wakes dormant)" "$DORMANT_AFTER_CREATE" "$DORMANT_BEFORE_CREATE"
+# The minted row is EXCLUDED from this count: until its async bind lands
+# (the 10s poll below), the fresh row has tab_id null and would transiently
+# count as dormant — a sub-second race this check lost on the 2026-08-13
+# third run (measured 6 where run two measured 5 at the same line). The
+# check's actual claim is about the PRE-CREATE rows only: create mints
+# fresh, it never wakes a seeded dormant row.
+DORMANT_AFTER_CREATE="$(dormant_uuids "$(dev_status)" | grep -v -F "$CREATE_UUID" | grep -c .)"
+check "rung $RUNG dormant count unchanged among pre-create rows (create mints fresh, never wakes dormant)" "$DORMANT_AFTER_CREATE" "$DORMANT_BEFORE_CREATE"
 
 # Bounded wait (10s poll): the minted row's tab_id lands in store, the same
 # async `clave bind` proxy every other rung waits on.
@@ -658,10 +690,11 @@ check_nonempty "rung $RUNG tab_id bound uuid=${CREATE_UUID:0:13}" "$BOUND_TID"
 [[ -n "$BOUND_TID" ]] && LANDED=$((LANDED + 1))
 
 # `clave add` runs `zellij action new-tab`, not `zellij pipe` — no CliPipe
-# broadcast, so no EOF-twin traffic is attributable to it.
+# broadcast, so sandbox-attributable twin traffic should be ~0. Recorded,
+# not asserted: the count is user-global (see count_eof_twins).
 TWINS_AFTER="$(count_eof_twins)"
 TWIN_DELTA=$((TWINS_AFTER - TWINS_BEFORE))
-check "rung $RUNG EOF-twin delta" "$TWIN_DELTA" "0"
+measure "rung $RUNG EOF-twin delta (user-global log, unattributable; ~0 if sandbox-only)" "$TWIN_DELTA"
 
 width_belief "$RUNG"
 
@@ -670,17 +703,22 @@ printf '[%s %s] BUDGET rung %d: attempted=%d landed=%d (the "2 then never again"
 
 # ---------------------------------------------------------------------------
 # Remaining rungs — wake ladder, mixed paths continued (BLOCKER 2 + 3): nav
-# pipes over every WAKEABLE dormant row, prediction-free. Target the BOTTOM
-# of the rendered dormant block (the lowest uuid among the tied ordinal —
-# every qa-fleet row seeds commit_ord 0): model.rs's rank_desc sorts the
-# dormant block uuid-DESCENDING on a tie, so the stale row — the scenario's
-# own last-minted, highest-uuid non-live row — sorts to the TOP and would
-# sit there forever if targeted (BLOCKER 3's exact forgery: nothing ever
-# leaves that position). Bottom-up drains every wakeable row first and
-# leaves the stale row stranded alone; `wakeable_uuids` then reports empty
-# and the loop stops before ever clicking it. Which uuid each click
-# actually landed on is OBSERVED, never predicted (BLOCKER 2): snapshot the
-# dormant set, wait, and read back whichever single uuid left it.
+# pipes over every WAKEABLE dormant row, prediction-free. Target the TOP of
+# the rendered dormant block (row LIVE_NOW+1). The earlier bottom-targeting
+# was built on a false premise ("qa-fleet seeds commit_ord 0, ties sort
+# uuid-desc, stale row at top"): the scenario actually seeds DISTINCT
+# ordinals and the ghost row is deliberately the OLDEST (lowest ordinal),
+# and model.rs `rows()` sorts each block by ordinal DESCENDING — so the
+# ghost renders at the BOTTOM, exactly where the ladder aimed. The
+# 2026-08-13 run proved it: row 7 picked, clave.log answered
+# "cwd missing → stale" for the ghost uuid, nothing woke, red at rung 2 —
+# BLOCKER 3's forgery in the flesh. Top of block = the HIGHEST-ordinal
+# dormant row, which by that same seeding is always wakeable; the ghost
+# can only reach the top once it is the last dormant row standing, and
+# then `wakeable_uuids` is already empty and the loop has stopped before
+# ever clicking it. Which uuid each click actually landed on is OBSERVED,
+# never predicted (BLOCKER 2): snapshot the dormant set, wait, and read
+# back whichever single uuid left it.
 # ---------------------------------------------------------------------------
 while :; do
   CUR_STATUS="$(dev_status)"
@@ -692,16 +730,24 @@ while :; do
 
   DORMANT_BEFORE_SET="$(dormant_uuids "$CUR_STATUS")"
   DORMANT_BEFORE_COUNT="$(printf '%s\n' "$DORMANT_BEFORE_SET" | grep -c .)"
-  LIVE_BEFORE="$(count_live_instances)"
+  LIVE_BEFORE="$(count_live_tabs)"
   LIVE_RC=$?
-  check "ct.sh list-panes -t -c -j (rung $RUNG live-instance count)" "$([[ $LIVE_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+  check "ct.sh list-panes -t -c -j (rung $RUNG live-tab count)" "$([[ $LIVE_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+  measure "rung $RUNG live tabs (= bar instances by design) before pipes" "$LIVE_BEFORE"
   TWINS_BEFORE="$(count_eof_twins)"
 
   LIVE_NOW=$((LIVE_START + LANDED))
-  ROW=$((LIVE_NOW + DORMANT_BEFORE_COUNT))
+  ROW=$((LIVE_NOW + 1))
+  # rc-gate both pipe legs (same discipline as ct_list_panes): a ct.sh
+  # refusal here (session died mid-drive) would otherwise surface as "no
+  # row left the dormant set" — a forged #178 signature. The refusal text
+  # itself is already in this log via fd2; the check makes it gating.
   "$CT" pipe --name clave-nav -- "{\"row\":${ROW}}"
+  PIPE1_RC=$?
   "$CT" pipe --name clave-nav -- '{"commit":true}'
-  measure "rung $RUNG ($METHOD) row picked (bottom of dormant block)" "$ROW"
+  PIPE2_RC=$?
+  check "rung $RUNG ct.sh pipe legs accepted (row+commit)" "$([[ $PIPE1_RC -eq 0 && $PIPE2_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+  measure "rung $RUNG ($METHOD) row picked (top of dormant block)" "$ROW"
   EXPECTED_TWINS=$((LIVE_BEFORE * 2))
 
   # Bounded wait (10s poll): which uuid left the dormant SET — not a
@@ -726,10 +772,11 @@ while :; do
   DORMANT_AFTER="$(count_dormant)"
   check "rung $RUNG dormant count decremented" "$DORMANT_AFTER" "$((DORMANT_BEFORE_COUNT - 1))"
 
-  # EOF-twin delta exact: pipes-sent x live-instances.
+  # EOF-twin delta: would be pipes-sent x live-instances if the log were
+  # sandbox-scoped. It is not (see count_eof_twins) — recorded, not asserted.
   TWINS_AFTER="$(count_eof_twins)"
   TWIN_DELTA=$((TWINS_AFTER - TWINS_BEFORE))
-  check "rung $RUNG EOF-twin delta" "$TWIN_DELTA" "$EXPECTED_TWINS"
+  measure "rung $RUNG EOF-twin delta (user-global log, unattributable; ~${EXPECTED_TWINS} if sandbox-only)" "$TWIN_DELTA"
 
   width_belief "$RUNG"
 

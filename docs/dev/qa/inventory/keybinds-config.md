@@ -96,7 +96,7 @@ stable, `$(clave dev instance --field data)` for your sandbox.
 2. Human relaunches; drive one pipe: `scripts/ct.sh` any nav action.
 **Healthy:** grants pre-seeded under BOTH key forms; pipes deliver (EOF-twin drop lines appear in `zellij.log` — the standing delivery proof); no prompt.
 **Broken:** `Action CliPipe did not complete within 1s` on every pipe; a permission prompt wedged in a strip-width pane; bar inert.
-**Drive assertion:** preflight (QA-DRIVE phase 0): the cache file contains an entry for the wasm under both key forms with the full current set — `grep -c "$WASM" permissions.kdl` >= 2; post-launch, one probe pipe produces its expected EOF-twin delta in the log.
+**Drive assertion:** preflight (QA-DRIVE phase 0): the cache file contains an entry for the wasm under both key forms with the full current set — `grep -c "$WASM" permissions.kdl` >= 2; post-launch, one probe pipe's EOF-twin delta is recorded, not asserted (user-global log — FOOTGUNS "The zellij log is USER-GLOBAL").
 **Guard today:** `merge_permissions_kdl` seeds both key forms (setup.rs:455-456), `permissions_seeded` probe (setup.rs:485); guardrail parses the cache in both branches (`permissions_kdl_is_well_formed_in_both_branches`, kdl_guardrail.rs:312).
 **Refs:** `crates/clave/src/setup.rs:439-486`; `crates/clave/tests/kdl_guardrail.rs:312`; FOOTGUNS.md "Zellij plugin permissions are ALL-OR-NOTHING"; zellij-utils `kdl/mod.rs:5456-5500`.
 

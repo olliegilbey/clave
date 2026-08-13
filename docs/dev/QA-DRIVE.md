@@ -30,7 +30,12 @@ known-liar detectors), no automatic bisecting.
 - **Assertions print what they measured**, pass or fail — "empty" is written
   as the word, so a silent failure and a clean pass never look alike.
 - Delivery accounting: expected EOF-twin deltas are computed per phase
-  (pipes-sent × live-instances) and compared, not eyeballed.
+  (pipes-sent × live-instances) and RECORDED alongside the measured delta —
+  never asserted. The zellij log is user-global and its truncated source
+  column cannot attribute a `clave-bar: dropped` line to a session (the
+  stable and sandbox wasm paths collapse to the same 25-char prefix), so a
+  live maintainer fleet pollutes every delta. First red run proved it:
+  rung 1 measured 10, all of it main-session traffic.
 
 ## The phase spine
 
@@ -41,11 +46,11 @@ loudly and stops the run; later phases assume earlier truth.
 |---|---|---|---|---|
 | 0 | Preflight | nothing | build tag on the loaded tail; config+launch coherence (`clave_versions`/`clave_unversioned` from the runbook, scripted); permission cache seeded both key forms; no orphan `zellij pipe` processes | V5, V11, V12, V14, K7, P7 |
 | 1 | Baseline join | `dev status` + guarded dump | every seeded row in expected state; the eager-launch row's `tab_id` BOUND (the #178 resume face); measured viewport geometry recorded in the log; store↔layout join printed with unresolvables MARKED, not filtered; store `seq` recorded | Z10, P9's resume face, drive-loop step 4 |
-| 2 | **Bind ladder (mixed paths)** | ~6 binds through mixed paths: dormant wakes via nav pipes (`{"row":N}` pick + commit) plus ≥1 scripted create | after EACH bind, within a bounded wait: `tab_id` bound in store (bind is the proxy for row class); dormant count decremented on every instance's next snapshot; EOF-twin delta exact; seek-trace resting width == target (model belief, NOT pane truth — the eyeball stays the oracle). First discriminator: is the bind budget spent-and-never-refilled after bind 2 (#178's fleet signature)? | **P9 (#178)**, **B22 (#181 detection)**, P10, P11, P14, R1 |
+| 2 | **Bind ladder (mixed paths)** | ~6 binds through mixed paths: dormant wakes via nav pipes (`{"row":N}` pick + commit) plus ≥1 scripted create | after EACH bind, within a bounded wait: `tab_id` bound in store (bind is the proxy for row class); dormant count decremented on every instance's next snapshot; EOF-twin delta recorded (unattributable in the shared log — see Delivery accounting); seek-trace resting width == target (model belief, NOT pane truth — the eyeball stays the oracle). First discriminator: is the bind budget spent-and-never-refilled after bind 2 (#178's fleet signature)? | **P9 (#178)**, **B22 (#181 detection)**, P10, P11, P14, R1 |
 | 3 | Tab churn | close a NON-last tab; close the HIGHEST tab then create one; re-join after each | nav answers with exactly one focus change; no `bind-evict` in evlog; no stale binds; recycled id carries no inherited stamp | B14, B15 (#55), Z15, P4, P12/P13 |
 | 4 | Ring walk | pick into the dormant block, walk both directions, wrap; Alt+Enter one commit | single executor (one focus change per press, never two); walk stays in-block; commit opens exactly one tab | P1 (#162), P2, P16, K8 — becomes single-ring on #179 |
 | 5 | Collapse burst | 12× toggle with pauses, then 5× rapid | store writes per press ≤ 2; final collapsed parity across all instances' snapshots; bar still answers press 13+ | B6–B9, B10/B11, P5 |
-| 6 | Quiescence | idle 60s | evlog, zellij log, store `seq` all flat | P17, B19/B20, drive step 6 |
+| 6 | Quiescence | idle 60s | evlog and store `seq` flat; zellij log flat after the mark for sandbox-attributable lines only (the shared log is never globally flat with a live maintainer fleet — see Delivery accounting) | P17, B19/B20, drive step 6 |
 | 7 | Teardown | nothing | prints the kill pair for the human | drive step 9 |
 
 **Eyeball checkpoints** (human, one message each): after phase 2 — one bar
