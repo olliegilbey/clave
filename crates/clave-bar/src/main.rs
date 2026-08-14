@@ -662,8 +662,15 @@ impl ZellijPlugin for State {
         // #181: the width machine. It is silent on every render except the one
         // after a mode change, where it asks zellij to switch this tab to the
         // other declared geometry, and the one after that, where it checks the
-        // pane moved the way the new mode wanted. Ungated: every instance is
-        // always visible and switches only its own tab.
+        // pane moved the way the new mode wanted.
+        //
+        // It is NOT ungated, and an earlier comment here claiming every
+        // instance is always visible and switches only its own tab was wrong on
+        // both counts: hidden instances do render, and zellij resolves a
+        // plugin's swap-layout request against the FOCUSED tab, discarding the
+        // pane id the request carries (v0.44.3 — FOOTGUNS.md). The gate lives in
+        // `width_effects`, which holds the switch until this bar's own tab is
+        // the focused one.
         let fx = self.model.width_effects(cols);
         self.run_effects(fx);
         // One line per row, display-ordered. Everything visual — the column
