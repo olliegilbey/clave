@@ -2813,9 +2813,33 @@ mod tests {
         assert_eq!(status_at(&m, 0), Some(RowStatus::Idle)); // rendered dim NOW
         let fx = m.apply_tabs(vec![tab(10, 0, "t", true)]);
         assert!(fx.iter().all(|e| !matches!(e, Effect::MarkRead { .. })));
+        // A repeat of the SAME Done — any unrelated store push carries every
+        // row's status — must NOT disturb the override: the user has read this
+        // completion and the row stays dim. This is the assertion that tells
+        // the rule apart from its inversion; the Working one below cannot,
+        // because the override only ever changes how a `Done` renders, so a
+        // Working row reads Working either way. Inverted, every push while an
+        // agent sits finished re-lights it green, and "green" stops meaning
+        // "there is something here you have not seen". (cargo mutants
+        // 2026-08-14: `status != Done` → `==` survived on the Working
+        // assertion alone.)
+        m.apply_snapshot(snap(2, vec![agent("u1", Status::Done, Some(10))]));
+        assert_eq!(
+            status_at(&m, 0),
+            Some(RowStatus::Idle),
+            "a re-push of the same Done is not a new completion"
+        );
         // A later snapshot showing Working clears the local override.
-        m.apply_snapshot(snap(2, vec![agent("u1", Status::Working, Some(10))]));
+        m.apply_snapshot(snap(3, vec![agent("u1", Status::Working, Some(10))]));
         assert_eq!(status_at(&m, 0), Some(RowStatus::Working));
+        // And the clear is real: the NEXT completion is unread again, which is
+        // the thing the user is waiting to be told about.
+        m.apply_snapshot(snap(4, vec![agent("u1", Status::Done, Some(10))]));
+        assert_eq!(
+            status_at(&m, 0),
+            Some(RowStatus::Done),
+            "a second completion is unread again"
+        );
     }
 
     #[test]
@@ -5713,6 +5737,61 @@ mod tests {
             m.nav("{\"commit\":true}", Some(1)).is_empty(),
             "in-flight open must not double-fire"
         );
+    }
+
+    /// The in-flight mark is double-fire guard #1 (`clave open`'s own liveness
+    /// no-op is #2), and it is only a guard for as long as it survives the
+    /// store traffic that arrives while the open is still running. It clears on
+    /// exactly two things — the row stopped being dormant (the tab appeared) or
+    /// the snapshot flagged it stale (the open failed, so it must be
+    /// retryable) — and on nothing else.
+    ///
+    /// If an unrelated push cleared it, a user who pressed Alt+Enter watches
+    /// the ↻ vanish, presses again, and gets a SECOND `clave open` for a
+    /// session already launching: the double-attach this guard exists to stop.
+    ///
+    /// (cargo mutants 2026-08-14 found two ways to that: dropping the `!` so
+    /// a still-dormant row clears the mark, and flipping the row lookup so the
+    /// verdict is read off whichever OTHER agent happens to come first — which
+    /// is why a second, live agent is in the snapshot below.)
+    #[test]
+    fn an_in_flight_open_holds_its_mark_through_unrelated_snapshots() {
+        let mut m = live_plus_dormant();
+        m.beacon(1);
+        select_dormant(&mut m);
+        assert_eq!(
+            m.nav("{\"commit\":true}", Some(1)),
+            vec![Effect::OpenAgent { uuid: "u-d".into() }]
+        );
+        // A push lands while the open is still in flight: an unrelated agent
+        // binds into the live tab. `u-d` is still dormant and still not stale.
+        let mut d = agent("u-d", Status::Idle, None);
+        d.commit_ord = 999;
+        m.apply_snapshot(snap(2, vec![d, agent("u-other", Status::Idle, Some(1))]));
+        assert_eq!(
+            status_at(&m, DORMANT_LINE),
+            Some(RowStatus::Opening),
+            "the row is still launching, so it still says so"
+        );
+        assert!(
+            m.nav("{\"commit\":true}", Some(1)).is_empty(),
+            "and the guard still refuses the second press"
+        );
+        // The tab appears: the open resolved, so the mark retires and the row
+        // leaves the dormant block entirely.
+        m.apply_tabs(vec![tab(1, 0, "live", true), tab(2, 1, "woken", false)]);
+        m.apply_snapshot(snap(
+            3,
+            vec![
+                agent("u-d", Status::Idle, Some(2)),
+                agent("u-other", Status::Idle, Some(1)),
+            ],
+        ));
+        assert!(
+            keys(&m).iter().all(|k| *k != RowKey::Dormant("u-d".into())),
+            "the woken row is live now"
+        );
+        assert_ne!(status_at(&m, 1), Some(RowStatus::Opening));
     }
 
     #[test]
