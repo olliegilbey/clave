@@ -97,6 +97,32 @@ fn layout_plugin_configs(kdl: &str, what: &str) -> Vec<BTreeMap<String, String>>
     out
 }
 
+/// The bar pane's `Run` in each of a layout's swap geometries. A swap REUSES
+/// the running bar rather than spawning a second one — but only because
+/// `apply_tiled_panes_layout_to_existing_panes` matches an existing pane on
+/// `invoked_with() == run` (zellij-server 0.44.3 `tab/layout_applier.rs:1218`,
+/// called from `tab/mod.rs:1093-1141`). `Run` for a plugin is
+/// `(location, configuration)` and does NOT include `size`, which is exactly
+/// why the two geometries may differ in width and in nothing else: any drift in
+/// the plugin block demotes the match to logical position and can land the bar
+/// in the wrong slot.
+fn swap_bar_runs(kdl: &str, what: &str) -> Vec<Run> {
+    let layout = Layout::from_str(kdl, format!("guardrail:{what}"), None, None)
+        .unwrap_or_else(|e| panic!("{what} did not parse: {e:?}\n---\n{kdl}"));
+    layout
+        .swap_tiled_layouts
+        .iter()
+        .flat_map(|(by_constraint, _name)| by_constraint.values())
+        .filter_map(|tiled| {
+            tiled
+                .children
+                .iter()
+                .find_map(|c| c.run.as_ref().filter(|r| r.get_run_plugin().is_some()))
+                .cloned()
+        })
+        .collect()
+}
+
 /// The bar pane's declared size in each of a layout's swap geometries, keyed by
 /// the swap layout's name, IN DECLARATION ORDER. The order is load-bearing:
 /// `next_swap_layout` is relative and its first call on a tab lands on index 0,
@@ -377,6 +403,19 @@ fn every_layout_declares_both_swap_geometries_narrow_first_when_born_wide() {
             "{what}: collapsed {collapsed}% is not narrower than expanded {expanded}%"
         );
         assert!((1..=100).contains(&expanded) && (1..=100).contains(&collapsed));
+        // …and the two geometries must declare the SAME bar, so that switching
+        // between them moves the running one instead of spawning a second.
+        let runs = swap_bar_runs(kdl, what);
+        assert_eq!(
+            runs.len(),
+            2,
+            "{what}: expected two bar panes, got {runs:?}"
+        );
+        assert_eq!(
+            runs[0], runs[1],
+            "{what}: the two swap geometries declare DIFFERENT bars — a swap \
+             would no longer match the running pane"
+        );
     };
 
     check(&setup::layout_kdl(BIN_ABS, WASM), "layout.kdl", false);

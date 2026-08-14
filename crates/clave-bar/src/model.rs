@@ -1680,7 +1680,8 @@ impl BarModel {
     /// own tab frame claims itself active, FOOTGUNS.md) — but the answer here is
     /// about permission to touch the FOCUSED tab, not about electing anybody.
     fn own_tab_focused(&self) -> bool {
-        self.own_tab().is_some_and(|own| self.current_tab == Some(own))
+        self.own_tab()
+            .is_some_and(|own| self.current_tab == Some(own))
     }
 
     /// Does the beacon name a tab that is not in the last delivered tab set?
@@ -3828,6 +3829,113 @@ mod tests {
         for cols in [54usize, 30, 141, 11, 200, 3] {
             assert_eq!(m.width_effects(cols), Vec::<Effect>::new(), "at {cols}");
         }
+    }
+
+    /// The cross-tab defect, pinned. Zellij applies a plugin's swap-layout
+    /// request to the FOCUSED tab, discarding the pane id the request carries,
+    /// so a bar on a background tab that flipped mode off a store snapshot would
+    /// resize whatever the user was actually looking at. A background bar issues
+    /// nothing — not on the toggle, not on the peek a nav elsewhere broadcasts
+    /// to it, and not on any number of repaints.
+    #[test]
+    fn a_background_bar_never_switches_a_layout_it_does_not_own() {
+        let mut m = background_bar();
+        m.toggle();
+        for cols in [54usize, 30, 54, 30] {
+            assert_eq!(m.width_effects(cols), Vec::<Effect>::new(), "at {cols}");
+        }
+        // A nav elsewhere: the visited pipe is a BROADCAST, so this bar hears
+        // about a tab that is not its own and arms a peek. Still not its layout.
+        assert!(m.visited(10), "a collapsed bar arms a peek on any nav");
+        for cols in [30usize, 54] {
+            assert_eq!(
+                m.width_effects(cols),
+                Vec::<Effect>::new(),
+                "peek at {cols}"
+            );
+        }
+    }
+
+    /// The held switch is spent by the first render after the tab comes back —
+    /// no timer, no retry, nothing watching. Focus arrives as the beacon, which
+    /// is exactly what the visited pipe delivers to every bar on a nav.
+    #[test]
+    fn a_held_switch_fires_on_the_render_after_the_tab_regains_focus() {
+        let mut m = background_bar();
+        m.toggle(); // wants collapsed, may not say so yet
+        assert_eq!(m.width_effects(54), Vec::<Effect>::new(), "held");
+        m.beacon(11); // the user switches to this bar's tab
+        assert_eq!(m.width_effects(54), vec![Effect::SwapWidth]);
+        assert_eq!(m.width_effects(30), Vec::<Effect>::new(), "landed");
+    }
+
+    /// What is owed is an END STATE, not a queue. A mode that moves twice while
+    /// the tab is in the background costs ONE switch if it ended up somewhere
+    /// new, and NOTHING if it came back to where it started — never a replay of
+    /// every width it passed through.
+    #[test]
+    fn intent_changing_twice_while_held_costs_one_switch_or_none() {
+        // Ends somewhere new: collapsed → expanded → collapsed is one switch.
+        let mut m = background_bar();
+        m.toggle();
+        assert_eq!(m.width_effects(54), Vec::<Effect>::new());
+        m.toggle();
+        m.toggle();
+        m.beacon(11);
+        assert_eq!(m.width_effects(54), vec![Effect::SwapWidth]);
+        assert_eq!(m.width_effects(30), Vec::<Effect>::new(), "one switch only");
+
+        // Ends where it started: nothing was ever owed.
+        let mut m = background_bar();
+        m.toggle();
+        m.toggle();
+        assert_eq!(m.width_effects(54), Vec::<Effect>::new());
+        m.beacon(11);
+        assert_eq!(
+            m.width_effects(54),
+            Vec::<Effect>::new(),
+            "a round trip owes no switch"
+        );
+    }
+
+    /// A peek that arms and expires while the tab is in the background is the
+    /// commonest form of the round trip above — a nav burst broadcasts to every
+    /// bar in the fleet, and every one of them peeks and sinks.
+    #[test]
+    fn a_peek_that_comes_and_goes_in_the_background_owes_nothing() {
+        let mut m = background_bar();
+        m.toggle(); // collapsed
+        m.beacon(11);
+        assert_eq!(m.width_effects(54), vec![Effect::SwapWidth]);
+        assert_eq!(m.width_effects(30), Vec::<Effect>::new());
+        m.beacon(10); // the user leaves
+        assert!(m.visited(10)); // and navs, which every bar hears
+        assert!(m.peek_expired());
+        m.beacon(11); // and comes back
+        assert_eq!(
+            m.width_effects(30),
+            Vec::<Effect>::new(),
+            "a peek nobody saw must not move the pane"
+        );
+    }
+
+    /// The correction is the one part that must NOT keep: its baseline is a
+    /// width measured while we had focus, and spending it later would be a
+    /// resize of somebody else's tab off a stale number.
+    #[test]
+    fn a_correction_is_abandoned_when_focus_leaves_mid_switch() {
+        let mut m = focused_bar();
+        m.toggle();
+        assert_eq!(m.width_effects(54), vec![Effect::SwapWidth]);
+        m.beacon(10); // focus leaves before the check render
+        // The pane went the WRONG way — normally worth one correction.
+        assert_eq!(m.width_effects(75), Vec::<Effect>::new());
+        m.beacon(11);
+        assert_eq!(
+            m.width_effects(75),
+            Vec::<Effect>::new(),
+            "a stale correction must not fire on return"
+        );
     }
 
     #[test]
