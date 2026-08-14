@@ -525,6 +525,13 @@ pub(crate) fn prune_in(s: &mut Store, stale_ids: &[usize]) -> bool {
             let carried = s.tab_order.get(&id).copied().unwrap_or(0);
             r.commit_ord = r.commit_ord.max(carried);
             r.tab_id = None;
+            // The pane died with the tab, so the mapping dies with it (#178,
+            // Codex P2 on PR #185). Left set, a dead pane would ride every
+            // later snapshot: the dormant row would read as "pane announced
+            // but absent", which is the #178 starvation signature — a
+            // permanent false episode masking the real ones — and a
+            // uuid-directed nav would chase a pane that no longer exists.
+            r.pane_id = None;
             changed = true;
         }
     }
@@ -950,6 +957,26 @@ mod tests {
         // Session recreate clears it alongside tab_id.
         clear_session_order(&p).unwrap();
         assert_eq!(read_store(&p).unwrap().agents["u1"].pane_id, None);
+    }
+
+    #[test]
+    fn a_closing_tab_takes_its_pane_mapping_with_it() {
+        // Codex P2 on PR #185. A pane that outlives its tab is worse than no
+        // pane at all: the dormant row reads as "announced but absent", which
+        // is #178's own starvation signature, so a permanent false episode
+        // would mask every real one.
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            s.agents.insert("u1".into(), rec("u1"));
+        })
+        .unwrap();
+        apply_bind(&p, "u1", 4).unwrap().expect("bound");
+        apply_register(&p, "u1", 42).unwrap().expect("registered");
+        apply_prune_tabs(&p, &[4]).unwrap().expect("pruned");
+        let r = &read_store(&p).unwrap().agents["u1"];
+        assert_eq!(r.tab_id, None);
+        assert_eq!(r.pane_id, None, "the pane died with its tab");
     }
 
     #[test]
