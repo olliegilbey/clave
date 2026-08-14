@@ -11,11 +11,13 @@ generated files: `config.kdl` + `layout.kdl` (rewritten by `just release` /
 per-worktree dev instance (`clave-test*` session, `~/.local/state/clave-dev*`
 root). `clave_versions` / `clave_unversioned` are the RELEASE-RUNBOOK Part C
 Step 0 check functions (written to `$TMPDIR/clave-release-checks.sh`). The
-one-grep diagnosis for the whole plane: `grep 'clave-bar: loaded'` on
-`ZLOG="${TMPDIR%/}/zellij-$(id -u)/zellij-log/zellij.log"` — every line must
-report the same version AND the same `build=` tag, and the log must be
-line-count-marked before launch because it is machine-shared and never
-truncated. Many items here are maintainer-machine live checks by construction
+one-grep diagnosis for *this launch*: mark the line count of
+`ZLOG="${TMPDIR%/}/zellij-$(id -u)/zellij-log/zellij.log"` before launch (it
+is machine-shared and never truncated), then `grep 'clave-bar: loaded'` on
+only the appended tail — every tail line must report the expected version AND
+`build=` tag. A whole-file grep reads stale loads from other sessions and
+epochs and can false a release result either way (V5; FOOTGUNS "EOF-twin
+lines are diagnostic telemetry only"). Many items here are maintainer-machine live checks by construction
 (Tier 2 does not exist, #47); the drive assertions say which half automates.
 
 ### V1 — Bar shelled to bare `clave` ×7 (#44) [FIELD v0.1.1]

@@ -364,8 +364,18 @@ check_min "permission cache carries both key forms ($WASM)" "${PERM_COUNT:-0}" 2
 
 # Zero orphan `zellij pipe` processes (P7, #140 — an orphan hammers the
 # router at full core; "empty" IS the healthy reading, print it as the word).
-ORPHANS="$(pgrep -f 'zellij pipe' 2>/dev/null || true)"
-check "orphan 'zellij pipe' processes" "$ORPHANS" ""
+# Probed TWICE ~2s apart (#183 review): a healthy in-flight client from any
+# session lives inside its ~1s window and matches at most one probe; only a
+# pid present in BOTH probes has outlived the window and is the stale
+# signature. Machine-wide pipe quiescence is NOT a precondition.
+PIPES_A="$(pgrep -f 'zellij pipe' 2>/dev/null || true)"
+sleep 2
+PIPES_B="$(pgrep -f 'zellij pipe' 2>/dev/null || true)"
+ORPHANS="$(comm -12 <(sort <<<"$PIPES_A") <(sort <<<"$PIPES_B") | xargs)"
+if [[ -n "$ORPHANS" ]]; then
+  measure "stale pipe forensics (pgrep -fl)" "$(pgrep -fl 'zellij pipe' 2>/dev/null || true)"
+fi
+check "orphan 'zellij pipe' processes (pid in both probes, 2s apart)" "$ORPHANS" ""
 
 # ===========================================================================
 # Phase 1 — baseline join

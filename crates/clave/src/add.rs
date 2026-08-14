@@ -769,11 +769,14 @@ pub fn run_add(worktree: bool) -> Result<()> {
     // "clave" session (§6.8), so the field path names the session it is
     // already inside.
     let session = crate::env::session_name();
+    // Fail closed like open.rs does: an empty dump under-reports live agents
+    // in `live_uuid_union`, and a live agent misread as dormant turns a
+    // resume pick into a second tab instead of a jump.
     let dump = cmd_stdout(
         &zellij,
         &["--session", session.as_str(), "action", "dump-layout"],
     )
-    .unwrap_or_default();
+    .with_context(|| format!("zellij dump-layout for session {session}"))?;
     let paths = store_paths()?;
     let store = crate::store::read_store(&paths)?;
     let live = live_uuid_union(&store, &dump);

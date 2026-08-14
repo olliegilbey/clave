@@ -9,10 +9,13 @@ a broadcast; it is named by the last `clave-visited` **beacon**). Vocabulary
 [UBIQUITOUS_LANGUAGE.md](../../../../UBIQUITOUS_LANGUAGE.md). Two standing
 facts govern every item: **every non-tty `zellij pipe` also delivers one empty
 "EOF-twin" message per live instance**, logged as `clave-bar: dropped <name>
-pipe with empty payload` — those lines are the ONLY proof of broadcast
-delivery (payload arrivals log nothing) and appear once per live instance per
-delivery, in health as well as sickness; and each CLI pipe blocks the zellij
-server router ~1s. Conventions below: `ZLOG="${TMPDIR%/}/zellij-$(id
+pipe with empty payload` — those lines are the only *log trace* of a broadcast
+(payload arrivals log nothing) but they are corroborating telemetry, never
+delivery proof: the log is user-global and a twin is unattributable to a
+session, so delivery is always gated on the payload's own observable (the
+store bind, the focus change — see P8's drive assertion). They appear once per
+live instance per delivery, in health as well as sickness; and each CLI pipe
+blocks the zellij server router ~1s. Conventions below: `ZLOG="${TMPDIR%/}/zellij-$(id
 -u)/zellij-log/zellij.log"` (shared machine-wide — mark the line count before
 driving, read only the appended tail); store probes go through `clave dev
 status | jq '.store'`; every zellij touch goes through `scripts/ct.sh`
@@ -24,7 +27,7 @@ status | jq '.store'`; every zellij touch goes through `scripts/ct.sh`
 **Reproduce:** 1. `just sandbox` + human launches a 2-agent scenario. 2. Nav onto tab 2 (`scripts/ct.sh pipe --name clave-nav -- '{"dir":"next"}'` or human `Alt+j`). 3. `scripts/ct.sh close-tab` (the focused, beacon-named tab). 4. Send one more nav pipe.
 **Healthy:** the press after the close moves focus — exactly one focus change. Tier-3 pass recorded 2026-08-11 on build `e646049`.
 **Broken:** NO focus change AND no `clave-nav` log line at all. EOF-twin drop lines still appear — they are a control present in health, never the evidence (this cost a day of misdiagnosis as "pipe starvation").
-**Drive assertion:** record the `focus=true` tab from `scripts/ct.sh dump-layout` (structure is trustworthy; width is not), send one nav pipe, re-dump within 3s → the focused tab changed. Twin delta for the pipe == live instance count.
+**Drive assertion:** record the `focus=true` tab from `scripts/ct.sh dump-layout` (structure is trustworthy; width is not), send one nav pipe, re-dump within 3s → the focused tab changed (that focus change is the gate). Record the twin delta for forensics only — the log is user-global and never a gate (P8).
 **Guard today:** model-side election — `nav_executor` answers the replicated beacon alone (`crates/clave-bar/src/model.rs:1752`), refused re-anchors persist as `reanchor_owed` debt (`model.rs:538`, paid at `model.rs:1407-1416`); tests `a_beaconless_focus_change_never_leaves_two_nav_executors`, `a_new_tabs_birth_beacon_elects_no_executor_among_starved_bars`.
 **Refs:** #162 (PR #171); FOOTGUNS.md "Nav is dead in the whole session…"; SUBSYSTEM-VALIDATION.md C5, 2026-08-11 findings; QA-DRIVE phase 4.
 
@@ -64,7 +67,7 @@ status | jq '.store'`; every zellij touch goes through `scripts/ct.sh`
 **Reproduce:** (pre-fix build) press `Alt+o` with several tabs open; measure keyboard latency.
 **Healthy:** exactly one announce per gesture — twin delta after one `Alt+o` == 1 pipe × live instances; residual ~1s single-pipe floor (#141).
 **Broken:** one `zellij pipe` subprocess per bar; measured ~2s frozen keyboard per press (2026-08-02).
-**Drive assertion:** after one organic gesture (human), count `dropped clave-visited pipe with empty payload` appended to `$ZLOG`: delta must equal live-instance count exactly, not N×instances. Freeze feel stays HUMAN.
+**Drive assertion:** after one organic gesture (human), record the `dropped clave-visited pipe with empty payload` delta appended to `$ZLOG` for forensics — healthy reads 1×live instances, fan-out's tell is N×instances, but the user-global log makes the delta a hint, never a gate (P8). Freeze feel stays HUMAN.
 **Guard today:** gate at EMIT, in the model — the announce fires from `apply_tabs` only on the birth/organic branches, one emitting instance, trigger consumed only on the emitting branch (`crates/clave-bar/src/model.rs:1244-1270`).
 **Refs:** FOOTGUNS.md "Each of those 1s CliPipe timeouts BLOCKS the server router"; PR #128 round 3; #141.
 
@@ -84,7 +87,7 @@ status | jq '.store'`; every zellij touch goes through `scripts/ct.sh`
 **Reproduce:** Repro unknown — detection only: `pgrep -fl 'zellij pipe'` — any client older than seconds is the signature (found 2026-08-04 at 3155 CPU-minutes, spinning against the maintainer's fleet); `$ZLOG` shows `unknown message` storms + 1s `CliPipe` stalls.
 **Healthy:** no `zellij pipe` process outlives its ~1s window; a laggy fleet warrants this `ps` check before any deeper debugging.
 **Broken:** an orphaned `zellij pipe --name clave-status` at full core for days, hammering the router.
-**Drive assertion:** QA-DRIVE phase 0 preflight: `pgrep -f 'zellij pipe'` returns nothing (and print the output — empty must be the measured word, not silence).
+**Drive assertion:** QA-DRIVE phase 0 preflight probes `pgrep -f 'zellij pipe'` twice ~2s apart and fails only on a pid present in both probes — a healthy in-flight client from any session lives inside its ~1s window and matches at most once, so machine-wide pipe quiescence is not a precondition. On a persistent pid, print the `pgrep -fl` line for forensics; empty must be the measured word, not silence.
 **Guard today:** nothing — `push_snapshot` spawns without waiting and without a bound (`crates/clave/src/hook.rs:565-582`); the preflight is the only detector.
 **Refs:** #140; FOOTGUNS.md "A `clave-status` hook push can spin FOREVER".
 
