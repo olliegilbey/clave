@@ -207,7 +207,7 @@ adversarial reviewer.
 | status | `●` | U+25CF | Idle · Working · NeedsYou · Done — the **colour** is the state (`Status::glyph`, `clave-types`) |
 | status | `✖` | U+2716 | `Status::Failed`. Note U+2716 **heavy** multiplication x — not U+2717 |
 | status | `✗` | U+2717 | the **stale** row flag, set when `clave open` finds the cwd missing. A flag, not a `Status` — see `BarModel::rows` |
-| status | `◌` | U+25CC | a dormant row |
+| status | `○` | U+25CB | a dormant row — hollow, not dotted, since #144 (was U+25CC `◌`) |
 | status | `↻` | U+21BB | an open in flight (`opening`) |
 | rule | `│` | U+2502 | new — separates the status hue from the battery hue |
 | battery | nf-md-battery ramp | U+F0079, U+F0082…U+F007A, U+F008E | S7 (#62). **Eleven** fill steps, not five: `md-battery` full, `md-battery_90`…`md-battery_10` descending (note they run BACKWARDS through the codepoints), then `md-battery_outline` empty. Verified by parsing the installed patched font's glyph-name table, not assumed |
