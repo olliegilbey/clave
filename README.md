@@ -123,8 +123,9 @@ belong to Zellij ([#24](../../issues/24)). `Alt+f` is the one stock key clave
 takes over rather than unbinds: Zellij's own `Alt+f` toggles floating panes and
 so opens the first one at a size nothing chose, tiny enough to need resizing
 every time. Clave's replacement opens your shell at a fixed, workable size
-([#188](../../issues/188)) — Zellij's toggle is still there under every mode
-other than the default one.
+([#188](../../issues/188)) — four-fifths of the room to the right of the bar,
+starting flush against the bar's edge. Zellij's toggle is still there under
+every mode other than the default one.
 
 ## How it works
 
