@@ -2,6 +2,7 @@
 //! tab. The INTERACTIVE weave (fzf) lives in run_add; everything decidable
 //! is a pure function above it so it can be unit-tested.
 
+use std::collections::BTreeSet;
 use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -95,6 +96,35 @@ pub fn live_uuid_union(store: &Store, dump_layout: &str) -> Vec<String> {
         }
     }
     live
+}
+
+/// The rows `clave prune` (#149) must never retire: the ones the RUNNING
+/// zellij session is actually hosting, per its layout dump.
+///
+/// Deliberately NOT [`live_uuid_union`], and the difference is the whole
+/// point: binds are session-scoped and cleared only at the NEXT launch, so
+/// between a kill and a relaunch every row still carries its dead session's
+/// `tab_id` and a bind-based guard would make the entire fleet unprunable
+/// (#150 review). Only presence in the live dump protects.
+///
+/// The `live_session` leg is the same #99 translation [`live_uuid_union`]
+/// does, for the same reason and it is load-bearing here in a harsher way: a
+/// pane whose conversation rotated runs `claude --resume <live-id>`, so the
+/// dump names the CONVERSATION and not the row. Matched on the minted uuid
+/// alone, a rotated agent sitting open in a tab is invisible to this — and an
+/// invisible row is an unprotected one, so `clave prune` deletes the sidebar
+/// row of an agent the user is looking at.
+pub fn protected_from_dump(store: &Store, dump_layout: &str) -> BTreeSet<String> {
+    let live = live_uuids(dump_layout);
+    store
+        .agents
+        .values()
+        .filter(|r| {
+            live.iter()
+                .any(|u| *u == r.uuid || Some(u.as_str()) == r.live_session.as_deref())
+        })
+        .map(|r| r.uuid.clone())
+        .collect()
 }
 
 /// Labels get interpolated into KDL string literals and fzf menu lines —
@@ -1176,6 +1206,65 @@ mod tests {
             live_uuid_union(&s, dump),
             vec!["minted".to_string(), "stranger".to_string()]
         );
+    }
+
+    /// `clave prune` retires idle rows, and the only thing standing between it
+    /// and a row the user is looking at is this predicate. Two ways it goes
+    /// wrong, and both delete a live agent's sidebar row:
+    ///
+    /// - a pane whose conversation ROTATED (`/clear`) is resurrected as
+    ///   `claude --resume <live-id>`, so the dump names the conversation and
+    ///   not the row — matched on the minted uuid alone it protects nothing;
+    /// - a row bound to a tab of a session that is no longer running must NOT
+    ///   be protected, or the fleet becomes unprunable forever (#150 review).
+    ///
+    /// This lived as a closure inside `main.rs` until the 2026-08-14 mutation
+    /// sweep, where `main` could be replaced wholesale with `Ok(())` and every
+    /// operator inside the closure flipped, all green — `main.rs` has no test
+    /// harness beyond its argument-parsing pins. Moved beside its
+    /// `live_uuid_union` sibling, which carries the same translation.
+    #[test]
+    fn the_idle_pruner_protects_a_rotated_pane_and_only_the_running_session() {
+        let mut s = Store::default();
+        // Open in a tab, conversation rotated: the dump names "rotated".
+        let mut spun = rec("u-rotated");
+        spun.live_session = Some("rotated".into());
+        s.agents.insert("u-rotated".into(), spun);
+        // Open in a tab under its own minted id.
+        s.agents.insert("u-plain".into(), rec("u-plain"));
+        // Bound — but to a tab of a session that has since been killed, so it
+        // is absent from the dump. Prunable.
+        let mut ghost = rec("u-deadbind");
+        ghost.tab_id = Some(4);
+        s.agents.insert("u-deadbind".into(), ghost);
+        let dump = r#"
+            layout {
+                tab name="a" {
+                    pane command="claude" {
+                        args "--resume" "rotated"
+                    }
+                }
+                tab name="b" {
+                    pane command="claude" {
+                        args "--session-id" "u-plain"
+                    }
+                }
+            }
+        "#;
+        let protected = protected_from_dump(&s, dump);
+        assert!(
+            protected.contains("u-rotated"),
+            "a rotated pane must be protected under its ROW's uuid, not the \
+             conversation id the dump names"
+        );
+        assert!(protected.contains("u-plain"));
+        assert!(
+            !protected.contains("u-deadbind"),
+            "a bind from a session that is not running protects nothing"
+        );
+        // An empty dump protects nothing at all — the caller reads a failed
+        // `dump-layout` as "no session", and that is the same shape.
+        assert!(protected_from_dump(&s, "layout { tab { pane } }").is_empty());
     }
 
     /// Task 7b′, the bug this fixed: a dwell-opened tab and a template-born
