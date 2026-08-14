@@ -25,6 +25,10 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CT="$SCRIPT_DIR/ct.sh"
+# Sandbox derivation is cwd-keyed (sandbox.rs): run from THIS checkout's
+# root so `dev instance` resolves THIS worktree's sandbox even when the
+# script is invoked by absolute path from some other directory.
+cd "$ROOT" || exit 1
 CLAVE_BIN="${CLAVE_BIN:-$ROOT/target/release/clave}"
 
 usage() {
@@ -604,8 +608,10 @@ LANDED=0
 # thereafter — each CONFIRMED bind below (create or wake) is exactly one
 # more live-block row — rather than re-deriving it via a row-count query
 # every rung (BLOCKER 2 finding 2).
-LIVE_START="$(count_live_tabs)" || LIVE_START=0
-[[ "$LIVE_START" =~ ^[0-9]+$ ]] || LIVE_START=0
+LIVE_START="$(count_live_tabs)"
+LIVE_RC=$?
+check "ct.sh list-panes -t -c -j (phase-2 baseline live-tab count)" \
+  "$([[ $LIVE_RC -eq 0 && "$LIVE_START" =~ ^[0-9]+$ ]] && echo ok || echo failed)" "ok"
 
 # ---------------------------------------------------------------------------
 # Rung 1 — the scripted CREATE leg (MAJOR 5): `clave add`'s CLI path. The
@@ -637,11 +643,10 @@ head -n1
 EOS
 chmod +x "$FZF_STUB"
 
-# `add.rs`'s own `zellij action new-tab` call is NOT session-scoped the way
-# open.rs's calls are (open.rs pins `ZELLIJ_SESSION_NAME` on every zellij
-# invocation it makes, §6.9; `clave add` inherits whatever the caller's
-# shell already has) — so this script has to close that gap itself, the
-# same belt-and-braces discipline ct.sh applies to every zellij touch
+# `clave add` is session-hard since #183 (33e27fc): every internal zellij
+# leg — dump-layout, pipe, new-tab — names `--session` explicitly and a
+# dead named session exits 1. The env pinning below is the SECOND layer,
+# the same belt-and-braces discipline ct.sh applies to every zellij touch
 # (AGENTS.md: never even a read against the maintainer's session).
 PRECREATE_LIVE="$(jq -r '.session_live // false' <<<"$(dev_status)" 2>/dev/null)"
 check "session live immediately before scripted-create" "$PRECREATE_LIVE" "true"
