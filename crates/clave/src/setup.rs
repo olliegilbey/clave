@@ -272,6 +272,31 @@ fn template_name(collapsed: bool) -> &'static str {
     }
 }
 
+/// TEST-ONLY: the percent of the bar pane a tab is actually BORN with.
+///
+/// Since #181 every generated layout carries THREE bar panes — the two swap
+/// templates plus the node the tab is born from — so reading the first
+/// `size="N%"` in the file reads a swap template and answers the same number
+/// whatever the tab was born with. Two width tests were silently emptied that
+/// way (#181 review): one asserted `contains("32%")` on a file that contains
+/// both percentages, the other read the first percent and compared it with
+/// itself. `node` names the node the birth pane lives under —
+/// `default_tab_template` for the session and launch layouts, `tab name=` for
+/// the one-shot layout `clave add` writes, which has no template.
+#[cfg(test)]
+pub(crate) fn birth_pct(kdl: &str, node: &str) -> String {
+    let after = kdl
+        .split_once(node)
+        .unwrap_or_else(|| panic!("no `{node}` node:\n{kdl}"))
+        .1;
+    after
+        .split_once("size=\"")
+        .and_then(|(_, s)| s.split_once('%'))
+        .unwrap_or_else(|| panic!("no percent-sized bar pane under `{node}`:\n{kdl}"))
+        .0
+        .to_string()
+}
+
 /// The session layout: EVERY tab gets the bar via default_tab_template
 /// (§6.8). Task 9 checkpoint C6 validates the template survives real use;
 /// fallback = per-tab panes + a new-tab keybind with an explicit layout.
@@ -1015,14 +1040,20 @@ mod tests {
     /// `cargo test` — no TTY — and fails from Ollie's interactive zellij shell,
     /// where 142 columns emits 38% and not `BAR_BIRTH_PERCENT`. The
     /// parameterised form exists precisely so the gate is width-independent.
+    ///
+    /// **Read through `birth_pct`, never `contains`** (#181 review): the file now
+    /// holds all three percentages — both swap templates and the birth pane — so
+    /// a substring assertion is satisfied by a geometry the tab is not born in,
+    /// and the collapsed half of this test could not fail at all.
     #[test]
     fn the_launch_percent_is_derived_from_the_real_terminal_width() {
+        let born = |kdl: &str| birth_pct(kdl, "default_tab_template");
         // 54/280 = 19.29%, not expressible; 19% floors to 53, inside the band.
         let wide = launch_layout_kdl_for("clave", "/w.wasm", None, Some(280), false);
-        assert!(wide.contains("size=\"19%\""), "{wide}");
+        assert_eq!(born(&wide), "19", "{wide}");
         // 54/120 = 45% exactly.
         let narrow = launch_layout_kdl_for("clave", "/w.wasm", None, Some(120), false);
-        assert!(narrow.contains("size=\"45%\""), "{narrow}");
+        assert_eq!(born(&narrow), "45", "{narrow}");
         // The two must actually DIFFER, or the parameter is decorative — the
         // shape a single-width assertion cannot see.
         assert_ne!(
@@ -1030,24 +1061,45 @@ mod tests {
             "the display width did not reach the emitted layout"
         );
         // D36, found live: the collapse mode PERSISTS across a launch, so the
-        // birth must be computed against the target the bar will actually seek.
-        // On the 95-column window this was found on, the expanded computation
-        // put 57% of the terminal under the sidebar before it shrank away.
+        // bar must be BORN in the mode the fleet was left in. On the 95-column
+        // window this was found on, the expanded computation put 57% of the
+        // terminal under the sidebar before it shrank away.
         let expanded_95 = launch_layout_kdl_for("clave", "/w.wasm", None, Some(95), false);
         let collapsed_95 = launch_layout_kdl_for("clave", "/w.wasm", None, Some(95), true);
-        assert!(expanded_95.contains("size=\"57%\""), "{expanded_95}");
-        assert!(collapsed_95.contains("size=\"32%\""), "{collapsed_95}");
-        assert_ne!(
-            expanded_95, collapsed_95,
-            "the collapse mode did not reach the emitted layout"
-        );
+        assert_eq!(born(&expanded_95), "57", "{expanded_95}");
+        assert_eq!(born(&collapsed_95), "32", "{collapsed_95}");
 
         // No TTY (a script, CI): the 200-column fiction, still a valid layout.
         let headless = launch_layout_kdl_for("clave", "/w.wasm", None, None, false);
-        assert!(
-            headless.contains(&format!("size=\"{}%\"", clave_types::BAR_BIRTH_PERCENT)),
+        assert_eq!(
+            born(&headless),
+            clave_types::BAR_BIRTH_PERCENT.to_string(),
             "{headless}"
         );
+    }
+
+    /// The swap layouts are DECLARED in the order the tab's birth mode demands:
+    /// `next_swap_layout` is relative, so index 0 must be the geometry the tab
+    /// is NOT in or the first Alt+c re-applies the width it already has. The
+    /// percents alone cannot see this — both files carry both — so the order of
+    /// the two `swap_tiled_layout` names is what is pinned.
+    #[test]
+    fn a_fleet_left_collapsed_declares_the_expanded_geometry_first() {
+        let names = |kdl: &str| {
+            kdl.match_indices("swap_tiled_layout name=\"")
+                .map(|(i, m)| {
+                    kdl[i + m.len()..]
+                        .split_once('"')
+                        .expect("a quoted swap layout name")
+                        .0
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+        };
+        let expanded = launch_layout_kdl_for("clave", "/w.wasm", None, Some(280), false);
+        let collapsed = launch_layout_kdl_for("clave", "/w.wasm", None, Some(280), true);
+        assert_eq!(names(&expanded), ["clave_collapsed", "clave_expanded"]);
+        assert_eq!(names(&collapsed), ["clave_expanded", "clave_collapsed"]);
     }
 
     #[test]
