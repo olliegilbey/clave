@@ -429,7 +429,21 @@ if [[ -n "$EAGER_CMD" ]]; then
   check "eager resume targets live_session, not the minted uuid" \
     "$([[ "$EAGER_CMD" == *"--resume ${EAGER_LS}"* ]] && echo ok || echo "mismatch: $EAGER_CMD")" "ok"
 else
-  measure "eager resume identity" "unresolvable — no pane_command in tab $EAGER_TID names claude (deepest-child, unknown not mismatched)"
+  # Deepest-child fallback (#183 review round 2): the pane's command is a
+  # child, so read the process table instead. A machine-wide ps scan is
+  # user-global like zellij.log — but the NEEDLE here is a minted-per-drive
+  # uuid, globally unique, so a match IS attributable: only this sandbox's
+  # claude can carry `--resume <this uuid>` in its argv. A hit on the minted
+  # uuid is a proven rotation miss (fail-closed); a hit on live_session is a
+  # pass; neither resolvable stays a measure, unknown not mismatched.
+  if pgrep -f -- "--resume ${EAGER_UUID}" >/dev/null 2>&1; then
+    check "eager resume targets live_session, not the minted uuid (ps fallback)" \
+      "mismatch: a process resumes the minted uuid ${EAGER_UUID}" "ok"
+  elif pgrep -f -- "--resume ${EAGER_LS}" >/dev/null 2>&1; then
+    check "eager resume targets live_session, not the minted uuid (ps fallback)" "ok" "ok"
+  else
+    measure "eager resume identity" "unresolvable — no pane_command in tab $EAGER_TID names claude and no process resumes either uuid (deepest-child, unknown not mismatched)"
+  fi
 fi
 
 # Store <-> layout join, unresolvables MARKED, never filtered (TESTING.md,

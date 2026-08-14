@@ -873,7 +873,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
         // the right zellij.
         if candidates.iter().any(|c| c.uuid == uuid && c.live) {
             let payload = format!("{{\"uuid\":\"{uuid}\"}}");
-            let _ = Command::new(&zellij) // discovered above (Fix 2)
+            let status = Command::new(&zellij) // discovered above (Fix 2)
                 .args([
                     "--session",
                     &session,
@@ -883,7 +883,9 @@ pub fn run_add(worktree: bool) -> Result<()> {
                     "--",
                     &payload,
                 ])
-                .status();
+                .status()
+                .context("sending clave-nav pipe")?;
+            anyhow::ensure!(status.success(), "zellij pipe to {session} failed");
             return Ok(());
         }
         // Carry the picked candidate's OWN cwd/branch (2026-07-21): a
