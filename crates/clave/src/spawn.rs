@@ -366,6 +366,16 @@ pub fn register_pane(uuid: &str) {
     // status push re-carries the field, so a bar born after this write still
     // hydrates the mapping. Best-effort, exactly like the pipe below: a failed
     // persist costs the bind until the next snapshot, never the exec.
+    //
+    // SINCE #187 THAT COST IS SHARPER, and it is accepted deliberately. The bar
+    // now REPLACES its uuid→pane map from every snapshot it accepts rather than
+    // merging into it, because a merge has no removal path and a dead pane
+    // lingered in memory for the life of the plugin. So if this write fails
+    // while the broadcast below lands, the bar keeps the mapping only until its
+    // next snapshot and then drops it — the row waits for the next registration
+    // to bind, which is exactly the pre-#178 behaviour. The alternative is to
+    // make this write blocking or fatal, and it can be neither: it runs
+    // immediately before the exec into Claude.
     if let Err(e) =
         crate::store::store_paths().and_then(|p| crate::store::apply_register(&p, uuid, pane_id))
     {
