@@ -819,7 +819,7 @@ mod tests {
     /// has conversed" precisely so a store it cannot read never licenses a
     /// fresh session that shadows a real one (#139/#143).
     ///
-    /// Found by `cargo mutants` 2026-08-14: widening the `NotFound` guard to
+    /// Found by `cargo mutants` 2026-08-15: widening the `NotFound` guard to
     /// `true` — i.e. every read error defaults — left the suite green.
     /// The witness is a DIRECTORY at the data path, which is an ordinary
     /// `Err` from `fs::read` on both CI platforms and needs no permission
@@ -896,7 +896,7 @@ mod tests {
     /// rewrites `cwd` — if this silently did nothing the row would keep the
     /// dead path forever, and the next open would land on a directory that is
     /// no longer there: the ✗ stale branch, for a session that is perfectly
-    /// alive. Found by `cargo mutants` 2026-08-14, which replaced the whole
+    /// alive. Found by `cargo mutants` 2026-08-15, which replaced the whole
     /// body with `Ok(None)` and the suite stayed green.
     ///
     /// Contract, same shape as its `apply_*` neighbours: `branch` is optional
@@ -1134,7 +1134,7 @@ mod tests {
         // `apply_snapshot`'s `seq <= self.seq` gate discards it — and the bar
         // re-derives the same stale set from the next TabUpdate and fires
         // another `clave prune-tabs`, forever, while the dead agent keeps
-        // rendering live. (cargo mutants 2026-08-14: `seq += 1` → `seq *= 1`
+        // rendering live. (cargo mutants 2026-08-15: `seq += 1` → `seq *= 1`
         // survived; the change-gating below was pinned, the bump was not.)
         // `before` is 2 here, not 0, so this witness tells `+= 1` apart from
         // BOTH the no-op forms a mutation swaps in (`*= 1`, and a bump the

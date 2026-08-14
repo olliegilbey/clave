@@ -2821,7 +2821,7 @@ mod tests {
         // Working row reads Working either way. Inverted, every push while an
         // agent sits finished re-lights it green, and "green" stops meaning
         // "there is something here you have not seen". (cargo mutants
-        // 2026-08-14: `status != Done` → `==` survived on the Working
+        // 2026-08-15: `status != Done` → `==` survived on the Working
         // assertion alone.)
         m.apply_snapshot(snap(2, vec![agent("u1", Status::Done, Some(10))]));
         assert_eq!(
@@ -5750,7 +5750,7 @@ mod tests {
     /// the ↻ vanish, presses again, and gets a SECOND `clave open` for a
     /// session already launching: the double-attach this guard exists to stop.
     ///
-    /// (cargo mutants 2026-08-14 found two ways to that: dropping the `!` so
+    /// (cargo mutants 2026-08-15 found two ways to that: dropping the `!` so
     /// a still-dormant row clears the mark, and flipping the row lookup so the
     /// verdict is read off whichever OTHER agent happens to come first — which
     /// is why a second, live agent is in the snapshot below.)

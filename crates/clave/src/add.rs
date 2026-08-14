@@ -1218,7 +1218,7 @@ mod tests {
     /// - a row bound to a tab of a session that is no longer running must NOT
     ///   be protected, or the fleet becomes unprunable forever (#150 review).
     ///
-    /// This lived as a closure inside `main.rs` until the 2026-08-14 mutation
+    /// This lived as a closure inside `main.rs` until the 2026-08-15 mutation
     /// sweep, where `main` could be replaced wholesale with `Ok(())` and every
     /// operator inside the closure flipped, all green — `main.rs` has no test
     /// harness beyond its argument-parsing pins. Moved beside its
@@ -1397,7 +1397,7 @@ mod tests {
         // tab rides every later snapshot as "this row announced a pane" while
         // no bar can see it — the permanent false stall #178 is hunting, and a
         // uuid-directed jump chases a pane that no longer exists. (cargo
-        // mutants 2026-08-14: deleting `pane_id: None` from the merge survived
+        // mutants 2026-08-15: deleting `pane_id: None` from the merge survived
         // while its `tab_id` twin one line above was pinned.)
         assert_eq!(merged.pane_id, None);
         assert_eq!(merged.cwd, row.cwd); // worktree cwd NOT relocated

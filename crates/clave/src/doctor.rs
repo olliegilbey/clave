@@ -980,7 +980,7 @@ mod tests {
         // gated on BOTH lists being empty; loosened to either, a config with
         // duplicates prints "hooks merged (1 entry per event)" directly beside
         // the problem saying they are not, and a reader who believes the tick
-        // stops reading. (cargo mutants 2026-08-14: `&&` → `||` survived.)
+        // stops reading. (cargo mutants 2026-08-15: `&&` → `||` survived.)
         assert!(
             !f.iter().any(|x| x.label.contains("hooks merged")),
             "no green tick beside the hook problem it contradicts"
@@ -1009,7 +1009,7 @@ mod tests {
         // the version string: `0.1.0` also appears in the tool-version
         // findings, so "some Ok finding mentions 0.1.0" was satisfied whether
         // the skew arm reported Ok, reported a warning, or reported nothing at
-        // all. (cargo mutants 2026-08-14: widening the guard to `>=`, forcing
+        // all. (cargo mutants 2026-08-15: widening the guard to `>=`, forcing
         // it to `true`, and deleting the Ok arm outright all survived here.)
         let level = diagnose(&facts);
         let rel = level
