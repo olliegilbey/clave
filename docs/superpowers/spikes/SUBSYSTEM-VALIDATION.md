@@ -666,6 +666,50 @@ echoes back as clave-visited on every instance anyway, so arming peeks
 ONLY on the pipe path means a peek can never exist without its sink
 timer. Expanded bars ignore peeks.
 
+**Round 22 (2026-08-14, #181 — the seek is DELETED and round 19's verdict is
+scoped, not overturned).** The runaway that closed the 0.1.3 release was
+measured parked at 141 columns and at 11 — both directions — and the cause is
+not a bug in the seek's arithmetic. Zellij resizes in increments of ~5% of the
+display that the API will not disclose, so the reachable widths are a lattice an
+exact column target is frequently not on (LEDGER D34: 47 against a target of 54
+at 280 columns, permanently). Feedback was the plugin's own renders, which
+zellij does not send for a resize it refuses. And a runaway terminates with its
+budget spent, which is an accepted end state, so it passed every convergence
+assertion the suite had.
+
+What ships instead: both geometries are declared as `swap_tiled_layout` nodes in
+every generated layout, and a mode change is one `next_swap_layout()` call.
+DELETED: the step learner, the learned polarity, the drift-confirmation gates,
+the storm brake, the acceptance band, the rest anchoring, `resize_pane_with_id`
+entirely, and the convergence simulation harness with its property tests —
+roughly 1,750 lines net.
+
+**Round 19's "dead on arrival" verdict stands for the mechanism it tested and
+not for this one.** Round 19 relied on zellij IMPLICITLY relayouting after an
+unsuppress, which `set_is_tiled_damaged()` blocks; `resize_pane_with_id` is
+itself a damage-setter, so the seek was damaging the very thing the swap layout
+needed. This design suppresses nothing and resizes nothing, and the EXPLICIT
+`next_swap_layout` is not damage-gated at all. Round 19's record is what shelved
+this for three weeks (LEDGER D22 flagged the over-reach at the time); it is now
+scoped in FOOTGUNS to the implicit path.
+
+Three parser facts, all proved through zellij's real `Layout::from_str` rather
+than assumed, and each of which would have cost a round: a bare `tab` inside a
+`swap_tiled_layout` is expanded through `default_tab_template` and yields a
+double bar, so the geometries are named `tab_template`s referenced by name; two
+unconstrained entries in ONE `swap_tiled_layout` collide in a
+`BTreeMap<LayoutConstraint, _>`, so alternatives are separate nodes; and
+`next_swap_layout` is relative with the first call landing on index 0, so the
+geometry the tab was NOT born in is declared first.
+
+**Verdict:** _gates green, 28/28 mutants caught in the changed code — but NOT
+live-validated. `zellij-server` is not vendored, so two behaviours are
+unverifiable from source and are the first things to watch: whether the swap
+relayout re-uses the running plugin pane rather than starting a second one, and
+whether a plugin's switch applies to its own tab. Sandbox staging was blocked on
+the machine's commit-signing gate, and launching a session is the maintainer's
+in any case._
+
 ## C7 — dump-layout liveness + resume picker
 - With one agent live: `zellij action dump-layout | grep -A2 clave` — baked
   `args "spawn" "<uuid>" …` present, on its own line.

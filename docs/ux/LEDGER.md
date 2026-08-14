@@ -508,6 +508,70 @@ resting-width costs become dead paths:
   ever catch it. Needs a display area around 400 columns; Ollie runs ~280, so it
   is out of reach today. **Not out of reach forever.**
 
+### D39 — The width seek is DELETED. Both widths are declared, and zellij switches between them (2026-08-14)
+
+**This retires D20, D21, D26, D34, D35 and most of D37, and it takes D22 off the
+shelf.** Everything those entries argue about — the learnable step, the
+acceptance band, the lattice, the birth anchor, the polarity — was in service of
+hitting an exact column count through an API that cannot express one. There is
+no longer a column count to hit.
+
+Ollie's call, and the brief verbatim: *"I really don't know why we fight with the
+sidebar sizing so much. Why it can't just be a set percentage width of the
+window, and toggles between two set percentages — with the text of the tabs
+changing when it does. The whole healing thing and trying to lock on the exact
+column width seems overkill."* And, on the mechanism: *"layout kdl files, don't
+they have percentage widths for panes? Can't we use those? Which yeah, sounds
+like the two layouts and swapping between them — wouldn't that be cleaner and
+trivial?"*
+
+**What ships.** Every generated layout declares both geometries as
+`swap_tiled_layout` nodes, `clave_expanded` and `clave_collapsed`, each a
+percent-sized bar pane. Alt+c, the store's authoritative heal and both edges of
+peek-on-nav all do one thing: `next_swap_layout()`. Zellij resolves the percent
+against the real window and applies it in a single relayout.
+
+**Why D22's recorded objection dissolves.** D22 shelved this because
+SUBSYSTEM-VALIDATION round 19 recorded swap layouts as dead on arrival — the
+tab's damage flag blocks the IMPLICIT relayout, and `resize_pane_with_id` is
+itself a damage-setter. This design issues no resizes at all, so nothing damages
+the layout, and the EXPLICIT switch is not damage-gated in the first place.
+
+**Three things that are load-bearing and are not obvious.**
+
+1. **Named `tab_template`s, not bare `tab` nodes.** With a `default_tab_template`
+   present, zellij expands every bare `tab` inside a `swap_tiled_layout` THROUGH
+   it (`kdl_layout_parser.rs:1906-1920`), stapling the template's bar pane on top
+   of the swap layout's own — a double bar at neither geometry. A node named
+   after a `tab_template` takes the other branch (`:1926-1938`) and is used
+   verbatim. Proved through zellij's real parser, not assumed.
+2. **Declaration order.** `next_swap_layout` is relative and the plugin API has
+   no absolute form, so the first call on a tab lands on index 0. Index 0 is
+   therefore the geometry the tab was NOT born in, and the first Alt+c of a
+   session moves the pane instead of re-applying the width it already has.
+3. **The switch is checked on DIRECTION, never on a column count.** The
+   geometries are percentages, so both shrink with the window: an expanded bar on
+   a halved window is genuinely narrower than 30, and a check against the two
+   design widths would declare it collapsed and switch it. One correction is
+   allowed per change, and outside that single render the model emits nothing at
+   all.
+
+**What is given up, both accepted in conversation.** Peek-on-nav is a layout
+switch rather than a nudge. And the bar is a whole percent of the window, so on a
+display where the target is not expressible as one (280 columns: 54 is 19.29%) it
+lands a column either side and stays there. Nothing corrects that any more, which
+is the point — `render_rows`' clip (D31) already lays the rows out against the
+columns zellij actually gave it.
+
+**Still owed: one live run.** The mechanism is traced end to end through the
+vendored parser and the plugin shim, and `next_swap_layout()` exists at
+`zellij-tile-0.44.3/src/shim.rs:1329`. But `zellij-server` is not vendored, so
+two things are unverifiable from source and must be watched on the first real
+session: whether the swap relayout re-uses the running plugin pane rather than
+starting a second one, and whether a plugin's switch applies to its own tab.
+D22's warning stands until then — this subsystem has a twenty-round history of
+paths that read correctly and behaved otherwise.
+
 ### D38 — The battery cell's width belongs to the profile, not the gutter (2026-08-11)
 
 Ollie's design call of 2026-07-31, built at #105: in the expanded view the
