@@ -976,6 +976,15 @@ mod tests {
         let dup = f.iter().find(|x| x.label.contains("duplicate")).unwrap();
         assert_eq!(dup.severity, Severity::Problem);
         assert!(dup.advice.iter().any(|l| l.contains("double-fire")));
+        // …and doctor must not tick the same line it just failed. The Ok is
+        // gated on BOTH lists being empty; loosened to either, a config with
+        // duplicates prints "hooks merged (1 entry per event)" directly beside
+        // the problem saying they are not, and a reader who believes the tick
+        // stops reading. (cargo mutants 2026-08-14: `&&` → `||` survived.)
+        assert!(
+            !f.iter().any(|x| x.label.contains("hooks merged")),
+            "no green tick beside the hook problem it contradicts"
+        );
     }
 
     #[test]
@@ -995,11 +1004,23 @@ mod tests {
         assert!(!diagnose(&facts).iter().any(|x| x.label.contains("release")));
         facts.bin_dir_exists = true;
         facts.installed_releases = vec!["0.1.0".into()];
-        // current == newest → Ok mention.
+        // current == newest → Ok mention, and NO skew warning. Both halves are
+        // asserted, and the label is matched on its own words rather than on
+        // the version string: `0.1.0` also appears in the tool-version
+        // findings, so "some Ok finding mentions 0.1.0" was satisfied whether
+        // the skew arm reported Ok, reported a warning, or reported nothing at
+        // all. (cargo mutants 2026-08-14: widening the guard to `>=`, forcing
+        // it to `true`, and deleting the Ok arm outright all survived here.)
+        let level = diagnose(&facts);
+        let rel = level
+            .iter()
+            .find(|x| x.label.contains("stable release installed"))
+            .expect("an exactly-current binary reports its release as Ok");
+        assert_eq!(rel.severity, Severity::Ok);
+        assert!(rel.label.contains("0.1.0"));
         assert!(
-            diagnose(&facts)
-                .iter()
-                .any(|x| x.severity == Severity::Ok && x.label.contains("0.1.0"))
+            !level.iter().any(|x| x.label.contains("ahead")),
+            "a binary level with the newest release is not ahead of it"
         );
         facts.version_line = "0.2.0 (dev)".into();
         let f = diagnose(&facts);
