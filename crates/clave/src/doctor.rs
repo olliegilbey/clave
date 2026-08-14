@@ -1011,16 +1011,16 @@ mod tests {
         // the skew arm reported Ok, reported a warning, or reported nothing at
         // all. (cargo mutants 2026-08-15: widening the guard to `>=`, forcing
         // it to `true`, and deleting the Ok arm outright all survived here.)
-        let level = diagnose(&facts);
-        let rel = level
+        let findings = diagnose(&facts);
+        let rel = findings
             .iter()
             .find(|x| x.label.contains("stable release installed"))
             .expect("an exactly-current binary reports its release as Ok");
         assert_eq!(rel.severity, Severity::Ok);
         assert!(rel.label.contains("0.1.0"));
         assert!(
-            !level.iter().any(|x| x.label.contains("ahead")),
-            "a binary level with the newest release is not ahead of it"
+            !findings.iter().any(|x| x.label.contains("ahead")),
+            "a binary at the newest installed version is not ahead of it"
         );
         facts.version_line = "0.2.0 (dev)".into();
         let f = diagnose(&facts);
