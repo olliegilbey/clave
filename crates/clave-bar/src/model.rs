@@ -3787,6 +3787,36 @@ mod tests {
         assert_eq!(m.width_effects(30), Vec::<Effect>::new());
     }
 
+    /// The same correction, in the EXPAND direction — the case independent
+    /// mutation testing found untested (#181 review, finding 3). Every other
+    /// width test drives the collapse side, so the expand half of the direction
+    /// check could be replaced by "always landed" and the suite stayed green.
+    ///
+    /// It is the half that corrupts the display: a bar that accepts an expansion
+    /// which never happened starts drawing the wide profile into a narrow pane,
+    /// and the rows stay clipped until the next keypress repaints.
+    #[test]
+    fn an_expansion_the_pane_ignored_is_corrected_too() {
+        let mut m = collapsed_model();
+        assert_eq!(m.width_effects(54), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(30),
+            Vec::<Effect>::new(),
+            "landed collapsed"
+        );
+        m.toggle(); // collapsed -> expanded
+        assert_eq!(m.width_effects(30), vec![Effect::SwapWidth]);
+        // The pane did not move at all. Unmoved is not expanded, so one
+        // correction is spent — an equality that read as success here would
+        // leave the wide profile rendering into a 30-column pane.
+        assert_eq!(m.width_effects(30), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(54),
+            Vec::<Effect>::new(),
+            "correction landed"
+        );
+    }
+
     /// The bound, which is what makes this not a seek. A layout that refuses to
     /// move at all costs two calls and then silence — where the old machine
     /// spent a budget, learned a polarity from the refusal and could re-arm.
