@@ -799,11 +799,16 @@ Each step exists because skipping it produces a confident, wrong result.
 **Never discard the drive's output — and the output is not the delivery
 evidence.** `>/dev/null 2>&1` on a drive loop hides the wrapper refusals, which
 are the only thing the client ever prints — a delivered pipe prints nothing.
-Delivery is proved separately, by the plugin's EOF-twin drop lines in
-`zellij.log` (payload arrivals do not log; the twins do). So a dead or bouncing
-drive with discarded output reads as green: keep the output visible for
-refusals, and corroborate the twins in the log after every phase, not once at
-the end. Both rules were violated on the #148 drive (2026-08-11) — the screen's
+Delivery has to be read somewhere else: from the payload's own effect — the
+store bind the drive already polls — because payload arrivals do not log at all.
+The plugin's EOF-twin drop lines in `zellij.log` corroborate, and never more
+than that: they are empty-payload control drops with no session identity in a
+user-global log, so a dark maintainer fleet reduces the interference without
+ever conferring attribution (FOOTGUNS "The zellij log is USER-GLOBAL"). So a
+dead or bouncing drive with discarded output reads as green: keep the output
+visible for refusals, and record the twin delta after every phase, not once at
+the end — as forensics, never as the pass.
+Both rules were violated on the #148 drive (2026-08-11) — the screen's
 owner saw "nothing moved at all"; the script said done.
 
 **The join is not as easy as it looks.** `list-panes -t -j` reports a pane's
@@ -812,6 +817,13 @@ owner saw "nothing moved at all"; the script said done.
 visible are joinable; the rest are unknown, not mismatched. Reading them as
 mismatches invents a bug, and filtering them out silently hides one — print
 every pane and mark the unresolvable ones.
+
+**QA-DRIVE.md and `scripts/qa-drive.sh` are this loop's phases 0–2, scripted.**
+After the human stages and launches, the script proves the build, joins the
+baseline, and drives the bind ladder in one traced run, with the same
+never-discard-output discipline as above. The manual steps here remain the
+fallback, and are still the source for phases 3–7, which are not yet
+scripted.
 
 ## Agent-side sanctioned commands
 

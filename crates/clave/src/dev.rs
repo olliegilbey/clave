@@ -22,6 +22,13 @@ pub struct ScenarioAgent {
     /// c8-stale: delete the agent's cwd AFTER seeding its jsonl, so the
     /// row's dwell-open hits the §6.3 staleness branch.
     pub delete_cwd_after: bool,
+    /// #182 (qa-fleet): seed a SECOND real transcript at
+    /// `scenario_rotated_uuid` and point the row's `live_session` at it —
+    /// modeling the #99 rotation (`/clear`, or any fresh conversation on the
+    /// same pane) that `resume_target`/`verified_site` exist to prefer. A
+    /// plain agent's `live_session` stays `None`: it never rotated, so the
+    /// minted uuid IS the live conversation.
+    pub rotated: bool,
     /// Explicit short repo directory name (e.g. `"clave"`), shared by every
     /// agent that names it — one shared dir under `repos/` is what lets
     /// several agents render the SAME repo ink (render.rs lock §4). `None`
@@ -68,6 +75,7 @@ impl ScenarioAgent {
         ago_secs: 0,
         worktree: false,
         delete_cwd_after: false,
+        rotated: false,
         repo: None,
         branch: None,
         title: None,
@@ -479,11 +487,77 @@ pub const SCENARIOS: &[Scenario] = &[
             },
         ],
     },
+    // #182: the QA drive's fleet — six DORMANT rows only. The eager,
+    // live-style row the drive checklist opens with is whichever the
+    // human's launch line names (see docs/dev/QA-DRIVE.md), not seeded
+    // here — seeding a fake "live" row would just be a second dormant row
+    // wearing a different status.
+    Scenario {
+        name: "qa-fleet",
+        agents: &[
+            ScenarioAgent {
+                slug: "steady",
+                ago_secs: 300,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "settled",
+                ago_secs: 900,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "quiet",
+                ago_secs: 5_400,
+                ..ScenarioAgent::DEFAULT
+            },
+            // Shares a repo with `ghost` below — the pinned caveat
+            // (run_scenario's `ensure_worktree` doc comment / ux-gate1's
+            // `vanished`): a stale agent sharing a repo MUST be a worktree,
+            // or its `delete_cwd_after` would `remove_dir_all` the shared
+            // repo dir out from under this row too.
+            ScenarioAgent {
+                slug: "wt",
+                ago_secs: 600,
+                worktree: true,
+                repo: Some("qa-fleet-shared"),
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "ghost",
+                ago_secs: 7_200,
+                worktree: true,
+                delete_cwd_after: true,
+                repo: Some("qa-fleet-shared"),
+                ..ScenarioAgent::DEFAULT
+            },
+            // The rotated row (#182): a second real transcript at
+            // `scenario_rotated_uuid`, with `live_session` pointed at it —
+            // proof the QA drive resumes on the ROTATED conversation, not
+            // the frozen minted one.
+            ScenarioAgent {
+                slug: "rotated",
+                ago_secs: 120,
+                rotated: true,
+                ..ScenarioAgent::DEFAULT
+            },
+        ],
+    },
 ];
 
 /// Valid v4-shaped, deterministic, self-identifying (`c85c` ≈ c8 scenario).
 pub fn scenario_uuid(n: u32) -> String {
     format!("00000000-0000-4000-8000-c85c{n:08}")
+}
+
+/// The SECOND mint for a `rotated: true` agent (#182) — the transcript a
+/// `/clear` (or any fresh conversation on the same pane) would leave behind,
+/// which `live_session` then names. `+ 50` keeps the shared `c85c` prefix (so
+/// `is_scenario_jsonl` still sweeps it on `dev reset`) while landing well
+/// past any `scenario_uuid(n)` a single scenario mints today — the largest,
+/// `tall`, tops out at 34 agents — so the two mints never collide, and
+/// `uuid_tag` (last-8-chars) still differs between an agent's own pair.
+pub fn scenario_rotated_uuid(n: u32) -> String {
+    format!("00000000-0000-4000-8000-c85c{:08}", n + 50)
 }
 
 /// The ONE command printed for Ollie to launch the sandboxed session.
@@ -641,6 +715,7 @@ fn repo_dir_name(scenario_name: &str, a: &ScenarioAgent) -> String {
 fn agent_record(
     scenario_name: &str,
     a: &ScenarioAgent,
+    n: u32,
     uuid: &str,
     cwd_str: &str,
     repo_root: &str,
@@ -688,9 +763,13 @@ fn agent_record(
         // guess — which is what makes `cold`'s blank provenance travel the
         // #86 known-default path rather than the `main`/`master` fallback.
         default_branch: Some("main".to_string()),
-        // Seeded rows have no transcript at all, so there is no rotation to
-        // model; the scenario's agents are always on their minted uuid.
-        live_session: None,
+        // #182: most seeded rows never rotate, so `live_session` stays
+        // `None` — agreement with the minted uuid is never stored (see
+        // spawn.rs's `resume_target` doc comment). A `rotated: true` agent
+        // is the exception: `run_scenario` seeds a SECOND real transcript at
+        // `scenario_rotated_uuid(n)`, and this is where the row learns to
+        // point at it, exactly as a real `/clear` would leave behind.
+        live_session: a.rotated.then(|| scenario_rotated_uuid(n)),
     }
 }
 
@@ -727,7 +806,8 @@ pub fn run_scenario(name: &str) -> Result<()> {
     // fully recoverable with `clave dev reset` (wipes scenario state; see
     // SCENARIO_STATE_DIRS — the build artifact in data/ survives).
     for (i, a) in sc.agents.iter().enumerate() {
-        let uuid = scenario_uuid(i as u32 + 1);
+        let n = i as u32 + 1;
+        let uuid = scenario_uuid(n);
         let repo = root.join("repos").join(repo_dir_name(name, a));
         std::fs::create_dir_all(&repo)?;
         // -b main: pin the branch — else init.defaultBranch (maybe `master`)
@@ -753,28 +833,20 @@ pub fn run_scenario(name: &str) -> Result<()> {
         // is never sandboxed, so a prior run's transcript persists and
         // `--session-id` reuse is REFUSED — an existing jsonl means this
         // agent is already seeded, which is the goal state, not an error.
-        if seed_needed(&crate::env::claude_config_dir()?, &cwd_str, &uuid) {
-            println!("seeding {uuid} ({})…", a.slug);
-            // Discovered claude (coderabbit CLI, 2026-07-22): a contributor
-            // whose claude lives off PATH (nvm, ~/.claude/local) could not
-            // seed a scenario at all. Unlike dev.rs's zellij calls — session
-            // lifecycle the human drives — this is a real exec clave owns.
-            let st = Command::new(crate::discover::tool_path(crate::discover::ToolId::Claude))
-                .current_dir(&cwd)
-                .args(["-p", "--session-id", &uuid, "Reply with exactly: ok"])
-                .status()
-                .context("running claude -p (is claude discoverable?)")?;
-            anyhow::ensure!(st.success(), "claude -p seeding failed for {uuid}");
-        } else {
-            println!(
-                "{uuid} ({}) already seeded — reusing its transcript",
-                a.slug
-            );
+        seed_transcript(&cwd, &cwd_str, &uuid, a.slug)?;
+        // #182: a `rotated: true` agent gets a SECOND real transcript at the
+        // SAME cwd, guarded by the same idempotence check — the faithful
+        // shape of a `/clear`'d pane, which writes a new jsonl next to the
+        // old one rather than replacing it. `agent_record` points
+        // `live_session` at this mint, and `resume_target`/`verified_site`
+        // are what then prefer it over the frozen original.
+        if a.rotated {
+            seed_transcript(&cwd, &cwd_str, &scenario_rotated_uuid(n), a.slug)?;
         }
         crate::store::with_store_mut(&paths, |s| {
             s.agents.insert(
                 uuid.clone(),
-                agent_record(name, a, &uuid, &cwd_str, &repo.to_string_lossy(), now),
+                agent_record(name, a, n, &uuid, &cwd_str, &repo.to_string_lossy(), now),
             );
             s.seq += 1;
         })?;
@@ -1043,9 +1115,76 @@ fn seed_needed(claude_dir: &Path, physical_cwd: &str, uuid: &str) -> bool {
     )
 }
 
+/// One real `claude -p --session-id <uuid>` seed at `cwd`, resume-or-create
+/// (`seed_needed`) exactly as `run_scenario`'s original single-mint loop did.
+/// Factored out for #182: a `rotated: true` agent seeds this TWICE — once
+/// for its minted uuid, once for `scenario_rotated_uuid` — and the two calls
+/// must stay byte-identical in behaviour or the rotated row's second
+/// transcript would be seeded by a subtly different path than the first.
+fn seed_transcript(cwd: &Path, cwd_str: &str, uuid: &str, slug: &str) -> Result<()> {
+    if seed_needed(&crate::env::claude_config_dir()?, cwd_str, uuid) {
+        println!("seeding {uuid} ({slug})…");
+        // Discovered claude (coderabbit CLI, 2026-07-22): a contributor
+        // whose claude lives off PATH (nvm, ~/.claude/local) could not
+        // seed a scenario at all. Unlike dev.rs's zellij calls — session
+        // lifecycle the human drives — this is a real exec clave owns.
+        let st = Command::new(crate::discover::tool_path(crate::discover::ToolId::Claude))
+            .current_dir(cwd)
+            .args(["-p", "--session-id", uuid, "Reply with exactly: ok"])
+            .status()
+            .context("running claude -p (is claude discoverable?)")?;
+        anyhow::ensure!(st.success(), "claude -p seeding failed for {uuid}");
+    } else {
+        println!("{uuid} ({slug}) already seeded — reusing its transcript");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_record_carries_the_rotated_mint_only_for_a_rotated_agent() {
+        // #182: `live_session` is how `resume_target`/`verified_site` learn
+        // a row's real conversation moved on from its minted uuid — a
+        // rotated scenario agent must set it to the SECOND mint, a plain one
+        // must stay `None` (agreement with the minted uuid is never stored,
+        // per spawn.rs's `resume_target` doc comment).
+        let rotated = ScenarioAgent {
+            slug: "rotated",
+            rotated: true,
+            ..ScenarioAgent::DEFAULT
+        };
+        let rec = agent_record(
+            "qa-fleet",
+            &rotated,
+            6,
+            &scenario_uuid(6),
+            "/cwd",
+            "/repo",
+            1_000,
+        );
+        assert_eq!(
+            rec.live_session.as_deref(),
+            Some(scenario_rotated_uuid(6).as_str())
+        );
+
+        let plain = ScenarioAgent {
+            slug: "plain",
+            ..ScenarioAgent::DEFAULT
+        };
+        let rec = agent_record(
+            "qa-fleet",
+            &plain,
+            1,
+            &scenario_uuid(1),
+            "/cwd",
+            "/repo",
+            1_000,
+        );
+        assert_eq!(rec.live_session, None);
+    }
 
     #[test]
     fn seeding_skips_an_already_seeded_session() {
@@ -1189,7 +1328,8 @@ mod tests {
                 "c8-worktree",
                 "c8-stale",
                 "ux-gate1",
-                "tall"
+                "tall",
+                "qa-fleet"
             ]
         );
         // cold-start: 3 agents, staggered recency, none worktree.
@@ -1283,6 +1423,50 @@ mod tests {
     }
 
     #[test]
+    fn qa_fleet_carries_the_182_dormant_lineup() {
+        // #182: the QA drive's fleet — six dormant rows (the eager, live-style
+        // row is whichever the human's launch line names, per the design doc,
+        // not seeded here). One worktree, one stale (worktree +
+        // delete_cwd_after — the pinned caveat: sharing a repo with a live
+        // agent, a plain checkout's `remove_dir_all` would take that agent's
+        // dir with it), one rotated, three plain.
+        let sc = SCENARIOS.iter().find(|s| s.name == "qa-fleet").unwrap();
+        assert_eq!(sc.agents.len(), 6);
+
+        let worktrees: Vec<&ScenarioAgent> = sc.agents.iter().filter(|a| a.worktree).collect();
+        assert_eq!(worktrees.len(), 2, "one worktree + one stale worktree");
+
+        let stale: Vec<&ScenarioAgent> = sc.agents.iter().filter(|a| a.delete_cwd_after).collect();
+        assert_eq!(stale.len(), 1);
+        assert!(
+            stale[0].worktree,
+            "the stale agent must be a worktree (dev.rs's pinned caveat)"
+        );
+
+        let rotated: Vec<&ScenarioAgent> = sc.agents.iter().filter(|a| a.rotated).collect();
+        assert_eq!(rotated.len(), 1);
+
+        let plain = sc
+            .agents
+            .iter()
+            .filter(|a| !a.worktree && !a.rotated)
+            .count();
+        assert_eq!(plain, 3);
+
+        // Staggered recency: every ago_secs distinct.
+        let ago: std::collections::BTreeSet<u64> = sc.agents.iter().map(|a| a.ago_secs).collect();
+        assert_eq!(ago.len(), sc.agents.len(), "ago_secs must all differ");
+
+        // The stale agent shares a repo with the plain worktree agent —
+        // exactly the shape the pinned caveat guards (a shared repo's
+        // remove_dir_all must remove only the stale agent's OWN worktree
+        // dir). Every other agent gets its own distinct repo.
+        let shared: std::collections::BTreeSet<&str> =
+            worktrees.iter().filter_map(|a| a.repo).collect();
+        assert_eq!(shared.len(), 1, "the two worktree agents share one repo");
+    }
+
+    #[test]
     fn ux_gate1_renders_the_locked_visual_design() {
         // The real pipeline, not a reimplementation: store::snapshot_from →
         // BarModel::apply_snapshot → BarModel::rows() → render::render_rows —
@@ -1305,14 +1489,15 @@ mod tests {
         let now = 2_000_000_000u64;
         let mut store = crate::store::Store::default();
         for (i, a) in sc.agents.iter().enumerate() {
-            let uuid = scenario_uuid(i as u32 + 1);
+            let n = i as u32 + 1;
+            let uuid = scenario_uuid(n);
             let repo_root = format!("/sandbox/repos/{}", repo_dir_name("ux-gate1", a));
             let cwd = if a.worktree {
                 format!("{repo_root}/.claude-worktrees/{}", uuid_tag(&uuid))
             } else {
                 repo_root.clone()
             };
-            let mut record = agent_record("ux-gate1", a, &uuid, &cwd, &repo_root, now);
+            let mut record = agent_record("ux-gate1", a, n, &uuid, &cwd, &repo_root, now);
             record.tab_id = Some(i); // simulate: every row open in a live tab
             store.agents.insert(uuid, record);
         }
@@ -1454,6 +1639,36 @@ mod tests {
         assert_eq!(u, "00000000-0000-4000-8000-c85c00000001");
         assert!(uuid::Uuid::parse_str(&u).is_ok());
         assert_ne!(scenario_uuid(2), u);
+    }
+
+    #[test]
+    fn scenario_rotated_uuid_is_deterministic_and_never_collides_with_the_first_mint() {
+        // #182: the rotated mint shares the c85c prefix (so `is_scenario_jsonl`
+        // sweeps it on `dev reset` same as the first) but adds 50 to the
+        // ordinal, clearing every `scenario_uuid` any scenario mints today
+        // (largest is `tall` at 34 agents) and staying under u32::MAX with
+        // room to spare.
+        let u = scenario_rotated_uuid(1);
+        assert_eq!(u, "00000000-0000-4000-8000-c85c00000051");
+        assert!(uuid::Uuid::parse_str(&u).is_ok());
+        assert_eq!(scenario_rotated_uuid(1), u); // deterministic
+        assert_ne!(scenario_rotated_uuid(1), scenario_rotated_uuid(2));
+        // Non-collision against every scenario_uuid a scenario under 50
+        // agents could mint.
+        let firsts: std::collections::BTreeSet<String> = (1..=50).map(scenario_uuid).collect();
+        for n in 1..=50 {
+            let rotated = scenario_rotated_uuid(n);
+            assert!(
+                !firsts.contains(&rotated),
+                "rotated mint {rotated} collides with a first mint"
+            );
+        }
+        // uuid_tag (last-8-chars) stays unique too — the same worktree-branch
+        // hazard `uuid_tag`'s own doc comment records.
+        assert_ne!(
+            uuid_tag(&scenario_uuid(1)),
+            uuid_tag(&scenario_rotated_uuid(1))
+        );
     }
 
     #[test]

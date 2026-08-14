@@ -760,7 +760,23 @@ pub fn run_add(worktree: bool) -> Result<()> {
     //    resume picker instead; the old first-live-agent jump made a second
     //    agent in the same repo impossible).
     let zellij = tool_path(crate::discover::ToolId::Zellij); // Fix 2 (review 2026-07-22)
-    let dump = cmd_stdout(&zellij, &["action", "dump-layout"]).unwrap_or_default();
+    // Session-hard (#183 review, P1): every zellij leg below names its target
+    // explicitly. The env vars alone FAIL OPEN — with no name supplied, a
+    // dead target session lets zellij serve the sole remaining live one
+    // (FOOTGUNS, the 2026-08-07 incident; `send_action_to_session`'s
+    // `ActiveSession::One` arm) — where `--session` makes the same race exit
+    // 1 instead. `session_name()` is `$CLAVE_SESSION` or the dedicated
+    // "clave" session (§6.8), so the field path names the session it is
+    // already inside.
+    let session = crate::env::session_name();
+    // Fail closed like open.rs does: an empty dump under-reports live agents
+    // in `live_uuid_union`, and a live agent misread as dormant turns a
+    // resume pick into a second tab instead of a jump.
+    let dump = cmd_stdout(
+        &zellij,
+        &["--session", session.as_str(), "action", "dump-layout"],
+    )
+    .with_context(|| format!("zellij dump-layout for session {session}"))?;
     let paths = store_paths()?;
     let store = crate::store::read_store(&paths)?;
     let live = live_uuid_union(&store, &dump);
@@ -860,9 +876,19 @@ pub fn run_add(worktree: bool) -> Result<()> {
         // the right zellij.
         if candidates.iter().any(|c| c.uuid == uuid && c.live) {
             let payload = format!("{{\"uuid\":\"{uuid}\"}}");
-            let _ = Command::new(&zellij) // discovered above (Fix 2)
-                .args(["pipe", "--name", "clave-nav", "--", &payload])
-                .status();
+            let status = Command::new(&zellij) // discovered above (Fix 2)
+                .args([
+                    "--session",
+                    &session,
+                    "pipe",
+                    "--name",
+                    "clave-nav",
+                    "--",
+                    &payload,
+                ])
+                .status()
+                .context("sending clave-nav pipe")?;
+            anyhow::ensure!(status.success(), "zellij pipe to {session} failed");
             return Ok(());
         }
         // Carry the picked candidate's OWN cwd/branch (2026-07-21): a
@@ -958,6 +984,8 @@ pub fn run_add(worktree: bool) -> Result<()> {
     std::fs::write(&tmp, layout)?;
     let status = Command::new(&zellij) // discovered above (Fix 2)
         .args([
+            "--session",
+            &session,
             "action",
             "new-tab",
             "--layout",
