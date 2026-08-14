@@ -8,7 +8,7 @@ use std::io::Write;
 
 // The pure model lives in the LIB half of this crate (src/lib.rs → model.rs)
 // so it host-tests without linking this bin's wasm host-import shims.
-use clave_bar::model::{BarModel, Effect, PEEK_SINK_SECS, PaneMeta, TabMeta};
+use clave_bar::model::{BarModel, BindStallState, Effect, PEEK_SINK_SECS, PaneMeta, TabMeta};
 use clave_bar::plugin_config::resolve_binary;
 use clave_bar::render::{Row, render_rows};
 use zellij_tile::prelude::*;
@@ -185,6 +185,50 @@ impl State {
                          it can converge."
                     );
                 }
+                // #178: UNGATED, for the same reason StormCapped is — the
+                // instance that goes silent is by definition not the one being
+                // watched, so every instance must be able to say so.
+                Effect::BindStall {
+                    state,
+                    stranded,
+                    own_tab,
+                } => {
+                    // An unresolved own tab is one of the reported states, so
+                    // the identity has to survive being unknown.
+                    let whose = match own_tab {
+                        Some(t) => format!("tab {t}"),
+                        None => "unresolved tab".to_string(),
+                    };
+                    match state {
+                        BindStallState::Cleared => {
+                            eprintln!("clave-bar: bind leg live again ({whose})");
+                        }
+                        BindStallState::FramesIncoherent => {
+                            eprintln!(
+                                "clave-bar: BIND STALLED ({whose}) — tab and pane frames \
+                                 disagree, so no bind can be computed. Healthy for a frame \
+                                 or two; permanent if no further frame reaches this \
+                                 instance (#178)."
+                            );
+                        }
+                        BindStallState::OwnPositionUnknown => {
+                            eprintln!(
+                                "clave-bar: BIND STALLED ({whose}) — this instance's tab is \
+                                 absent from the frame, so every row reads as another \
+                                 tab's (#178)."
+                            );
+                        }
+                        BindStallState::PaneKnownButAbsent => {
+                            eprintln!(
+                                "clave-bar: BIND STALLED ({whose}) — {stranded} unbound \
+                                 row(s) whose pane was announced to us but is missing from \
+                                 this instance's pane frame. No bind is emitted and no \
+                                 retry budget is spent; this is the starvation signature \
+                                 (#178)."
+                            );
+                        }
+                    }
+                }
                 // C6 width-seek effects are SELF-targeted (round 20: every
                 // instance drives only its own pane, with render feedback).
                 Effect::ShrinkSelf => {
@@ -270,7 +314,16 @@ impl State {
     /// so calling it on an incoherent frame is a no-op and the next frame is
     /// the retry.
     fn settle_identity(&mut self) {
-        let fx = self.model.identity_effects();
+        // #178's breadcrumb is taken FIRST and SEPARATELY, because
+        // `identity_effects` fails closed on exactly the frames it needs to
+        // describe: an unelected instance and an unresolved own tab both
+        // return before the bind pass runs, so a report gathered from inside
+        // that pass could only ever describe frames already healthy enough to
+        // bind (#184 review, found independently by two reviewers). Keeping it
+        // out of `identity_effects` also keeps that function's contract what it
+        // has always been — the actions to take, nothing else.
+        let mut fx: Vec<Effect> = self.model.bind_stall_report().into_iter().collect();
+        fx.extend(self.model.identity_effects());
         if !fx.is_empty() {
             self.run_effects(fx);
         }
