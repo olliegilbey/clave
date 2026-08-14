@@ -1292,6 +1292,7 @@ mod tests {
         row.last_visited = 42;
         row.commit_ord = 88;
         row.tab_id = Some(3); // the DEAD tab that hosted it last time
+        row.pane_id = Some(17); // and the DEAD pane inside it
         let fresh = rec("u-wt"); // what the weave derives from the PICKED dir
         let merged = merge_resume_record(Some(&row), fresh.clone());
         assert_eq!(merged.status, Status::Idle);
@@ -1303,6 +1304,13 @@ mod tests {
         // The resumed agent lands in a brand-new tab: the old bind is stale
         // by definition — reset, the new tab's bar re-binds on join (§6.6 B).
         assert_eq!(merged.tab_id, None);
+        // And so is the pane inside it. A pane id carried over from a dead
+        // tab rides every later snapshot as "this row announced a pane" while
+        // no bar can see it — the permanent false stall #178 is hunting, and a
+        // uuid-directed jump chases a pane that no longer exists. (cargo
+        // mutants 2026-08-14: deleting `pane_id: None` from the merge survived
+        // while its `tab_id` twin one line above was pinned.)
+        assert_eq!(merged.pane_id, None);
         assert_eq!(merged.cwd, row.cwd); // worktree cwd NOT relocated
         assert_eq!(merged.worktree, row.worktree);
         assert_eq!(merged.label, row.label); // earned label survives
