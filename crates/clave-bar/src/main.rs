@@ -16,11 +16,11 @@ use zellij_tile::prelude::*;
 #[derive(Default)]
 struct State {
     model: BarModel,
-    /// Our own plugin pane id (get_plugin_ids) — used to decide whether THIS
-    /// instance sits in the active tab. There is one bar instance per tab
-    /// (§6.6); render-side state converges via broadcast, but WRITE effects
-    /// (RenameTab, MarkRead) run on the active-tab instance only, so N
-    /// instances don't fire N duplicate renames / `clave focus` runs.
+    /// Our own plugin pane id (get_plugin_ids). The identity itself lives in
+    /// the model — `set_own_pane` — because that is where the frame join is
+    /// testable; this copy is kept so the adapter can be re-seeded on a plugin
+    /// reload without going through the model.
+    #[allow(dead_code)]
     own_plugin_id: Option<u32>,
     /// Peek-on-nav timers in flight: each armed peek starts one
     /// set_timeout(1.0); only the LAST expiry sinks the bar, so a nav burst
@@ -56,7 +56,7 @@ impl State {
     /// may reach instances in any order).
     fn run_effects(&mut self, effects: Vec<Effect>) {
         // Nothing to gate. render() calls this every repaint with the width
-        // seek's usually-empty result, and both gates below build a pair of
+        // width machine's usually-empty result, and both gates below build a pair of
         // BTreeSets to test frame coherence — so without this the hottest path
         // in the plugin pays for an election it never uses.
         if effects.is_empty() {
@@ -169,25 +169,9 @@ impl State {
                     let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
                     run_command(&refs, BTreeMap::new());
                 }
-                // #137: UNGATED on purpose — every instance rate-limits its own
-                // pane, so every instance must be able to say so. Gating this to
-                // the executor would hide exactly the storms that only happen on
-                // the eleven bars nobody is looking at.
-                Effect::StormCapped {
-                    actions,
-                    cols,
-                    target,
-                } => {
-                    eprintln!(
-                        "clave-bar: WIDTH SEEK CAPPED after {actions} resizes without \
-                         settling — parking at cols={cols} (target {target}). This is the \
-                         storm brake (#137); something is re-arming the seek faster than \
-                         it can converge."
-                    );
-                }
-                // #178: UNGATED, for the same reason StormCapped is — the
-                // instance that goes silent is by definition not the one being
-                // watched, so every instance must be able to say so.
+                // #178: UNGATED on purpose — the instance that goes silent is by
+                // definition not the one being watched, so every instance must be
+                // able to say so.
                 Effect::BindStall {
                     state,
                     stranded,
@@ -229,24 +213,12 @@ impl State {
                         }
                     }
                 }
-                // C6 width-seek effects are SELF-targeted (round 20: every
-                // instance drives only its own pane, with render feedback).
-                Effect::ShrinkSelf => {
-                    if let Some(own) = self.own_plugin_id {
-                        resize_pane_with_id(
-                            ResizeStrategy::new(Resize::Decrease, Some(Direction::Right)),
-                            PaneId::Plugin(own),
-                        );
-                    }
-                }
-                Effect::GrowSelf => {
-                    if let Some(own) = self.own_plugin_id {
-                        resize_pane_with_id(
-                            ResizeStrategy::new(Resize::Increase, Some(Direction::Right)),
-                            PaneId::Plugin(own),
-                        );
-                    }
-                }
+                // #181: the width lives in the layout now. Each instance
+                // switches its OWN tab between the two declared geometries;
+                // there is no tab-targeted form of this command and none is
+                // wanted — collapse is a per-tab display mode that every
+                // instance flips for itself off the same store snapshot.
+                Effect::SwapWidth => next_swap_layout(),
                 // §6.6 C8 dormant nav (ungated — click reaches exactly one
                 // instance, nav effects are executor-only by construction,
                 // and the model's `opening` guard + clave open's no-op make
@@ -340,7 +312,7 @@ impl State {
     }
 
     /// Alt+c (round 20, collapse-in-place): flip the width target and let
-    /// the render-fed seek drive OWN pane width there. No hide_self /
+    /// the render-fed width machine switch OWN pane geometry there. No hide_self /
     /// show_self — suppress was structurally hostile (lossy re-insert,
     /// damage flag blocks swap-layout restores, resizes emit no events for
     /// hidden panes). Every instance stays visible, hears this pipe, and
@@ -496,7 +468,7 @@ impl ZellijPlugin for State {
             );
             "clave".to_string()
         });
-        // D37: gate the width seek HERE, not when the snapshot is requested.
+        // D37: gate the width machine HERE, not when the snapshot is requested.
         // `load()` only ASKS for permission; the grant arrives later as an
         // event, and zellij renders this pane before then — so a gate set in
         // the `PermissionRequestResult` arm is set AFTER the first render has
@@ -533,7 +505,7 @@ impl ZellijPlugin for State {
         // directly (no focus-stealing first click) and MoveFocus skips it —
         // nothing the bar does needs focus (clicks, pipes, hide_self).
         set_selectable(false);
-        // `own_plugin_id` stays for ShrinkSelf/GrowSelf's resize_pane_with_id;
+        // `own_plugin_id` is the model's identity input;
         // the model gets the same id because identity resolution lives there
         // now — this file is `test = false`, and RC-A shipped precisely
         // because the frame join was written where nothing could assert on it.
@@ -687,18 +659,19 @@ impl ZellijPlugin for State {
         // render: they fire from apply_tabs (birth / clave-organic) and
         // apply_panes (the #162 reanchor debt) — both frame-witnessed — and
         // from the click/nav landings, which still emit AnnounceVisit.
-        // C6 width seek (round 20, collapse-in-place): each of our resizes
-        // triggers a repaint with the new cols (round 10) — this render
-        // chain is the seek's feedback loop. SELF-targeted and ungated:
-        // every instance is always visible and drives only its own pane.
-        let fx = self.model.width_seek(cols);
+        // #181: the width machine. It is silent on every render except the one
+        // after a mode change, where it asks zellij to switch this tab to the
+        // other declared geometry, and the one after that, where it checks the
+        // pane moved the way the new mode wanted. Ungated: every instance is
+        // always visible and switches only its own tab.
+        let fx = self.model.width_effects(cols);
         self.run_effects(fx);
         // One line per row, display-ordered. Everything visual — the column
         // arithmetic, the palette, the fade, the truncation — lives in
         // `render_rows` (design-lock; LEDGER D4/D5). This file stays zellij
         // plumbing: the profile comes from the model so it cannot drift from
-        // the width the seek above is chasing (D16), and `cols` is whatever
-        // zellij actually gave us rather than the target.
+        // the geometry the switch above asked for (D16), and `cols` is whatever
+        // zellij actually gave us rather than a design number.
         // #148: `rows` is the pane HEIGHT in lines. The renderer slices the row
         // list to it (the viewport); a bar that printed past the bottom drew
         // rows the user could reach with nav keys and never see. Remembered

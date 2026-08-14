@@ -254,22 +254,26 @@ pub const LABEL_SEP: &str = " \u{00b7} ";
 // ── sidebar geometry ────────────────────────────────────────────────────────
 //
 // S8 §3.3, deferred there and taken here (#86): ONE definition per number.
-// Three artifacts have to agree about how wide the bar is — `clave-bar`'s width
-// seek drives the pane to it, `clave-bar`'s renderer lays every column out
-// against it, and `clave`'s three KDL generators size the newborn pane as a
-// PERCENT of it — and until now each held its own copy with nothing linking
-// them. The very next task moves the expanded target (LEDGER D19), and moving
-// `BAR_TARGET_COLS` alone used to leave every golden, the preview and the
-// scenario render test green while pinning the OLD width.
+// Two artifacts have to agree about how wide the bar is — `clave-bar`'s renderer
+// lays every column out against it, and `clave`'s KDL generators turn it into
+// the percent both declared geometries are sized at — and until now each held
+// its own copy with nothing linking them. Moving `BAR_TARGET_COLS` alone used to
+// leave every golden, the preview and the scenario render test green while
+// pinning the OLD width.
+//
+// Since #181 these are DESIGN widths, not runtime targets: nothing converges on
+// them any more. They decide the column budget the rows are drawn to and the
+// percent the layout declares; whatever zellij then resolves that percent to is
+// what the renderer is handed, and `render_rows` clips (D31).
 //
 // Here rather than in either crate because `clave-types` is already a
 // dependency of both and already compiles to wasm; a compile-time constant
 // rather than configuration because there is no code path in which a running
-// instance's target changes (S8 §3.2 rejects all three config channels — each
-// is the #43/#44 mixed-artifact shape).
+// instance's width changes (S8 §3.2 rejects all three config channels — each is
+// the #43/#44 mixed-artifact shape).
 
-/// The expanded width the bar is drawn at and the width seek converges to
-/// (LEDGER D2, then D19, then #105): `12 gutter + 9 title + 1 + 7 repo + 1 +
+/// The expanded width the bar is drawn at, and the width its declared geometry
+/// is sized to reach (LEDGER D2, then D19, then #105): `12 gutter + 9 title + 1 + 7 repo + 1 +
 /// 22 summary + 1 margin + 1 cap`. The renderer takes `cols` as a parameter —
 /// zellij hands the plugin whatever the pane actually is — but every number in
 /// the ratified design was chosen against this one.
@@ -277,8 +281,7 @@ pub const LABEL_SEP: &str = " \u{00b7} ";
 /// **44 → 54 (LEDGER D19), Ollie's call after running the fleet live:** *"mostly
 /// for the summary, but could do another two chars for the title."* So title
 /// takes 7 → 9 and summary takes the remaining 17 → 25. Collapsed is unchanged,
-/// which widens the separation from 14 to 24 — see the separation test below,
-/// where that change retires a whole class of seek behaviour.
+/// which widens the separation from 14 to 24.
 ///
 /// **#105 then takes the gutter's battery cell to four columns** — the token
 /// count, which the eleven-glyph ramp can only approximate — spent out of
@@ -295,30 +298,29 @@ pub const BAR_TARGET_COLS: usize = 54;
 /// and only repo and summary narrow relative to EXPANDED's post-#105 numbers,
 /// through the same `render_rows`.
 ///
-/// Its distance from `BAR_TARGET_COLS` is load-bearing beyond the two renders:
-/// the seek's acceptance bands must not overlap, or a collapse is accepted as
-/// an expand (LEDGER D21, `clave-bar`'s `converged`).
+/// It must stay the NARROWER of the two, and since #181 that is load-bearing in
+/// one more place: the bar accepts a geometry switch by checking the pane moved
+/// in the direction the new mode wants, so an inverted pair would make every
+/// collapse read as a failure and spend its one correction undoing itself.
 pub const COLLAPSED_TARGET_COLS: usize = 30;
 const _: () = assert!(
     COLLAPSED_TARGET_COLS < BAR_TARGET_COLS,
-    "collapsed must be the NARROWER profile: the seek, the width profiles and \
-     Alt+c's direction all read it that way"
+    "collapsed must be the NARROWER profile: the width profiles, the declared \
+     geometries and Alt+c's direction all read it that way"
 );
 
-/// The reference viewport the birth percent is derived against (S8 §3.4). A
-/// documented fiction: real windows vary, and the birth-armed seek corrects the
-/// difference. It exists so the percent is a DERIVATION rather than a number
-/// somebody chose.
+/// The reference viewport the fallback percents are derived against (S8 §3.4).
+/// A documented fiction, used only when the real display width is unknown — a
+/// `clave setup` run from a script, a launch with no TTY. It exists so the
+/// percent is a DERIVATION rather than a number somebody chose.
 pub const REFERENCE_VIEWPORT_COLS: usize = 200;
 
-/// The `size="N%"` every generated bar pane is born at.
+/// The expanded `size="N%"` for a display of unknown width.
 ///
-/// It MUST be a percent: a fixed `size=30` makes zellij refuse every resize on
+/// It MUST be a percent: a fixed `size=54` makes zellij refuse every resize on
 /// the pane (`CantResizeFixedPanes`), which left Alt+c dead in any freshly
-/// launched session (c8-cold-start 2026-07-18). So this is a birth HINT and the
-/// seek is the authority — a stale `clave` on `PATH` (#44) emitting last
-/// version's percent costs a visible flicker at birth, not a wrong bar, and
-/// that one-way geometry contract is why the seam cannot desync.
+/// launched session (c8-cold-start 2026-07-18) and would also make the bar's
+/// neighbour user-unresizable.
 ///
 /// Computed, not hand-derived: the literal used to live in three format
 /// strings, and round 21 had to remember to touch each one by hand.
@@ -329,15 +331,9 @@ pub const BAR_BIRTH_PERCENT: usize = BAR_TARGET_COLS * 100 / REFERENCE_VIEWPORT_
 /// has to be sized even when there is no TTY to derive a percent from.
 pub const COLLAPSED_BIRTH_PERCENT: usize = COLLAPSED_TARGET_COLS * 100 / REFERENCE_VIEWPORT_COLS;
 
-/// The birth percent for a display of KNOWN width — the fiction removed.
-///
-/// **This is what makes the target reachable at all (LEDGER D34/D35).** Zellij
-/// resizes in whole increments, so the widths a bar can ever occupy are a
-/// lattice anchored at wherever it was BORN. Born at 54, a collapse and expand
-/// return to exactly 54 on any display; born at `27% × 280` = 75, the same
-/// toggle rests at 47 forever and the target is never reached. Measured through
-/// the real `width_seek` across seven display widths: exact birth lands 54 on
-/// every one of them, the percent fiction on two.
+/// The percent that puts `target_cols` on a display of KNOWN width — the
+/// fiction removed (LEDGER D35). Prefer [`bar_percent_for`], which picks the
+/// target for you; this is the arithmetic underneath it.
 ///
 /// Falls back to [`BAR_BIRTH_PERCENT`] when the width is unknown or absurd —
 /// there is no honest percent for a zero-width display, and a caller with no
@@ -349,20 +345,21 @@ pub const COLLAPSED_BIRTH_PERCENT: usize = COLLAPSED_TARGET_COLS * 100 / REFEREN
 /// a 280-column display one percent is 2.8 columns, so 54 (19.29%) is simply
 /// not expressible: 19% floors to 53, 20% to 56. This rounds to NEAREST, which
 /// bounds the residual at roughly half a percent of the display — 53 here, one
-/// column under. That is inside the seek's acceptance band at every step, so the
-/// bar settles on its birth width immediately and the lattice is anchored there
-/// rather than at the fiction's 75.
+/// column under. Since #181 that residual is simply the width the bar has:
+/// nothing tries to close it, and `render_rows` lays the rows out against the
+/// columns zellij actually gave it.
 ///
 /// The result is clamped to `1..=100`: zellij rejects anything outside that. A
 /// display narrower than the target clamps to 100 rather than overflowing — the
-/// bar asks for the whole tab, the seek argues it down, and `render_rows`' clip
-/// (D31) keeps the rows inside the pane while that happens.
-/// `target_cols` is the width the bar will actually SEEK, which is
-/// [`COLLAPSED_TARGET_COLS`] when the store says the fleet was left collapsed.
+/// bar asks for the whole tab, and `render_rows`' clip (D31) keeps the rows
+/// inside the pane. That clamp IS the minimum-width behaviour on a narrow
+/// window: the bar never renders below its own design width by shrinking, it
+/// takes what it needs of a small screen.
+///
 /// **Taking the expanded target unconditionally was the D36 bug**: the mode
 /// persists across a launch, so a maintainer who quit collapsed got a bar born
-/// at 54 that immediately shrank to 30 — the exact jank this function exists to
-/// remove, reintroduced by ignoring half the state.
+/// at 54 that immediately shrank to 30 — the exact jank this exists to remove,
+/// reintroduced by ignoring half the state.
 pub fn birth_percent_for(display_cols: usize, target_cols: usize) -> usize {
     if display_cols == 0 {
         return BAR_BIRTH_PERCENT;
