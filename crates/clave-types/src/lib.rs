@@ -324,6 +324,11 @@ pub const REFERENCE_VIEWPORT_COLS: usize = 200;
 /// strings, and round 21 had to remember to touch each one by hand.
 pub const BAR_BIRTH_PERCENT: usize = BAR_TARGET_COLS * 100 / REFERENCE_VIEWPORT_COLS;
 
+/// [`BAR_BIRTH_PERCENT`]'s collapsed twin, derived the same way. Needed because
+/// #181 gives the collapsed geometry its own KDL node — a swap layout — which
+/// has to be sized even when there is no TTY to derive a percent from.
+pub const COLLAPSED_BIRTH_PERCENT: usize = COLLAPSED_TARGET_COLS * 100 / REFERENCE_VIEWPORT_COLS;
+
 /// The birth percent for a display of KNOWN width — the fiction removed.
 ///
 /// **This is what makes the target reachable at all (LEDGER D34/D35).** Zellij
@@ -368,7 +373,23 @@ pub fn birth_percent_for(display_cols: usize, target_cols: usize) -> usize {
     pct.clamp(1, 100)
 }
 
-/// The width the bar seeks in a given collapse mode — the one place the two
+/// The `size="N%"` a bar pane gets in a given collapse mode, for a display of
+/// known width — the ONE entry point the KDL generators use (#181).
+///
+/// Since #181 the width is decided entirely here: zellij resolves the percent
+/// against whatever the window actually is, and Alt+c switches between two
+/// pre-declared geometries rather than stepping the pane toward a column count.
+/// `None` (no TTY) falls back to the reference-viewport fiction, which is the
+/// only honest answer when the display width is unknown.
+pub fn bar_percent_for(display_cols: Option<usize>, collapsed: bool) -> usize {
+    match display_cols {
+        Some(cols) if cols > 0 => birth_percent_for(cols, target_cols_for(collapsed)),
+        _ if collapsed => COLLAPSED_BIRTH_PERCENT,
+        _ => BAR_BIRTH_PERCENT,
+    }
+}
+
+/// The width the bar occupies in a given collapse mode — the one place the two
 /// targets are chosen between outside the plugin, so a caller cannot pick the
 /// wrong one by writing the constant it happens to remember.
 pub fn target_cols_for(collapsed: bool) -> usize {
@@ -523,6 +544,31 @@ mod tests {
         assert_eq!(birth_percent_for(BAR_TARGET_COLS, BAR_TARGET_COLS), 100);
         // Never zero, however wide the display — `size="0%"` is not a layout.
         assert!(birth_percent_for(100_000, BAR_TARGET_COLS) >= 1);
+    }
+
+    /// #181: the two swap geometries must be sized even with no TTY, and the
+    /// collapsed one must not silently fall back to the EXPANDED fiction — that
+    /// would make the collapsed swap layout a second copy of the expanded one
+    /// and Alt+c a no-op in any layout generated without a terminal.
+    #[test]
+    fn both_swap_geometries_are_sized_with_and_without_a_display() {
+        assert_eq!(COLLAPSED_BIRTH_PERCENT, 15); // 30 * 100 / 200
+        assert_ne!(BAR_BIRTH_PERCENT, COLLAPSED_BIRTH_PERCENT);
+        assert_eq!(bar_percent_for(None, false), BAR_BIRTH_PERCENT);
+        assert_eq!(bar_percent_for(None, true), COLLAPSED_BIRTH_PERCENT);
+        assert_eq!(bar_percent_for(Some(0), true), COLLAPSED_BIRTH_PERCENT);
+        // With a display the percents are the target-derived ones, and the
+        // collapsed geometry is strictly the narrower of the two on every
+        // display wide enough for the two targets to be distinguishable.
+        for display in [80usize, 120, 200, 280, 400] {
+            let expanded = bar_percent_for(Some(display), false);
+            let collapsed = bar_percent_for(Some(display), true);
+            assert!(
+                collapsed < expanded,
+                "display {display}: collapsed {collapsed}% is not narrower than \
+                 expanded {expanded}%"
+            );
+        }
     }
 
     #[test]

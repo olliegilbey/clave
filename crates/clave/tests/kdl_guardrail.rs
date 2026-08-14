@@ -30,7 +30,7 @@ use clave_types::Status;
 use std::collections::BTreeMap;
 use zellij_utils::input::actions::Action;
 use zellij_utils::input::config::Config;
-use zellij_utils::input::layout::{Layout, Run, TiledPaneLayout};
+use zellij_utils::input::layout::{Layout, Run, SplitSize, TiledPaneLayout};
 
 /// Assert a layout-shaped artifact parses through zellij's REAL layout parser.
 /// The full KDL text and the parser error ride in the panic message — a
@@ -86,7 +86,43 @@ fn layout_plugin_configs(kdl: &str, what: &str) -> Vec<BTreeMap<String, String>>
     if let Some((tiled, _floating)) = &layout.template {
         walk(tiled, &mut out);
     }
+    // #181: the two swap geometries carry their own copy of the bar pane, and a
+    // copy whose configuration differs by one character is a SECOND bar the
+    // first time Alt+c switches to it. They are part of the identity set.
+    for (by_constraint, _name) in &layout.swap_tiled_layouts {
+        for tiled in by_constraint.values() {
+            walk(tiled, &mut out);
+        }
+    }
     out
+}
+
+/// The bar pane's declared size in each of a layout's swap geometries, keyed by
+/// the swap layout's name, IN DECLARATION ORDER. The order is load-bearing:
+/// `next_swap_layout` is relative and its first call on a tab lands on index 0,
+/// so index 0 must be the geometry the tab was NOT born in.
+fn swap_bar_sizes(kdl: &str, what: &str) -> Vec<(String, SplitSize)> {
+    let layout = Layout::from_str(kdl, format!("guardrail:{what}"), None, None)
+        .unwrap_or_else(|e| panic!("{what} did not parse: {e:?}\n---\n{kdl}"));
+    layout
+        .swap_tiled_layouts
+        .iter()
+        .map(|(by_constraint, name)| {
+            let tiled = by_constraint
+                .values()
+                .next()
+                .unwrap_or_else(|| panic!("{what}: swap layout {name:?} declares no geometry"));
+            let bar = tiled
+                .children
+                .iter()
+                .find(|c| c.run.as_ref().and_then(Run::get_run_plugin).is_some())
+                .unwrap_or_else(|| panic!("{what}: swap layout {name:?} has no bar pane"));
+            let size = bar.split_size.unwrap_or_else(|| {
+                panic!("{what}: swap layout {name:?} sizes its bar with nothing")
+            });
+            (name.clone().unwrap_or_default(), size)
+        })
+        .collect()
 }
 
 /// Every `MessagePlugin` keybind's configuration in a config artifact, as
@@ -294,6 +330,76 @@ fn launch_layout_kdl_parses_in_both_branches() {
         &setup::launch_layout_kdl_for(BIN_ABS, WASM, Some(&r), None, false),
         "launch.kdl (eager most-recent tab)",
     );
+}
+
+/// #181, the whole width mechanism in one assertion. Every layout clave emits
+/// must declare BOTH geometries as swap layouts, sized as percents (a fixed
+/// pane cannot be resized at all, which would freeze the collapse toggle), with
+/// the collapsed one strictly narrower — and with the geometry the tab was NOT
+/// born in FIRST, because `next_swap_layout` is relative and its first call on
+/// a tab lands on index 0.
+#[test]
+fn every_layout_declares_both_swap_geometries_narrow_first_when_born_wide() {
+    let expected_order = |born_collapsed: bool| {
+        if born_collapsed {
+            ["clave_expanded", "clave_collapsed"]
+        } else {
+            ["clave_collapsed", "clave_expanded"]
+        }
+    };
+    let check = |kdl: &str, what: &str, born_collapsed: bool| {
+        let sizes = swap_bar_sizes(kdl, what);
+        assert_eq!(
+            sizes.len(),
+            2,
+            "{what}: expected two swap geometries, got {sizes:?}"
+        );
+        let names: Vec<&str> = sizes.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            expected_order(born_collapsed),
+            "{what}: wrong swap order"
+        );
+        let pct = |s: &SplitSize| match s {
+            SplitSize::Percent(p) => *p,
+            // A `Fixed` bar is refused by every resize AND makes its neighbour
+            // user-unresizable — the reason the collapse toggle was dead in
+            // fresh sessions before percents (c8-cold-start 2026-07-18).
+            SplitSize::Fixed(f) => panic!("{what}: bar sized Fixed({f}), not a percent"),
+        };
+        let (expanded, collapsed) = if born_collapsed {
+            (pct(&sizes[0].1), pct(&sizes[1].1))
+        } else {
+            (pct(&sizes[1].1), pct(&sizes[0].1))
+        };
+        assert!(
+            collapsed < expanded,
+            "{what}: collapsed {collapsed}% is not narrower than expanded {expanded}%"
+        );
+        assert!((1..=100).contains(&expanded) && (1..=100).contains(&collapsed));
+    };
+
+    check(&setup::layout_kdl(BIN_ABS, WASM), "layout.kdl", false);
+    for born_collapsed in [false, true] {
+        check(
+            &setup::launch_layout_kdl_for("clave", WASM, None, Some(280), born_collapsed),
+            "launch.kdl",
+            born_collapsed,
+        );
+        check(
+            &add::tab_layout(
+                BIN_ABS,
+                WASM,
+                "row",
+                "u-1",
+                "/tmp",
+                Some(280),
+                born_collapsed,
+            ),
+            "one-shot tab layout",
+            born_collapsed,
+        );
+    }
 }
 
 #[test]

@@ -140,34 +140,27 @@ pub fn tab_node(
 ) -> String {
     // split_direction="vertical" is REQUIRED for a LEFT bar: zellij stacks
     // sibling panes horizontally (rows) by default (Task 9 C1 finding; same
-    // wrapper as setup::layout_kdl and the S2 spike layout). The size is a
-    // PERCENT formatted from `clave_types::BAR_BIRTH_PERCENT`, never `size=30`:
-    // fixed panes refuse resizes — see setup::layout_kdl.
+    // wrapper as setup::layout_kdl and the S2 spike layout). The bar pane
+    // itself — percent-sized, never fixed — comes from the one place that
+    // emits it (`setup::bar_pane_kdl`).
     // `command` bakes the environment's clave (§2 binary split): the
     // versioned copy's absolute path in a stable session, bare `clave` in
     // dev/sandbox — so the resurrected pane re-execs the SAME binary.
-    // `clave_binary` must match config.kdl's MessagePlugin keybind
-    // configuration exactly (#44): zellij resolves a pipe's destination by
-    // (location, configuration) — a miss launches a SECOND bar instead of
-    // reaching this one.
     format!(
         r#"    tab name="{label}" focus=true {{
         pane split_direction="vertical" {{
-            pane size="{pct}%" borderless=true {{
-                plugin location="file:{wasm}" {{
-                    {key} "{binary}"
-                }}
-            }}
-            pane cwd="{cwd}" command="{binary}" {{
+{pane}            pane cwd="{cwd}" command="{binary}" {{
                 args "spawn" "{uuid}" "--name" "{label}" "--cwd" "{cwd}"
             }}
         }}
     }}
 "#,
-        key = clave_types::CLAVE_BINARY_KEY,
-        pct = display_cols.map_or(clave_types::BAR_BIRTH_PERCENT, |cols| {
-            clave_types::birth_percent_for(cols, clave_types::target_cols_for(collapsed))
-        })
+        pane = crate::setup::bar_pane_kdl(
+            binary,
+            wasm,
+            clave_types::bar_percent_for(display_cols, collapsed),
+            "            "
+        ),
     )
 }
 
@@ -220,9 +213,15 @@ pub fn tab_layout(
     display_cols: Option<usize>,
     collapsed: bool,
 ) -> String {
+    // #181: the new tab carries the same two swap geometries every other tab
+    // has, so Alt+c works in a dwell-opened tab exactly as it does in a
+    // template-born one. This file has NO default_tab_template (that is the
+    // whole point of the one-shot path), so the explicit tab node below is used
+    // verbatim and the swap layouts sit alongside it.
     format!(
-        "layout {{\n{}}}\n",
-        tab_node(binary, wasm, label, uuid, cwd, display_cols, collapsed)
+        "layout {{\n{swaps}{tab}}}\n",
+        swaps = crate::setup::swap_layouts_kdl(binary, wasm, display_cols, collapsed),
+        tab = tab_node(binary, wasm, label, uuid, cwd, display_cols, collapsed)
     )
 }
 

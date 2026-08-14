@@ -189,6 +189,89 @@ pub fn config_kdl(binary: &str, wasm: &str) -> String {
     )
 }
 
+/// One bar pane, sized as a percent of whatever the window turns out to be.
+///
+/// A percent and NEVER `size=54`: a fixed-size pane cannot be resized at all
+/// (zellij refuses with `CantResizeFixedPanes`, because its resizing IS percent
+/// arithmetic), which would freeze the bar's neighbour as well as the bar.
+///
+/// `clave_binary` is HALF of zellij's identity for the plugin — pipe
+/// destinations match on (location, configuration) exactly — so this key must
+/// equal what `config_kdl` bakes into every `MessagePlugin` keybind or each
+/// keypress launches a second bar (#44).
+pub fn bar_pane_kdl(binary: &str, wasm: &str, pct: usize, indent: &str) -> String {
+    format!(
+        "{indent}pane size=\"{pct}%\" borderless=true {{\n\
+         {indent}    plugin location=\"file:{wasm}\" {{\n\
+         {indent}        {key} \"{binary}\"\n\
+         {indent}    }}\n\
+         {indent}}}\n",
+        key = clave_types::CLAVE_BINARY_KEY
+    )
+}
+
+/// The two width geometries, declared once as zellij SWAP LAYOUTS (#181).
+///
+/// This replaces the width seek outright. The bar used to hit a column target
+/// by issuing relative resize steps and watching its own repaints — but zellij
+/// resizes in ~5%-of-display increments that are not specifiable, so the
+/// reachable widths are a lattice an exact target frequently is not on (LEDGER
+/// D34: at 280 columns the expanded bar rested at 47 against a target of 54,
+/// forever). Declaring both geometries and asking zellij to switch between them
+/// deletes the arithmetic, the feedback loop and everything that could starve
+/// it: `next_swap_layout` is one host call with no reply to wait for.
+///
+/// **Named `tab_template`s, not bare `tab` nodes.** When a `default_tab_template`
+/// exists, zellij expands every bare `tab` inside a `swap_tiled_layout` THROUGH
+/// it (`kdl_layout_parser.rs:1906-1920`), which would staple the template's bar
+/// pane on top of the swap layout's own — a double bar at the template's width,
+/// i.e. neither geometry. A node named after a `tab_template` takes the other
+/// branch (`:1926-1938`) and is used verbatim.
+///
+/// **Order is load-bearing.** `next_swap_layout` is relative — the first call on
+/// a tab lands on index 0 — so index 0 is the geometry OPPOSITE the one the tab
+/// is born in. That makes the first Alt+c of a session move the pane instead of
+/// re-applying the width it already has.
+pub fn swap_layouts_kdl(
+    binary: &str,
+    wasm: &str,
+    display_cols: Option<usize>,
+    collapsed: bool,
+) -> String {
+    let mut out = String::new();
+    for mode in [false, true] {
+        let pct = clave_types::bar_percent_for(display_cols, mode);
+        out.push_str(&format!(
+            "    tab_template name=\"{name}\" split_direction=\"vertical\" {{\n\
+             {pane}    \x20   children\n\
+             \x20   }}\n",
+            name = template_name(mode),
+            pane = bar_pane_kdl(binary, wasm, pct, "        "),
+        ));
+    }
+    // The tab is born `collapsed`, so the first swap must land on the other one.
+    for mode in [!collapsed, collapsed] {
+        out.push_str(&format!(
+            "    swap_tiled_layout name=\"{name}\" {{\n\
+             \x20       {name}\n\
+             \x20   }}\n",
+            name = template_name(mode),
+        ));
+    }
+    out
+}
+
+/// The KDL node name of a geometry. Also the swap layout's name, which is what
+/// `zellij action list-tabs --layout` reports back — so a live session says
+/// which of the two it is in.
+fn template_name(collapsed: bool) -> &'static str {
+    if collapsed {
+        "clave_collapsed"
+    } else {
+        "clave_expanded"
+    }
+}
+
 /// The session layout: EVERY tab gets the bar via default_tab_template
 /// (§6.8). Task 9 checkpoint C6 validates the template survives real use;
 /// fallback = per-tab panes + a new-tab keybind with an explicit layout.
@@ -202,41 +285,30 @@ pub fn layout_kdl(binary: &str, wasm: &str) -> String {
     //    inserts the default pane at the template's TOP-LEVEL
     //    external_children_index — it does not recurse — so a nested
     //    `children` yields tabs with no terminal at all.
-    // size MUST be a percent: fixed sizes (`size=30`) make zellij refuse
-    // every resize on the pane (CantResizeFixedPanes) — Alt+c collapse was
-    // dead in any freshly-launched session (c8-cold-start 2026-07-18; pre-C8
-    // sessions were resurrected from the serialized cache, which rewrites
-    // sizes as percentages — masking this). The bar's birth-armed width seek
-    // converges the birth percent onto the exact template cols.
+    // The width itself is declared TWICE more, as the two swap layouts
+    // `swap_layouts_kdl` emits — that pair is what Alt+c switches between since
+    // #181, and it is why nothing in the bar resizes anything any more.
     //
-    // The percent is FORMATTED from `clave_types::BAR_BIRTH_PERCENT`, which is
-    // `BAR_TARGET_COLS` against S8 §3.4's 200-column reference viewport — the
-    // same derivation that made 15% right for 30 columns and 19% for 38. It is
-    // a HINT, not a contract: the seek corrects a bad birth either way, so a
-    // stale percent costs a visible flicker on every launch, not a wrong bar —
-    // S8 §3.3's own words, "the percent is a birth hint, the seek is the
-    // authority". Hand-deriving it here (three format strings, three chances to
-    // forget) is what §3.3 names as the acceptable-but-worse fallback; it is
-    // now taken as §3.3 actually recommends (#86).
-    // The plugin's configuration is HALF of zellij's identity for it: pipe
-    // destinations match on (location, configuration) exactly, so this key
-    // must equal what config_kdl bakes into every MessagePlugin keybind or
-    // each keypress launches a second bar (#44).
+    // `clave setup` writes this file from a shell with no reliable knowledge of
+    // the window it will be opened in, so both geometries take the
+    // reference-viewport fiction. `launch_layout_kdl_for` has the real width and
+    // uses it; this file is the fallback for sessions opened by hand.
     format!(
         "// GENERATED by `clave setup` — regenerate, don't hand-edit.\n\
          layout {{\n\
+         {swaps}\
          \x20   default_tab_template split_direction=\"vertical\" {{\n\
-         \x20       pane size=\"{pct}%\" borderless=true {{\n\
-         \x20           plugin location=\"file:{wasm}\" {{\n\
-         \x20               {key} \"{binary}\"\n\
-         \x20           }}\n\
-         \x20       }}\n\
-         \x20       children\n\
+         {pane}\x20       children\n\
          \x20   }}\n\
          \x20   tab name=\"clave\" focus=true\n\
          }}\n",
-        key = clave_types::CLAVE_BINARY_KEY,
-        pct = clave_types::BAR_BIRTH_PERCENT
+        swaps = swap_layouts_kdl(binary, wasm, None, false),
+        pane = bar_pane_kdl(
+            binary,
+            wasm,
+            clave_types::bar_percent_for(None, false),
+            "        "
+        ),
     )
 }
 
@@ -295,32 +367,30 @@ pub fn launch_layout_kdl_for(
         ),
         None => "    tab name=\"clave\" focus=true\n".to_string(),
     };
-    // percent-sized, not size=30: fixed panes refuse resizes — see layout_kdl.
-    // `clave_binary` identity requirement: see layout_kdl.
+    // Percent-sized, never fixed, and `clave_binary` identity: see layout_kdl.
     //
-    // The percent is derived from the REAL terminal width when there is one
-    // (LEDGER D35). This is the single highest-leverage number in the width
-    // system: zellij only resizes in whole increments, so the widths the bar
-    // can ever occupy form a lattice anchored at its BIRTH. Born near the
-    // target, a collapse and expand return to it on any display; born at the
-    // 200-column fiction's percent, a 280-column display rests at 47 forever
-    // and never reaches 54 (D34, measured). This template is also what every
-    // Alt+t tab inherits, so one correct number here fixes the whole session.
+    // The percents are derived from the REAL terminal width when there is one
+    // (LEDGER D35): `clave dev launch` and `clave` run OUTSIDE zellij, so the
+    // controlling TTY's width IS the display area the percents resolve against.
+    // The template is what every Alt+t tab inherits, so one correct pair here
+    // sizes the whole session.
+    //
+    // The template is born in the mode the store was left in (D36) and the swap
+    // layouts are ordered against that, so the first Alt+c moves the pane.
     format!(
         "// GENERATED at launch — §6.8 clave-owned cold start.\n\
          layout {{\n\
+         {swaps}\
          \x20   default_tab_template split_direction=\"vertical\" {{\n\
-         \x20       pane size=\"{pct}%\" borderless=true {{\n\
-         \x20           plugin location=\"file:{wasm}\" {{\n\
-         \x20               {key} \"{binary}\"\n\
-         \x20           }}\n\
-         \x20       }}\n\
-         \x20       children\n\
+         {pane}\x20       children\n\
          \x20   }}\n{tab}}}\n",
-        key = clave_types::CLAVE_BINARY_KEY,
-        pct = display_cols.map_or(clave_types::BAR_BIRTH_PERCENT, |cols| {
-            clave_types::birth_percent_for(cols, clave_types::target_cols_for(collapsed))
-        })
+        swaps = swap_layouts_kdl(binary, wasm, display_cols, collapsed),
+        pane = bar_pane_kdl(
+            binary,
+            wasm,
+            clave_types::bar_percent_for(display_cols, collapsed),
+            "        "
+        ),
     )
 }
 
@@ -1023,10 +1093,20 @@ mod tests {
         // The eager tab replaces the plain placeholder tab entirely.
         assert!(!kdl.contains("tab name=\"clave\" focus=true"));
         // DOUBLE-BAR regression guard (live finding, 2026-07-18): the
-        // template wraps explicit tab nodes too, so the ONLY bar pane in
-        // the whole layout must be the template's — the eager tab node is
-        // BARE.
-        assert_eq!(kdl.matches("plugin location").count(), 1);
+        // template wraps explicit tab nodes too, so a bar pane in the eager
+        // tab node would load TWO plugin instances in the same second and
+        // break executor election. The tab node must be BARE.
+        let tab = kdl
+            .split_once("tab name=")
+            .expect("the eager branch emits a named tab")
+            .1;
+        assert!(
+            !tab.contains("plugin location"),
+            "eager tab is not bare:\n{tab}"
+        );
+        // Three bar declarations and no more: the default template plus the two
+        // #181 swap geometries. A fourth means a generator grew its own copy.
+        assert_eq!(kdl.matches("plugin location").count(), 3);
         r.label = "x".into(); // silence unused-mut if needed
     }
 
