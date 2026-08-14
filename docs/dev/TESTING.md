@@ -498,10 +498,17 @@ lines.
 
 | Pass | Files | Mutants | Missed |
 |---|---|---|---|
-| state machine + store | `model.rs`, `store.rs` | 377 | 12 |
+| state machine + store | `model.rs`, `store.rs` | 377 | 18 |
 | host logic | `hook.rs`, `add.rs`, `spawn.rs`, `discover.rs`, `clave-types` | 331 | 28 |
-| everything else | `render.rs`, `doctor.rs`, `setup.rs`, `release.rs`, `sandbox.rs`, `open.rs`, `main.rs`, the small modules | 414 | 38 |
-| the dev harness | `dev.rs` | 268 | 0 |
+| everything else | `render.rs`, `doctor.rs`, `setup.rs`, `release.rs`, `sandbox.rs`, `open.rs`, `main.rs`, the small modules | 414 | 53 |
+| the dev harness | `dev.rs` | 268 | 211 |
+
+The dev-harness pass is the outlier and it is not a defect: **196 of its 211
+survivors are a field deleted from a `ScenarioAgent` literal** in the demo
+scenario table. That table is fixture data — a world to look at, not a rule to
+hold — so nothing asserts its values and nothing should. The other 15 are the
+harness's own `run_*` entry points. Read that number as "the scenario table is
+unasserted", which is the intended state, and ignore it when comparing passes.
 
 **The survivors sort into three piles, and only the third was worth a test.**
 
@@ -524,7 +531,7 @@ candidate rather than a test one. `first_words`' 32-char cap, where the renderer
 clamps again anyway. The cross-directory uuid collision in `resume_candidates`,
 documented near-impossible at the line.
 
-**3 — real behaviour nobody pinned.** Nine, each now held by a test or an
+**3 — real behaviour nobody pinned.** Ten, each now held by a test or an
 assertion, and each named in the test's own doc-comment so the next reader knows
 where it came from:
 
@@ -539,8 +546,13 @@ where it came from:
 | doctor's release-skew guard | "you are running unreleased code" on a binary that is exactly the released one | `skew_warns_only_when_dev_is_ahead_and_only_with_bin_dir` |
 | `apply_snapshot`'s unread-override clear | every store push re-lights a finished row the user already read, so green stops meaning "unseen" | `focus_on_done_agent_marks_read_once_and_renders_idle` |
 | `prune_opening`'s two conditions | the ↻ mark clears early, and with it the double-fire guard: a second Enter starts a second copy of the same agent | `an_in_flight_open_holds_its_mark_through_unrelated_snapshots` |
+| `write_generated`'s `NotFound` guard on settings.json | `clave setup` merges into `{}` and writes it back, replacing a user's whole Claude config — a file that is often a dotfiles symlink | `only_a_missing_settings_file_reads_as_empty` |
 
-Two of those nine were shape-1 witnesses (doctor's skew, the unread override):
+The store and setup entries are the same rule in two places, and worth naming as
+a rule: **a read-modify-write must distinguish "absent" from "unreadable", and
+only the first may default.** Both were written correctly and neither was held.
+
+Two of those ten were shape-1 witnesses (doctor's skew, the unread override):
 the assertion was there, and passed under both the rule and its inversion. That
 is the shape mutation testing is *for*, and it found them in a module whose
 tests read as thorough.
