@@ -23,7 +23,7 @@ conversation.
 |---|---|---|---|
 | `●` red | waiting on you | `✖` | last turn failed |
 | `●` amber | working | `✗` | its directory is gone |
-| `●` green | finished while you were away | `◌` | dormant — no process, opens where it left off |
+| `●` green | finished while you were away | `○` | dormant — no process, opens where it left off |
 | `●` grey | idle | `↻` | opening |
 
 Then, left to right across the row:
