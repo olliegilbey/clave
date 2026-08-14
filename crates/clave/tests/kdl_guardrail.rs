@@ -128,6 +128,7 @@ fn eager_record() -> AgentRecord {
         worktree: Some("/home/o/code/clave/.claude-worktrees/ab12cd34".into()),
         label_source: LabelSource::Summary,
         tab_id: None,
+        pane_id: None,
         stale: false,
         title: None,
         summary: String::new(),

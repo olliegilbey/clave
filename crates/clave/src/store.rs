@@ -71,6 +71,15 @@ pub struct AgentRecord {
     /// session recreate (see clear_session_order).
     #[serde(default)]
     pub tab_id: Option<usize>,
+    /// Zellij terminal pane id hosting this agent (#178). The `clave-register`
+    /// broadcast is the fast path and reaches only the instances ALIVE when it
+    /// fires — a tab born by a wake misses its own announcement, and the older
+    /// instances that heard it cannot see a pane outside their own tab. Riding
+    /// the snapshot instead means every instance, however late it loads, can
+    /// compute the bind. Session-scoped exactly like `tab_id` and cleared with
+    /// it, since pane ids are reissued per zellij session.
+    #[serde(default)]
+    pub pane_id: Option<u32>,
     /// §5 (2026-07-17): `clave open` found the row's cwd missing → the bar
     /// renders ✗ instead of ◌. A row flag, NOT a status (statuses are hook
     /// lifecycle); cleared by a later successful open. `default` keeps
@@ -297,6 +306,7 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
                 commit_ord: r.commit_ord,
                 last_visited: r.last_visited,
                 tab_id: r.tab_id,
+                pane_id: r.pane_id,
                 stale: r.stale,
                 title: r.title.clone(),
                 summary: r.summary.clone(),
@@ -434,6 +444,34 @@ pub fn apply_bind(paths: &StorePaths, uuid: &str, tab_id: usize) -> Result<Optio
     })
 }
 
+/// `clave spawn`'s pane registration, persisted (#178). The `clave-register`
+/// pipe remains the fast path, but a broadcast only reaches instances that are
+/// ALREADY RUNNING when it fires: a tab created by a wake misses its own
+/// announcement, and every instance that did hear it is by then a BACKGROUND
+/// instance, which cannot see a pane outside its own tab (FOOTGUNS: PaneUpdate
+/// reaches only the active tab). Knowledge and visibility therefore land in
+/// different instances and the bind is uncomputable everywhere — #178.
+///
+/// Riding the store fixes that at the root: the snapshot is the one view every
+/// instance agrees on, so however late a bar loads it hydrates the mapping and
+/// can compute its own bind. Change-gated like its neighbours; unknown uuid
+/// returns None (spawn can race a pruned row).
+pub fn apply_register(
+    paths: &StorePaths,
+    uuid: &str,
+    pane_id: u32,
+) -> Result<Option<AgentSnapshot>> {
+    with_store_mut(paths, |s| {
+        let r = s.agents.get_mut(uuid)?;
+        if r.pane_id == Some(pane_id) {
+            return None; // re-registration of the same pane: no push
+        }
+        r.pane_id = Some(pane_id);
+        s.seq += 1; // monotonic pipe contract (§5)
+        Some(snapshot_from(s))
+    })
+}
+
 /// `clave prune-tabs <stale tab ids…>` (#6/F3): carry each dying tab's
 /// commitment ordinal onto the agent that was bound to it (S1), then drop the
 /// tab_order entries and clear agent tab_id binds for EXACTLY the ids listed —
@@ -487,6 +525,13 @@ pub(crate) fn prune_in(s: &mut Store, stale_ids: &[usize]) -> bool {
             let carried = s.tab_order.get(&id).copied().unwrap_or(0);
             r.commit_ord = r.commit_ord.max(carried);
             r.tab_id = None;
+            // The pane died with the tab, so the mapping dies with it (#178,
+            // Codex P2 on PR #185). Left set, a dead pane would ride every
+            // later snapshot: the dormant row would read as "pane announced
+            // but absent", which is the #178 starvation signature — a
+            // permanent false episode masking the real ones — and a
+            // uuid-directed nav would chase a pane that no longer exists.
+            r.pane_id = None;
             changed = true;
         }
     }
@@ -581,11 +626,20 @@ pub fn backfill_summaries(s: &mut Store) -> bool {
 /// nothing matches.
 pub fn clear_session_order(paths: &StorePaths) -> Result<()> {
     with_store_mut(paths, |s| {
-        let bound = s.agents.values().any(|r| r.tab_id.is_some());
+        // Pane ids are reissued per zellij session exactly as tab ids are, so
+        // a survivor from the last session is a lie that would join a fresh
+        // tab to a dead pane — the RC-A shape. Cleared on the same pass.
+        let bound = s
+            .agents
+            .values()
+            .any(|r| r.tab_id.is_some() || r.pane_id.is_some());
         let mut changed = false;
         if !s.tab_order.is_empty() || bound {
             s.tab_order.clear();
-            s.agents.values_mut().for_each(|r| r.tab_id = None);
+            s.agents.values_mut().for_each(|r| {
+                r.tab_id = None;
+                r.pane_id = None;
+            });
             changed = true;
         }
         // Session create is the one locked pass that runs at every launch,
@@ -688,6 +742,7 @@ mod tests {
             worktree: None,
             label_source: LabelSource::FirstPrompt,
             tab_id: None,
+            pane_id: None,
             stale: false,
             title: None,
             summary: String::new(),
@@ -871,6 +926,57 @@ mod tests {
         assert_eq!(snap.agents[0].tab_id, Some(9));
         // Unknown uuid: silently none (bar may race a pruned agent).
         assert!(apply_bind(&p, "ghost", 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn register_persists_the_pane_and_survives_onto_the_wire() {
+        // #178: the pane mapping has to reach instances the broadcast cannot,
+        // so it rides the snapshot. Change-gated like its neighbours, and a
+        // session recreate must drop it — pane ids are reissued per session,
+        // so a survivor would join a fresh tab to a dead pane.
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            s.agents.insert("u1".into(), rec("u1"));
+        })
+        .unwrap();
+        let snap = apply_register(&p, "u1", 42).unwrap().expect("registered");
+        assert_eq!(snap.agents[0].pane_id, Some(42));
+        assert_eq!(snap.seq, 1);
+        // Re-registering the same pane is the common case (a re-exec): no
+        // change, no seq bump, no push.
+        assert!(apply_register(&p, "u1", 42).unwrap().is_none());
+        assert_eq!(read_store(&p).unwrap().seq, 1);
+        // A new pane for the same row (re-spawned into a fresh pane) lands.
+        let snap = apply_register(&p, "u1", 43)
+            .unwrap()
+            .expect("re-registered");
+        assert_eq!(snap.agents[0].pane_id, Some(43));
+        // Unknown uuid: silently none, exactly like apply_bind.
+        assert!(apply_register(&p, "ghost", 1).unwrap().is_none());
+        // Session recreate clears it alongside tab_id.
+        clear_session_order(&p).unwrap();
+        assert_eq!(read_store(&p).unwrap().agents["u1"].pane_id, None);
+    }
+
+    #[test]
+    fn a_closing_tab_takes_its_pane_mapping_with_it() {
+        // Codex P2 on PR #185. A pane that outlives its tab is worse than no
+        // pane at all: the dormant row reads as "announced but absent", which
+        // is #178's own starvation signature, so a permanent false episode
+        // would mask every real one.
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            s.agents.insert("u1".into(), rec("u1"));
+        })
+        .unwrap();
+        apply_bind(&p, "u1", 4).unwrap().expect("bound");
+        apply_register(&p, "u1", 42).unwrap().expect("registered");
+        apply_prune_tabs(&p, &[4]).unwrap().expect("pruned");
+        let r = &read_store(&p).unwrap().agents["u1"];
+        assert_eq!(r.tab_id, None);
+        assert_eq!(r.pane_id, None, "the pane died with its tab");
     }
 
     #[test]

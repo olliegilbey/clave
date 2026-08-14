@@ -746,6 +746,7 @@ fn agent_record(
         worktree: a.worktree.then(|| cwd_str.to_string()),
         label_source: crate::store::LabelSource::FirstPrompt,
         tab_id: None,
+        pane_id: None,
         stale: false,
         title: a.title.map(String::from),
         summary: a.summary.to_string(),
