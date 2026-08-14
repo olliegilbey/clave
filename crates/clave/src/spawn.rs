@@ -359,6 +359,18 @@ pub fn register_pane(uuid: &str) {
         eprintln!("clave spawn: unparseable ZELLIJ_PANE_ID {pane_id:?}");
         return;
     };
+    // Persist FIRST, then announce (#178). The store write is synchronous and
+    // spawns nothing — it must not use `push_snapshot`, whose un-reaped child
+    // is the C7 zombie this function's own double-fork exists to avoid. No
+    // push is needed: every bar runs `clave snapshot` at load, and every later
+    // status push re-carries the field, so a bar born after this write still
+    // hydrates the mapping. Best-effort, exactly like the pipe below: a failed
+    // persist costs the bind until the next snapshot, never the exec.
+    if let Err(e) =
+        crate::store::store_paths().and_then(|p| crate::store::apply_register(&p, uuid, pane_id))
+    {
+        eprintln!("clave spawn: pane registration not persisted: {e}");
+    }
     let reg = Register {
         uuid: uuid.to_string(),
         pane_id,
@@ -736,6 +748,7 @@ mod tests {
                 worktree: None,
                 label_source: crate::store::LabelSource::FirstPrompt,
                 tab_id: None,
+                pane_id: None,
                 stale: false,
                 title: None,
                 summary: String::new(),

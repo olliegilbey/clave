@@ -1214,6 +1214,22 @@ impl BarModel {
         // The mode below is now authoritative, so the seek may act (D37).
         self.awaiting_hydration = false;
         self.agents = snap.agents;
+        // Hydrate the pane mapping from the snapshot (#178). `clave-register`
+        // is a broadcast, so it reaches only the instances alive when it fires
+        // — a tab born by a wake never hears about its OWN pane, while the
+        // instances that did hear are background ones that cannot see a pane
+        // outside their tab. Seeding here is what makes the bind computable in
+        // the one instance that can act on it, on this snapshot or any later
+        // one; it is self-healing rather than timing-dependent.
+        //
+        // MERGE, not replace: a register that beat this snapshot is fresher
+        // than the row it describes, and the store clears pane ids only on
+        // session recreate — which rebuilds every instance anyway.
+        for a in &self.agents {
+            if let Some(pane) = a.pane_id {
+                self.uuid_to_pane.insert(a.uuid.clone(), pane);
+            }
+        }
         // REPLACE the tab order — the store's map is authoritative and
         // self-healing by construction; merging deltas is the exact failure
         // mode that diverged live (C5 round 5).
@@ -2462,6 +2478,7 @@ mod tests {
             commit_ord: 0,
             last_visited: 0,
             tab_id,
+            pane_id: None,
             stale: false,
             title: None,
             summary: String::new(),
@@ -2485,6 +2502,7 @@ mod tests {
             commit_ord: 0,
             last_visited: 0,
             tab_id,
+            pane_id: None,
             stale: false,
             title: None,
             summary: String::new(),
@@ -3465,6 +3483,46 @@ mod tests {
                 uuid: "u1".into(),
                 tab_id: 11,
             }]
+        );
+    }
+
+    #[test]
+    fn a_snapshot_pane_id_binds_an_instance_that_never_heard_the_register() {
+        // #178 itself. A tab born by a wake is not running when its own
+        // `clave-register` broadcast fires, so it never learns its pane — and
+        // the instances that DID hear are background ones that cannot see a
+        // pane outside their tab. Nobody could compute the bind. Carrying the
+        // pane on the snapshot closes it: no `register()` call here at all.
+        let mut m = fleet_of_three(11);
+        let mut a = agent("u1", Status::Working, None);
+        a.pane_id = Some(6); // the terminal pane in tab 11, per FLEET_PANES
+        m.apply_snapshot(snap_full(1, vec![a], &[(11, 100)]));
+        assert_eq!(
+            m.identity_effects(),
+            vec![Effect::Bind {
+                uuid: "u1".into(),
+                tab_id: 11,
+            }],
+            "the snapshot is the one view every instance agrees on"
+        );
+        // And it is not mistaken for a stall on the way: the leg never went
+        // quiet, so there is no episode to report.
+        assert_eq!(m.bind_stall_report(), None);
+    }
+
+    #[test]
+    fn a_snapshot_pane_in_another_tab_still_binds_nothing_here() {
+        // The mirror: hydrating from the snapshot must not let an instance
+        // bind a pane that is not in ITS tab. Pane 7 lives in tab 12.
+        let mut m = fleet_of_three(11);
+        let mut a = agent("u1", Status::Working, None);
+        a.pane_id = Some(7);
+        m.apply_snapshot(snap_full(1, vec![a], &[(11, 100)]));
+        assert!(
+            !m.identity_effects()
+                .iter()
+                .any(|e| matches!(e, Effect::Bind { .. })),
+            "a pane outside our tab is another instance's bind to make"
         );
     }
 

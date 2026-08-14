@@ -465,6 +465,7 @@ pub fn merge_resume_record(existing: Option<&AgentRecord>, fresh: AgentRecord) -
             // The resume opens a brand-new tab: the old bind is stale by
             // definition. The new tab's bar re-binds on join (§6.6 B).
             tab_id: None,
+            pane_id: None,
             ..row.clone()
         },
         None => fresh,
@@ -1020,6 +1021,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
             worktree: worktree_path.clone(),
             label_source: LabelSource::FirstPrompt,
             tab_id: None,
+            pane_id: None,
             stale: false,
             title: None,
             summary: String::new(),
@@ -1072,6 +1074,7 @@ mod tests {
             worktree: None,
             label_source: LabelSource::FirstPrompt,
             tab_id: None,
+            pane_id: None,
             stale: false,
             title: None,
             summary: String::new(),

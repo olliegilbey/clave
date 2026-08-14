@@ -129,6 +129,12 @@ pub struct Agent {
     /// diverge (round 6). Session-scoped; None until bound / after recreate.
     #[serde(default)]
     pub tab_id: Option<usize>,
+    /// Zellij terminal pane id hosting this agent (#178) — the wire twin of
+    /// `AgentRecord::pane_id`, which carries the rationale. Without it a
+    /// sidebar born after the `clave-register` broadcast can never learn which
+    /// pane its own row owns, so the bind is uncomputable in every instance.
+    #[serde(default)]
+    pub pane_id: Option<u32>,
     /// §5 (2026-07-17): `clave open` found the row's cwd missing → the bar
     /// renders ✗ instead of ◌. A row flag, NOT a status (statuses are hook
     /// lifecycle); cleared by a later successful open. `default` keeps
@@ -583,6 +589,7 @@ mod tests {
             commit_ord: 0,
             last_visited: 0,
             tab_id: None,
+            pane_id: None,
             stale: false,
             title: None,
             summary: String::new(),
@@ -611,6 +618,7 @@ mod tests {
                 commit_ord: 0,
                 last_visited: 0,
                 tab_id: None,
+                pane_id: None,
                 stale: false,
                 title: None,
                 summary: String::new(),
@@ -642,6 +650,7 @@ mod tests {
             commit_ord: 0,
             last_visited: 0,
             tab_id: Some(4),
+            pane_id: None,
             stale: false,
             title: None,
             summary: String::new(),
@@ -675,6 +684,7 @@ mod tests {
             commit_ord: 0,
             last_visited: 0,
             tab_id: None,
+            pane_id: None,
             stale: true,
             title: None,
             summary: String::new(),
@@ -710,6 +720,7 @@ mod tests {
             commit_ord: 0,
             last_visited: 0,
             tab_id: None,
+            pane_id: None,
             stale: false,
             title: Some("CLA-MAIN".into()),
             summary: "fix the flaky auth".into(),
@@ -759,6 +770,7 @@ mod tests {
             commit_ord: 0,
             last_visited: 0,
             tab_id: None,
+            pane_id: None,
             stale: false,
             title: None,
             summary: String::new(),
@@ -832,6 +844,7 @@ mod tests {
             commit_ord: 7,
             last_visited: 0,
             tab_id: None,
+            pane_id: None,
             stale: false,
             title: None,
             summary: String::new(),
