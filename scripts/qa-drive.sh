@@ -439,7 +439,7 @@ else
   if pgrep -f -- "--resume ${EAGER_UUID}" >/dev/null 2>&1; then
     check "eager resume targets live_session, not the minted uuid (ps fallback)" \
       "mismatch: a process resumes the minted uuid ${EAGER_UUID}" "ok"
-  elif pgrep -f -- "--resume ${EAGER_LS}" >/dev/null 2>&1; then
+  elif [[ -n "${EAGER_LS}" ]] && pgrep -f -- "--resume ${EAGER_LS}" >/dev/null 2>&1; then
     check "eager resume targets live_session, not the minted uuid (ps fallback)" "ok" "ok"
   else
     measure "eager resume identity" "unresolvable — no pane_command in tab $EAGER_TID names claude and no process resumes either uuid (deepest-child, unknown not mismatched)"
