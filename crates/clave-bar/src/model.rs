@@ -141,7 +141,10 @@ pub enum Effect {
         /// Unbound rows whose pane id we know but cannot place in any tab —
         /// the starvation signature (`PaneKnownButAbsent`); zero otherwise.
         stranded: usize,
-        own_tab: usize,
+        /// `None` when the frames cannot resolve this instance's own tab —
+        /// which is itself one of the reported states, so it must not be a
+        /// precondition for reporting.
+        own_tab: Option<usize>,
     },
 }
 
@@ -806,7 +809,14 @@ impl BarModel {
     /// pane id at all and is deliberately NOT counted — dormancy is not a
     /// stall, and conflating the two would make this line fire on every
     /// healthy fleet.
-    fn bind_stall_report(&mut self, own_tab: usize) -> Option<Effect> {
+    /// **Runs BEFORE every gate, and that is the whole point** (#184 review,
+    /// found independently by two reviewers). `identity_effects` refuses on an
+    /// unelected instance and again on an unresolved own tab, and both refusals
+    /// return before `bind_effects` is ever called — so a report computed
+    /// inside the bind pass could only ever describe frames that were already
+    /// healthy enough to bind. The two states this hunt most needs to see are
+    /// exactly the ones those gates swallow.
+    pub fn bind_stall_report(&mut self) -> Option<Effect> {
         let stranded = self
             .agents
             .iter()
@@ -817,9 +827,13 @@ impl BarModel {
                     .is_some_and(|p| self.tab_position_of_pane(*p).is_none())
             })
             .count();
+        // `own_tab()` is `Some` only when the frames agree, so it answers both
+        // of the first two questions — but not which one, and the difference
+        // is a stale pane frame versus a tab that has left the frame entirely.
+        let own_tab = self.own_tab();
         let state = if !self.frames_coherent() {
             BindStallState::FramesIncoherent
-        } else if !self.tabs.iter().any(|t| t.tab_id == own_tab) {
+        } else if own_tab.is_none() {
             BindStallState::OwnPositionUnknown
         } else if stranded > 0 {
             BindStallState::PaneKnownButAbsent
@@ -1013,7 +1027,6 @@ impl BarModel {
     /// unknown uuid — no push, no `seq` bump) costs exactly one subprocess.
     pub fn bind_effects(&mut self, own_tab: usize) -> Vec<Effect> {
         let mut out = Vec::new();
-        out.extend(self.bind_stall_report(own_tab));
         if !self.frames_coherent() {
             return out;
         }
@@ -2837,15 +2850,9 @@ mod tests {
                 agent("u2", Status::Working, None),
             ],
         ));
-        assert_eq!(
-            m.bind_effects(11),
-            vec![Effect::BindStall {
-                state: BindStallState::PaneKnownButAbsent,
-                stranded: 1,
-                own_tab: 11,
-            }]
-        );
-        // ...and only one: the state is unchanged, so the next frame is quiet.
+        // The bind pass itself stays pure: it computes binds, and reports
+        // nothing (the #178 breadcrumb runs ahead of the gates, in
+        // `identity_effects`).
         assert_eq!(m.bind_effects(11), Vec::<Effect>::new());
     }
 
@@ -3397,18 +3404,19 @@ mod tests {
             &[(11, 100)],
         ));
         m.apply_panes(panes_at(&FLEET_PANES_AFTER_CLOSE));
-        // No BIND is computed — and since #178 the refusal says so once,
-        // because from outside this instance a refusal that retries next frame
-        // and one that never gets a next frame look identical.
-        let fx = m.bind_effects(11);
-        assert!(!fx.iter().any(|e| matches!(e, Effect::Bind { .. })));
+        assert_eq!(m.bind_effects(11), Vec::<Effect>::new());
+        // ...and the production path says so, which is the point of #178's
+        // breadcrumb: `identity_effects` returns on the unresolved own tab
+        // before it ever reaches the bind pass, so a report computed inside
+        // that pass could never describe this frame (#184 review, found by two
+        // reviewers independently).
         assert_eq!(
-            fx,
-            vec![Effect::BindStall {
+            m.bind_stall_report(),
+            Some(Effect::BindStall {
                 state: BindStallState::FramesIncoherent,
                 stranded: 0,
-                own_tab: 11,
-            }]
+                own_tab: None,
+            })
         );
     }
 
@@ -3418,40 +3426,46 @@ mod tests {
         // the contract of the breadcrumb that ends that: one line per state
         // CHANGE (a starved bar must not spam a shared log), and a closing
         // line when the leg comes back, so a log can be read as episodes.
-        let mut m = BarModel::default();
-        m.apply_tabs(vec![tab(11, 1, "ag", true)]);
-        m.apply_panes(vec![pane(1, 5, false, true)]);
+        // Driven through the PRODUCTION entry point, not the bind pass.
+        let mut m = fleet_of_three(11);
         m.register("u1".into(), 9); // announced pane, absent from our frame
-        m.apply_snapshot(snap(1, vec![agent("u1", Status::Working, None)]));
+        m.apply_snapshot(snap_full(
+            1,
+            vec![agent("u1", Status::Working, None)],
+            &[(11, 100)],
+        ));
         assert_eq!(
-            m.bind_effects(11),
-            vec![Effect::BindStall {
+            m.bind_stall_report(),
+            Some(Effect::BindStall {
                 state: BindStallState::PaneKnownButAbsent,
                 stranded: 1,
-                own_tab: 11,
-            }]
+                own_tab: Some(11),
+            })
         );
         // Steady state is quiet, however many frames arrive.
-        assert_eq!(m.bind_effects(11), Vec::<Effect>::new());
-        assert_eq!(m.bind_effects(11), Vec::<Effect>::new());
-        // The pane frame finally reaches us: the leg recovers, says so ONCE,
-        // and the bind it was owed lands in the same pass.
-        m.apply_panes(vec![pane(1, 5, false, true), pane(1, 9, false, false)]);
+        assert_eq!(m.bind_stall_report(), None);
+        assert_eq!(m.bind_stall_report(), None);
+        // The pane frame finally reaches us: the leg recovers and says so
+        // ONCE, and the bind it was owed lands on the same settle.
+        let mut panes = panes_at(&FLEET_PANES);
+        panes.push(pane(1, 9, false, false));
+        m.apply_panes(panes);
         assert_eq!(
-            m.bind_effects(11),
-            vec![
-                Effect::BindStall {
-                    state: BindStallState::Cleared,
-                    stranded: 0,
-                    own_tab: 11,
-                },
-                Effect::Bind {
-                    uuid: "u1".into(),
-                    tab_id: 11,
-                },
-            ]
+            m.bind_stall_report(),
+            Some(Effect::BindStall {
+                state: BindStallState::Cleared,
+                stranded: 0,
+                own_tab: Some(11),
+            })
         );
-        assert_eq!(m.bind_effects(11), Vec::<Effect>::new());
+        assert_eq!(m.bind_stall_report(), None);
+        assert_eq!(
+            m.identity_effects(),
+            vec![Effect::Bind {
+                uuid: "u1".into(),
+                tab_id: 11,
+            }]
+        );
     }
 
     #[test]
@@ -3459,17 +3473,21 @@ mod tests {
         // The false positive that would make the breadcrumb worthless: every
         // healthy fleet carries unbound rows. Only a row whose pane was
         // ANNOUNCED and cannot be placed counts.
-        let mut m = BarModel::default();
-        m.apply_tabs(vec![tab(11, 1, "ag", true)]);
-        m.apply_panes(vec![pane(1, 5, false, true)]);
-        m.apply_snapshot(snap(
+        let mut m = fleet_of_three(11);
+        m.apply_snapshot(snap_full(
             1,
             vec![
                 agent("dormant-1", Status::Idle, None),
                 agent("dormant-2", Status::Idle, None),
             ],
+            &[(11, 100)],
         ));
-        assert_eq!(m.bind_effects(11), Vec::<Effect>::new());
+        assert!(
+            !m.identity_effects()
+                .iter()
+                .any(|e| matches!(e, Effect::BindStall { .. })),
+            "unbound rows with no announced pane are ordinary dormancy"
+        );
     }
 
     #[test]
