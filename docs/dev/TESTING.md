@@ -489,6 +489,79 @@ Read all four buckets, they mean different things:
 tool reporting a finding, not the recipe being broken — which is another reason
 it is not wired into `just gates`.
 
+#### The whole-workspace sweep, 2026-08-15
+
+Every mutable file in both crates, run as four parallel passes over ~1,390
+mutants. It takes hours on a 12-core machine, which is the concrete reason this
+is a considered act and not a gate — and why the recipes default to changed
+lines.
+
+| Pass | Files | Mutants | Missed |
+|---|---|---|---|
+| state machine + store | `model.rs`, `store.rs` | 377 | 12 |
+| host logic | `hook.rs`, `add.rs`, `spawn.rs`, `discover.rs`, `clave-types` | 331 | 28 |
+| everything else | `render.rs`, `doctor.rs`, `setup.rs`, `release.rs`, `sandbox.rs`, `open.rs`, `main.rs`, the small modules | 414 | 38 |
+| the dev harness | `dev.rs` | 268 | 0 |
+
+**The survivors sort into three piles, and only the third was worth a test.**
+
+**1 — an IO shell whose decidable half is already extracted.** The large
+majority: `fzf_pick`, `runtime_binary`, `discover`, `push_snapshot`,
+`git_output`, `scan_jsonl_stems`, `worktree_identity`, `PidGate::from_env`, and
+every `run_*` entry point including `main` itself. This is the architecture
+reporting itself rather than a gap — `binary_resolution_is_anomalous`,
+`resolve`, `open_decision`, `open_is_live` and `resolve_row` are each pure, each
+tested, and each of these survivors is the wrapper around one of them.
+`.cargo/mutants.toml`'s `exclude_re` already names two by hand. The rest are
+deliberately NOT added: the list would then need maintaining, and a real finding
+can hide behind a stale name far more easily than behind a survivor you have to
+read.
+
+**2 — equivalent or arbitrary.** `frames_coherent`'s `||` (behaviourally
+identical; the line itself says so, and says why). `cursor_gen`'s increment —
+the field is `#[allow(dead_code)]` pending #92, so this is a *deletion*
+candidate rather than a test one. `first_words`' 32-char cap, where the renderer
+clamps again anyway. The cross-directory uuid collision in `resume_candidates`,
+documented near-impossible at the line.
+
+**3 — real behaviour nobody pinned.** Nine, each now held by a test or an
+assertion, and each named in the test's own doc-comment so the next reader knows
+where it came from:
+
+| What could change silently | What that costs in the field | Held by |
+|---|---|---|
+| `apply_relocation`'s whole body | a session whose worktree moved keeps the dead path, so the next open goes ✗ stale | `relocation_repoints_the_row_and_only_touches_branch_when_told` |
+| `read_store`'s `NotFound` guard, widened | an unreadable store reads as empty, and `with_store_mut` renames an empty one over it — the fleet is gone | `an_unreadable_store_is_an_error_and_is_never_written_over` |
+| `apply_prune_tabs`' `seq` bump | every bar discards the prune push and re-fires the subprocess forever, while the closed tab's agent still renders live | `prune_tabs_removes_listed_stale_ids_order_safe_and_change_gated` |
+| `merge_resume_record`'s `pane_id` reset | a resumed row carries a dead pane into the new session: a permanent false #178 stall, and a jump that chases a pane that is gone | `merge_resume_preserves_existing_row_and_resets_status` |
+| the idle pruner's protection rule | `clave prune` deletes the row of an agent open in a tab whose conversation was `/clear`ed | `the_idle_pruner_protects_a_rotated_pane_and_only_the_running_session` |
+| doctor's hooks-merged tick | a green tick printed beside the hook problem it contradicts | `hook_problems_zero_and_duplicate` |
+| doctor's release-skew guard | "you are running unreleased code" on a binary that is exactly the released one | `skew_warns_only_when_dev_is_ahead_and_only_with_bin_dir` |
+| `apply_snapshot`'s unread-override clear | every store push re-lights a finished row the user already read, so green stops meaning "unseen" | `focus_on_done_agent_marks_read_once_and_renders_idle` |
+| `prune_opening`'s two conditions | the ↻ mark clears early, and with it the double-fire guard: a second Enter starts a second copy of the same agent | `an_in_flight_open_holds_its_mark_through_unrelated_snapshots` |
+
+Two of those nine were shape-1 witnesses (doctor's skew, the unread override):
+the assertion was there, and passed under both the rule and its inversion. That
+is the shape mutation testing is *for*, and it found them in a module whose
+tests read as thorough.
+
+**The standing blind spot is `crates/clave/src/main.rs`.** `main` can be
+replaced wholesale with `Ok(())` and the suite stays green, so every rule
+written inline in a command arm is unverified — the CLI parse pins cover the
+arguments, nothing covers the arms. The idle pruner's protection rule was one of
+those and moved out to `add::protected_from_dump`; the one still there is the
+spawn arm's "a store we cannot READ must count as evidenced, or we would create
+a session that shadows a live one" (#139/#143). The pattern to follow is the
+one this crate already uses everywhere else — `prune_in`, `touch_in`,
+`open_decision`, `binary_resolution_is_anomalous`: if an arm decides something,
+the decision belongs beside its siblings and not inside the entry point.
+
+The other unguarded rule the sweep named is `run_open`'s
+`cwd_exists = <path is a dir> || <the conversation relocated>` (#139). Flipped
+to `&&`, every dormant wake reports ✗ stale. It cannot be reached hermetically —
+it needs a real store, a real zellij and a real transcript tree — so it is
+tier-2 work (#47), not a unit test.
+
 ### 2 — Fixtures captured from reality, with a liveness assertion
 
 Shape 5's only antidote. The discipline has three parts.
