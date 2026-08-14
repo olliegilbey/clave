@@ -1122,6 +1122,7 @@ mod tests {
         apply_touch(&p, 11).unwrap(); // stale timeline entry
         // Stale set is {11}: remove EXACTLY 11's bind + timeline entry; 10 (a
         // tab the prune never observed die) is untouched — the order-safety.
+        let before = read_store(&p).unwrap().seq;
         let snap = apply_prune_tabs(&p, &[11]).unwrap().expect("pruned");
         let s = read_store(&p).unwrap();
         assert_eq!(s.agents["u-live"].tab_id, Some(10), "live bind untouched");
@@ -1129,6 +1130,21 @@ mod tests {
         assert!(s.tab_order.contains_key(&10));
         assert!(!s.tab_order.contains_key(&11), "stale timeline dropped");
         assert!(snap.agents.iter().all(|a| a.tab_id != Some(11)));
+        // §5: the push must be STRICTLY newer than what the bars hold, or
+        // `apply_snapshot`'s `seq <= self.seq` gate discards it — and the bar
+        // re-derives the same stale set from the next TabUpdate and fires
+        // another `clave prune-tabs`, forever, while the dead agent keeps
+        // rendering live. (cargo mutants 2026-08-14: `seq += 1` → `seq *= 1`
+        // survived; the change-gating below was pinned, the bump was not.)
+        // `before` is 2 here, not 0, so this witness tells `+= 1` apart from
+        // BOTH the no-op forms a mutation swaps in (`*= 1`, and a bump the
+        // snapshot is taken before).
+        assert!(
+            snap.seq > before,
+            "a prune that changed something must advance seq: {before} -> {}",
+            snap.seq
+        );
+        assert_eq!(snap.seq, read_store(&p).unwrap().seq);
         // Idempotent late arrival: re-removing an already-dead id → no change,
         // no push, no seq bump (this is what makes two out-of-order prunes safe).
         let seq = read_store(&p).unwrap().seq;
