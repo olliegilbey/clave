@@ -115,10 +115,16 @@ Then `Alt+a`, pick a directory, choose `new`. That's your first agent.
 | `Alt+o` | back to where you were |
 | `Alt+c` | collapse the bar to a strip, or expand it |
 | `Alt+t` `Alt+w` | new tab, close tab |
+| `Alt+f` | a scratch shell floating over the fleet — leaving it closes it |
 
 `Alt` is clave's namespace. Five stock Zellij bindings that Claude Code needs
 are unbound for you (`Ctrl+g/t/o/b/q`); the rest of Zellij's `Ctrl` keys still
-belong to Zellij ([#24](../../issues/24)).
+belong to Zellij ([#24](../../issues/24)). `Alt+f` is the one stock key clave
+takes over rather than unbinds: Zellij's own `Alt+f` toggles floating panes and
+so opens the first one at a size nothing chose, tiny enough to need resizing
+every time. Clave's replacement opens your shell at a fixed, workable size
+([#188](../../issues/188)) — Zellij's toggle is still there under every mode
+other than the default one.
 
 ## How it works
 
