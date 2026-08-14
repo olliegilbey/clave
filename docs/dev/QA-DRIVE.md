@@ -30,7 +30,9 @@ known-liar detectors), no automatic bisecting.
 - **Assertions print what they measured**, pass or fail — "empty" is written
   as the word, so a silent failure and a clean pass never look alike.
 - Delivery accounting: expected EOF-twin deltas are computed per phase
-  (pipes-sent × live-instances) and RECORDED alongside the measured delta —
+  (pipes-sent × live TABS, a stand-in for instance count that the sandbox's
+  single sidebar makes wrong — see the one-sidebar gap below) and RECORDED
+  alongside the measured delta —
   never asserted. The zellij log is user-global and its truncated source
   column cannot attribute a `clave-bar: dropped` line to a session (the
   stable and sandbox wasm paths collapse to the same 25-char prefix), so a
@@ -42,11 +44,21 @@ known-liar detectors), no automatic bisecting.
 Each phase names the inventory classes it regression-covers. A phase FAILS
 loudly and stops the run; later phases assume earlier truth.
 
+**The sandbox fleet runs ONE sidebar across all tabs.** Measured 2026-08-14
+after a clean phase 0–2 run: a single plugin pane in the whole session, on tab
+0, while the tabs the drive creates come up bare. The real fleet gets one
+sidebar per tab. So nothing in this table exercises how sidebar instances
+interact — election, executor gating, beacons, and the background-instance
+versus newborn-instance split are all multi-instance properties, and a green
+run proves nothing about any of them. Known gap, tracked as #186; until it
+closes, "Covers" below means single-instance behaviour only. This is why a
+drive went green on a build that was reproducibly broken in the field.
+
 | # | Phase | Drives | Asserts | Covers |
 |---|---|---|---|---|
 | 0 | Preflight | nothing | build tag on the loaded tail; config+launch coherence (`clave_versions`/`clave_unversioned` from the runbook, scripted); permission cache seeded both key forms; no orphan `zellij pipe` processes | V5, V11, V12, V14, K7, P7 |
 | 1 | Baseline join | `dev status` + guarded dump | row and dormant counts match the scenario seed; the eager-launch row's `tab_id` BOUND and its resumed identity == `live_session` (the #178 resume face); measured viewport geometry recorded in the log; store↔layout join printed with unresolvables MARKED, not filtered; store `seq` recorded | Z10, P9's resume face, drive-loop step 4 |
-| 2 | **Bind ladder (mixed paths)** | ~6 binds through mixed paths: dormant wakes via nav pipes (`{"row":N}` pick + commit) plus ≥1 scripted create | after EACH bind, within a bounded wait: `tab_id` bound in store (bind is the proxy for row class); dormant count decremented in the shared store (`dev status` — per-instance snapshots are not observable from outside); EOF-twin delta recorded (unattributable in the shared log — see Delivery accounting); seek-trace resting width == target only when the build carries the seek instrumentation, else an honest NOTE (the shipped bar has no emitter; model belief, NOT pane truth — the eyeball stays the oracle). First discriminator: is the bind budget spent-and-never-refilled after bind 2 (#178's fleet signature)? | **P9 (#178)**, **B22 (#181 detection)**, P10, P11, P14, R1 |
+| 2 | **Bind ladder (mixed paths)** | ~6 binds through mixed paths: dormant wakes via nav pipes (`{"row":N}` pick + commit) plus ≥1 scripted create | after EACH bind, within a bounded wait: `tab_id` bound in store (bind is the proxy for row class); dormant count decremented in the shared store (`dev status` — per-instance snapshots are not observable from outside); EOF-twin delta recorded (unattributable in the shared log — see Delivery accounting); seek-trace resting width == target only when the build carries the seek instrumentation, else an honest NOTE (the shipped bar has no emitter; model belief, NOT pane truth — the eyeball stays the oracle). First discriminator: is the bind budget spent-and-never-refilled after bind 2 (#178's fleet signature)? — this one cannot fire while the sandbox runs a single sidebar (#186) | P9's bind path only, NOT #178's class (#186), **B22 (#181 detection)**, P10, P11, P14, R1 |
 | 3 | Tab churn | close a NON-last tab; close the HIGHEST tab then create one; re-join after each | nav answers with exactly one focus change; no `bind-evict` in evlog; no stale binds; recycled id carries no inherited stamp | B14, B15 (#55), Z15, P4, P12/P13 |
 | 4 | Ring walk | pick into the dormant block, walk both directions, wrap; Alt+Enter one commit | single executor (one focus change per press, never two); walk stays in-block; commit opens exactly one tab | P1 (#162), P2, P16, K8 — becomes single-ring on #179 |
 | 5 | Collapse burst | 12× toggle with pauses, then 5× rapid | store writes per press ≤ 2; final collapsed parity across all instances' snapshots; bar still answers press 13+ | B6–B9, B10/B11, P5 |
@@ -96,8 +108,9 @@ known-red.
 
 ## Build order (each lands separately, gates green)
 
-1. `qa-fleet` scenario + phase 0–2 (**catches #178's class** — build this
-   first, and it doubles as #178's reproduction harness).
+1. `qa-fleet` scenario + phase 0–2 (build this first). It does NOT catch
+   #178's class and is not a reproduction harness for it — that needs one
+   sidebar per tab in the sandbox, which is #186.
 2. Phases 3–4 (churn + ring).
 3. Phases 5–6 (collapse + quiescence).
 4. Runbook/TESTING integration line + retire the duplicated manual steps.
