@@ -275,6 +275,98 @@ fn alt_a_carries_the_shared_floating_geometry() {
 }
 
 #[test]
+fn alt_f_opens_a_scratch_shell_at_its_own_geometry() {
+    // #188. Same reasoning as the Alt+a test above — assert the PARSED action,
+    // because `x 10` parses as happily as `x "10%"` and only the second yields
+    // any geometry at all. Two extra things are asserted here that Alt+a does
+    // not need:
+    //   * that clave's bind BEATS zellij's stock `Alt f`
+    //     (`ToggleFloatingPanes`, default.kdl:187) after the merge — a toggle
+    //     takes no size, so if stock won, #188 is back;
+    //   * that a command rides the Run node. `Run` with no arguments is a hard
+    //     parse error ("No command found in Run action"), and `NewPane`'s KDL
+    //     branch ignores child blocks outright (kdl/mod.rs:552,1695), so `Run
+    //     <shell>` is the only form that can carry BOTH a shell and a size.
+    use zellij_utils::data::{BareKey, InputMode, KeyWithModifier};
+    use zellij_utils::input::actions::Action;
+    use zellij_utils::input::layout::PercentOrFixed;
+
+    let base = Config::from_default_assets().expect("stock zellij 0.44.3 defaults must parse");
+    let merged = Config::from_kdl(&setup::config_kdl("clave", WASM), Some(base))
+        .expect("clave config.kdl must merge over stock defaults");
+    let alt_f = KeyWithModifier::new(BareKey::Char('f')).with_alt_modifier();
+
+    // Invariant #6: the Alt binds must fire while Claude Code holds focus, so
+    // locked mode counts as much as normal — and stock `Alt f` lives in
+    // `shared_except "locked"`, so locked is where the bind is purely ours.
+    for mode in [InputMode::Normal, InputMode::Locked] {
+        let actions = merged
+            .keybinds
+            .get_actions_for_key_in_mode(&mode, &alt_f)
+            .unwrap_or_else(|| panic!("Alt+f must be bound in {mode:?}"));
+
+        let (command, coordinates) = actions
+            .iter()
+            .find_map(|action| match action {
+                Action::NewFloatingPane {
+                    command,
+                    coordinates,
+                    ..
+                } => Some((command.clone(), coordinates.clone())),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!("Alt+f must open a FLOATING pane in {mode:?}, not toggle zellij's")
+            });
+        let coordinates = coordinates
+            .unwrap_or_else(|| panic!("Alt+f's floating pane must carry explicit geometry (#188)"));
+        // The shell is resolved at keypress from the session's env, not baked
+        // at `clave setup` time — so the `${SHELL:-…}` expansion must survive
+        // KDL string escaping intact, and `close_on_exit true` must have landed
+        // (it parses to hold_on_close=false: leaving the shell closes the pane
+        // rather than parking a dead one over the fleet).
+        let command = command
+            .unwrap_or_else(|| panic!("Alt+f must spawn a shell — Run needs a command to parse"));
+        assert!(
+            command
+                .args
+                .iter()
+                .any(|a| a.contains("$SHELL") || a.contains("${SHELL")),
+            "Alt+f must open the USER's shell, not a baked one: {command:?}"
+        );
+        assert!(
+            !command.hold_on_close,
+            "Alt+f's pane must close when the shell exits (close_on_exit true)"
+        );
+
+        assert_eq!(
+            (
+                coordinates.x,
+                coordinates.y,
+                coordinates.width,
+                coordinates.height
+            ),
+            (
+                Some(PercentOrFixed::Percent(
+                    clave_types::SHELL_FLOATING_X_PERCENT
+                )),
+                Some(PercentOrFixed::Percent(
+                    clave_types::SHELL_FLOATING_Y_PERCENT
+                )),
+                Some(PercentOrFixed::Percent(
+                    clave_types::SHELL_FLOATING_WIDTH_PERCENT
+                )),
+                Some(PercentOrFixed::Percent(
+                    clave_types::SHELL_FLOATING_HEIGHT_PERCENT
+                )),
+            ),
+            "Alt+f's geometry must be the scratch shell's own — NOT the picker's \
+             near-fullscreen pair, which is load-bearing for the picker's layout"
+        );
+    }
+}
+
+#[test]
 fn layout_kdl_parses_through_real_zellij_parser() {
     assert_layout_ok(&setup::layout_kdl(BIN_ABS, WASM), "layout.kdl");
 }

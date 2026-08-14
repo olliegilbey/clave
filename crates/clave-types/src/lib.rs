@@ -381,9 +381,14 @@ pub fn target_cols_for(collapsed: bool) -> usize {
 
 // ── floating pane geometry ──────────────────────────────────────────────────
 //
-// ONE geometry for every floating pane clave opens: the `Alt a` directory
-// picker today (#110), the row-detail helper pane when #7 lands. Two panes
-// that appear over the same fleet should appear at the same size.
+// ONE geometry for every floating pane clave's own UI opens: the `Alt a`
+// directory picker today (#110), the row-detail helper pane when #7 lands. Two
+// panes that appear over the same fleet should appear at the same size.
+//
+// The `Alt f` scratch shell (#188) is deliberately NOT one of them and carries
+// its own, smaller pair below — the picker's values are near-fullscreen because
+// its own layout needs them, and a scratch terminal wants the fleet still
+// visible around it.
 //
 // **The bar needs no clearing — zellij fences floating panes off it already.**
 // `clave-bar` calls `set_selectable(false)` at load, and zellij's
@@ -421,6 +426,36 @@ pub const FLOATING_HEIGHT_PERCENT: usize = 90;
 const _: () = assert!(
     FLOATING_X_PERCENT + FLOATING_WIDTH_PERCENT <= 100
         && FLOATING_Y_PERCENT + FLOATING_HEIGHT_PERCENT <= 100,
+    "a floating pane overflowing its viewport is shrunk to fit, so the geometry \
+     would not be the one written here"
+);
+
+// ── the Alt+f scratch shell's geometry (#188) ───────────────────────────────
+//
+// A centred four-fifths box: big enough to work in without resizing, small
+// enough that the fleet stays legible behind it. Same percent-of-the-non-bar-
+// area rules as the picker's constants above.
+//
+// Without a geometry zellij applies `half_size_middle_geom` — half of an area
+// the bar has ALREADY shrunk — which is the unusable sliver #188 reports. Stock
+// `Alt f` had no geometry because it was zellij's own binding, not clave's.
+
+/// Left edge of the centred box. Paired with [`SHELL_FLOATING_WIDTH_PERCENT`]
+/// so the slack left and right is equal.
+pub const SHELL_FLOATING_X_PERCENT: usize = 10;
+
+/// Top edge, mirroring [`SHELL_FLOATING_X_PERCENT`] on the vertical.
+pub const SHELL_FLOATING_Y_PERCENT: usize = 10;
+
+/// Four-fifths of the non-bar width.
+pub const SHELL_FLOATING_WIDTH_PERCENT: usize = 80;
+
+/// Four-fifths of the non-bar height.
+pub const SHELL_FLOATING_HEIGHT_PERCENT: usize = 80;
+
+const _: () = assert!(
+    SHELL_FLOATING_X_PERCENT + SHELL_FLOATING_WIDTH_PERCENT <= 100
+        && SHELL_FLOATING_Y_PERCENT + SHELL_FLOATING_HEIGHT_PERCENT <= 100,
     "a floating pane overflowing its viewport is shrunk to fit, so the geometry \
      would not be the one written here"
 );
