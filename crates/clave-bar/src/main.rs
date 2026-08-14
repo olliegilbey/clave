@@ -8,7 +8,7 @@ use std::io::Write;
 
 // The pure model lives in the LIB half of this crate (src/lib.rs → model.rs)
 // so it host-tests without linking this bin's wasm host-import shims.
-use clave_bar::model::{BarModel, Effect, PEEK_SINK_SECS, PaneMeta, TabMeta};
+use clave_bar::model::{BarModel, BindStallState, Effect, PEEK_SINK_SECS, PaneMeta, TabMeta};
 use clave_bar::plugin_config::resolve_binary;
 use clave_bar::render::{Row, render_rows};
 use zellij_tile::prelude::*;
@@ -185,6 +185,39 @@ impl State {
                          it can converge."
                     );
                 }
+                // #178: UNGATED, for the same reason StormCapped is — the
+                // instance that goes silent is by definition not the one being
+                // watched, so every instance must be able to say so.
+                Effect::BindStall {
+                    state,
+                    stranded,
+                    own_tab,
+                } => match state {
+                    BindStallState::Cleared => {
+                        eprintln!("clave-bar: bind leg live again (tab {own_tab})");
+                    }
+                    BindStallState::FramesIncoherent => {
+                        eprintln!(
+                            "clave-bar: BIND STALLED (tab {own_tab}) — tab and pane frames \
+                             disagree, so no bind can be computed. Healthy for a frame or \
+                             two; permanent if no further frame reaches this instance (#178)."
+                        );
+                    }
+                    BindStallState::OwnPositionUnknown => {
+                        eprintln!(
+                            "clave-bar: BIND STALLED (tab {own_tab}) — this tab is absent \
+                             from the tab frame, so every row reads as another tab's (#178)."
+                        );
+                    }
+                    BindStallState::PaneKnownButAbsent => {
+                        eprintln!(
+                            "clave-bar: BIND STALLED (tab {own_tab}) — {stranded} unbound \
+                             row(s) whose pane was announced to us but is missing from this \
+                             instance's pane frame. No bind is emitted and no retry budget \
+                             is spent; this is the starvation signature (#178)."
+                        );
+                    }
+                },
                 // C6 width-seek effects are SELF-targeted (round 20: every
                 // instance drives only its own pane, with render feedback).
                 Effect::ShrinkSelf => {
