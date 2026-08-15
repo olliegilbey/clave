@@ -711,10 +711,8 @@ above still holds and for the same practical reason), and every third press on
 an untouched tab returns to the birth position and moves nothing. A tab zellij
 marks DAMAGED — pane resize, pane close, or a mouse border drag
 (`tab/mod.rs:2398,2465,5779`) — spends its next switch re-applying instead of
-advancing (`swap_layouts.rs:241-250`). Those stack, so the bar's correction
-budget is two, not one. What makes the correction work at all: a switch that
-moves nothing still renders and reports session state unconditionally
-(`screen.rs:7561-7573`).
+advancing (`swap_layouts.rs:241-250`). A switch that moves nothing still renders
+and reports session state unconditionally (`screen.rs:7561-7573`).
 
 **Verdict:** _gates green, 28/28 mutants caught in the changed code — but NOT
 live-validated. Sandbox staging was blocked on the machine's commit-signing
@@ -729,6 +727,37 @@ slots before creating anything (`tab/layout_applier.rs:160-234`, reuse path at
 loses the requesting pane id in routing (`route.rs:1263-1270`) and the screen
 resolves it against the FOCUSED tab (`screen.rs:7561`), which is the defect the
 bar's focus gate exists to contain.
+
+**The correction budget is DELETED, and with it the last watch-your-own-repaints
+pattern in the codebase (#197).** The drive of 2026-08-15 measured what the
+budget could not fix: a rapid double-press desynced the bar's belief about which
+geometry its tab was in, permanently — twelve presses, several focus changes and
+a long idle all failed to recover a tab resting collapsed while the store said
+expanded, because the machine checked the DIRECTION its pane moved and never the
+position it was in. The position was being delivered the whole time:
+`TabInfo.active_swap_layout_name` (`zellij-utils-0.44.3/src/data.rs:2252`) is on
+every tab of every `TabUpdate`, and both geometries carry names. The bar now
+compares that name with the store's mode and asks for one switch while they
+disagree, so every frame re-derives the answer and the stuck class is
+unreachable by construction.
+
+Two consequences worth recording as approaches NOT to retry. The declaration
+order is now birth-geometry-FIRST, reversing the round-22 fact above: the birth
+position reports as `"BASE"`, which says nothing about width, so the bar must
+spend one switch to leave it — and same-width-first is what keeps that switch
+invisible. Declaring the opposite geometry first, which #181 shipped for the
+sake of the first Alt+c, would now be a full-width flash on every cold start.
+And the rule needs SOME bound: because a switch reports back whether or not it
+achieved anything, an unbounded "keep asking while they disagree" would loop
+forever against a damaged tab. One ask per reported position is the bound; the
+next report or the next press re-arms it.
+
+**Not verified from source, and both fail safe.** `zellij-server` is still not
+vendored, so the exact name reported at the birth position is read from zellij's
+own serialization fixture (`zellij-utils-0.44.3/src/kdl/mod.rs:6302` uses
+`"BASE"`) rather than from the producer. Any name that is neither of clave's two
+is treated as the birth position, so a different string costs one switch and
+nothing else.
 
 ## C7 — dump-layout liveness + resume picker
 - With one agent live: `zellij action dump-layout | grep -A2 clave` — baked

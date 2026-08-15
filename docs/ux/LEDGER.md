@@ -508,6 +508,50 @@ resting-width costs become dead paths:
   ever catch it. Needs a display area around 400 columns; Ollie runs ~280, so it
   is out of reach today. **Not out of reach forever.**
 
+### D40 — The bar reads zellij's report of which layout its tab is in, and remembers nothing (2026-08-15)
+
+**This finishes D39 and retires the last of the watch-your-own-repaints pattern
+in this codebase.** D39 deleted the resize loop but kept its shape in miniature:
+the bar remembered which geometry it believed its tab was in, seeded that at
+hydration, confirmed each switch by watching the DIRECTION its own pane
+repainted in, and allowed two corrections per change. Nothing ever re-derived
+the belief.
+
+**What that cost, measured.** A rapid double-press could put the belief
+permanently at odds with the tab. The sandbox drive of 2026-08-15 found a tab
+resting at the collapsed width while the store said expanded, and it stayed
+there through twelve presses, several focus changes and a long idle — there was
+no path in the machine that could ever notice.
+
+**What ships instead.** Zellij puts `active_swap_layout_name` on every tab of
+every `TabUpdate`, and both geometries are declared with names, so the question
+"which layout is this tab in" has an authoritative answer already arriving. The
+rule is now: while the reported layout disagrees with the store's mode and this
+bar's own tab is focused, ask for one switch. The focus gate is untouched. The
+seeding, the direction check and the correction budget are gone, and the stuck
+class is unreachable rather than rarer: every frame re-derives the answer.
+
+**Two things this needed.** The layout generator now declares the BIRTH geometry
+first rather than the opposite one. Zellij hides the birth layout at cycle
+position 0 and reports it as `"BASE"` — a name that says nothing about width — so
+the bar must spend one switch to leave it for a position it can reason about;
+declaring the same width first makes that switch invisible instead of a
+cold-start flash. And a refused switch is not re-asked until the report or the
+mode moves: zellij answers every switch with a `TabUpdate` whether or not the
+switch achieved anything, so an unbounded rule would ask forever against a tab
+the user had manually resized.
+
+**What is given up.** That bound is a stall where the old budget was a burst: a
+tab that refuses its switch waits for the next press or the next focus change
+rather than being retried on the spot. Bounded and self-clearing, against a
+failure that was permanent.
+
+**Still owed: one live run**, same as D39's. `zellij-server` is not vendored, so
+the exact string reported at the birth position (`"BASE"` is what zellij's own
+serialization test uses) and the claim that a `TabUpdate` follows every switch
+are read from source anchors rather than watched. Both fail SAFE — an
+unrecognised name is treated as the birth position, which costs one switch.
+
 ### D39 — The width seek is DELETED. Both widths are declared, and zellij switches between them (2026-08-14)
 
 **This retires D20, D21, D26, D34, D35 and most of D37, and it takes D22 off the
@@ -549,18 +593,15 @@ the layout, and the EXPLICIT switch is not damage-gated in the first place.
    no absolute form. The cycle it walks is THREE positions long, not the two we
    declare: zellij hides the tab's own birth layout ahead of them
    (`swap_layouts.rs:38-56`, applied from `tab/mod.rs:889,967`), so a tab walks
-   birth → declared[0] → declared[1] → birth. The first call lands on
-   declared[0], which is therefore the geometry the tab was NOT born in, and the
-   first Alt+c of a session moves the pane instead of re-applying the width it
-   already has. Every third press after that lands back on the hidden birth
-   position and moves nothing; the correction call is what rescues it.
+   birth → declared[0] → declared[1] → birth. **Superseded by D40:** declared[0]
+   is now the geometry the tab WAS born in, so the switch that trades the
+   unnameable birth position for a named one moves nothing the user can see.
 3. **The switch is checked on DIRECTION, never on a column count.** The
    geometries are percentages, so both shrink with the window: an expanded bar on
    a halved window is genuinely narrower than 30, and a check against the two
-   design widths would declare it collapsed and switch it. Two corrections are
-   allowed per change — the three-position cycle above and the damaged-tab
-   re-apply can each cost a no-move call — and outside those renders the model
-   emits nothing at all.
+   design widths would declare it collapsed and switch it. **Superseded by
+   D40:** the switch is not checked at all any more — zellij reports which
+   layout the tab is in, so no width is read and no direction inferred.
 
 **What is given up, both accepted in conversation.** Peek-on-nav is a layout
 switch rather than a nudge. And the bar is a whole percent of the window, so on a

@@ -208,8 +208,8 @@ it does not restore `~/.claude/settings.json`'s hook path.
 
 This is where a real bug lived (D21) and was fixed (D26), and it is now where the
 whole of D39 gets its only live proof. `Alt+c` is one `next_swap_layout()` call
-and nothing else: no arithmetic, no watching, no correction unless the pane fails
-to move.
+and nothing else: no arithmetic, no watching, and a second call only if zellij's
+own report says the tab is still in the wrong layout (D40).
 
 > **This item PASSED on the old machinery, 2026-07-30** — six-plus toggles across
 > three display widths, clean every time. That result does not carry: the
@@ -739,12 +739,18 @@ nothing in it can exec a real `claude --resume`.
 These come out of the review of the swap-layout width switch, and they exist
 because reading zellij's source answered each of them only halfway. **The switch
 cycles through three positions, not the two we declare** — zellij hides the
-tab's own birth layout ahead of them — so one press in three moves nothing on
-its first call and is rescued by a correction. **A tab zellij considers damaged**
-(a pane resized or closed, a border dragged with the mouse) **spends its next
-switch re-applying rather than advancing**, which is a second way to get a
-no-move. Everything below is a question about what those two facts look like
-from the chair. None of them has an automated test that could reach it.
+tab's own birth layout ahead of them — so a switch can land somewhere neither
+geometry asked for. **A tab zellij considers damaged** (a pane resized or
+closed, a border dragged with the mouse) **spends its next switch re-applying
+rather than advancing**, which is a way to get no movement at all.
+
+Since #197 the bar answers both by reading the layout name zellij reports for
+its tab on every frame, and asking for one more switch while that name disagrees
+with the mode the store wants — no belief, no width arithmetic. The one thing it
+will not do is ask twice from the same reported position, so a switch zellij
+refuses outright waits for the next press or the next focus change. Everything
+below is a question about what that looks like from the chair. None of them has
+an automated test that could reach it.
 
 ### 10a — Cold start into collapse
 
@@ -753,10 +759,11 @@ Watch the bar on its very first paints, before touching anything. Then press
 `Alt+c` once.
 
 **Correct.** The bar is **born collapsed at 30 and never widens** — no frame at
-53, no snap back. That flash is what this branch removed; seeing it means the
-bar's seeded belief about its own geometry is not taking. And the first `Alt+c`
-after the launch must move the pane, in one press: the flash used to leave the
-switch cycle parked one position out, so the first real press moved nothing.
+53, no snap back. The bar does spend one layout switch on its first focused
+paint (it has to, to trade zellij's unnamed birth position for a named one), but
+that switch lands on the same width by construction, so nothing should be
+visible. A frame at 53 means the layout file's declaration order is wrong. And
+the first `Alt+c` after the launch must move the pane, in one press.
 
 **Vacuous if.** The store was not collapsed at kill time — check
 `clave dev status | jq .store.collapsed` is `true` before relaunching. Or you
@@ -765,24 +772,26 @@ layout has no store to read and always births expanded, which is a known and
 accepted wrong, not this finding. Or you blinked — the flash is about one frame,
 so repeat it three times before recording a pass.
 
-### 10b — Six slow toggles, with press three under a microscope
+### 10b — Six slow toggles, then six fast ones
 
 **Do.** On a tab you have not touched since it was born — no pane resized, none
 closed, no border dragged — press `Alt+c` six times, several seconds apart, and
-**record the column width after each press**.
+**record the column width after each press**. Then press it six times as fast as
+you can and record where it comes to rest.
 
 **Correct.** Six presses, six clean moves, alternating 53 / 30 / 53 / 30 / 53 /
-30. **Press three is the one to watch**: it is the press whose first switch call
-lands on the hidden duplicate of the tab's birth width and moves nothing, and the
-bar's correction is what carries it the rest of the way. It must still land on
-the right width. Two visible steps, a perceptible stutter, or a press that lands
-wrong and stays wrong are all findings — give the widths either way.
+30. One press in three walks the cycle through the tab's hidden birth position,
+so a brief second step is possible; landing wrong and staying wrong is not.
+
+The fast run is the #197 regression: a rapid burst used to be able to desync the
+bar from its tab **permanently** — the pane stuck at one width while the store
+said the other, unrecoverable by further presses, by switching tabs, or by
+waiting. Whatever the burst leaves on screen, the width and the drawn profile
+must agree once it settles, and one further press must move the pane.
 
 **Vacuous if.** You navigated during the run: a peek expands the bar for ~0.9 s
-and hides the answer. You pressed quickly: the correction rides on the next
-render, so a burst can paper over a stumble a slow press exposes. Or the tab was
-already damaged when you started, which moves the awkward press somewhere else —
-use a tab you have just opened.
+and hides the answer. Or the tab was already damaged when you started, which
+moves the awkward press somewhere else — use a tab you have just opened.
 
 ### 10c — A dragged pane border
 
@@ -790,12 +799,13 @@ use a tab you have just opened.
 the sidebar sits at a width neither geometry asks for. Then press `Alt+c` once
 and look before pressing anything else.
 
-**Correct.** The pane moves to the other geometry, in that one press. A dragged
-border marks the tab damaged, and a damaged tab spends its next switch
-re-applying its current layout instead of advancing — this press is precisely
-what the correction budget exists for. Record which of three you got: the right
-width (correct), the **wrong** width (finding), or no movement at all (finding,
-and the worse one).
+**Correct.** The pane moves to the other geometry, in that one press — or, at
+worst, in the press after it. A dragged border marks the tab damaged, and a
+damaged tab spends its next switch re-applying its current layout instead of
+advancing; since #197 the bar does not retry that on its own, so the cost lands
+as one press that appears to do nothing. Record which of three you got: the
+right width (correct), no movement until a second press (accepted, worth
+noting), or the **wrong** width that stays wrong (finding).
 
 **Vacuous if.** The drag did not actually move the border — the sidebar is not
 selectable, so not every drag lands. Or you pressed `Alt+c` twice before looking;
@@ -908,8 +918,9 @@ Fill it in as you go; the numbers are the deliverable, not the ticks.
 | Resize: is the shrink-and-stay acceptable? (maintainer's call) | |
 | **10a** Collapsed cold start: born at 30, no flash to 53? | |
 | **10a** First `Alt+c` after that launch moved the pane? | |
-| **10b** Six widths in order, and did press three land cleanly? | |
-| **10c** After a border drag, one `Alt+c` → right width / wrong width / nothing | |
+| **10b** Six slow widths in order? | |
+| **10b** Six FAST presses: settled width, profile agrees, next press moves? | |
+| **10c** After a border drag, `Alt+c` → right width / needed a 2nd press / wrong | |
 | **10d** With the picker open: did it move? And which profile at which width after Esc? | |
 | **10e** After a zellij tab-strip click: which tab's sidebar moved? | |
 | Chip filled after `/rename` + one prompt? | |
