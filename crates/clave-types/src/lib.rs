@@ -436,26 +436,22 @@ const _: () = assert!(
 // resizing, small enough that the fleet stays legible behind it. Same
 // percent-of-the-non-bar-area rules as the picker's constants above.
 //
-// It is NOT horizontally centred and cannot be. Zellij reads `x` as a percent
-// of the non-bar width but measures that result from absolute column zero, then
-// floors it at the bar's right edge — the clamp already recorded in FOOTGUNS.md
-// ("the two floating-geometry paths clamp overflow DIFFERENTLY"). A tenth of the
-// remaining width only clears a 54-column bar on a terminal wider than roughly
-// 590 columns, so in every real terminal the pane starts flush against the bar
-// and the whole leftover fifth sits on the right. Centring inside the non-bar
-// area is not expressible in percentages here. `y` has no such floor, so the
-// vertical tenth above and below is real.
+// It is NOT horizontally centred and cannot be: zellij resolves `x` as a percent
+// of the non-bar width but measures it from absolute column zero, so anything
+// non-zero moves the left edge only on terminals wide enough for the percentage
+// to clear the bar — pinning it at 0 keeps the pane flush against the bar at
+// every width.
 //
 // Without a geometry zellij applies `half_size_middle_geom` — half of an area
 // the bar has ALREADY shrunk — which is the unusable sliver #188 reports. Stock
 // `Alt f` had no geometry because it was zellij's own binding, not clave's.
 
-/// Left edge, written as a tenth but floored at the bar in practice (see the
-/// note above), which is where the pane actually opens.
-pub const SHELL_FLOATING_X_PERCENT: usize = 10;
+/// Left edge: flush against the bar, like the picker's [`FLOATING_X_PERCENT`].
+pub const SHELL_FLOATING_X_PERCENT: usize = 0;
 
-/// Top edge. Unlike the horizontal, this one lands where it is written, so the
-/// tenth above is paired by a tenth below.
+/// Top edge. `y` is floored at the viewport's top exactly as `x` is at its left,
+/// but nothing sits above the viewport here, so the tenth lands where written
+/// and is paired by a tenth below.
 pub const SHELL_FLOATING_Y_PERCENT: usize = 10;
 
 /// Four-fifths of the non-bar width.
@@ -464,9 +460,6 @@ pub const SHELL_FLOATING_WIDTH_PERCENT: usize = 80;
 /// Four-fifths of the non-bar height.
 pub const SHELL_FLOATING_HEIGHT_PERCENT: usize = 80;
 
-// Still the right check under the clamp: flooring `x` at the bar's edge leaves
-// the pane four-fifths of the width starting from that edge, which ends inside
-// the viewport, and an unfloored `x` sums to nine-tenths. Neither overflows.
 const _: () = assert!(
     SHELL_FLOATING_X_PERCENT + SHELL_FLOATING_WIDTH_PERCENT <= 100
         && SHELL_FLOATING_Y_PERCENT + SHELL_FLOATING_HEIGHT_PERCENT <= 100,
