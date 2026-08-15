@@ -329,7 +329,7 @@ impl RowStatus {
             RowStatus::Failed => ('\u{2716}', Rgb(0xE8, 0x24, 0x24)), // samuraiRed
             // Hollow, not dim: sumiInk4 on the sumiInk3 bar was near-invisible
             // (#123). The SHAPE carries "not running"; the ink stays legible.
-            RowStatus::Dormant => ('\u{25cc}', DEFAULT_INK),
+            RowStatus::Dormant => ('\u{25cb}', DEFAULT_INK),
             RowStatus::DormantSelected => ('\u{23ce}', Rgb(0xE6, 0xC3, 0x84)), // carpYellow
             RowStatus::Opening => ('\u{21bb}', Rgb(0xE6, 0xC3, 0x84)),         // carpYellow
             RowStatus::Stale => ('\u{2717}', Rgb(0xE8, 0x24, 0x24)),           // samuraiRed
@@ -1885,13 +1885,16 @@ mod tests {
             (RowStatus::Done, '\u{25cf}', spring_green),
             (RowStatus::Idle, '\u{25cf}', sumi_ink4),
             (RowStatus::Failed, '\u{2716}', samurai_red), // HEAVY multiplication x
-            (RowStatus::Dormant, '\u{25cc}', fuji_white),
+            (RowStatus::Dormant, '\u{25cb}', fuji_white),
             (RowStatus::DormantSelected, '\u{23ce}', carp_yellow), // ⏎ commit affordance (#100)
             (RowStatus::Opening, '\u{21bb}', carp_yellow),
             (RowStatus::Stale, '\u{2717}', samurai_red), // BALLOT x — a flag, not a Status
         ];
         for (status, glyph, colour) in table {
             assert_eq!(status.mark(), (glyph, colour), "{status:?}");
+            // Every marker is exactly one cell: the gutter is position-locked
+            // (lock §2.1), so a two-cell glyph shifts the whole row right.
+            assert_eq!(glyph.width(), Some(1), "{status:?} is not one cell wide");
             // And it reaches the row: col 2 is the status cell (lock §2.1).
             let row = agent(status, Provenance::Main, None, "s");
             let bare = strip_sgr(&render_all(&[row], DESIGN_COLS, Widths::EXPANDED)[0]);

@@ -163,7 +163,7 @@ eagerly opens the single most-recent row and leaves the rest dormant, so expect
 | 6 | `KDL-GRD` / clave | dormant, worktree mark — this is the one whose cwd was deleted |
 | 7 | `README` / docs | dormant |
 
-Every dormant row shows the dormant mark **U+25CC** whatever its stored status:
+Every dormant row shows the dormant mark **U+25CB** whatever its stored status:
 dormancy outranks `Status` in the row-state order, so the seeded `NeedsYou`,
 `Failed` and `Working` values are not visible until those rows are opened.
 
