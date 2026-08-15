@@ -1062,7 +1062,7 @@ verified for real, not mocked. UUIDs are deterministic and self-identifying:
 
 | Scenario | Seeds | Validates |
 |---|---|---|
-| `c8-cold-start` | 3 agents at staggered recency (60s / 1h / 24h ago), none worktree | Cold relaunch: most-recent agent resumes focused with history, no ENTER gates; the rest sit dormant `◌` in recency order |
+| `c8-cold-start` | 3 agents at staggered recency (60s / 1h / 24h ago), none worktree | Cold relaunch: most-recent agent resumes focused with history, no ENTER gates; the rest sit dormant `○` in recency order |
 | `c8-worktree` | 2 agents; one in a real `git worktree` | Dwell-open resumes the agent **in its worktree path**, store row intact |
 | `c8-stale` | 2 agents; one has its cwd deleted after seeding | The staleness branch (§6.3): dwelling the row → `✗`, no tab created, the session is unaffected |
 
