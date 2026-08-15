@@ -325,9 +325,27 @@ impl State {
     /// One pipe message → model. Split out of pipe() so early returns here
     /// can't skip the unconditional unblock (dd38ace — see pipe()).
     fn handle_pipe(&mut self, message: PipeMessage) -> bool {
+        // zellij appends a blank message to EVERY CLI pipe (#45). It is not a
+        // delivery, and the `clave-toggle` arm below used to treat it as a
+        // press — so one scripted Alt+c arrived twice and flipped the bar back
+        // to where it started, while the keybind (which is not a CLI pipe)
+        // fired once. The drop line stays: those log lines are how pipe
+        // delivery is counted in the field (QA pipe-delivery P8).
+        if clave_bar::pipe::is_cli_blank_twin(
+            matches!(message.source, PipeSource::Cli(_)),
+            message.payload.as_deref(),
+        ) {
+            eprintln!(
+                "clave-bar: dropped {} pipe with empty payload",
+                message.name
+            );
+            return false;
+        }
         let name = message.name.as_str();
         let Some(payload) = message.payload.as_deref() else {
             // Toggle and organic carry no payload; everything else must.
+            // Reachable from a KEYBIND only — the guard above has already
+            // dropped the CLI's blank twin, which has the same shape.
             // A keybind MessagePlugin without a payload attribute delivers
             // payload=None, so a payload-less pipe NEVER reaches the named
             // match below — clave-organic sat dead there and the Alt+o
