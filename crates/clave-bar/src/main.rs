@@ -571,6 +571,10 @@ impl ZellijPlugin for State {
                         position: t.position,
                         name: t.name.clone(),
                         active: t.active,
+                        // #197: zellij's own answer to "which width geometry is
+                        // this tab in", which the width machine reads instead
+                        // of remembering what it last asked for.
+                        swap_layout: t.active_swap_layout_name.clone(),
                     })
                     .collect();
                 let fx = self.model.apply_tabs(metas);
@@ -669,10 +673,11 @@ impl ZellijPlugin for State {
         // render: they fire from apply_tabs (birth / clave-organic) and
         // apply_panes (the #162 reanchor debt) — both frame-witnessed — and
         // from the click/nav landings, which still emit AnnounceVisit.
-        // #181: the width machine. It is silent on every render except the one
-        // after a mode change, where it asks zellij to switch this tab to the
-        // other declared geometry, and the one after that, where it checks the
-        // pane moved the way the new mode wanted.
+        // #181/#197: the width machine. It compares the geometry zellij last
+        // REPORTED for this tab (`active_swap_layout_name`, carried on every
+        // TabUpdate) with the mode the store wants, and asks for one switch
+        // while they disagree. It reads no widths and remembers no positions,
+        // so it is silent on every render where the two already agree.
         //
         // It is NOT ungated, and an earlier comment here claiming every
         // instance is always visible and switches only its own tab was wrong on
@@ -681,7 +686,7 @@ impl ZellijPlugin for State {
         // pane id the request carries (v0.44.3 — FOOTGUNS.md). The gate lives in
         // `width_effects`, which holds the switch until this bar's own tab is
         // the focused one.
-        let fx = self.model.width_effects(cols);
+        let fx = self.model.width_effects();
         self.run_effects(fx);
         // One line per row, display-ordered. Everything visual — the column
         // arithmetic, the palette, the fade, the truncation — lives in

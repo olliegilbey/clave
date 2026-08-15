@@ -25,6 +25,51 @@ pub struct TabMeta {
     pub position: usize,
     pub name: String,
     pub active: bool,
+    /// Zellij's `TabInfo.active_swap_layout_name` — which of the declared
+    /// geometries this tab is ACTUALLY in (#197). `None`, or any name that is
+    /// neither of clave's two, means the tab is on the hidden birth position
+    /// zellij reports as `"BASE"`; see [`TabGeometry`].
+    pub swap_layout: Option<String>,
+}
+
+/// Which width geometry a tab is in, as zellij reports it (#197).
+///
+/// The bar used to keep a BELIEF here — what it thought its last switch had
+/// achieved — and check the DIRECTION of the pane's next repaint to confirm.
+/// Nothing re-derived that belief, so a tab that got out of step stayed out of
+/// step forever: twelve presses, focus changes and idling all failed to rescue
+/// a tab stuck at the collapsed width while the store said expanded (#197
+/// sandbox drive). This is the replacement, and it is not a belief: every
+/// `TabUpdate` carries the name, so every frame re-derives the answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TabGeometry {
+    Collapsed,
+    Expanded,
+    /// The tab's own birth layout — zellij hides it at position 0 of the swap
+    /// cycle and reports it as `"BASE"`, a name that says nothing about width.
+    /// Treated as a disagreement with EITHER mode, so the bar spends one switch
+    /// to leave it: the layout generator declares the birth geometry first
+    /// (`setup.rs`), so that switch lands on the same width under a name the
+    /// bar can compare, and the user sees nothing move.
+    Birth,
+}
+
+impl TabGeometry {
+    fn wanted(collapsed: bool) -> Self {
+        if collapsed {
+            Self::Collapsed
+        } else {
+            Self::Expanded
+        }
+    }
+
+    fn from_reported(name: Option<&str>) -> Self {
+        match name {
+            Some(n) if n == clave_types::swap_layout_name(true) => Self::Collapsed,
+            Some(n) if n == clave_types::swap_layout_name(false) => Self::Expanded,
+            _ => Self::Birth,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,31 +212,6 @@ pub enum BindStallState {
 /// Event::Timer carries peek sinks alone — no classification needed until
 /// #92's read timer joins the channel).
 pub const PEEK_SINK_SECS: f64 = 0.9;
-
-/// How many `next_swap_layout` calls one width change may cost (#181).
-///
-/// The switch is relative — there is no absolute "apply layout N" in the plugin
-/// API — so a tab whose swap position is out of phase with the mode the bar is
-/// showing lands on the wrong geometry, and one extra call puts it back.
-///
-/// The budget is TWO, not one, because the live cycle is three positions long,
-/// not two. Zellij inserts the tab's BIRTH layout as a hidden position at index
-/// 0 of the tab's swap list (`swap_layouts.rs:38-56`, applied from
-/// `tab/mod.rs:889,967`), so the tab walks birth → declared[0] → declared[1] →
-/// birth. One of those three steps is a duplicate of the geometry the tab is
-/// already in, i.e. a call that moves nothing. On top of that, a tab zellij has
-/// marked DAMAGED — the user resized or closed a pane, or dragged a pane border
-/// with the mouse (`tab/mod.rs:2398,2465,5779`) — spends its next switch
-/// RE-APPLYING the current position instead of advancing
-/// (`swap_layouts.rs:241-250`). Those two stack: a damaged tab can re-apply
-/// (no move), then advance onto the birth duplicate (no move), and only the
-/// third call moves it. One correction would strand that tab on the wrong
-/// geometry until the next keypress.
-///
-/// The bound is still what makes this NOT the old seek: it is a fixed, tiny
-/// count, it learns nothing from what it sees, and it cannot run at all except
-/// in the renders that follow a width change this bar asked for.
-const SWAP_CORRECTIONS: u8 = 2;
 
 /// A row that has never received a user commitment (S1). Sorts below every row
 /// that has. Reachable for a LIVE tab only when its birth touch never landed —
@@ -390,26 +410,24 @@ pub struct BarModel {
     /// Local unread-override: Done agents we've already cleared on focus.
     /// Render-side only; `clave focus` persists the real transition.
     read_locally: BTreeSet<String>,
-    /// #181: which of the two declared geometries this bar believes its TAB is
-    /// currently in. A switch is owed whenever it disagrees with
-    /// `showing_collapsed()`, and issuing one is what brings it back into
-    /// agreement — so the owed switch is DERIVED, never booked.
+    /// The one ask we have already spent, as `(where the tab was, what the
+    /// store wanted)` — #197's only piece of width state, and a debounce
+    /// rather than a belief.
     ///
-    /// That is the whole answer to "what if the mode changes twice before the
-    /// switch goes out": there is no queue to replay, only an end state to
-    /// reach, and a mode that leaves and returns owes nothing.
+    /// A switch is DERIVED: it is owed whenever zellij's reported geometry
+    /// disagrees with the mode. That answers "what if the mode changes twice
+    /// before the switch goes out" by itself — there is no queue to replay,
+    /// only an end state to reach, and a mode that leaves and returns owes
+    /// nothing. What it does not answer is a tab that will not move: zellij
+    /// reports a `TabUpdate` after every switch whether or not the switch
+    /// achieved anything, so a refused switch would re-derive the same
+    /// disagreement and ask again, forever. Refusing a second identical ask
+    /// bounds that at one call per reported position.
     ///
-    /// It is SEEDED from the hydrating snapshot (`apply_snapshot`, #197 finding
-    /// K), not left at its `false` default: the pane is born at the width the
-    /// persisted mode wants, so the launch already agrees and a cold start into
-    /// collapse owes no switch at all.
-    shown_collapsed: bool,
-    /// The width we were at when we asked for the switch, and how many
-    /// corrections that ask is still entitled to. `None` = no switch is in
-    /// flight and the render path does nothing at all.
-    swap_from: Option<usize>,
-    /// Corrections left for the switch in flight — see `SWAP_CORRECTIONS`.
-    swap_corrections: u8,
+    /// It cannot strand a tab the way the old belief did: it is cleared the
+    /// moment the report or the mode moves, and it is never consulted to decide
+    /// WHERE the tab is — only whether this exact ask has already been made.
+    swap_asked: Option<(TabGeometry, bool)>,
     /// tab_id of the last visited (focused) tab — replicated on every
     /// instance from the visited-pipe/nav broadcast streams. This is the nav
     /// walk base: the local TabInfo.active flag is stale everywhere except
@@ -1028,9 +1046,6 @@ impl BarModel {
         }
         self.seq = snap.seq;
         // The mode below is now authoritative, so a switch may be booked (D37).
-        // This is also the ONE snapshot that gets to seed `shown_collapsed` —
-        // see the seed below, after the collapse ledger has settled the mode.
-        let hydrating = self.awaiting_hydration;
         self.awaiting_hydration = false;
         self.agents = snap.agents;
         // Hydrate the pane mapping from the snapshot (#178). `clave-register`
@@ -1099,29 +1114,6 @@ impl BarModel {
             // the give-up arm was buying.
             Some(_) => {}
             None => self.heal_collapse(snap.collapsed),
-        }
-        // #197 finding K: seed the geometry belief from the hydrating snapshot.
-        //
-        // `clave launch` composes the session layout with the store's collapse
-        // flag (`setup.rs`, `launch_layout_kdl`), so the bar pane is BORN at the
-        // width the mode we just hydrated wants. `shown_collapsed` starting at
-        // `false` therefore made the first snapshot of a collapsed fleet look
-        // like a disagreement: the correctly-born pane was widened and snapped
-        // back on every cold start, and the swap cycle was left parked on the
-        // hidden birth position, so the user's first Alt+c moved nothing.
-        //
-        // ONLY here. A later snapshot changing the mode is a real disagreement
-        // and must still owe its switch; seeding on every snapshot would make
-        // the heal path silent and strand panes at the wrong width.
-        //
-        // The accepted, known cost: the hand-opened FALLBACK layout that `clave
-        // setup` writes (`setup.rs`, `default_layout_kdl`) has no store to read
-        // and always births the pane expanded. A collapsed store opened that way
-        // now draws the collapsed profile into an expanded pane until the next
-        // keypress, instead of being switched to match. That is a smaller wrong
-        // than a visible flash on every collapsed launch through the normal path.
-        if hydrating {
-            self.shown_collapsed = self.showing_collapsed();
         }
         // Borrow-friendly pass: snapshot views first, then mutate the guards.
         let views: Vec<(String, Status, String, Option<usize>)> = self
@@ -1884,16 +1876,14 @@ impl BarModel {
         }
     }
 
-    /// Is the tab in a different geometry from the one this bar is showing?
-    ///
-    /// Nobody books a switch: `toggle`, `heal_collapse` and both peek edges just
-    /// move the mode, and the answer here changes with them. So there is one
-    /// width path in the model, no way to change the mode without the pane
-    /// following, and — the reason it is derived rather than a flag — a mode
-    /// that changes twice before the switch can go out owes ONE switch to where
-    /// it ended up, or none at all if it came back to where it started.
-    fn swap_owed(&self) -> bool {
-        self.shown_collapsed != self.showing_collapsed()
+    /// Which geometry zellij says OUR tab is in, from the last `TabUpdate`.
+    /// `None` only while the frames cannot resolve our own tab at all.
+    fn reported_geometry(&self) -> Option<TabGeometry> {
+        let own = self.own_tab()?;
+        self.tabs
+            .iter()
+            .find(|t| t.tab_id == own)
+            .map(|t| TabGeometry::from_reported(t.swap_layout.as_deref()))
     }
 
     /// Alt+c (round 20, collapse-in-place): flip between the template width and
@@ -1945,82 +1935,76 @@ impl BarModel {
         self.awaiting_hydration = true;
     }
 
-    /// The whole width mechanism, driven by our own render (#181).
+    /// The whole width mechanism (#181, rebuilt on reported truth in #197).
     ///
-    /// It does exactly two things and neither of them is arithmetic:
+    /// One rule: **while zellij says this tab is in a geometry the store does
+    /// not want, and this bar's own tab is the focused one, ask for one
+    /// switch.** Nothing here is arithmetic, and nothing here is a memory of
+    /// what a previous switch was supposed to have achieved.
     ///
-    /// 1. **Ask.** A geometry the tab does not have becomes one
-    ///    `next_swap_layout` call, and the width we are leaving is remembered.
-    /// 2. **Check, up to twice.** The switch is RELATIVE — the plugin API has
-    ///    no "apply layout N" — so a tab out of phase with the mode lands on
-    ///    the wrong geometry. If the pane did not move the way the new mode
-    ///    wants, another call is spent, up to `SWAP_CORRECTIONS` of them: the
-    ///    cycle is three positions long (zellij hides the tab's birth layout at
-    ///    index 0) and a damaged tab burns one switch re-applying, so two
-    ///    no-move calls in a row are reachable and the third always moves.
+    /// That second point is the change. The old machine kept a belief about
+    /// which geometry its tab was in, seeded it at hydration, and confirmed
+    /// each switch by watching the DIRECTION its own pane repainted in, with a
+    /// budget of two corrections. Nothing ever re-derived the belief, so a
+    /// rapid double-press could put it permanently at odds with reality: a tab
+    /// stuck at the collapsed width while the store said expanded survived
+    /// twelve presses, focus changes and a long idle (#197 sandbox drive).
+    /// Zellij reports `active_swap_layout_name` on every tab of every
+    /// `TabUpdate`, so that belief was never necessary. Reading it instead
+    /// makes the stuck class unreachable by construction — each frame answers
+    /// the question again from scratch — and deletes the seeding, the direction
+    /// check and the correction budget outright.
     ///
-    /// The check is on the DIRECTION of the move, never on a column count.
-    /// Absolute widths would be wrong the moment the window is resized: the
-    /// geometries are percentages, so both of them shrink with the window and a
-    /// comparison against 54 and 30 would start declaring an expanded bar
-    /// collapsed. Direction survives any window size.
+    /// **Why one ask per reported position.** Zellij sends a `TabUpdate` after
+    /// every switch whether or not the switch moved anything (a tab the user
+    /// has manually resized re-applies its current position instead of
+    /// advancing), so a rule with no debounce would re-derive the same
+    /// disagreement and ask again without limit. `swap_asked` refuses a second
+    /// identical ask; the next report, or the next mode change, re-arms it. The
+    /// cost is that a tab which refused its switch waits for one of those
+    /// rather than being retried on the spot — a bounded stall where the old
+    /// budget bought a bounded burst, and no longer a permanent one.
     ///
-    /// Nothing here can run away. Outside the single render that follows a
-    /// switch this function returns immediately, so a bar sitting quietly, a bar
-    /// on a hidden tab, and a bar whose window was just resized all emit
-    /// nothing at all.
+    /// **The birth position.** The name is missing (`"BASE"`) for the layout a
+    /// tab was born in, so that position always reads as a disagreement and
+    /// always costs one switch. `setup.rs` declares the birth geometry FIRST
+    /// precisely so that switch lands on the same width under a name, and the
+    /// user sees nothing move.
     ///
-    /// **The focus gate.** A swap-layout request carries the requesting plugin's
-    /// pane id, but zellij drops it in routing and resolves the switch against
-    /// the FOCUSED tab (v0.44.3; see FOOTGUNS.md, and there is no tab-scoped
-    /// plugin command — only a CLI action). clave runs one bar per tab, mode
-    /// changes reach every bar through the store snapshot, and a hidden bar
-    /// still renders — so an ungated switch is a background bar resizing
-    /// somebody else's tab. The switch is therefore issued only while this bar's
-    /// own tab is the focused one; otherwise it is HELD — and holding costs
-    /// nothing to write down, because what is owed is `shown_collapsed`
-    /// disagreeing with the mode, which is already state. The render that
-    /// follows this tab regaining focus (the visited beacon repaints every bar)
-    /// spends it. A tab closed while a switch is held takes the whole bar
-    /// with it, so there is nothing left to owe.
-    pub fn width_effects(&mut self, own_cols: usize) -> Vec<Effect> {
+    /// **The focus gate,** unchanged. A swap-layout request carries the
+    /// requesting plugin's pane id, but zellij drops it in routing and resolves
+    /// the switch against the FOCUSED tab (v0.44.3; see FOOTGUNS.md, and there
+    /// is no tab-scoped plugin command — only a CLI action). clave runs one bar
+    /// per tab, mode changes reach every bar through the store snapshot, and a
+    /// hidden bar still renders — so an ungated switch is a background bar
+    /// resizing somebody else's tab. A background bar therefore emits nothing
+    /// and writes nothing down: the disagreement is still there when its tab
+    /// comes back, and the render that follows (the visited beacon repaints
+    /// every bar) settles it. A tab closed while a switch is owed takes the
+    /// whole bar with it.
+    pub fn width_effects(&mut self) -> Vec<Effect> {
         // D37: the mode is not known yet, so any switch would be against a
         // guess. The pane is already born at the persisted mode's width.
         if self.awaiting_hydration {
             return Vec::new();
         }
         if !self.own_tab_focused() {
-            // The switch itself keeps (it is a disagreement, not a message).
-            // The in-flight correction does NOT: its baseline is the width from
-            // a render on a tab we may not be looking at any more, and a
-            // correction issued from the background is the very cross-tab
-            // resize this gate exists to prevent. Dropping it costs at most one
-            // stale geometry, which the next mode change settles.
-            self.swap_from = None;
+            self.swap_asked = None;
             return Vec::new();
         }
-        if self.swap_owed() {
-            self.shown_collapsed = self.showing_collapsed();
-            self.swap_from = Some(own_cols);
-            self.swap_corrections = SWAP_CORRECTIONS;
-            return vec![Effect::SwapWidth];
-        }
-        let Some(from) = self.swap_from else {
+        // No frame can place our own tab yet: nothing to compare against.
+        let Some(at) = self.reported_geometry() else {
             return Vec::new();
         };
-        // One look, whatever it shows: the answer is either "landed" or "one
-        // more", and both end the episode.
-        self.swap_from = None;
-        let landed = if self.showing_collapsed() {
-            own_cols < from
-        } else {
-            own_cols > from
-        };
-        if landed || self.swap_corrections == 0 {
+        let want = self.showing_collapsed();
+        if at == TabGeometry::wanted(want) {
+            self.swap_asked = None;
             return Vec::new();
         }
-        self.swap_corrections -= 1;
-        self.swap_from = Some(own_cols);
+        if self.swap_asked == Some((at, want)) {
+            return Vec::new(); // already spent a switch on exactly this
+        }
+        self.swap_asked = Some((at, want));
         vec![Effect::SwapWidth]
     }
 }
@@ -2106,7 +2090,23 @@ mod tests {
             position: pos,
             name: name.into(),
             active,
+            // A fresh tab is on its birth layout, which zellij will not name.
+            swap_layout: None,
         }
+    }
+
+    /// The three-tab fleet's next `TabUpdate`, with OUR tab (11) reporting the
+    /// geometry zellij actually has it in: `Some(collapsed)` is one of the two
+    /// declared layouts by name, `None` is the unnameable birth position
+    /// (`"BASE"`). This is the only input the width machine reads.
+    fn reports(m: &mut BarModel, at: Option<bool>, active: usize) {
+        let mut tabs = vec![
+            tab(10, 0, "a", active == 10),
+            tab(11, 1, "b", active == 11),
+            tab(12, 2, "c", active == 12),
+        ];
+        tabs[1].swap_layout = at.map(|c| clave_types::swap_layout_name(c).to_string());
+        m.apply_tabs(tabs);
     }
 
     fn pane(tab_pos: usize, id: u32, plugin: bool, focused: bool) -> PaneMeta {
@@ -3769,14 +3769,17 @@ mod tests {
         );
     }
 
-    /// A model toggled once (expanded → collapsed): one geometry switch owed.
-    /// A bar of the three-tab fleet whose OWN tab is the focused one. Every
-    /// width test needs this: `width_effects` refuses to touch the layout from a
-    /// background tab, because zellij would apply the switch to whichever tab
-    /// has focus rather than to the one that asked.
+    /// A bar of the three-tab fleet whose OWN tab is the focused one, SETTLED:
+    /// the store wants expanded and zellij reports the expanded layout. Every
+    /// width test needs the focus half — `width_effects` refuses to touch the
+    /// layout from a background tab, because zellij would apply the switch to
+    /// whichever tab has focus rather than to the one that asked — and the
+    /// settled half keeps each test's first assertion about the thing it is
+    /// testing rather than about the birth position.
     fn focused_bar() -> BarModel {
         let mut m = fleet_bar(11, 11);
         m.beacon(11);
+        reports(&mut m, Some(false), 11);
         assert!(m.own_tab_focused(), "focused_bar is not focused");
         m
     }
@@ -3785,6 +3788,7 @@ mod tests {
     fn background_bar() -> BarModel {
         let mut m = fleet_bar(11, 10);
         m.beacon(10);
+        reports(&mut m, Some(false), 10);
         assert!(!m.own_tab_focused(), "background_bar is focused");
         m
     }
@@ -3795,117 +3799,155 @@ mod tests {
         m
     }
 
-    /// The one width property that matters, and the one the old seek could not
-    /// hold: **a mode change always moves the pane, and moves it the right way.**
+    /// The one width property that matters: **a mode change moves the pane, and
+    /// zellij's own report of where it landed is what ends the episode.**
     ///
     /// Driven through the real entry point rather than restated. `width_effects`
     /// is called once per render, so the sequence below is exactly what a live
-    /// bar sees: the render after the toggle asks for the switch, and the render
-    /// after that — carrying the width zellij produced — accepts it.
+    /// bar sees: the render after the toggle asks for the switch, and the
+    /// `TabUpdate` zellij sends after the switch reports the new layout.
     #[test]
-    fn a_toggle_switches_geometry_and_accepts_a_pane_that_moved_the_right_way() {
+    fn a_toggle_switches_geometry_and_the_reported_layout_ends_it() {
         let mut m = focused_bar();
-        assert_eq!(m.width_effects(54), Vec::<Effect>::new(), "quiet at rest");
+        assert_eq!(m.width_effects(), Vec::<Effect>::new(), "quiet at rest");
         m.toggle(); // expanded -> collapsed
-        assert_eq!(m.width_effects(54), vec![Effect::SwapWidth]);
-        // Zellij applied the collapsed geometry: narrower, which is what
-        // collapsing means. Nothing more to ask for, ever.
-        assert_eq!(m.width_effects(30), Vec::<Effect>::new());
-        assert_eq!(m.width_effects(30), Vec::<Effect>::new());
+        assert_eq!(m.width_effects(), vec![Effect::SwapWidth]);
+        reports(&mut m, Some(true), 11); // zellij: you are in clave_collapsed
+        assert_eq!(m.width_effects(), Vec::<Effect>::new());
+        assert_eq!(m.width_effects(), Vec::<Effect>::new());
         m.toggle(); // collapsed -> expanded
-        assert_eq!(m.width_effects(30), vec![Effect::SwapWidth]);
-        assert_eq!(m.width_effects(54), Vec::<Effect>::new());
+        assert_eq!(m.width_effects(), vec![Effect::SwapWidth]);
+        reports(&mut m, Some(false), 11);
+        assert_eq!(m.width_effects(), Vec::<Effect>::new());
     }
 
-    /// The switch is RELATIVE — `next_swap_layout` has no absolute form — so a
-    /// tab whose swap index is out of phase lands on the geometry it was
-    /// already in. Exactly one correction is spent to fix that, and the phase
-    /// is then right for every later toggle.
-    #[test]
-    fn a_switch_that_went_the_wrong_way_is_corrected_exactly_once() {
-        let mut m = focused_bar();
-        m.toggle(); // wants collapsed
-        assert_eq!(m.width_effects(54), vec![Effect::SwapWidth]);
-        // Out of phase: the pane got WIDER when collapsing was asked for.
-        assert_eq!(m.width_effects(75), vec![Effect::SwapWidth]);
-        // The correction landed.
-        assert_eq!(m.width_effects(30), Vec::<Effect>::new());
-    }
-
-    /// The same correction, in the EXPAND direction — the case independent
-    /// mutation testing found untested (#181 review, finding 3). Every other
-    /// width test drives the collapse side, so the expand half of the direction
-    /// check could be replaced by "always landed" and the suite stayed green.
+    /// The switch is RELATIVE — `next_swap_layout` has no absolute form — and
+    /// the cycle it walks is three positions long, so a switch can land on a
+    /// geometry nobody asked for. The report says so and the next render asks
+    /// again. There is no budget and no direction check: the rule is "keep
+    /// asking while the report disagrees", and three positions bound it.
     ///
-    /// It is the half that corrupts the display: a bar that accepts an expansion
-    /// which never happened starts drawing the wide profile into a narrow pane,
-    /// and the rows stay clipped until the next keypress repaints.
+    /// This is the EXPAND direction, the half independent mutation testing
+    /// found untested under the old machine (#181 review, finding 3), and the
+    /// half that corrupts the display: a bar that believes an expansion which
+    /// never happened draws the wide profile into a narrow pane.
     #[test]
-    fn an_expansion_the_pane_ignored_is_corrected_too() {
+    fn a_switch_that_lands_on_the_wrong_layout_is_asked_again() {
         let mut m = collapsed_model();
-        assert_eq!(m.width_effects(54), vec![Effect::SwapWidth]);
-        assert_eq!(
-            m.width_effects(30),
-            Vec::<Effect>::new(),
-            "landed collapsed"
-        );
+        assert_eq!(m.width_effects(), vec![Effect::SwapWidth]);
+        reports(&mut m, Some(true), 11);
+        assert_eq!(m.width_effects(), Vec::<Effect>::new(), "landed collapsed");
         m.toggle(); // collapsed -> expanded
-        assert_eq!(m.width_effects(30), vec![Effect::SwapWidth]);
-        // The pane did not move at all. Unmoved is not expanded, so one
-        // correction is spent — an equality that read as success here would
-        // leave the wide profile rendering into a 30-column pane.
-        assert_eq!(m.width_effects(30), vec![Effect::SwapWidth]);
-        assert_eq!(
-            m.width_effects(54),
-            Vec::<Effect>::new(),
-            "correction landed"
-        );
+        assert_eq!(m.width_effects(), vec![Effect::SwapWidth]);
+        // The cycle stepped onto the tab's hidden birth position instead.
+        reports(&mut m, None, 11);
+        assert_eq!(m.width_effects(), vec![Effect::SwapWidth]);
+        reports(&mut m, Some(false), 11);
+        assert_eq!(m.width_effects(), Vec::<Effect>::new(), "landed expanded");
     }
 
-    /// The bound, which is what makes this not a seek. A layout that refuses to
-    /// move at all costs three calls — the ask plus both corrections — and then
-    /// silence, where the old machine spent a budget, learned a polarity from
-    /// the refusal and could re-arm. Three is the worst case a real tab can
-    /// reach: a damaged tab re-applies instead of advancing, and the position
-    /// after that is the hidden duplicate of the tab's birth layout.
+    /// The bound. Zellij answers every switch with a `TabUpdate` whether or not
+    /// the switch achieved anything — a tab the user has manually resized
+    /// re-applies its current position instead of advancing — so the rule needs
+    /// something to stop it asking forever. One ask per reported position is
+    /// that something: a tab that never moves costs ONE call, however many
+    /// renders and however many identical frames follow.
     #[test]
-    fn a_layout_that_never_moves_costs_three_calls_and_then_goes_quiet() {
+    fn a_tab_that_refuses_to_move_is_asked_once_not_forever() {
         let mut m = focused_bar();
         m.toggle();
-        let spent = (0..64)
-            .map(|_| m.width_effects(54))
-            .take_while(|fx| !fx.is_empty())
-            .count();
-        assert_eq!(spent, 3, "unbounded switching: {spent} calls");
+        let mut spent = 0;
+        for _ in 0..64 {
+            spent += m.width_effects().len();
+            reports(&mut m, Some(false), 11); // unchanged: the switch was refused
+        }
+        assert_eq!(spent, 1, "unbounded switching: {spent} calls");
     }
 
-    /// A resized window must not be mistaken for a wrong geometry. The two
-    /// geometries are PERCENTAGES, so both shrink with the window — an
-    /// expanded bar on a halved window is genuinely narrower than the collapsed
-    /// target, and a check against absolute column counts would collapse it.
-    /// The check is on the direction of the move, so it does not care.
+    /// …and it is a stall, not a strand. The refusing tab is asked again the
+    /// moment anything about the question changes — a fresh press, or the tab
+    /// leaving and regaining focus. That is the whole difference from the
+    /// machine this replaced, where a tab could sit at the wrong width through
+    /// twelve presses and every focus change (#197 sandbox drive).
     #[test]
-    fn a_narrow_window_does_not_read_as_the_wrong_geometry() {
+    fn a_refused_switch_is_retried_on_the_next_press_or_focus_change() {
         let mut m = focused_bar();
-        m.toggle(); // collapsed
-        assert_eq!(m.width_effects(26), vec![Effect::SwapWidth]);
-        // 15 columns is wider than nothing and narrower than 26: correct.
-        assert_eq!(m.width_effects(15), Vec::<Effect>::new());
-        m.toggle(); // expanded, on the same narrow window
-        assert_eq!(m.width_effects(15), vec![Effect::SwapWidth]);
-        // 26 columns — under BOTH design targets, and still the right answer.
-        assert_eq!(m.width_effects(26), Vec::<Effect>::new());
+        m.toggle();
+        assert_eq!(m.width_effects(), vec![Effect::SwapWidth]);
+        reports(&mut m, Some(false), 11);
+        assert_eq!(m.width_effects(), Vec::<Effect>::new(), "stalled");
+        // The user leaves and comes back.
+        m.beacon(10);
+        assert_eq!(m.width_effects(), Vec::<Effect>::new(), "background");
+        m.beacon(11);
+        assert_eq!(m.width_effects(), vec![Effect::SwapWidth], "retried");
+        reports(&mut m, Some(false), 11);
+        // Or presses again. Alt+c back to the mode the tab is already in is
+        // silent — and it also re-arms, so the press after it asks again.
+        m.toggle();
+        assert_eq!(m.width_effects(), Vec::<Effect>::new());
+        m.toggle();
+        assert_eq!(m.width_effects(), vec![Effect::SwapWidth]);
     }
 
-    /// A quiet bar emits nothing, whatever its width and however many times it
-    /// is repainted. This is the property the runaway violated: the old seek
-    /// re-armed on observed drift, so a bar nobody had touched could start
-    /// resizing itself.
+    /// The birth position. Zellij hides the layout a tab was born in at cycle
+    /// position 0 and reports it as `"BASE"` — a name that says nothing about
+    /// width — so the bar cannot compare it with anything and spends one switch
+    /// leaving it. `setup.rs` declares the birth geometry FIRST so that switch
+    /// lands on the same width under a name, which is why a cold start does not
+    /// flash. After that the tab is nameable and the machine is silent.
+    #[test]
+    fn the_unnamed_birth_position_costs_one_switch_and_then_agrees() {
+        let mut m = fleet_bar(11, 11);
+        m.beacon(11);
+        reports(&mut m, None, 11); // "BASE": zellij will not say which width
+        assert_eq!(m.width_effects(), vec![Effect::SwapWidth]);
+        // The switch lands on the first declared layout, which is the width the
+        // tab was already at — now under a name.
+        reports(&mut m, Some(false), 11);
+        assert_eq!(m.width_effects(), Vec::<Effect>::new());
+        // And it costs exactly one: a tab that stayed on BASE is not asked
+        // again until the question changes.
+        let mut stuck = fleet_bar(11, 11);
+        stuck.beacon(11);
+        let mut spent = 0;
+        for _ in 0..8 {
+            reports(&mut stuck, None, 11);
+            spent += stuck.width_effects().len();
+        }
+        assert_eq!(spent, 1);
+    }
+
+    /// A name from some other layout file is the birth position's case, not a
+    /// panic and not silence: unrecognised means "cannot compare", which is a
+    /// disagreement with either mode.
+    #[test]
+    fn an_unrecognised_layout_name_is_treated_as_the_birth_position() {
+        let mut m = fleet_bar(11, 11);
+        m.beacon(11);
+        let mut tabs = vec![
+            tab(10, 0, "a", false),
+            tab(11, 1, "b", true),
+            tab(12, 2, "c", false),
+        ];
+        tabs[1].swap_layout = Some("vertical".into());
+        m.apply_tabs(tabs);
+        assert_eq!(m.width_effects(), vec![Effect::SwapWidth]);
+    }
+
+    /// A quiet bar emits nothing, however many times it is repainted. This is
+    /// the property the runaway violated: the old seek re-armed on observed
+    /// drift, so a bar nobody had touched could start resizing itself. Nothing
+    /// here reads a width at all, so a resized window cannot provoke it either
+    /// — the two geometries are PERCENTAGES, and a check against absolute
+    /// column counts would have called an expanded bar on a narrow window
+    /// collapsed.
     #[test]
     fn an_untouched_bar_never_asks_for_anything() {
         let mut m = focused_bar();
-        for cols in [54usize, 30, 141, 11, 200, 3] {
-            assert_eq!(m.width_effects(cols), Vec::<Effect>::new(), "at {cols}");
+        for _ in 0..8 {
+            assert_eq!(m.width_effects(), Vec::<Effect>::new());
+            reports(&mut m, Some(false), 11);
         }
     }
 
@@ -3919,18 +3961,16 @@ mod tests {
     fn a_background_bar_never_switches_a_layout_it_does_not_own() {
         let mut m = background_bar();
         m.toggle();
-        for cols in [54usize, 30, 54, 30] {
-            assert_eq!(m.width_effects(cols), Vec::<Effect>::new(), "at {cols}");
+        for _ in 0..4 {
+            assert_eq!(m.width_effects(), Vec::<Effect>::new());
+            reports(&mut m, Some(false), 10);
         }
         // A nav elsewhere: the visited pipe is a BROADCAST, so this bar hears
         // about a tab that is not its own and arms a peek. Still not its layout.
         assert!(m.visited(10), "a collapsed bar arms a peek on any nav");
-        for cols in [30usize, 54] {
-            assert_eq!(
-                m.width_effects(cols),
-                Vec::<Effect>::new(),
-                "peek at {cols}"
-            );
+        for _ in 0..2 {
+            assert_eq!(m.width_effects(), Vec::<Effect>::new(), "peek");
+            reports(&mut m, Some(false), 10);
         }
     }
 
@@ -3941,10 +3981,11 @@ mod tests {
     fn a_held_switch_fires_on_the_render_after_the_tab_regains_focus() {
         let mut m = background_bar();
         m.toggle(); // wants collapsed, may not say so yet
-        assert_eq!(m.width_effects(54), Vec::<Effect>::new(), "held");
+        assert_eq!(m.width_effects(), Vec::<Effect>::new(), "held");
         m.beacon(11); // the user switches to this bar's tab
-        assert_eq!(m.width_effects(54), vec![Effect::SwapWidth]);
-        assert_eq!(m.width_effects(30), Vec::<Effect>::new(), "landed");
+        assert_eq!(m.width_effects(), vec![Effect::SwapWidth]);
+        reports(&mut m, Some(true), 11);
+        assert_eq!(m.width_effects(), Vec::<Effect>::new(), "landed");
     }
 
     /// What is owed is an END STATE, not a queue. A mode that moves twice while
@@ -3956,21 +3997,22 @@ mod tests {
         // Ends somewhere new: collapsed → expanded → collapsed is one switch.
         let mut m = background_bar();
         m.toggle();
-        assert_eq!(m.width_effects(54), Vec::<Effect>::new());
+        assert_eq!(m.width_effects(), Vec::<Effect>::new());
         m.toggle();
         m.toggle();
         m.beacon(11);
-        assert_eq!(m.width_effects(54), vec![Effect::SwapWidth]);
-        assert_eq!(m.width_effects(30), Vec::<Effect>::new(), "one switch only");
+        assert_eq!(m.width_effects(), vec![Effect::SwapWidth]);
+        reports(&mut m, Some(true), 11);
+        assert_eq!(m.width_effects(), Vec::<Effect>::new(), "one switch only");
 
         // Ends where it started: nothing was ever owed.
         let mut m = background_bar();
         m.toggle();
         m.toggle();
-        assert_eq!(m.width_effects(54), Vec::<Effect>::new());
+        assert_eq!(m.width_effects(), Vec::<Effect>::new());
         m.beacon(11);
         assert_eq!(
-            m.width_effects(54),
+            m.width_effects(),
             Vec::<Effect>::new(),
             "a round trip owes no switch"
         );
@@ -3984,35 +4026,17 @@ mod tests {
         let mut m = background_bar();
         m.toggle(); // collapsed
         m.beacon(11);
-        assert_eq!(m.width_effects(54), vec![Effect::SwapWidth]);
-        assert_eq!(m.width_effects(30), Vec::<Effect>::new());
+        assert_eq!(m.width_effects(), vec![Effect::SwapWidth]);
+        reports(&mut m, Some(true), 11);
+        assert_eq!(m.width_effects(), Vec::<Effect>::new());
         m.beacon(10); // the user leaves
         assert!(m.visited(10)); // and navs, which every bar hears
         assert!(m.peek_expired());
         m.beacon(11); // and comes back
         assert_eq!(
-            m.width_effects(30),
+            m.width_effects(),
             Vec::<Effect>::new(),
             "a peek nobody saw must not move the pane"
-        );
-    }
-
-    /// The correction is the one part that must NOT keep: its baseline is a
-    /// width measured while we had focus, and spending it later would be a
-    /// resize of somebody else's tab off a stale number.
-    #[test]
-    fn a_correction_is_abandoned_when_focus_leaves_mid_switch() {
-        let mut m = focused_bar();
-        m.toggle();
-        assert_eq!(m.width_effects(54), vec![Effect::SwapWidth]);
-        m.beacon(10); // focus leaves before the check render
-        // The pane went the WRONG way — normally worth one correction.
-        assert_eq!(m.width_effects(75), Vec::<Effect>::new());
-        m.beacon(11);
-        assert_eq!(
-            m.width_effects(75),
-            Vec::<Effect>::new(),
-            "a stale correction must not fire on return"
         );
     }
 
@@ -4022,22 +4046,25 @@ mod tests {
         // clave-visited pipe) briefly expands the bar; ~1s after the last
         // nav it sinks back to the gutter.
         let mut m = collapsed_model();
-        assert_eq!(m.width_effects(54), vec![Effect::SwapWidth]); // the toggle
-        assert_eq!(m.width_effects(30), Vec::<Effect>::new()); // settled
+        assert_eq!(m.width_effects(), vec![Effect::SwapWidth]); // the toggle
+        reports(&mut m, Some(true), 11);
+        assert_eq!(m.width_effects(), Vec::<Effect>::new()); // settled
         // The nav lands on THIS bar's own tab — the bar the user is now
         // reading, and so the only one entitled to move a pane.
         assert!(m.visited(11), "collapsed bar must arm a peek");
         assert_eq!(m.current_tab(), Some(11)); // still a beacon
         // The peek is a geometry switch like any other since #181 — the bar
         // shows the expanded profile and occupies the expanded pane.
-        assert_eq!(m.width_effects(30), vec![Effect::SwapWidth]);
-        assert_eq!(m.width_effects(54), Vec::<Effect>::new());
+        assert_eq!(m.width_effects(), vec![Effect::SwapWidth]);
+        reports(&mut m, Some(false), 11);
+        assert_eq!(m.width_effects(), Vec::<Effect>::new());
         // A second nav during the peek re-arms (main.rs counts its timers).
         assert!(m.visited(11));
         // Expiry: sink back to the gutter.
         assert!(m.peek_expired());
-        assert_eq!(m.width_effects(54), vec![Effect::SwapWidth]);
-        assert_eq!(m.width_effects(30), Vec::<Effect>::new());
+        assert_eq!(m.width_effects(), vec![Effect::SwapWidth]);
+        reports(&mut m, Some(true), 11);
+        assert_eq!(m.width_effects(), Vec::<Effect>::new());
     }
 
     #[test]
@@ -4047,22 +4074,24 @@ mod tests {
         assert_eq!(m.current_tab(), Some(11)); // beacon still lands
         // And asked for no geometry switch: a beacon that corrupted
         // `collapsed` would have booked one.
-        assert_eq!(m.width_effects(54), Vec::<Effect>::new());
+        assert_eq!(m.width_effects(), Vec::<Effect>::new());
     }
 
     #[test]
     fn toggle_cancels_a_peek_and_a_late_expiry_is_a_noop() {
         let mut m = collapsed_model();
-        assert_eq!(m.width_effects(54), vec![Effect::SwapWidth]);
-        assert_eq!(m.width_effects(30), Vec::<Effect>::new());
+        assert_eq!(m.width_effects(), vec![Effect::SwapWidth]);
+        reports(&mut m, Some(true), 11);
+        assert_eq!(m.width_effects(), Vec::<Effect>::new());
         assert!(m.visited(11));
         // Alt+c mid-peek: now genuinely expanded; the peek flag must not
         // survive to fight the user's explicit toggle.
         m.toggle();
         assert!(!m.peek_expired(), "late timer after a toggle is a no-op");
         // One switch, to the expanded geometry, unpoisoned by the peek.
-        assert_eq!(m.width_effects(30), vec![Effect::SwapWidth]);
-        assert_eq!(m.width_effects(54), Vec::<Effect>::new());
+        assert_eq!(m.width_effects(), vec![Effect::SwapWidth]);
+        reports(&mut m, Some(false), 11);
+        assert_eq!(m.width_effects(), Vec::<Effect>::new());
     }
 
     /// Issue #5 path (a), birth-while-collapsed: a bar born after the toggle
@@ -4076,9 +4105,9 @@ mod tests {
         s.collapsed = true;
         m.apply_snapshot(s);
         assert!(m.collapsed, "snapshot-carried flag did not hydrate");
-        // Born expanded among collapsed bars → must switch geometry, exactly
-        // as if it had heard the toggle itself.
-        assert_eq!(m.width_effects(54), vec![Effect::SwapWidth]);
+        // Sitting in the expanded layout among collapsed bars → must switch
+        // geometry, exactly as if it had heard the toggle itself.
+        assert_eq!(m.width_effects(), vec![Effect::SwapWidth]);
     }
 
     /// Issue #5 path (c), missed pipe: an instance that missed the toggle
@@ -4090,13 +4119,13 @@ mod tests {
         // Desynced: expanded while the store says collapsed.
         let mut missed = focused_bar();
         missed.apply_snapshot(snap(1, vec![])); // hydrated expanded, seq 1
-        assert_eq!(missed.width_effects(54), Vec::<Effect>::new());
+        assert_eq!(missed.width_effects(), Vec::<Effect>::new());
         let mut heal = snap(2, vec![]);
         heal.collapsed = true;
         missed.apply_snapshot(heal);
         assert!(missed.collapsed, "missed-pipe instance did not heal");
         assert_eq!(
-            missed.width_effects(54),
+            missed.width_effects(),
             vec![Effect::SwapWidth],
             "healing must switch the pane to the collapsed geometry"
         );
@@ -4106,14 +4135,15 @@ mod tests {
         let mut synced = focused_bar();
         synced.apply_snapshot(snap(1, vec![]));
         synced.toggle(); // collapsed, one switch owed
-        assert_eq!(synced.width_effects(54), vec![Effect::SwapWidth]);
-        assert_eq!(synced.width_effects(30), Vec::<Effect>::new());
+        assert_eq!(synced.width_effects(), vec![Effect::SwapWidth]);
+        reports(&mut synced, Some(true), 11);
+        assert_eq!(synced.width_effects(), Vec::<Effect>::new());
         let mut same = snap(2, vec![]);
         same.collapsed = true;
         let fx = synced.apply_snapshot(same);
         assert!(synced.collapsed);
         assert_eq!(
-            synced.width_effects(30),
+            synced.width_effects(),
             Vec::<Effect>::new(),
             "an unchanged snapshot flag must not switch the geometry again"
         );
@@ -5547,60 +5577,68 @@ mod tests {
         let mut m = focused_bar();
         m.await_hydration();
         m.toggle(); // a keypress before hydration is still not a licence
-        assert_eq!(m.width_effects(75), Vec::<Effect>::new());
-        assert_eq!(m.width_effects(30), Vec::<Effect>::new());
+        assert_eq!(m.width_effects(), Vec::<Effect>::new());
+        assert_eq!(m.width_effects(), Vec::<Effect>::new());
         // The snapshot arrives and the mode is authoritative from here on.
         let mut snapshot = snap(1, vec![]);
         snapshot.collapsed = true;
         m.apply_snapshot(snapshot);
-        // The mode is authoritative from here on — and it agrees with the
-        // width the pane was BORN at, so the hydrating snapshot owes nothing.
-        // (`a_collapsed_cold_start_does_not_flash_wide` is that property's
-        // own test; here it is only the D37 gate's exit condition.)
-        let mut snapshot = snap(1, vec![]);
-        snapshot.collapsed = true;
-        m.apply_snapshot(snapshot);
-        assert_eq!(m.width_effects(30), Vec::<Effect>::new());
+        // The bar is in the expanded layout and the store now says collapsed:
+        // one switch, and the report ends it.
+        assert_eq!(m.width_effects(), vec![Effect::SwapWidth]);
+        reports(&mut m, Some(true), 11);
+        assert_eq!(m.width_effects(), Vec::<Effect>::new());
         // A keypress AFTER hydration is a licence, and moves the pane.
         m.toggle();
-        assert_eq!(m.width_effects(30), vec![Effect::SwapWidth]);
+        assert_eq!(m.width_effects(), vec![Effect::SwapWidth]);
     }
 
     /// Finding K (#197 review): the cold-start flash. `clave launch` composes
     /// the layout with the store's collapse flag, so a fleet left collapsed is
-    /// BORN at the collapsed width. The bar's record of which geometry its tab
-    /// is in used to default to expanded and was never seeded, so the first
-    /// snapshot read as a disagreement: every collapsed cold start widened the
-    /// correctly-born pane and snapped it back, and left the swap cycle parked
-    /// one position out so the user's first Alt+c moved nothing.
+    /// BORN at the collapsed width — and a bar that widened it on hydration and
+    /// snapped it back is what the field saw on every collapsed cold start.
     ///
-    /// The hydrating snapshot now seeds that record, and the launch is silent.
+    /// That was fixed by seeding a belief. It is now structural instead: the
+    /// bar reads the layout name zellij reports, and the layout generator
+    /// declares the BIRTH geometry first, so leaving the unnameable birth
+    /// position costs one switch to the same width. One relayout, nothing to
+    /// see, and no seed to be wrong later.
     #[test]
     fn a_collapsed_cold_start_does_not_flash_wide() {
-        let mut m = focused_bar();
+        let mut m = fleet_bar(11, 11);
+        m.beacon(11);
         m.await_hydration();
+        reports(&mut m, None, 11); // born on "BASE", at the collapsed width
         let mut snapshot = snap(1, vec![]);
         snapshot.collapsed = true;
         m.apply_snapshot(snapshot);
+        // The one naming switch: it lands on the first DECLARED layout, which
+        // for a tab born collapsed is the collapsed one. Same width.
+        assert_eq!(m.width_effects(), vec![Effect::SwapWidth]);
+        reports(&mut m, Some(true), 11);
         assert_eq!(
-            m.width_effects(30),
+            m.width_effects(),
             Vec::<Effect>::new(),
-            "a pane born collapsed must not be switched by its own hydration"
+            "a pane born collapsed must not be widened after it is named"
         );
-        assert_eq!(m.width_effects(30), Vec::<Effect>::new(), "nor later");
+        assert_eq!(m.width_effects(), Vec::<Effect>::new(), "nor later");
     }
 
-    /// The other half of the seed: an EXPANDED cold start is equally silent,
-    /// and both are silent for the same reason rather than because expanded
-    /// happens to be the default the field started at.
+    /// The other half: an EXPANDED cold start settles the same way, for the
+    /// same reason rather than because expanded happens to be the default the
+    /// field started at.
     #[test]
-    fn an_expanded_cold_start_does_not_switch_either() {
-        let mut m = focused_bar();
+    fn an_expanded_cold_start_settles_the_same_way() {
+        let mut m = fleet_bar(11, 11);
+        m.beacon(11);
         m.await_hydration();
+        reports(&mut m, None, 11);
         m.apply_snapshot(snap(1, vec![])); // collapsed: false
-        assert_eq!(m.width_effects(54), Vec::<Effect>::new());
+        assert_eq!(m.width_effects(), vec![Effect::SwapWidth]);
+        reports(&mut m, Some(false), 11);
+        assert_eq!(m.width_effects(), Vec::<Effect>::new());
         m.toggle();
-        assert_eq!(m.width_effects(54), vec![Effect::SwapWidth]);
+        assert_eq!(m.width_effects(), vec![Effect::SwapWidth]);
     }
 
     // === #137: the collapse-mode repair storm ==============================
