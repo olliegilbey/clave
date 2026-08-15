@@ -57,7 +57,11 @@ here in the same change.**
 
 The vertical bar itself is the **sidebar** (or **the bar**). Its two width
 states are **expanded** and **collapsed** — never "mini", "wide" or "narrow".
-The process that drives the pane toward a target width is the **width seek**.
+Each is a **geometry**: a named layout in the generated KDL that zellij switches
+the tab between, and reports back by name. The **birth position** is the third,
+unnamed one zellij hides at the head of that cycle — the layout the tab was
+created from. (The **width seek**, the loop that used to step the pane toward a
+column target, was deleted at #181; the term survives only in the ledger.)
 
 ### 3.1 A row
 
