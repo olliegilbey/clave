@@ -754,7 +754,7 @@ an automated test that could reach it.
 
 ### 10a — Cold start into collapse
 
-**Do.** Collapse the fleet (`Alt+c`), quit the session, relaunch it (S1–S3).
+**Do.** Collapse the sidebar (`Alt+c`), quit the session, relaunch it (S1–S3).
 Watch the bar on its very first paints, before touching anything. Then press
 `Alt+c` once.
 

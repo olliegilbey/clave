@@ -118,13 +118,13 @@ with a pre-marked line count is the log-read idiom throughout.
 **Guard today:** `collapsed` rides the seq-gated store snapshot (`clave-types/src/lib.rs:226`) — heal-at-birth and on every push.
 **Refs:** SUBSYSTEM-VALIDATION C8 (2026-07-19/20 finding); C6 round 20 known quirk.
 
-### B11 — Tab born expanded in a collapsed fleet
-**Seam:** a new tab's bar missed the collapse pipe that predates it — birth state came from the template, not fleet parity.
-**Preconditions:** fleet collapsed (`Alt+c`), then a new tab created.
-**Reproduce:** `Alt+c` (collapse all), then `Alt+t` (new tab).
+### B11 — Tab born expanded while the sidebar is collapsed
+**Seam:** a new tab's bar missed the collapse pipe that predates it — birth state came from the template, not the sidebar's current width.
+**Preconditions:** sidebar collapsed (`Alt+c`), then a new tab created.
+**Reproduce:** `Alt+c` (collapse the sidebar), then `Alt+t` (new terminal tab).
 **Healthy:** the newborn bar is born collapsed — it hydrates parity from the snapshot and `target_cols_for` (`clave-types/src/lib.rs:368`) seeks the collapsed width.
 **Broken:** new bar wide while every other tab shows a strip.
-**Drive assertion:** `HUMAN-ONLY: newborn bar matches fleet width`. Model tier: newborn-hydration tests around `target_cols_for` / birth seek.
+**Drive assertion:** `HUMAN-ONLY: newborn bar matches the sidebar width`. Model tier: newborn-hydration tests around `target_cols_for` / birth seek.
 **Guard today:** closed by B10's snapshot flag (collapse parity persists across birth and launch).
 **Refs:** SUBSYSTEM-VALIDATION C6 round 20 ("a tab created while collapsed is born expanded — fix later by carrying the collapsed flag in store snapshots"); B10.
 
