@@ -372,10 +372,13 @@ pub fn register_pane(uuid: &str) {
     // merging into it, because a merge has no removal path and a dead pane
     // lingered in memory for the life of the plugin. So if this write fails
     // while the broadcast below lands, the bar keeps the mapping only until its
-    // next snapshot and then drops it — the row waits for the next registration
-    // to bind, which is exactly the pre-#178 behaviour. The alternative is to
-    // make this write blocking or fatal, and it can be neither: it runs
-    // immediately before the exec into Claude.
+    // next snapshot and then drops it — and the row cannot bind until the agent
+    // is REOPENED, because this registration fires once per spawn and a running
+    // agent never repeats it. Nothing raises the alarm either: the bar's
+    // bind-stall breadcrumb (#184) reads the dropped mapping as the stall
+    // clearing and reports `Cleared`. The alternative is to make this write
+    // blocking or fatal, and it can be neither: it runs immediately before the
+    // exec into Claude.
     if let Err(e) =
         crate::store::store_paths().and_then(|p| crate::store::apply_register(&p, uuid, pane_id))
     {
