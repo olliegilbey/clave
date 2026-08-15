@@ -546,15 +546,21 @@ the layout, and the EXPLICIT switch is not damage-gated in the first place.
    after a `tab_template` takes the other branch (`:1926-1938`) and is used
    verbatim. Proved through zellij's real parser, not assumed.
 2. **Declaration order.** `next_swap_layout` is relative and the plugin API has
-   no absolute form, so the first call on a tab lands on index 0. Index 0 is
-   therefore the geometry the tab was NOT born in, and the first Alt+c of a
-   session moves the pane instead of re-applying the width it already has.
+   no absolute form. The cycle it walks is THREE positions long, not the two we
+   declare: zellij hides the tab's own birth layout ahead of them
+   (`swap_layouts.rs:38-56`, applied from `tab/mod.rs:889,967`), so a tab walks
+   birth → declared[0] → declared[1] → birth. The first call lands on
+   declared[0], which is therefore the geometry the tab was NOT born in, and the
+   first Alt+c of a session moves the pane instead of re-applying the width it
+   already has. Every third press after that lands back on the hidden birth
+   position and moves nothing; the correction call is what rescues it.
 3. **The switch is checked on DIRECTION, never on a column count.** The
    geometries are percentages, so both shrink with the window: an expanded bar on
    a halved window is genuinely narrower than 30, and a check against the two
-   design widths would declare it collapsed and switch it. One correction is
-   allowed per change, and outside that single render the model emits nothing at
-   all.
+   design widths would declare it collapsed and switch it. Two corrections are
+   allowed per change — the three-position cycle above and the damaged-tab
+   re-apply can each cost a no-move call — and outside those renders the model
+   emits nothing at all.
 
 **What is given up, both accepted in conversation.** Peek-on-nav is a layout
 switch rather than a nudge. And the bar is a whole percent of the window, so on a

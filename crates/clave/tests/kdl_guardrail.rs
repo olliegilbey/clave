@@ -125,8 +125,10 @@ fn swap_bar_runs(kdl: &str, what: &str) -> Vec<Run> {
 
 /// The bar pane's declared size in each of a layout's swap geometries, keyed by
 /// the swap layout's name, IN DECLARATION ORDER. The order is load-bearing:
-/// `next_swap_layout` is relative and its first call on a tab lands on index 0,
-/// so index 0 must be the geometry the tab was NOT born in.
+/// `next_swap_layout` is relative, and zellij hides the tab's own birth layout
+/// ahead of the declared pair (so the live cycle is birth → declared[0] →
+/// declared[1] → birth). The first call therefore lands on the first DECLARED
+/// geometry, which must be the one the tab was NOT born in.
 fn swap_bar_sizes(kdl: &str, what: &str) -> Vec<(String, SplitSize)> {
     let layout = Layout::from_str(kdl, format!("guardrail:{what}"), None, None)
         .unwrap_or_else(|e| panic!("{what} did not parse: {e:?}\n---\n{kdl}"));
@@ -362,8 +364,9 @@ fn launch_layout_kdl_parses_in_both_branches() {
 /// must declare BOTH geometries as swap layouts, sized as percents (a fixed
 /// pane cannot be resized at all, which would freeze the collapse toggle), with
 /// the collapsed one strictly narrower — and with the geometry the tab was NOT
-/// born in FIRST, because `next_swap_layout` is relative and its first call on
-/// a tab lands on index 0.
+/// born in FIRST, because `next_swap_layout` is relative and zellij hides the
+/// tab's own birth layout ahead of the declared pair, so the first call lands
+/// on the first DECLARED geometry.
 #[test]
 fn every_layout_declares_both_swap_geometries_narrow_first_when_born_wide() {
     let expected_order = |born_collapsed: bool| {

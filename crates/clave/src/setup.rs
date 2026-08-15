@@ -228,10 +228,17 @@ pub fn bar_pane_kdl(binary: &str, wasm: &str, pct: usize, indent: &str) -> Strin
 /// i.e. neither geometry. A node named after a `tab_template` takes the other
 /// branch (`:1926-1938`) and is used verbatim.
 ///
-/// **Order is load-bearing.** `next_swap_layout` is relative — the first call on
-/// a tab lands on index 0 — so index 0 is the geometry OPPOSITE the one the tab
-/// is born in. That makes the first Alt+c of a session move the pane instead of
-/// re-applying the width it already has.
+/// **Order is load-bearing.** `next_swap_layout` is relative — the plugin API
+/// has no absolute form — and the cycle it walks is THREE positions long, not
+/// two: zellij inserts the tab's own BIRTH layout as a hidden position ahead of
+/// the declared ones (`zellij-server/src/tab/swap_layouts.rs:38-56`, applied
+/// from `tab/mod.rs:889,967`), so a tab walks birth → declared[0] →
+/// declared[1] → birth. The first call therefore lands on the first DECLARED
+/// geometry, which is why that one must be the geometry OPPOSITE the width the
+/// tab is born at: it makes the first Alt+c of a session move the pane instead
+/// of re-applying the width it already has. Every third press after that lands
+/// back on the hidden birth position and moves nothing; the bar's own
+/// correction call is what rescues it (`clave-bar`'s `SWAP_CORRECTIONS`).
 pub fn swap_layouts_kdl(
     binary: &str,
     wasm: &str,
