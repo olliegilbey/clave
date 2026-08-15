@@ -393,6 +393,23 @@ pub fn bar_percent_for(display_cols: Option<usize>, collapsed: bool) -> usize {
     }
 }
 
+/// The NAME of a collapse mode's swap layout, shared vocabulary because both
+/// halves of clave depend on the same two strings (#197).
+///
+/// The CLI writes them into the generated KDL, as both the `tab_template` and
+/// the `swap_tiled_layout` that uses it; zellij then reports the active one
+/// back on every `TabInfo` (`active_swap_layout_name`), which is how the bar
+/// knows which geometry its tab is ACTUALLY in rather than which one it once
+/// asked for. If these two drifted apart the bar would read every tab as being
+/// in an unrecognised layout and switch it forever.
+pub fn swap_layout_name(collapsed: bool) -> &'static str {
+    if collapsed {
+        "clave_collapsed"
+    } else {
+        "clave_expanded"
+    }
+}
+
 /// The width the bar occupies in a given collapse mode — the one place the two
 /// targets are chosen between outside the plugin, so a caller cannot pick the
 /// wrong one by writing the constant it happens to remember.

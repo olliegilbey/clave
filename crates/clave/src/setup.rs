@@ -233,12 +233,20 @@ pub fn bar_pane_kdl(binary: &str, wasm: &str, pct: usize, indent: &str) -> Strin
 /// two: zellij inserts the tab's own BIRTH layout as a hidden position ahead of
 /// the declared ones (`zellij-server/src/tab/swap_layouts.rs:38-56`, applied
 /// from `tab/mod.rs:889,967`), so a tab walks birth → declared[0] →
-/// declared[1] → birth. The first call therefore lands on the first DECLARED
-/// geometry, which is why that one must be the geometry OPPOSITE the width the
-/// tab is born at: it makes the first Alt+c of a session move the pane instead
-/// of re-applying the width it already has. Every third press after that lands
-/// back on the hidden birth position and moves nothing; the bar's own
-/// correction call is what rescues it (`clave-bar`'s `SWAP_CORRECTIONS`).
+/// declared[1] → birth. The birth position is the one zellij will not name:
+/// it reports `"BASE"` there, not either of the two names below, so a bar
+/// sitting on it cannot tell which geometry it is looking at.
+///
+/// The first DECLARED geometry is therefore the one the tab is BORN at (#197).
+/// That makes the nameless position and the position after it the same width,
+/// so the bar's first switch — the one that trades `"BASE"` for a name it can
+/// reason about — moves nothing the user can see. Declaring the opposite
+/// geometry first (what #181 shipped) would make that same switch a full-width
+/// flash on every cold start.
+///
+/// The bar needs no phase bookkeeping to use this: it compares the reported
+/// name with the mode the store wants and switches while they disagree, so an
+/// out-of-phase tab converges within the cycle instead of being tracked.
 pub fn swap_layouts_kdl(
     binary: &str,
     wasm: &str,
@@ -256,8 +264,9 @@ pub fn swap_layouts_kdl(
             pane = bar_pane_kdl(binary, wasm, pct, "        "),
         ));
     }
-    // The tab is born `collapsed`, so the first swap must land on the other one.
-    for mode in [!collapsed, collapsed] {
+    // The tab is born `collapsed`, and the first swap must land on the SAME
+    // geometry under a name zellij will report (#197 — see the order note).
+    for mode in [collapsed, !collapsed] {
         out.push_str(&format!(
             "    swap_tiled_layout name=\"{name}\" {{\n\
              \x20       {name}\n\
@@ -269,14 +278,12 @@ pub fn swap_layouts_kdl(
 }
 
 /// The KDL node name of a geometry. Also the swap layout's name, which is what
-/// `zellij action list-tabs --layout` reports back — so a live session says
-/// which of the two it is in.
+/// `zellij action list-tabs --layout` reports back and what every `TabInfo`
+/// carries as `active_swap_layout_name` — so both a live session and the bar
+/// itself can say which of the two a tab is in. Shared with the bar through
+/// `clave-types` for exactly that reason.
 fn template_name(collapsed: bool) -> &'static str {
-    if collapsed {
-        "clave_collapsed"
-    } else {
-        "clave_expanded"
-    }
+    clave_types::swap_layout_name(collapsed)
 }
 
 /// TEST-ONLY: the percent of the bar pane a tab is actually BORN with.
@@ -1087,12 +1094,15 @@ mod tests {
     }
 
     /// The swap layouts are DECLARED in the order the tab's birth mode demands:
-    /// `next_swap_layout` is relative, so index 0 must be the geometry the tab
-    /// is NOT in or the first Alt+c re-applies the width it already has. The
-    /// percents alone cannot see this — both files carry both — so the order of
-    /// the two `swap_tiled_layout` names is what is pinned.
+    /// `next_swap_layout` is relative and zellij hides the birth layout ahead of
+    /// the pair, so index 0 must be the geometry the tab IS born in (#197). The
+    /// bar spends one switch leaving the birth position — zellij names it
+    /// `"BASE"`, which says nothing about width — and same-width-first is what
+    /// makes that switch invisible instead of a cold-start flash. The percents
+    /// alone cannot see this — both files carry both — so the order of the two
+    /// `swap_tiled_layout` names is what is pinned.
     #[test]
-    fn a_fleet_left_collapsed_declares_the_expanded_geometry_first() {
+    fn a_fleet_left_collapsed_declares_the_collapsed_geometry_first() {
         let names = |kdl: &str| {
             kdl.match_indices("swap_tiled_layout name=\"")
                 .map(|(i, m)| {
@@ -1106,8 +1116,8 @@ mod tests {
         };
         let expanded = launch_layout_kdl_for("clave", "/w.wasm", None, Some(280), false);
         let collapsed = launch_layout_kdl_for("clave", "/w.wasm", None, Some(280), true);
-        assert_eq!(names(&expanded), ["clave_collapsed", "clave_expanded"]);
-        assert_eq!(names(&collapsed), ["clave_expanded", "clave_collapsed"]);
+        assert_eq!(names(&expanded), ["clave_expanded", "clave_collapsed"]);
+        assert_eq!(names(&collapsed), ["clave_collapsed", "clave_expanded"]);
     }
 
     #[test]

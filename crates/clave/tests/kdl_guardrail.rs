@@ -128,7 +128,9 @@ fn swap_bar_runs(kdl: &str, what: &str) -> Vec<Run> {
 /// `next_swap_layout` is relative, and zellij hides the tab's own birth layout
 /// ahead of the declared pair (so the live cycle is birth → declared[0] →
 /// declared[1] → birth). The first call therefore lands on the first DECLARED
-/// geometry, which must be the one the tab was NOT born in.
+/// geometry, which must be the one the tab WAS born in — the birth position is
+/// the one zellij reports as `"BASE"` rather than by name, and matching its
+/// width makes the bar's first (naming) switch invisible (#197).
 fn swap_bar_sizes(kdl: &str, what: &str) -> Vec<(String, SplitSize)> {
     let layout = Layout::from_str(kdl, format!("guardrail:{what}"), None, None)
         .unwrap_or_else(|e| panic!("{what} did not parse: {e:?}\n---\n{kdl}"));
@@ -363,18 +365,20 @@ fn launch_layout_kdl_parses_in_both_branches() {
 /// #181, the whole width mechanism in one assertion. Every layout clave emits
 /// must declare BOTH geometries as swap layouts, sized as percents (a fixed
 /// pane cannot be resized at all, which would freeze the collapse toggle), with
-/// the collapsed one strictly narrower — and with the geometry the tab was NOT
-/// born in FIRST, because `next_swap_layout` is relative and zellij hides the
-/// tab's own birth layout ahead of the declared pair, so the first call lands
-/// on the first DECLARED geometry.
+/// the collapsed one strictly narrower — and with the geometry the tab WAS
+/// born in FIRST (#197), because `next_swap_layout` is relative and zellij
+/// hides the tab's own birth layout ahead of the declared pair: the first call
+/// lands on the first DECLARED geometry, and the bar has to spend that call to
+/// trade the unnameable birth position (`"BASE"`) for a name it can compare
+/// against the store. Same-width-first makes that call invisible; the opposite
+/// order made every cold start flash.
 #[test]
-fn every_layout_declares_both_swap_geometries_narrow_first_when_born_wide() {
+fn every_layout_declares_both_swap_geometries_birth_width_first() {
     let expected_order = |born_collapsed: bool| {
-        if born_collapsed {
-            ["clave_expanded", "clave_collapsed"]
-        } else {
-            ["clave_collapsed", "clave_expanded"]
-        }
+        [
+            clave_types::swap_layout_name(born_collapsed),
+            clave_types::swap_layout_name(!born_collapsed),
+        ]
     };
     let check = |kdl: &str, what: &str, born_collapsed: bool| {
         let sizes = swap_bar_sizes(kdl, what);
@@ -397,9 +401,9 @@ fn every_layout_declares_both_swap_geometries_narrow_first_when_born_wide() {
             SplitSize::Fixed(f) => panic!("{what}: bar sized Fixed({f}), not a percent"),
         };
         let (expanded, collapsed) = if born_collapsed {
-            (pct(&sizes[0].1), pct(&sizes[1].1))
-        } else {
             (pct(&sizes[1].1), pct(&sizes[0].1))
+        } else {
+            (pct(&sizes[0].1), pct(&sizes[1].1))
         };
         assert!(
             collapsed < expanded,
