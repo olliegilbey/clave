@@ -804,11 +804,11 @@ impl BarModel {
     /// frame. Read-only over the frames; it decides nothing.
     ///
     /// `stranded` counts the rows that carry the whole hypothesis: unbound in
-    /// the store, pane id known to us from a broadcast, and that pane absent
-    /// from our pane frame. A dormant row that has never been woken has no
-    /// pane id at all and is deliberately NOT counted — dormancy is not a
-    /// stall, and conflating the two would make this line fire on every
-    /// healthy fleet.
+    /// the store, pane id known to us from the snapshot or the broadcast, and
+    /// that pane absent from our pane frame. A dormant row that has never been
+    /// woken has no pane id at all and is deliberately NOT counted — dormancy
+    /// is not a stall, and conflating the two would make this line fire on
+    /// every healthy fleet.
     /// **Runs BEFORE every gate, and that is the whole point** (#184 review,
     /// found independently by two reviewers). `identity_effects` refuses on an
     /// unelected instance and again on an unresolved own tab, and both refusals
@@ -1203,6 +1203,14 @@ impl BarModel {
     /// registration's (best-effort) store write also landed. That is what buys
     /// the map a removal path; the bridging value still matters, because it is
     /// what binds the interval before the store's echo comes back.
+    ///
+    /// The bridge holds only UNCONDITIONALLY absent a snapshot in flight. A
+    /// snapshot generated before this registration but sequence-numbered after
+    /// our current position is still accepted (§5 gates on `seq`, not on wall
+    /// time) and retires the announced pane on arrival — and nothing schedules
+    /// a replacement, because the registration itself pushes no snapshot (see
+    /// `spawn.rs`, "No push is needed"). The map is then whatever the NEXT
+    /// store write happens to carry.
     pub fn register(&mut self, uuid: String, pane_id: u32) {
         self.uuid_to_pane.insert(uuid, pane_id);
         self.prune_opening();
@@ -1241,9 +1249,13 @@ impl BarModel {
         // runs immediately before the exec into Claude and must never block or
         // fail it. So if that store write fails while the in-process broadcast
         // lands, this replace drops the live mapping at the next snapshot and
-        // the row waits for the next registration to bind — exactly the
-        // pre-#178 behaviour, bounded and self-healing. That is the price of
-        // having a removal path at all, and it is worth paying.
+        // the row CANNOT bind until the agent is reopened — a running agent
+        // never registers a second time, so there is no later announcement to
+        // recover from. Nor is it observed: the #184 bind-stall breadcrumb, the
+        // one instrument built to catch a stuck bind leg, reads the retirement
+        // as the stall ending and reports `Cleared`. That is the price of having
+        // a removal path at all — silent, not self-healing — and it is accepted
+        // deliberately.
         self.uuid_to_pane = self
             .agents
             .iter()
@@ -3627,6 +3639,36 @@ mod tests {
         assert_eq!(
             m.nav("{\"uuid\":\"u1\"}", None),
             vec![Effect::FocusPane { pane_id: 6 }]
+        );
+    }
+
+    #[test]
+    fn the_register_broadcast_binds_a_row_the_snapshot_carried_without_a_pane() {
+        // The bridge #187 left standing, and the ONLY test that holds it. Every
+        // other bind test puts the pane on the snapshot row, so neutering
+        // `register()` fails none of them — the announcement is what closes the
+        // interval between a spawn and the store's echo, and without this test
+        // that leg could be deleted silently.
+        let mut m = fleet_of_three(11);
+        m.apply_snapshot(snap_full(
+            1,
+            vec![agent("u1", Status::Working, None)],
+            &[(11, 100)],
+        ));
+        assert!(
+            !m.identity_effects()
+                .iter()
+                .any(|e| matches!(e, Effect::Bind { .. })),
+            "no pane anywhere yet: nothing to bind to"
+        );
+        m.register("u1".into(), 6); // pane 6 is tab 11's terminal, per FLEET_PANES
+        assert_eq!(
+            m.identity_effects(),
+            vec![Effect::Bind {
+                uuid: "u1".into(),
+                tab_id: 11,
+            }],
+            "the announcement must bind on its own, before any store echo"
         );
     }
 
