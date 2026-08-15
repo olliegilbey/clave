@@ -66,7 +66,9 @@ drive went green on a build that was reproducibly broken in the field.
 | 7 | Teardown | nothing | prints the kill pair for the human | drive step 9 |
 
 **Eyeball checkpoints** (human, one message each): after phase 2 — one bar
-per tab, woken rows show agent chips not terminal glyphs; after phase 5 —
+total, on the tab it loaded into (the sandbox fleet runs a single sidebar —
+#186; "one bar per tab" is a real-fleet property this drive cannot show),
+woken rows show agent chips not terminal glyphs; after phase 5 —
 every tab a strip (or every tab wide), no width outliers. These stay human
 because every automated width/screen probe is a known liar.
 
