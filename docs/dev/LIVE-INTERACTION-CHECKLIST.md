@@ -11,10 +11,13 @@
 > is wrong and resizes. So there is no seek to settle, no acceptance band, no
 > learned step and no drift re-arm — every item that used to ask you to wait for
 > convergence now asks you to confirm a single instant change. Two things about
-> that mechanism are unverifiable from source because `zellij-server` is not
-> vendored, and this run is the only place they can be checked: **that a swap
-> re-uses the running bar rather than starting a second one, and that a plugin's
-> switch lands on its own tab.** Items 1, 2 and 6 carry them.
+> that mechanism were called unverifiable here — **that a swap re-uses the
+> running bar rather than starting a second one, and which tab a plugin's switch
+> lands on**. The #197 review read `zellij-server` 0.44.3 and settled both from
+> source: the swap DOES re-use the running pane, and the switch lands on the
+> FOCUSED tab, not the asking one. Items 1, 2 and 6 still carry them, now as
+> confirmation rather than discovery — and **item 10 is what the source could
+> not settle**, five edges of the switch that only a live run can answer.
 
 The D28 gate-2 run: **Gate 1 validated the design by looking at it; this validates
 the behaviour by driving it.** Nothing below is covered by any automated tier.
@@ -731,14 +734,117 @@ nothing in it can exec a real `claude --resume`.
 - **The store was wiped between the clear and the resurrection.** `live_session`
   lives in the store, so a wipe degrades this to the pre-fix path by design.
 
+## 10. The width switch's five edges (#197 review)
+
+These come out of the review of the swap-layout width switch, and they exist
+because reading zellij's source answered each of them only halfway. **The switch
+cycles through three positions, not the two we declare** — zellij hides the
+tab's own birth layout ahead of them — so one press in three moves nothing on
+its first call and is rescued by a correction. **A tab zellij considers damaged**
+(a pane resized or closed, a border dragged with the mouse) **spends its next
+switch re-applying rather than advancing**, which is a second way to get a
+no-move. Everything below is a question about what those two facts look like
+from the chair. None of them has an automated test that could reach it.
+
+### 10a — Cold start into collapse
+
+**Do.** Collapse the fleet (`Alt+c`), quit the session, relaunch it (S1–S3).
+Watch the bar on its very first paints, before touching anything. Then press
+`Alt+c` once.
+
+**Correct.** The bar is **born collapsed at 30 and never widens** — no frame at
+53, no snap back. That flash is what this branch removed; seeing it means the
+bar's seeded belief about its own geometry is not taking. And the first `Alt+c`
+after the launch must move the pane, in one press: the flash used to leave the
+switch cycle parked one position out, so the first real press moved nothing.
+
+**Vacuous if.** The store was not collapsed at kill time — check
+`clave dev status | jq .store.collapsed` is `true` before relaunching. Or you
+launched by hand instead of using the printed launch command: the fallback
+layout has no store to read and always births expanded, which is a known and
+accepted wrong, not this finding. Or you blinked — the flash is about one frame,
+so repeat it three times before recording a pass.
+
+### 10b — Six slow toggles, with press three under a microscope
+
+**Do.** On a tab you have not touched since it was born — no pane resized, none
+closed, no border dragged — press `Alt+c` six times, several seconds apart, and
+**record the column width after each press**.
+
+**Correct.** Six presses, six clean moves, alternating 53 / 30 / 53 / 30 / 53 /
+30. **Press three is the one to watch**: it is the press whose first switch call
+lands on the hidden duplicate of the tab's birth width and moves nothing, and the
+bar's correction is what carries it the rest of the way. It must still land on
+the right width. Two visible steps, a perceptible stutter, or a press that lands
+wrong and stays wrong are all findings — give the widths either way.
+
+**Vacuous if.** You navigated during the run: a peek expands the bar for ~0.9 s
+and hides the answer. You pressed quickly: the correction rides on the next
+render, so a burst can paper over a stumble a slow press exposes. Or the tab was
+already damaged when you started, which moves the awkward press somewhere else —
+use a tab you have just opened.
+
+### 10c — A dragged pane border
+
+**Do.** Drag the border between the sidebar and the terminal with the mouse, so
+the sidebar sits at a width neither geometry asks for. Then press `Alt+c` once
+and look before pressing anything else.
+
+**Correct.** The pane moves to the other geometry, in that one press. A dragged
+border marks the tab damaged, and a damaged tab spends its next switch
+re-applying its current layout instead of advancing — this press is precisely
+what the correction budget exists for. Record which of three you got: the right
+width (correct), the **wrong** width (finding), or no movement at all (finding,
+and the worse one).
+
+**Vacuous if.** The drag did not actually move the border — the sidebar is not
+selectable, so not every drag lands. Or you pressed `Alt+c` twice before looking;
+the second press hides what the first did.
+
+### 10d — A floating pane over the bar
+
+**Do.** Open the directory picker (`Alt+a`), which is a floating pane. With it
+still open, press `Alt+c`. Then close it with Esc and look at the bar.
+
+**Correct.** The question is **not** whether the pane moved while the picker was
+up — it is whether the bar's drawing matches its width once the picker is gone.
+A collapsed profile drawn into a 53-column pane, or an expanded profile crammed
+into 30, is the finding: the mode changed and the geometry did not follow.
+Record both numbers — the width, and which profile is drawn. Known, and
+deliberately not fixed on this branch: the switch may simply do nothing at all
+while a floating pane is up. Say which happened.
+
+**Vacuous if.** You picked a directory or created an agent — that focuses a new
+tab, so the bar you are reading is a different one. Cancel with Esc. Or you
+toggled after closing the picker rather than during, which is item 1's test.
+
+### 10e — A mouse tab-switch, then a toggle
+
+**Do.** Click another tab on **zellij's own tab strip** at the top of the window
+— not a row in the clave sidebar — then press `Alt+c`. Afterwards check at least
+two other tabs' widths.
+
+**Correct.** The sidebar that moves is the one in the tab you just clicked into,
+and **no other tab's width changes at all**. Zellij resolves a plugin's switch
+request against whichever tab is focused rather than the one that asked, and the
+bar protects against that by only asking while it believes its own tab is
+focused — so a focus change arriving by a route the bar does not hear about is
+exactly how the wrong tab gets resized. If a background tab's sidebar moved,
+record which one and how you got there.
+
+**Vacuous if.** You switched tabs with `Alt+o` or by clicking a sidebar row.
+Both are routes the bar already hears about; the zellij tab strip is the whole
+point of this item. Or you toggled before the new tab had finished painting.
+
 ## What this checklist CANNOT test
 
 So that absence of a finding is not read as absence of a problem:
 
-- **Whether a swap layout re-uses the running bar.** `zellij-server` is not
-  vendored, so this is traced only as far as the parser. Item 1 observes it once,
-  on one machine, on one zellij version. One clean observation is not a guarantee
-  — it is the best evidence available, and D39 says so.
+- **Whether a swap layout re-uses the running bar.** Settled from
+  `zellij-server` 0.44.3 source in the #197 review — the applier matches existing
+  panes to the new layout's slots before creating anything — but that is a read of
+  one version, and item 1 still observes it on one machine. One clean observation
+  plus one source read is the best evidence available, and D39 says so.
 - **A window resized while a tab is in the background.** Both geometries are
   percentages, so nothing is watching and nothing needs to be, but the interaction
   between a background tab's stale geometry and the next switch has been reasoned
@@ -800,6 +906,12 @@ Fill it in as you go; the numbers are the deliverable, not the ticks.
 | Birth width while collapsed: born collapsed, no flash? | |
 | Resize: width after halving, and did anything move it back? | |
 | Resize: is the shrink-and-stay acceptable? (maintainer's call) | |
+| **10a** Collapsed cold start: born at 30, no flash to 53? | |
+| **10a** First `Alt+c` after that launch moved the pane? | |
+| **10b** Six widths in order, and did press three land cleanly? | |
+| **10c** After a border drag, one `Alt+c` → right width / wrong width / nothing | |
+| **10d** With the picker open: did it move? And which profile at which width after Esc? | |
+| **10e** After a zellij tab-strip click: which tab's sidebar moved? | |
 | Chip filled after `/rename` + one prompt? | |
 | Summary tier observed at each step | |
 | Provenance: blank / branch / worktree all correct? | |
