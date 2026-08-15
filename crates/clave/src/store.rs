@@ -492,7 +492,11 @@ pub fn apply_register(
 /// change), so a lost push is re-emitted while the entry persists. Residual: if
 /// a listed id is REUSED within the subprocess-latency window a late removal
 /// could unbind the new tenant — `apply_bind` eviction is the backstop and the
-/// window is milliseconds. Empty payload = no-op (nothing observed dead).
+/// window is milliseconds. That backstop covers the TAB link only: since #187
+/// (PR #193) the sidebar no longer retains a pane across a snapshot, so a
+/// reused-id victim whose row also lost its pane has no recovery path and stays
+/// unbound until the agent is reopened (issue #195). Empty payload = no-op
+/// (nothing observed dead).
 /// None = no change.
 pub fn apply_prune_tabs(paths: &StorePaths, stale_ids: &[usize]) -> Result<Option<AgentSnapshot>> {
     with_store_mut(paths, |s| {
