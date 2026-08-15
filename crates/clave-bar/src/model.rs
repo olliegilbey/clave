@@ -397,9 +397,12 @@ pub struct BarModel {
     ///
     /// That is the whole answer to "what if the mode changes twice before the
     /// switch goes out": there is no queue to replay, only an end state to
-    /// reach, and a mode that leaves and returns owes nothing. It starts
-    /// `false` = expanded, the mode `collapsed` itself defaults to; a bar that
-    /// hydrates into collapse therefore owes exactly one switch, as before.
+    /// reach, and a mode that leaves and returns owes nothing.
+    ///
+    /// It is SEEDED from the hydrating snapshot (`apply_snapshot`, #197 finding
+    /// K), not left at its `false` default: the pane is born at the width the
+    /// persisted mode wants, so the launch already agrees and a cold start into
+    /// collapse owes no switch at all.
     shown_collapsed: bool,
     /// The width we were at when we asked for the switch, and how many
     /// corrections that ask is still entitled to. `None` = no switch is in
@@ -1025,6 +1028,9 @@ impl BarModel {
         }
         self.seq = snap.seq;
         // The mode below is now authoritative, so a switch may be booked (D37).
+        // This is also the ONE snapshot that gets to seed `shown_collapsed` —
+        // see the seed below, after the collapse ledger has settled the mode.
+        let hydrating = self.awaiting_hydration;
         self.awaiting_hydration = false;
         self.agents = snap.agents;
         // Hydrate the pane mapping from the snapshot (#178). `clave-register`
@@ -1093,6 +1099,29 @@ impl BarModel {
             // the give-up arm was buying.
             Some(_) => {}
             None => self.heal_collapse(snap.collapsed),
+        }
+        // #197 finding K: seed the geometry belief from the hydrating snapshot.
+        //
+        // `clave launch` composes the session layout with the store's collapse
+        // flag (`setup.rs`, `launch_layout_kdl`), so the bar pane is BORN at the
+        // width the mode we just hydrated wants. `shown_collapsed` starting at
+        // `false` therefore made the first snapshot of a collapsed fleet look
+        // like a disagreement: the correctly-born pane was widened and snapped
+        // back on every cold start, and the swap cycle was left parked on the
+        // hidden birth position, so the user's first Alt+c moved nothing.
+        //
+        // ONLY here. A later snapshot changing the mode is a real disagreement
+        // and must still owe its switch; seeding on every snapshot would make
+        // the heal path silent and strand panes at the wrong width.
+        //
+        // The accepted, known cost: the hand-opened FALLBACK layout that `clave
+        // setup` writes (`setup.rs`, `default_layout_kdl`) has no store to read
+        // and always births the pane expanded. A collapsed store opened that way
+        // now draws the collapsed profile into an expanded pane until the next
+        // keypress, instead of being switched to match. That is a smaller wrong
+        // than a visible flash on every collapsed launch through the normal path.
+        if hydrating {
+            self.shown_collapsed = self.showing_collapsed();
         }
         // Borrow-friendly pass: snapshot views first, then mutate the guards.
         let views: Vec<(String, Status, String, Option<usize>)> = self
@@ -5524,7 +5553,54 @@ mod tests {
         let mut snapshot = snap(1, vec![]);
         snapshot.collapsed = true;
         m.apply_snapshot(snapshot);
-        assert_eq!(m.width_effects(75), vec![Effect::SwapWidth]);
+        // The mode is authoritative from here on — and it agrees with the
+        // width the pane was BORN at, so the hydrating snapshot owes nothing.
+        // (`a_collapsed_cold_start_does_not_flash_wide` is that property's
+        // own test; here it is only the D37 gate's exit condition.)
+        let mut snapshot = snap(1, vec![]);
+        snapshot.collapsed = true;
+        m.apply_snapshot(snapshot);
+        assert_eq!(m.width_effects(30), Vec::<Effect>::new());
+        // A keypress AFTER hydration is a licence, and moves the pane.
+        m.toggle();
+        assert_eq!(m.width_effects(30), vec![Effect::SwapWidth]);
+    }
+
+    /// Finding K (#197 review): the cold-start flash. `clave launch` composes
+    /// the layout with the store's collapse flag, so a fleet left collapsed is
+    /// BORN at the collapsed width. The bar's record of which geometry its tab
+    /// is in used to default to expanded and was never seeded, so the first
+    /// snapshot read as a disagreement: every collapsed cold start widened the
+    /// correctly-born pane and snapped it back, and left the swap cycle parked
+    /// one position out so the user's first Alt+c moved nothing.
+    ///
+    /// The hydrating snapshot now seeds that record, and the launch is silent.
+    #[test]
+    fn a_collapsed_cold_start_does_not_flash_wide() {
+        let mut m = focused_bar();
+        m.await_hydration();
+        let mut snapshot = snap(1, vec![]);
+        snapshot.collapsed = true;
+        m.apply_snapshot(snapshot);
+        assert_eq!(
+            m.width_effects(30),
+            Vec::<Effect>::new(),
+            "a pane born collapsed must not be switched by its own hydration"
+        );
+        assert_eq!(m.width_effects(30), Vec::<Effect>::new(), "nor later");
+    }
+
+    /// The other half of the seed: an EXPANDED cold start is equally silent,
+    /// and both are silent for the same reason rather than because expanded
+    /// happens to be the default the field started at.
+    #[test]
+    fn an_expanded_cold_start_does_not_switch_either() {
+        let mut m = focused_bar();
+        m.await_hydration();
+        m.apply_snapshot(snap(1, vec![])); // collapsed: false
+        assert_eq!(m.width_effects(54), Vec::<Effect>::new());
+        m.toggle();
+        assert_eq!(m.width_effects(54), vec![Effect::SwapWidth]);
     }
 
     // === #137: the collapse-mode repair storm ==============================
