@@ -287,6 +287,9 @@ fn alt_f_opens_a_scratch_shell_at_its_own_geometry() {
     //     parse error ("No command found in Run action"), and `NewPane`'s KDL
     //     branch ignores child blocks outright (kdl/mod.rs:552,1695), so `Run
     //     <shell>` is the only form that can carry BOTH a shell and a size.
+    // The expected percentages are written out rather than read back from
+    // `clave-types`: comparing a constant against itself passes however far it
+    // moves, and moving one is exactly the change this test exists to catch.
     use zellij_utils::data::{BareKey, InputMode, KeyWithModifier};
     use zellij_utils::input::actions::Action;
     use zellij_utils::input::layout::PercentOrFixed;
@@ -305,19 +308,27 @@ fn alt_f_opens_a_scratch_shell_at_its_own_geometry() {
             .get_actions_for_key_in_mode(&mode, &alt_f)
             .unwrap_or_else(|| panic!("Alt+f must be bound in {mode:?}"));
 
-        let (command, coordinates) = actions
-            .iter()
-            .find_map(|action| match action {
-                Action::NewFloatingPane {
-                    command,
-                    coordinates,
-                    ..
-                } => Some((command.clone(), coordinates.clone())),
-                _ => None,
-            })
-            .unwrap_or_else(|| {
-                panic!("Alt+f must open a FLOATING pane in {mode:?}, not toggle zellij's")
-            });
+        // Exactly one action, not "ours is in there somewhere": a merge that
+        // APPENDED would leave zellij's `ToggleFloatingPanes` alongside ours and
+        // still fire it, which is #188 again.
+        assert_eq!(
+            actions.len(),
+            1,
+            "Alt+f in {mode:?} must run clave's bind ALONE — zellij's stock \
+             ToggleFloatingPanes must have been replaced, not joined: {actions:?}"
+        );
+        let (command, coordinates) = match &actions[0] {
+            Action::NewFloatingPane {
+                command,
+                coordinates,
+                ..
+            } => (command.clone(), coordinates.clone()),
+            other => {
+                panic!(
+                    "Alt+f must open a FLOATING pane in {mode:?}, not toggle zellij's: {other:?}"
+                )
+            }
+        };
         let coordinates = coordinates
             .unwrap_or_else(|| panic!("Alt+f's floating pane must carry explicit geometry (#188)"));
         // The shell is resolved at keypress from the session's env, not baked
@@ -347,18 +358,10 @@ fn alt_f_opens_a_scratch_shell_at_its_own_geometry() {
                 coordinates.height
             ),
             (
-                Some(PercentOrFixed::Percent(
-                    clave_types::SHELL_FLOATING_X_PERCENT
-                )),
-                Some(PercentOrFixed::Percent(
-                    clave_types::SHELL_FLOATING_Y_PERCENT
-                )),
-                Some(PercentOrFixed::Percent(
-                    clave_types::SHELL_FLOATING_WIDTH_PERCENT
-                )),
-                Some(PercentOrFixed::Percent(
-                    clave_types::SHELL_FLOATING_HEIGHT_PERCENT
-                )),
+                Some(PercentOrFixed::Percent(0)),
+                Some(PercentOrFixed::Percent(10)),
+                Some(PercentOrFixed::Percent(80)),
+                Some(PercentOrFixed::Percent(80)),
             ),
             "Alt+f's geometry must be the scratch shell's own — NOT the picker's \
              near-fullscreen pair, which is load-bearing for the picker's layout"
