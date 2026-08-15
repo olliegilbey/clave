@@ -508,6 +508,49 @@ resting-width costs become dead paths:
   ever catch it. Needs a display area around 400 columns; Ollie runs ~280, so it
   is out of reach today. **Not out of reach forever.**
 
+### D41 — Snap-back is a contract; the drag arm restores it with one remembered width (2026-08-15)
+
+**Ruled by Ollie, live QA of the #197 build:** dragging the sidebar border and
+releasing must snap the sidebar back to its set width, as the stable (v0.1.2)
+seek did as a byproduct. No new snap-back design — "revert to the old design if
+possible. KISS." The old *mechanism* is not the possible part (the seek is what
+ate 90% of his screen — #181, D39); the old *behaviour* is.
+
+**Why D40 alone cannot see a drag.** D40's rule compares layout NAMES, and a
+drag changes the width without changing the name — zellij still reports the
+same `active_swap_layout_name`. Reported truth is silent exactly where the drag
+lives; that silence was the regression.
+
+**What ships.** One remembered width per geometry, learned not predicted:
+`settled_cols` records the width zellij renders the bar at on the first frame
+where the reported name agrees with the wanted mode. A later frame at a
+different width under the same name spends one switch. The drag that moved the
+width also marked the tab damaged, and a damaged tab's switch RE-APPLIES its
+current position (the D40 verifier finding) — so that one switch IS the
+snap-back; the machine never computes a target column. Same debounce shape as
+D40: one ask per drifted width, re-armed when the width recovers or the
+geometry moves. Same focus gate.
+
+**Predicting the width was rejected** — the expected column count is derivable
+from the window width and the layout percentages, but only by re-implementing
+zellij's rounding; a prediction off by one asks forever. Learning the width
+from zellij makes rounding unfalsifiable by construction.
+
+**What is given up, both bounded.** (1) A window resize moves the
+percent-derived width while `settled_cols` remembers the old one —
+indistinguishable from a drag from inside the pane — costing ONE dead re-apply
+(invisible: it lands on the width the pane already has), after which the
+debounce holds and the next toggle re-records the width. (2) A held drag is
+fought in real time: every width the border is dragged through is a fresh
+mismatch, so the border resists rather than waiting for release. Checklist 10c
+records how that feels; if it feels bad live, the fix is a settle-delay, which
+is a new entry, not a revert of this one.
+
+**Still owed: the same live run as D40's** — the re-apply-not-advance behaviour
+of a damaged tab is read from zellij source, not yet watched. Fails safe-ish: an
+advance instead of a re-apply changes the reported name, which the D40 arm
+corrects on the next frame, at the cost of a visible flicker.
+
 ### D40 — The bar reads zellij's report of which layout its tab is in, and remembers nothing (2026-08-15)
 
 **This finishes D39 and retires the last of the watch-your-own-repaints pattern

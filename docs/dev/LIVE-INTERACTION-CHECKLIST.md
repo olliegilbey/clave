@@ -518,9 +518,12 @@ widen it again.
 - 26 is under `EXPANDED`'s `min_intact_cols()` floor (32 since #105), so expect a
   uniform CLIP — D31 — with every row cut at the same column. **Ragged** clipping,
   rows disagreeing on width, is a real finding.
-- The bar must be quiet throughout: no movement of its own at any point,
-  during the drag or after. Any self-initiated resize here means something
-  survived that should not have.
+- The bar must be visually still throughout: nothing on screen moves except
+  proportionally with the window. One **invisible** self-ask is expected and
+  by design: the snap-back arm cannot tell a window resize from a drag, so it
+  spends one switch at the new width — a re-apply that lands on the width the
+  pane already has. Visible movement, or the width walking anywhere the
+  window did not take it, is a real finding.
 - `Alt+c` still works at the new size and still moves the pane, and the collapsed
   geometry is now proportionally narrower too — on a halved window it can be
   narrower than the expanded bar was. That is arithmetic, not a defect.
@@ -746,9 +749,12 @@ rather than advancing**, which is a way to get no movement at all.
 
 Since #197 the bar answers both by reading the layout name zellij reports for
 its tab on every frame, and asking for one more switch while that name disagrees
-with the mode the store wants — no belief, no width arithmetic. The one thing it
-will not do is ask twice from the same reported position, so a switch zellij
-refuses outright waits for the next press or the next focus change. Everything
+with the mode the store wants — no belief, and the only width it reads is the
+one zellij renders it at: when that width drifts while the name still agrees (a
+border drag), one more switch snaps it back (10c). The one thing it will not do
+is ask twice from the same reported position or the same drifted width, so a
+switch zellij refuses outright waits for the next press, the next focus change,
+or the next movement. Everything
 below is a question about what that looks like from the chair. None of them has
 an automated test that could reach it.
 
@@ -793,23 +799,30 @@ must agree once it settles, and one further press must move the pane.
 and hides the answer. Or the tab was already damaged when you started, which
 moves the awkward press somewhere else — use a tab you have just opened.
 
-### 10c — A dragged pane border
+### 10c — A dragged pane border snaps back
 
-**Do.** Drag the border between the sidebar and the terminal with the mouse, so
-the sidebar sits at a width neither geometry asks for. Then press `Alt+c` once
-and look before pressing anything else.
+**Do.** Drag the border between the sidebar and the workspace with the mouse,
+toward the workspace and then well into the sidebar, and let go. Press nothing.
+Watch. Then press `Alt+c` once and confirm the toggle still works.
 
-**Correct.** The pane moves to the other geometry, in that one press — or, at
-worst, in the press after it. A dragged border marks the tab damaged, and a
-damaged tab spends its next switch re-applying its current layout instead of
-advancing; since #197 the bar does not retry that on its own, so the cost lands
-as one press that appears to do nothing. Record which of three you got: the
-right width (correct), no movement until a second press (accepted, worth
-noting), or the **wrong** width that stays wrong (finding).
+**Correct.** The sidebar **returns to its set width on its own** — stable's
+snap-back, restored by Ollie's ruling (2026-08-15) after the first #197 build
+lost it. The mechanism: the bar compares the width zellij renders it at against
+the width its current geometry settled at, and a mismatch under an unchanged
+layout name spends one switch — which re-applies the current layout, because
+the drag marked the tab damaged. While the border is **held**, the bar may
+visibly fight the drag (each width it is dragged through is a fresh mismatch);
+that is the mechanism working, not a storm — but record how it feels. After
+release, the width must come back without any keypress, and the following
+`Alt+c` must move the pane normally in one press.
+
+Record which you got: snapped back on its own (correct), snapped back only
+after `Alt+c` (finding — the drag arm never fired), or terminal content left
+covering the sidebar (the #197 regression, finding).
 
 **Vacuous if.** The drag did not actually move the border — the sidebar is not
-selectable, so not every drag lands. Or you pressed `Alt+c` twice before looking;
-the second press hides what the first did.
+selectable, so not every drag lands. Or the tab was in the middle of a toggle
+when you dragged; settle it first.
 
 ### 10d — A floating pane over the bar
 
@@ -920,7 +933,8 @@ Fill it in as you go; the numbers are the deliverable, not the ticks.
 | **10a** First `Alt+c` after that launch moved the pane? | |
 | **10b** Six slow widths in order? | |
 | **10b** Six FAST presses: settled width, profile agrees, next press moves? | |
-| **10c** After a border drag, `Alt+c` → right width / needed a 2nd press / wrong | |
+| **10c** Border drag: snapped back on its own / only after `Alt+c` / stayed covered | |
+| **10c** How the held drag felt (fights back is by design — but note it) | |
 | **10d** With the picker open: did it move? And which profile at which width after Esc? | |
 | **10e** After a zellij tab-strip click: which tab's sidebar moved? | |
 | Chip filled after `/rename` + one prompt? | |

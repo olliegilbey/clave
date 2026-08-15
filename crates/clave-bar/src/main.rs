@@ -676,8 +676,10 @@ impl ZellijPlugin for State {
         // #181/#197: the width machine. It compares the geometry zellij last
         // REPORTED for this tab (`active_swap_layout_name`, carried on every
         // TabUpdate) with the mode the store wants, and asks for one switch
-        // while they disagree. It reads no widths and remembers no positions,
-        // so it is silent on every render where the two already agree.
+        // while they disagree. The `cols` it takes is the one width it does
+        // read: zellij's own answer for this pane, which the snap-back arm
+        // compares against what this geometry last settled at — a drag moves
+        // it without moving the reported name (`width_effects` doc).
         //
         // It is NOT ungated, and an earlier comment here claiming every
         // instance is always visible and switches only its own tab was wrong on
@@ -686,7 +688,7 @@ impl ZellijPlugin for State {
         // pane id the request carries (v0.44.3 — FOOTGUNS.md). The gate lives in
         // `width_effects`, which holds the switch until this bar's own tab is
         // the focused one.
-        let fx = self.model.width_effects();
+        let fx = self.model.width_effects(Some(cols));
         self.run_effects(fx);
         // One line per row, display-ordered. Everything visual — the column
         // arithmetic, the palette, the fade, the truncation — lives in

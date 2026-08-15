@@ -1308,6 +1308,14 @@ mod tests {
             {"position":1,"name":"agent","active":true,"display_area_columns":280}
         ]"#;
         assert_eq!(display_cols_from_tabs_json(json), Some(280));
+        // Rows SHOULD agree (the display area is the window), but the active
+        // row is the one preferred — proven with a fixture zellij would never
+        // emit, because "prefers active" is otherwise unfalsifiable.
+        let disagreeing = r#"[
+            {"position":0,"name":"clave","active":false,"display_area_columns":100},
+            {"position":1,"name":"agent","active":true,"display_area_columns":280}
+        ]"#;
+        assert_eq!(display_cols_from_tabs_json(disagreeing), Some(280));
         // The focused tab is preferred, and a list with none falls back to the
         // first — every row carries the window, so both answers are the same.
         assert_eq!(
@@ -1413,6 +1421,7 @@ mod tests {
         row.last_visited = 42;
         row.commit_ord = 88;
         row.tab_id = Some(3); // the DEAD tab that hosted it last time
+        row.pane_id = Some(9); // and the dead pane inside it (#178)
         let fresh = rec("u-wt"); // what the weave derives from the PICKED dir
         let merged = merge_resume_record(Some(&row), fresh.clone());
         assert_eq!(merged.status, Status::Idle);
@@ -1423,7 +1432,10 @@ mod tests {
         assert_eq!(merged.commit_ord, 88);
         // The resumed agent lands in a brand-new tab: the old bind is stale
         // by definition — reset, the new tab's bar re-binds on join (§6.6 B).
+        // pane_id travels with it: a surviving stale pane_id is #178's class
+        // (a row keyed to a pane that no longer exists joins nothing, silently).
         assert_eq!(merged.tab_id, None);
+        assert_eq!(merged.pane_id, None);
         assert_eq!(merged.cwd, row.cwd); // worktree cwd NOT relocated
         assert_eq!(merged.worktree, row.worktree);
         assert_eq!(merged.label, row.label); // earned label survives
