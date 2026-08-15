@@ -20,8 +20,16 @@ build-bar-release:
 
 # Local release-parity build: the CLI with the bar wasm EMBEDDED (spec
 # §Distribution) — what cargo-dist produces in CI, buildable on any clone.
-dist-build: build-bar-release
-    CLAVE_BAR_WASM=$(pwd)/target/wasm32-wasip1/release/clave-bar.wasm cargo build --release -p clave
+#
+# The wasm build is inlined rather than depending on `build-bar-release` for
+# the reason #109 hit `release`: a `just` dependency is its own recipe
+# invocation with its own shell, so a tag set in THIS body never reaches it and
+# the embedded bar reports `build=dev` (#167). Both lines carry the same tag
+# expression release CI uses — the exact tag when HEAD is tagged, else the
+# short SHA — so a parity build is distinguishable from a dev-install one.
+dist-build:
+    CLAVE_BUILD_TAG=$(git describe --tags --exact-match HEAD 2>/dev/null || git rev-parse --short HEAD) cargo build -p clave-bar --release --target wasm32-wasip1
+    CLAVE_BAR_WASM=$(pwd)/target/wasm32-wasip1/release/clave-bar.wasm CLAVE_BUILD_TAG=$(git describe --tags --exact-match HEAD 2>/dev/null || git rev-parse --short HEAD) cargo build --release -p clave
 
 # Everything (host + plugin).
 build-all: build build-bar

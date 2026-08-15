@@ -81,7 +81,7 @@ pub struct AgentRecord {
     #[serde(default)]
     pub pane_id: Option<u32>,
     /// §5 (2026-07-17): `clave open` found the row's cwd missing → the bar
-    /// renders ✗ instead of ◌. A row flag, NOT a status (statuses are hook
+    /// renders ✗ instead of ○. A row flag, NOT a status (statuses are hook
     /// lifecycle); cleared by a later successful open. `default` keeps
     /// pre-field payloads parseable.
     #[serde(default)]
@@ -813,6 +813,36 @@ mod tests {
         assert!(s.agents.is_empty());
     }
 
+    /// The other half of `missing_file_reads_as_default`, and the half that
+    /// matters: only a MISSING file defaults. A file that is present but
+    /// unreadable must be an error all the way out, because `with_store_mut`
+    /// reads before it writes — an unreadable store that read as "empty" would
+    /// be atomically renamed over with an empty one, and the whole fleet would
+    /// be gone from the sidebar with nothing to recover it from. `clave spawn`
+    /// leans on the same distinction: it treats `Err` as "assume this session
+    /// has conversed" precisely so a store it cannot read never licenses a
+    /// fresh session that shadows a real one (#139/#143).
+    ///
+    /// Found by `cargo mutants` 2026-08-15: widening the `NotFound` guard to
+    /// `true` — i.e. every read error defaults — left the suite green.
+    /// The witness is a DIRECTORY at the data path, which is an ordinary
+    /// `Err` from `fs::read` on both CI platforms and needs no permission
+    /// games (a root CI runner would ignore a chmod).
+    #[test]
+    fn an_unreadable_store_is_an_error_and_is_never_written_over() {
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        fs::create_dir(&p.data).unwrap();
+        assert!(
+            read_store(&p).is_err(),
+            "present-but-unreadable must not read as an empty store"
+        );
+        // And the locked write refuses rather than clobbering: it reads first,
+        // so the error must abort the whole read-modify-write.
+        assert!(with_store_mut(&p, |s| s.agents.insert("u1".into(), rec("u1"))).is_err());
+        assert!(p.data.is_dir(), "nothing was renamed over the data path");
+    }
+
     #[test]
     fn rmw_roundtrips_and_bumps_seq() {
         let d = tempfile::tempdir().unwrap();
@@ -861,6 +891,63 @@ mod tests {
         // Unknown uuid: silently fine (plugin may race a just-closed agent) —
         // no snapshot, seq untouched.
         assert!(apply_focus(&p, "ghost", 1000).unwrap().is_none());
+        assert_eq!(read_store(&p).unwrap().seq, s.seq);
+    }
+
+    /// #139: `clave spawn` found the transcript somewhere other than the cwd
+    /// the row bakes (a worktree that moved, or was recreated elsewhere), so
+    /// the row is repointed at the transcript's true home. Nothing else ever
+    /// rewrites `cwd` — if this silently did nothing the row would keep the
+    /// dead path forever, and the next open would land on a directory that is
+    /// no longer there: the ✗ stale branch, for a session that is perfectly
+    /// alive. Found by `cargo mutants` 2026-08-15, which replaced the whole
+    /// body with `Ok(None)` and the suite stayed green.
+    ///
+    /// Contract, same shape as its `apply_*` neighbours: `branch` is optional
+    /// and `None` leaves the recorded branch alone (the caller only knows the
+    /// branch when the new home is inside a git tree), an unknown uuid is a
+    /// silent no-op that broadcasts nothing, and a real move bumps `seq` so
+    /// the push is strictly newer than whatever the bars are holding.
+    #[test]
+    fn relocation_repoints_the_row_and_only_touches_branch_when_told() {
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            s.agents.insert("u1".into(), rec("u1"));
+        })
+        .unwrap();
+        let before = read_store(&p).unwrap().seq;
+
+        // Moved, and the new home is a git tree: both fields follow.
+        let snap = apply_relocation(&p, "u1", "/new/home", Some("feature"))
+            .unwrap()
+            .expect("a known row relocates");
+        let s = read_store(&p).unwrap();
+        assert_eq!(s.agents["u1"].cwd, "/new/home");
+        assert_eq!(s.agents["u1"].branch, "feature");
+        assert!(s.seq > before, "§5: content changed ⇒ seq advanced");
+        assert_eq!(snap.seq, s.seq, "the pushed snapshot is the written store");
+        assert_eq!(snap.agents[0].cwd, "/new/home");
+
+        // Moved again, branch unknown: the cwd follows, the branch is HELD —
+        // not blanked, which would strip the provenance chip off a row whose
+        // branch nobody re-measured.
+        let seq_after_first = s.seq;
+        apply_relocation(&p, "u1", "/newer/home", None)
+            .unwrap()
+            .expect("a second relocation still pushes");
+        let s = read_store(&p).unwrap();
+        assert_eq!(s.agents["u1"].cwd, "/newer/home");
+        assert_eq!(s.agents["u1"].branch, "feature");
+        assert!(s.seq > seq_after_first);
+
+        // Unknown uuid: the row was pruned while spawn was searching. No
+        // write, no bump, nothing broadcast.
+        assert!(
+            apply_relocation(&p, "ghost", "/anywhere", None)
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(read_store(&p).unwrap().seq, s.seq);
     }
 
@@ -1039,6 +1126,7 @@ mod tests {
         apply_touch(&p, 11).unwrap(); // stale timeline entry
         // Stale set is {11}: remove EXACTLY 11's bind + timeline entry; 10 (a
         // tab the prune never observed die) is untouched — the order-safety.
+        let before = read_store(&p).unwrap().seq;
         let snap = apply_prune_tabs(&p, &[11]).unwrap().expect("pruned");
         let s = read_store(&p).unwrap();
         assert_eq!(s.agents["u-live"].tab_id, Some(10), "live bind untouched");
@@ -1046,6 +1134,21 @@ mod tests {
         assert!(s.tab_order.contains_key(&10));
         assert!(!s.tab_order.contains_key(&11), "stale timeline dropped");
         assert!(snap.agents.iter().all(|a| a.tab_id != Some(11)));
+        // §5: the push must be STRICTLY newer than what the bars hold, or
+        // `apply_snapshot`'s `seq <= self.seq` gate discards it — and the bar
+        // re-derives the same stale set from the next TabUpdate and fires
+        // another `clave prune-tabs`, forever, while the dead agent keeps
+        // rendering live. (cargo mutants 2026-08-15: `seq += 1` → `seq *= 1`
+        // survived; the change-gating below was pinned, the bump was not.)
+        // `before` is 2 here, not 0, so this witness tells `+= 1` apart from
+        // BOTH the no-op forms a mutation swaps in (`*= 1`, and a bump the
+        // snapshot is taken before).
+        assert!(
+            snap.seq > before,
+            "a prune that changed something must advance seq: {before} -> {}",
+            snap.seq
+        );
+        assert_eq!(snap.seq, read_store(&p).unwrap().seq);
         // Idempotent late arrival: re-removing an already-dead id → no change,
         // no push, no seq bump (this is what makes two out-of-order prunes safe).
         let seq = read_store(&p).unwrap().seq;
