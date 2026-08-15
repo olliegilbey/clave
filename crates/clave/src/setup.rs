@@ -486,6 +486,28 @@ pub fn permissions_seeded(existing: &str, wasm_abs: &str) -> bool {
     existing.contains(&format!("\"file:{wasm_abs}\""))
 }
 
+/// Claude's `settings.json` as a JSON value — an empty object when the file
+/// does not exist yet, and an ERROR in every other failure.
+///
+/// That asymmetry is the whole of it, and it is the same rule `store::read_store`
+/// holds for the same reason: the caller merges clave's hooks into this value
+/// and writes it straight back, so a file that is present but unreadable
+/// defaulting to `{}` would replace the user's entire Claude configuration with
+/// clave's hooks alone. The path is routinely a symlink into a dotfiles repo,
+/// which makes the blast radius somebody's committed config rather than one
+/// machine's state.
+///
+/// Split out of `write_generated` so it is reachable without an environment:
+/// the caller resolves the path through `$CLAUDE_CONFIG_DIR`, which no
+/// hermetic test may set (`crates/clave` runs its tests in one process).
+fn read_settings(path: &std::path::Path) -> Result<serde_json::Value> {
+    match std::fs::read(path) {
+        Ok(b) => serde_json::from_slice(&b).context("parsing ~/.claude/settings.json"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(serde_json::json!({})),
+        Err(e) => Err(e).context("reading settings.json"),
+    }
+}
+
 /// The generation weave shared by `clave setup` (dev/sandbox) and `clave
 /// release` (stable): write config.kdl + layout.kdl baking `binary` into
 /// commands and `wasm` into plugin locations, merge the clave hooks
@@ -509,11 +531,7 @@ pub fn write_generated(dir: &std::path::Path, binary: &str, wasm: &str) -> Resul
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent)?; // fresh box: ~/.claude may not exist yet
     }
-    let mut settings: serde_json::Value = match std::fs::read(&settings_path) {
-        Ok(b) => serde_json::from_slice(&b).context("parsing ~/.claude/settings.json")?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
-        Err(e) => return Err(e).context("reading settings.json"),
-    };
+    let mut settings = read_settings(&settings_path)?;
     if merge_hooks(&mut settings, binary) {
         std::fs::write(&settings_path, serde_json::to_vec_pretty(&settings)?)?;
         println!("hooks merged into {}", settings_path.display());
@@ -1329,6 +1347,39 @@ mod tests {
         assert_eq!(stops.len(), 2); // their entry + ours, not a rewrite
         assert_eq!(stops[0]["hooks"][0]["command"], "clave-vault hook Stop"); // untouched
         assert_eq!(stops[1]["hooks"][0]["command"], "clave hook Stop");
+    }
+
+    /// Only a MISSING settings.json defaults to empty. `clave setup` merges
+    /// into whatever this returns and writes the result back, so any other
+    /// failure defaulting would hand the user a settings.json containing
+    /// nothing but clave's hooks — and that file is often a symlink into a
+    /// dotfiles repo.
+    ///
+    /// Found by `cargo mutants` 2026-08-15: the `NotFound` guard could be
+    /// widened to `true`, narrowed to `false`, or inverted, and the suite
+    /// stayed green in all three cases. The witnesses below tell all three
+    /// apart — a directory at the path is an ordinary read error on both CI
+    /// platforms, and needs no permission games a root runner would ignore.
+    #[test]
+    fn only_a_missing_settings_file_reads_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("settings.json");
+        assert_eq!(read_settings(&missing).unwrap(), serde_json::json!({}));
+
+        let real = dir.path().join("real.json");
+        std::fs::write(&real, br#"{"env":{"KEEP":"me"}}"#).unwrap();
+        assert_eq!(read_settings(&real).unwrap()["env"]["KEEP"], "me");
+
+        // Present but unreadable: an error, never an empty object.
+        let unreadable = dir.path().join("unreadable.json");
+        std::fs::create_dir(&unreadable).unwrap();
+        assert!(read_settings(&unreadable).is_err());
+
+        // Present and unparseable: also an error. Merging into `{}` here would
+        // discard a settings file that is merely mid-edit.
+        let garbage = dir.path().join("garbage.json");
+        std::fs::write(&garbage, b"{not json").unwrap();
+        assert!(read_settings(&garbage).is_err());
     }
 
     #[test]
