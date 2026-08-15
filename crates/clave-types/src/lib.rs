@@ -352,9 +352,16 @@ pub const COLLAPSED_BIRTH_PERCENT: usize = COLLAPSED_TARGET_COLS * 100 / REFEREN
 /// The result is clamped to `1..=100`: zellij rejects anything outside that. A
 /// display narrower than the target clamps to 100 rather than overflowing — the
 /// bar asks for the whole tab, and `render_rows`' clip (D31) keeps the rows
-/// inside the pane. That clamp IS the minimum-width behaviour on a narrow
-/// window: the bar never renders below its own design width by shrinking, it
-/// takes what it needs of a small screen.
+/// inside the pane.
+///
+/// **That clamp protects the LAUNCH, and only the launch.** A session opened in
+/// a narrow window still gets a bar wide enough to read. Since #181 the width is
+/// a percentage of the window and nothing watches it, so RESIZING the window
+/// afterwards shrinks the bar with it and nothing brings it back — halve the
+/// window and the expanded bar ends up narrower than the collapsed one was.
+/// Preserving it across a resize would mean watching for the change and issuing
+/// a correction, which is the machinery #181 exists to delete, so the loss is
+/// accepted and recorded in LEDGER D39 rather than fixed.
 ///
 /// **Taking the expanded target unconditionally was the D36 bug**: the mode
 /// persists across a launch, so a maintainer who quit collapsed got a bar born
@@ -465,19 +472,15 @@ mod tests {
         assert!((1..=100).contains(&BAR_BIRTH_PERCENT));
     }
 
-    /// The seek's two targets, and the property that is not local to either:
-    /// their separation. `clave-bar`'s `converged` refuses any width both
-    /// bands would accept, so the geometry cannot silently make Alt+c a no-op
-    /// again (LEDGER D21). Fail here if it changes.
+    /// The two targets, and the property that is not local to either: their
+    /// separation, 24 columns since D19. Fail here if it changes.
     ///
-    /// **24 since D19, and the number crossed a threshold on the way.** At
-    /// 44/30 the separation was 14 — at or below the widest learnable step
-    /// (`MAX_LEARNABLE_STEP` = 20), so the two acceptance bands could overlap
-    /// and every toggle on a wide display paid a disambiguating step. At 54/30
-    /// the separation EXCEEDS the widest step the seek can learn, so the bands
-    /// can no longer overlap at all: the disqualification, the bracket rule and
-    /// both resting-width costs become unreachable paths rather than live ones
-    /// (D26's four inherited reservations, three of which this retires).
+    /// **Since D39 this is a design number, not a tolerance.** Both widths are
+    /// declared in the layout and zellij switches between them, so nothing has
+    /// to tell the two apart by measuring and no acceptance band can overlap.
+    /// What the separation buys now is only what it looks like it buys: Alt+c
+    /// produces a visibly different bar, wide enough to hold the summary and
+    /// narrow enough to be a gutter.
     #[test]
     fn the_collapsed_target_is_narrower_and_separated_from_the_expanded_one() {
         assert_eq!(BAR_TARGET_COLS.abs_diff(COLLAPSED_TARGET_COLS), 24);

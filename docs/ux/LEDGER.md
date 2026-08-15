@@ -563,6 +563,21 @@ lands a column either side and stays there. Nothing corrects that any more, whic
 is the point — `render_rows`' clip (D31) already lays the rows out against the
 columns zellij actually gave it.
 
+**A third thing was given up that the conversation did not name, and it is the
+one virtue Ollie asked to keep.** He asked that the bar never become uselessly
+thin on a narrow window. Half of that survives: a session LAUNCHED in a narrow
+window still gets a readable bar, because the birth percent is clamped at 100 and
+the bar simply takes what it needs of a small screen. Resizing the window
+afterwards does not. The two geometries are percentages of the window, so both
+shrink with it and nothing brings them back — halve the window and the expanded
+bar is narrower than the collapsed one was, and stays there until the mode is
+toggled or the session relaunched. Restoring it would mean reacting to window
+changes and issuing corrections, which is exactly the watch-and-correct pattern
+this entry deletes, so it is recorded as a loss and not fixed. **Ollie may want
+more than a note here; that call is his.** The floor that remains is
+`render_rows`' clip: below `min_intact_cols()` the rows drop cells rather than
+render garbage, so a shrunken bar is degraded and never broken.
+
 **Still owed: one live run.** The mechanism is traced end to end through the
 vendored parser and the plugin shim, and `next_swap_layout()` exists at
 `zellij-tile-0.44.3/src/shim.rs:1329`. But `zellij-server` is not vendored, so

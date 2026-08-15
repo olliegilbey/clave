@@ -16,12 +16,6 @@ use zellij_tile::prelude::*;
 #[derive(Default)]
 struct State {
     model: BarModel,
-    /// Our own plugin pane id (get_plugin_ids). The identity itself lives in
-    /// the model — `set_own_pane` — because that is where the frame join is
-    /// testable; this copy is kept so the adapter can be re-seeded on a plugin
-    /// reload without going through the model.
-    #[allow(dead_code)]
-    own_plugin_id: Option<u32>,
     /// Peek-on-nav timers in flight: each armed peek starts one
     /// set_timeout(1.0); only the LAST expiry sinks the bar, so a nav burst
     /// keeps it expanded until ~1s after the final press. The ONLY timers
@@ -505,13 +499,11 @@ impl ZellijPlugin for State {
         // directly (no focus-stealing first click) and MoveFocus skips it —
         // nothing the bar does needs focus (clicks, pipes, hide_self).
         set_selectable(false);
-        // `own_plugin_id` is the model's identity input;
-        // the model gets the same id because identity resolution lives there
-        // now — this file is `test = false`, and RC-A shipped precisely
-        // because the frame join was written where nothing could assert on it.
-        let id = get_plugin_ids().plugin_id;
-        self.own_plugin_id = Some(id);
-        self.model.set_own_pane(id);
+        // The plugin's own pane id goes STRAIGHT to the model and is not kept
+        // here: identity resolution lives there, where it can be asserted on —
+        // this file is `test = false`, and RC-A shipped precisely because the
+        // frame join was written where nothing could see it.
+        self.model.set_own_pane(get_plugin_ids().plugin_id);
     }
 
     fn update(&mut self, event: Event) -> bool {

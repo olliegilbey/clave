@@ -983,10 +983,11 @@ mod tests {
         // zellij 0.44.3 REFUSES resize_pane_with_id on fixed-size panes
         // (CantResizeFixedPanes, tiled_pane_grid.rs) — a `size=30` bar can
         // never collapse (Alt+c dead, live finding c8-cold-start
-        // 2026-07-18). Percent sizes are flexible; the bar's birth-armed
-        // width seek converges to the exact template cols. Historically
-        // masked: pre-C8 sessions were resurrected from zellij's serialized
-        // cache, which rewrites sizes as percentages.
+        // 2026-07-18). Percent sizes are flexible, and since #181 the percent
+        // is the whole story: zellij resolves it against the real window and
+        // nothing walks the pane anywhere afterwards. Historically masked:
+        // pre-C8 sessions were resurrected from zellij's serialized cache,
+        // which rewrites sizes as percentages.
         for kdl in [
             layout_kdl("clave", "/w.wasm"),
             launch_layout_kdl_for("clave", "/w.wasm", None, None, false),

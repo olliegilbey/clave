@@ -126,7 +126,7 @@ pub enum Effect {
     /// event log, and nothing to the zellij log, so there is currently no way
     /// to tell those two apart from outside.
     ///
-    /// Same breadcrumb discipline as `StormCapped`: state-CHANGE triggered, so
+    /// Breadcrumb discipline: state-CHANGE triggered, so
     /// a steady state costs one line and not one per frame; printed by main.rs
     /// rather than shelled out to the CLI, because a subprocess on a path we
     /// suspect of starvation would be the same mistake in a smaller font.
