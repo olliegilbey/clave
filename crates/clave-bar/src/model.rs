@@ -171,13 +171,27 @@ pub const PEEK_SINK_SECS: f64 = 0.9;
 /// How many `next_swap_layout` calls one width change may cost (#181).
 ///
 /// The switch is relative — there is no absolute "apply layout N" in the plugin
-/// API — so a tab whose swap index is out of phase with the mode the bar is
-/// showing lands on the wrong geometry. One extra call puts it back, and with
-/// exactly two declared geometries one is always enough. The bound is what
-/// makes this NOT the old seek: it cannot spend a second correction, cannot
-/// learn anything from what it sees, and cannot run at all except in the single
-/// render that follows a width change it asked for.
-const SWAP_CORRECTIONS: u8 = 1;
+/// API — so a tab whose swap position is out of phase with the mode the bar is
+/// showing lands on the wrong geometry, and one extra call puts it back.
+///
+/// The budget is TWO, not one, because the live cycle is three positions long,
+/// not two. Zellij inserts the tab's BIRTH layout as a hidden position at index
+/// 0 of the tab's swap list (`swap_layouts.rs:38-56`, applied from
+/// `tab/mod.rs:889,967`), so the tab walks birth → declared[0] → declared[1] →
+/// birth. One of those three steps is a duplicate of the geometry the tab is
+/// already in, i.e. a call that moves nothing. On top of that, a tab zellij has
+/// marked DAMAGED — the user resized or closed a pane, or dragged a pane border
+/// with the mouse (`tab/mod.rs:2398,2465,5779`) — spends its next switch
+/// RE-APPLYING the current position instead of advancing
+/// (`swap_layouts.rs:241-250`). Those two stack: a damaged tab can re-apply
+/// (no move), then advance onto the birth duplicate (no move), and only the
+/// third call moves it. One correction would strand that tab on the wrong
+/// geometry until the next keypress.
+///
+/// The bound is still what makes this NOT the old seek: it is a fixed, tiny
+/// count, it learns nothing from what it sees, and it cannot run at all except
+/// in the renders that follow a width change this bar asked for.
+const SWAP_CORRECTIONS: u8 = 2;
 
 /// A row that has never received a user commitment (S1). Sorts below every row
 /// that has. Reachable for a LIVE tab only when its birth touch never landed —
@@ -1908,11 +1922,13 @@ impl BarModel {
     ///
     /// 1. **Ask.** A geometry the tab does not have becomes one
     ///    `next_swap_layout` call, and the width we are leaving is remembered.
-    /// 2. **Check, once.** The switch is RELATIVE — the plugin API has no
-    ///    "apply layout N" — so a tab out of phase with the mode lands on the
-    ///    wrong geometry. If the pane did not move the way the new mode wants,
-    ///    one more call puts it right, and with two declared geometries one is
-    ///    always enough.
+    /// 2. **Check, up to twice.** The switch is RELATIVE — the plugin API has
+    ///    no "apply layout N" — so a tab out of phase with the mode lands on
+    ///    the wrong geometry. If the pane did not move the way the new mode
+    ///    wants, another call is spent, up to `SWAP_CORRECTIONS` of them: the
+    ///    cycle is three positions long (zellij hides the tab's birth layout at
+    ///    index 0) and a damaged tab burns one switch re-applying, so two
+    ///    no-move calls in a row are reachable and the third always moves.
     ///
     /// The check is on the DIRECTION of the move, never on a column count.
     /// Absolute widths would be wrong the moment the window is resized: the
@@ -3818,17 +3834,20 @@ mod tests {
     }
 
     /// The bound, which is what makes this not a seek. A layout that refuses to
-    /// move at all costs two calls and then silence — where the old machine
-    /// spent a budget, learned a polarity from the refusal and could re-arm.
+    /// move at all costs three calls — the ask plus both corrections — and then
+    /// silence, where the old machine spent a budget, learned a polarity from
+    /// the refusal and could re-arm. Three is the worst case a real tab can
+    /// reach: a damaged tab re-applies instead of advancing, and the position
+    /// after that is the hidden duplicate of the tab's birth layout.
     #[test]
-    fn a_layout_that_never_moves_costs_two_calls_and_then_goes_quiet() {
+    fn a_layout_that_never_moves_costs_three_calls_and_then_goes_quiet() {
         let mut m = focused_bar();
         m.toggle();
         let spent = (0..64)
             .map(|_| m.width_effects(54))
             .take_while(|fx| !fx.is_empty())
             .count();
-        assert_eq!(spent, 2, "unbounded switching: {spent} calls");
+        assert_eq!(spent, 3, "unbounded switching: {spent} calls");
     }
 
     /// A resized window must not be mistaken for a wrong geometry. The two
