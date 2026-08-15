@@ -486,15 +486,6 @@ pub fn permissions_seeded(existing: &str, wasm_abs: &str) -> bool {
     existing.contains(&format!("\"file:{wasm_abs}\""))
 }
 
-/// The generation weave shared by `clave setup` (dev/sandbox) and `clave
-/// release` (stable): write config.kdl + layout.kdl baking `binary` into
-/// commands and `wasm` into plugin locations, merge the clave hooks
-/// (replace-on-version-change, keyed on `binary`), and seed the permission
-/// cache for `wasm`. Idempotent by construction — every part merges.
-///
-/// The two callers differ ONLY in what they pass: dev = (`"clave"`,
-/// unversioned wasm); release = (versioned CLI absolute path, versioned
-/// wasm). Everything version-shaped stays in the caller (§2).
 /// Claude's `settings.json` as a JSON value — an empty object when the file
 /// does not exist yet, and an ERROR in every other failure.
 ///
@@ -517,6 +508,15 @@ fn read_settings(path: &std::path::Path) -> Result<serde_json::Value> {
     }
 }
 
+/// The generation weave shared by `clave setup` (dev/sandbox) and `clave
+/// release` (stable): write config.kdl + layout.kdl baking `binary` into
+/// commands and `wasm` into plugin locations, merge the clave hooks
+/// (replace-on-version-change, keyed on `binary`), and seed the permission
+/// cache for `wasm`. Idempotent by construction — every part merges.
+///
+/// The two callers differ ONLY in what they pass: dev = (`"clave"`,
+/// unversioned wasm); release = (versioned CLI absolute path, versioned
+/// wasm). Everything version-shaped stays in the caller (§2).
 pub fn write_generated(dir: &std::path::Path, binary: &str, wasm: &str) -> Result<()> {
     std::fs::write(dir.join("config.kdl"), config_kdl(binary, wasm))?;
     std::fs::write(dir.join("layout.kdl"), layout_kdl(binary, wasm))?;
