@@ -121,29 +121,23 @@ pub fn sanitize_label(s: &str) -> String {
 /// finding, c8-cold-start 2026-07-18 — the eager tab loaded two plugin
 /// instances in the same second and broke executor election).
 ///
-/// `display_cols` is the width the new tab will actually be born into, and
-/// `collapsed` the mode it must be born in (LEDGER D35/D36, task 7b′). Both are
-/// `Option`/`bool` rather than read here because this runs INSIDE zellij: a
-/// `terminal_size()` call would report the *calling pane's* width, not the
-/// tab's, which is the fiction that made dwell-opened tabs rest one column off
-/// every template-born tab (measured live 2026-07-31). Both callers now have a
-/// real answer: the bar reads `get_tab_info` for the dwell-open path, and
-/// `clave add` asks the session (`display_cols_from_tabs_json`). `None` keeps
-/// the reference-viewport fallback for a caller whose read failed, and for the
-/// tests.
+/// `collapsed` is the mode the tab must be born in (LEDGER D36, task 7b′): a
+/// tab born expanded into a collapsed fleet flashes wide and then snaps. The
+/// width itself is not an input any more — the bar pane is a fixed column
+/// count taken from `target_cols_for`, which zellij applies exactly whatever
+/// the window is, so nothing here needs to know the display.
 pub fn tab_node(
     binary: &str,
     wasm: &str,
     label: &str,
     uuid: &str,
     cwd: &str,
-    display_cols: Option<usize>,
     collapsed: bool,
 ) -> String {
     // split_direction="vertical" is REQUIRED for a LEFT bar: zellij stacks
     // sibling panes horizontally (rows) by default (Task 9 C1 finding; same
     // wrapper as setup::layout_kdl and the S2 spike layout). The bar pane
-    // itself — percent-sized, never fixed — comes from the one place that
+    // itself — fixed-cols, see its doc — comes from the one place that
     // emits it (`setup::bar_pane_kdl`).
     // `command` bakes the environment's clave (§2 binary split): the
     // versioned copy's absolute path in a stable session, bare `clave` in
@@ -160,7 +154,7 @@ pub fn tab_node(
         pane = crate::setup::bar_pane_kdl(
             binary,
             wasm,
-            clave_types::bar_percent_for(display_cols, collapsed),
+            clave_types::target_cols_for(collapsed),
             "            "
         ),
     )
@@ -180,38 +174,6 @@ pub fn tab_node_bare(binary: &str, label: &str, uuid: &str, cwd: &str) -> String
     }}
 "#
     )
-}
-
-/// The window width, read out of `zellij action list-tabs --all --json`.
-///
-/// `clave add` runs INSIDE zellij — Alt+a opens it as a floating pane — so a
-/// `terminal_size()` read here reports THAT PANE, not the window, which is why
-/// the layout it writes used to be sized against the 200-column reference
-/// fiction: on a 280-column display that is a 75-column sidebar where 54 was
-/// wanted (#181 review). Before #181 the bar's width seek walked the newborn
-/// pane back to target; deleting the seek made the wrong birth width permanent.
-///
-/// This is the CLI twin of the `get_tab_info` host call the bar already uses on
-/// the dwell-open path. Every tab reports the SAME display area — it is the
-/// window, not the tab — so the focused row is preferred only for tidiness and
-/// any row answers correctly.
-///
-/// Fail-open by design: anything unparseable yields `None`, which falls back to
-/// the reference fiction — exactly the behaviour this replaces, never worse.
-pub fn display_cols_from_tabs_json(json: &str) -> Option<usize> {
-    let v: serde_json::Value = serde_json::from_str(json).ok()?;
-    // A bare array is what `Vec<TabInfo>` serializes to; the object form is
-    // tolerated so a future zellij that wraps the list does not silently
-    // reintroduce the fiction.
-    let tabs = v
-        .as_array()
-        .or_else(|| v.get("tabs").and_then(serde_json::Value::as_array))?;
-    let tab = tabs
-        .iter()
-        .find(|t| t.get("active").and_then(serde_json::Value::as_bool) == Some(true))
-        .or_else(|| tabs.first())?;
-    let cols = tab.get("display_area_columns")?.as_u64()? as usize;
-    (cols > 0).then_some(cols)
 }
 
 /// Reject a cwd that can't be safely interpolated into generated KDL.
@@ -244,7 +206,6 @@ pub fn tab_layout(
     label: &str,
     uuid: &str,
     cwd: &str,
-    display_cols: Option<usize>,
     collapsed: bool,
 ) -> String {
     // #181: the new tab carries the same two swap geometries every other tab
@@ -254,8 +215,8 @@ pub fn tab_layout(
     // verbatim and the swap layouts sit alongside it.
     format!(
         "layout {{\n{swaps}{tab}}}\n",
-        swaps = crate::setup::swap_layouts_kdl(binary, wasm, display_cols, collapsed),
-        tab = tab_node(binary, wasm, label, uuid, cwd, display_cols, collapsed)
+        swaps = crate::setup::swap_layouts_kdl(binary, wasm, collapsed),
+        tab = tab_node(binary, wasm, label, uuid, cwd, collapsed)
     )
 }
 
@@ -814,27 +775,12 @@ pub fn run_add(worktree: bool) -> Result<()> {
     let paths = store_paths()?;
     let store = crate::store::read_store(&paths)?;
     let live = live_uuid_union(&store, &dump);
-    // The two layout inputs the new tab's bar is SIZED by (#181 review). Both
-    // are derived here, lock-free, for the same reason `existing` is: they feed
-    // the layout only. `collapsed` is the mode the fleet is in — a tab born
-    // expanded into a collapsed fleet flashes wide and then snaps, which is the
-    // jank D36 removed everywhere except here. Best-effort on the width: an
-    // unreadable answer takes the reference fallback rather than failing add.
+    // The one layout input the new tab's bar is SIZED by. Derived here,
+    // lock-free, for the same reason `existing` is: it feeds the layout only.
+    // `collapsed` is the mode the fleet is in — a tab born expanded into a
+    // collapsed fleet flashes wide and then snaps, which is the jank D36
+    // removed everywhere except here.
     let collapsed = store.collapsed;
-    let display_cols = cmd_stdout(
-        &zellij,
-        &[
-            "--session",
-            session.as_str(),
-            "action",
-            "list-tabs",
-            "--all",
-            "--json",
-        ],
-    )
-    .ok()
-    .as_deref()
-    .and_then(display_cols_from_tabs_json);
 
     // 4) new vs resume.
     let Some(choice) = fzf_pick(&["new".into(), "resume".into()], "agent> ")? else {
@@ -1034,15 +980,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
     validate_cwd(&agent_cwd)?;
     let wasm = wasm_path()?.to_str().context("wasm path")?.to_string();
     let binary = crate::release::runtime_binary();
-    let layout = tab_layout(
-        &binary,
-        &wasm,
-        &label,
-        &uuid,
-        &agent_cwd,
-        display_cols,
-        collapsed,
-    );
+    let layout = tab_layout(&binary, &wasm, &label, &uuid, &agent_cwd, collapsed);
     let tmp = std::env::temp_dir().join(format!("clave-{uuid}.kdl"));
     std::fs::write(&tmp, layout)?;
     let status = Command::new(&zellij) // discovered above (Fix 2)
@@ -1240,114 +1178,6 @@ mod tests {
         );
     }
 
-    /// Task 7b′, the bug this fixed: a dwell-opened tab and a template-born
-    /// tab must rest at the SAME width. They did not — measured live
-    /// 2026-07-31, the launch tab sat at 28% (terminal-derived) and every
-    /// dwell-opened tab at 27% (the reference-viewport fiction), one column
-    /// apart and visible on every tab switch.
-    ///
-    /// Pinning the two generators against EACH OTHER rather than against a
-    /// literal is deliberate: the failure mode is DIVERGENCE, so a test that
-    /// restated the expected percent would go on passing if both moved and
-    /// still disagreed.
-    ///
-    /// **Each side is read from its OWN birth node** (#181 review). Reading the
-    /// first `size="` in the file used to answer for both; since #181 that is a
-    /// swap template, always the expanded one, so the collapsed pass of this
-    /// loop compared the expanded percent with itself and the test could not
-    /// fail.
-    #[test]
-    fn the_open_path_and_the_launch_path_agree_on_birth_width() {
-        // The one-shot layout has no template — its bar is inside the tab node.
-        let pct = |kdl: &str| crate::setup::birth_pct(kdl, "tab name=");
-        for cols in [95, 115, 142, 200, 280] {
-            for collapsed in [false, true] {
-                let open = tab_layout("clave", "/w.wasm", "l", "u", "/c", Some(cols), collapsed);
-                let launch = crate::setup::launch_layout_kdl_for(
-                    "clave",
-                    "/w.wasm",
-                    None,
-                    Some(cols),
-                    collapsed,
-                );
-                let want = crate::setup::birth_pct(&launch, "default_tab_template");
-                assert_eq!(
-                    pct(&open),
-                    want,
-                    "open vs launch disagree at {cols} cols, collapsed={collapsed}"
-                );
-                // The collapsed pass must not be the expanded pass wearing a
-                // different name — that is exactly how this test emptied itself.
-                if collapsed {
-                    let expanded =
-                        tab_layout("clave", "/w.wasm", "l", "u", "/c", Some(cols), false);
-                    assert_ne!(
-                        pct(&open),
-                        pct(&expanded),
-                        "collapse mode did not reach the birth pane at {cols} cols"
-                    );
-                }
-            }
-        }
-        // And the fallback still holds for a caller with no width to give.
-        let fiction = tab_layout("clave", "/w.wasm", "l", "u", "/c", None, false);
-        assert_eq!(pct(&fiction), clave_types::BAR_BIRTH_PERCENT.to_string());
-    }
-
-    /// #181 review, finding 1: `Alt+a` sized its tab against the 200-column
-    /// reference fiction, so on Ollie's 280-column display it was born 75
-    /// columns wide against a 54-column design — and the deleted width seek is
-    /// what used to walk it back. `clave add` runs inside zellij, so it asks the
-    /// session for the window instead of measuring its own floating pane.
-    #[test]
-    fn the_window_width_is_read_out_of_the_session_not_the_calling_pane() {
-        // The shape `zellij action list-tabs --all --json` emits: a list of
-        // tabs, one of them focused, every one carrying the same display area.
-        let json = r#"[
-            {"position":0,"name":"clave","active":false,"display_area_columns":280},
-            {"position":1,"name":"agent","active":true,"display_area_columns":280}
-        ]"#;
-        assert_eq!(display_cols_from_tabs_json(json), Some(280));
-        // Rows SHOULD agree (the display area is the window), but the active
-        // row is the one preferred — proven with a fixture zellij would never
-        // emit, because "prefers active" is otherwise unfalsifiable.
-        let disagreeing = r#"[
-            {"position":0,"name":"clave","active":false,"display_area_columns":100},
-            {"position":1,"name":"agent","active":true,"display_area_columns":280}
-        ]"#;
-        assert_eq!(display_cols_from_tabs_json(disagreeing), Some(280));
-        // The focused tab is preferred, and a list with none falls back to the
-        // first — every row carries the window, so both answers are the same.
-        assert_eq!(
-            display_cols_from_tabs_json(r#"[{"active":false,"display_area_columns":95}]"#),
-            Some(95)
-        );
-        // Fail-open, every way it can go wrong: the fallback is the fiction,
-        // which is exactly what this path did before, never worse.
-        for bad in [
-            "",
-            "not json",
-            "[]",
-            r#"[{"name":"clave"}]"#,
-            r#"[{"display_area_columns":0}]"#,
-            r#"[{"display_area_columns":"280"}]"#,
-        ] {
-            assert_eq!(display_cols_from_tabs_json(bad), None, "{bad}");
-        }
-        // And the width actually reaches the emitted layout: 54/280 is 19%,
-        // not the fiction's 27%.
-        let kdl = tab_layout(
-            "clave",
-            "/w.wasm",
-            "l",
-            "u",
-            "/c",
-            display_cols_from_tabs_json(json),
-            false,
-        );
-        assert_eq!(crate::setup::birth_pct(&kdl, "tab name="), "19");
-    }
-
     #[test]
     fn tab_layout_bakes_the_idempotent_spawn() {
         let kdl = tab_layout(
@@ -1356,7 +1186,6 @@ mod tests {
             "x · main",
             "u-1",
             "/x",
-            None,
             false,
         );
         // The bar pane, the baked spawn (idempotent resurrection, §6.3/S4),
@@ -1370,15 +1199,7 @@ mod tests {
         // §2 binary split: the pane command is the passed binary. A stable
         // session bakes the versioned copy's absolute path instead of bare.
         assert!(kdl.contains("command=\"clave\""));
-        let abs = tab_layout(
-            "/data/clave/bin/clave-v0.1.0",
-            "/w",
-            "l",
-            "u",
-            "/x",
-            None,
-            false,
-        );
+        let abs = tab_layout("/data/clave/bin/clave-v0.1.0", "/w", "l", "u", "/x", false);
         assert!(abs.contains("command=\"/data/clave/bin/clave-v0.1.0\""));
         assert!(!abs.contains("command=\"clave\""));
     }
@@ -1852,7 +1673,6 @@ garbage that should be ignored
             &picked.label,
             &picked.uuid,
             &picked.cwd,
-            None,
             false,
         );
         assert!(kdl.contains("cwd=\"/repo/.claude/worktrees/wt\""));

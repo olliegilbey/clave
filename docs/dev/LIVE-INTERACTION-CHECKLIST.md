@@ -747,16 +747,18 @@ geometry asked for. **A tab zellij considers damaged** (a pane resized or
 closed, a border dragged with the mouse) **spends its next switch re-applying
 rather than advancing**, which is a way to get no movement at all.
 
-Since #197 the bar answers both by reading the layout name zellij reports for
-its tab on every frame, and asking for one more switch while that name disagrees
-with the mode the store wants — no belief, and the only width it reads is the
-one zellij renders it at: when that width drifts while the name still agrees (a
-border drag), one more switch snaps it back (10c). The one thing it will not do
-is ask twice from the same reported position or the same drifted width, so a
-switch zellij refuses outright waits for the next press, the next focus change,
-or the next movement. Everything
-below is a question about what that looks like from the chair. None of them has
-an automated test that could reach it.
+Since the 2026-08-17 rebuild the bar answers both from its PAINTED width: the
+two geometries are declared as fixed column counts (54 expanded, 30 collapsed),
+so on every paint the bar compares the width zellij just gave it against the
+constant its mode wants, and asks for one switch while they differ — unbounded
+while the width keeps moving, at most three asks while it is frozen (the cycle
+is three positions long), then it rests until the width or the mode changes.
+The layout name zellij reports is read by NOTHING: zellij only computes it for
+tabs with two or more selectable panes, which no clave tab has (FOOTGUNS). And
+a border drag is REFUSED by zellij itself — fixed panes cannot be resized from
+either side — so snap-back is enforced at the source rather than corrected
+after. Everything below is a question about what that looks like from the
+chair. None of them has an automated test that could reach it.
 
 ### 10a — Cold start into collapse
 
@@ -765,11 +767,11 @@ Watch the bar on its very first paints, before touching anything. Then press
 `Alt+c` once.
 
 **Correct.** The bar is **born collapsed at 30 and never widens** — no frame at
-53, no snap back. The bar does spend one layout switch on its first focused
-paint (it has to, to trade zellij's unnamed birth position for a named one), but
-that switch lands on the same width by construction, so nothing should be
-visible. A frame at 53 means the layout file's declaration order is wrong. And
-the first `Alt+c` after the launch must move the pane, in one press.
+53, no snap back, and since the 2026-08-17 rebuild no switch at all: the launch
+layout carries the collapsed width as a fixed column count, the machine compares
+the painted 30 against the same constant, and they agree from the first paint.
+A frame at 53 means the launch layout was composed against the wrong store
+flag. And the first `Alt+c` after the launch must move the pane, in one press.
 
 **Vacuous if.** The store was not collapsed at kill time — check
 `clave dev status | jq .store.collapsed` is `true` before relaunching. Or you
@@ -799,31 +801,25 @@ must agree once it settles, and one further press must move the pane.
 and hides the answer. Or the tab was already damaged when you started, which
 moves the awkward press somewhere else — use a tab you have just opened.
 
-### 10c — A dragged pane border snaps back
+### 10c — A dragged pane border is refused outright
 
-**Do.** Drag the border between the sidebar and the workspace with the mouse,
-toward the workspace and then well into the sidebar, and let go. Press nothing.
-Watch. Then press `Alt+c` once and confirm the toggle still works.
+**Do.** Try to drag the border between the sidebar and the workspace with the
+mouse, in both directions. Then press `Alt+c` once and confirm the toggle
+still works.
 
-**Correct.** The sidebar **returns to its set width on its own** — stable's
-snap-back, restored by Ollie's ruling (2026-08-15) after the first #197 build
-lost it. The mechanism: the bar compares the width zellij renders it at against
-the width its current geometry settled at, and a mismatch under an unchanged
-layout name spends one switch — which re-applies the current layout, because
-the drag marked the tab damaged. While the border is **held**, the bar stays
-quiet — a moving width never holds still for the two consecutive renders the
-arm demands (v0.1.2's drift gate, ported) — so the correction fires **on
-release**, possibly one event later if the session is idle. After release, the
-width must come back without any keypress, and the following `Alt+c` must move
-the pane normally in one press.
+**Correct.** The border **does not move at all** — the bar pane is fixed-width
+(2026-08-17 rebuild), and zellij refuses resizes touching a fixed pane from
+either side. This is the 2026-08-15 snap-back ruling enforced at the source:
+there is no drag to undo, so there is no correction arm to watch. Zellij may
+flash a "FIXED!" notice on the pane — record whether it does and how it looks,
+that is the one unknown here. The `Alt+c` after the attempt must move the pane
+normally in one press (the drag attempt must not have damaged the tab into
+eating a switch — if it did, the press after that one must move it, and that
+is a finding to record).
 
-Record which you got: snapped back on its own (correct), snapped back only
-after `Alt+c` (finding — the drag arm never fired), or terminal content left
-covering the sidebar (the #197 regression, finding).
-
-**Vacuous if.** The drag did not actually move the border — the sidebar is not
-selectable, so not every drag lands. Or the tab was in the middle of a toggle
-when you dragged; settle it first.
+Record which you got: border immobile (correct), border moved at all
+(finding — the pane was not emitted fixed; check the generated layout), or a
+moved border that snapped back (finding — same, plus the corrector fired).
 
 ### 10d — A floating pane over the bar
 
@@ -934,8 +930,8 @@ Fill it in as you go; the numbers are the deliverable, not the ticks.
 | **10a** First `Alt+c` after that launch moved the pane? | |
 | **10b** Six slow widths in order? | |
 | **10b** Six FAST presses: settled width, profile agrees, next press moves? | |
-| **10c** Border drag: snapped back on release / only after `Alt+c` / stayed covered | |
-| **10c** Held drag stayed quiet (no fighting)? | |
+| **10c** Border drag refused (immobile)? FIXED! flash — how does it look? | |
+| **10c** `Alt+c` after the drag attempt moved in one press? | |
 | **10d** With the picker open: did it move? And which profile at which width after Esc? | |
 | **10e** After a zellij tab-strip click: which tab's sidebar moved? | |
 | Chip filled after `/rename` + one prompt? | |

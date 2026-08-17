@@ -309,90 +309,6 @@ const _: () = assert!(
      geometries and Alt+c's direction all read it that way"
 );
 
-/// The reference viewport the fallback percents are derived against (S8 §3.4).
-/// A documented fiction, used only when the real display width is unknown — a
-/// `clave setup` run from a script, a launch with no TTY. It exists so the
-/// percent is a DERIVATION rather than a number somebody chose.
-pub const REFERENCE_VIEWPORT_COLS: usize = 200;
-
-/// The expanded `size="N%"` for a display of unknown width.
-///
-/// It MUST be a percent: a fixed `size=54` makes zellij refuse every resize on
-/// the pane (`CantResizeFixedPanes`), which left Alt+c dead in any freshly
-/// launched session (c8-cold-start 2026-07-18) and would also make the bar's
-/// neighbour user-unresizable.
-///
-/// Computed, not hand-derived: the literal used to live in three format
-/// strings, and round 21 had to remember to touch each one by hand.
-pub const BAR_BIRTH_PERCENT: usize = BAR_TARGET_COLS * 100 / REFERENCE_VIEWPORT_COLS;
-
-/// [`BAR_BIRTH_PERCENT`]'s collapsed twin, derived the same way. Needed because
-/// #181 gives the collapsed geometry its own KDL node — a swap layout — which
-/// has to be sized even when there is no TTY to derive a percent from.
-pub const COLLAPSED_BIRTH_PERCENT: usize = COLLAPSED_TARGET_COLS * 100 / REFERENCE_VIEWPORT_COLS;
-
-/// The percent that puts `target_cols` on a display of KNOWN width — the
-/// fiction removed (LEDGER D35). Prefer [`bar_percent_for`], which picks the
-/// target for you; this is the arithmetic underneath it.
-///
-/// Falls back to [`BAR_BIRTH_PERCENT`] when the width is unknown or absurd —
-/// there is no honest percent for a zero-width display, and a caller with no
-/// TTY (a `clave setup` in a script) must still emit a valid layout.
-///
-/// **Exactness is not available, and pretending otherwise would be the bug.**
-/// A KDL size is a whole percent, and zellij resolves it by FLOORING
-/// `(percent / 100) × display` (`zellij-utils-0.44.3/src/pane_size.rs:136`). On
-/// a 280-column display one percent is 2.8 columns, so 54 (19.29%) is simply
-/// not expressible: 19% floors to 53, 20% to 56. This rounds to NEAREST, which
-/// bounds the residual at roughly half a percent of the display — 53 here, one
-/// column under. Since #181 that residual is simply the width the bar has:
-/// nothing tries to close it, and `render_rows` lays the rows out against the
-/// columns zellij actually gave it.
-///
-/// The result is clamped to `1..=100`: zellij rejects anything outside that. A
-/// display narrower than the target clamps to 100 rather than overflowing — the
-/// bar asks for the whole tab, and `render_rows`' clip (D31) keeps the rows
-/// inside the pane.
-///
-/// **That clamp protects the LAUNCH, and only the launch.** A session opened in
-/// a narrow window still gets a bar wide enough to read. Since #181 the width is
-/// a percentage of the window and nothing watches it, so RESIZING the window
-/// afterwards shrinks the bar with it and nothing brings it back — halve the
-/// window and the expanded bar ends up narrower than the collapsed one was.
-/// Preserving it across a resize would mean watching for the change and issuing
-/// a correction, which is the machinery #181 exists to delete, so the loss is
-/// accepted and recorded in LEDGER D39 rather than fixed.
-///
-/// **Taking the expanded target unconditionally was the D36 bug**: the mode
-/// persists across a launch, so a maintainer who quit collapsed got a bar born
-/// at 54 that immediately shrank to 30 — the exact jank this exists to remove,
-/// reintroduced by ignoring half the state.
-pub fn birth_percent_for(display_cols: usize, target_cols: usize) -> usize {
-    if display_cols == 0 {
-        return BAR_BIRTH_PERCENT;
-    }
-    // Round to nearest rather than truncate: truncation is biased narrow, and
-    // a bar born narrow is the case that renders below its own intact floor.
-    let pct = (target_cols * 100 + display_cols / 2) / display_cols;
-    pct.clamp(1, 100)
-}
-
-/// The `size="N%"` a bar pane gets in a given collapse mode, for a display of
-/// known width — the ONE entry point the KDL generators use (#181).
-///
-/// Since #181 the width is decided entirely here: zellij resolves the percent
-/// against whatever the window actually is, and Alt+c switches between two
-/// pre-declared geometries rather than stepping the pane toward a column count.
-/// `None` (no TTY) falls back to the reference-viewport fiction, which is the
-/// only honest answer when the display width is unknown.
-pub fn bar_percent_for(display_cols: Option<usize>, collapsed: bool) -> usize {
-    match display_cols {
-        Some(cols) if cols > 0 => birth_percent_for(cols, target_cols_for(collapsed)),
-        _ if collapsed => COLLAPSED_BIRTH_PERCENT,
-        _ => BAR_BIRTH_PERCENT,
-    }
-}
-
 /// The NAME of a collapse mode's swap layout, shared vocabulary because both
 /// halves of clave depend on the same two strings (#197).
 ///
@@ -471,24 +387,6 @@ const _: () = assert!(
 mod tests {
     use super::*;
 
-    /// The one place the birth percent's VALUE is checked. Every other site
-    /// (three KDL generators and the test that reads them back) formats this
-    /// constant, so a target move carries the percent with it — the skew S8
-    /// §3.3 was written to remove, and the one round 21 had to fix by hand.
-    #[test]
-    fn birth_percent_is_derived_from_the_bar_target() {
-        // 54 * 100 / 200. Derived, not chosen — it was 22 at a 44 target.
-        assert_eq!(BAR_BIRTH_PERCENT, 27);
-        assert_eq!(
-            BAR_BIRTH_PERCENT,
-            BAR_TARGET_COLS * 100 / REFERENCE_VIEWPORT_COLS
-        );
-        // Percent sizing is not a style choice: a fixed `size=N` makes zellij
-        // refuse every resize on the pane, so the newborn width must be
-        // expressible as a whole percent of a real viewport.
-        assert!((1..=100).contains(&BAR_BIRTH_PERCENT));
-    }
-
     /// The two targets, and the property that is not local to either: their
     /// separation, 24 columns since D19. Fail here if it changes.
     ///
@@ -501,91 +399,6 @@ mod tests {
     #[test]
     fn the_collapsed_target_is_narrower_and_separated_from_the_expanded_one() {
         assert_eq!(BAR_TARGET_COLS.abs_diff(COLLAPSED_TARGET_COLS), 24);
-    }
-
-    /// What the percent actually RESOLVES to, computed the way zellij computes
-    /// it — `floor((pct/100) × display)`. Asserting the percent alone would
-    /// prove nothing about the width the bar is born at, which is the only
-    /// thing D34/D35 care about.
-    #[test]
-    fn a_known_display_births_the_bar_within_a_column_or_two_of_target() {
-        for display in [80usize, 120, 160, 200, 240, 280, 320, 400, 500] {
-            for collapsed in [false, true] {
-                let target = target_cols_for(collapsed);
-                let pct = birth_percent_for(display, target);
-                let born = pct * display / 100;
-                let err = born.abs_diff(target);
-                assert!(
-                    err * 200 <= display + 200,
-                    "display {display} collapsed={collapsed}: {pct}% births {born}, \
-                     {err} off {target}"
-                );
-            }
-        }
-        // The maintainer's own display, pinned as a number rather than a bound:
-        // 54/280 is 19.29%, which is not expressible, so 19% -> 53.
-        assert_eq!(birth_percent_for(280, BAR_TARGET_COLS), 19);
-        assert_eq!(19 * 280 / 100, 53);
-        // A display where it IS exact — 54/120 = 45% exactly.
-        assert_eq!(birth_percent_for(120, BAR_TARGET_COLS), 45);
-        assert_eq!(45 * 120 / 100, 54);
-    }
-
-    /// D36, the live failure: the collapse mode PERSISTS across a launch, so a
-    /// birth computed for the expanded target is born wrong whenever the fleet
-    /// was left collapsed. Measured on the maintainer's own 95-column window,
-    /// where it put 57% of the terminal under the sidebar before shrinking.
-    #[test]
-    fn a_collapsed_fleet_is_born_at_the_collapsed_width() {
-        // 95 columns, the window the bug was found on.
-        assert_eq!(birth_percent_for(95, BAR_TARGET_COLS), 57); // what shipped
-        assert_eq!(57 * 95 / 100, 54); // 57% of the window — the jank
-        let collapsed = birth_percent_for(95, target_cols_for(true));
-        assert_eq!(collapsed, 32);
-        assert_eq!(32 * 95 / 100, 30); // born AT the collapsed target
-        // The two modes must actually differ, or the parameter is decorative.
-        assert_ne!(
-            birth_percent_for(95, target_cols_for(true)),
-            birth_percent_for(95, target_cols_for(false))
-        );
-    }
-
-    /// The degenerate inputs, each of which has a wrong answer that looks fine.
-    #[test]
-    fn birth_percent_for_survives_absurd_displays() {
-        // No TTY: fall back to the fiction rather than emitting `0%`, which
-        // zellij rejects and which would fail at session launch, not here.
-        assert_eq!(birth_percent_for(0, BAR_TARGET_COLS), BAR_BIRTH_PERCENT);
-        // Narrower than the bar wants: ask for everything, never over 100.
-        assert_eq!(birth_percent_for(20, BAR_TARGET_COLS), 100);
-        assert_eq!(birth_percent_for(BAR_TARGET_COLS, BAR_TARGET_COLS), 100);
-        // Never zero, however wide the display — `size="0%"` is not a layout.
-        assert!(birth_percent_for(100_000, BAR_TARGET_COLS) >= 1);
-    }
-
-    /// #181: the two swap geometries must be sized even with no TTY, and the
-    /// collapsed one must not silently fall back to the EXPANDED fiction — that
-    /// would make the collapsed swap layout a second copy of the expanded one
-    /// and Alt+c a no-op in any layout generated without a terminal.
-    #[test]
-    fn both_swap_geometries_are_sized_with_and_without_a_display() {
-        assert_eq!(COLLAPSED_BIRTH_PERCENT, 15); // 30 * 100 / 200
-        assert_ne!(BAR_BIRTH_PERCENT, COLLAPSED_BIRTH_PERCENT);
-        assert_eq!(bar_percent_for(None, false), BAR_BIRTH_PERCENT);
-        assert_eq!(bar_percent_for(None, true), COLLAPSED_BIRTH_PERCENT);
-        assert_eq!(bar_percent_for(Some(0), true), COLLAPSED_BIRTH_PERCENT);
-        // With a display the percents are the target-derived ones, and the
-        // collapsed geometry is strictly the narrower of the two on every
-        // display wide enough for the two targets to be distinguishable.
-        for display in [80usize, 120, 200, 280, 400] {
-            let expanded = bar_percent_for(Some(display), false);
-            let collapsed = bar_percent_for(Some(display), true);
-            assert!(
-                collapsed < expanded,
-                "display {display}: collapsed {collapsed}% is not narrower than \
-                 expanded {expanded}%"
-            );
-        }
     }
 
     #[test]

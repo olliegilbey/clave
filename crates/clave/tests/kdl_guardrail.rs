@@ -349,7 +349,7 @@ fn layout_kdl_parses_through_real_zellij_parser() {
 fn launch_layout_kdl_parses_in_both_branches() {
     // Empty store → bar-only (template + one plain `clave` tab).
     assert_layout_ok(
-        &setup::launch_layout_kdl_for("clave", WASM, None, None, false),
+        &setup::launch_layout_kdl("clave", WASM, None, false),
         "launch.kdl (empty store, bar-only)",
     );
     // Non-empty store → the eager most-recent branch, which composes in
@@ -357,21 +357,22 @@ fn launch_layout_kdl_parses_in_both_branches() {
     // that the empty branch never touches.
     let r = eager_record();
     assert_layout_ok(
-        &setup::launch_layout_kdl_for(BIN_ABS, WASM, Some(&r), None, false),
+        &setup::launch_layout_kdl(BIN_ABS, WASM, Some(&r), false),
         "launch.kdl (eager most-recent tab)",
     );
 }
 
 /// #181, the whole width mechanism in one assertion. Every layout clave emits
-/// must declare BOTH geometries as swap layouts, sized as percents (a fixed
-/// pane cannot be resized at all, which would freeze the collapse toggle), with
-/// the collapsed one strictly narrower — and with the geometry the tab WAS
-/// born in FIRST (#197), because `next_swap_layout` is relative and zellij
-/// hides the tab's own birth layout ahead of the declared pair: the first call
-/// lands on the first DECLARED geometry, and the bar has to spend that call to
-/// trade the unnameable birth position (`"BASE"`) for a name it can compare
-/// against the store. Same-width-first makes that call invisible; the opposite
-/// order made every cold start flash.
+/// must declare BOTH geometries as swap layouts, sized as the two FIXED column
+/// constants (fixed panes refuse every resize, which is what makes the bar
+/// border un-draggable and the painted width exactly one of the two constants
+/// the bar compares against) — and with the geometry the tab WAS born in FIRST
+/// (#197), because `next_swap_layout` is relative and zellij hides the tab's
+/// own birth layout ahead of the declared pair: the first call lands on the
+/// first DECLARED geometry, and the bar has to spend that call to trade the
+/// unnameable birth position (`"BASE"`) for a name it can compare against the
+/// store. Same-width-first makes that call invisible; the opposite order made
+/// every cold start flash.
 #[test]
 fn every_layout_declares_both_swap_geometries_birth_width_first() {
     let expected_order = |born_collapsed: bool| {
@@ -393,23 +394,21 @@ fn every_layout_declares_both_swap_geometries_birth_width_first() {
             expected_order(born_collapsed),
             "{what}: wrong swap order"
         );
-        let pct = |s: &SplitSize| match s {
-            SplitSize::Percent(p) => *p,
-            // A `Fixed` bar is refused by every resize AND makes its neighbour
-            // user-unresizable — the reason the collapse toggle was dead in
-            // fresh sessions before percents (c8-cold-start 2026-07-18).
-            SplitSize::Fixed(f) => panic!("{what}: bar sized Fixed({f}), not a percent"),
+        let fixed = |s: &SplitSize| match s {
+            SplitSize::Fixed(f) => *f,
+            // A `Percent` bar would let the border be dragged and its painted
+            // width drift off the two constants the bar reasons in — percent
+            // was only ever mandatory while the deleted resize seek needed a
+            // resizable pane (c8-cold-start 2026-07-18).
+            SplitSize::Percent(p) => panic!("{what}: bar sized {p}%, not fixed cols"),
         };
         let (expanded, collapsed) = if born_collapsed {
-            (pct(&sizes[1].1), pct(&sizes[0].1))
+            (fixed(&sizes[1].1), fixed(&sizes[0].1))
         } else {
-            (pct(&sizes[0].1), pct(&sizes[1].1))
+            (fixed(&sizes[0].1), fixed(&sizes[1].1))
         };
-        assert!(
-            collapsed < expanded,
-            "{what}: collapsed {collapsed}% is not narrower than expanded {expanded}%"
-        );
-        assert!((1..=100).contains(&expanded) && (1..=100).contains(&collapsed));
+        assert_eq!(expanded, clave_types::BAR_TARGET_COLS, "{what}");
+        assert_eq!(collapsed, clave_types::COLLAPSED_TARGET_COLS, "{what}");
         // …and the two geometries must declare the SAME bar, so that switching
         // between them moves the running one instead of spawning a second.
         let runs = swap_bar_runs(kdl, what);
@@ -428,20 +427,12 @@ fn every_layout_declares_both_swap_geometries_birth_width_first() {
     check(&setup::layout_kdl(BIN_ABS, WASM), "layout.kdl", false);
     for born_collapsed in [false, true] {
         check(
-            &setup::launch_layout_kdl_for("clave", WASM, None, Some(280), born_collapsed),
+            &setup::launch_layout_kdl("clave", WASM, None, born_collapsed),
             "launch.kdl",
             born_collapsed,
         );
         check(
-            &add::tab_layout(
-                BIN_ABS,
-                WASM,
-                "row",
-                "u-1",
-                "/tmp",
-                Some(280),
-                born_collapsed,
-            ),
+            &add::tab_layout(BIN_ABS, WASM, "row", "u-1", "/tmp", born_collapsed),
             "one-shot tab layout",
             born_collapsed,
         );
@@ -457,7 +448,7 @@ fn add_tab_layout_parses_through_real_zellij_parser() {
     let label = add::sanitize_label("fix \"auth\"\nflow · main");
     let cwd = "/home/o/code/clave/.claude-worktrees/ab12cd34";
     add::validate_cwd(cwd).expect("test cwd must pass validate_cwd");
-    let kdl = add::tab_layout(BIN_ABS, WASM, &label, "u-1", cwd, None, false);
+    let kdl = add::tab_layout(BIN_ABS, WASM, &label, "u-1", cwd, false);
     assert_layout_ok(&kdl, "add/open one-shot tab layout");
 }
 
@@ -552,7 +543,6 @@ fn backslash_label_is_guarded_through_real_parser() {
         r"fix the \d regex",
         "u-1",
         "/home/o/x",
-        None,
         false,
     );
     assert!(
@@ -561,7 +551,7 @@ fn backslash_label_is_guarded_through_real_parser() {
     );
     // The guard: the same label THROUGH sanitize_label must parse clean.
     let label = add::sanitize_label(r"fix the \d regex");
-    let kdl = add::tab_layout(BIN_ABS, WASM, &label, "u-1", "/home/o/x", None, false);
+    let kdl = add::tab_layout(BIN_ABS, WASM, &label, "u-1", "/home/o/x", false);
     assert_layout_ok(&kdl, "add/open tab layout (backslash-bearing label)");
     // And a backslash-bearing cwd must be REFUSED, not baked.
     assert!(add::validate_cwd(r"/home/o/we\ird").is_err());
@@ -626,9 +616,9 @@ fn keybind_and_layout_plugin_configurations_match() {
     let agreed_keybind_config = kb[0].clone();
 
     let r = eager_record();
-    let launch_eager = setup::launch_layout_kdl_for(BIN_ABS, WASM, Some(&r), None, false);
-    let launch_empty = setup::launch_layout_kdl_for(BIN_ABS, WASM, None, None, false);
-    let one_shot = add::tab_layout(BIN_ABS, WASM, "lbl", "u-1", "/home/o/x", None, false);
+    let launch_eager = setup::launch_layout_kdl(BIN_ABS, WASM, Some(&r), false);
+    let launch_empty = setup::launch_layout_kdl(BIN_ABS, WASM, None, false);
+    let one_shot = add::tab_layout(BIN_ABS, WASM, "lbl", "u-1", "/home/o/x", false);
     let layout_kdl_text = setup::layout_kdl(BIN_ABS, WASM);
 
     for (what, text) in [

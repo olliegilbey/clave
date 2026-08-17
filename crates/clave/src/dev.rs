@@ -1519,7 +1519,6 @@ mod tests {
                     position: i,
                     name: format!("tab-{i}"),
                     active: i == 0,
-                    swap_layout: None, // the width machine is not under test here
                 })
                 .collect(),
         );

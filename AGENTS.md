@@ -1,13 +1,12 @@
 # AGENTS.md — clave
 
-**clave** is a Zellij fleet-orchestration sidebar: it launches and navigates a
-fleet of `claude` agents as tabs in one multiplexer session, keyed off a store
-the agents' hooks write into. It builds its own daily driver — the maintainer
-lives inside a clave session while developing clave from a session inside it.
+**clave** is a Zellij fleet-orchestration sidebar: it controls and manages a set of `claude` agents as vertical tabs in one multiplexer session, keyed off a store the agents' hooks write into. It builds its own daily driver — we live inside a clave session while developing clave from a session inside it.
 
 clave will support other CLI-based agents down the line, keep this in mind as a design decision for DRY and neat APIs that are sensible and straightforward.
 
-Be deliberate in avoiding overengineering early - this is greenfield, we are iterating quickly with minimal buildout to achieve the goals.
+Be deliberate in avoiding overengineering early - this is greenfield, we are iterating quickly with minimal buildout to achieve the goals. Focus on KISS.
+
+Ground all work in the screenshots - look at the clave-working-sample PNG images in the root first to gain a visual understanding.
 
 Two crates, one workspace:
 
