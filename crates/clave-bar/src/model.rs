@@ -377,6 +377,15 @@ pub struct BarModel {
     /// correct for the launch tab and stale-but-static otherwise — strictly
     /// better than today's guaranteed wrong-then-heal.
     awaiting_hydration: bool,
+    /// Alt+f's spawn is in flight: `ShellSpawn` was emitted and no pane frame
+    /// has landed since. Until one does, `shell_toggle`'s inputs are the
+    /// pre-spawn state — a second press would read "no floating pane" and
+    /// spawn again (key-repeat fans out shells; CodeRabbit, PR #209). Cleared
+    /// by ANY `apply_panes`, not only one showing a floating pane: a spawn
+    /// that failed must not wedge the key forever ("a dropped Alt+f is a
+    /// repeatable keypress"), and the manifest the spawn itself causes is the
+    /// next one in flight anyway.
+    shell_spawn_pending: bool,
     /// §5 pipe contract: apply only strictly-newer seq.
     seq: u64,
     agents: Vec<Agent>,
@@ -1454,6 +1463,9 @@ impl BarModel {
     /// so the payment is frame-witnessed in the same sense the debt is.
     pub fn apply_panes(&mut self, panes: Vec<PaneMeta>) -> Vec<Effect> {
         self.panes = panes;
+        // The frame that ends the Alt+f spawn window: from here shell_toggle
+        // reads delivered truth again (see `shell_spawn_pending`).
+        self.shell_spawn_pending = false;
         self.prune_opening();
         if self.reanchor_owed
             && self.elects_confirmed()
@@ -1848,6 +1860,11 @@ impl BarModel {
         if !self.own_tab_focused() {
             return Vec::new();
         }
+        // A spawn is in flight: every input below is pre-spawn state, so any
+        // decision would be wrong (worst: another spawn). Drop the press.
+        if self.shell_spawn_pending {
+            return Vec::new();
+        }
         // Under the gate, own tab == the tab the user is looking at, and the
         // frames are coherent — both lookups below resolve against the same
         // delivered pair.
@@ -1867,6 +1884,7 @@ impl BarModel {
         if has_floating {
             vec![Effect::ShellShow]
         } else {
+            self.shell_spawn_pending = true;
             vec![Effect::ShellSpawn]
         }
     }
@@ -3865,6 +3883,44 @@ mod tests {
             vec![Effect::ShellHide],
             "visible floating panes: the press must hide them"
         );
+    }
+
+    #[test]
+    fn a_second_press_before_the_pane_frame_never_spawns_twice() {
+        // Key-repeat on Alt+f: presses land faster than zellij's PaneUpdate,
+        // so every one of them reads "no floating pane" — without the latch,
+        // N presses fan out N shells (CodeRabbit, PR #209). The latch drops
+        // presses until ANY pane frame lands, including one that shows no
+        // floating pane at all: a failed spawn must leave the key repeatable,
+        // not wedged.
+        let mut m = fleet_of_three(11);
+        m.beacon(11);
+        assert_eq!(m.shell_toggle(), vec![Effect::ShellSpawn]);
+        assert_eq!(
+            m.shell_toggle(),
+            Vec::<Effect>::new(),
+            "spawn in flight: a repeat press must be dropped, not re-spawn"
+        );
+        // The spawn failed — the next manifest still shows no floating pane.
+        m.apply_panes(panes_at(&FLEET_PANES));
+        assert_eq!(
+            m.shell_toggle(),
+            vec![Effect::ShellSpawn],
+            "any pane frame reopens the decision; a failed spawn must not \
+             wedge Alt+f forever"
+        );
+        // This time the frame delivers the pane: the latch clears into the
+        // normal show/hide table, not another spawn.
+        let mut panes = panes_at(&FLEET_PANES);
+        panes.push(PaneMeta {
+            tab_position: 1,
+            pane_id: 200,
+            is_plugin: false,
+            is_focused: false,
+            is_floating: true,
+        });
+        m.apply_panes(panes);
+        assert_eq!(m.shell_toggle(), vec![Effect::ShellShow]);
     }
 
     #[test]
