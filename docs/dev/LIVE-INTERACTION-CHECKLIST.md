@@ -749,10 +749,12 @@ rather than advancing**, which is a way to get no movement at all.
 
 Since the 2026-08-17 rebuild the bar answers both from its PAINTED width: the
 two geometries are declared as fixed column counts (54 expanded, 30 collapsed),
-so on every paint the bar compares the width zellij just gave it against the
-constant its mode wants, and asks for one switch while they differ — unbounded
-while the width keeps moving, at most three asks while it is frozen (the cycle
-is three positions long), then it rests until the width or the mode changes.
+so the bar compares the width zellij paints it at against the constant its
+mode wants and asks for one switch on a mismatch — then goes DEAF until a
+0.15s cooldown judges the latest paint once (a swap's queued repaints echo the
+pre-swap width; judging them was the filmed infinite toggle loop), spending at
+most three asks per mode-intent (the cycle is three positions long) before it
+rests until the intent changes.
 The layout name zellij reports is read by NOTHING: zellij only computes it for
 tabs with two or more selectable panes, which no clave tab has (FOOTGUNS). And
 a border drag is REFUSED by zellij itself — fixed panes cannot be resized from

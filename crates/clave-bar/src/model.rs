@@ -163,18 +163,36 @@ pub enum BindStallState {
     Cleared,
 }
 
-/// The ONLY timer the bar arms (#100 deleted the 0.4s dormant dwell, so
-/// Event::Timer carries peek sinks alone — no classification needed until
-/// #92's read timer joins the channel).
+/// The peek sink timer. Event::Timer carries TWO kinds again since the
+/// 2026-08-17 width-loop fix (the width cooldown below rejoined it; #100 had
+/// deleted the 0.4s dormant dwell and with it the classification) — main.rs
+/// tells them apart by the elapsed seconds the event echoes, the same
+/// duration-cutoff scheme the dwell era used.
 pub const PEEK_SINK_SECS: f64 = 0.9;
 
-/// The width machine's spin guard (`BarModel::frozen`): the most consecutive
-/// switch asks the bar may spend while its painted width does not change.
+/// How long a switch ask deafens the width machine (`main.rs` arms it via
+/// `set_timeout` on every `Effect::SwapWidth`). A swap's repaints arrive
+/// QUEUED and stale — the QA-drive trace (2026-08-17) showed a burst of
+/// pre-swap widths landing within ~10ms of the ask — so a machine that
+/// judges every paint spends its whole budget on echoes of its own last
+/// move. One ask buys silence until this clock expires; the expiry judges
+/// the LATEST painted width once. 150ms is an order of magnitude past the
+/// measured burst and well under [`PEEK_SINK_SECS`], which keeps the two
+/// timer kinds separable by elapsed time.
+pub const WIDTH_COOLDOWN_SECS: f64 = 0.15;
+
+/// The width machine's walk budget (`BarModel::walk_spent`): the most switch
+/// asks one mode-intent may spend without ever landing its target width.
 /// Three is derived, not tuned: the swap cycle is three positions long
 /// (FOOTGUNS — birth, then the two declared geometries) and a user-damaged
-/// tab re-applies once before advancing, so three same-width asks provably
-/// visit every position; a fourth could only repeat the walk.
-pub const FROZEN_ASK_CAP: u8 = 3;
+/// tab re-applies once before advancing, so three cooldown-spaced asks — each
+/// judged against the width the previous one actually produced — provably
+/// visit every position; a fourth could only repeat the walk. The budget is
+/// per INTENT, never re-armed by mere movement: a walk whose positions keep
+/// the width changing without ever producing the target (a window too narrow
+/// to hold it) would otherwise loop forever at the cooldown's cadence — the
+/// same runaway the QA drive filmed, just slower.
+pub const WALK_ASK_CAP: u8 = 3;
 
 /// A row that has never received a user commitment (S1). Sorts below every row
 /// that has. Reachable for a LIVE tab only when its birth touch never landed —
@@ -373,28 +391,34 @@ pub struct BarModel {
     /// Local unread-override: Done agents we've already cleared on focus.
     /// Render-side only; `clave focus` persists the real transition.
     read_locally: BTreeSet<String>,
-    /// The width machine's only state (#197, rebuilt on painted truth): the
-    /// spin guard, as `(painted cols, wanted mode, asks spent while BOTH were
-    /// unchanged)`. A debounce, never a belief — it is cleared the moment the
-    /// painted width or the mode moves, and it is never consulted to decide
-    /// where the tab is, only whether asking again can help.
+    /// The width machine's state (#197, rebuilt on painted truth; paced by a
+    /// cooldown after the 2026-08-17 QA drive filmed the paint-echo runaway).
     ///
     /// A switch is DERIVED: it is owed whenever the width zellij paints this
     /// pane at is not the width the mode declares
     /// (`clave_types::target_cols_for` — a fixed column count the layouts
     /// carry verbatim, so the comparison is equality against a constant).
     /// There is no queue to replay, only an end state to reach; a mode that
-    /// leaves and returns owes nothing. What derivation alone does not answer
-    /// is a switch that cannot change the width: the hidden birth position
-    /// doubles the birth geometry's width, a user-damaged tab spends a switch
-    /// re-applying, and a window too narrow to hold the target never reaches
-    /// it — and zellij repaints after every switch whether or not it moved
-    /// anything, so an unguarded rule would ask forever. [`FROZEN_ASK_CAP`]
-    /// consecutive asks from one frozen width provably walks the whole
-    /// three-position swap cycle even through one damage re-apply; a width
-    /// still frozen after that is one zellij cannot produce, and the bar
-    /// rests until the width or the mode changes.
-    frozen: Option<(usize, bool, u8)>,
+    /// leaves and returns owes nothing.
+    ///
+    /// `swap_in_flight`: an ask has been sent and its cooldown timer has not
+    /// fired yet. While set the machine records paints but judges none of
+    /// them — a swap's repaints arrive queued and STALE, and a machine that
+    /// judged them spent its whole budget on echoes of its own last move,
+    /// which is exactly the infinite toggle loop the QA drive filmed
+    /// (three asks per millisecond, each burst re-arming the next).
+    /// Cleared only by [`Self::width_cooldown_elapsed`], which judges the
+    /// latest paint once.
+    swap_in_flight: bool,
+    /// The width of the most recent paint, recorded deaf or not — what the
+    /// cooldown expiry judges instead of the paint that preceded the ask.
+    last_painted: Option<usize>,
+    /// The walk budget: `(wanted mode, asks spent on it without landing)`.
+    /// Cleared when the painted width EQUALS the target or the intent
+    /// changes (toggle, peek, focus loss) — never by mere movement, which
+    /// the machine's own walk causes ([`WALK_ASK_CAP`]). Never consulted to
+    /// decide where the tab is, only whether asking again can help.
+    walk_spent: Option<(bool, u8)>,
     /// tab_id of the last visited (focused) tab — replicated on every
     /// instance from the visited-pipe/nav broadcast streams. This is the nav
     /// walk base: the local TabInfo.active flag is stale everywhere except
@@ -1456,6 +1480,22 @@ impl BarModel {
         }
     }
 
+    /// The width profile for one PAINT. Identical to [`Self::widths`] except
+    /// during the D37 hydration window, where the mode is still `Default`'s
+    /// guess while the painted width is store truth (the launch layout is
+    /// composed from `store.collapsed`) — so the paint picks the profile. A
+    /// collapsed cold start otherwise drew the expanded profile squeezed
+    /// into the 30-col pane for the ~200ms before the snapshot arrived (QA
+    /// drive, 2026-08-17): the geometry never moved, but the ink flashed.
+    /// This carves NO exception into D16's state-not-cols lock — a hydrated
+    /// bar (every peek, every toggle) still chooses by state alone.
+    pub fn widths_at(&self, cols: usize) -> Widths {
+        if self.awaiting_hydration && cols == clave_types::COLLAPSED_TARGET_COLS {
+            return Widths::COLLAPSED;
+        }
+        self.widths()
+    }
+
     /// The one collapse predicate. A peeking bar seeks (and renders) the
     /// template width even though it is collapsed — the collapse resumes when
     /// the peek expires.
@@ -1897,7 +1937,8 @@ impl BarModel {
     ///
     /// One rule: **while this pane is painted at a width other than the one
     /// the store's mode declares, and this bar's own tab is the focused one,
-    /// ask for one switch per paint.** The declared widths are fixed column
+    /// ask for one switch per judged paint — and an ask defers all judgement
+    /// to its cooldown expiry.** The declared widths are fixed column
     /// counts ([`clave_types::target_cols_for`]) carried verbatim by the
     /// layouts and applied exactly by layout application, so "which geometry
     /// am I in" is one equality against a constant — the same shape as the
@@ -1915,30 +1956,36 @@ impl BarModel {
     /// The painted width is the one input zellij cannot withhold: it arrives
     /// with every render, and it is the very thing the user sees.
     ///
-    /// **The spin guard** (`frozen`, this machine's only state). A switch
-    /// that cannot change the width must not become a loop: the hidden birth
-    /// position doubles the birth geometry's width (the generator declares
-    /// the birth geometry first, so leaving `BASE` moves nothing visible), a
-    /// user-damaged tab spends its next switch re-applying instead of
-    /// advancing, and a window too narrow to hold the target never reaches
-    /// it — while zellij repaints after every switch whether or not anything
-    /// moved. So: asks are unbounded while the painted width keeps changing,
-    /// and capped at [`FROZEN_ASK_CAP`] while it is frozen. Three provably
-    /// walks the three-position swap cycle even through one damage re-apply;
-    /// a width still frozen after three is one zellij cannot produce, and
-    /// the bar rests at it until the width or the mode changes (the round-20
-    /// "wherever cols stop changing" ruling, inherited from the seek era).
+    /// **The cooldown** (`swap_in_flight` + [`WIDTH_COOLDOWN_SECS`]). A
+    /// swap's repaints arrive queued and STALE — a toggle's pane resize
+    /// lands renders after its `TabUpdate` (measured 2026-08-15), and the
+    /// 2026-08-17 QA drive filmed the consequence: paints echoing the
+    /// PREVIOUS width bought three asks inside a millisecond, the three-ask
+    /// walk lapped the whole cycle, and the walk's own paint wake re-armed
+    /// the next burst — an infinite expand/collapse loop at paint speed.
+    /// So an ask buys deafness: paints are recorded (`last_painted`) but not
+    /// judged until the cooldown timer fires and
+    /// [`Self::width_cooldown_elapsed`] judges the latest width exactly
+    /// once. Every ask is thereby judged against the width the previous ask
+    /// actually produced, never against its echoes. The first mismatching
+    /// paint still asks IMMEDIATELY — only follow-ups wait — so the idle
+    /// starvation that killed the stillness gate (FOOTGUNS: zellij never
+    /// repaints an idle plugin) cannot recur: the timer, unlike a render, is
+    /// always delivered.
     ///
-    /// **Transitional paints.** A toggle's pane resize lands renders AFTER
-    /// its `TabUpdate` (measured live, 2026-08-15), so a stale pre-resize
-    /// width can arrive just after an ask and trigger a second one — which
-    /// overshoots the cycle. That costs a visible flap at worst, never a
-    /// wedge: overshooting changes the painted width, which resets the
-    /// guard, and post-apply paints carry the true width, so the walk always
-    /// re-converges on the one fixpoint `cols == target`. The old stillness
-    /// gate bought the same safety by delaying every judgement two renders —
-    /// and starved in an idle session, where the second render never comes
-    /// (FOOTGUNS: zellij never repaints an idle plugin).
+    /// **The walk budget** (`walk_spent`, [`WALK_ASK_CAP`]). A switch that
+    /// cannot reach the target must not become a loop: the hidden birth
+    /// position doubles the birth geometry's width, a user-damaged tab
+    /// spends its next switch re-applying instead of advancing, and a window
+    /// too narrow to hold the target never reaches it — its positions can
+    /// keep the width CHANGING forever without ever producing the target,
+    /// so the budget is per intent and is not re-armed by movement. Three
+    /// cooldown-spaced asks provably visit every position even through one
+    /// damage re-apply; an intent still unmet after three is one zellij
+    /// cannot produce, and the bar rests wherever the walk stopped until the
+    /// intent changes (the round-20 "wherever cols stop changing" ruling,
+    /// narrowed: a toggle, peek, or refocus re-arms it; a window resize
+    /// alone no longer does).
     ///
     /// **The drag arm is GONE, not moved.** Fixed-width panes cannot be
     /// resized in zellij at all, from either side of the border (FOOTGUNS,
@@ -1962,27 +2009,48 @@ impl BarModel {
             return Vec::new();
         }
         if !self.own_tab_focused() {
-            self.frozen = None;
+            self.walk_spent = None;
             return Vec::new();
         }
         // Only render carries a width; a frame with none has nothing to say.
         let Some(cols) = own_cols else {
             return Vec::new();
         };
+        self.last_painted = Some(cols);
+        // Deaf: an ask is in flight and its repaint echoes prove nothing.
+        // The cooldown expiry judges `last_painted` once, in this instant's
+        // place.
+        if self.swap_in_flight {
+            return Vec::new();
+        }
         let want = self.showing_collapsed();
         if cols == clave_types::target_cols_for(want) {
-            self.frozen = None;
+            self.walk_spent = None;
             return Vec::new();
         }
-        let spent = match self.frozen {
-            Some((c, w, n)) if c == cols && w == want => n,
+        let spent = match self.walk_spent {
+            Some((w, n)) if w == want => n,
             _ => 0,
         };
-        if spent >= FROZEN_ASK_CAP {
+        if spent >= WALK_ASK_CAP {
             return Vec::new();
         }
-        self.frozen = Some((cols, want, spent + 1));
+        self.walk_spent = Some((want, spent + 1));
+        self.swap_in_flight = true;
         vec![Effect::SwapWidth]
+    }
+
+    /// The width cooldown fired (`main.rs` arms one [`WIDTH_COOLDOWN_SECS`]
+    /// timer per `Effect::SwapWidth`): end the deafness and judge the latest
+    /// painted width exactly once. Inert when no ask is in flight, so a
+    /// misrouted timer expiry (the peek sink shares the event) costs
+    /// nothing.
+    pub fn width_cooldown_elapsed(&mut self) -> Vec<Effect> {
+        if !self.swap_in_flight {
+            return Vec::new();
+        }
+        self.swap_in_flight = false;
+        self.width_effects(self.last_painted)
     }
 }
 
@@ -3776,11 +3844,12 @@ mod tests {
     /// The one width property that matters: **a mode change moves the pane,
     /// and the pane ARRIVING at the mode's width is what ends the episode.**
     ///
-    /// Driven through the real entry point: `width_effects` is called once per
-    /// render with the width zellij just painted us at, so the sequence below
-    /// is exactly what a live bar sees — the paint after the toggle still
-    /// shows the old width and asks for the switch; the paint after the
-    /// switch shows the new width and rests.
+    /// Driven through the real entry points: `width_effects` once per render
+    /// with the width zellij just painted us at, and `width_cooldown_elapsed`
+    /// for the timer main.rs arms per ask — the sequence below is exactly
+    /// what a live bar sees. The paint after the toggle still shows the old
+    /// width and asks; the paints after the switch land while the ask's
+    /// cooldown holds, and the expiry finds the target width and rests.
     #[test]
     fn a_toggle_asks_on_the_first_paint_and_the_target_width_ends_it() {
         let mut m = focused_bar();
@@ -3788,92 +3857,160 @@ mod tests {
         m.toggle(); // wants collapsed
         assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
         assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
+        assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
         assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
         m.toggle(); // and back
         assert_eq!(m.width_effects(Some(COL_W)), vec![Effect::SwapWidth]);
         assert_eq!(m.width_effects(Some(EXP_W)), Vec::<Effect>::new());
+        assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
     }
 
     /// The swap cycle hides the tab's birth layout as a position of its own
     /// (FOOTGUNS), so one switch can land on a DIFFERENT position with the
-    /// SAME width. The paint after it shows the width unchanged, and the
-    /// machine must ask again rather than conclude it already asked.
+    /// SAME width. The cooldown expiry sees the width unchanged and asks
+    /// again rather than conclude it already asked.
     #[test]
     fn a_no_move_landing_is_asked_again_from_the_same_width() {
         let mut m = focused_bar();
         m.toggle(); // wants collapsed
         assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
         // The switch traded one expanded-width position for another
-        // (birth → declared expanded): same width, new paint.
+        // (birth → declared expanded): same width, new paint, judged deaf —
+        // the expiry spends the second ask.
+        assert_eq!(m.width_effects(Some(EXP_W)), Vec::<Effect>::new());
+        assert_eq!(m.width_cooldown_elapsed(), vec![Effect::SwapWidth]);
+        assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
+        assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
+    }
+
+    /// A paint that arrives while an ask's cooldown holds buys NOTHING —
+    /// however many arrive, whatever they claim. This is the regression the
+    /// QA drive filmed (2026-08-17): a swap's queued repaints echo the
+    /// pre-swap width, and a machine that judged them spent three asks
+    /// inside a millisecond, lapped the whole swap cycle, and re-armed
+    /// itself off its own paint wake — expand/collapse at paint speed,
+    /// forever. Replayed verbatim from the live trace.
+    #[test]
+    fn the_paint_echo_burst_buys_one_ask_and_the_expiry_ends_the_episode() {
+        let mut m = focused_bar();
+        m.toggle(); // wants collapsed
         assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        // The live trace: five echoes of the pre-swap width, then the true
+        // landing, all inside one cooldown. Every one of them judged
+        // nothing.
+        for _ in 0..5 {
+            assert_eq!(m.width_effects(Some(EXP_W)), Vec::<Effect>::new());
+        }
+        assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
+        // The expiry judges the LATEST width — the true landing — and
+        // rests. One press, one ask, episode over.
+        assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
         assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
     }
 
     /// A width zellij cannot produce (a window too narrow for the target)
-    /// must not become a spin: [`FROZEN_ASK_CAP`] consecutive asks walk the
-    /// whole cycle, and a width still frozen after them is conceded — the bar
-    /// rests at it until the width or the mode changes. (The round-20
-    /// "wherever cols stop changing" ruling, inherited from the seek era.)
+    /// must not become a spin: [`WALK_ASK_CAP`] cooldown-spaced asks walk
+    /// the whole cycle, and an intent still unmet after them is conceded —
+    /// the bar rests wherever the walk stopped until the intent changes.
+    /// (The round-20 "wherever cols stop changing" ruling.)
     #[test]
     fn a_width_zellij_cannot_produce_is_asked_thrice_then_rested() {
         let mut m = focused_bar();
         m.toggle(); // wants collapsed; the window can only paint 47
-        for _ in 0..FROZEN_ASK_CAP {
-            assert_eq!(m.width_effects(Some(47)), vec![Effect::SwapWidth]);
+        assert_eq!(m.width_effects(Some(47)), vec![Effect::SwapWidth]);
+        for _ in 1..WALK_ASK_CAP {
+            assert_eq!(m.width_cooldown_elapsed(), vec![Effect::SwapWidth]);
         }
-        assert_eq!(m.width_effects(Some(47)), Vec::<Effect>::new(), "rested");
+        assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new(), "rested");
         assert_eq!(m.width_effects(Some(47)), Vec::<Effect>::new(), "still");
     }
 
-    /// The spin guard counts asks from ONE frozen width: any movement is
-    /// progress and resets it, so a walk that keeps moving is never starved
-    /// of the asks it needs to converge.
+    /// The budget is per INTENT, not per width: a walk whose positions keep
+    /// the width moving without ever producing the target must still rest
+    /// after [`WALK_ASK_CAP`] asks. Movement re-arming the budget was the
+    /// second half of the filmed runaway — on a window that can paint both
+    /// 47 and 30 but never 54, each landing re-armed the other's counter and
+    /// the walk cycled at the cooldown's cadence, forever.
     #[test]
-    fn a_width_change_resets_the_spin_guard() {
-        let mut m = focused_bar();
-        m.toggle();
-        for _ in 0..FROZEN_ASK_CAP {
-            assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
-        }
-        assert_eq!(m.width_effects(Some(EXP_W)), Vec::<Effect>::new());
-        // The pane moves (however late): a fresh width, a fresh budget.
-        assert_eq!(m.width_effects(Some(40)), vec![Effect::SwapWidth]);
+    fn a_walk_that_keeps_moving_without_landing_rests_after_its_budget() {
+        let mut m = collapsed_model();
         assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
+        m.toggle(); // wants expanded; the window cannot hold 54
+        assert_eq!(m.width_effects(Some(COL_W)), vec![Effect::SwapWidth]);
+        for paint in [47, COL_W] {
+            assert_eq!(m.width_effects(Some(paint)), Vec::<Effect>::new());
+            assert_eq!(m.width_cooldown_elapsed(), vec![Effect::SwapWidth]);
+        }
+        // Three spent without a landing: the walk rests, moving or not.
+        assert_eq!(m.width_effects(Some(47)), Vec::<Effect>::new());
+        assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new(), "rested");
+        assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new(), "still");
     }
 
-    /// A stale pre-resize paint can arrive after the pane already moved (a
-    /// toggle's pane resize lands renders after its `TabUpdate` — measured
-    /// live, 2026-08-15). Acting on it overshoots the cycle, which is a
-    /// visible flap at worst and never a wedge: the next honest paint either
-    /// rests at the target or re-asks with a fresh budget.
+    /// A stale pre-resize paint can drain from the pipeline AFTER the
+    /// episode already ended at the target (a landing clears the budget).
+    /// The machine cannot tell it from a real deviation and spends an ask —
+    /// a visible flap at worst, never a wedge: the walk re-converges and
+    /// rests, and the flap cannot re-arm itself because every follow-up
+    /// judgement waits out a cooldown.
     #[test]
-    fn a_stale_transitional_paint_costs_a_flap_and_converges() {
+    fn a_stale_paint_after_a_landing_costs_a_flap_and_converges() {
         let mut m = focused_bar();
         m.toggle(); // wants collapsed
         assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
         assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
-        // A stale expanded-width paint drains from the pipeline: the machine
-        // cannot tell it from a real deviation and spends an ask.
+        assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new(), "landed");
+        // The stale echo, arriving at rest: one ask, fresh budget.
         assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
-        // The honest paint after the overshoot walk lands home and rests.
+        // Its walk goes home again and the expiry rests.
         assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
+        assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
         assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
     }
 
-    /// The mode changing re-arms the guard even at an unchanged width: a new
-    /// intent deserves a fresh walk.
+    /// The mode changing re-arms the budget even at an unchanged width: a
+    /// new intent deserves a fresh walk.
     #[test]
-    fn a_mode_flip_resets_the_spin_guard() {
+    fn a_mode_flip_rearms_the_walk_budget() {
         let mut m = focused_bar();
-        m.toggle(); // wants collapsed
-        for _ in 0..FROZEN_ASK_CAP {
-            assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        m.toggle(); // wants collapsed; the pane never moves
+        assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        for _ in 1..WALK_ASK_CAP {
+            assert_eq!(m.width_cooldown_elapsed(), vec![Effect::SwapWidth]);
         }
-        assert_eq!(m.width_effects(Some(EXP_W)), Vec::<Effect>::new());
+        assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
         m.toggle(); // wants expanded again — and the pane is already there
         assert_eq!(m.width_effects(Some(EXP_W)), Vec::<Effect>::new());
-        m.toggle(); // wants collapsed: same frozen width, fresh intent
+        m.toggle(); // wants collapsed: same width, fresh intent
         assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+    }
+
+    /// A toggle pressed while an ask is in flight is not lost and not
+    /// double-served: the paint stays unjudged until the expiry, which
+    /// serves the NEW intent.
+    #[test]
+    fn a_toggle_mid_cooldown_is_served_at_the_expiry() {
+        let mut m = focused_bar();
+        m.toggle(); // wants collapsed
+        assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        m.toggle(); // changed their mind before the swap settled
+        assert_eq!(m.width_effects(Some(EXP_W)), Vec::<Effect>::new());
+        // The expiry judges the latest paint against the CURRENT intent:
+        // expanded, already painted expanded — nothing owed.
+        assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
+    }
+
+    /// The peek sink shares the Timer event, so an expiry can reach the
+    /// width machine with no ask in flight. It must judge nothing — ending
+    /// a deafness that does not exist would be a second entry point into
+    /// the ask logic.
+    #[test]
+    fn a_cooldown_expiry_at_rest_is_inert() {
+        let mut m = focused_bar();
+        assert_eq!(m.width_effects(Some(EXP_W)), Vec::<Effect>::new());
+        assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
+        m.toggle(); // a mismatch exists, but no ask is in flight
+        assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
     }
 
     /// An untouched bar at its mode's width never asks for anything, however
@@ -3945,6 +4082,7 @@ mod tests {
         frame(&mut m, 11);
         assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
         assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
+        assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
         m.beacon(10); // the user leaves
         assert!(m.visited(10)); // and navs, which every bar hears
         assert!(m.peek_expired());
@@ -3965,6 +4103,7 @@ mod tests {
         let mut m = collapsed_model();
         assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
         assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
+        assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
         // The nav lands on THIS bar's own tab — the bar the user is now
         // reading, and so the only one entitled to move a pane.
         assert!(m.visited(11), "collapsed bar must arm a peek");
@@ -3973,12 +4112,14 @@ mod tests {
         // shows the expanded profile and occupies the expanded pane.
         assert_eq!(m.width_effects(Some(COL_W)), vec![Effect::SwapWidth]);
         assert_eq!(m.width_effects(Some(EXP_W)), Vec::<Effect>::new());
+        assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
         // A second nav during the peek re-arms (main.rs counts its timers).
         assert!(m.visited(11));
         // Expiry: sink back to the gutter.
         assert!(m.peek_expired());
         assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
         assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
+        assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
     }
 
     #[test]
@@ -3996,6 +4137,7 @@ mod tests {
         let mut m = collapsed_model();
         assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
         assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
+        assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
         assert!(m.visited(11));
         // Alt+c mid-peek: now genuinely expanded; the peek flag must not
         // survive to fight the user's explicit toggle.
@@ -4454,6 +4596,24 @@ mod tests {
         assert_eq!(m.widths(), Widths::EXPANDED, "a peek shows the template");
         assert!(m.peek_expired());
         assert_eq!(m.widths(), Widths::COLLAPSED);
+    }
+
+    /// The one exception window: while awaiting hydration the mode is a
+    /// default guess but the painted width is store truth (the launch layout
+    /// is composed from `store.collapsed`), so the PAINT picks the profile —
+    /// a collapsed cold start must not flash the expanded ink into its
+    /// 30-col pane. Hydration restores D16's state-only rule.
+    #[test]
+    fn a_bar_awaiting_hydration_draws_the_profile_its_pane_was_born_at() {
+        let mut m = BarModel::default();
+        m.await_hydration();
+        assert_eq!(m.widths_at(COL_W), Widths::COLLAPSED, "born collapsed");
+        assert_eq!(m.widths_at(EXP_W), Widths::EXPANDED, "born expanded");
+        let mut s = snap(1, vec![]);
+        s.collapsed = true;
+        m.apply_snapshot(s);
+        // Hydrated: state rules again, whatever width a stale paint claims.
+        assert_eq!(m.widths_at(EXP_W), Widths::COLLAPSED);
     }
 
     // --- PROVISIONAL ink allocation (delete with `ProvisionalInks`) --------
@@ -5487,6 +5647,7 @@ mod tests {
         // one switch, and arriving at the collapsed width ends it.
         assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
         assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
+        assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
         // A keypress AFTER hydration is a licence, and moves the pane.
         m.toggle();
         assert_eq!(m.width_effects(Some(COL_W)), vec![Effect::SwapWidth]);

@@ -8,18 +8,26 @@ use std::io::Write;
 
 // The pure model lives in the LIB half of this crate (src/lib.rs → model.rs)
 // so it host-tests without linking this bin's wasm host-import shims.
-use clave_bar::model::{BarModel, BindStallState, Effect, PEEK_SINK_SECS, PaneMeta, TabMeta};
+use clave_bar::model::{
+    BarModel, BindStallState, Effect, PEEK_SINK_SECS, PaneMeta, TabMeta, WIDTH_COOLDOWN_SECS,
+};
 use clave_bar::plugin_config::resolve_binary;
 use clave_bar::render::{Row, render_rows};
 use zellij_tile::prelude::*;
+
+/// Event::Timer echoes the elapsed seconds, and the bar's two timer kinds sit
+/// either side of this line: the width cooldown (0.15s) below it, the peek
+/// sink (0.9s) above. The dwell era's classify_timer scheme, revived.
+const TIMER_KIND_CUTOFF_SECS: f64 = 0.5;
 
 #[derive(Default)]
 struct State {
     model: BarModel,
     /// Peek-on-nav timers in flight: each armed peek starts one
     /// set_timeout(1.0); only the LAST expiry sinks the bar, so a nav burst
-    /// keeps it expanded until ~1s after the final press. The ONLY timers
-    /// the bar arms (#100 deleted the dormant dwell).
+    /// keeps it expanded until ~1s after the final press. Since the
+    /// 2026-08-17 width-loop fix the width cooldown shares the Timer event
+    /// (classified by elapsed time, TIMER_KIND_CUTOFF_SECS).
     pending_peeks: u32,
     /// The pane height in lines, as of the last `render` — the only place
     /// zellij tells us (#148). A click carries a line of the VIEWPORT, so
@@ -212,7 +220,13 @@ impl State {
                 // there is no tab-targeted form of this command and none is
                 // wanted — collapse is a per-tab display mode that every
                 // instance flips for itself off the same store snapshot.
-                Effect::SwapWidth => next_swap_layout(),
+                // The timer ends the ask's deafness: the swap's queued
+                // repaints echo the PRE-swap width, and judging them is the
+                // paint-speed toggle loop the 2026-08-17 QA drive filmed.
+                Effect::SwapWidth => {
+                    next_swap_layout();
+                    set_timeout(WIDTH_COOLDOWN_SECS);
+                }
                 // §6.6 C8 dormant nav (ungated — click reaches exactly one
                 // instance, nav effects are executor-only by construction,
                 // and the model's `opening` guard + clave open's no-op make
@@ -603,15 +617,31 @@ impl ZellijPlugin for State {
                 self.settle_identity(); // fresh manifest → own-tab joins resolvable
                 true
             }
-            Event::Timer(_elapsed) => {
-                // Peek sinks are the ONLY timers the bar arms (#100 deleted
-                // the dormant dwell, so the two-kind classify_timer split
-                // went with it). One expiry per armed peek; only the LAST
-                // sinks (nav burst = one visible expand, one sink).
-                // peek_expired() is false when a toggle already cancelled
-                // the peek — no repaint.
-                self.pending_peeks = self.pending_peeks.saturating_sub(1);
-                self.pending_peeks == 0 && self.model.peek_expired()
+            Event::Timer(elapsed) => {
+                // TWO timer kinds share this event again (the dwell era's
+                // classify_timer scheme, revived for the width cooldown):
+                // Timer echoes the ELAPSED seconds, and the two durations
+                // sit either side of the cutoff. The width leg runs on
+                // EVERY expiry — `width_cooldown_elapsed` is inert unless
+                // an ask is in flight, so a peek expiry (or a delayed
+                // width timer classified long) ending the deafness a few
+                // ms early is harmless, and no expiry can strand it.
+                let fx = self.model.width_cooldown_elapsed();
+                let width_moved = !fx.is_empty();
+                self.run_effects(fx);
+                // The peek leg is the one that must NOT run on a width
+                // expiry: it counts armed peeks, and a foreign decrement
+                // sinks a live peek early. One expiry per armed peek; only
+                // the LAST sinks (nav burst = one visible expand, one
+                // sink). peek_expired() is false when a toggle already
+                // cancelled the peek — no repaint.
+                let peek_sunk = if elapsed >= TIMER_KIND_CUTOFF_SECS && self.pending_peeks > 0 {
+                    self.pending_peeks -= 1;
+                    self.pending_peeks == 0 && self.model.peek_expired()
+                } else {
+                    false
+                };
+                width_moved || peek_sunk
             }
             Event::Mouse(Mouse::LeftClick(line, _col)) => {
                 // §6.6: rows are mouse-clickable. line is the rendered row.
@@ -651,13 +681,11 @@ impl ZellijPlugin for State {
         // render: they fire from apply_tabs (birth / clave-organic) and
         // apply_panes (the #162 reanchor debt) — both frame-witnessed — and
         // from the click/nav landings, which still emit AnnounceVisit.
-        // #181/#197: the width machine. It compares the geometry zellij last
-        // REPORTED for this tab (`active_swap_layout_name`, carried on every
-        // TabUpdate) with the mode the store wants, and asks for one switch
-        // while they disagree. The `cols` it takes is the one width it does
-        // read: zellij's own answer for this pane, which the snap-back arm
-        // compares against what this geometry last settled at — a drag moves
-        // it without moving the reported name (`width_effects` doc).
+        // #181/#197: the width machine. It compares the width zellij just
+        // PAINTED this pane at (`cols` — the one input zellij cannot
+        // withhold) with the fixed column count the store's mode declares,
+        // and asks for one switch while they differ; an ask defers all
+        // further judgement to its cooldown expiry (`width_effects` doc).
         //
         // It is NOT ungated, and an earlier comment here claiming every
         // instance is always visible and switches only its own tab was wrong on
@@ -681,7 +709,7 @@ impl ZellijPlugin for State {
         // do not carry it.
         self.pane_height = rows;
         let list: Vec<Row> = self.model.rows().into_iter().map(|(_, row)| row).collect();
-        let lines = render_rows(&list, cols, rows, self.model.widths());
+        let lines = render_rows(&list, cols, rows, self.model.widths_at(cols));
         // Final review 2026-08-11: emit the frame WITHOUT a trailing newline.
         // Once the viewport (#148) slices to exactly `rows` lines, the pane is
         // full at steady state; a trailing newline after the bottom row would

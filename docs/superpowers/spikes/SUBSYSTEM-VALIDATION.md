@@ -896,12 +896,25 @@ width is always exactly one of two constants (the machine is one equality,
 keyed like the battery cell's mode read), zellij refuses border drags
 touching a fixed pane (the 2026-08-15 snap-back ruling enforced at the
 source — the drag/stillness arms are deleted, not moved), and window
-resizes cannot drift the bar. Guard: `FROZEN_ASK_CAP = 3` consecutive
-asks per frozen (width, mode) pair — the cycle is three long — then rest
-until either changes; asks are unbounded while the width keeps moving.
-D34's "fixed targets unreachable" applied to RESIZE'S 5% lattice, not to
-layout application; D35's real-terminal percent derivation deleted with
-the plumbing.
+resizes cannot drift the bar. D34's "fixed targets unreachable" applied
+to RESIZE'S 5% lattice, not to layout application; D35's real-terminal
+percent derivation deleted with the plumbing.
+(3) **The first fixed-cols guard ("asks unbounded while the width keeps
+moving, `FROZEN_ASK_CAP=3` per frozen pair") LOOPED IN THE FIELD, twice,
+same day**: a swap's repaints arrive queued and stale, so one toggle's
+echo paints bought three asks in a millisecond, the three-ask walk lapped
+the cycle, and the lap's transit paints re-armed the next burst — while
+the "frozen width" key never engaged because the walk kept the width
+moving. Filmed with the instrumented bar (the FOOTGUNS paint-echo entry
+is the trace). Replaced by: an ask deafens the machine until a
+`WIDTH_COOLDOWN_SECS` (0.15s) timer judges the LATEST paint once (timer
+shares Event::Timer with the peek sink, classified by elapsed — the dwell
+era's scheme), plus `WALK_ASK_CAP = 3` per mode-INTENT, never re-armed by
+movement (a too-narrow window otherwise loops at cooldown cadence).
+Do not resurrect either judge-every-paint or movement-re-arms-budget:
+each alone is a loop, fast or slow. Validated live: 13 presses = 13
+single-ask moves, fast six-burst settles at the mode's width, machine at
+rest.
 
 ## C9 — Hydration (S5)
 - With agents in the store, kill+relaunch the session (or reload the plugin):
