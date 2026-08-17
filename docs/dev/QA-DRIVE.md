@@ -91,10 +91,13 @@ known-red.
 2. Hand the launch line to the human; wait.
 3. `scripts/qa-drive.sh qa-fleet` — the full spine, phases 0–7; stop on
    first failure.
-   **Phases 3–6 have never been driven live** — phases 0–2 have (2026-08-12/13,
-   three runs). The script's header lists the seven things in them that only a
-   live run can settle, each also commented at its own check; a first red there
-   is evidence to read, not a script to patch until it greens.
+   **Full 0–7 driven live green: run 4, 2026-08-17**, both eyeball
+   checkpoints confirmed. Runs 1–3 each went red on one real finding (all
+   fixed and recorded in FOOTGUNS.md); the script header's ledger records
+   how each once-pending assumption settled. Still awaiting a first live
+   run: the CONCURRENT burst shape (ledger (6) — runs 1–4 drove the burst
+   serially because the CLI pipe blocks). A first red on a new shape is
+   evidence to read, not a script to patch until it greens.
 4. On failure: capture the drive log tail + the joins BEFORE any teardown,
    grep FOOTGUNS, then debug systematically. A failed phase is evidence,
    not an excuse to re-run until green.

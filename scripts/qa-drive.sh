@@ -27,7 +27,11 @@
 #   (6) the collapse burst assumes CLI pipes deliver serialized — five rapid
 #       `clave-toggle` presses land as five presses on ONE writer, so the
 #       store's final parity is the burst's witness (pipe.rs pins the twin
-#       guard; nothing pins CLI delivery order but the queue itself);
+#       guard; nothing pins CLI delivery order but the queue itself). Runs
+#       1-4 drove this with a SERIAL loop — the CLI pipe blocks until the
+#       plugin unblocks it, so no queue ever formed; the burst launches
+#       concurrently since the PR #202 review, and the queued shape has not
+#       yet been driven live;
 #   (7) quiescence assumes the seeded fleet is hook-quiet at rest — a seeded
 #       agent that still ticks (an unfinished claude -p, a background
 #       SessionEnd) advances `seq` under the flat-line check and reads as a
@@ -230,7 +234,7 @@ print_summary() {
     printf '  %-18s %s\n' "${PHASE_NAMES[$i]}" "${PHASE_RESULTS[$i]}"
   done
   echo "log: ${DRIVE_LOG}"
-  echo "Phases 3-6 have never been driven live — see the header's FIRST LIVE RUN PENDING list."
+  echo "Full 0-7 driven live green: run 4, 2026-08-17 — the header's ledger records how each pending assumption settled."
 }
 
 # Mark the current phase FAILED, print the summary, and stop the run. The
@@ -264,6 +268,19 @@ check_min() {
     verdict="PASS"
   fi
   printf '[%s %s] CHECK %s: measured=%s expected=>=%s %s\n' "$CURRENT_PHASE" "$(ts)" "$desc" "${measured:-empty}" "$min" "$verdict"
+  [[ "$verdict" == "FAIL" ]] && fail_phase
+}
+
+# check_numeric <desc> <measured> — measured must be a bare integer. The
+# guard for asserted READS: a `// 0` or `:-0` fallback lets a dead
+# dev_status or an unreadable log read 0 on BOTH ends of a window, and a
+# flat/bounded check then passes without having observed anything
+# (CodeRabbit, PR #202 — same family as run 3's jq `//` blindness to
+# `false`). jq prints `null` for a missing key, which this rejects too.
+check_numeric() {
+  local desc="$1" measured="${2:-}" verdict="FAIL"
+  [[ "$measured" =~ ^[0-9]+$ ]] && verdict="PASS"
+  printf '[%s %s] CHECK %s: measured=%s expected=<integer> %s\n' "$CURRENT_PHASE" "$(ts)" "$desc" "${measured:-empty}" "$verdict"
   [[ "$verdict" == "FAIL" ]] && fail_phase
 }
 
@@ -1643,8 +1660,9 @@ rejoin_check "phase 4 (post-commit):"
 #   - each PACED press lands its flip (12 individual bounded waits — a press
 #     that stops answering fails AT its ordinal, which is the B6 regression's
 #     exact signature: the budget that spent itself and never refilled);
-#   - the RAPID burst nets to parity (5 presses back-to-back, asserted only
-#     at the settled end — FIRST LIVE RUN PENDING (6): serialized delivery);
+#   - the RAPID burst nets to parity (5 presses launched concurrently,
+#     asserted only at the settled end — header ledger (6): the queued
+#     shape awaits its first live run);
 #   - the bar still answers AFTER the burst (press 18) — the #137-class
 #     detector: a storm brake that turned into a lifetime budget died at
 #     exactly this press shape, 33 clean presses then silence.
@@ -1673,7 +1691,8 @@ wait_collapsed() {
 
 P5_STATUS="$(dev_status)"
 P5_COLLAPSED0="$(jq -r '.store.collapsed // false' <<<"$P5_STATUS" 2>/dev/null)"
-P5_SEQ0="$(jq -r '.store.seq // 0' <<<"$P5_STATUS" 2>/dev/null)"
+P5_SEQ0="$(jq -r '.store.seq' <<<"$P5_STATUS" 2>/dev/null)"
+check_numeric "phase-5 start store seq readable" "$P5_SEQ0"
 P5_TWINS_BEFORE="$(count_eof_twins)"
 measure "phase-5 start" "collapsed=${P5_COLLAPSED0} seq=${P5_SEQ0}"
 
@@ -1702,16 +1721,28 @@ done
 # at most one companion snapshot push. Asserted over the paced 12 in
 # aggregate — the sandbox fleet is hook-quiet by seed, and if it is not,
 # FIRST LIVE RUN PENDING (7) says how this reads.
-P5_SEQ_PACED="$(jq -r '.store.seq // 0' < <(dev_status) 2>/dev/null)"
+P5_SEQ_PACED="$(jq -r '.store.seq' < <(dev_status) 2>/dev/null)"
+check_numeric "paced-12 store seq readable" "$P5_SEQ_PACED"
 measure "store seq across the paced 12" "before=${P5_SEQ0} after=${P5_SEQ_PACED} delta=$((P5_SEQ_PACED - P5_SEQ0))"
 check "paced writes per press <= 2 (12 presses, delta <= 24)" \
   "$(((P5_SEQ_PACED - P5_SEQ0) <= 24 ? 1 : 0))" "1"
 
-# The rapid burst: five presses, no pause, judged only at the settled end.
+# The rapid burst: five presses launched TOGETHER, judged only at the
+# settled end. The CLI pipe BLOCKS until the plugin unblocks it, so a
+# serial loop is five request-response round trips — no queue ever forms
+# (CodeRabbit, PR #202). Backgrounding makes the burst real; each pipe's
+# own exit status is still asserted once all five have finished. Order
+# inside the burst is the queue's (header ledger (6)) and does not matter:
+# five identical toggles net to parity regardless of arrival order.
+P5_PIDS=()
 for i in $(seq 1 5); do
-  toggle_pipe
-  P5_RC=$?
-  check "rapid press ${i}/5 pipe accepted" "$([[ $P5_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+  toggle_pipe &
+  P5_PIDS+=("$!")
+done
+for i in "${!P5_PIDS[@]}"; do
+  P5_RC=0
+  wait "${P5_PIDS[$i]}" || P5_RC=$?
+  check "rapid press $((i + 1))/5 pipe accepted" "$([[ $P5_RC -eq 0 ]] && echo ok || echo failed)" "ok"
 done
 # 12 + 5 = 17 presses: odd, so the settled flag must be the START's inverse.
 if [[ "$P5_COLLAPSED0" == "true" ]]; then P5_EXPECT="false"; else P5_EXPECT="true"; fi
@@ -1724,7 +1755,8 @@ check "post-burst press pipe accepted" "$([[ $P5_RC -eq 0 ]] && echo ok || echo 
 check "the bar still answers after the burst (press 18 landed, back to start)" \
   "$(wait_collapsed "$P5_COLLAPSED0")" "$P5_COLLAPSED0"
 
-P5_SEQ_END="$(jq -r '.store.seq // 0' < <(dev_status) 2>/dev/null)"
+P5_SEQ_END="$(jq -r '.store.seq' < <(dev_status) 2>/dev/null)"
+check_numeric "burst-end store seq readable" "$P5_SEQ_END"
 measure "store seq across all 18 presses" "before=${P5_SEQ0} after=${P5_SEQ_END} delta=$((P5_SEQ_END - P5_SEQ0))"
 check "total writes per press <= 2 (18 presses, delta <= 36)" \
   "$(((P5_SEQ_END - P5_SEQ0) <= 36 ? 1 : 0))" "1"
@@ -1746,18 +1778,24 @@ measure "phase 5 EOF-twin delta (user-global log, unattributable — forensic on
 phase "P6-quiescence"
 
 P6_WAIT="${CLAVE_QUIESCE_WAIT:-60}"
+# Quiescence asserts on EQUALITY across a window, so a masked read is worse
+# than a missing one: a dead dev_status or an unreadable evlog defaulted to
+# 0 on both ends reads as perfectly flat (CodeRabbit, PR #202). Every input
+# to a flatness check must prove it was actually read.
 P6_STATUS="$(dev_status)"
-P6_SEQ0="$(jq -r '.store.seq // 0' <<<"$P6_STATUS" 2>/dev/null)"
-P6_EV0="$(wc -l <"$EVLOG" 2>/dev/null | tr -d ' ')" || P6_EV0=0
-P6_EV0="${P6_EV0:-0}"
+P6_SEQ0="$(jq -r '.store.seq' <<<"$P6_STATUS" 2>/dev/null)"
+check_numeric "quiescence start store seq readable" "$P6_SEQ0"
+P6_EV0="$(wc -l <"$EVLOG" 2>/dev/null | tr -d ' ')"
+check_numeric "quiescence start evlog readable" "$P6_EV0"
 P6_BARS0="$(bar_loaded_count)"
 P6_ZLINES0="$(wc -l <"$ZLOG" 2>/dev/null | tr -d ' ')" || P6_ZLINES0=0
 measure "quiescence start (idling ${P6_WAIT}s)" "seq=${P6_SEQ0} evlog_lines=${P6_EV0} tagged_bars=${P6_BARS0}"
 sleep "$P6_WAIT"
 
-P6_SEQ1="$(jq -r '.store.seq // 0' < <(dev_status) 2>/dev/null)"
-P6_EV1="$(wc -l <"$EVLOG" 2>/dev/null | tr -d ' ')" || P6_EV1=0
-P6_EV1="${P6_EV1:-0}"
+P6_SEQ1="$(jq -r '.store.seq' < <(dev_status) 2>/dev/null)"
+check_numeric "quiescence end store seq readable" "$P6_SEQ1"
+P6_EV1="$(wc -l <"$EVLOG" 2>/dev/null | tr -d ' ')"
+check_numeric "quiescence end evlog readable" "$P6_EV1"
 check "store seq flat across ${P6_WAIT}s idle" "$P6_SEQ1" "$P6_SEQ0"
 check "evlog flat across ${P6_WAIT}s idle" "$P6_EV1" "$P6_EV0"
 check "no new sandbox bar loaded while idle (tagged 'clave-bar: loaded' delta)" \
