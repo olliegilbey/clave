@@ -100,6 +100,31 @@ pub fn config_kdl(binary: &str, wasm: &str) -> String {
         w = clave_types::FLOATING_WIDTH_PERCENT,
         h = clave_types::FLOATING_HEIGHT_PERCENT,
     ));
+    // Alt+f is zellij's OWN default (`ToggleFloatingPanes`, default.kdl:187),
+    // and a toggle takes no geometry — so its first pane got
+    // `half_size_middle_geom`, half of an area the bar has already shrunk, the
+    // unusable sliver of #188. Binding it here is the only way to give it a
+    // size, and `Run` is the only keybind form that carries floating
+    // coordinates at all: `NewPane`'s KDL branch parses string ARGUMENTS only
+    // and ignores a child block entirely (kdl/mod.rs:552,1695), so
+    // `NewPane { floating true; x …; }` silently drops the geometry.
+    //
+    // Cost of the swap: `Alt f` in normal+locked no longer hides an open
+    // floating set, it opens another scratch shell. The toggle survives in
+    // every other mode (stock is `shared_except "locked"`, we override two).
+    //
+    // `sh -c` because Run needs a real command and the shell to open is the
+    // user's, resolved at keypress from the session's env rather than baked at
+    // `clave setup` time — one config that keeps working after a chsh, and over
+    // SSH where the generating shell need not be the using one.
+    binds.push_str(&format!(
+        "        bind \"Alt f\" {{ Run \"sh\" \"-c\" \"exec ${{SHELL:-/bin/sh}}\" {{ floating true; \
+         close_on_exit true; name \"shell\"; x \"{x}%\"; y \"{y}%\"; width \"{w}%\"; height \"{h}%\"; }}; }}\n",
+        x = clave_types::SHELL_FLOATING_X_PERCENT,
+        y = clave_types::SHELL_FLOATING_Y_PERCENT,
+        w = clave_types::SHELL_FLOATING_WIDTH_PERCENT,
+        h = clave_types::SHELL_FLOATING_HEIGHT_PERCENT,
+    ));
     binds.push_str(&format!(
         "        bind \"Alt c\" {{ MessagePlugin \"file:{wasm}\" {{ name \"clave-toggle\"; {key} \"{binary}\"; }}; }}\n",
         key = clave_types::CLAVE_BINARY_KEY
@@ -1307,6 +1332,7 @@ mod tests {
         for key in [
             "Alt a",
             "Alt c",
+            "Alt f",
             "Alt t",
             "Alt w",
             "Alt j",
