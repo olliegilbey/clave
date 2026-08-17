@@ -54,11 +54,10 @@ pub fn open_decision(_row: &AgentRecord, is_live: bool, cwd_exists: bool) -> Ope
     }
 }
 
-/// `display_cols`/`collapsed` come from the BAR (task 7b′): this runs inside
-/// zellij, where a `terminal_size()` read would report the calling pane rather
-/// than the tab the new bar is born into. `None` falls back to the reference
-/// viewport, which is what a hand-run `clave open` gets.
-pub fn run_open(uuid: &str, display_cols: Option<usize>, collapsed: bool) -> Result<()> {
+/// `collapsed` comes from the BAR (D36): the new tab must be born in the mode
+/// the fleet is in, or it flashes wide and then snaps. A hand-run `clave open`
+/// passes nothing and is born expanded.
+pub fn run_open(uuid: &str, collapsed: bool) -> Result<()> {
     let paths = crate::store::store_paths()?;
     let store = crate::store::read_store(&paths)?;
     let Some(row) = store.agents.get(uuid) else {
@@ -140,7 +139,6 @@ pub fn run_open(uuid: &str, display_cols: Option<usize>, collapsed: bool) -> Res
                 &label,
                 uuid,
                 open_cwd,
-                display_cols,
                 collapsed,
             );
             let tmp = std::env::temp_dir().join(format!("clave-open-{uuid}.kdl"));

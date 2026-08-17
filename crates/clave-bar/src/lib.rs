@@ -13,5 +13,6 @@
 //! test cleanly on the host. main.rs consumes them via `use clave_bar::…`.
 
 pub mod model;
+pub mod pipe;
 pub mod plugin_config;
 pub mod render;

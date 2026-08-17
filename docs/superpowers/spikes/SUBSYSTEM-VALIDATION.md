@@ -666,6 +666,99 @@ echoes back as clave-visited on every instance anyway, so arming peeks
 ONLY on the pipe path means a peek can never exist without its sink
 timer. Expanded bars ignore peeks.
 
+**Round 22 (2026-08-14, #181 — the seek is DELETED and round 19's verdict is
+scoped, not overturned).** The runaway that closed the 0.1.3 release was
+measured parked at 141 columns and at 11 — both directions — and the cause is
+not a bug in the seek's arithmetic. Zellij resizes in increments of ~5% of the
+display that the API will not disclose, so the reachable widths are a lattice an
+exact column target is frequently not on (LEDGER D34: 47 against a target of 54
+at 280 columns, permanently). Feedback was the plugin's own renders, which
+zellij does not send for a resize it refuses. And a runaway terminates with its
+budget spent, which is an accepted end state, so it passed every convergence
+assertion the suite had.
+
+What ships instead: both geometries are declared as `swap_tiled_layout` nodes in
+every generated layout, and a mode change is one `next_swap_layout()` call.
+DELETED: the step learner, the learned polarity, the drift-confirmation gates,
+the storm brake, the acceptance band, the rest anchoring, `resize_pane_with_id`
+entirely, and the convergence simulation harness with its property tests —
+roughly 1,750 lines net.
+
+**Round 19's "dead on arrival" verdict stands for the mechanism it tested and
+not for this one.** Round 19 relied on zellij IMPLICITLY relayouting after an
+unsuppress, which `set_is_tiled_damaged()` blocks; `resize_pane_with_id` is
+itself a damage-setter, so the seek was damaging the very thing the swap layout
+needed. This design suppresses nothing and resizes nothing, and the EXPLICIT
+`next_swap_layout` is not damage-gated at all. Round 19's record is what shelved
+this for three weeks (LEDGER D22 flagged the over-reach at the time); it is now
+scoped in FOOTGUNS to the implicit path.
+
+Three parser facts, all proved through zellij's real `Layout::from_str` rather
+than assumed, and each of which would have cost a round: a bare `tab` inside a
+`swap_tiled_layout` is expanded through `default_tab_template` and yields a
+double bar, so the geometries are named `tab_template`s referenced by name; two
+unconstrained entries in ONE `swap_tiled_layout` collide in a
+`BTreeMap<LayoutConstraint, _>`, so alternatives are separate nodes; and
+`next_swap_layout` is relative, so the geometry the tab was NOT born in is
+declared first.
+
+**Correction (#197 review, from `zellij-server` 0.44.3 source).** The cycle is
+THREE positions long, not two. Zellij inserts the tab's own birth layout as a
+hidden position ahead of the declared pair (`tab/swap_layouts.rs:38-56`, applied
+from `tab/mod.rs:889,967`), so a tab walks birth → declared[0] → declared[1] →
+birth: the first call lands on the first DECLARED geometry (the order fact
+above still holds and for the same practical reason), and every third press on
+an untouched tab returns to the birth position and moves nothing. A tab zellij
+marks DAMAGED — pane resize, pane close, or a mouse border drag
+(`tab/mod.rs:2398,2465,5779`) — spends its next switch re-applying instead of
+advancing (`swap_layouts.rs:241-250`). A switch that moves nothing still renders
+and reports session state unconditionally (`screen.rs:7561-7573`).
+
+**Verdict:** _gates green, 28/28 mutants caught in the changed code — but NOT
+live-validated. Sandbox staging was blocked on the machine's commit-signing
+gate, and launching a session is the maintainer's in any case._
+
+**The two behaviours this entry called unverifiable are now VERIFIED from
+source** (#197 review; `zellij-server` 0.44.3 read from crates.io, still not
+vendored). The swap relayout RE-USES the running plugin pane rather than
+starting a second one — the applier matches existing panes to the new layout's
+slots before creating anything (`tab/layout_applier.rs:160-234`, reuse path at
+`:1218-1230`). And a plugin's switch does NOT apply to its own tab: the request
+loses the requesting pane id in routing (`route.rs:1263-1270`) and the screen
+resolves it against the FOCUSED tab (`screen.rs:7561`), which is the defect the
+bar's focus gate exists to contain.
+
+**The correction budget is DELETED, and with it the last watch-your-own-repaints
+pattern in the codebase (#197).** The drive of 2026-08-15 measured what the
+budget could not fix: a rapid double-press desynced the bar's belief about which
+geometry its tab was in, permanently — twelve presses, several focus changes and
+a long idle all failed to recover a tab resting collapsed while the store said
+expanded, because the machine checked the DIRECTION its pane moved and never the
+position it was in. The position was being delivered the whole time:
+`TabInfo.active_swap_layout_name` (`zellij-utils-0.44.3/src/data.rs:2252`) is on
+every tab of every `TabUpdate`, and both geometries carry names. The bar now
+compares that name with the store's mode and asks for one switch while they
+disagree, so every frame re-derives the answer and the stuck class is
+unreachable by construction.
+
+Two consequences worth recording as approaches NOT to retry. The declaration
+order is now birth-geometry-FIRST, reversing the round-22 fact above: the birth
+position reports as `"BASE"`, which says nothing about width, so the bar must
+spend one switch to leave it — and same-width-first is what keeps that switch
+invisible. Declaring the opposite geometry first, which #181 shipped for the
+sake of the first Alt+c, would now be a full-width flash on every cold start.
+And the rule needs SOME bound: because a switch reports back whether or not it
+achieved anything, an unbounded "keep asking while they disagree" would loop
+forever against a damaged tab. One ask per reported position is the bound; the
+next report or the next press re-arms it.
+
+**Not verified from source, and both fail safe.** `zellij-server` is still not
+vendored, so the exact name reported at the birth position is read from zellij's
+own serialization fixture (`zellij-utils-0.44.3/src/kdl/mod.rs:6302` uses
+`"BASE"`) rather than from the producer. Any name that is neither of clave's two
+is treated as the birth position, so a different string costs one switch and
+nothing else.
+
 ## C7 — dump-layout liveness + resume picker
 - With one agent live: `zellij action dump-layout | grep -A2 clave` — baked
   `args "spawn" "<uuid>" …` present, on its own line.
@@ -780,6 +873,48 @@ defunct panes). Alt+c collapse validated post-fix (percent panes +
 birth seek). Picker resume not re-run — unchanged surface, C7-covered.
 Accepted quirks this round: collapsed floor is window-width-dependent;
 collapse parity desync on reload/missed-pipe (backlogged snapshot flag).
+
+**2026-08-17 — two more forbidden paths, and the design that closed C6's
+width family.** (1) **Reading `active_swap_layout_name` as the position
+oracle** (#197's "reported truth") is DEAD: zellij computes that name only
+for tabs with ≥2 SELECTABLE tiled panes and hard-returns `None` for the
+canonical clave tab (unselectable bar + one workspace pane;
+`zellij-server-0.44.3/src/tab/mod.rs:1042` — "no layout for single pane").
+Instrumented sandbox drive: `None` on every frame; the machine read every
+frame as the birth position, spent its one bounded ask per mode flip, and
+walked the three-position cycle one step per press — every third toggle a
+lost press, drag snap-back arm unreachable. A `new-pane` split (second
+selectable pane) made names appear next frame and the machine heal in one
+switch — proof of mechanism, not a fix (clave tabs never have the split).
+(2) **The percent mandate above ("all three layout generators emit
+`size=\"15%\"`") is OBSOLETE and reversed**: it existed so the SEEK could
+resize (resize refuses fixed panes), the seek is deleted, and the only
+width actuator since #181 is swap-layout APPLICATION, which applies fixed
+sizes exactly (this very section proved layouts birth fixed panes fine).
+Fixed `size=54`/`size=30` bar panes are now load-bearing: the painted
+width is always exactly one of two constants (the machine is one equality,
+keyed like the battery cell's mode read), zellij refuses border drags
+touching a fixed pane (the 2026-08-15 snap-back ruling enforced at the
+source — the drag/stillness arms are deleted, not moved), and window
+resizes cannot drift the bar. D34's "fixed targets unreachable" applied
+to RESIZE'S 5% lattice, not to layout application; D35's real-terminal
+percent derivation deleted with the plumbing.
+(3) **The first fixed-cols guard ("asks unbounded while the width keeps
+moving, `FROZEN_ASK_CAP=3` per frozen pair") LOOPED IN THE FIELD, twice,
+same day**: a swap's repaints arrive queued and stale, so one toggle's
+echo paints bought three asks in a millisecond, the three-ask walk lapped
+the cycle, and the lap's transit paints re-armed the next burst — while
+the "frozen width" key never engaged because the walk kept the width
+moving. Filmed with the instrumented bar (the FOOTGUNS paint-echo entry
+is the trace). Replaced by: an ask deafens the machine until a
+`WIDTH_COOLDOWN_SECS` (0.15s) timer judges the LATEST paint once (timer
+shares Event::Timer with the peek sink, classified by elapsed — the dwell
+era's scheme), plus `WALK_ASK_CAP = 3` per mode-INTENT, never re-armed by
+movement (a too-narrow window otherwise loops at cooldown cadence).
+Do not resurrect either judge-every-paint or movement-re-arms-budget:
+each alone is a loop, fast or slow. Validated live: 13 presses = 13
+single-ask moves, fast six-burst settles at the mode's width, machine at
+rest.
 
 ## C9 — Hydration (S5)
 - With agents in the store, kill+relaunch the session (or reload the plugin):
