@@ -5,12 +5,13 @@
 # churn, the nav ring walk, the collapse burst, quiescence and the teardown
 # hand-back, scripted against THIS checkout's per-worktree sandbox instance.
 #
-# FIRST LIVE RUN PENDING — phases 3-6. Phases 0-2 have been driven against
-# a live sandbox (2026-08-13, three runs); phases 3-6 have NOT. They are built
-# against the same code paths and the same wrappers, and every assertion prints
-# what it measured, so a first run that goes red is evidence either way — but
-# seven things in them can only be settled live, and each is commented AT its
-# check with this same marker:
+# ALL PHASES DRIVEN LIVE GREEN — run 4, 2026-08-17, full 0-7 pass plus both
+# human eyeball checkpoints. The list below was the FIRST LIVE RUN PENDING
+# ledger; it is kept because each entry records an assumption a live run had
+# to settle, and how the first runs settled them: runs 1-3 each went red on a
+# real finding first (the stale-executor nav wedge, the starved-bar prune of
+# a newborn bind — both fixed in clave-bar — and wait_collapsed's jq `//`
+# blindness to `false`, fixed here). Per-check markers remain at their sites:
 #   (1) `go-to-tab-by-id` exists on the maintainer's zellij server (0.44.3 has
 #       it; an older server takes the positional fallback, which is verified);
 #   (2) the focused tab is read from `dump-layout`'s `focus=true` tab node and

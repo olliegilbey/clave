@@ -116,5 +116,8 @@ known-red.
    first, and it doubles as #178's reproduction harness). LANDED (#182).
 2. Phases 3–4 (churn + ring). LANDED (#200).
 3. Phases 5–7 (collapse + quiescence + the teardown hand-back). LANDED
-   (2026-08-17, the pre-release drive).
+   (2026-08-17, the pre-release drive). **Full 0–7 driven live green on run 4
+   (2026-08-17) plus both eyeball checkpoints; runs 1–3 each went red on a
+   real finding first (nav wedge, newborn-bind prune, jq `//` vs `false` —
+   see FOOTGUNS).**
 4. Runbook/TESTING integration line + retire the duplicated manual steps.
