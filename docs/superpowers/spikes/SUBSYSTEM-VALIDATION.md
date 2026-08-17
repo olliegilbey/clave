@@ -874,6 +874,35 @@ birth seek). Picker resume not re-run — unchanged surface, C7-covered.
 Accepted quirks this round: collapsed floor is window-width-dependent;
 collapse parity desync on reload/missed-pipe (backlogged snapshot flag).
 
+**2026-08-17 — two more forbidden paths, and the design that closed C6's
+width family.** (1) **Reading `active_swap_layout_name` as the position
+oracle** (#197's "reported truth") is DEAD: zellij computes that name only
+for tabs with ≥2 SELECTABLE tiled panes and hard-returns `None` for the
+canonical clave tab (unselectable bar + one workspace pane;
+`zellij-server-0.44.3/src/tab/mod.rs:1042` — "no layout for single pane").
+Instrumented sandbox drive: `None` on every frame; the machine read every
+frame as the birth position, spent its one bounded ask per mode flip, and
+walked the three-position cycle one step per press — every third toggle a
+lost press, drag snap-back arm unreachable. A `new-pane` split (second
+selectable pane) made names appear next frame and the machine heal in one
+switch — proof of mechanism, not a fix (clave tabs never have the split).
+(2) **The percent mandate above ("all three layout generators emit
+`size=\"15%\"`") is OBSOLETE and reversed**: it existed so the SEEK could
+resize (resize refuses fixed panes), the seek is deleted, and the only
+width actuator since #181 is swap-layout APPLICATION, which applies fixed
+sizes exactly (this very section proved layouts birth fixed panes fine).
+Fixed `size=54`/`size=30` bar panes are now load-bearing: the painted
+width is always exactly one of two constants (the machine is one equality,
+keyed like the battery cell's mode read), zellij refuses border drags
+touching a fixed pane (the 2026-08-15 snap-back ruling enforced at the
+source — the drag/stillness arms are deleted, not moved), and window
+resizes cannot drift the bar. Guard: `FROZEN_ASK_CAP = 3` consecutive
+asks per frozen (width, mode) pair — the cycle is three long — then rest
+until either changes; asks are unbounded while the width keeps moving.
+D34's "fixed targets unreachable" applied to RESIZE'S 5% lattice, not to
+layout application; D35's real-terminal percent derivation deleted with
+the plumbing.
+
 ## C9 — Hydration (S5)
 - With agents in the store, kill+relaunch the session (or reload the plugin):
   bars show correct glyphs/labels BEFORE any new hook event; zellij log shows
