@@ -359,6 +359,14 @@ pub struct BarModel {
     /// uuid → terminal pane id, from clave-register (S2).
     uuid_to_pane: BTreeMap<String, u32>,
     tabs: Vec<TabMeta>,
+    /// The highest tab id any delivered TabUpdate has ever shown this
+    /// instance (monotone; `None` until the first frame). The prune horizon:
+    /// TabUpdate reaches only the active tab, so a background bar's `tabs`
+    /// can predate a create — a bound id above this mark is a newborn it has
+    /// never been shown, not a corpse it observed (2026-08-17 QA drive: a
+    /// starved bar pruned a just-created tab's register+touch+bind in one
+    /// write, and #187's replace-not-merge made the unbind permanent).
+    max_tab_id_seen: Option<usize>,
     panes: Vec<PaneMeta>,
     /// tab_id → the commitment ORDINAL of the last USER COMMITMENT to that tab
     /// (§6.6 / S1). NOT owned here: the store is the one writer (`clave touch`
@@ -1173,6 +1181,14 @@ impl BarModel {
     /// §6.5 unread clear is the one action keyed on the active tab here).
     pub fn apply_tabs(&mut self, tabs: Vec<TabMeta>) -> Vec<Effect> {
         self.tabs = tabs;
+        // Monotone high-water mark of tab ids this instance has been SHOWN.
+        // `prune_effect` reads it: an id above it was never witnessed, so it
+        // is a newborn beyond a starved frame's horizon, never a corpse.
+        self.max_tab_id_seen = self
+            .max_tab_id_seen
+            .into_iter()
+            .chain(self.tabs.iter().map(|t| t.tab_id))
+            .max();
         let mut effects = Vec::new();
         // #23 (2026-07-21): a tab CLOSE (`Alt+w`; `Ctrl+D` closes a plain shell
         // tab but never an agent pane, FOOTGUNS.md) can STRAND the nav beacon —
@@ -1349,18 +1365,21 @@ impl BarModel {
         if live.is_empty() {
             return None;
         }
+        // "Observed-stale" means OBSERVED: an id above the highest this
+        // instance has ever been shown was never in any of its frames, so it
+        // is a tab created beyond a starved frame's horizon — pruning it
+        // reverts the newborn's fresh register/touch/bind (2026-08-17 QA
+        // drive, P2 rung 1). Ids at or below the mark stay prunable: a
+        // witnessed id absent from the current live set was seen to die.
+        let horizon = self.max_tab_id_seen.unwrap_or(0);
+        let observed_stale = |id: &usize| !live.contains(id) && *id <= horizon;
         let mut stale: BTreeSet<usize> = self
             .agents
             .iter()
             .filter_map(|a| a.tab_id)
-            .filter(|id| !live.contains(id))
+            .filter(&observed_stale)
             .collect();
-        stale.extend(
-            self.tab_order
-                .keys()
-                .copied()
-                .filter(|id| !live.contains(id)),
-        );
+        stale.extend(self.tab_order.keys().copied().filter(observed_stale));
         (!stale.is_empty()).then(|| Effect::PruneTabs {
             stale_ids: stale.into_iter().collect(), // BTreeSet → sorted, deduped
         })
@@ -3077,16 +3096,16 @@ mod tests {
         ));
         assert_eq!(
             m.identity_effects(),
-            vec![
-                Effect::Bind {
-                    uuid: "u1".into(),
-                    tab_id: 11
-                },
-                // 99 is seeded in the timeline but not in the tab set yet.
-                Effect::PruneTabs {
-                    stale_ids: vec![99]
-                }
-            ]
+            vec![Effect::Bind {
+                uuid: "u1".into(),
+                tab_id: 11
+            }],
+            // 99 is seeded in the timeline but not in the tab set yet — and
+            // it ARRIVES two lines down, which is exactly why it must not be
+            // pruned here: an id above everything this instance has been
+            // shown is a tab created beyond its frame horizon, and pruning
+            // it is the newborn-revert the 2026-08-17 QA drive caught live
+            // (this assertion expected PruneTabs{[99]} until then).
         );
         // Same seq, same pane, new tab id at our position.
         m.apply_tabs(vec![tab(10, 0, "a", false), tab(99, 1, "b", true)]);
@@ -3883,6 +3902,44 @@ mod tests {
             m.identity_effects(),
             Vec::<Effect>::new(),
             "a clean store must cost no prune subprocess"
+        );
+    }
+
+    #[test]
+    fn a_bar_never_shown_a_tab_must_not_prune_its_newborn_bind() {
+        // 2026-08-17 QA-drive P2 rung 1, run 2: `clave add` created tab 1 and
+        // its agent registered, touched, and bound — three store writes — and
+        // tab 0's bar, background since the create with a tab frame still
+        // reading {0}, received the snapshot, derived the bound tab 1 as
+        // observed-stale, and pruned the newborn. One write reverted all
+        // three, and (per #187) the retired pane mapping meant the row could
+        // never bind again. "Observed-stale" must mean OBSERVED: an id above
+        // everything this instance has ever been shown was never witnessed
+        // alive or dead, and is not this bar's to prune.
+        let mut m = BarModel::default();
+        m.set_own_pane(100);
+        m.apply_panes(panes_at(&[(0, 100, 5)]));
+        m.apply_tabs(vec![tab(10, 0, "a", true)]);
+        let mut s = snap(1, vec![agent("u-new", Status::Working, Some(11))]);
+        s.tab_order = [(10usize, 100u64), (11, 200)].into();
+        m.apply_snapshot(s);
+        assert!(
+            m.identity_effects()
+                .iter()
+                .all(|e| !matches!(e, Effect::PruneTabs { .. })),
+            "a tab beyond this instance's horizon is a newborn, not a corpse"
+        );
+        // The moment a frame shows tab 11 alive and a later one shows it
+        // gone, the same instance's prune is back in business.
+        m.apply_tabs(vec![tab(10, 0, "a", true), tab(11, 1, "b", false)]);
+        m.apply_panes(panes_at(&[(0, 100, 5), (1, 101, 6)]));
+        m.apply_tabs(vec![tab(10, 0, "a", true)]);
+        m.apply_panes(panes_at(&[(0, 100, 5)]));
+        assert!(
+            m.identity_effects().contains(&Effect::PruneTabs {
+                stale_ids: vec![11]
+            }),
+            "a witnessed close must still prune"
         );
     }
 
