@@ -27,16 +27,6 @@ pub const CLAVE_BINARY_KEY: &str = "clave_binary";
 /// is exactly the pre-fix behaviour and therefore invisible.
 pub const AGENT_UUID_ENV: &str = "CLAVE_AGENT_UUID";
 
-/// Env var carrying the pid of the Claude that clave itself exec'd (#97), so
-/// the hook can tell that Claude apart from any `claude` nested inside it.
-///
-/// `exec` preserves the pid, so `clave spawn`'s own `process::id()` IS the
-/// agent Claude's pid. Without this, [`AGENT_UUID_ENV`] would be ambient
-/// authority: environment is inherited by every descendant, so a nested
-/// `claude` would carry the uuid, take the same fallback, and write its status
-/// and prose into another agent's row.
-pub const AGENT_PID_ENV: &str = "CLAVE_AGENT_PID";
-
 /// Env var naming the agent's SMART ZONE: how many tokens of context this user
 /// trusts a model to stay sharp within (S7, #62). ONE global number — it is a
 /// property of the user, not of the model, and the same figure holds across a

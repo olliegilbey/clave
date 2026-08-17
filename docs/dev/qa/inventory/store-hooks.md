@@ -48,8 +48,8 @@ the maintainer's live session.
 **Healthy:** parent row unchanged by the nested run's hooks (fails closed: gate takes the untracked fast path).
 **Broken:** nested Claude's hooks write the parent's row — its status, ordering and prose flip on the child's lifecycle.
 **Drive assertion:** snapshot the row JSON, run the nested `claude -p`, assert the row bytes are unchanged (allowing only writes attributable to the parent's own events).
-**Guard today:** `PidGate` (hook.rs:774-801) — `CLAVE_AGENT_PID` vs Claude's `CLAUDE_PID`, fails closed when either is missing; unit-tested (hook.rs:1073-1103 region).
-**Refs:** #97 (caught in review); `crates/clave/src/hook.rs:774` (`PidGate`); FOOTGUNS.md "Env set before an `exec`".
+**Guard today:** NONE BY DESIGN — the PidGate was deleted by the #180 ruling (2026-08-17): one pane holds one Claude, agents do not nest interactive claudes, and the gate's fail-closed was the field's orphan trap. The one clave-owned nested site (`dev.rs::seed_transcript`) scrubs `CLAVE_AGENT_UUID` via `env_remove`; a deliberate nested `claude` in an agent's shell WILL write the parent's row and that is accepted.
+**Refs:** #97 (the gate's origin, caught in review) → #180 (its deletion); FOOTGUNS.md "Env set before an `exec`" ([REVERSED]).
 
 ### S4 — Older binary strips unknown store fields (#69, #86, #111)
 **Seam:** serde read-modify-write in `with_store_mut` — deserialize drops unknown keys, the whole row re-serializes without them.
@@ -213,8 +213,9 @@ the maintainer's live session.
 **Guard today:** canonicalize-before-munge enforced at the call site (main.rs:263-268), rationale in `munge.rs:11`; covered by unit tests around `munge_cwd` (munge.rs:20).
 **Refs:** `crates/clave/src/munge.rs:11-20`; `crates/clave/src/main.rs:263-268`; FOOTGUNS.md "`munge_cwd` must be fed the CANONICAL cwd".
 
-### S17 — Out-of-band resume orphans the row: the PidGate has no re-adoption path (#180) [FIELD, OPEN]
-**Seam:** `hook.rs::resolve_row`'s two admission routes vs a Claude that clave did not exec — a manual `claude --resume` carries a rotated session id (not a store key) and none of the spawn-set env (`CLAVE_AGENT_UUID`/`CLAVE_AGENT_PID`), so the PidGate fails closed and every hook declines, forever.
+### S17 — Out-of-band resume orphans the row (#180) [RULED 2026-08-17]
+**Seam:** `hook.rs::resolve_row`'s two admission routes vs a Claude that clave did not exec — a manual `claude --resume` carries a rotated session id (not a store key) and no spawn-set `CLAVE_AGENT_UUID`, so every hook declines.
+**Ruling:** the PidGate is DELETED (env uuid alone binds — one pane, one Claude), which removes the gate-shaped half of this freeze for every clave-spawned pane. The out-of-band case itself is UNSUPPORTED BY DESIGN: recovery is in-band — close the pane, Alt+Enter the row. The env one-liner heal below remains the documented emergency path (`CLAVE_AGENT_PID` in it is now inert).
 **Preconditions:** a spawned agent whose pane Claude was replaced out of band. The field driver is the Ctrl-Z trap: `clave spawn` execs claude as the pane's own process, so a suspended claude has no shell to `fg` it — Ctrl-C plus manual `claude --resume <name>` is the only exit, and it is exactly the resume clave cannot see.
 **Reproduce:**
 1. Sandbox row live in a tab (any `c8-*` scenario).
@@ -223,5 +224,5 @@ the maintainer's live session.
 **Healthy (desired, undesigned):** the row re-adopts the resumed conversation — tokens/status/title resume tracking.
 **Broken (current, by design):** the row freezes at its pre-suspend values while the transcript appends; renames fired while orphaned never land. Measured on the daily driver 2026-08-12: frozen at 28,606 tokens while the session ran past 65k.
 **Drive assertion:** after step 3, `last_interacted` must rise within 10s — red today; goes green with whatever re-adoption path #180 rules in.
-**Guard today:** nothing — the fail-closed gate is CORRECT (it exists so a nested claude can never write the wrong row, S3); what is missing is any sanctioned re-adoption. Validated manual heal: `CLAVE_AGENT_UUID=<uuid> CLAVE_AGENT_PID=$$ exec claude --resume <name>` (exec preserves the pid, the gate passes, and the missed `custom-title` re-stamps from the transcript tail on the first accepted hook).
-**Refs:** #180; `crates/clave/src/hook.rs:751` (`resolve_row` + its "worst case is the old freeze" doc), `:774` (`PidGate`); S1 (the guarded rotation class this is the residual of); S3 (why the gate must stay closed); FOOTGUNS.md title re-stamp measurement.
+**Guard today:** in-band recovery (close pane, Alt+Enter) plus the validated manual heal: `CLAVE_AGENT_UUID=<uuid> exec claude --resume <name>` (the env var alone passes `resolve_row`; the missed `custom-title` re-stamps from the transcript tail on the first accepted hook).
+**Refs:** #180 (the ruling); `crates/clave/src/hook.rs` (`resolve_row`); S1 (the guarded rotation class this is the residual of); S3 (the gate's deletion record); FOOTGUNS.md title re-stamp measurement.

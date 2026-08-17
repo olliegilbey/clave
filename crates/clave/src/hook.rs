@@ -26,7 +26,7 @@ use crate::store::{
 /// deliberate (#97). An unparseable payload yields `session_id: None`; before
 /// the rotation work that returned immediately, because the session id was the
 /// only key. It is no longer the only key — a hook firing from the agent's own
-/// Claude, proven by [`PidGate`], belongs to that agent whatever its JSON
+/// Claude, proven by its pane's `CLAVE_AGENT_UUID`, belongs to that agent whatever its JSON
 /// looked like, and refusing it would reintroduce the freeze for exactly the
 /// events most likely to be malformed. The event NAME comes from argv, not
 /// from this payload, so the status transition is still driven by something
@@ -586,11 +586,12 @@ pub fn push_snapshot(snap: &AgentSnapshot) {
 /// lock closure so it unit-tests against a plain `Store`. Returns whether
 /// anything changed; bumps `seq` itself (exactly once) when it did.
 ///
-/// `own_claude` is [`PidGate::is_the_agents_own_claude`], and it gates ONE
-/// field — `live_session`. Everything else here is driven by an event
-/// `resolve_row` already admitted; that pointer is the only value whose
-/// lifetime outlives the event, so it is the only one that can be poisoned by a
-/// Claude that merely LOOKS like this row's (see the write site below).
+/// `own_claude` is "the firing Claude carries THIS row's `CLAVE_AGENT_UUID`",
+/// and it gates ONE field — `live_session`. Everything else here is driven by
+/// an event `resolve_row` already admitted; that pointer is the only value
+/// whose lifetime outlives the event, so it is the only one that can be
+/// poisoned by a Claude that merely LOOKS like this row's (see the write site
+/// below).
 pub fn apply_hook_event(
     s: &mut crate::store::Store,
     uuid: &str,
@@ -613,9 +614,9 @@ pub fn apply_hook_event(
     // session. Held as `None` when it equals `uuid`, so the field can go BACK
     // to agreeing rather than keep pointing at a superseded conversation.
     //
-    // GATED ON THE PID, unlike everything else here, and the asymmetry is the
+    // GATED ON THE ENV, unlike everything else here, and the asymmetry is the
     // point. `resolve_row` admits a payload whose `session_id` NAMES A ROW
-    // without consulting the gate — correctly, that is the ordinary path — but
+    // without consulting the env — correctly, that is the ordinary path — but
     // the minted transcript this bug leaves orphaned is listed in `claude
     // --resume`'s own picker, so a Claude started by hand OUTSIDE clave can
     // fire hooks carrying exactly that id. Ungated, its `session_id == uuid`
@@ -624,8 +625,9 @@ pub fn apply_hook_event(
     // describes the event and is corrected by the next one; this pointer is
     // read once, much later, by a process with nothing else to go on.
     //
-    // Fails closed: no `CLAUDE_PID`, or a mismatch, and the pointer simply
-    // holds. Worst case is the pre-#99 target, never a wrong one.
+    // Fails closed: no `CLAVE_AGENT_UUID`, or one naming another row, and the
+    // pointer simply holds. Worst case is the pre-#99 target, never a wrong
+    // one.
     //
     // Not part of `changed`, on purpose. `with_store_mut` persists the record
     // either way; `changed` gates only the SNAPSHOT PUSH, and the bar renders
@@ -717,90 +719,32 @@ pub fn apply_hook_event(
 /// active use.
 ///
 /// `CLAVE_AGENT_UUID` is the fallback, set by `clave spawn` before the exec.
+/// One pane holds exactly one Claude — clave EXECS it, nothing nests another
+/// (maintainer ruling on #180, 2026-08-17) — so the inherited uuid IS the
+/// pane speaking, and it survives every rotation, `/clear` and resume inside
+/// that pane. (A pid gate used to stand here against a hypothetical nested
+/// `claude`; it was the fail-closed trap — any process-tree shape it did not
+/// predict froze the row forever, and the nested case it defended against
+/// cannot occur.)
 ///
-/// **Store membership is NOT sufficient to accept it**, and an earlier version
-/// of this function got that wrong. The env var is inherited by every
-/// descendant of the agent's Claude, so a nested `claude` — an agent shelling
-/// one out, `clave dev`'s own `claude -p` — carries it too, and its session id
-/// is likewise unknown to the store. Membership proves the value names *a*
-/// row, never *this* row: the nested session's Stop, Notification and
-/// UserPromptSubmit would all have driven the parent agent's status, ordering
-/// and prose. Caught in review, three independent lanes.
-///
-/// So the fallback is gated on [`PidGate`]: it is taken only when the Claude
-/// that fired this hook IS the Claude clave exec'd. `CLAUDE_PID` is set by
-/// Claude Code to its own pid — verified empirically, a nested `claude`
-/// reported its own pid and not its parent's — and `exec` preserves the pid,
-/// so `clave spawn`'s `process::id()` IS the agent Claude's pid.
-///
-/// The routes that matter fail CLOSED: a missing value, a STALE one (a dead
-/// pid cannot match a live `CLAUDE_PID`), or a pid mismatch all resolve to
-/// `None` and the hook declines exactly as it did before any of this existed.
-/// The worst case is the old freeze, never an ACCIDENTAL write to the wrong
-/// agent — which is the threat, since the mechanism exists because environment
-/// is inherited without anyone intending it.
+/// Both routes fail CLOSED on a Claude started outside `clave spawn`: no env
+/// uuid, and a session id naming no row, resolve to `None` and the hook
+/// declines. The worst case is a row that does not track, never a write to
+/// the wrong row — an env value can only name the row whose pane exported it.
 ///
 /// It is NOT a defence against a deliberate local caller: exporting a real
-/// row's uuid with matching `CLAVE_AGENT_PID` and `CLAUDE_PID` passes. That is
-/// same-user, same-machine, and anyone who can set that environment can write
-/// the store directly, so there is nothing to defend. Stated because an earlier
-/// draft claimed "hand-set" values fail closed, and they do not.
+/// row's uuid passes. That is same-user, same-machine, and anyone who can set
+/// that environment can write the store directly, so there is nothing to
+/// defend.
 ///
-/// Pure and total: map lookups and integer comparison, no I/O, so it is safe
-/// on the §6.5 fast path and testable without a store on disk.
-pub fn resolve_row(
-    store: &Store,
-    session: Option<&str>,
-    env_uuid: Option<&str>,
-    gate: PidGate,
-) -> Option<String> {
-    if let Some(s) = session.filter(|s| store.agents.contains_key(*s)) {
-        return Some(s.to_string());
-    }
-    if !gate.is_the_agents_own_claude() {
-        return None;
-    }
-    env_uuid
-        .filter(|e| store.agents.contains_key(*e))
+/// Pure and total: map lookups, no I/O, so it is safe on the §6.5 fast path
+/// and testable without a store on disk.
+pub fn resolve_row(store: &Store, session: Option<&str>, env_uuid: Option<&str>) -> Option<String> {
+    session
+        .filter(|s| store.agents.contains_key(*s))
+        .or(env_uuid.filter(|e| store.agents.contains_key(*e)))
         .map(str::to_string)
 }
-
-/// "Is the Claude that fired this hook the one clave exec'd?" — the guard that
-/// keeps [`resolve_row`]'s env fallback from being ambient authority.
-///
-/// Both halves are read from the environment by the caller so this stays pure.
-/// `agent` is clave's own `CLAVE_AGENT_PID`; `firing` is Claude's `CLAUDE_PID`.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct PidGate {
-    pub agent: Option<u32>,
-    pub firing: Option<u32>,
-}
-
-impl PidGate {
-    /// Read both sides from the ambient environment.
-    pub fn from_env() -> Self {
-        let get = |k: &str| std::env::var(k).ok()?.parse::<u32>().ok();
-        Self {
-            agent: get(clave_types::AGENT_PID_ENV),
-            firing: get(CLAUDE_PID_ENV),
-        }
-    }
-
-    /// True only when both are present AND equal. `None` on either side is a
-    /// refusal, not a pass: an absent `CLAUDE_PID` means we cannot tell which
-    /// Claude fired, and guessing is the whole bug this exists to prevent.
-    pub fn is_the_agents_own_claude(self) -> bool {
-        matches!((self.agent, self.firing), (Some(a), Some(f)) if a == f)
-    }
-}
-
-/// Claude Code's own pid, exported into every process it spawns — including
-/// hooks. NOT clave's to set, which is why it lives here rather than in
-/// `clave-types` beside the two clave owns: it is an OBSERVED property of an
-/// external tool (verified 2026-07-31; a nested `claude` reported its own pid,
-/// not its parent's), and if Claude ever stops setting it, [`PidGate`] fails
-/// closed and the rotation fix degrades to the pre-fix freeze.
-const CLAUDE_PID_ENV: &str = "CLAUDE_PID";
 
 /// The transcript to read for this event, validated (#87 / S4 §4.3a/d).
 ///
@@ -820,7 +764,8 @@ const CLAUDE_PID_ENV: &str = "CLAUDE_PID";
 ///   this is self-CONSISTENCY, not verification — a liar can lie consistently.
 ///   #87 specified the store row's uuid here, which would be a real binding;
 ///   rotation makes that impossible, because the live file is not named after
-///   the minted uuid. What still holds is confinement plus [`PidGate`], so the
+///   the minted uuid. What still holds is confinement plus [`resolve_row`]'s
+///   admission (the payload id named a row, or the pane's own env did), so the
 ///   worst case is grafting another transcript from the same tree, not an
 ///   arbitrary file read. When `session_id` DOES name a row the binding is
 ///   strong again, because then `uuid == session`.
@@ -883,35 +828,12 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
     let paths = store_paths()?;
     // FAST PATH (§6.5): lock-free read; untracked session → exit immediately.
     // clave must never serialize unrelated sessions' hooks behind its lock.
-    // `resolve_row` keeps that property — map lookups and an integer compare,
-    // no I/O. The admitted set does GROW, by exactly one case and deliberately:
-    // the agent's own Claude firing with a rotated id, which used to return
-    // early and is the whole point of #97. What the pid gate preserves is the
-    // invariant §6.5 actually cares about — no UNRELATED session ever reaches
-    // this lock. (An earlier draft of this comment claimed the set was
-    // unchanged; that was an overclaim, and this file treats those as defects.)
+    // `resolve_row` keeps that property — map lookups, no I/O. A session
+    // outside the fleet carries no `CLAVE_AGENT_UUID` and its id names no
+    // row, so it never reaches the lock.
     let env_uuid = std::env::var(clave_types::AGENT_UUID_ENV).ok();
-    let gate = PidGate::from_env();
     let store = read_store(&paths)?;
-    let Some(uuid) = resolve_row(&store, session.as_deref(), env_uuid.as_deref(), gate) else {
-        // Observability for the ONE silent drop that is hard to reason about
-        // from outside: the env named a real row and the gate refused it. The
-        // condition is deliberately narrow — an unrelated session carries no
-        // `CLAVE_AGENT_UUID`, so this cannot become per-event noise for the
-        // whole machine, which §6.5 forbids. #97 was a silent freeze; a
-        // mechanism that can silently decline should say so. (CodeRabbit, #98)
-        if let Some(e) = env_uuid
-            .as_deref()
-            .filter(|e| store.agents.contains_key(*e))
-        {
-            crate::evlog::log_event(
-                "hook",
-                &format!(
-                    "{event}: declined {e} — firing claude {:?} is not the agent's {:?}",
-                    gate.firing, gate.agent
-                ),
-            );
-        }
+    let Some(uuid) = resolve_row(&store, session.as_deref(), env_uuid.as_deref()) else {
         return Ok(());
     };
     // §6.9: claude_config_dir() (not raw home) so the sandbox override
@@ -956,7 +878,7 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
             &payload,
             tail.as_deref(),
             now_unix(),
-            gate.is_the_agents_own_claude(),
+            env_uuid.as_deref() == Some(uuid.as_str()),
         )
         .then(|| snapshot_from(s))
     })?;
@@ -1101,84 +1023,47 @@ mod tests {
     /// vary. Same family as D23 and #91 — the fixture encoded the assumption
     /// under test.
     #[test]
-    fn a_rotated_session_id_resolves_only_for_the_agents_own_claude() {
+    fn a_rotated_session_id_resolves_via_the_panes_env_uuid() {
         let mut store = Store::default();
         store.agents.insert("minted".into(), rec("minted"));
-        let same = PidGate {
-            agent: Some(42),
-            firing: Some(42),
-        };
-        let nested = PidGate {
-            agent: Some(42),
-            firing: Some(99),
-        };
 
-        // The ordinary case is UNCHANGED and needs no gate at all: a payload
-        // id that names a row wins outright, whatever the pids say.
-        for g in [same, nested, PidGate::default()] {
-            assert_eq!(
-                resolve_row(&store, Some("minted"), None, g).as_deref(),
-                Some("minted")
-            );
-        }
+        // The ordinary case: a payload id that names a row wins outright,
+        // with or without an environment.
         assert_eq!(
-            resolve_row(&store, Some("minted"), Some("other"), same).as_deref(),
+            resolve_row(&store, Some("minted"), None).as_deref(),
+            Some("minted")
+        );
+        assert_eq!(
+            resolve_row(&store, Some("minted"), Some("other")).as_deref(),
             Some("minted"),
             "a valid payload id must not be overridden by the environment"
         );
 
         // The rotation: the new id names nothing, the env carries the minted
-        // key, and the firing Claude IS the agent's — so the row is found.
+        // key — the pane's own Claude, so the row is found. No pid gate: one
+        // pane holds exactly one Claude (#180 ruling, 2026-08-17), so the
+        // inherited uuid IS the pane speaking.
         assert_eq!(
-            resolve_row(&store, Some("rotated"), Some("minted"), same).as_deref(),
+            resolve_row(&store, Some("rotated"), Some("minted")).as_deref(),
             Some("minted")
         );
 
-        // THE REVIEW FINDING. A nested `claude` inherits the env and its own
-        // session id is equally unknown, so store membership alone would have
-        // handed it this row. The pid gate is the only thing refusing it.
-        assert_eq!(
-            resolve_row(&store, Some("nested-session"), Some("minted"), nested),
-            None,
-            "a nested claude must never resolve to the agent's row"
-        );
-
-        // Every unknown fails CLOSED, including a half-populated gate — an
-        // absent CLAUDE_PID means we cannot tell which Claude fired.
-        for g in [
-            PidGate::default(),
-            PidGate {
-                agent: Some(42),
-                firing: None,
-            },
-            PidGate {
-                agent: None,
-                firing: Some(42),
-            },
-        ] {
-            assert_eq!(
-                resolve_row(&store, Some("rotated"), Some("minted"), g),
-                None
-            );
-        }
-        assert_eq!(
-            resolve_row(&store, Some("rotated"), Some("bogus"), same),
-            None
-        );
-        assert_eq!(resolve_row(&store, None, None, same), None);
+        // Out-of-band fails CLOSED: a Claude started outside `clave spawn`
+        // carries no env uuid, and an env value naming no row is refused.
+        assert_eq!(resolve_row(&store, Some("rotated"), None), None);
+        assert_eq!(resolve_row(&store, Some("rotated"), Some("bogus")), None);
+        assert_eq!(resolve_row(&store, None, None), None);
 
         // A MALFORMED payload (serde yields `session_id: None`) resolves via
-        // the env when the gate passes. This is a deliberate behaviour change
-        // — the old code returned early on a missing session id — and it was
-        // untested until the opus review pointed out that a mutation
-        // restoring the `session.is_some()` requirement would have survived.
+        // the env. This is a deliberate behaviour — the pre-#97 code returned
+        // early on a missing session id — and it was untested until the opus
+        // review pointed out that a mutation restoring the
+        // `session.is_some()` requirement would have survived.
         assert_eq!(
-            resolve_row(&store, None, Some("minted"), same).as_deref(),
+            resolve_row(&store, None, Some("minted")).as_deref(),
             Some("minted"),
             "the agent's own Claude is still its own Claude with unparseable JSON"
         );
-        // …but never for a nested one, which is the whole point of the gate.
-        assert_eq!(resolve_row(&store, None, Some("minted"), nested), None);
     }
 
     /// #87 / S4 §4.3a/d. The payload names its own current transcript, which

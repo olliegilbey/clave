@@ -43,11 +43,23 @@ here in the same change.**
 | Term | Means |
 |---|---|
 | **fleet** | All agent sessions clave knows about, live and dormant. The thing the sidebar shows. A fleet is **launched, killed, seeded — never collapsed or expanded**: width states belong to the sidebar. |
-| **store** | The on-disk JSON that hooks write and the CLI reads. The single writer of truth; the plugin never reads it directly. |
+| **store** | The on-disk JSON that hooks write and the CLI reads. The single writer of truth *about panes*; the plugin never reads it directly. See the canon rule below. |
+| **transcript** | A conversation's jsonl under Claude's own `projects/` tree. **The canon of conversations** — see the canon rule below. |
 | **snapshot** | The full-replace payload the CLI pipes to the plugin. Carries **seq**, a monotonic counter — a consumer applies only strictly-newer seq and discards the rest. |
 | **bind** | Associating an agent session's uuid with a `tab_id`. Done once, by the agent tab's own bar instance. |
 | **hook** | A Claude Code lifecycle callback that writes into the store. The source of status and recency. |
 | **agent** | One record in the store / one entry in a snapshot. The data; a **row** is its rendering. |
+
+> **The canon rule** (maintainer ruling, 2026-08-17): **Claude's jsonl is the
+> canon of conversations; clave's store is a disposable snapshot of panes.** A
+> store field earns its place only by recording what the jsonl cannot cheaply
+> answer — and the load-bearing case is "which conversation does *this pane*
+> currently hold" (`live_session`), because a project dir holds a transcript
+> for every claude ever run there (#99's banned heuristic). Anything read back
+> out of the store must defer to the jsonl at the point of use — existence-check
+> before trust (`resume_target`), discover from the project dir first
+> (`resume_candidates`). No lineage lists, no backfill guessing: a stale
+> snapshot degrades to "resume opens the older conversation", never to loss.
 
 ---
 

@@ -152,15 +152,14 @@ pub struct AgentRecord {
     /// (confirmed live 2026-07-31 — the resumed agent knew only the pre-clear
     /// content).
     ///
-    /// Written by `hook::apply_hook_event` under [`PidGate`] — BOTH directions,
-    /// which is stricter than the event admission around it: `resolve_row` lets
-    /// a payload whose id names a row through ungated, and an outside `claude
-    /// --resume <minted>` on the orphaned transcript would otherwise read as
-    /// agreement and wipe a pointer that is still true. Never trusted blind on
-    /// the way out either: `resume_target` requires the named jsonl to EXIST,
-    /// and refuses a value shaped like a flag, before it reaches argv.
-    ///
-    /// [`PidGate`]: crate::hook::PidGate
+    /// Written by `hook::apply_hook_event` only when the firing Claude carries
+    /// this row's own `CLAVE_AGENT_UUID` — BOTH directions, which is stricter
+    /// than the event admission around it: `resolve_row` lets a payload whose
+    /// id names a row through ungated, and an outside `claude --resume
+    /// <minted>` on the orphaned transcript would otherwise read as agreement
+    /// and wipe a pointer that is still true. Never trusted blind on the way
+    /// out either: `resume_target` requires the named jsonl to EXIST, and
+    /// refuses a value shaped like a flag, before it reaches argv.
     #[serde(default)]
     pub live_session: Option<String>,
 }

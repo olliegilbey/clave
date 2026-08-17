@@ -620,11 +620,12 @@ genuinely new agent anyway.
   freezes at its pre-`/clear` value means `resolve_transcript` is falling back
   to the derived path — a different bug, and one the fix explicitly guards
   against by holding the old value rather than reading the abandoned file.
-- **After step 5 the row is NOT stamped by the nested run**, and
-  `~/.local/state/clave-dev/state/clave.log` gains a `declined … is not the
-  agent's` line naming both pids. A row whose `last_interacted` jumps when the
-  nested Claude finishes means `PidGate` failed open, which is the
-  ambient-authority bug the review caught before it shipped.
+- **(Historical — the PidGate is deleted, #180 ruling 2026-08-17.)** A nested
+  `claude` run by hand in the agent's shell now DOES stamp the row; that is
+  accepted, since one pane holds one Claude and agents do not nest them.
+  `clave dev`'s own seeding claude is the exception clave owns, and it scrubs
+  `CLAVE_AGENT_UUID` (`dev.rs::seed_transcript`) — a row stamped during
+  scenario seeding means that scrub regressed.
 
 ### Vacuous if
 
