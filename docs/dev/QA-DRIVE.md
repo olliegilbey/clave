@@ -89,8 +89,12 @@ known-red.
 
 1. `just sandbox qa-fleet` (per-worktree instance), take the log mark.
 2. Hand the launch line to the human; wait.
-3. `scripts/qa-drive.sh qa-fleet` — all built phases (currently 0–2; the
-   spine below runs to 7 as the later slices land); stop on first failure.
+3. `scripts/qa-drive.sh qa-fleet` — all built phases (currently 0–4; the
+   spine above runs to 7 as the later slices land); stop on first failure.
+   **Phases 3–4 have never been driven live** — phases 0–2 have (2026-08-12/13,
+   three runs). The script's header lists the five things in them that only a
+   live run can settle, each also commented at its own check; a first red there
+   is evidence to read, not a script to patch until it greens.
 4. On failure: capture the drive log tail + the joins BEFORE any teardown,
    grep FOOTGUNS, then debug systematically. A failed phase is evidence,
    not an excuse to re-run until green.

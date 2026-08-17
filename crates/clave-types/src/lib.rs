@@ -329,9 +329,14 @@ pub fn target_cols_for(collapsed: bool) -> usize {
 
 // ── floating pane geometry ──────────────────────────────────────────────────
 //
-// ONE geometry for every floating pane clave opens: the `Alt a` directory
-// picker today (#110), the row-detail helper pane when #7 lands. Two panes
-// that appear over the same fleet should appear at the same size.
+// ONE geometry for every floating pane clave's own UI opens: the `Alt a`
+// directory picker today (#110), the row-detail helper pane when #7 lands. Two
+// panes that appear over the same fleet should appear at the same size.
+//
+// The `Alt f` scratch shell (#188) is deliberately NOT one of them and carries
+// its own, smaller pair below — the picker's values are near-fullscreen because
+// its own layout needs them, and a scratch terminal wants the fleet still
+// visible around it.
 //
 // **The bar needs no clearing — zellij fences floating panes off it already.**
 // `clave-bar` calls `set_selectable(false)` at load, and zellij's
@@ -369,6 +374,43 @@ pub const FLOATING_HEIGHT_PERCENT: usize = 90;
 const _: () = assert!(
     FLOATING_X_PERCENT + FLOATING_WIDTH_PERCENT <= 100
         && FLOATING_Y_PERCENT + FLOATING_HEIGHT_PERCENT <= 100,
+    "a floating pane overflowing its viewport is shrunk to fit, so the geometry \
+     would not be the one written here"
+);
+
+// ── the Alt+f scratch shell's geometry (#188) ───────────────────────────────
+//
+// A four-fifths box against the bar's right edge: big enough to work in without
+// resizing, small enough that the fleet stays legible behind it. Same
+// percent-of-the-non-bar-area rules as the picker's constants above.
+//
+// It is NOT horizontally centred and cannot be: zellij resolves `x` as a percent
+// of the non-bar width but measures it from absolute column zero, so anything
+// non-zero moves the left edge only on terminals wide enough for the percentage
+// to clear the bar — pinning it at 0 keeps the pane flush against the bar at
+// every width.
+//
+// Without a geometry zellij applies `half_size_middle_geom` — half of an area
+// the bar has ALREADY shrunk — which is the unusable sliver #188 reports. Stock
+// `Alt f` had no geometry because it was zellij's own binding, not clave's.
+
+/// Left edge: flush against the bar, like the picker's [`FLOATING_X_PERCENT`].
+pub const SHELL_FLOATING_X_PERCENT: usize = 0;
+
+/// Top edge. `y` is floored at the viewport's top exactly as `x` is at its left,
+/// but nothing sits above the viewport here, so the tenth lands where written
+/// and is paired by a tenth below.
+pub const SHELL_FLOATING_Y_PERCENT: usize = 10;
+
+/// Four-fifths of the non-bar width.
+pub const SHELL_FLOATING_WIDTH_PERCENT: usize = 80;
+
+/// Four-fifths of the non-bar height.
+pub const SHELL_FLOATING_HEIGHT_PERCENT: usize = 80;
+
+const _: () = assert!(
+    SHELL_FLOATING_X_PERCENT + SHELL_FLOATING_WIDTH_PERCENT <= 100
+        && SHELL_FLOATING_Y_PERCENT + SHELL_FLOATING_HEIGHT_PERCENT <= 100,
     "a floating pane overflowing its viewport is shrunk to fit, so the geometry \
      would not be the one written here"
 );

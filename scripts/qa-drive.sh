@@ -1,10 +1,29 @@
 #!/usr/bin/env bash
-# qa-drive.sh — the automated regression drive, phases 0-2 (docs/dev/QA-DRIVE.md).
+# qa-drive.sh — the automated regression drive, phases 0-4 (docs/dev/QA-DRIVE.md).
 #
-# What this is: preflight, baseline join, and the dormant-row bind ladder,
-# scripted against THIS checkout's per-worktree sandbox instance. Phases 3-7
-# (churn, ring walk, collapse, quiescence, teardown) are not built yet — see
-# the build order in docs/dev/QA-DRIVE.md.
+# What this is: preflight, baseline join, the dormant-row bind ladder, tab
+# churn and the nav ring walk, scripted against THIS checkout's per-worktree
+# sandbox instance. Phases 5-7 (collapse, quiescence, teardown) are not built
+# yet — see the build order in docs/dev/QA-DRIVE.md.
+#
+# FIRST LIVE RUN PENDING — phases 3 and 4. Phases 0-2 have been driven against
+# a live sandbox (2026-08-13, three runs); phases 3-4 have NOT. They are built
+# against the same code paths and the same wrappers, and every assertion prints
+# what it measured, so a first run that goes red is evidence either way — but
+# five things in them can only be settled live, and each is commented AT its
+# check with this same marker:
+#   (1) `go-to-tab-by-id` exists on the maintainer's zellij server (0.44.3 has
+#       it; an older server takes the positional fallback, which is verified);
+#   (2) the focused tab is read from `dump-layout`'s `focus=true` tab node and
+#       joined back to a tab_id by RANK — the rank join is base-independent,
+#       but the dump's tab order is assumed to be tab-position order;
+#   (3) `clave prune-tabs` lands its store echo inside the 15s re-join window;
+#   (4) zellij recycles the closed highest tab id onto the next `new-tab` in
+#       THIS session (screen.rs `get_new_tab_id`) — recorded, and the stamp
+#       assertions say so honestly when it does not hold;
+#   (5) the ring's landing prediction (rendered dormant order) matches what the
+#       bar actually renders. That prediction IS phase 4's assertion, so a
+#       mismatch is a finding to read, not a script bug to assume.
 #
 # What this is NOT: a launcher. It assumes a human has ALREADY staged
 # (`just sandbox <scenario>`) and LAUNCHED the sandbox session. It never runs
@@ -35,7 +54,8 @@ usage() {
   cat <<EOF
 usage: $0 <scenario>
 
-Drives QA-DRIVE phases 0-2 (preflight, baseline join, bind ladder) against
+Drives QA-DRIVE phases 0-4 (preflight, baseline join, bind ladder, tab churn,
+ring walk) against
 THIS checkout's per-worktree sandbox instance (\`clave dev instance\`). Never
 launches or kills a zellij session — stage and launch first:
 
@@ -48,8 +68,12 @@ then run this. Refuses closed if the instance's sandbox session is not live.
   <scenario>   the scenario name already staged/launched (e.g. qa-fleet).
                Informational for the report header and for phase 1's exact
                row-count expectation, which is currently known for
-               \`qa-fleet\` only — other scenarios still run phases 0-2 but
+               \`qa-fleet\` only — other scenarios still run every phase but
                phase 1's row-count checks fall back to measurement-only.
+               Phases 3-4 need a fleet of at least three live tabs and a
+               dormant block of at least two rows; they refuse with the
+               measured counts rather than assert against a fleet too small
+               to carry the property.
 EOF
 }
 
@@ -198,7 +222,8 @@ print_summary() {
     printf '  %-18s %s\n' "${PHASE_NAMES[$i]}" "${PHASE_RESULTS[$i]}"
   done
   echo "log: ${DRIVE_LOG}"
-  echo "Phases 3-7 (churn, ring, collapse, quiescence, teardown) are not yet built."
+  echo "Phases 5-7 (collapse, quiescence, teardown) are not yet built."
+  echo "Phases 3-4 have never been driven live — see the header's FIRST LIVE RUN PENDING list."
 }
 
 # Mark the current phase FAILED, print the summary, and stop the run. The
@@ -849,5 +874,749 @@ while :; do
 done
 
 measure "bind ladder totals" "attempted=${ATTEMPTED} landed=${LANDED}"
+
+# ===========================================================================
+# Shared instruments for phases 3-4
+# ===========================================================================
+#
+# Everything below is pane-INDEPENDENT on purpose (the drive's standing rule
+# for churn and nav): tabs are named by their STABLE tab id, never by which
+# pane happens to be focused inside them, and every zellij touch still goes
+# through ct.sh. `TabInfo.tab_id` (zellij-utils data.rs:2269 "The stable
+# identifier for this tab") is the same number the store's binds and
+# `tab_order` are keyed on and the same one `list-panes` reports, so store
+# truth and zellij truth join on it without a position anywhere in between.
+
+# The sandbox's own event log (§6.9). UNLIKE the zellij log this one IS
+# attributable: it lives in this instance's state dir, so a maintainer fleet
+# cannot appear in it and a delta here is a real assertion, not a forensic.
+EVLOG="$STATE_DIR/clave.log"
+
+# Count lines for one `cmd` in the evlog. Absent file reads as 0 — the log is
+# created on first write, and a sandbox that has logged nothing yet is a valid
+# state, not an error.
+evlog_count() {
+  local n
+  n="$(grep -c -F "\"cmd\":\"$1\"" "$EVLOG" 2>/dev/null)" || n=0
+  printf '%s' "${n:-0}"
+}
+
+# Fresh `clave-bar: loaded` lines carrying THIS build's tag, since the script's
+# log mark. The only way to count bar instances at all: the bar is invisible to
+# `list-panes` (FOOTGUNS, "list-panes does not show the clave-bar at all"), so
+# a new tab's bar is proved to have loaded by its own log line and nothing
+# else. Attributable by CONTENT (the build tag), which is what makes it usable
+# in a user-global log — with one honest residual: a second worktree sitting at
+# the same HEAD would share the tag.
+bar_loaded_count() {
+  local n
+  n="$(zlog_tail | grep -F 'clave-bar: loaded' | grep -c -F "build=$BUILD_TAG")" || n=0
+  printf '%s' "${n:-0}"
+}
+
+# The live tab id set as a compact JSON array. One bar per tab is the layout's
+# design, so this is also the bar's LIVE BLOCK membership (count_live_tabs'
+# rationale, phase 2).
+live_tab_ids() {
+  local panes
+  panes="$(ct_list_panes)" || return 1
+  jq -c '[.[] | .tab_id] | unique' <<<"$panes" 2>/dev/null
+}
+
+ct_dump_layout() {
+  local out
+  if ! out="$("$CT" dump-layout)"; then
+    printf '[%s %s] ct.sh dump-layout FAILED (stderr above)\n' "$CURRENT_PHASE" "$(ts)" >&2
+    return 1
+  fi
+  printf '%s' "$out"
+}
+
+# WHICH TAB IS FOCUSED, as a tab_id — the one focus observable this drive has,
+# and the spine of both phases below.
+#
+# `list-panes` cannot answer it: `PaneInfo.is_focused` is "focused in its
+# LAYER" (zellij-utils data.rs:2302), so every tab reports a focused pane.
+# `dump-layout` can: `serialize_tab` writes `focus=true` on the focused tab
+# node and on no other (zellij-utils session_serialization.rs:109, snapshot
+# `can_serialize_tab_focus`). The dump names no ids, so the focused node's RANK
+# among tab nodes is joined back to a tab_id through `list-panes`' own
+# tab_position ordering — a rank join, deliberately, because it does not care
+# whether zellij counts tab positions from 0 or from 1.
+#
+# FIRST LIVE RUN PENDING (2): the join assumes the dump lists tabs in tab
+# position order. Every caller prints the id it read, so a wrong join shows up
+# as a focus that never matches anything rather than as a silent pass.
+focused_tab_id() {
+  local dump idx panes
+  dump="$(ct_dump_layout)" || return 1
+  idx="$(awk '$1 == "tab" { i++; if ($0 ~ /focus=true/) { print i; exit } }' <<<"$dump")"
+  [[ -z "$idx" ]] && return 1
+  panes="$(ct_list_panes)" || return 1
+  jq -r --argjson i "$idx" \
+    '[.[] | {tab_id, tab_position}] | unique_by(.tab_id) | sort_by(.tab_position) | .[$i - 1].tab_id // empty' \
+    <<<"$panes" 2>/dev/null
+}
+
+# Focus a tab BY ID, then PROVE it landed. Nothing here touches a pane.
+# `go-to-tab-by-id` is zellij 0.44's stable-id action (zellij-utils
+# cli.rs:1213 "Go to tab with stable ID"); the positional `go-to-tab` fallback
+# is for an older server, and the +1 is the documented 0-indexed tab_position
+# → 1-based tab index conversion (data.rs:2277).
+#
+# FIRST LIVE RUN PENDING (1): which of the two legs the maintainer's server
+# takes. The verification loop below is why it does not matter — a fallback
+# that converts wrongly fails here, loudly, instead of drifting one tab off.
+focus_tab() {
+  local want="$1" panes pos got
+  if ! "$CT" go-to-tab-by-id "$want"; then
+    printf '[%s %s] NOTE go-to-tab-by-id refused for tab %s — falling back to positional go-to-tab\n' \
+      "$CURRENT_PHASE" "$(ts)" "$want"
+    panes="$(ct_list_panes)" || return 1
+    pos="$(jq -r --argjson t "$want" '[.[] | select(.tab_id == $t) | .tab_position] | unique | .[0] // empty' <<<"$panes" 2>/dev/null)"
+    [[ -z "$pos" ]] && return 1
+    "$CT" go-to-tab "$((pos + 1))" || return 1
+  fi
+  for _ in $(seq 1 5); do
+    got="$(focused_tab_id)"
+    [[ -n "$got" && "$got" == "$want" ]] && return 0
+    sleep 1
+  done
+  return 1
+}
+
+# Focus a tab and assert the landing, in one line of drive.
+focus_tab_checked() {
+  local want="$1" label="$2" rc
+  focus_tab "$want"
+  rc=$?
+  check "$label focus landed on tab $want" \
+    "$([[ $rc -eq 0 ]] && echo "tab=$want" || echo "focused=$(focused_tab_id)")" "tab=$want"
+}
+
+# The re-join, run after EVERY churn step (QA-DRIVE phase 3: "re-join after
+# each"). Two store-side faces of the #55 mis-bind class:
+#   - a bind pointing at a tab that is gone (the prune echo never landed), and
+#   - two agents claiming one tab (the eviction that `bind-evict` logs).
+# Bounded poll, because `clave prune-tabs` is fire-and-forget: the bar emits it
+# on the close frame and the store lands it a beat later.
+#
+# FIRST LIVE RUN PENDING (3): that 15s is enough. If a run fails here, read the
+# printed binds before assuming the window — a permanently stale bind and a
+# slow echo look identical at second 15 and are not the same finding.
+REJOIN_WAIT="${CLAVE_REJOIN_WAIT:-15}"
+rejoin_check() {
+  local label="$1" i status live stale dupes
+  for i in $(seq 1 "$REJOIN_WAIT"); do
+    status="$(dev_status)"
+    if ! live="$(live_tab_ids)"; then
+      check "$label ct.sh list-panes -t -c -j (re-join)" "failed" "ok"
+      return
+    fi
+    stale="$(jq -r --argjson live "$live" \
+      '[.store.agents | to_entries[] | select(.value.tab_id != null and ((.value.tab_id) as $t | $live | index($t) | not)) | "\(.key[0:13]):\(.value.tab_id)"] | join(",")' \
+      <<<"$status" 2>/dev/null)"
+    dupes="$(jq -r \
+      '[.store.agents | to_entries[] | select(.value.tab_id != null) | .value.tab_id] | group_by(.) | map(select(length > 1) | .[0]) | join(",")' \
+      <<<"$status" 2>/dev/null)"
+    [[ -z "$stale" && -z "$dupes" ]] && break
+    sleep 1
+  done
+  measure "$label live tab ids" "$live"
+  measure "$label store binds (uuid:tab)" \
+    "$(jq -r '[.store.agents | to_entries[] | select(.value.tab_id != null) | "\(.key[0:13]):\(.value.tab_id)"] | join(" ")' <<<"$status" 2>/dev/null)"
+  check "$label no store bind points at a dead tab (waited ${REJOIN_WAIT}s)" "$stale" ""
+  check "$label no two agents share one tab" "$dupes" ""
+}
+
+# The bar's LIVE block, top row first: ordinal DESC, ties by tab position ASC
+# (model.rs `rows` sorts both blocks with one `rank_desc` comparator). Both
+# inputs are readable from outside — `tab_order[tab]` is in the store snapshot
+# and so is any bound agent's `commit_ord`, and `live_ord` takes the max of the
+# two (model.rs `live_ord`).
+predict_top_live_tab() {
+  jq -r --argjson panes "$2" '
+    . as $s
+    | ($panes | map({tab_id, tab_position}) | unique_by(.tab_id)) as $tabs
+    | [ $tabs[]
+        | .tab_id as $t
+        | { tab: $t,
+            pos: .tab_position,
+            ord: ([ ($s.store.tab_order[($t | tostring)] // 0),
+                    ([$s.store.agents[] | select(.tab_id == $t) | .commit_ord] | max // 0) ] | max) } ]
+    | sort_by([-.ord, .pos]) | .[0].tab // empty' <<<"$1" 2>/dev/null
+}
+
+# The bar's DORMANT block, top row first: the same comparator read from the
+# other side — `dormant_ord` DESC, ties uuid DESC (model.rs `rows` sorts the
+# dormant vector by `usize::MAX - i` over a uuid-ASCENDING list, which renders
+# uuid-descending). For a store-dormant row `dormant_ord` is `commit_ord`
+# alone: the carried leg reads `tab_order[a.tab_id]` and `tab_id` is null here.
+#
+# That last sentence is a DEPENDENCY, not a detail: a row still holding a bind
+# to a dead tab is dormant to the bar and would shift every rank below it. The
+# re-join above is what rules that out, which is why phase 4 runs after phase 3
+# and not before it.
+dormant_render_order() {
+  jq -r '.store.agents | to_entries | map(select(.value.tab_id == null))
+         | sort_by([.value.commit_ord, .key]) | reverse | .[].key' <<<"$1" 2>/dev/null
+}
+
+# Send one nav payload. Every CLI `zellij pipe` also delivers a blank EOF twin
+# (FOOTGUNS) — the bar's empty-payload guard drops it, so one call here is one
+# nav press, and the twin shows up only in the recorded twin delta.
+nav_pipe() {
+  "$CT" pipe --name clave-nav -- "$1"
+}
+
+# Point the executor election at a tab. `clave-visited` is the replicated
+# beacon the bars broadcast themselves on every executed SwitchTab (model.rs
+# AnnounceVisit/ConvergeVisit), and `nav_executor` answers that beacon ALONE
+# (FOOTGUNS, #162) — so this pipe is indistinguishable from an organic one:
+# every instance converges on it, and the bar standing in the named tab is
+# the one elected. It matters because a NATIVE focus change emits no beacon:
+# `focus_tab` moves zellij focus without moving the election, so a drive that
+# only parks focus somewhere keeps talking to whichever bar the last beacon
+# named. NOTE `beacon` also clears every instance's cursor, so an anchor must
+# come BEFORE the pick it fronts, never after.
+anchor_executor() {
+  "$CT" pipe --name clave-visited -- "$1"
+}
+
+# Focus must NOT move. A dormant landing is a pure selection — `nav` returns
+# `ArmPeek` at most and never a `SwitchTab` (model.rs, the `RowKey::Dormant`
+# arm) — so ANY focus movement during a dormant walk means a second instance
+# acted on the same press and walked its own LIVE ring. That is the shape
+# stillness can see: an executor elected AFTER the pick, holding no dormant
+# selection. It is NOT the whole single-executor story — two bars elected AT
+# the pick both receive the broadcast, both select the same dormant row, both
+# stay in-block, and focus never moves. That lockstep shape is counted
+# instead, in the attributable evlog: each executor runs its own `clave open`
+# at the commit (an already-live no-op still logs), so the open-count bracket
+# around phase 4's walks+commit is the detector for it, and this check is
+# only the detector for the post-pick shape.
+assert_focus_unchanged() {
+  local expected="$1" label="$2" got
+  got="$(focused_tab_id)"
+  check "$label focus unchanged (a dormant landing never switches tabs)" "${got:-empty}" "$expected"
+}
+
+# ===========================================================================
+# Phase 3 — tab churn
+# ===========================================================================
+# Closes a NON-last tab, then the HIGHEST tab followed by a create, re-joining
+# after each. Covers B14, B15 (#55), Z15, P4, P12/P13.
+phase "P3-tab-churn"
+
+P3_STATUS="$(dev_status)"
+P3_PANES="$(ct_list_panes)"
+P3_RC=$?
+check "ct.sh list-panes -t -c -j (phase-3 baseline)" "$([[ $P3_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+P3_LIVE="$(jq -c '[.[] | .tab_id] | unique' <<<"$P3_PANES" 2>/dev/null)"
+P3_LIVE_N="$(jq 'length' <<<"$P3_LIVE" 2>/dev/null)"
+measure "phase-3 baseline live tabs" "${P3_LIVE} (count=${P3_LIVE_N})"
+
+# Three tabs is the floor for the property, not a convenience: "a NON-last tab"
+# and "the HIGHEST tab" have to be able to be different tabs, and closing the
+# last tab standing closes the session.
+if [[ ! "$P3_LIVE_N" =~ ^[0-9]+$ ]] || ((P3_LIVE_N < 3)); then
+  printf '[%s %s] REFUSING: phase 3 needs at least 3 live tabs, measured %s. The bind ladder is what supplies them — read phase 2 above before reading this as a churn failure.\n' \
+    "$CURRENT_PHASE" "$(ts)" "${P3_LIVE_N:-empty}"
+  fail_phase
+fi
+
+EVICT_BEFORE="$(evlog_count bind-evict)"
+measure "evlog bind-evict count before churn (sandbox-scoped, so this IS attributable)" "$EVICT_BEFORE"
+TWINS_BEFORE="$(count_eof_twins)"
+
+rejoin_check "phase-3 baseline:"
+
+# ---------------------------------------------------------------------------
+# Churn A — close a NON-last tab (B14: a close at a position above ours is the
+# one whose prune had no retry before #55).
+# ---------------------------------------------------------------------------
+# The target: not the last position (that is the trivial close, and it is the
+# one the old code got right), and not the highest id (that is churn B's job,
+# and doing both to one tab would leave the recycle test with nothing to
+# recycle). Preferring a BOUND tab is deliberate — an unbind is the half of the
+# prune that touches an agent row.
+A_TAB="$(jq -r --argjson status "$P3_STATUS" '
+  ([.[] | {tab_id, tab_position}] | unique_by(.tab_id) | sort_by(.tab_position)) as $tabs
+  | ($tabs | map(.tab_id) | max) as $maxid
+  | [ $tabs[0:(($tabs | length) - 1)][] | .tab_id | select(. != $maxid) ] as $cands
+  | ([$status.store.agents[] | .tab_id] | map(select(. != null))) as $bound
+  | ([ $cands[] | select(. as $t | $bound | index($t)) ] + $cands)
+  | .[0] // empty' <<<"$P3_PANES" 2>/dev/null)"
+check_nonempty "churn A target: a non-last, non-highest tab exists" "$A_TAB"
+A_UUID="$(jq -r --argjson t "${A_TAB:-null}" '.store.agents | to_entries[] | select(.value.tab_id == $t) | .key' <<<"$P3_STATUS" 2>/dev/null | head -n1)"
+measure "churn A target tab" "tab=${A_TAB} bound_uuid=${A_UUID:0:13}"
+
+focus_tab_checked "$A_TAB" "churn A:"
+"$CT" close-tab
+A_CLOSE_RC=$?
+check "churn A ct.sh close-tab accepted" "$([[ $A_CLOSE_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+
+A_GONE="no"
+for _ in $(seq 1 10); do
+  if NOW_LIVE="$(live_tab_ids)"; then
+    [[ "$(jq -r --argjson t "$A_TAB" 'index($t) // "gone"' <<<"$NOW_LIVE")" == "gone" ]] && A_GONE="yes" && break
+  fi
+  sleep 1
+done
+measure "churn A live tabs after close" "${NOW_LIVE:-empty}"
+check "churn A closed tab left the live set" "$A_GONE" "yes"
+
+rejoin_check "churn A:"
+check "churn A no new bind-evict" "$(($(evlog_count bind-evict) - EVICT_BEFORE))" "0"
+if [[ -n "$A_UUID" ]]; then
+  measure "churn A closed tab's agent row" \
+    "$(jq -r --arg u "$A_UUID" '"tab_id=" + ((.store.agents[$u].tab_id | tostring) // "null")' < <(dev_status) 2>/dev/null)"
+fi
+
+# Nav still answers, with exactly one focus change. The press is `{"row":1}` —
+# the TOP of the live block — and the drive predicts which tab that is from the
+# store's own ordering inputs, so a wrong landing is a real finding rather than
+# an unreadable "focus moved somewhere".
+#
+# Focus is parked on some OTHER tab first, because a press that lands where
+# focus already sits proves nothing. The parking move comes BEFORE the
+# prediction, and that ordering is load-bearing: focusing a tab the store has
+# never stamped fires a birth `clave touch`, which mints the highest ordinal
+# going and makes THAT tab the top live row — predict first and the drive would
+# be racing the ordering it is predicting. So: park, let the touch settle,
+# predict, and if the parked tab is itself the top row, park somewhere else and
+# try again rather than assert something vacuous.
+nav_focus_check() {
+  local label="$1" status panes want here got i samples rc cand tried
+  panes="$(ct_list_panes)" || {
+    check "$label ct.sh list-panes -t -c -j (nav check)" "failed" "ok"
+    return
+  }
+  tried=""
+  want=""
+  for cand in $(jq -r '[.[] | .tab_id] | unique | .[]' <<<"$panes" 2>/dev/null); do
+    focus_tab_checked "$cand" "$label parked:"
+    sleep 2 # a birth `clave touch` is fire-and-forget; give it the beat
+    status="$(dev_status)"
+    panes="$(ct_list_panes)" || {
+      check "$label ct.sh list-panes -t -c -j (nav check, post-park)" "failed" "ok"
+      return
+    }
+    want="$(predict_top_live_tab "$status" "$panes")"
+    tried="${tried}park=${cand}->top=${want:-empty} "
+    [[ -n "$want" && "$want" != "$cand" ]] && break
+  done
+  measure "$label parking attempts (a park that is itself the top row proves nothing)" "$tried"
+  here="$(focused_tab_id)"
+  measure "$label predicted top live row (ordinal desc, ties by position)" "${want:-empty} (focus parked on ${here:-empty})"
+  if [[ -z "$want" || "$want" == "$here" ]]; then
+    printf '[%s %s] NOTE %s nav focus check NOT EXERCISED: every tab tried is itself the top live row, so a press could not move focus. Not a pass.\n' \
+      "$CURRENT_PHASE" "$(ts)" "$label"
+    return
+  fi
+  nav_pipe '{"row":1}'
+  rc=$?
+  check "$label nav pipe accepted" "$([[ $rc -eq 0 ]] && echo ok || echo failed)" "ok"
+  for i in $(seq 1 10); do
+    got="$(focused_tab_id)"
+    [[ "$got" == "$want" ]] && break
+    sleep 1
+  done
+  check "$label nav {\"row\":1} focused the predicted top live tab" "${got:-empty}" "$want"
+  # …and then STOPS. A second executor answering the same press drags focus
+  # somewhere else a beat later; three samples over ~3s is the bound this drive
+  # can afford, and it is a bound, not a proof — say so rather than imply more.
+  samples=""
+  for i in 1 2 3; do
+    sleep 1
+    got="$(focused_tab_id)"
+    # A failed read joins the sample set as the WORD, so it fails this check
+    # rather than disappearing out of a de-duplicated list.
+    samples="${samples}${got:-empty} "
+  done
+  measure "$label focus samples over the 3s after the press (one press, one landing)" "$samples"
+  check "$label focus settled: no second landing within 3s" \
+    "$(printf '%s' "$samples" | tr ' ' '\n' | grep -v '^$' | sort -u | paste -sd, -)" "$want"
+}
+
+nav_focus_check "churn A:"
+
+# ---------------------------------------------------------------------------
+# Churn B — close the HIGHEST tab, then create one. zellij RECYCLES tab ids
+# (`get_new_tab_id` = last key + 1 over a BTreeMap, screen.rs:1617), so this is
+# the sequence that hands a fresh tab a dead tab's id — B15/#55's ground.
+# ---------------------------------------------------------------------------
+B_STATUS="$(dev_status)"
+B_PANES="$(ct_list_panes)"
+B_RC=$?
+check "ct.sh list-panes -t -c -j (churn B baseline)" "$([[ $B_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+B_TAB="$(jq -r '[.[] | .tab_id] | max // empty' <<<"$B_PANES" 2>/dev/null)"
+check_nonempty "churn B target: the highest live tab id" "$B_TAB"
+B_OLD_ORD="$(jq -r --arg t "${B_TAB}" '.store.tab_order[$t] // empty' <<<"$B_STATUS" 2>/dev/null)"
+B_UUID="$(jq -r --argjson t "${B_TAB:-null}" '.store.agents | to_entries[] | select(.value.tab_id == $t) | .key' <<<"$B_STATUS" 2>/dev/null | head -n1)"
+measure "churn B target tab" "tab=${B_TAB} tab_order_ordinal=${B_OLD_ORD:-empty} bound_uuid=${B_UUID:0:13}"
+
+focus_tab_checked "$B_TAB" "churn B:"
+"$CT" close-tab
+B_CLOSE_RC=$?
+check "churn B ct.sh close-tab accepted" "$([[ $B_CLOSE_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+
+B_GONE="no"
+for _ in $(seq 1 10); do
+  if NOW_LIVE="$(live_tab_ids)"; then
+    [[ "$(jq -r --argjson t "$B_TAB" 'index($t) // "gone"' <<<"$NOW_LIVE")" == "gone" ]] && B_GONE="yes" && break
+  fi
+  sleep 1
+done
+measure "churn B live tabs after close" "${NOW_LIVE:-empty}"
+check "churn B highest tab left the live set" "$B_GONE" "yes"
+rejoin_check "churn B (post-close):"
+check "churn B no new bind-evict (post-close)" "$(($(evlog_count bind-evict) - EVICT_BEFORE))" "0"
+
+# The diff base for "what did the create add" is the POST-close set, not the
+# phase baseline: recycling hands the new tab the closed tab's exact id, so a
+# diff against the pre-close set is EMPTY on precisely the run that exercises
+# the property, and the recycling measure and stamp assertions below would be
+# unreachable. Read fresh, rc-gated — a refused read must not silently become
+# the diff's operand.
+B_LIVE_POSTCLOSE="$(live_tab_ids)"
+B_POSTCLOSE_RC=$?
+check "ct.sh list-panes -t -c -j (churn B post-close diff base)" \
+  "$([[ $B_POSTCLOSE_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+
+# The create. `ct.sh new-tab` is the pane-independent create: no fzf, no agent,
+# no CLI of ours — just zellij building a tab from the session's
+# `default_tab_template`, which is what puts a bar in it. Two things then have
+# to be true for the tab to be HOOKED UP rather than merely present: its bar
+# loaded, and the store learned about the tab.
+LOADED_BEFORE="$(bar_loaded_count)"
+measure "clave-bar loaded lines carrying build=${BUILD_TAG} before create" "$LOADED_BEFORE"
+"$CT" new-tab
+NEWTAB_RC=$?
+check "churn B ct.sh new-tab accepted" "$([[ $NEWTAB_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+
+NEW_IDS=""
+for _ in $(seq 1 10); do
+  if NOW_LIVE="$(live_tab_ids)"; then
+    NEW_IDS="$(jq -r --argjson before "$B_LIVE_POSTCLOSE" '[.[] | select(. as $t | $before | index($t) | not)] | join(",")' <<<"$NOW_LIVE" 2>/dev/null)"
+    [[ -n "$NEW_IDS" ]] && break
+  fi
+  sleep 1
+done
+measure "churn B live tabs after create" "${NOW_LIVE:-empty}"
+check "churn B exactly one new tab id appeared" "$(printf '%s' "$NEW_IDS" | awk -F, 'NF{print NF}')" "1"
+NEW_TAB="$NEW_IDS"
+
+# The recycle. FIRST LIVE RUN PENDING (4): whether this session's server hands
+# the closed id back. It is what screen.rs does, but it is a server detail and
+# this drive does not get to assume it — so it is MEASURED, and the two stamp
+# assertions below say plainly which of them the run actually exercised.
+if [[ "$NEW_TAB" == "$B_TAB" ]]; then
+  measure "churn B tab id recycling" "recycled: the new tab took the closed tab's id ${B_TAB}"
+else
+  printf '[%s %s] NOTE churn B: the new tab is id %s, not the closed %s — this run did NOT exercise recycling, so the inherited-stamp check below is a control, not the property.\n' \
+    "$CURRENT_PHASE" "$(ts)" "$NEW_TAB" "$B_TAB"
+fi
+
+# The birth stamp is fire-and-forget (`Effect::Touch` → `clave touch <tab>`),
+# so it is polled for, not sampled once — and the poll doubles as the settle
+# the nav check below needs, since a stamp landing mid-check would reorder the
+# live block underneath it.
+C_STATUS="$(dev_status)"
+NEW_ORD=""
+for _ in $(seq 1 10); do
+  C_STATUS="$(dev_status)"
+  NEW_ORD="$(jq -r --arg t "${NEW_TAB}" '.store.tab_order[$t] // empty' <<<"$C_STATUS" 2>/dev/null)"
+  [[ -n "$NEW_ORD" && "$NEW_ORD" != "$B_OLD_ORD" ]] && break
+  sleep 1
+done
+NEW_BOUND="$(jq -r --argjson t "${NEW_TAB:-null}" '[.store.agents | to_entries[] | select(.value.tab_id == $t) | .key[0:13]] | join(",")' <<<"$C_STATUS" 2>/dev/null)"
+check "churn B the new tab inherited no bind (a dead agent must not follow its id)" "$NEW_BOUND" ""
+measure "churn B new tab's tab_order ordinal" "${NEW_ORD:-empty} (closed tab's was ${B_OLD_ORD:-empty})"
+if [[ -n "$B_OLD_ORD" ]]; then
+  check "churn B the new tab carries no INHERITED stamp" \
+    "$([[ "$NEW_ORD" == "$B_OLD_ORD" ]] && echo "inherited ${NEW_ORD}" || echo "not-inherited")" "not-inherited"
+fi
+# The other half of B15, deliberately NOT an assertion: `needs_birth_touch`
+# latches per (instance, tab id) and zellij recycles ids, so a recycled tab can
+# come back PERMANENTLY unstamped — which sorts it below every dormant row
+# (FOOTGUNS, "birth_touched latches on the tab ID"). The tab born here carries
+# a NEW bar instance with an empty latch, so the stamp is expected to land; a
+# missing one is a live sighting of that class, and it belongs in the report as
+# a finding, not as a red gate on a known-open defect.
+if [[ -z "$NEW_ORD" ]]; then
+  printf '[%s %s] NOTE churn B: the new tab has NO tab_order stamp. That is the birth_touch latch signature (B15/#55) — record it, do not read it as this phase failing.\n' \
+    "$CURRENT_PHASE" "$(ts)"
+fi
+
+LOADED_AFTER="$LOADED_BEFORE"
+for _ in $(seq 1 10); do
+  LOADED_AFTER="$(bar_loaded_count)"
+  ((LOADED_AFTER > LOADED_BEFORE)) && break
+  sleep 1
+done
+measure "clave-bar loaded lines carrying build=${BUILD_TAG} after create" "$LOADED_AFTER"
+check_min "churn B the new tab's bar LOADED (fresh build-tagged loaded line; the bar is invisible to list-panes)" \
+  "$((LOADED_AFTER - LOADED_BEFORE))" 1
+
+rejoin_check "churn B (post-create):"
+check "churn B no new bind-evict (post-create)" "$(($(evlog_count bind-evict) - EVICT_BEFORE))" "0"
+nav_focus_check "churn B:"
+
+# ---------------------------------------------------------------------------
+# Churn C — a wake THROUGH the churn: the other half of "hooked up correctly".
+# A `new-tab` proves a bar loads; only a wake proves a store row still binds
+# after the tab set has been shuffled twice.
+#
+# Conditional on there being a dormant row to SPARE: phase 4 needs a dormant
+# block of its own, and a drive that eats its own preconditions reports a
+# refusal it caused. The skip is loud.
+# ---------------------------------------------------------------------------
+C_STATUS="$(dev_status)"
+C_WAKEABLE="$(wakeable_uuids "$C_STATUS")"
+C_WAKEABLE_N="$(printf '%s\n' "$C_WAKEABLE" | grep -c .)"
+measure "churn C wakeable dormant rows" "$C_WAKEABLE_N"
+if ((C_WAKEABLE_N >= 2)); then
+  C_LIVE="$(live_tab_ids)"
+  C_LIVE_RC=$?
+  C_LIVE_N="$(jq 'length' <<<"$C_LIVE" 2>/dev/null)"
+  # rc-gated because the live block's LENGTH is the offset every `{"row":N}`
+  # pick is built on: a refused read would silently aim the pick a few rows off
+  # and wake the wrong agent (phase 2's own discipline).
+  check "churn C ct.sh list-panes -t -c -j (live block length)" \
+    "$([[ $C_LIVE_RC -eq 0 && "$C_LIVE_N" =~ ^[0-9]+$ ]] && echo ok || echo failed)" "ok"
+  C_TARGET=""
+  C_RANK=0
+  while IFS= read -r u; do
+    C_RANK=$((C_RANK + 1))
+    if printf '%s\n' "$C_WAKEABLE" | grep -qx -F "$u"; then
+      C_TARGET="$u"
+      break
+    fi
+  done < <(dormant_render_order "$C_STATUS")
+  C_ROW=$((C_LIVE_N + C_RANK))
+  C_DORMANT_BEFORE="$(dormant_uuids "$C_STATUS")"
+  C_OPEN_BEFORE="$(evlog_count open)"
+  measure "churn C wake target" "uuid=${C_TARGET:0:13} dormant_rank=${C_RANK} display_row=${C_ROW}"
+  nav_pipe "{\"row\":${C_ROW}}"
+  C_P1=$?
+  nav_pipe '{"commit":true}'
+  C_P2=$?
+  check "churn C nav pipe legs accepted (row+commit)" "$([[ $C_P1 -eq 0 && $C_P2 -eq 0 ]] && echo ok || echo failed)" "ok"
+  C_BOUND=""
+  for _ in $(seq 1 15); do
+    C_BOUND="$(comm -23 <(printf '%s\n' "$C_DORMANT_BEFORE" | sort) <(dormant_uuids "$(dev_status)" | sort))"
+    [[ -n "$C_BOUND" ]] && break
+    sleep 1
+  done
+  measure "churn C uuid that left the dormant set" "${C_BOUND:0:13}"
+  check "churn C exactly one row left the dormant set" "$(printf '%s\n' "$C_BOUND" | grep -c .)" "1"
+  check "churn C the row that woke is the one picked" "${C_BOUND}" "${C_TARGET}"
+  C_TID="$(jq -r --arg u "${C_BOUND}" '.store.agents[$u].tab_id // empty' < <(dev_status) 2>/dev/null)"
+  check_nonempty "churn C woken row bound to a tab after two closes and a create" "$C_TID"
+  # One commit, one `clave open`. The evlog is sandbox-scoped, so this counts
+  # EXECUTORS: two instances acting on one broadcast would log two.
+  check "churn C exactly one clave open ran (one executor)" "$(($(evlog_count open) - C_OPEN_BEFORE))" "1"
+  rejoin_check "churn C:"
+else
+  printf '[%s %s] SKIP churn C wake: %s wakeable dormant row(s), and phase 4 needs the dormant block. The re-join above still covers the churn; what is untested here is a wake THROUGH it.\n' \
+    "$CURRENT_PHASE" "$(ts)" "$C_WAKEABLE_N"
+fi
+
+check "phase 3 no new bind-evict overall" "$(($(evlog_count bind-evict) - EVICT_BEFORE))" "0"
+measure "phase 3 EOF-twin delta (user-global log, unattributable — forensic only)" \
+  "$(($(count_eof_twins) - TWINS_BEFORE))"
+
+# ===========================================================================
+# Phase 4 — ring walk
+# ===========================================================================
+# Picks into the dormant block, walks both directions, wraps, and commits once.
+# Covers P1 (#162), P2, P16, K8.
+#
+# What is being proved and HOW, because none of it is directly visible: the
+# cursor is per-instance model state that no store and no zellij read exposes.
+#   - single executor → two reads, because neither alone covers both #162
+#     shapes: focus must not move during a dormant walk (a second executor
+#     elected after the pick has no dormant selection, so its ring is the
+#     LIVE one and it would switch tabs), and the attributable evlog `open`
+#     count bracketing walks+commit must land at exactly one (two executors
+#     elected at the pick walk the same block in lockstep and never move
+#     focus — but each runs its own `clave open` at the commit);
+#   - in-block + wrap → the walk is net-zero by construction (a full wrap, then
+#     one step each way), so the COMMIT must land on the row that was picked.
+#     The landing uuid is the walk's only witness, and predicting it is the
+#     assertion;
+#   - one commit, one tab → the evlog's `open` count and the live tab delta.
+# The walk is driven twice from two different focused tabs: ring movement is
+# supposed to work regardless of which tab you are standing in.
+phase "P4-ring-walk"
+
+P4_STATUS="$(dev_status)"
+P4_LIVE="$(live_tab_ids)"
+P4_RC=$?
+check "ct.sh list-panes -t -c -j (phase-4 baseline)" "$([[ $P4_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+P4_LIVE_N="$(jq 'length' <<<"$P4_LIVE" 2>/dev/null)"
+P4_DORMANT="$(dormant_render_order "$P4_STATUS")"
+P4_DORMANT_N="$(printf '%s\n' "$P4_DORMANT" | grep -c .)"
+P4_WAKEABLE="$(wakeable_uuids "$P4_STATUS")"
+P4_WAKEABLE_N="$(printf '%s\n' "$P4_WAKEABLE" | grep -c .)"
+measure "phase-4 blocks" "live=${P4_LIVE_N} dormant=${P4_DORMANT_N} wakeable=${P4_WAKEABLE_N}"
+measure "phase-4 dormant block, rendered order (top first)" "$(printf '%s' "$P4_DORMANT" | tr '\n' ' ')"
+
+# A ring of one cannot be walked and a block with nothing committable cannot be
+# landed on. Both are refusals with the measured counts, never a soft pass.
+if ((P4_DORMANT_N < 2)) || ((P4_WAKEABLE_N < 1)) || ((P4_LIVE_N < 2)); then
+  printf '[%s %s] REFUSING: phase 4 needs >=2 dormant rows (>=1 wakeable) and >=2 live tabs; measured dormant=%s wakeable=%s live=%s.\n' \
+    "$CURRENT_PHASE" "$(ts)" "$P4_DORMANT_N" "$P4_WAKEABLE_N" "$P4_LIVE_N"
+  fail_phase
+fi
+
+P4_EVICT_BEFORE="$(evlog_count bind-evict)"
+P4_TWINS_BEFORE="$(count_eof_twins)"
+
+# The target and its display row. `{"row":N}` indexes the WHOLE rendered list
+# (live block first), which is why the live block's length is the offset — the
+# same arithmetic phase 2's ladder uses.
+P4_TARGET=""
+P4_RANK=0
+while IFS= read -r u; do
+  P4_RANK=$((P4_RANK + 1))
+  if printf '%s\n' "$P4_WAKEABLE" | grep -qx -F "$u"; then
+    P4_TARGET="$u"
+    break
+  fi
+done <<<"$P4_DORMANT"
+P4_ROW=$((P4_LIVE_N + P4_RANK))
+check_nonempty "phase-4 target: the first WAKEABLE row of the dormant block" "$P4_TARGET"
+measure "phase-4 target" "uuid=${P4_TARGET:0:13} dormant_rank=${P4_RANK} display_row=${P4_ROW}"
+
+# Two tabs to stand in, chosen by position so they are as far apart in the tab
+# bar as the fleet allows.
+P4_PANES="$(ct_list_panes)"
+P4_PANES_RC=$?
+check "ct.sh list-panes -t -c -j (phase-4 tab positions)" "$([[ $P4_PANES_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+P4_FIRST_TAB="$(jq -r '[.[] | {tab_id, tab_position}] | unique_by(.tab_id) | sort_by(.tab_position) | .[0].tab_id // empty' <<<"$P4_PANES" 2>/dev/null)"
+P4_LAST_TAB="$(jq -r '[.[] | {tab_id, tab_position}] | unique_by(.tab_id) | sort_by(.tab_position) | .[-1].tab_id // empty' <<<"$P4_PANES" 2>/dev/null)"
+measure "phase-4 standing tabs" "first=${P4_FIRST_TAB} last=${P4_LAST_TAB}"
+check "phase-4 the two standing tabs are different tabs" \
+  "$([[ -n "$P4_FIRST_TAB" && "$P4_FIRST_TAB" != "$P4_LAST_TAB" ]] && echo ok || echo "first=${P4_FIRST_TAB} last=${P4_LAST_TAB}")" "ok"
+
+# ---------------------------------------------------------------------------
+# One walk leg: pick into the dormant block from the tab you are standing in,
+# wrap the ring once, then step both ways. Every press is followed by a focus
+# read, and that read is the assertion — see `assert_focus_unchanged`.
+# ---------------------------------------------------------------------------
+walk_leg() {
+  local stand="$1" label="$2" i rc
+  focus_tab_checked "$stand" "$label"
+  # Elect the standing tab's bar before the pick. Without this the walk is
+  # answered by whichever bar the LAST beacon named (a native focus change
+  # emits none), so both walks would exercise one bar's cursor and the
+  # second-instance coverage would be fake. The pipe is fire-and-forget and
+  # the election is model state no outside read exposes — the commit landing
+  # on the picked row is its witness.
+  anchor_executor "$stand"
+  rc=$?
+  check "$label executor anchor pipe accepted (clave-visited ${stand})" "$([[ $rc -eq 0 ]] && echo ok || echo failed)" "ok"
+  sleep 1
+  nav_pipe "{\"row\":${P4_ROW}}"
+  rc=$?
+  check "$label pick pipe accepted (row ${P4_ROW})" "$([[ $rc -eq 0 ]] && echo ok || echo failed)" "ok"
+  sleep 1
+  assert_focus_unchanged "$stand" "$label after the pick,"
+  # A FULL wrap: exactly as many `next` presses as the block has rows returns
+  # the cursor to where it started (#112 — the walk wraps WITHIN one block and
+  # never crosses into the live one).
+  for i in $(seq 1 "$P4_DORMANT_N"); do
+    nav_pipe '{"dir":"next"}'
+    rc=$?
+    check "$label next ${i}/${P4_DORMANT_N} pipe accepted" "$([[ $rc -eq 0 ]] && echo ok || echo failed)" "ok"
+    sleep 1
+    assert_focus_unchanged "$stand" "$label after next ${i}/${P4_DORMANT_N},"
+  done
+  # …and both directions: one step back, one step forward, net zero again.
+  nav_pipe '{"dir":"prev"}'
+  rc=$?
+  check "$label prev pipe accepted" "$([[ $rc -eq 0 ]] && echo ok || echo failed)" "ok"
+  sleep 1
+  assert_focus_unchanged "$stand" "$label after prev,"
+  nav_pipe '{"dir":"next"}'
+  rc=$?
+  check "$label closing next pipe accepted" "$([[ $rc -eq 0 ]] && echo ok || echo failed)" "ok"
+  sleep 1
+  assert_focus_unchanged "$stand" "$label after the closing next,"
+}
+
+# Walk 1 — standing in the FIRST tab. No commit: this leg exists to show the
+# ring turning without spending the selection.
+#
+# The open-count bracket OPENS here, before any press: it is the attributable
+# single-executor evidence (see `assert_focus_unchanged` — stillness cannot
+# see two executors walking in lockstep, the evlog can).
+P4_OPEN_BEFORE="$(evlog_count open)"
+P4_SEQ_BEFORE="$(jq -r '.store.seq // empty' <<<"$P4_STATUS" 2>/dev/null)"
+walk_leg "$P4_FIRST_TAB" "walk 1 (standing in tab ${P4_FIRST_TAB}):"
+
+# A walk is selection only: it writes nothing. Recorded rather than asserted —
+# a live agent's hook can advance `seq` underneath any drive, and mistaking
+# that for a nav write would be a false red.
+measure "store seq across walk 1 (a walk selects; it should write nothing)" \
+  "before=${P4_SEQ_BEFORE} after=$(jq -r '.store.seq // empty' < <(dev_status) 2>/dev/null)"
+
+# ---------------------------------------------------------------------------
+# Walk 2 — the same walk from the OTHER end of the tab bar, then the one
+# commit. The leg's anchor re-elects THIS tab's bar (walk 1's beacon would
+# otherwise keep answering — see `anchor_executor`), and that same anchor
+# wipes every cursor, so re-picking is required, not redundant: the cursor is
+# executor-local state, the bar in this tab builds its own from scratch, and
+# that is the property being shown — the ring works from wherever you are
+# standing, driven by whichever bar is standing there.
+# ---------------------------------------------------------------------------
+walk_leg "$P4_LAST_TAB" "walk 2 (standing in tab ${P4_LAST_TAB}):"
+
+# The bracket's midpoint: a walk is selection only, so NO open may have run
+# yet — and pinning zero here is what proves the ==1 after the commit came
+# from the commit alone, not from a stray walk-time open cancelling against a
+# commit that never landed.
+check "the two walks ran no clave open (a walk selects; it opens nothing)" \
+  "$(($(evlog_count open) - P4_OPEN_BEFORE))" "0"
+
+P4_DORMANT_BEFORE="$(dormant_uuids "$(dev_status)")"
+P4_LIVE_BEFORE_N="$(jq 'length' < <(live_tab_ids) 2>/dev/null)"
+nav_pipe '{"commit":true}'
+P4_COMMIT_RC=$?
+check "commit pipe accepted (the Alt+Enter equivalent)" "$([[ $P4_COMMIT_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+
+P4_LANDED=""
+for _ in $(seq 1 15); do
+  P4_LANDED="$(comm -23 <(printf '%s\n' "$P4_DORMANT_BEFORE" | sort) <(dormant_uuids "$(dev_status)" | sort))"
+  [[ -n "$P4_LANDED" ]] && break
+  sleep 1
+done
+measure "commit: uuid that left the dormant set" "${P4_LANDED:0:13}"
+check "commit woke exactly one row" "$(printf '%s\n' "$P4_LANDED" | grep -c .)" "1"
+# THE ring assertion. Two full wraps and a step each way later, the selection
+# must still be on the row that was picked — if the walk had left the block, or
+# stepped by anything other than one, this lands somewhere else.
+check "the walk stayed in-block and net-zero: the commit landed on the row picked" \
+  "${P4_LANDED}" "${P4_TARGET}"
+check "walks+commit ran exactly one clave open (one executor, never two — the lockstep detector)" \
+  "$(($(evlog_count open) - P4_OPEN_BEFORE))" "1"
+P4_LIVE_AFTER_N="$(jq 'length' < <(live_tab_ids) 2>/dev/null)"
+check "commit opened exactly one tab" "$P4_LIVE_AFTER_N" "$((P4_LIVE_BEFORE_N + 1))"
+P4_TID=""
+for _ in $(seq 1 10); do
+  P4_TID="$(jq -r --arg u "${P4_LANDED}" '.store.agents[$u].tab_id // empty' < <(dev_status) 2>/dev/null)"
+  [[ -n "$P4_TID" ]] && break
+  sleep 1
+done
+check_nonempty "the committed row bound to its tab" "$P4_TID"
+measure "focused tab after the commit (recorded, not asserted: the tab is created by clave open, and which tab zellij leaves focused is its call)" \
+  "$(focused_tab_id)"
+check "phase 4 no new bind-evict" "$(($(evlog_count bind-evict) - P4_EVICT_BEFORE))" "0"
+measure "phase 4 EOF-twin delta (user-global log, unattributable — forensic only)" \
+  "$(($(count_eof_twins) - P4_TWINS_BEFORE))"
+
+rejoin_check "phase 4 (post-commit):"
 
 print_summary
