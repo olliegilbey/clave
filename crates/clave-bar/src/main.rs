@@ -235,6 +235,37 @@ impl State {
                     self.pending_peeks += 1;
                     set_timeout(PEEK_SINK_SECS);
                 }
+                // Alt+f (#207). All three arms run ungated here: the model
+                // already elected the beacon-named instance at emit (the #162
+                // template — `shell_toggle` returns empty everywhere else),
+                // and `None` targets the active tab, which is that instance's
+                // own. Show/hide are state-changed idempotent server-side;
+                // spawn is not, which is exactly why the election lives in
+                // the model where the tests reach it.
+                Effect::ShellHide => {
+                    let _ = hide_floating_panes(None);
+                }
+                Effect::ShellShow => {
+                    let _ = show_floating_panes(None);
+                }
+                Effect::ShellSpawn => {
+                    // Coordinates, not a layout: this is the one geometry
+                    // path that floors x at the viewport's left edge, i.e.
+                    // flush against the bar (#207 probe). The cwd is the
+                    // bar's own — the session cwd it was born with, same
+                    // shell-in-the-session semantics the #188 Run bind had.
+                    open_terminal_floating(
+                        get_plugin_ids().initial_cwd,
+                        FloatingPaneCoordinates::new(
+                            Some(format!("{}%", clave_types::SHELL_FLOATING_X_PERCENT)),
+                            Some(format!("{}%", clave_types::SHELL_FLOATING_Y_PERCENT)),
+                            Some(format!("{}%", clave_types::SHELL_FLOATING_WIDTH_PERCENT)),
+                            Some(format!("{}%", clave_types::SHELL_FLOATING_HEIGHT_PERCENT)),
+                            None,
+                            None,
+                        ),
+                    );
+                }
                 Effect::OpenAgent { uuid } => {
                     // Collapse mode rides along for D36's reason: the new tab
                     // must be born in the mode the fleet is in. The width
@@ -360,6 +391,14 @@ impl State {
                     self.model.set_organic_pending();
                     return true;
                 }
+                "clave-shell" => {
+                    // Alt+f (#207): the model decides spawn/show/hide and
+                    // elects the acting instance; nothing here repaints the
+                    // bar (the shell floats over it, it does not move it).
+                    let fx = self.model.shell_toggle();
+                    self.run_effects(fx);
+                    return false;
+                }
                 _ => {
                     eprintln!("clave-bar: dropped {name} pipe with empty payload");
                     return false;
@@ -440,6 +479,16 @@ impl State {
                 self.toggle_collapsed();
                 true
             }
+            "clave-shell" => {
+                // Alt+f's payload-carrying variant — the scripted QA form
+                // (`zellij pipe --name clave-shell -- press`): a payload-LESS
+                // CLI pipe has the #45 blank-twin shape and is dropped above,
+                // so automation must send a payload, and it must behave
+                // exactly like the keybind (same clave-organic reasoning).
+                let fx = self.model.shell_toggle();
+                self.run_effects(fx);
+                false
+            }
             other => {
                 eprintln!("clave-bar: unknown pipe {other:?}");
                 false
@@ -495,6 +544,7 @@ impl ZellijPlugin for State {
             PermissionType::ChangeApplicationState, // focus_pane / rename_tab / hide_self
             PermissionType::ReadApplicationState,   // TabUpdate + PaneUpdate truth
             PermissionType::RunCommands,            // hydrate (clave snapshot) + clave focus
+            PermissionType::OpenTerminalsOrPlugins, // Alt+f scratch-shell spawn (#207)
         ]);
         subscribe(&[
             EventType::TabUpdate,
@@ -567,6 +617,7 @@ impl ZellijPlugin for State {
                         position: t.position,
                         name: t.name.clone(),
                         active: t.active,
+                        floating_visible: t.are_floating_panes_visible,
                     })
                     .collect();
                 let fx = self.model.apply_tabs(metas);
@@ -603,6 +654,7 @@ impl ZellijPlugin for State {
                             pane_id: p.id,
                             is_plugin: p.is_plugin,
                             is_focused: p.is_focused,
+                            is_floating: p.is_floating,
                         });
                     }
                 }

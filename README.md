@@ -115,17 +115,18 @@ Then `Alt+a`, pick a directory, choose `new`. That's your first agent.
 | `Alt+o` | back to where you were |
 | `Alt+c` | collapse the bar to a strip, or expand it |
 | `Alt+t` `Alt+w` | new tab, close tab |
-| `Alt+f` | a scratch shell floating over the fleet — leaving it closes it |
+| `Alt+f` | a scratch shell floating over the fleet — press again to tuck it away, leave it to close it |
 
 `Alt` is clave's namespace. Five stock Zellij bindings that Claude Code needs
 are unbound for you (`Ctrl+g/t/o/b/q`); the rest of Zellij's `Ctrl` keys still
 belong to Zellij ([#24](../../issues/24)). `Alt+f` is the one stock key clave
-takes over rather than unbinds: Zellij's own `Alt+f` toggles floating panes and
-so opens the first one at a size nothing chose, tiny enough to need resizing
-every time. Clave's replacement opens your shell at a fixed, workable size
-([#188](../../issues/188)) — four-fifths of the room to the right of the bar,
-starting flush against the bar's edge. Zellij's toggle is still there under
-every mode other than the default one. One cost: `Alt+f` used to reach the
+takes over rather than unbinds: Zellij's own `Alt+f` toggles floating panes,
+but opens the first one at a size nothing chose, tiny enough to need resizing
+every time. Clave routes the press to the sidebar instead, which spawns your
+shell at a fixed, workable size — flush against the bar's edge and reaching
+almost all the way to the screen's right — and tucks it away or brings it back
+on every press after ([#188](../../issues/188), [#207](../../issues/207)).
+Nothing is spawned until the first press. One cost: `Alt+f` used to reach the
 program you were typing in, where it is readline's "forward one word", and clave
 now takes it — `Alt+b` still moves back a word, so word motion in a prompt is
 one-directional.

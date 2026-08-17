@@ -380,9 +380,17 @@ const _: () = assert!(
 
 // ── the Alt+f scratch shell's geometry (#188) ───────────────────────────────
 //
-// A four-fifths box against the bar's right edge: big enough to work in without
-// resizing, small enough that the fleet stays legible behind it. Same
+// A box flush against the bar's right edge, reaching almost all the way to the
+// screen's right (Ollie's call, 2026-08-17 #207 drive): big enough to work in
+// without resizing, with a sliver of fleet visible at the right edge. Same
 // percent-of-the-non-bar-area rules as the picker's constants above.
+//
+// Since #207 these feed the bar's `open_terminal_floating` call, not a
+// keybind: `Alt f` pipes to the bar (`clave-shell`), which spawns through the
+// COORDINATES path — the only geometry path that floors x at the viewport's
+// left edge. A `swap_floating_layout` resolves the same percents from
+// absolute column zero and parks the shell over the bar (live probe
+// 2026-08-17); do not move them back into layout KDL.
 //
 // It is NOT horizontally centred and cannot be: zellij resolves `x` as a percent
 // of the non-bar width but measures it from absolute column zero, so anything
@@ -402,8 +410,10 @@ pub const SHELL_FLOATING_X_PERCENT: usize = 0;
 /// and is paired by a tenth below.
 pub const SHELL_FLOATING_Y_PERCENT: usize = 10;
 
-/// Four-fifths of the non-bar width.
-pub const SHELL_FLOATING_WIDTH_PERCENT: usize = 80;
+/// Nearly the whole non-bar width — the right edge stops a few columns short
+/// of the screen's (`adjust_coordinates` narrows an overflow to the viewport's
+/// right edge, so even 100 would be safe; 97 leaves the gap deliberate).
+pub const SHELL_FLOATING_WIDTH_PERCENT: usize = 97;
 
 /// Four-fifths of the non-bar height.
 pub const SHELL_FLOATING_HEIGHT_PERCENT: usize = 80;

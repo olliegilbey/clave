@@ -25,6 +25,9 @@ pub struct TabMeta {
     pub position: usize,
     pub name: String,
     pub active: bool,
+    /// zellij's `are_floating_panes_visible` for this tab — whether the
+    /// floating set is currently shown. One input of the Alt+f decision (#207).
+    pub floating_visible: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +36,10 @@ pub struct PaneMeta {
     pub pane_id: u32,
     pub is_plugin: bool,
     pub is_focused: bool,
+    /// Floating panes ride the same manifest as tiled ones, flagged. Their
+    /// presence on the active tab is what separates Alt+f's show from its
+    /// spawn (#207) — respawning over a hidden shell is the stacking bug.
+    pub is_floating: bool,
 }
 
 /// Side effects for main.rs to execute — kept as data so tests assert them.
@@ -101,6 +108,23 @@ pub enum Effect {
     /// landing on a collapsed bar peeks like live nav does (no visited pipe
     /// exists for it, so the model asks explicitly).
     ArmPeek,
+    /// hide_floating_panes(None) — Alt+f while the active tab's floating set
+    /// is visible (#207). `None` targets the active tab server-side, and the
+    /// emitter is the beacon-named instance, whose tab that is.
+    ShellHide,
+    /// show_floating_panes(None) — Alt+f while the active tab HAS floating
+    /// panes but they are hidden. Never a spawn: respawning over a hidden
+    /// shell is #207's every-press-stacks bug.
+    ShellShow,
+    /// open_terminal_floating(cwd, shell geometry) — Alt+f on a tab with no
+    /// floating pane at all. The ONLY non-idempotent arm of the trio, which is
+    /// why `shell_toggle` emits solely from the beacon-named instance: N
+    /// emitters would be N shells. Spawning by COORDINATES is load-bearing —
+    /// it is the one geometry path that floors x at the viewport's left edge
+    /// (pane_size.rs `adjust_coordinates`); a swap_floating_layout resolves
+    /// the same percents from absolute column 0 and puts the shell over the
+    /// bar (#207 live probe, 2026-08-17).
+    ShellSpawn,
     /// run_command(["clave","open",uuid]) — §6.3. Fired ONLY by the Alt+Enter
     /// commit (#100 dwell-commit: selection and launch are separate acts);
     /// the model has already marked the uuid in-flight (↻).
@@ -1811,6 +1835,42 @@ impl BarModel {
             .is_some_and(|own| self.current_tab == Some(own))
     }
 
+    /// Alt+f (#207): decide what the press means for the ACTIVE tab — spawn
+    /// the scratch shell, show it, or hide it — and decide it HERE, where a
+    /// test can reach it (#162 template). The keybind's `MessagePlugin`
+    /// broadcasts to every instance, and only the spawn arm is dangerous in
+    /// duplicate (N emitters, N shells), so the whole decision runs on the
+    /// beacon-named instance alone — `own_tab_focused`, the same election as
+    /// `clave-nav`, because a starved bar's own frames claim it is active
+    /// (FOOTGUNS.md:63-65) and only the replicated beacon refuses it.
+    /// Fail-closed: a dropped Alt+f is a repeatable keypress.
+    pub fn shell_toggle(&mut self) -> Vec<Effect> {
+        if !self.own_tab_focused() {
+            return Vec::new();
+        }
+        // Under the gate, own tab == the tab the user is looking at, and the
+        // frames are coherent — both lookups below resolve against the same
+        // delivered pair.
+        let visible = self.own_tab().is_some_and(|own| {
+            self.tabs
+                .iter()
+                .any(|t| t.tab_id == own && t.floating_visible)
+        });
+        if visible {
+            return vec![Effect::ShellHide];
+        }
+        let has_floating = self.own_tab_position().is_some_and(|pos| {
+            self.panes
+                .iter()
+                .any(|p| p.tab_position == pos && p.is_floating)
+        });
+        if has_floating {
+            vec![Effect::ShellShow]
+        } else {
+            vec![Effect::ShellSpawn]
+        }
+    }
+
     /// Does the beacon name a tab that is not in the last delivered tab set?
     /// A beacon that never landed (`None`) is not stranded — it is simply
     /// unset, and birth is the trigger that answers for it.
@@ -2246,6 +2306,7 @@ mod tests {
             position: pos,
             name: name.into(),
             active,
+            floating_visible: false,
         }
     }
 
@@ -2265,6 +2326,7 @@ mod tests {
             pane_id: id,
             is_plugin: plugin,
             is_focused: focused,
+            is_floating: false,
         }
     }
 
@@ -3757,6 +3819,73 @@ mod tests {
             None,
             "a live beacon outranks local truth, coherent frames or not"
         );
+    }
+
+    #[test]
+    fn alt_f_spawns_shows_or_hides_from_the_active_tabs_floating_state() {
+        // #207: one press, one executor decision — spawn when the tab has no
+        // floating pane, show when one exists hidden, hide when visible. The
+        // decision lives here so a test can reach it (#162 template), and the
+        // acting instance is the beacon-named one, same rule as `clave-nav`.
+        let mut m = fleet_of_three(11);
+        m.beacon(11); // the user is looking at our tab
+        assert_eq!(
+            m.shell_toggle(),
+            vec![Effect::ShellSpawn],
+            "no floating pane on the active tab: the press must spawn the shell"
+        );
+        // A floating pane now exists on our tab (position 1) but the tab frame
+        // says the floating set is not visible — the post-hide state.
+        let mut panes = panes_at(&FLEET_PANES);
+        panes.push(PaneMeta {
+            tab_position: 1,
+            pane_id: 200,
+            is_plugin: false,
+            is_focused: false,
+            is_floating: true,
+        });
+        m.apply_panes(panes);
+        assert_eq!(
+            m.shell_toggle(),
+            vec![Effect::ShellShow],
+            "a hidden floating pane must be shown, NOT respawned — respawn here \
+             is #207's stacking bug reborn"
+        );
+        // The tab frame now reports the floating set visible.
+        m.apply_tabs(vec![
+            tab(10, 0, "a", false),
+            TabMeta {
+                floating_visible: true,
+                ..tab(11, 1, "b", true)
+            },
+            tab(12, 2, "c", false),
+        ]);
+        assert_eq!(
+            m.shell_toggle(),
+            vec![Effect::ShellHide],
+            "visible floating panes: the press must hide them"
+        );
+    }
+
+    #[test]
+    fn a_starved_bar_never_acts_on_alt_f() {
+        // FOOTGUNS.md:63-65: a starved bar's frozen frames are self-coherent
+        // and claim its OWN tab active, so `elects_confirmed` is exactly the
+        // self-diagnosed "am I active" that lies. Only the replicated beacon
+        // can refuse it — and the spawn arm is the one that MUST be exclusive:
+        // N acting bars would open N shells (the CLI-twin shape of #207).
+        let mut m = starved_bar(12);
+        m.beacon(11); // the broadcast says the user is elsewhere
+        assert_eq!(
+            m.shell_toggle(),
+            Vec::<Effect>::new(),
+            "the beacon names another tab: a starved bar must not act"
+        );
+        // A newborn instance (no frames at all) refuses too — fail-closed,
+        // a dropped Alt+f is a repeatable keypress.
+        let mut newborn = BarModel::default();
+        newborn.set_own_pane(101);
+        assert_eq!(newborn.shell_toggle(), Vec::<Effect>::new());
     }
 
     #[test]
@@ -7033,12 +7162,14 @@ mod tests {
                                         pane_id: bar_pane(id),
                                         is_plugin: true,
                                         is_focused: false,
+                                        is_floating: false,
                                     },
                                     PaneMeta {
                                         tab_position: pos,
                                         pane_id: term_pane(id),
                                         is_plugin: false,
                                         is_focused: false,
+                                        is_floating: false,
                                     },
                                 ]
                             })
