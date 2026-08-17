@@ -1069,11 +1069,32 @@ nav_pipe() {
   "$CT" pipe --name clave-nav -- "$1"
 }
 
+# Point the executor election at a tab. `clave-visited` is the replicated
+# beacon the bars broadcast themselves on every executed SwitchTab (model.rs
+# AnnounceVisit/ConvergeVisit), and `nav_executor` answers that beacon ALONE
+# (FOOTGUNS, #162) — so this pipe is indistinguishable from an organic one:
+# every instance converges on it, and the bar standing in the named tab is
+# the one elected. It matters because a NATIVE focus change emits no beacon:
+# `focus_tab` moves zellij focus without moving the election, so a drive that
+# only parks focus somewhere keeps talking to whichever bar the last beacon
+# named. NOTE `beacon` also clears every instance's cursor, so an anchor must
+# come BEFORE the pick it fronts, never after.
+anchor_executor() {
+  "$CT" pipe --name clave-visited -- "$1"
+}
+
 # Focus must NOT move. A dormant landing is a pure selection — `nav` returns
 # `ArmPeek` at most and never a `SwitchTab` (model.rs, the `RowKey::Dormant`
 # arm) — so ANY focus movement during a dormant walk means a second instance
-# acted on the same press and walked its own LIVE ring. That is the single-
-# executor detector (#162's two-executor shape), and it costs one dump.
+# acted on the same press and walked its own LIVE ring. That is the shape
+# stillness can see: an executor elected AFTER the pick, holding no dormant
+# selection. It is NOT the whole single-executor story — two bars elected AT
+# the pick both receive the broadcast, both select the same dormant row, both
+# stay in-block, and focus never moves. That lockstep shape is counted
+# instead, in the attributable evlog: each executor runs its own `clave open`
+# at the commit (an already-live no-op still logs), so the open-count bracket
+# around phase 4's walks+commit is the detector for it, and this check is
+# only the detector for the post-pick shape.
 assert_focus_unchanged() {
   local expected="$1" label="$2" got
   got="$(focused_tab_id)"
@@ -1234,7 +1255,6 @@ check_nonempty "churn B target: the highest live tab id" "$B_TAB"
 B_OLD_ORD="$(jq -r --arg t "${B_TAB}" '.store.tab_order[$t] // empty' <<<"$B_STATUS" 2>/dev/null)"
 B_UUID="$(jq -r --argjson t "${B_TAB:-null}" '.store.agents | to_entries[] | select(.value.tab_id == $t) | .key' <<<"$B_STATUS" 2>/dev/null | head -n1)"
 measure "churn B target tab" "tab=${B_TAB} tab_order_ordinal=${B_OLD_ORD:-empty} bound_uuid=${B_UUID:0:13}"
-B_LIVE_BEFORE="$(jq -c '[.[] | .tab_id] | unique' <<<"$B_PANES" 2>/dev/null)"
 
 focus_tab_checked "$B_TAB" "churn B:"
 "$CT" close-tab
@@ -1253,6 +1273,17 @@ check "churn B highest tab left the live set" "$B_GONE" "yes"
 rejoin_check "churn B (post-close):"
 check "churn B no new bind-evict (post-close)" "$(($(evlog_count bind-evict) - EVICT_BEFORE))" "0"
 
+# The diff base for "what did the create add" is the POST-close set, not the
+# phase baseline: recycling hands the new tab the closed tab's exact id, so a
+# diff against the pre-close set is EMPTY on precisely the run that exercises
+# the property, and the recycling measure and stamp assertions below would be
+# unreachable. Read fresh, rc-gated — a refused read must not silently become
+# the diff's operand.
+B_LIVE_POSTCLOSE="$(live_tab_ids)"
+B_POSTCLOSE_RC=$?
+check "ct.sh list-panes -t -c -j (churn B post-close diff base)" \
+  "$([[ $B_POSTCLOSE_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+
 # The create. `ct.sh new-tab` is the pane-independent create: no fzf, no agent,
 # no CLI of ours — just zellij building a tab from the session's
 # `default_tab_template`, which is what puts a bar in it. Two things then have
@@ -1267,7 +1298,7 @@ check "churn B ct.sh new-tab accepted" "$([[ $NEWTAB_RC -eq 0 ]] && echo ok || e
 NEW_IDS=""
 for _ in $(seq 1 10); do
   if NOW_LIVE="$(live_tab_ids)"; then
-    NEW_IDS="$(jq -r --argjson before "$B_LIVE_BEFORE" '[.[] | select(. as $t | $before | index($t) | not)] | join(",")' <<<"$NOW_LIVE" 2>/dev/null)"
+    NEW_IDS="$(jq -r --argjson before "$B_LIVE_POSTCLOSE" '[.[] | select(. as $t | $before | index($t) | not)] | join(",")' <<<"$NOW_LIVE" 2>/dev/null)"
     [[ -n "$NEW_IDS" ]] && break
   fi
   sleep 1
@@ -1404,9 +1435,13 @@ measure "phase 3 EOF-twin delta (user-global log, unattributable — forensic on
 #
 # What is being proved and HOW, because none of it is directly visible: the
 # cursor is per-instance model state that no store and no zellij read exposes.
-#   - single executor → focus must not move at all during a dormant walk
-#     (a second executor has no dormant selection, so its ring is the LIVE one
-#     and it would switch tabs);
+#   - single executor → two reads, because neither alone covers both #162
+#     shapes: focus must not move during a dormant walk (a second executor
+#     elected after the pick has no dormant selection, so its ring is the
+#     LIVE one and it would switch tabs), and the attributable evlog `open`
+#     count bracketing walks+commit must land at exactly one (two executors
+#     elected at the pick walk the same block in lockstep and never move
+#     focus — but each runs its own `clave open` at the commit);
 #   - in-block + wrap → the walk is net-zero by construction (a full wrap, then
 #     one step each way), so the COMMIT must land on the row that was picked.
 #     The landing uuid is the walk's only witness, and predicting it is the
@@ -1474,6 +1509,16 @@ check "phase-4 the two standing tabs are different tabs" \
 walk_leg() {
   local stand="$1" label="$2" i rc
   focus_tab_checked "$stand" "$label"
+  # Elect the standing tab's bar before the pick. Without this the walk is
+  # answered by whichever bar the LAST beacon named (a native focus change
+  # emits none), so both walks would exercise one bar's cursor and the
+  # second-instance coverage would be fake. The pipe is fire-and-forget and
+  # the election is model state no outside read exposes — the commit landing
+  # on the picked row is its witness.
+  anchor_executor "$stand"
+  rc=$?
+  check "$label executor anchor pipe accepted (clave-visited ${stand})" "$([[ $rc -eq 0 ]] && echo ok || echo failed)" "ok"
+  sleep 1
   nav_pipe "{\"row\":${P4_ROW}}"
   rc=$?
   check "$label pick pipe accepted (row ${P4_ROW})" "$([[ $rc -eq 0 ]] && echo ok || echo failed)" "ok"
@@ -1504,6 +1549,11 @@ walk_leg() {
 
 # Walk 1 — standing in the FIRST tab. No commit: this leg exists to show the
 # ring turning without spending the selection.
+#
+# The open-count bracket OPENS here, before any press: it is the attributable
+# single-executor evidence (see `assert_focus_unchanged` — stillness cannot
+# see two executors walking in lockstep, the evlog can).
+P4_OPEN_BEFORE="$(evlog_count open)"
 P4_SEQ_BEFORE="$(jq -r '.store.seq // empty' <<<"$P4_STATUS" 2>/dev/null)"
 walk_leg "$P4_FIRST_TAB" "walk 1 (standing in tab ${P4_FIRST_TAB}):"
 
@@ -1515,14 +1565,23 @@ measure "store seq across walk 1 (a walk selects; it should write nothing)" \
 
 # ---------------------------------------------------------------------------
 # Walk 2 — the same walk from the OTHER end of the tab bar, then the one
-# commit. Re-picking is not redundant: the cursor is executor-local state, so
-# the bar in this tab has its own, and that is the property being shown — the
-# ring works from wherever you are standing.
+# commit. The leg's anchor re-elects THIS tab's bar (walk 1's beacon would
+# otherwise keep answering — see `anchor_executor`), and that same anchor
+# wipes every cursor, so re-picking is required, not redundant: the cursor is
+# executor-local state, the bar in this tab builds its own from scratch, and
+# that is the property being shown — the ring works from wherever you are
+# standing, driven by whichever bar is standing there.
 # ---------------------------------------------------------------------------
 walk_leg "$P4_LAST_TAB" "walk 2 (standing in tab ${P4_LAST_TAB}):"
 
+# The bracket's midpoint: a walk is selection only, so NO open may have run
+# yet — and pinning zero here is what proves the ==1 after the commit came
+# from the commit alone, not from a stray walk-time open cancelling against a
+# commit that never landed.
+check "the two walks ran no clave open (a walk selects; it opens nothing)" \
+  "$(($(evlog_count open) - P4_OPEN_BEFORE))" "0"
+
 P4_DORMANT_BEFORE="$(dormant_uuids "$(dev_status)")"
-P4_OPEN_BEFORE="$(evlog_count open)"
 P4_LIVE_BEFORE_N="$(jq 'length' < <(live_tab_ids) 2>/dev/null)"
 nav_pipe '{"commit":true}'
 P4_COMMIT_RC=$?
@@ -1541,7 +1600,7 @@ check "commit woke exactly one row" "$(printf '%s\n' "$P4_LANDED" | grep -c .)" 
 # stepped by anything other than one, this lands somewhere else.
 check "the walk stayed in-block and net-zero: the commit landed on the row picked" \
   "${P4_LANDED}" "${P4_TARGET}"
-check "commit ran exactly one clave open (one executor, never two)" \
+check "walks+commit ran exactly one clave open (one executor, never two — the lockstep detector)" \
   "$(($(evlog_count open) - P4_OPEN_BEFORE))" "1"
 P4_LIVE_AFTER_N="$(jq 'length' < <(live_tab_ids) 2>/dev/null)"
 check "commit opened exactly one tab" "$P4_LIVE_AFTER_N" "$((P4_LIVE_BEFORE_N + 1))"
