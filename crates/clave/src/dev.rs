@@ -1164,7 +1164,13 @@ fn seed_transcript(cwd: &Path, cwd_str: &str, uuid: &str, slug: &str) -> Result<
         // whose claude lives off PATH (nvm, ~/.claude/local) could not
         // seed a scenario at all. Unlike dev.rs's zellij calls — session
         // lifecycle the human drives — this is a real exec clave owns.
+        // The ONE place clave itself runs a claude inside another's pane:
+        // `clave dev` is usually driven from an agent's shell, so this child
+        // would inherit that pane's `CLAVE_AGENT_UUID`. Hooks trust that var
+        // outright (the pid gate is gone — one pane, one Claude), so scrub it
+        // here rather than gate it there.
         let st = Command::new(crate::discover::tool_path(crate::discover::ToolId::Claude))
+            .env_remove(clave_types::AGENT_UUID_ENV)
             .current_dir(cwd)
             .args(["-p", "--session-id", uuid, "Reply with exactly: ok"])
             .status()
