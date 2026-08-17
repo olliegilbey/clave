@@ -136,7 +136,7 @@ pub struct Agent {
     #[serde(default)]
     pub pane_id: Option<u32>,
     /// §5 (2026-07-17): `clave open` found the row's cwd missing → the bar
-    /// renders ✗ instead of ◌. A row flag, NOT a status (statuses are hook
+    /// renders ✗ instead of ○. A row flag, NOT a status (statuses are hook
     /// lifecycle); cleared by a later successful open. `default` keeps
     /// pre-field payloads parseable.
     #[serde(default)]

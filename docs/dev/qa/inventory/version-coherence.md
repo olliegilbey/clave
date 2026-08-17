@@ -150,15 +150,15 @@ lines are diagnostic telemetry only"). Many items here are maintainer-machine li
 **Guard today:** the sanctioned command spells the `-c` (TESTING.md); doc-level only.
 **Refs:** FOOTGUNS:60, :120; TESTING.md "Hot-reload the sandbox bar" (with the wasm_bridge/plugin_map citation chain).
 
-### V14 — `build=dev` / stray working-tree wasm (#109; #167 OPEN sibling)
+### V14 — `build=dev` / stray working-tree wasm (#109, #167)
 **Seam:** two builds of the SAME version are indistinguishable by version alone — the `build=` tag is the discriminator, and the release recipe once set `CLAVE_BUILD_TAG` for the CLI but not the wasm, so every released sidebar reported `build=dev`.
 **Preconditions:** a cut via a recipe that misses the tag on the wasm line, or a stray working-tree wasm copied into the stable install.
-**Reproduce:** historical (#109): post-v0.1.2 log showed `clave-bar: loaded v0.1.2 build=dev` while dev-installs showed proper short-SHA tags — backwards. #167 is the same class alive in `dist-build`.
-**Healthy:** both build lines in the `release` recipe export the tag (`justfile:119-120`, `git describe --tags --exact-match`); a released bar logs `build=vX.Y.Z` exactly.
+**Reproduce:** historical (#109): post-v0.1.2 log showed `clave-bar: loaded v0.1.2 build=dev` while dev-installs showed proper short-SHA tags — backwards. #167 was the same class alive in `dist-build` (and in release CI, which compiled the wasm before exporting the tag) — both closed.
+**Healthy:** both build lines in the `release` recipe export the tag (`justfile:127-128`, `git describe --tags --exact-match`); a released bar logs `build=vX.Y.Z` exactly.
 **Broken:** `build=dev` on an otherwise-correct line — runbook Step 3 makes it a STOP (`dev` = untagged local build; a bare short SHA = a dev-install artifact; both are the stray-wasm case).
 **Drive assertion:** post-cold-start: appended `$ZLOG` `clave-bar: loaded v` lines all report version == tag AND `build=` == the exact tag being cut. Read the tail after launch (tail-read rule, V5), never `grep -c`.
-**Guard today:** fixed recipe; Step 3 table row; tail-read rule. #167 (dist-build wasm untagged) still open.
-**Refs:** #109 (closed), #167 (open); RELEASE-RUNBOOK Step 3; FOOTGUNS:121.
+**Guard today:** `release`, `dist-build` and the CI wasm step all tag both artifacts; Step 3 table row; tail-read rule.
+**Refs:** #109, #167 (both closed); RELEASE-RUNBOOK Step 3; FOOTGUNS:121.
 
 ### V15 — dist fragment executed by GitHub (#67)
 **Seam:** cargo-dist generated a workflow *fragment* into `.github/workflows/`, where GitHub executes anything — the fragment failed on every push and normalised red CI.

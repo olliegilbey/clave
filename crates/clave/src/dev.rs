@@ -274,12 +274,18 @@ pub const SCENARIOS: &[Scenario] = &[
                 ..ScenarioAgent::DEFAULT
             },
             // ~30 dormant rows, varied statuses/repos, staggered recency —
-            // enough to overflow any normal pane.
+            // enough to overflow any normal pane. #173: they also climb the
+            // battery ramp, 8k → 153k in 5k steps, so every fill step from
+            // full to empty is on screen at once (and the tail sits past the
+            // default smart zone, exercising the clamp). Seeded rows never
+            // run a hook, so a count typed here is the only way the gauge is
+            // eyeballable in a sandbox.
             ScenarioAgent {
                 slug: "d01",
                 ago_secs: 3600,
                 repo: Some("clave"),
                 status: clave_types::Status::Idle,
+                context_tokens: Some(8_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -287,6 +293,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 ago_secs: 5400,
                 repo: Some("nalu"),
                 status: clave_types::Status::Working,
+                context_tokens: Some(13_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -294,6 +301,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 ago_secs: 7200,
                 repo: Some("infra"),
                 status: clave_types::Status::NeedsYou,
+                context_tokens: Some(18_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -301,6 +309,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 ago_secs: 9000,
                 repo: Some("webapp"),
                 status: clave_types::Status::Failed,
+                context_tokens: Some(23_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -308,6 +317,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 ago_secs: 10800,
                 repo: Some("docs"),
                 status: clave_types::Status::Done,
+                context_tokens: Some(28_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -315,6 +325,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 ago_secs: 12600,
                 repo: Some("api"),
                 status: clave_types::Status::Idle,
+                context_tokens: Some(33_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -322,6 +333,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 ago_secs: 14400,
                 repo: Some("mobile"),
                 status: clave_types::Status::Working,
+                context_tokens: Some(38_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -329,6 +341,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 ago_secs: 16200,
                 repo: Some("cli"),
                 status: clave_types::Status::NeedsYou,
+                context_tokens: Some(43_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -336,6 +349,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 ago_secs: 18000,
                 repo: Some("edge"),
                 status: clave_types::Status::Failed,
+                context_tokens: Some(48_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -343,6 +357,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 ago_secs: 19800,
                 repo: Some("auth"),
                 status: clave_types::Status::Done,
+                context_tokens: Some(53_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -350,6 +365,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 ago_secs: 21600,
                 repo: Some("clave"),
                 status: clave_types::Status::Idle,
+                context_tokens: Some(58_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -357,6 +373,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 ago_secs: 23400,
                 repo: Some("nalu"),
                 status: clave_types::Status::Working,
+                context_tokens: Some(63_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -364,6 +381,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 ago_secs: 25200,
                 repo: Some("infra"),
                 status: clave_types::Status::NeedsYou,
+                context_tokens: Some(68_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -371,6 +389,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 ago_secs: 27000,
                 repo: Some("webapp"),
                 status: clave_types::Status::Failed,
+                context_tokens: Some(73_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -378,6 +397,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 ago_secs: 28800,
                 repo: Some("docs"),
                 status: clave_types::Status::Done,
+                context_tokens: Some(78_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -385,6 +405,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 ago_secs: 30600,
                 repo: Some("api"),
                 status: clave_types::Status::Idle,
+                context_tokens: Some(83_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -392,6 +413,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 ago_secs: 32400,
                 repo: Some("mobile"),
                 status: clave_types::Status::Working,
+                context_tokens: Some(88_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -399,6 +421,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 ago_secs: 34200,
                 repo: Some("cli"),
                 status: clave_types::Status::NeedsYou,
+                context_tokens: Some(93_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -406,6 +429,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 ago_secs: 36000,
                 repo: Some("edge"),
                 status: clave_types::Status::Failed,
+                context_tokens: Some(98_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -413,6 +437,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 ago_secs: 37800,
                 repo: Some("auth"),
                 status: clave_types::Status::Done,
+                context_tokens: Some(103_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -420,6 +445,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 ago_secs: 39600,
                 repo: Some("clave"),
                 status: clave_types::Status::Idle,
+                context_tokens: Some(108_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -427,6 +453,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 ago_secs: 41400,
                 repo: Some("nalu"),
                 status: clave_types::Status::Working,
+                context_tokens: Some(113_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -434,6 +461,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 ago_secs: 43200,
                 repo: Some("infra"),
                 status: clave_types::Status::NeedsYou,
+                context_tokens: Some(118_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -441,6 +469,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 ago_secs: 45000,
                 repo: Some("webapp"),
                 status: clave_types::Status::Failed,
+                context_tokens: Some(123_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -448,6 +477,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 ago_secs: 46800,
                 repo: Some("docs"),
                 status: clave_types::Status::Done,
+                context_tokens: Some(128_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -455,6 +485,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 ago_secs: 48600,
                 repo: Some("api"),
                 status: clave_types::Status::Idle,
+                context_tokens: Some(133_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -462,6 +493,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 ago_secs: 50400,
                 repo: Some("mobile"),
                 status: clave_types::Status::Working,
+                context_tokens: Some(138_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -469,6 +501,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 ago_secs: 52200,
                 repo: Some("cli"),
                 status: clave_types::Status::NeedsYou,
+                context_tokens: Some(143_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -476,6 +509,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 ago_secs: 54000,
                 repo: Some("edge"),
                 status: clave_types::Status::Failed,
+                context_tokens: Some(148_000),
                 ..ScenarioAgent::DEFAULT
             },
             ScenarioAgent {
@@ -483,6 +517,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 ago_secs: 55800,
                 repo: Some("auth"),
                 status: clave_types::Status::Done,
+                context_tokens: Some(153_000),
                 ..ScenarioAgent::DEFAULT
             },
         ],
@@ -1421,6 +1456,51 @@ mod tests {
         let stale: Vec<&ScenarioAgent> = sc.agents.iter().filter(|a| a.delete_cwd_after).collect();
         assert!(!stale.is_empty());
         assert!(stale.iter().all(|a| a.worktree));
+    }
+
+    #[test]
+    fn tall_dormant_rows_span_the_whole_battery_ramp() {
+        // #173: found in v0.1.3 live validation — `tall`'s dormant rows seeded
+        // no token count at all, so every battery cell in the scenario the
+        // viewport is driven with rendered blank. Seeded rows never run a
+        // hook, so the counts here are the only ones that scenario will ever
+        // have. Bucketed against the DEFAULT smart zone rather than
+        // `hook::smart_zone()`: the env var is process-global and this must
+        // not depend on the machine running the tests.
+        let sc = SCENARIOS.iter().find(|s| s.name == "tall").unwrap();
+        let dormant: Vec<&ScenarioAgent> = sc
+            .agents
+            .iter()
+            .filter(|a| a.slug.starts_with('d'))
+            .collect();
+        assert_eq!(dormant.len(), 30);
+
+        // Every dormant row carries a count — the bug was the `None`s.
+        assert!(
+            dormant.iter().all(|a| a.context_tokens.is_some()),
+            "a dormant row with no context_tokens renders a blank battery"
+        );
+
+        let zone = clave_types::DEFAULT_SMART_ZONE_TOKENS;
+        let levels: std::collections::BTreeSet<u8> = dormant
+            .iter()
+            .map(|a| crate::hook::battery_level(a.context_tokens.unwrap(), zone))
+            .collect();
+
+        // Full to empty, every fill step on screen at once.
+        assert_eq!(
+            levels.len(),
+            usize::from(clave_types::BATTERY_LEVELS),
+            "want every battery level 0..={}, got {levels:?}",
+            clave_types::BATTERY_LEVELS - 1
+        );
+
+        // The tail sits PAST the zone, so the clamp (and #105's red token
+        // text) is exercised too, not just the ramp below it.
+        assert!(
+            dormant.iter().any(|a| a.context_tokens.unwrap() > zone),
+            "no dormant row exceeds the smart zone, so the clamp never shows"
+        );
     }
 
     #[test]

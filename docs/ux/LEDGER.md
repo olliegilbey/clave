@@ -131,7 +131,7 @@ lives in `render.rs`, and `Status::glyph()` keeps its current contract.
 | `Done` | `\u{25cf}` | `#98BB6C` springGreen |
 | `Idle` | `\u{25cf}` | `#54546D` sumiInk4 |
 | `Failed` | `\u{2716}` | `#E82424` samuraiRed |
-| `Dormant` | `\u{25cc}` | `#DCD7BA` fujiWhite |
+| `Dormant` | `\u{25cb}` | `#DCD7BA` fujiWhite |
 | `Opening` | `\u{21bb}` | `#E6C384` carpYellow |
 | `Stale` | `\u{2717}` | `#E82424` samuraiRed |
 

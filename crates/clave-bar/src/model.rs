@@ -629,11 +629,11 @@ impl BarModel {
     /// frame. Read-only over the frames; it decides nothing.
     ///
     /// `stranded` counts the rows that carry the whole hypothesis: unbound in
-    /// the store, pane id known to us from a broadcast, and that pane absent
-    /// from our pane frame. A dormant row that has never been woken has no
-    /// pane id at all and is deliberately NOT counted — dormancy is not a
-    /// stall, and conflating the two would make this line fire on every
-    /// healthy fleet.
+    /// the store, pane id known to us from the snapshot or the broadcast, and
+    /// that pane absent from our pane frame. A dormant row that has never been
+    /// woken has no pane id at all and is deliberately NOT counted — dormancy
+    /// is not a stall, and conflating the two would make this line fire on
+    /// every healthy fleet.
     /// **Runs BEFORE every gate, and that is the whole point** (#184 review,
     /// found independently by two reviewers). `identity_effects` refuses on an
     /// unelected instance and again on an unresolved own tab, and both refusals
@@ -1022,6 +1022,20 @@ impl BarModel {
         }
     }
 
+    /// The `clave-register` broadcast (S2). A HINT, not a fact: since #187 the
+    /// snapshot is authoritative for this map, so what lands here survives only
+    /// until the next accepted snapshot — which re-asserts it iff the
+    /// registration's (best-effort) store write also landed. That is what buys
+    /// the map a removal path; the bridging value still matters, because it is
+    /// what binds the interval before the store's echo comes back.
+    ///
+    /// The bridge holds only UNCONDITIONALLY absent a snapshot in flight. A
+    /// snapshot generated before this registration but sequence-numbered after
+    /// our current position is still accepted (§5 gates on `seq`, not on wall
+    /// time) and retires the announced pane on arrival — and nothing schedules
+    /// a replacement, because the registration itself pushes no snapshot (see
+    /// `spawn.rs`, "No push is needed"). The map is then whatever the NEXT
+    /// store write happens to carry.
     pub fn register(&mut self, uuid: String, pane_id: u32) {
         self.uuid_to_pane.insert(uuid, pane_id);
         self.prune_opening();
@@ -1047,14 +1061,31 @@ impl BarModel {
         // the one instance that can act on it, on this snapshot or any later
         // one; it is self-healing rather than timing-dependent.
         //
-        // MERGE, not replace: a register that beat this snapshot is fresher
-        // than the row it describes, and the store clears pane ids only on
-        // session recreate — which rebuilds every instance anyway.
-        for a in &self.agents {
-            if let Some(pane) = a.pane_id {
-                self.uuid_to_pane.insert(a.uuid.clone(), pane);
-            }
-        }
+        // REPLACE, not merge (#187). A merge has no removal path at all, so a
+        // pane learned from the broadcast outlived the pane itself: entries only
+        // ever accumulated for the life of the instance. A dead entry is not
+        // inert — it fakes a `PaneKnownButAbsent` episode in the #184 breadcrumb
+        // (masking a real one) and lets a uuid-directed nav aim at a pane that
+        // is gone. Replacing makes the store the single source of truth: a row
+        // that carries no pane RETIRES the cached mapping, and the store now
+        // clears `pane_id` on tab close and on session recreate alike (#185).
+        //
+        // ACCEPTED DEGRADATION: `register_pane` persists best-effort, because it
+        // runs immediately before the exec into Claude and must never block or
+        // fail it. So if that store write fails while the in-process broadcast
+        // lands, this replace drops the live mapping at the next snapshot and
+        // the row CANNOT bind until the agent is reopened — a running agent
+        // never registers a second time, so there is no later announcement to
+        // recover from. Nor is it observed: the #184 bind-stall breadcrumb, the
+        // one instrument built to catch a stuck bind leg, reads the retirement
+        // as the stall ending and reports `Cleared`. That is the price of having
+        // a removal path at all — silent, not self-healing — and it is accepted
+        // deliberately.
+        self.uuid_to_pane = self
+            .agents
+            .iter()
+            .filter_map(|a| a.pane_id.map(|pane| (a.uuid.clone(), pane)))
+            .collect();
         // REPLACE the tab order — the store's map is authoritative and
         // self-healing by construction; merging deltas is the exact failure
         // mode that diverged live (C5 round 5).
@@ -2085,6 +2116,18 @@ mod tests {
         }
     }
 
+    /// The same row carrying its terminal pane — the production shape since
+    /// #178, and since #187 the ONLY lasting source of the uuid→pane mapping:
+    /// the bar replaces its map from every snapshot it accepts, so a row that
+    /// omits the pane retires it. A test that wants the mapping to survive a
+    /// snapshot puts it on the row here, exactly as the store does.
+    fn agent_at(uuid: &str, status: Status, tab_id: Option<usize>, pane_id: u32) -> Agent {
+        Agent {
+            pane_id: Some(pane_id),
+            ..agent(uuid, status, tab_id)
+        }
+    }
+
     /// An agent with an explicit label (Idle, never interacted).
     fn agent_labelled(uuid: &str, label: &str, tab_id: Option<usize>) -> Agent {
         Agent {
@@ -2419,9 +2462,33 @@ mod tests {
         assert_eq!(status_at(&m, 0), Some(RowStatus::Idle)); // rendered dim NOW
         let fx = m.apply_tabs(vec![tab(10, 0, "t", true)]);
         assert!(fx.iter().all(|e| !matches!(e, Effect::MarkRead { .. })));
+        // A repeat of the SAME Done — any unrelated store push carries every
+        // row's status — must NOT disturb the override: the user has read this
+        // completion and the row stays dim. This is the assertion that tells
+        // the rule apart from its inversion; the Working one below cannot,
+        // because the override only ever changes how a `Done` renders, so a
+        // Working row reads Working either way. Inverted, every push while an
+        // agent sits finished re-lights it green, and "green" stops meaning
+        // "there is something here you have not seen". (cargo mutants
+        // 2026-08-15: `status != Done` → `==` survived on the Working
+        // assertion alone.)
+        m.apply_snapshot(snap(2, vec![agent("u1", Status::Done, Some(10))]));
+        assert_eq!(
+            status_at(&m, 0),
+            Some(RowStatus::Idle),
+            "a re-push of the same Done is not a new completion"
+        );
         // A later snapshot showing Working clears the local override.
-        m.apply_snapshot(snap(2, vec![agent("u1", Status::Working, Some(10))]));
+        m.apply_snapshot(snap(3, vec![agent("u1", Status::Working, Some(10))]));
         assert_eq!(status_at(&m, 0), Some(RowStatus::Working));
+        // And the clear is real: the NEXT completion is unread again, which is
+        // the thing the user is waiting to be told about.
+        m.apply_snapshot(snap(4, vec![agent("u1", Status::Done, Some(10))]));
+        assert_eq!(
+            status_at(&m, 0),
+            Some(RowStatus::Done),
+            "a second completion is unread again"
+        );
     }
 
     #[test]
@@ -2450,7 +2517,7 @@ mod tests {
         m.apply_tabs(vec![tab(11, 1, "ag", true)]);
         m.apply_panes(vec![pane(1, 5, false, true)]);
         m.register("u1".into(), 5);
-        m.apply_snapshot(snap(1, vec![agent("u1", Status::Working, None)]));
+        m.apply_snapshot(snap(1, vec![agent_at("u1", Status::Working, None, 5)]));
         assert_eq!(
             m.bind_effects(11),
             vec![Effect::Bind {
@@ -2460,7 +2527,7 @@ mod tests {
         );
         // Repeat calls before (or after) the echo: silent.
         assert_eq!(m.bind_effects(11), Vec::<Effect>::new());
-        m.apply_snapshot(snap(2, vec![agent("u1", Status::Working, Some(11))]));
+        m.apply_snapshot(snap(2, vec![agent_at("u1", Status::Working, Some(11), 5)]));
         assert_eq!(m.bind_effects(11), Vec::<Effect>::new());
         // An agent whose pane is NOT in my tab is never mine to bind — but
         // pane 9 is in no tab of my frame AT ALL, which since #178 is worth
@@ -2470,8 +2537,8 @@ mod tests {
         m.apply_snapshot(snap(
             3,
             vec![
-                agent("u1", Status::Working, Some(11)),
-                agent("u2", Status::Working, None),
+                agent_at("u1", Status::Working, Some(11), 5),
+                agent_at("u2", Status::Working, None, 9),
             ],
         ));
         // The bind pass itself stays pure: it computes binds, and reports
@@ -2638,7 +2705,7 @@ mod tests {
         m.register("u1".into(), 6); // our tab's terminal pane
         m.apply_snapshot(snap_full(
             1,
-            vec![agent("u1", Status::Working, None)],
+            vec![agent_at("u1", Status::Working, None, 6)],
             &[(10, 100), (11, 100), (12, 100)],
         ));
         m.apply_panes(panes_at(&FLEET_PANES_AFTER_CLOSE));
@@ -2673,7 +2740,7 @@ mod tests {
         m.register("u1".into(), 6);
         m.apply_snapshot(snap_full(
             1,
-            vec![agent("u1", Status::Working, None)],
+            vec![agent_at("u1", Status::Working, None, 6)],
             &[(11, 100)],
         ));
         assert_eq!(
@@ -2688,7 +2755,7 @@ mod tests {
         // `bind_effects`; dropping it there was the unbounded-ping-pong bug.
         m.apply_snapshot(snap_full(
             2,
-            vec![agent("u1", Status::Working, Some(11))],
+            vec![agent_at("u1", Status::Working, Some(11), 6)],
             &[(11, 100)],
         ));
         assert_eq!(m.identity_effects(), Vec::<Effect>::new());
@@ -2696,7 +2763,7 @@ mod tests {
         // back to None at a higher seq. We must fight back.
         m.apply_snapshot(snap_full(
             3,
-            vec![agent("u1", Status::Working, None)],
+            vec![agent_at("u1", Status::Working, None, 6)],
             &[(11, 100)],
         ));
         assert_eq!(
@@ -2717,7 +2784,7 @@ mod tests {
         m.register("u1".into(), 6);
         m.apply_snapshot(snap_full(
             1,
-            vec![agent("u1", Status::Working, None)],
+            vec![agent_at("u1", Status::Working, None, 6)],
             &[(11, 100)],
         ));
         assert_eq!(m.identity_effects().len(), 1);
@@ -2741,7 +2808,7 @@ mod tests {
         for seq in 1..=20 {
             m.apply_snapshot(snap_full(
                 seq,
-                vec![agent("u1", Status::Working, None)],
+                vec![agent_at("u1", Status::Working, None, 6)],
                 &[(11, 100)],
             ));
             emitted += m.identity_effects().len();
@@ -2761,7 +2828,7 @@ mod tests {
         for seq in 1..=20 {
             m.apply_snapshot(snap_full(
                 seq,
-                vec![agent("u1", Status::Working, None)],
+                vec![agent_at("u1", Status::Working, None, 6)],
                 &[(11, 100)],
             ));
             m.identity_effects();
@@ -2770,7 +2837,7 @@ mod tests {
         // A confirming snapshot: nothing to send, and the history is kept.
         m.apply_snapshot(snap_full(
             21,
-            vec![agent("u1", Status::Working, Some(11))],
+            vec![agent_at("u1", Status::Working, Some(11), 6)],
             &[(11, 100)],
         ));
         assert_eq!(m.identity_effects(), Vec::<Effect>::new());
@@ -2781,7 +2848,7 @@ mod tests {
         for seq in 22..=40 {
             m.apply_snapshot(snap_full(
                 seq,
-                vec![agent("u1", Status::Working, None)],
+                vec![agent_at("u1", Status::Working, None, 6)],
                 &[(11, 100)],
             ));
             emitted += m.identity_effects().len();
@@ -2836,8 +2903,8 @@ mod tests {
             m.apply_snapshot(snap_full(
                 seq,
                 vec![
-                    agent("u1", Status::Working, a),
-                    agent("u2", Status::Working, b),
+                    agent_at("u1", Status::Working, a, 6),
+                    agent_at("u2", Status::Working, b, 6),
                 ],
                 &[(11, 100)],
             ));
@@ -2877,7 +2944,7 @@ mod tests {
             seq += 1;
             m.apply_snapshot(snap_full(
                 seq,
-                vec![agent("u1", Status::Working, None)],
+                vec![agent_at("u1", Status::Working, None, 6)],
                 &[(11, 100)],
             ));
             assert_eq!(
@@ -2893,7 +2960,7 @@ mod tests {
                 seq += 1;
                 m.apply_snapshot(snap_full(
                     seq,
-                    vec![agent("u1", Status::Working, Some(11))],
+                    vec![agent_at("u1", Status::Working, Some(11), 6)],
                     &[(11, 100)],
                 ));
                 assert_eq!(m.identity_effects(), Vec::<Effect>::new());
@@ -2907,7 +2974,7 @@ mod tests {
         m.register("u1".into(), 6);
         m.apply_snapshot(snap_full(
             1,
-            vec![agent("u1", Status::Working, None)],
+            vec![agent_at("u1", Status::Working, None, 6)],
             &[(11, 100)],
         ));
         assert_eq!(m.identity_effects().len(), 1);
@@ -2916,7 +2983,7 @@ mod tests {
         m.register("u1".into(), 7);
         m.apply_snapshot(snap_full(
             2,
-            vec![agent("u1", Status::Working, None)],
+            vec![agent_at("u1", Status::Working, None, 7)],
             &[(11, 100)],
         ));
         assert_eq!(m.identity_effects(), Vec::<Effect>::new());
@@ -2925,7 +2992,7 @@ mod tests {
         for seq in 3..=20 {
             m.apply_snapshot(snap_full(
                 seq,
-                vec![agent("u1", Status::Working, None)],
+                vec![agent_at("u1", Status::Working, None, 6)],
                 &[(11, 100)],
             ));
             emitted += m.identity_effects().len();
@@ -2983,7 +3050,7 @@ mod tests {
         m.register("u1".into(), 6);
         m.apply_snapshot(snap_full(
             1,
-            vec![agent("u1", Status::Working, None)],
+            vec![agent_at("u1", Status::Working, None, 6)],
             &[(10, 100), (11, 100), (99, 100)],
         ));
         assert_eq!(
@@ -3024,7 +3091,7 @@ mod tests {
         m.register("u1".into(), 6);
         m.apply_snapshot(snap_full(
             1,
-            vec![agent("u1", Status::Working, None)],
+            vec![agent_at("u1", Status::Working, None, 6)],
             &[(11, 100)],
         ));
         m.apply_panes(panes_at(&FLEET_PANES_AFTER_CLOSE));
@@ -3055,7 +3122,7 @@ mod tests {
         m.register("u1".into(), 9); // announced pane, absent from our frame
         m.apply_snapshot(snap_full(
             1,
-            vec![agent("u1", Status::Working, None)],
+            vec![agent_at("u1", Status::Working, None, 9)],
             &[(11, 100)],
         ));
         assert_eq!(
@@ -3129,6 +3196,109 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, Effect::Bind { .. })),
             "a pane outside our tab is another instance's bind to make"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_without_the_pane_retires_one_learned_from_the_broadcast() {
+        // #187. The map had no removal path on any version: a pane learned from
+        // the `clave-register` broadcast outlived the pane itself. Left set, it
+        // is not inert — it fakes a PaneKnownButAbsent episode in the #184
+        // breadcrumb, which would mask a real one, and it leaves a uuid jump
+        // aimed at a pane that is gone. The snapshot is authoritative, so a row
+        // carrying no pane retires the cached mapping.
+        let mut m = fleet_of_three(11);
+        m.register("u1".into(), 9); // announced, absent from our pane frame
+        m.apply_snapshot(snap_full(
+            1,
+            vec![agent_at("u1", Status::Working, None, 9)],
+            &[(11, 100)],
+        ));
+        assert_eq!(
+            m.bind_stall_report(),
+            Some(Effect::BindStall {
+                state: BindStallState::PaneKnownButAbsent,
+                stranded: 1,
+                own_tab: Some(11),
+            })
+        );
+        assert_eq!(
+            m.nav("{\"uuid\":\"u1\"}", None),
+            vec![Effect::FocusPane { pane_id: 9 }]
+        );
+        // The tab closes. The store clears the row's pane alongside its tab
+        // (#185), so the next snapshot carries none — and the entry we learned
+        // from the broadcast goes with it.
+        m.apply_snapshot(snap_full(
+            2,
+            vec![agent("u1", Status::Idle, None)],
+            &[(11, 100)],
+        ));
+        assert_eq!(
+            m.nav("{\"uuid\":\"u1\"}", None),
+            Vec::<Effect>::new(),
+            "a retired pane must never be a nav target"
+        );
+        assert_eq!(
+            m.bind_stall_report(),
+            Some(Effect::BindStall {
+                state: BindStallState::Cleared,
+                stranded: 0,
+                own_tab: Some(11),
+            }),
+            "the breadcrumb must stop claiming a stall that only a stale entry made"
+        );
+    }
+
+    #[test]
+    fn a_stale_snapshot_retires_nothing() {
+        // The retirement rides the seq gate, not the arrival: an out-of-order
+        // snapshot is discarded whole (§5), so it cannot strip a mapping the
+        // store has since re-asserted.
+        let mut m = fleet_of_three(11);
+        m.apply_snapshot(snap_full(
+            5,
+            vec![agent_at("u1", Status::Working, None, 6)],
+            &[(11, 100)],
+        ));
+        m.apply_snapshot(snap_full(
+            4,
+            vec![agent("u1", Status::Working, None)],
+            &[(11, 100)],
+        ));
+        assert_eq!(
+            m.nav("{\"uuid\":\"u1\"}", None),
+            vec![Effect::FocusPane { pane_id: 6 }]
+        );
+    }
+
+    #[test]
+    fn the_register_broadcast_binds_a_row_the_snapshot_carried_without_a_pane() {
+        // The bridge #187 left standing, and the ONLY test that holds it. Every
+        // other bind test puts the pane on the snapshot row, so neutering
+        // `register()` fails none of them — the announcement is what closes the
+        // interval between a spawn and the store's echo, and without this test
+        // that leg could be deleted silently.
+        let mut m = fleet_of_three(11);
+        m.apply_snapshot(snap_full(
+            1,
+            vec![agent("u1", Status::Working, None)],
+            &[(11, 100)],
+        ));
+        assert!(
+            !m.identity_effects()
+                .iter()
+                .any(|e| matches!(e, Effect::Bind { .. })),
+            "no pane anywhere yet: nothing to bind to"
+        );
+        m.register("u1".into(), 6); // pane 6 is tab 11's terminal, per FLEET_PANES
+        assert_eq!(
+            m.identity_effects(),
+            vec![Effect::Bind {
+                uuid: "u1".into(),
+                tab_id: 11,
+            }],
+            "the announcement must bind on its own, before any store echo"
         );
     }
 
@@ -5013,7 +5183,7 @@ mod tests {
         m.apply_snapshot(AgentSnapshot {
             collapsed: false,
             seq: 1,
-            agents: vec![agent("u2", Status::Working, None)],
+            agents: vec![agent_at("u2", Status::Working, None, 42)],
             tab_order: Default::default(),
         });
         assert!(!keys(&m).contains(&RowKey::Dormant("u2".into())));
@@ -5272,6 +5442,61 @@ mod tests {
             m.nav("{\"commit\":true}", Some(1)).is_empty(),
             "in-flight open must not double-fire"
         );
+    }
+
+    /// The in-flight mark is double-fire guard #1 (`clave open`'s own liveness
+    /// no-op is #2), and it is only a guard for as long as it survives the
+    /// store traffic that arrives while the open is still running. It clears on
+    /// exactly two things — the row stopped being dormant (the tab appeared) or
+    /// the snapshot flagged it stale (the open failed, so it must be
+    /// retryable) — and on nothing else.
+    ///
+    /// If an unrelated push cleared it, a user who pressed Alt+Enter watches
+    /// the ↻ vanish, presses again, and gets a SECOND `clave open` for a
+    /// session already launching: the double-attach this guard exists to stop.
+    ///
+    /// (cargo mutants 2026-08-15 found two ways to that: dropping the `!` so
+    /// a still-dormant row clears the mark, and flipping the row lookup so the
+    /// verdict is read off whichever OTHER agent happens to come first — which
+    /// is why a second, live agent is in the snapshot below.)
+    #[test]
+    fn an_in_flight_open_holds_its_mark_through_unrelated_snapshots() {
+        let mut m = live_plus_dormant();
+        m.beacon(1);
+        select_dormant(&mut m);
+        assert_eq!(
+            m.nav("{\"commit\":true}", Some(1)),
+            vec![Effect::OpenAgent { uuid: "u-d".into() }]
+        );
+        // A push lands while the open is still in flight: an unrelated agent
+        // binds into the live tab. `u-d` is still dormant and still not stale.
+        let mut d = agent("u-d", Status::Idle, None);
+        d.commit_ord = 999;
+        m.apply_snapshot(snap(2, vec![d, agent("u-other", Status::Idle, Some(1))]));
+        assert_eq!(
+            status_at(&m, DORMANT_LINE),
+            Some(RowStatus::Opening),
+            "the row is still launching, so it still says so"
+        );
+        assert!(
+            m.nav("{\"commit\":true}", Some(1)).is_empty(),
+            "and the guard still refuses the second press"
+        );
+        // The tab appears: the open resolved, so the mark retires and the row
+        // leaves the dormant block entirely.
+        m.apply_tabs(vec![tab(1, 0, "live", true), tab(2, 1, "woken", false)]);
+        m.apply_snapshot(snap(
+            3,
+            vec![
+                agent("u-d", Status::Idle, Some(2)),
+                agent("u-other", Status::Idle, Some(1)),
+            ],
+        ));
+        assert!(
+            keys(&m).iter().all(|k| *k != RowKey::Dormant("u-d".into())),
+            "the woken row is live now"
+        );
+        assert_ne!(status_at(&m, 1), Some(RowStatus::Opening));
     }
 
     #[test]
@@ -5817,7 +6042,7 @@ mod tests {
     // the wasm --target build (see crates/clave-bar/Cargo.toml).
     mod proptests {
         use super::super::*;
-        use super::{agent, tab};
+        use super::{agent, agent_at, tab};
         use proptest::prelude::*;
 
         proptest! {
@@ -6600,8 +6825,18 @@ mod tests {
                             collapsed: false,
                             seq: self.seq,
                             agents: vec![
-                                agent("u1", Status::Working, self.holder(true)),
-                                agent("u2", Status::Working, self.holder(false)),
+                                agent_at(
+                                    "u1",
+                                    Status::Working,
+                                    self.holder(true),
+                                    term_pane(Self::OWN_TAB),
+                                ),
+                                agent_at(
+                                    "u2",
+                                    Status::Working,
+                                    self.holder(false),
+                                    term_pane(Self::OWN_TAB),
+                                ),
                             ],
                             // Seeded wide so the birth touch is mostly out of
                             // the way — these properties are about binds. A

@@ -459,22 +459,13 @@ fn main() -> Result<()> {
             };
             // NOT open::open_is_live — its tab_id short-circuit would let a
             // dead session's bind protect a row. Only presence in the live
-            // dump protects here.
+            // dump protects here; the rule itself is `add::protected_from_dump`,
+            // which lives beside its `live_uuid_union` sibling so both copies
+            // of the #99 rotation translation are in one place and testable.
             let protect = |s: &store::Store| -> std::collections::BTreeSet<String> {
                 match dump.as_deref() {
                     None => Default::default(),
-                    Some(d) => {
-                        let live = add::live_uuids(d);
-                        s.agents
-                            .values()
-                            .filter(|r| {
-                                live.iter().any(|u| {
-                                    *u == r.uuid || Some(u.as_str()) == r.live_session.as_deref()
-                                })
-                            })
-                            .map(|r| r.uuid.clone())
-                            .collect()
-                    }
+                    Some(d) => add::protected_from_dump(s, d),
                 }
             };
             let (removed, snap) = if dry_run {
