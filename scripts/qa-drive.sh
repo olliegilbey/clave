@@ -1656,10 +1656,14 @@ toggle_pipe() {
 
 # Bounded wait for the store's collapsed flag to read `want`. Prints the
 # settled value either way; the caller checks it.
+# NO `// empty` here: jq's `//` treats `false` itself as absent, so
+# `.store.collapsed // empty` can never observe the expanded state — run 3's
+# P5 failed its first false-ward press on exactly that (the store had
+# flipped; the probe was blind to it). A bare path prints true/false/null.
 wait_collapsed() {
   local want="$1" i got=""
   for i in $(seq 1 10); do
-    got="$(jq -r '.store.collapsed // empty' < <(dev_status) 2>/dev/null)"
+    got="$(jq -r '.store.collapsed' < <(dev_status) 2>/dev/null)"
     [[ "$got" == "$want" ]] && break
     sleep 1
   done
