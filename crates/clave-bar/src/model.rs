@@ -428,18 +428,31 @@ pub struct BarModel {
     /// moment the report or the mode moves, and it is never consulted to decide
     /// WHERE the tab is — only whether this exact ask has already been made.
     swap_asked: Option<(TabGeometry, bool)>,
-    /// The pane width zellij last gave this bar while the reported geometry
-    /// agreed with the wanted one — i.e. what THIS geometry's layout actually
-    /// produces, learned from zellij rather than predicted from percentages
-    /// (a prediction that rounded differently from zellij's own arithmetic
-    /// would ask forever). Re-recorded whenever the geometry changes, so a
-    /// toggle heals any staleness a window resize left behind.
-    settled_cols: Option<(TabGeometry, usize)>,
-    /// The deviant width snap-back already spent its one ask on. Same shape
-    /// as `swap_asked`: a drag re-applies the current position rather than
-    /// advancing, so an unbounded rule would re-ask every render; refusing a
-    /// second ask at the same width bounds it, and the width returning to
-    /// `settled_cols` (or the geometry moving) re-arms it.
+    /// The snap arm's stillness witness: `(wanted-collapsed, cols, count)` for
+    /// the run of consecutive renders that agreed on both. Nothing in the arm
+    /// acts on a width seen once — v0.1.2's drift-confirmation gate, the one
+    /// piece of the deleted seek worth keeping: a toggle's pane resize lands
+    /// RENDERS after its `TabUpdate` (measured live, 2026-08-15 — the "text
+    /// couldn't decide" thrash), and a drag in progress changes width every
+    /// render, so a single reading distinguishes neither from truth. A width
+    /// that holds still does.
+    still: Option<(bool, usize, u8)>,
+    /// What each geometry's layout actually produces, `[expanded, collapsed]`,
+    /// learned from zellij rather than predicted from percentages (a
+    /// prediction that rounded differently from zellij's own arithmetic would
+    /// ask forever). Adopted only from a STILL width, never one that equals
+    /// the other geometry's entry — the transitional frames after a switch
+    /// carry exactly that width, and adopting it is how the first drag arm
+    /// poisoned itself. The wanted side is cleared while a geometry switch is
+    /// owed, so every landing re-learns fresh.
+    settled_w: [Option<usize>; 2],
+    /// The deviant width snap-back already spent its one ask on. Refusing a
+    /// second ask at the same width bounds the arm against a tab that will
+    /// not move; the width recovering, or the geometry moving, re-arms it —
+    /// and a spent-on width that STAYS still through two more renders is
+    /// adopted as the geometry's new settled width, because zellij was asked
+    /// to fix it and declined: that is what a window resize looks like from
+    /// inside this pane.
     snap_asked: Option<usize>,
     /// tab_id of the last visited (focused) tab — replicated on every
     /// instance from the visited-pipe/nav broadcast streams. This is the nav
@@ -2002,19 +2015,23 @@ impl BarModel {
     /// snapped a dragged sidebar back; the reported-truth machine let terminal
     /// content cover it). The arm restores the old behaviour with the same
     /// vocabulary: `own_cols` is whatever width zellij just rendered us at
-    /// (`render`'s argument — never a design number), `settled_cols` is what
-    /// this geometry's layout is known to produce, and a mismatch between them
-    /// while the NAME already agrees asks for one switch. That switch snaps
-    /// the width back rather than advancing the cycle because the drag itself
-    /// marked the tab damaged, and a damaged tab's switch re-applies its
-    /// current position (zellij v0.44.3; see the 1030 verifier findings and
-    /// FOOTGUNS). Costs accepted, both bounded: a burst mid-drag (each
-    /// intermediate width is a fresh mismatch — the border fights back while
-    /// held, which is the stable feel), and one dead re-apply after a window
-    /// resize (the percent-derived width moves with the window while
-    /// `settled_cols` remembers the old one; the re-apply changes nothing
-    /// visible, `snap_asked` stops a second ask, and the next toggle
-    /// re-records the width and heals it).
+    /// (`render`'s argument — never a design number), `settled_w` is what each
+    /// geometry's layout is known to produce, and a STILL width (`still` doc:
+    /// the same reading on two consecutive renders — v0.1.2's
+    /// drift-confirmation gate, ported) that deviates from it while the NAME
+    /// already agrees asks for one switch. That switch snaps the width back
+    /// rather than advancing the cycle because the drag itself marked the tab
+    /// damaged, and a damaged tab's switch re-applies its current position
+    /// (zellij v0.44.3 `swap_layouts.rs:241-250`; verified live on the
+    /// sandbox, 2026-08-16: a bar mangled to 5% landed back on the declared
+    /// percent in one switch). The stillness gate is what makes the arm safe
+    /// against the two things a raw width can't distinguish: a toggle's pane
+    /// resize landing renders AFTER its `TabUpdate` (the first drag arm read
+    /// that as a drag and thrashed — live regression, 2026-08-15), and a drag
+    /// still in progress (the width never repeats mid-drag, so the arm fires
+    /// on release, which is the stable feel). A window resize is conceded,
+    /// not fought: one spent ask that zellij declines, two more still renders,
+    /// and the new width is adopted as this geometry's truth.
     pub fn width_effects(&mut self, own_cols: Option<usize>) -> Vec<Effect> {
         // D37: the mode is not known yet, so any switch would be against a
         // guess. The pane is already born at the persisted mode's width.
@@ -2024,6 +2041,7 @@ impl BarModel {
         if !self.own_tab_focused() {
             self.swap_asked = None;
             self.snap_asked = None;
+            self.still = None;
             return Vec::new();
         }
         // No frame can place our own tab yet: nothing to compare against.
@@ -2033,8 +2051,14 @@ impl BarModel {
         let want = self.showing_collapsed();
         if at == TabGeometry::wanted(want) {
             self.swap_asked = None;
-            return self.snap_effects(at, own_cols);
+            return self.snap_effects(want, own_cols);
         }
+        // A geometry switch is owed: the name arm owns the budget, and the
+        // landing must re-learn its width — the frames between the ask and
+        // the pane resize carry the OLD width under the NEW name.
+        self.still = None;
+        self.snap_asked = None;
+        self.settled_w[want as usize] = None;
         if self.swap_asked == Some((at, want)) {
             return Vec::new(); // already spent a switch on exactly this
         }
@@ -2045,29 +2069,52 @@ impl BarModel {
     /// The drag arm of `width_effects` — reached only once the reported name
     /// already agrees with the wanted mode (a name disagreement owns the
     /// switch budget outright; two arms asking in the same frame would race).
-    fn snap_effects(&mut self, at: TabGeometry, own_cols: Option<usize>) -> Vec<Effect> {
+    /// Every decision below waits for a STILL width (`still` doc): seen-twice
+    /// to adopt, seen-twice to call a deviation a drag, and two more beyond a
+    /// spent ask to concede the width to zellij.
+    fn snap_effects(&mut self, want: bool, own_cols: Option<usize>) -> Vec<Effect> {
         // Only render carries a width; every other caller compares names only.
         let Some(cols) = own_cols else {
             return Vec::new();
         };
-        match self.settled_cols {
-            // What this geometry's layout produces is already on record.
-            Some((g, w)) if g == at => {
-                if cols == w {
-                    self.snap_asked = None; // recovered (or never left): re-arm
+        let count = match self.still {
+            Some((w, c, n)) if w == want && c == cols => n.saturating_add(1),
+            _ => 1,
+        };
+        self.still = Some((want, cols, count));
+        let idx = want as usize;
+        match self.settled_w[idx] {
+            // Nothing on record: adopt the first still width — unless it is
+            // the OTHER geometry's width, which is what the transitional
+            // frames after a switch show, and adopting it is the thrash.
+            None => {
+                if count >= 2 && self.settled_w[1 - idx] != Some(cols) {
+                    self.settled_w[idx] = Some(cols);
+                    self.snap_asked = None;
+                }
+                Vec::new()
+            }
+            // At the settled width: quiet, and the arm re-arms.
+            Some(w) if cols == w => {
+                self.snap_asked = None;
+                Vec::new()
+            }
+            // Deviant. Still + unspent → one switch (the drag damaged the
+            // tab, so zellij re-applies the current geometry: the snap).
+            // Still through two MORE renders after the ask → zellij declined
+            // to move it; concede — this is the window-resize face.
+            Some(_) => {
+                if self.snap_asked == Some(cols) {
+                    if count >= 4 {
+                        self.settled_w[idx] = Some(cols);
+                        self.snap_asked = None;
+                    }
                     return Vec::new();
                 }
-                if self.snap_asked == Some(cols) {
-                    return Vec::new(); // already spent a switch on this width
+                if count >= 2 {
+                    self.snap_asked = Some(cols);
+                    return vec![Effect::SwapWidth];
                 }
-                self.snap_asked = Some(cols);
-                vec![Effect::SwapWidth]
-            }
-            // First agreed sight of this geometry: zellij's width IS the
-            // record. Never asks — birth and every toggle land here.
-            _ => {
-                self.settled_cols = Some((at, cols));
-                self.snap_asked = None;
                 Vec::new()
             }
         }
@@ -4236,55 +4283,116 @@ mod tests {
     /// The snap-back contract (the #197 live regression, Ollie's ruling): a
     /// dragged sidebar border snaps back, as stable's deleted seek did. The
     /// drag moves the pane width without moving the reported NAME, so the
-    /// name rule alone never sees it; the drag arm compares the rendered
-    /// width against what this geometry settled at and spends one switch —
-    /// which zellij turns into a re-apply, because the drag damaged the tab.
+    /// name rule alone never sees it; the drag arm waits for the deviant
+    /// width to hold STILL (mid-drag it never does — the correction fires on
+    /// release, v0.1.2's feel) and spends one switch — which zellij turns
+    /// into a re-apply, because the drag damaged the tab (verified live,
+    /// 2026-08-16: a 5%-mangled bar landed back on the declared percent in
+    /// one switch).
     #[test]
     fn a_dragged_border_costs_one_switch_and_the_restored_width_ends_it() {
         let mut m = focused_bar();
-        // Settled: the expanded layout renders us at 53 columns.
+        // Two still renders adopt 53 as the expanded layout's width.
         assert_eq!(m.width_effects(Some(53)), Vec::<Effect>::new());
-        // Drag: width moves, reported name does not.
-        assert_eq!(m.width_effects(Some(40)), vec![Effect::SwapWidth]);
-        // Same deviant width again (renders stream while the ask is in
-        // flight): the one switch is already spent.
+        assert_eq!(m.width_effects(Some(53)), Vec::<Effect>::new());
+        // Drag in progress: every width is seen once — no correction.
+        assert_eq!(m.width_effects(Some(48)), Vec::<Effect>::new());
+        assert_eq!(m.width_effects(Some(44)), Vec::<Effect>::new());
         assert_eq!(m.width_effects(Some(40)), Vec::<Effect>::new());
-        // The re-apply landed: back at the settled width, quiet, and re-armed
-        // for the next drag.
+        // Released: the width holds still — the snap fires, once.
+        assert_eq!(m.width_effects(Some(40)), vec![Effect::SwapWidth]);
+        assert_eq!(m.width_effects(Some(40)), Vec::<Effect>::new(), "spent");
+        // The re-apply landed: quiet at the settled width, and re-armed.
+        // Three quiet renders also pin the concession boundary: a premature
+        // concession would have adopted 40 mid-flight and read 53 as a drag.
         assert_eq!(m.width_effects(Some(53)), Vec::<Effect>::new());
+        assert_eq!(m.width_effects(Some(53)), Vec::<Effect>::new());
+        assert_eq!(m.width_effects(Some(53)), Vec::<Effect>::new());
+        assert_eq!(m.width_effects(Some(35)), Vec::<Effect>::new());
         assert_eq!(m.width_effects(Some(35)), vec![Effect::SwapWidth]);
     }
 
-    /// Each geometry keeps its own settled width: the first agreed sight
-    /// after a toggle is the record, never an ask — so a toggle can never
-    /// read as a drag, and a toggle heals whatever staleness a window resize
-    /// left behind (`settled_cols` doc).
+    /// The adoption boundary: a width seen ONCE is never adopted — that is
+    /// the whole point of the stillness gate. A bar whose first sight is one
+    /// stray reading must adopt the width that holds still after it, quietly,
+    /// not snap against the stray.
     #[test]
-    fn a_toggle_re_records_the_settled_width_instead_of_snapping() {
+    fn a_width_seen_once_is_never_adopted() {
         let mut m = focused_bar();
+        // One stray reading, then a width that holds still: the still one is
+        // the record, and nothing ever asks.
         assert_eq!(m.width_effects(Some(53)), Vec::<Effect>::new());
-        m.toggle();
-        assert_eq!(m.width_effects(Some(53)), vec![Effect::SwapWidth]); // the toggle's own
-        reports(&mut m, Some(true), 10);
-        // First sight of the collapsed geometry at 31: recorded, not snapped.
-        assert_eq!(m.width_effects(Some(31)), Vec::<Effect>::new());
-        // A drag in the new geometry snaps against ITS width.
-        assert_eq!(m.width_effects(Some(45)), vec![Effect::SwapWidth]);
+        assert_eq!(m.width_effects(Some(40)), Vec::<Effect>::new());
+        assert_eq!(m.width_effects(Some(40)), Vec::<Effect>::new());
+        assert_eq!(m.width_effects(Some(40)), Vec::<Effect>::new());
+        // 40 is settled: a still deviation from it IS a drag.
+        assert_eq!(m.width_effects(Some(30)), Vec::<Effect>::new());
+        assert_eq!(m.width_effects(Some(30)), vec![Effect::SwapWidth]);
     }
 
     /// A window resize moves the percent-derived width while the name still
-    /// agrees — indistinguishable from a drag from inside this pane, and the
-    /// accepted cost is ONE dead re-apply, not a loop: however many renders
-    /// follow at the new width, `snap_asked` refuses a second ask.
+    /// agrees — indistinguishable from a drag from inside this pane. The arm
+    /// spends one ask; zellij re-applies and the width stays put (it already
+    /// IS the layout's width for the new window), and two more still renders
+    /// concede it as the geometry's new truth. No loop, no stale memory —
+    /// and the next real drag snaps against the NEW width.
     #[test]
-    fn a_window_resize_costs_at_most_one_dead_reapply() {
+    fn a_window_resize_is_conceded_and_adopted() {
         let mut m = focused_bar();
         assert_eq!(m.width_effects(Some(53)), Vec::<Effect>::new());
-        // Window grew; the re-apply changes nothing, the width stays 60.
+        assert_eq!(m.width_effects(Some(53)), Vec::<Effect>::new());
+        // Window grew: 60 holds still → one ask.
+        assert_eq!(m.width_effects(Some(60)), Vec::<Effect>::new());
         assert_eq!(m.width_effects(Some(60)), vec![Effect::SwapWidth]);
+        // zellij declines to move it; two more still renders concede.
         for _ in 0..10 {
             assert_eq!(m.width_effects(Some(60)), Vec::<Effect>::new());
         }
+        // 60 is now the settled width: a drag snaps back against it.
+        assert_eq!(m.width_effects(Some(45)), Vec::<Effect>::new());
+        assert_eq!(m.width_effects(Some(45)), vec![Effect::SwapWidth]);
+    }
+
+    /// Live regression, 2026-08-15 sandbox drive: "the text on the bar
+    /// couldn't decide where it should be." A toggle's `TabUpdate` (the new
+    /// NAME) and the pane resize (the new COLS) are separate deliveries, and
+    /// the bar renders between them — so the first agreed-name frame still
+    /// carries the OLD width. A drag arm that records that frame as the
+    /// geometry's settled width then reads the real width, when it lands, as
+    /// a drag, and spends a switch on an UNDAMAGED tab — which advances the
+    /// cycle, wakes the name arm, and thrashes.
+    #[test]
+    fn a_toggles_late_pane_resize_is_not_a_drag() {
+        let mut m = focused_bar();
+        assert_eq!(m.width_effects(Some(53)), Vec::<Effect>::new());
+        assert_eq!(m.width_effects(Some(53)), Vec::<Effect>::new(), "settled");
+        m.toggle();
+        assert_eq!(m.width_effects(Some(53)), vec![Effect::SwapWidth]);
+        // The name lands first…
+        reports(&mut m, Some(true), 11);
+        // …and the bar renders — TWICE, so the stale width is even STILL —
+        // before its pane is resized. 53 is the expanded entry's width, and
+        // the adoption guard refuses to record it for the collapsed side.
+        assert_eq!(
+            m.width_effects(Some(53)),
+            Vec::<Effect>::new(),
+            "transitional frame must be quiet"
+        );
+        assert_eq!(
+            m.width_effects(Some(53)),
+            Vec::<Effect>::new(),
+            "a STILL transitional width must still be refused"
+        );
+        // Then the resize lands. THIS is the settle, not a drag.
+        assert_eq!(
+            m.width_effects(Some(31)),
+            Vec::<Effect>::new(),
+            "the real width arriving late must not be read as a drag"
+        );
+        assert_eq!(m.width_effects(Some(31)), Vec::<Effect>::new());
+        // And the collapsed side is armed against ITS width now:
+        assert_eq!(m.width_effects(Some(45)), Vec::<Effect>::new());
+        assert_eq!(m.width_effects(Some(45)), vec![Effect::SwapWidth]);
     }
 
     /// The focus gate covers the drag arm too: a background bar's switch
@@ -4294,6 +4402,8 @@ mod tests {
     fn a_background_bar_never_snaps() {
         let mut m = background_bar();
         assert_eq!(m.width_effects(Some(53)), Vec::<Effect>::new());
+        assert_eq!(m.width_effects(Some(53)), Vec::<Effect>::new());
+        assert_eq!(m.width_effects(Some(40)), Vec::<Effect>::new());
         assert_eq!(m.width_effects(Some(40)), Vec::<Effect>::new());
     }
 

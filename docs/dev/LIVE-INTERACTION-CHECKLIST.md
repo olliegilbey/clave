@@ -810,11 +810,12 @@ snap-back, restored by Ollie's ruling (2026-08-15) after the first #197 build
 lost it. The mechanism: the bar compares the width zellij renders it at against
 the width its current geometry settled at, and a mismatch under an unchanged
 layout name spends one switch — which re-applies the current layout, because
-the drag marked the tab damaged. While the border is **held**, the bar may
-visibly fight the drag (each width it is dragged through is a fresh mismatch);
-that is the mechanism working, not a storm — but record how it feels. After
-release, the width must come back without any keypress, and the following
-`Alt+c` must move the pane normally in one press.
+the drag marked the tab damaged. While the border is **held**, the bar stays
+quiet — a moving width never holds still for the two consecutive renders the
+arm demands (v0.1.2's drift gate, ported) — so the correction fires **on
+release**, possibly one event later if the session is idle. After release, the
+width must come back without any keypress, and the following `Alt+c` must move
+the pane normally in one press.
 
 Record which you got: snapped back on its own (correct), snapped back only
 after `Alt+c` (finding — the drag arm never fired), or terminal content left
@@ -933,8 +934,8 @@ Fill it in as you go; the numbers are the deliverable, not the ticks.
 | **10a** First `Alt+c` after that launch moved the pane? | |
 | **10b** Six slow widths in order? | |
 | **10b** Six FAST presses: settled width, profile agrees, next press moves? | |
-| **10c** Border drag: snapped back on its own / only after `Alt+c` / stayed covered | |
-| **10c** How the held drag felt (fights back is by design — but note it) | |
+| **10c** Border drag: snapped back on release / only after `Alt+c` / stayed covered | |
+| **10c** Held drag stayed quiet (no fighting)? | |
 | **10d** With the picker open: did it move? And which profile at which width after Esc? | |
 | **10e** After a zellij tab-strip click: which tab's sidebar moved? | |
 | Chip filled after `/rename` + one prompt? | |

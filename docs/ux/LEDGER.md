@@ -521,35 +521,46 @@ drag changes the width without changing the name — zellij still reports the
 same `active_swap_layout_name`. Reported truth is silent exactly where the drag
 lives; that silence was the regression.
 
-**What ships.** One remembered width per geometry, learned not predicted:
-`settled_cols` records the width zellij renders the bar at on the first frame
-where the reported name agrees with the wanted mode. A later frame at a
-different width under the same name spends one switch. The drag that moved the
-width also marked the tab damaged, and a damaged tab's switch RE-APPLIES its
-current position (the D40 verifier finding) — so that one switch IS the
-snap-back; the machine never computes a target column. Same debounce shape as
-D40: one ask per drifted width, re-armed when the width recovers or the
-geometry moves. Same focus gate.
+**What ships (amended same-day after the first cut thrashed live).** One
+remembered width per geometry, learned not predicted — but never from a width
+seen once. The first cut recorded the first agreed-name frame's width, and
+that frame carries the OLD width: a toggle's pane resize lands renders after
+its `TabUpdate`, so the arm poisoned its own memory, read the real width as a
+drag, spent a switch on an UNDAMAGED tab (which ADVANCES), and thrashed —
+Ollie, live: "the text on the bar couldn't decide where it should be."
+The amendment is v0.1.2's drift-confirmation gate, ported (the one piece of
+the deleted seek worth keeping): every decision waits for a STILL width, the
+same reading on two consecutive renders. Adopt a still width as the
+geometry's truth (refusing one that equals the OTHER geometry's width — the
+transitional frames show exactly that); call a still deviation a drag and
+spend one switch; and a spent-on width still standing two renders later is
+CONCEDED as the new truth (the window-resize face — zellij was asked and
+declined). The drag that moved the width also marked the tab damaged, and a
+damaged tab's switch RE-APPLIES its current position — verified live
+2026-08-16 on the sandbox: a bar mangled to 5% landed back on the declared
+percent in one switch, both directions. The machine never computes a target
+column. Same focus gate as D40.
 
 **Predicting the width was rejected** — the expected column count is derivable
 from the window width and the layout percentages, but only by re-implementing
 zellij's rounding; a prediction off by one asks forever. Learning the width
 from zellij makes rounding unfalsifiable by construction.
 
-**What is given up, both bounded.** (1) A window resize moves the
-percent-derived width while `settled_cols` remembers the old one —
-indistinguishable from a drag from inside the pane — costing ONE dead re-apply
-(invisible: it lands on the width the pane already has), after which the
-debounce holds and the next toggle re-records the width. (2) A held drag is
-fought in real time: every width the border is dragged through is a fresh
-mismatch, so the border resists rather than waiting for release. Checklist 10c
-records how that feels; if it feels bad live, the fix is a settle-delay, which
-is a new entry, not a revert of this one.
+**What is given up, all bounded.** (1) A window resize costs one dead re-apply
+(invisible — it lands on the width the pane already has) before the new width
+is conceded. (2) The snap fires on release, not during the drag, and needs one
+render after the width stops moving — in an idle session that render can wait
+for the next event, so a drag with the whole session dead-quiet may snap only
+on the next keypress or hook write. v0.1.2 had the same property and nobody
+ever filed it. (3) Under extreme delivery delay (two-plus renders between a
+switch's TabUpdate and its pane resize, all at a still width), one spurious
+flap can still happen; it self-corrects through the name arm and the
+concession rule, where the first cut looped forever.
 
-**Still owed: the same live run as D40's** — the re-apply-not-advance behaviour
-of a damaged tab is read from zellij source, not yet watched. Fails safe-ish: an
-advance instead of a re-apply changes the reported name, which the D40 arm
-corrects on the next frame, at the cost of a visible flicker.
+**Live runs owed: the drag round-trip through a real mouse** (checklist 10c).
+The re-apply-not-advance behaviour of a damaged tab is no longer owed — it was
+verified live on the sandbox 2026-08-16 (5% → declared percent, one switch,
+both directions), closing that debt for D40 as well.
 
 ### D40 — The bar reads zellij's report of which layout its tab is in, and remembers nothing (2026-08-15)
 
