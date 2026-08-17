@@ -49,7 +49,7 @@ loudly and stops the run; later phases assume earlier truth.
 | 2 | **Bind ladder (mixed paths)** | ~6 binds through mixed paths: dormant wakes via nav pipes (`{"row":N}` pick + commit) plus ≥1 scripted create | after EACH bind, within a bounded wait: `tab_id` bound in store (bind is the proxy for row class); dormant count decremented in the shared store (`dev status` — per-instance snapshots are not observable from outside); EOF-twin delta recorded (unattributable in the shared log — see Delivery accounting); seek-trace resting width == target only when the build carries the seek instrumentation, else an honest NOTE (the shipped bar has no emitter; model belief, NOT pane truth — the eyeball stays the oracle). First discriminator: is the bind budget spent-and-never-refilled after bind 2 (#178's fleet signature)? | **P9 (#178)**, **B22 (#181 detection)**, P10, P11, P14, R1 |
 | 3 | Tab churn | close a NON-last tab; close the HIGHEST tab then create one; re-join after each | nav answers with exactly one focus change; no `bind-evict` in evlog; no stale binds; recycled id carries no inherited stamp | B14, B15 (#55), Z15, P4, P12/P13 |
 | 4 | Ring walk | pick into the dormant block, walk both directions, wrap; Alt+Enter one commit | single executor (one focus change per press, never two); walk stays in-block; commit opens exactly one tab | P1 (#162), P2, P16, K8 — becomes single-ring on #179 |
-| 5 | Collapse burst | 12× toggle with pauses, then 5× rapid | store writes per press ≤ 2; final collapsed parity across all instances' snapshots; bar still answers press 13+ | B6–B9, B10/B11, P5 |
+| 5 | Collapse burst | 12× toggle with pauses, then 5× rapid, then 1 more | store writes per press ≤ 2; every paced press lands its store flip within a bounded wait; the rapid burst settles at parity (per-instance snapshots are not observable from outside — the store flag plus the phase-5 eyeball stand in for them); bar still answers press 18 | B6–B9, B10/B11, P5 |
 | 6 | Quiescence | idle 60s | evlog and store `seq` flat; zellij log flat after the mark for sandbox-attributable lines only (the shared log is never globally flat with a live maintainer fleet — see Delivery accounting) | P17, B19/B20, drive step 6 |
 | 7 | Teardown | nothing | prints the kill pair for the human | drive step 9 |
 
@@ -89,12 +89,15 @@ known-red.
 
 1. `just sandbox qa-fleet` (per-worktree instance), take the log mark.
 2. Hand the launch line to the human; wait.
-3. `scripts/qa-drive.sh qa-fleet` — all built phases (currently 0–4; the
-   spine above runs to 7 as the later slices land); stop on first failure.
-   **Phases 3–4 have never been driven live** — phases 0–2 have (2026-08-12/13,
-   three runs). The script's header lists the five things in them that only a
-   live run can settle, each also commented at its own check; a first red there
-   is evidence to read, not a script to patch until it greens.
+3. `scripts/qa-drive.sh qa-fleet` — the full spine, phases 0–7; stop on
+   first failure.
+   **Full 0–7 driven live green: run 4, 2026-08-17**, both eyeball
+   checkpoints confirmed. Runs 1–3 each went red on one real finding (all
+   fixed and recorded in FOOTGUNS.md); the script header's ledger records
+   how each once-pending assumption settled. Still awaiting a first live
+   run: the CONCURRENT burst shape (ledger (6) — runs 1–4 drove the burst
+   serially because the CLI pipe blocks). A first red on a new shape is
+   evidence to read, not a script to patch until it greens.
 4. On failure: capture the drive log tail + the joins BEFORE any teardown,
    grep FOOTGUNS, then debug systematically. A failed phase is evidence,
    not an excuse to re-run until green.
@@ -113,7 +116,11 @@ known-red.
 ## Build order (each lands separately, gates green)
 
 1. `qa-fleet` scenario + phase 0–2 (**catches #178's class** — build this
-   first, and it doubles as #178's reproduction harness).
-2. Phases 3–4 (churn + ring).
-3. Phases 5–6 (collapse + quiescence).
+   first, and it doubles as #178's reproduction harness). LANDED (#182).
+2. Phases 3–4 (churn + ring). LANDED (#200).
+3. Phases 5–7 (collapse + quiescence + the teardown hand-back). LANDED
+   (2026-08-17, the pre-release drive). **Full 0–7 driven live green on run 4
+   (2026-08-17) plus both eyeball checkpoints; runs 1–3 each went red on a
+   real finding first (nav wedge, newborn-bind prune, jq `//` vs `false` —
+   see FOOTGUNS).**
 4. Runbook/TESTING integration line + retire the duplicated manual steps.

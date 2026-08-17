@@ -40,11 +40,15 @@ pub struct PaneMeta {
 pub enum Effect {
     /// rename_tab_with_id(tab_id, name) — write clave's label on the real tab.
     RenameTab { tab_id: usize, name: String },
-    /// focus_pane_with_id(Terminal(pane_id)) — S2-proven; only for uuid jumps,
-    /// where the pane id is broadcast truth and duplicates are same-target.
+    /// focus_pane_with_id(Terminal(pane_id)) — S2-proven; uuid jumps and any
+    /// live pick on a tab with a registered agent pane. The pane id is
+    /// broadcast truth: position-immune (a starved executor's positions can
+    /// predate a close — the QA-drive nav wedge) and same-target across
+    /// duplicate instances.
     FocusPane { pane_id: u32 },
-    /// switch_tab_to(position + 1) — row/dir nav. All instances compute the
-    /// same target from replicated state, so duplicates are idempotent.
+    /// switch_tab_to(position + 1) — clicks and the nav fallback for tabs with
+    /// no registered pane. All instances compute the same target from
+    /// replicated state, so duplicates are idempotent.
     SwitchTab { position: usize },
     /// run_command zellij pipe clave-visited — converge the other instances
     /// after a single-instance jump (mouse click).
@@ -355,6 +359,22 @@ pub struct BarModel {
     /// uuid → terminal pane id, from clave-register (S2).
     uuid_to_pane: BTreeMap<String, u32>,
     tabs: Vec<TabMeta>,
+    /// Tab ids this instance WITNESSED dying: present in one delivered tab
+    /// frame, absent from the next. The only ids `prune_effect` may claim —
+    /// TabUpdate reaches only the active tab, so a background bar's `tabs`
+    /// can predate a create, and any id it was never shown dying is a newborn,
+    /// not a corpse (2026-08-17 QA drive: a starved bar pruned a just-created
+    /// tab's register+touch+bind in one write, and #187's replace-not-merge
+    /// made the unbind permanent). A claim is settled by the STORE ECHO — the
+    /// snapshot that no longer references the id — never at emit (emit-time
+    /// consumption is the missed-action class: a false executor gate would
+    /// eat the claim with no retry). Settling matters because zellij REUSES
+    /// ids (a closed top tab's id returns on the next create — Codex P1,
+    /// PR #202): a claim that outlived its own echo would read the reused
+    /// id's newborn as the corpse it once witnessed. A delivered frame that
+    /// shows a claimed id ALIVE again also voids the claim — witnessed
+    /// reborn, so whatever write raced ahead belongs to the newborn.
+    witnessed_dead: BTreeSet<usize>,
     panes: Vec<PaneMeta>,
     /// tab_id → the commitment ORDINAL of the last USER COMMITMENT to that tab
     /// (§6.6 / S1). NOT owned here: the store is the one writer (`clave touch`
@@ -1090,6 +1110,17 @@ impl BarModel {
         // self-healing by construction; merging deltas is the exact failure
         // mode that diverged live (C5 round 5).
         self.tab_order = snap.tab_order;
+        // Settle death claims: a witnessed-dead id the store no longer
+        // references has had its prune land (or never needed one) — the claim
+        // is spent. Settling at the ECHO, not at emit, is what keeps the
+        // prune retryable under a false executor gate; dropping the claim
+        // HERE is what stops it outliving its purpose and reading a REUSED
+        // id's newborn as the corpse it once witnessed (Codex P1, PR #202).
+        // An id still referenced keeps its claim: the prune has not landed
+        // yet, and the next coherent settle re-derives it (detection-driven).
+        self.witnessed_dead.retain(|id| {
+            self.agents.iter().any(|a| a.tab_id == Some(*id)) || self.tab_order.contains_key(id)
+        });
         let mut effects = Vec::new();
         // Collapse parity heal (issue #5, C8 parity-desync): once
         // seq-accepted, the store's flag is authoritative for any instance
@@ -1168,6 +1199,22 @@ impl BarModel {
     /// Apply zellij's tab truth (row SET only — order moves via visit(), the
     /// §6.5 unread clear is the one action keyed on the active tab here).
     pub fn apply_tabs(&mut self, tabs: Vec<TabMeta>) -> Vec<Effect> {
+        // Witness deaths BEFORE replacing the frame: an id in the outgoing
+        // frame and not the incoming one was SEEN to die, and that witness is
+        // the only licence `prune_effect` accepts. An id back alive voids any
+        // standing claim on it — witnessed reborn (id reuse), not stale.
+        let incoming: BTreeSet<usize> = tabs.iter().map(|t| t.tab_id).collect();
+        // Never witness against an EMPTY frame: closing the last tab closes
+        // the session, so it is a degenerate update, not a mass death.
+        if !incoming.is_empty() {
+            self.witnessed_dead.extend(
+                self.tabs
+                    .iter()
+                    .map(|t| t.tab_id)
+                    .filter(|id| !incoming.contains(id)),
+            );
+            self.witnessed_dead.retain(|id| !incoming.contains(id));
+        }
         self.tabs = tabs;
         let mut effects = Vec::new();
         // #23 (2026-07-21): a tab CLOSE (`Alt+w`; `Ctrl+D` closes a plain shell
@@ -1345,18 +1392,21 @@ impl BarModel {
         if live.is_empty() {
             return None;
         }
+        // "Observed-stale" means WITNESSED: only an id this instance saw
+        // leave a delivered tab frame is its to prune — anything else is a
+        // newborn beyond a starved frame's reach (2026-08-17 QA drive, P2
+        // rung 1), including a REUSED id whose earlier death this instance
+        // witnessed and whose claim the store echo has since settled
+        // (Codex P1, PR #202). The `witnessed_dead` field doc carries the
+        // full claim lifecycle.
+        let observed_stale = |id: &usize| !live.contains(id) && self.witnessed_dead.contains(id);
         let mut stale: BTreeSet<usize> = self
             .agents
             .iter()
             .filter_map(|a| a.tab_id)
-            .filter(|id| !live.contains(id))
+            .filter(&observed_stale)
             .collect();
-        stale.extend(
-            self.tab_order
-                .keys()
-                .copied()
-                .filter(|id| !live.contains(id)),
-        );
+        stale.extend(self.tab_order.keys().copied().filter(observed_stale));
         (!stale.is_empty()).then(|| Effect::PruneTabs {
             stale_ids: stale.into_iter().collect(), // BTreeSet → sorted, deduped
         })
@@ -1741,7 +1791,11 @@ impl BarModel {
     /// the tab the user left, so the first press walks from there and re-anchors
     /// on landing. One stale press, one executor — the fail-closed trade this
     /// whole subsystem takes, since a repeated keypress costs less than a jump
-    /// to the wrong tab.
+    /// to the wrong tab. That trade only holds if the press LANDS somewhere:
+    /// a position-addressed switch from a starved executor can be silently
+    /// refused (out of range after a close) and heals nothing, which is why
+    /// live picks now land by pane id where one is registered (the QA-drive
+    /// phase-3 wedge; FOOTGUNS.md).
     pub fn nav_executor(&self) -> Option<usize> {
         let own = self.own_tab()?;
         (self.current_tab == Some(own)).then_some(own)
@@ -1880,19 +1934,33 @@ impl BarModel {
         match key {
             RowKey::Tab(tab_id) => {
                 self.cursor = None; // live landing: focus truth takes over
-                let Some(position) = self
-                    .tabs
-                    .iter()
-                    .find(|t| t.tab_id == tab_id)
-                    .map(|t| t.position)
-                else {
-                    return Vec::new();
+                // QA-drive phase-3 wedge (2026-08-17): this executor may be a
+                // starved background bar, so `self.tabs` positions can predate
+                // a close — a SwitchTab aimed one past the end is silently
+                // refused by zellij, and the AnnounceVisit below still
+                // broadcasts, re-electing the same stale executor forever.
+                // The store's uuid→pane join is broadcast truth and
+                // position-immune, so a tab with a registered agent pane lands
+                // there; position remains only for tabs with no pane to ride.
+                let jump = match self
+                    .agent_in_tab(tab_id)
+                    .and_then(|a| self.uuid_to_pane.get(&a.uuid))
+                {
+                    Some(&pane_id) => Effect::FocusPane { pane_id },
+                    None => {
+                        let Some(position) = self
+                            .tabs
+                            .iter()
+                            .find(|t| t.tab_id == tab_id)
+                            .map(|t| t.position)
+                        else {
+                            return Vec::new();
+                        };
+                        Effect::SwitchTab { position }
+                    }
                 };
                 self.beacon(tab_id); // executor hand-off hint; pipe echo confirms
-                vec![
-                    Effect::SwitchTab { position },
-                    Effect::AnnounceVisit { tab_id },
-                ]
+                vec![jump, Effect::AnnounceVisit { tab_id }]
             }
             RowKey::Dormant(uuid) => {
                 // #100 dwell-commit: EVERY dormant landing — dir walk and
@@ -3055,16 +3123,16 @@ mod tests {
         ));
         assert_eq!(
             m.identity_effects(),
-            vec![
-                Effect::Bind {
-                    uuid: "u1".into(),
-                    tab_id: 11
-                },
-                // 99 is seeded in the timeline but not in the tab set yet.
-                Effect::PruneTabs {
-                    stale_ids: vec![99]
-                }
-            ]
+            vec![Effect::Bind {
+                uuid: "u1".into(),
+                tab_id: 11
+            }],
+            // 99 is seeded in the timeline but not in the tab set yet — and
+            // it ARRIVES two lines down, which is exactly why it must not be
+            // pruned here: an id this instance never witnessed dying is a
+            // tab created beyond a starved frame's reach, and pruning it is
+            // the newborn-revert the 2026-08-17 QA drive caught live
+            // (this assertion expected PruneTabs{[99]} until then).
         );
         // Same seq, same pane, new tab id at our position.
         m.apply_tabs(vec![tab(10, 0, "a", false), tab(99, 1, "b", true)]);
@@ -3382,6 +3450,53 @@ mod tests {
         assert_eq!(m.nav("not json", Some(10)), Vec::<Effect>::new());
         assert_eq!(m.nav("{\"row\":9}", Some(10)), Vec::<Effect>::new());
         assert_eq!(m.click(9, TALL_PANE), Vec::<Effect>::new());
+    }
+
+    #[test]
+    fn a_stale_executor_lands_a_live_pick_by_pane_id_not_position() {
+        // The 2026-08-17 QA-drive phase-3 wedge: the elected executor was a
+        // starved background bar whose tab frame predated a close, so its
+        // position-based SwitchTab aimed one past the end and zellij silently
+        // refused it — and because its AnnounceVisit still broadcast, the same
+        // stale executor was re-elected on every further press. Positions are
+        // frame truth and frames starve (TabUpdate reaches only the active
+        // tab); the store's uuid→pane join is broadcast truth. So a live pick
+        // on a tab with a registered agent pane must land by pane id.
+        let mut m = starved_bar(11);
+        m.apply_snapshot(snap_full(
+            1,
+            vec![agent_at("u1", Status::Working, Some(12), 7)],
+            &[(12, 1000)],
+        ));
+        assert_eq!(
+            m.nav("{\"row\":1}", Some(11)),
+            vec![
+                Effect::FocusPane { pane_id: 7 },
+                Effect::AnnounceVisit { tab_id: 12 },
+            ],
+            "a bound live pick must ride the position-immune pane id"
+        );
+    }
+
+    #[test]
+    fn a_live_pick_with_no_registered_pane_falls_back_to_position() {
+        // The remainder the pane-id landing accepts: a bound row whose pane
+        // was never announced (and any plain terminal tab) has no stable id
+        // to ride, so position — fresh on the bar the user is reading, the
+        // common case — is the only address there is.
+        let mut m = starved_bar(11);
+        m.apply_snapshot(snap_full(
+            1,
+            vec![agent("u1", Status::Working, Some(12))],
+            &[(12, 1000)],
+        ));
+        assert_eq!(
+            m.nav("{\"row\":1}", Some(11)),
+            vec![
+                Effect::SwitchTab { position: 2 },
+                Effect::AnnounceVisit { tab_id: 12 },
+            ]
+        );
     }
 
     #[test]
@@ -3814,6 +3929,122 @@ mod tests {
             m.identity_effects(),
             Vec::<Effect>::new(),
             "a clean store must cost no prune subprocess"
+        );
+    }
+
+    #[test]
+    fn a_bar_never_shown_a_tab_must_not_prune_its_newborn_bind() {
+        // 2026-08-17 QA-drive P2 rung 1, run 2: `clave add` created tab 1 and
+        // its agent registered, touched, and bound — three store writes — and
+        // tab 0's bar, background since the create with a tab frame still
+        // reading {0}, received the snapshot, derived the bound tab 1 as
+        // observed-stale, and pruned the newborn. One write reverted all
+        // three, and (per #187) the retired pane mapping meant the row could
+        // never bind again. "Observed-stale" must mean OBSERVED: an id above
+        // everything this instance has ever been shown was never witnessed
+        // alive or dead, and is not this bar's to prune.
+        let mut m = BarModel::default();
+        m.set_own_pane(100);
+        m.apply_panes(panes_at(&[(0, 100, 5)]));
+        m.apply_tabs(vec![tab(10, 0, "a", true)]);
+        let mut s = snap(1, vec![agent("u-new", Status::Working, Some(11))]);
+        s.tab_order = [(10usize, 100u64), (11, 200)].into();
+        m.apply_snapshot(s);
+        assert!(
+            m.identity_effects()
+                .iter()
+                .all(|e| !matches!(e, Effect::PruneTabs { .. })),
+            "a tab this instance never witnessed dying is a newborn, not a corpse"
+        );
+        // The moment a frame shows tab 11 alive and a later one shows it
+        // gone, the same instance's prune is back in business.
+        m.apply_tabs(vec![tab(10, 0, "a", true), tab(11, 1, "b", false)]);
+        m.apply_panes(panes_at(&[(0, 100, 5), (1, 101, 6)]));
+        m.apply_tabs(vec![tab(10, 0, "a", true)]);
+        m.apply_panes(panes_at(&[(0, 100, 5)]));
+        assert!(
+            m.identity_effects().contains(&Effect::PruneTabs {
+                stale_ids: vec![11]
+            }),
+            "a witnessed close must still prune"
+        );
+    }
+
+    #[test]
+    fn a_reused_tab_id_is_a_newborn_not_a_corpse_to_a_starved_bar() {
+        // Codex P1 on PR #202: zellij RECYCLES tab ids (FOOTGUNS — closing
+        // the highest tab hands its id to the next tab created). A bar that
+        // witnessed the old incarnation die retains that id under its
+        // high-water mark, so when it is later starved — frames frozen
+        // mutually-coherent, still claiming its own tab active — the
+        // newborn's broadcast snapshot reads as observed-stale and its fresh
+        // register/touch/bind is pruned, permanently (#187). A settled claim
+        // must not outlive its own store echo.
+        let mut m = BarModel::default();
+        m.set_own_pane(100);
+        // Tabs 10 (ours, active) and 11 alive together.
+        m.apply_panes(panes_at(&[(0, 100, 5), (1, 101, 6)]));
+        m.apply_tabs(vec![tab(10, 0, "a", true), tab(11, 1, "b", false)]);
+        let mut s = snap(1, vec![agent("u-old", Status::Working, Some(11))]);
+        s.tab_order = [(10usize, 100u64), (11, 200)].into();
+        m.apply_snapshot(s);
+        // Tab 11 — the highest — closes; we witness it and prune, correctly.
+        m.apply_tabs(vec![tab(10, 0, "a", true)]);
+        m.apply_panes(panes_at(&[(0, 100, 5)]));
+        assert!(
+            m.identity_effects().contains(&Effect::PruneTabs {
+                stale_ids: vec![11]
+            }),
+            "the witnessed close prunes"
+        );
+        // The store echo settles the claim: nothing references 11 any more.
+        m.apply_snapshot(snap_t(2, &[(10, 100)]));
+        assert_eq!(m.identity_effects(), Vec::<Effect>::new());
+        // A new tab is created and zellij hands it id 11 again. Creation
+        // focuses the newborn, so THIS bar is starved — no TabUpdate, no
+        // PaneUpdate, frozen frames still claiming tab 10 active. Only the
+        // snapshot push arrives, carrying the newborn's register/touch/bind.
+        let mut s = snap(3, vec![agent("u-reborn", Status::Working, Some(11))]);
+        s.tab_order = [(10usize, 100u64), (11, 300)].into();
+        m.apply_snapshot(s);
+        assert!(
+            m.identity_effects()
+                .iter()
+                .all(|e| !matches!(e, Effect::PruneTabs { .. })),
+            "a reused id whose death was already settled is a newborn, not a corpse"
+        );
+    }
+
+    #[test]
+    fn a_claim_still_referenced_by_a_bind_alone_keeps_its_prune_retrying() {
+        // The settle condition is a DISJUNCTION over both store surfaces: a
+        // witnessed-dead id is spent only when NEITHER an agent bind NOR a
+        // tab_order entry references it. An echo that dropped the ordinal but
+        // not the bind (a partial prune landing, or an unrelated push racing
+        // it) must keep the claim — dropping it there loses the retry and
+        // strands the dead bind forever (the #55 missed-action class).
+        let mut m = BarModel::default();
+        m.set_own_pane(100);
+        m.apply_panes(panes_at(&[(0, 100, 5), (1, 101, 6)]));
+        m.apply_tabs(vec![tab(10, 0, "a", true), tab(11, 1, "b", false)]);
+        let mut s = snap(1, vec![agent("u-old", Status::Working, Some(11))]);
+        s.tab_order = [(10usize, 100u64), (11, 200)].into();
+        m.apply_snapshot(s);
+        // Witness the close.
+        m.apply_tabs(vec![tab(10, 0, "a", true)]);
+        m.apply_panes(panes_at(&[(0, 100, 5)]));
+        assert!(m.identity_effects().contains(&Effect::PruneTabs {
+            stale_ids: vec![11]
+        }));
+        // Echo with the BIND still standing and the ordinal gone: unsettled.
+        let mut s = snap(2, vec![agent("u-old", Status::Working, Some(11))]);
+        s.tab_order = [(10usize, 100u64)].into();
+        m.apply_snapshot(s);
+        assert!(
+            m.identity_effects().contains(&Effect::PruneTabs {
+                stale_ids: vec![11]
+            }),
+            "a bind-only reference keeps the claim: the prune retries"
         );
     }
 

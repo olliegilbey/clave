@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# qa-drive.sh — the automated regression drive, phases 0-4 (docs/dev/QA-DRIVE.md).
+# qa-drive.sh — the automated regression drive, phases 0-7 (docs/dev/QA-DRIVE.md).
 #
 # What this is: preflight, baseline join, the dormant-row bind ladder, tab
-# churn and the nav ring walk, scripted against THIS checkout's per-worktree
-# sandbox instance. Phases 5-7 (collapse, quiescence, teardown) are not built
-# yet — see the build order in docs/dev/QA-DRIVE.md.
+# churn, the nav ring walk, the collapse burst, quiescence and the teardown
+# hand-back, scripted against THIS checkout's per-worktree sandbox instance.
 #
-# FIRST LIVE RUN PENDING — phases 3 and 4. Phases 0-2 have been driven against
-# a live sandbox (2026-08-13, three runs); phases 3-4 have NOT. They are built
-# against the same code paths and the same wrappers, and every assertion prints
-# what it measured, so a first run that goes red is evidence either way — but
-# five things in them can only be settled live, and each is commented AT its
-# check with this same marker:
+# ALL PHASES DRIVEN LIVE GREEN — run 4, 2026-08-17, full 0-7 pass plus both
+# human eyeball checkpoints. The list below was the FIRST LIVE RUN PENDING
+# ledger; it is kept because each entry records an assumption a live run had
+# to settle, and how the first runs settled them: runs 1-3 each went red on a
+# real finding first (the stale-executor nav wedge, the starved-bar prune of
+# a newborn bind — both fixed in clave-bar — and wait_collapsed's jq `//`
+# blindness to `false`, fixed here). Per-check markers remain at their sites:
 #   (1) `go-to-tab-by-id` exists on the maintainer's zellij server (0.44.3 has
 #       it; an older server takes the positional fallback, which is verified);
 #   (2) the focused tab is read from `dump-layout`'s `focus=true` tab node and
@@ -23,7 +23,19 @@
 #       assertions say so honestly when it does not hold;
 #   (5) the ring's landing prediction (rendered dormant order) matches what the
 #       bar actually renders. That prediction IS phase 4's assertion, so a
-#       mismatch is a finding to read, not a script bug to assume.
+#       mismatch is a finding to read, not a script bug to assume;
+#   (6) the collapse burst assumes CLI pipes deliver serialized — five rapid
+#       `clave-toggle` presses land as five presses on ONE writer, so the
+#       store's final parity is the burst's witness (pipe.rs pins the twin
+#       guard; nothing pins CLI delivery order but the queue itself). Runs
+#       1-4 drove this with a SERIAL loop — the CLI pipe blocks until the
+#       plugin unblocks it, so no queue ever formed; the burst launches
+#       concurrently since the PR #202 review, and the queued shape has not
+#       yet been driven live;
+#   (7) quiescence assumes the seeded fleet is hook-quiet at rest — a seeded
+#       agent that still ticks (an unfinished claude -p, a background
+#       SessionEnd) advances `seq` under the flat-line check and reads as a
+#       false red. The check prints both readings so that shape is legible.
 #
 # What this is NOT: a launcher. It assumes a human has ALREADY staged
 # (`just sandbox <scenario>`) and LAUNCHED the sandbox session. It never runs
@@ -54,8 +66,8 @@ usage() {
   cat <<EOF
 usage: $0 <scenario>
 
-Drives QA-DRIVE phases 0-4 (preflight, baseline join, bind ladder, tab churn,
-ring walk) against
+Drives QA-DRIVE phases 0-7 (preflight, baseline join, bind ladder, tab churn,
+ring walk, collapse burst, quiescence, teardown hand-back) against
 THIS checkout's per-worktree sandbox instance (\`clave dev instance\`). Never
 launches or kills a zellij session — stage and launch first:
 
@@ -222,8 +234,7 @@ print_summary() {
     printf '  %-18s %s\n' "${PHASE_NAMES[$i]}" "${PHASE_RESULTS[$i]}"
   done
   echo "log: ${DRIVE_LOG}"
-  echo "Phases 5-7 (collapse, quiescence, teardown) are not yet built."
-  echo "Phases 3-4 have never been driven live — see the header's FIRST LIVE RUN PENDING list."
+  echo "Full 0-7 driven live green: run 4, 2026-08-17 — the header's ledger records how each pending assumption settled."
 }
 
 # Mark the current phase FAILED, print the summary, and stop the run. The
@@ -257,6 +268,19 @@ check_min() {
     verdict="PASS"
   fi
   printf '[%s %s] CHECK %s: measured=%s expected=>=%s %s\n' "$CURRENT_PHASE" "$(ts)" "$desc" "${measured:-empty}" "$min" "$verdict"
+  [[ "$verdict" == "FAIL" ]] && fail_phase
+}
+
+# check_numeric <desc> <measured> — measured must be a bare integer. The
+# guard for asserted READS: a `// 0` or `:-0` fallback lets a dead
+# dev_status or an unreadable log read 0 on BOTH ends of a window, and a
+# flat/bounded check then passes without having observed anything
+# (CodeRabbit, PR #202 — same family as run 3's jq `//` blindness to
+# `false`). jq prints `null` for a missing key, which this rejects too.
+check_numeric() {
+  local desc="$1" measured="${2:-}" verdict="FAIL"
+  [[ "$measured" =~ ^[0-9]+$ ]] && verdict="PASS"
+  printf '[%s %s] CHECK %s: measured=%s expected=<integer> %s\n' "$CURRENT_PHASE" "$(ts)" "$desc" "${measured:-empty}" "$verdict"
   [[ "$verdict" == "FAIL" ]] && fail_phase
 }
 
@@ -1618,5 +1642,186 @@ measure "phase 4 EOF-twin delta (user-global log, unattributable — forensic on
   "$(($(count_eof_twins) - P4_TWINS_BEFORE))"
 
 rejoin_check "phase 4 (post-commit):"
+
+# ===========================================================================
+# Phase 5 — collapse burst
+# ===========================================================================
+# 12 paced toggles, 5 rapid, then one more. Covers B6-B9 (the toggle family),
+# B10/B11 (parity durability), P5 (pipe-delivered presses).
+#
+# What is being proved and HOW: a toggle's only outside-visible truth is the
+# store's `collapsed` flag — `PersistCollapse` executes on exactly ONE writer
+# per press (main.rs `toggle_collapsed`: the pending ledger books the write,
+# run_effects gates execution), so the flag flipping within a bounded wait
+# proves press delivery, single-writer execution, and store persistence in
+# one read. Pane geometry is deliberately NOT asserted — every automated
+# width probe is a known liar (QA-DRIVE, eyeball checkpoints); the post-run
+# eyeball owns it. Three shapes:
+#   - each PACED press lands its flip (12 individual bounded waits — a press
+#     that stops answering fails AT its ordinal, which is the B6 regression's
+#     exact signature: the budget that spent itself and never refilled);
+#   - the RAPID burst nets to parity (5 presses launched concurrently,
+#     asserted only at the settled end — header ledger (6): the queued
+#     shape awaits its first live run);
+#   - the bar still answers AFTER the burst (press 18) — the #137-class
+#     detector: a storm brake that turned into a lifetime budget died at
+#     exactly this press shape, 33 clean presses then silence.
+# 18 presses total: even, so the phase leaves `collapsed` where it found it.
+phase "P5-collapse-burst"
+
+toggle_pipe() {
+  "$CT" pipe --name clave-toggle -- "1"
+}
+
+# Bounded wait for the store's collapsed flag to read `want`. Prints the
+# settled value either way; the caller checks it.
+# NO `// empty` here: jq's `//` treats `false` itself as absent, so
+# `.store.collapsed // empty` can never observe the expanded state — run 3's
+# P5 failed its first false-ward press on exactly that (the store had
+# flipped; the probe was blind to it). A bare path prints true/false/null.
+wait_collapsed() {
+  local want="$1" i got=""
+  for i in $(seq 1 10); do
+    got="$(jq -r '.store.collapsed' < <(dev_status) 2>/dev/null)"
+    [[ "$got" == "$want" ]] && break
+    sleep 1
+  done
+  printf '%s' "${got}"
+}
+
+P5_STATUS="$(dev_status)"
+P5_COLLAPSED0="$(jq -r '.store.collapsed // false' <<<"$P5_STATUS" 2>/dev/null)"
+P5_SEQ0="$(jq -r '.store.seq' <<<"$P5_STATUS" 2>/dev/null)"
+check_numeric "phase-5 start store seq readable" "$P5_SEQ0"
+P5_TWINS_BEFORE="$(count_eof_twins)"
+measure "phase-5 start" "collapsed=${P5_COLLAPSED0} seq=${P5_SEQ0}"
+
+# One writer must exist before the first press: anchor the election to the
+# tab that is focused right now (phase 4's commit left focus wherever zellij
+# put it — recorded there, irrelevant here, the anchor just has to agree
+# with SOME live tab so exactly one bar executes the persist).
+P5_STAND="$(focused_tab_id)"
+check_nonempty "phase-5 standing tab (focus read)" "$P5_STAND"
+anchor_executor "$P5_STAND"
+P5_RC=$?
+check "phase-5 executor anchor pipe accepted (clave-visited ${P5_STAND})" "$([[ $P5_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+sleep 1
+
+P5_EXPECT="$P5_COLLAPSED0"
+for i in $(seq 1 12); do
+  if [[ "$P5_EXPECT" == "true" ]]; then P5_EXPECT="false"; else P5_EXPECT="true"; fi
+  toggle_pipe
+  P5_RC=$?
+  check "paced press ${i}/12 pipe accepted" "$([[ $P5_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+  check "paced press ${i}/12 landed (store collapsed flipped)" "$(wait_collapsed "$P5_EXPECT")" "$P5_EXPECT"
+  sleep 1
+done
+
+# Writes per press <= 2 (QA-DRIVE spine): the persist is one store write and
+# at most one companion snapshot push. Asserted over the paced 12 in
+# aggregate — the sandbox fleet is hook-quiet by seed, and if it is not,
+# FIRST LIVE RUN PENDING (7) says how this reads.
+P5_SEQ_PACED="$(jq -r '.store.seq' < <(dev_status) 2>/dev/null)"
+check_numeric "paced-12 store seq readable" "$P5_SEQ_PACED"
+measure "store seq across the paced 12" "before=${P5_SEQ0} after=${P5_SEQ_PACED} delta=$((P5_SEQ_PACED - P5_SEQ0))"
+check "paced writes per press <= 2 (12 presses, delta <= 24)" \
+  "$(((P5_SEQ_PACED - P5_SEQ0) <= 24 ? 1 : 0))" "1"
+
+# The rapid burst: five presses launched TOGETHER, judged only at the
+# settled end. The CLI pipe BLOCKS until the plugin unblocks it, so a
+# serial loop is five request-response round trips — no queue ever forms
+# (CodeRabbit, PR #202). Backgrounding makes the burst real; each pipe's
+# own exit status is still asserted once all five have finished. Order
+# inside the burst is the queue's (header ledger (6)) and does not matter:
+# five identical toggles net to parity regardless of arrival order.
+P5_PIDS=()
+for i in $(seq 1 5); do
+  toggle_pipe &
+  P5_PIDS+=("$!")
+done
+for i in "${!P5_PIDS[@]}"; do
+  P5_RC=0
+  wait "${P5_PIDS[$i]}" || P5_RC=$?
+  check "rapid press $((i + 1))/5 pipe accepted" "$([[ $P5_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+done
+# 12 + 5 = 17 presses: odd, so the settled flag must be the START's inverse.
+if [[ "$P5_COLLAPSED0" == "true" ]]; then P5_EXPECT="false"; else P5_EXPECT="true"; fi
+check "rapid burst settled at parity (17 presses = start inverted)" "$(wait_collapsed "$P5_EXPECT")" "$P5_EXPECT"
+
+# Press 18 — after the burst. The press that found #137's corpse.
+toggle_pipe
+P5_RC=$?
+check "post-burst press pipe accepted" "$([[ $P5_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+check "the bar still answers after the burst (press 18 landed, back to start)" \
+  "$(wait_collapsed "$P5_COLLAPSED0")" "$P5_COLLAPSED0"
+
+P5_SEQ_END="$(jq -r '.store.seq' < <(dev_status) 2>/dev/null)"
+check_numeric "burst-end store seq readable" "$P5_SEQ_END"
+measure "store seq across all 18 presses" "before=${P5_SEQ0} after=${P5_SEQ_END} delta=$((P5_SEQ_END - P5_SEQ0))"
+check "total writes per press <= 2 (18 presses, delta <= 36)" \
+  "$(((P5_SEQ_END - P5_SEQ0) <= 36 ? 1 : 0))" "1"
+measure "phase 5 EOF-twin delta (user-global log, unattributable — forensic only)" \
+  "$(($(count_eof_twins) - P5_TWINS_BEFORE))"
+
+# ===========================================================================
+# Phase 6 — quiescence
+# ===========================================================================
+# Idle, then prove nothing moved. Covers P17 (idle traffic), B19/B20 (the
+# self-exciting render loops — a bar that repaints itself into activity shows
+# up here as seq/evlog drift), drive-loop step 6.
+#
+# Attribution rule (QA-DRIVE "Delivery accounting"): the zellij log is
+# user-global and is NEVER globally flat with a live maintainer fleet, so the
+# asserted reading is the sandbox-attributable one — fresh `clave-bar:
+# loaded` lines carrying THIS build's tag (a quiet fleet loads no new bar).
+# Global growth is recorded as forensic, not asserted.
+phase "P6-quiescence"
+
+P6_WAIT="${CLAVE_QUIESCE_WAIT:-60}"
+# Quiescence asserts on EQUALITY across a window, so a masked read is worse
+# than a missing one: a dead dev_status or an unreadable evlog defaulted to
+# 0 on both ends reads as perfectly flat (CodeRabbit, PR #202). Every input
+# to a flatness check must prove it was actually read.
+P6_STATUS="$(dev_status)"
+P6_SEQ0="$(jq -r '.store.seq' <<<"$P6_STATUS" 2>/dev/null)"
+check_numeric "quiescence start store seq readable" "$P6_SEQ0"
+P6_EV0="$(wc -l <"$EVLOG" 2>/dev/null | tr -d ' ')"
+check_numeric "quiescence start evlog readable" "$P6_EV0"
+P6_BARS0="$(bar_loaded_count)"
+P6_ZLINES0="$(wc -l <"$ZLOG" 2>/dev/null | tr -d ' ')" || P6_ZLINES0=0
+measure "quiescence start (idling ${P6_WAIT}s)" "seq=${P6_SEQ0} evlog_lines=${P6_EV0} tagged_bars=${P6_BARS0}"
+sleep "$P6_WAIT"
+
+P6_SEQ1="$(jq -r '.store.seq' < <(dev_status) 2>/dev/null)"
+check_numeric "quiescence end store seq readable" "$P6_SEQ1"
+P6_EV1="$(wc -l <"$EVLOG" 2>/dev/null | tr -d ' ')"
+check_numeric "quiescence end evlog readable" "$P6_EV1"
+check "store seq flat across ${P6_WAIT}s idle" "$P6_SEQ1" "$P6_SEQ0"
+check "evlog flat across ${P6_WAIT}s idle" "$P6_EV1" "$P6_EV0"
+check "no new sandbox bar loaded while idle (tagged 'clave-bar: loaded' delta)" \
+  "$(($(bar_loaded_count) - P6_BARS0))" "0"
+P6_ZLINES1="$(wc -l <"$ZLOG" 2>/dev/null | tr -d ' ')" || P6_ZLINES1=0
+measure "global zellij log growth while idle (user-global, unattributable — forensic only)" \
+  "$((P6_ZLINES1 - P6_ZLINES0))"
+
+# ===========================================================================
+# Phase 7 — teardown (the hand-back)
+# ===========================================================================
+# Asserts nothing, launches nothing, kills nothing: session lifecycle is the
+# human's (AGENTS.md, TESTING.md "the interaction contract"). The drive's
+# last act is to print the kill pair and the two eyeball checkpoints it owes.
+phase "P7-teardown"
+
+measure "sandbox left as driven; store, evlog and drive log preserved for forensics" "$STATE_DIR"
+cat <<EOF
+
+The two eyeball checkpoints (human, one message each — QA-DRIVE):
+  1. one bar per tab; woken rows show agent chips, not terminal glyphs
+  2. every tab a strip (or every tab wide) — no width outliers
+
+Teardown, when done (human, non-zellij terminal):
+  zellij kill-session ${SESSION}
+  zellij delete-session --force ${SESSION}
+EOF
 
 print_summary
