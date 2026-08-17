@@ -730,8 +730,8 @@ nothing in it can exec a real `claude --resume`.
 - **`live_session` was never written** (step 3 said `null`). The row's live
   pointer is what the fix reads; without it resurrection correctly falls back to
   the minted uuid, so you would reproduce the pre-fix answer while testing #97,
-  not #99. It is written only by a hook that fired AFTER the clear and passed
-  the pid gate.
+  not #99. It is written only by a hook that fired AFTER the clear from a pane
+  carrying the row's `CLAVE_AGENT_UUID` (env-only binding, #180).
 - **You asked the resurrected agent to *check* the number** (grep, a file, its
   own transcript). It will find it and answer correctly from the wrong
   conversation. Ask it what it REMEMBERS, with no tools.
@@ -946,5 +946,5 @@ Fill it in as you go; the numbers are the deliverable, not the ticks.
 | One bar per tab, one build tag | |
 | **#97** After `/clear`, the row still rises and its status updates | |
 | **#97** `title`/`summary` keep rolling from the NEW transcript | |
-| **#97** A nested `claude -p` does NOT stamp the row; decline logged | |
+| **#97/#180** A nested `claude -p` in the pane's shell DOES stamp the row (env uuid binds; accepted by the #180 ruling) | |
 | **#99** Which conversation a resurrected rotated tab comes back on | |

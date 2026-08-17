@@ -102,8 +102,10 @@ Spanish for *key/keystone* (keyboard-driven, central); archaic past tense of
    **only** that. Claude rotates its own session id on `/clear` — new id, new
    transcript — so the minted uuid no longer locates the transcript and no longer
    matches the hook payload. Hook correlation is `CLAVE_AGENT_UUID`, carried across
-   `spawn`'s exec and gated on `CLAVE_AGENT_PID == CLAUDE_PID` so a nested `claude`
-   that merely inherited the env cannot write this row (`hook::resolve_row`, §6.5);
+   `spawn`'s exec — alone (revised 2026-08-17, #180 ruling: one pane holds one
+   Claude, so the pid gate that guarded against a nested `claude` inheriting the
+   env was deleted; the one clave-owned nested claude scrubs the var instead)
+   (`hook::resolve_row`, §6.5);
    the transcript is `payload.transcript_path`, canonicalized and confined under the
    claude config dir (`hook::resolve_transcript`). See UBIQUITOUS_LANGUAGE, "minted
    uuid vs live session id".) Everything in the store keys off the minted uuid.
@@ -423,9 +425,10 @@ last-writer-by-`seq` wins with no lost update. The uuid→pane join lives in the
 > content. `--resume <superseded-id>` does not re-chain lineage; it reopens that
 > file and appends. (Rotation triggers: §6.5.)
 >
-> Both paths also export `CLAVE_AGENT_UUID` and `CLAVE_AGENT_PID` before the exec —
-> the hook's identity channel (invariant #3, §6.5). The env is wired once, outside
-> the create/resume match, so only the flag varies.
+> Both paths also export `CLAVE_AGENT_UUID` before the exec — the hook's identity
+> channel (invariant #3, §6.5; `CLAVE_AGENT_PID` was deleted with the pid gate,
+> #180). The env is wired once, outside the create/resume match, so only the
+> flag varies.
 
 - On start, `clave spawn` registers its pane with `clave-bar`:
   `zellij pipe --name clave-register -- '{"uuid":…, "pane_id":<$ZELLIJ_PANE_ID>}'`
@@ -588,8 +591,8 @@ self-hydrates on load via `RunCommands` — §6.6).
   row (`hook::resolve_row`, revised 2026-07-31 — #97; the plain `session_id` →
   agent map it replaced is below). The order is: the payload's `session_id` **when
   it names a row** — the ordinary case, first, so nothing about an unrotated
-  session changes — else `CLAVE_AGENT_UUID` **gated on
-  `CLAVE_AGENT_PID == CLAUDE_PID`**, else decline.
+  session changes — else `CLAVE_AGENT_UUID` **alone** (the pid gate was deleted,
+  #180 ruling 2026-08-17), else decline.
   If the row is **untracked** it exits 0 immediately on a **lock-free** read
   (§5) — clave must never delay or perturb other sessions. It **never emits a
   permission decision**: a `PermissionRequest`/PreToolUse hook *can* approve/deny tool
