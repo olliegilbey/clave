@@ -2,6 +2,7 @@
 //! tab. The INTERACTIVE weave (fzf) lives in run_add; everything decidable
 //! is a pure function above it so it can be unit-tested.
 
+use std::collections::BTreeSet;
 use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -97,6 +98,35 @@ pub fn live_uuid_union(store: &Store, dump_layout: &str) -> Vec<String> {
     live
 }
 
+/// The rows `clave prune` (#149) must never retire: the ones the RUNNING
+/// zellij session is actually hosting, per its layout dump.
+///
+/// Deliberately NOT [`live_uuid_union`], and the difference is the whole
+/// point: binds are session-scoped and cleared only at the NEXT launch, so
+/// between a kill and a relaunch every row still carries its dead session's
+/// `tab_id` and a bind-based guard would make the entire fleet unprunable
+/// (#150 review). Only presence in the live dump protects.
+///
+/// The `live_session` leg is the same #99 translation [`live_uuid_union`]
+/// does, for the same reason and it is load-bearing here in a harsher way: a
+/// pane whose conversation rotated runs `claude --resume <live-id>`, so the
+/// dump names the CONVERSATION and not the row. Matched on the minted uuid
+/// alone, a rotated agent sitting open in a tab is invisible to this — and an
+/// invisible row is an unprotected one, so `clave prune` deletes the sidebar
+/// row of an agent the user is looking at.
+pub fn protected_from_dump(store: &Store, dump_layout: &str) -> BTreeSet<String> {
+    let live = live_uuids(dump_layout);
+    store
+        .agents
+        .values()
+        .filter(|r| {
+            live.iter()
+                .any(|u| *u == r.uuid || Some(u.as_str()) == r.live_session.as_deref())
+        })
+        .map(|r| r.uuid.clone())
+        .collect()
+}
+
 /// Labels get interpolated into KDL string literals and fzf menu lines —
 /// strip the things that break them: quotes, control chars, and backslash
 /// (KDL's escape introducer — a raw `\` is a parse error at whichever seam
@@ -121,53 +151,42 @@ pub fn sanitize_label(s: &str) -> String {
 /// finding, c8-cold-start 2026-07-18 — the eager tab loaded two plugin
 /// instances in the same second and broke executor election).
 ///
-/// `display_cols` is the width the new tab will actually be born into, and
-/// `collapsed` the mode it must be born in (LEDGER D35/D36, task 7b′). Both are
-/// `Option`/`bool` rather than read here because this runs INSIDE zellij: a
-/// `terminal_size()` call would report the *calling pane's* width, not the
-/// tab's, which is the fiction that made dwell-opened tabs rest one column off
-/// every template-born tab (measured live 2026-07-31). `None` keeps the
-/// reference-viewport fallback for callers with nothing better — `clave add`
-/// from a shell, and the tests.
+/// `collapsed` is the mode the tab must be born in (LEDGER D36, task 7b′): a
+/// tab born expanded into a collapsed fleet flashes wide and then snaps. The
+/// width itself is not an input any more — the bar pane is a fixed column
+/// count taken from `target_cols_for`, which zellij applies exactly whatever
+/// the window is, so nothing here needs to know the display.
 pub fn tab_node(
     binary: &str,
     wasm: &str,
     label: &str,
     uuid: &str,
     cwd: &str,
-    display_cols: Option<usize>,
     collapsed: bool,
 ) -> String {
     // split_direction="vertical" is REQUIRED for a LEFT bar: zellij stacks
     // sibling panes horizontally (rows) by default (Task 9 C1 finding; same
-    // wrapper as setup::layout_kdl and the S2 spike layout). The size is a
-    // PERCENT formatted from `clave_types::BAR_BIRTH_PERCENT`, never `size=30`:
-    // fixed panes refuse resizes — see setup::layout_kdl.
+    // wrapper as setup::layout_kdl and the S2 spike layout). The bar pane
+    // itself — fixed-cols, see its doc — comes from the one place that
+    // emits it (`setup::bar_pane_kdl`).
     // `command` bakes the environment's clave (§2 binary split): the
     // versioned copy's absolute path in a stable session, bare `clave` in
     // dev/sandbox — so the resurrected pane re-execs the SAME binary.
-    // `clave_binary` must match config.kdl's MessagePlugin keybind
-    // configuration exactly (#44): zellij resolves a pipe's destination by
-    // (location, configuration) — a miss launches a SECOND bar instead of
-    // reaching this one.
     format!(
         r#"    tab name="{label}" focus=true {{
         pane split_direction="vertical" {{
-            pane size="{pct}%" borderless=true {{
-                plugin location="file:{wasm}" {{
-                    {key} "{binary}"
-                }}
-            }}
-            pane cwd="{cwd}" command="{binary}" {{
+{pane}            pane cwd="{cwd}" command="{binary}" {{
                 args "spawn" "{uuid}" "--name" "{label}" "--cwd" "{cwd}"
             }}
         }}
     }}
 "#,
-        key = clave_types::CLAVE_BINARY_KEY,
-        pct = display_cols.map_or(clave_types::BAR_BIRTH_PERCENT, |cols| {
-            clave_types::birth_percent_for(cols, clave_types::target_cols_for(collapsed))
-        })
+        pane = crate::setup::bar_pane_kdl(
+            binary,
+            wasm,
+            clave_types::target_cols_for(collapsed),
+            "            "
+        ),
     )
 }
 
@@ -217,12 +236,17 @@ pub fn tab_layout(
     label: &str,
     uuid: &str,
     cwd: &str,
-    display_cols: Option<usize>,
     collapsed: bool,
 ) -> String {
+    // #181: the new tab carries the same two swap geometries every other tab
+    // has, so Alt+c works in a dwell-opened tab exactly as it does in a
+    // template-born one. This file has NO default_tab_template (that is the
+    // whole point of the one-shot path), so the explicit tab node below is used
+    // verbatim and the swap layouts sit alongside it.
     format!(
-        "layout {{\n{}}}\n",
-        tab_node(binary, wasm, label, uuid, cwd, display_cols, collapsed)
+        "layout {{\n{swaps}{tab}}}\n",
+        swaps = crate::setup::swap_layouts_kdl(binary, wasm, collapsed),
+        tab = tab_node(binary, wasm, label, uuid, cwd, collapsed)
     )
 }
 
@@ -781,6 +805,12 @@ pub fn run_add(worktree: bool) -> Result<()> {
     let paths = store_paths()?;
     let store = crate::store::read_store(&paths)?;
     let live = live_uuid_union(&store, &dump);
+    // The one layout input the new tab's bar is SIZED by. Derived here,
+    // lock-free, for the same reason `existing` is: it feeds the layout only.
+    // `collapsed` is the mode the fleet is in — a tab born expanded into a
+    // collapsed fleet flashes wide and then snaps, which is the jank D36
+    // removed everywhere except here.
+    let collapsed = store.collapsed;
 
     // 4) new vs resume.
     let Some(choice) = fzf_pick(&["new".into(), "resume".into()], "agent> ")? else {
@@ -980,7 +1010,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
     validate_cwd(&agent_cwd)?;
     let wasm = wasm_path()?.to_str().context("wasm path")?.to_string();
     let binary = crate::release::runtime_binary();
-    let layout = tab_layout(&binary, &wasm, &label, &uuid, &agent_cwd, None, false);
+    let layout = tab_layout(&binary, &wasm, &label, &uuid, &agent_cwd, collapsed);
     let tmp = std::env::temp_dir().join(format!("clave-{uuid}.kdl"));
     std::fs::write(&tmp, layout)?;
     let status = Command::new(&zellij) // discovered above (Fix 2)
@@ -1178,45 +1208,63 @@ mod tests {
         );
     }
 
-    /// Task 7b′, the bug this fixed: a dwell-opened tab and a template-born
-    /// tab must rest at the SAME width. They did not — measured live
-    /// 2026-07-31, the launch tab sat at 28% (terminal-derived) and every
-    /// dwell-opened tab at 27% (the reference-viewport fiction), one column
-    /// apart and visible on every tab switch.
+    /// `clave prune` retires idle rows, and the only thing standing between it
+    /// and a row the user is looking at is this predicate. Two ways it goes
+    /// wrong, and both delete a live agent's sidebar row:
     ///
-    /// Pinning the two generators against EACH OTHER rather than against a
-    /// literal is deliberate: the failure mode is DIVERGENCE, so a test that
-    /// restated the expected percent would go on passing if both moved and
-    /// still disagreed.
+    /// - a pane whose conversation ROTATED (`/clear`) is resurrected as
+    ///   `claude --resume <live-id>`, so the dump names the conversation and
+    ///   not the row — matched on the minted uuid alone it protects nothing;
+    /// - a row bound to a tab of a session that is no longer running must NOT
+    ///   be protected, or the fleet becomes unprunable forever (#150 review).
+    ///
+    /// This lived as a closure inside `main.rs` until the 2026-08-15 mutation
+    /// sweep, where `main` could be replaced wholesale with `Ok(())` and every
+    /// operator inside the closure flipped, all green — `main.rs` has no test
+    /// harness beyond its argument-parsing pins. Moved beside its
+    /// `live_uuid_union` sibling, which carries the same translation.
     #[test]
-    fn the_open_path_and_the_launch_path_agree_on_birth_width() {
-        let pct = |kdl: &str| {
-            kdl.split("size=\"")
-                .nth(1)
-                .and_then(|s| s.split('%').next())
-                .map(str::to_string)
-                .expect("a percent-sized bar pane")
-        };
-        for cols in [95, 115, 142, 200, 280] {
-            for collapsed in [false, true] {
-                let open = tab_layout("clave", "/w.wasm", "l", "u", "/c", Some(cols), collapsed);
-                let launch = crate::setup::launch_layout_kdl_for(
-                    "clave",
-                    "/w.wasm",
-                    None,
-                    Some(cols),
-                    collapsed,
-                );
-                assert_eq!(
-                    pct(&open),
-                    pct(&launch),
-                    "open vs launch disagree at {cols} cols, collapsed={collapsed}"
-                );
+    fn the_idle_pruner_protects_a_rotated_pane_and_only_the_running_session() {
+        let mut s = Store::default();
+        // Open in a tab, conversation rotated: the dump names "rotated".
+        let mut spun = rec("u-rotated");
+        spun.live_session = Some("rotated".into());
+        s.agents.insert("u-rotated".into(), spun);
+        // Open in a tab under its own minted id.
+        s.agents.insert("u-plain".into(), rec("u-plain"));
+        // Bound — but to a tab of a session that has since been killed, so it
+        // is absent from the dump. Prunable.
+        let mut ghost = rec("u-deadbind");
+        ghost.tab_id = Some(4);
+        s.agents.insert("u-deadbind".into(), ghost);
+        let dump = r#"
+            layout {
+                tab name="a" {
+                    pane command="claude" {
+                        args "--resume" "rotated"
+                    }
+                }
+                tab name="b" {
+                    pane command="claude" {
+                        args "--session-id" "u-plain"
+                    }
+                }
             }
-        }
-        // And the fallback still holds for a caller with no width to give.
-        let fiction = tab_layout("clave", "/w.wasm", "l", "u", "/c", None, false);
-        assert_eq!(pct(&fiction), clave_types::BAR_BIRTH_PERCENT.to_string());
+        "#;
+        let protected = protected_from_dump(&s, dump);
+        assert!(
+            protected.contains("u-rotated"),
+            "a rotated pane must be protected under its ROW's uuid, not the \
+             conversation id the dump names"
+        );
+        assert!(protected.contains("u-plain"));
+        assert!(
+            !protected.contains("u-deadbind"),
+            "a bind from a session that is not running protects nothing"
+        );
+        // An empty dump protects nothing at all — the caller reads a failed
+        // `dump-layout` as "no session", and that is the same shape.
+        assert!(protected_from_dump(&s, "layout { tab { pane } }").is_empty());
     }
 
     #[test]
@@ -1227,7 +1275,6 @@ mod tests {
             "x · main",
             "u-1",
             "/x",
-            None,
             false,
         );
         // The bar pane, the baked spawn (idempotent resurrection, §6.3/S4),
@@ -1241,15 +1288,7 @@ mod tests {
         // §2 binary split: the pane command is the passed binary. A stable
         // session bakes the versioned copy's absolute path instead of bare.
         assert!(kdl.contains("command=\"clave\""));
-        let abs = tab_layout(
-            "/data/clave/bin/clave-v0.1.0",
-            "/w",
-            "l",
-            "u",
-            "/x",
-            None,
-            false,
-        );
+        let abs = tab_layout("/data/clave/bin/clave-v0.1.0", "/w", "l", "u", "/x", false);
         assert!(abs.contains("command=\"/data/clave/bin/clave-v0.1.0\""));
         assert!(!abs.contains("command=\"clave\""));
     }
@@ -1292,6 +1331,7 @@ mod tests {
         row.last_visited = 42;
         row.commit_ord = 88;
         row.tab_id = Some(3); // the DEAD tab that hosted it last time
+        row.pane_id = Some(9); // and the dead pane inside it (#178)
         let fresh = rec("u-wt"); // what the weave derives from the PICKED dir
         let merged = merge_resume_record(Some(&row), fresh.clone());
         assert_eq!(merged.status, Status::Idle);
@@ -1302,7 +1342,16 @@ mod tests {
         assert_eq!(merged.commit_ord, 88);
         // The resumed agent lands in a brand-new tab: the old bind is stale
         // by definition — reset, the new tab's bar re-binds on join (§6.6 B).
+        // pane_id travels with it: a surviving stale pane_id is #178's class
+        // (a row keyed to a pane that no longer exists joins nothing, silently).
         assert_eq!(merged.tab_id, None);
+        // And so is the pane inside it. A pane id carried over from a dead
+        // tab rides every later snapshot as "this row announced a pane" while
+        // no bar can see it — the permanent false stall #178 is hunting, and a
+        // uuid-directed jump chases a pane that no longer exists. (cargo
+        // mutants 2026-08-15: deleting `pane_id: None` from the merge survived
+        // while its `tab_id` twin one line above was pinned.)
+        assert_eq!(merged.pane_id, None);
         assert_eq!(merged.cwd, row.cwd); // worktree cwd NOT relocated
         assert_eq!(merged.worktree, row.worktree);
         assert_eq!(merged.label, row.label); // earned label survives
@@ -1719,7 +1768,6 @@ garbage that should be ignored
             &picked.label,
             &picked.uuid,
             &picked.cwd,
-            None,
             false,
         );
         assert!(kdl.contains("cwd=\"/repo/.claude/worktrees/wt\""));

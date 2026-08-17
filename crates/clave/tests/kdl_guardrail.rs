@@ -30,7 +30,7 @@ use clave_types::Status;
 use std::collections::BTreeMap;
 use zellij_utils::input::actions::Action;
 use zellij_utils::input::config::Config;
-use zellij_utils::input::layout::{Layout, Run, TiledPaneLayout};
+use zellij_utils::input::layout::{Layout, Run, SplitSize, TiledPaneLayout};
 
 /// Assert a layout-shaped artifact parses through zellij's REAL layout parser.
 /// The full KDL text and the parser error ride in the panic message — a
@@ -86,7 +86,73 @@ fn layout_plugin_configs(kdl: &str, what: &str) -> Vec<BTreeMap<String, String>>
     if let Some((tiled, _floating)) = &layout.template {
         walk(tiled, &mut out);
     }
+    // #181: the two swap geometries carry their own copy of the bar pane, and a
+    // copy whose configuration differs by one character is a SECOND bar the
+    // first time Alt+c switches to it. They are part of the identity set.
+    for (by_constraint, _name) in &layout.swap_tiled_layouts {
+        for tiled in by_constraint.values() {
+            walk(tiled, &mut out);
+        }
+    }
     out
+}
+
+/// The bar pane's `Run` in each of a layout's swap geometries. A swap REUSES
+/// the running bar rather than spawning a second one — but only because
+/// `apply_tiled_panes_layout_to_existing_panes` matches an existing pane on
+/// `invoked_with() == run` (zellij-server 0.44.3 `tab/layout_applier.rs:1218`,
+/// called from `tab/mod.rs:1093-1141`). `Run` for a plugin is
+/// `(location, configuration)` and does NOT include `size`, which is exactly
+/// why the two geometries may differ in width and in nothing else: any drift in
+/// the plugin block demotes the match to logical position and can land the bar
+/// in the wrong slot.
+fn swap_bar_runs(kdl: &str, what: &str) -> Vec<Run> {
+    let layout = Layout::from_str(kdl, format!("guardrail:{what}"), None, None)
+        .unwrap_or_else(|e| panic!("{what} did not parse: {e:?}\n---\n{kdl}"));
+    layout
+        .swap_tiled_layouts
+        .iter()
+        .flat_map(|(by_constraint, _name)| by_constraint.values())
+        .filter_map(|tiled| {
+            tiled
+                .children
+                .iter()
+                .find_map(|c| c.run.as_ref().filter(|r| r.get_run_plugin().is_some()))
+                .cloned()
+        })
+        .collect()
+}
+
+/// The bar pane's declared size in each of a layout's swap geometries, keyed by
+/// the swap layout's name, IN DECLARATION ORDER. The order is load-bearing:
+/// `next_swap_layout` is relative, and zellij hides the tab's own birth layout
+/// ahead of the declared pair (so the live cycle is birth → declared[0] →
+/// declared[1] → birth). The first call therefore lands on the first DECLARED
+/// geometry, which must be the one the tab WAS born in — the birth position is
+/// the one zellij reports as `"BASE"` rather than by name, and matching its
+/// width makes the bar's first (naming) switch invisible (#197).
+fn swap_bar_sizes(kdl: &str, what: &str) -> Vec<(String, SplitSize)> {
+    let layout = Layout::from_str(kdl, format!("guardrail:{what}"), None, None)
+        .unwrap_or_else(|e| panic!("{what} did not parse: {e:?}\n---\n{kdl}"));
+    layout
+        .swap_tiled_layouts
+        .iter()
+        .map(|(by_constraint, name)| {
+            let tiled = by_constraint
+                .values()
+                .next()
+                .unwrap_or_else(|| panic!("{what}: swap layout {name:?} declares no geometry"));
+            let bar = tiled
+                .children
+                .iter()
+                .find(|c| c.run.as_ref().and_then(Run::get_run_plugin).is_some())
+                .unwrap_or_else(|| panic!("{what}: swap layout {name:?} has no bar pane"));
+            let size = bar.split_size.unwrap_or_else(|| {
+                panic!("{what}: swap layout {name:?} sizes its bar with nothing")
+            });
+            (name.clone().unwrap_or_default(), size)
+        })
+        .collect()
 }
 
 /// Every `MessagePlugin` keybind's configuration in a config artifact, as
@@ -378,7 +444,7 @@ fn layout_kdl_parses_through_real_zellij_parser() {
 fn launch_layout_kdl_parses_in_both_branches() {
     // Empty store → bar-only (template + one plain `clave` tab).
     assert_layout_ok(
-        &setup::launch_layout_kdl_for("clave", WASM, None, None, false),
+        &setup::launch_layout_kdl("clave", WASM, None, false),
         "launch.kdl (empty store, bar-only)",
     );
     // Non-empty store → the eager most-recent branch, which composes in
@@ -386,9 +452,86 @@ fn launch_layout_kdl_parses_in_both_branches() {
     // that the empty branch never touches.
     let r = eager_record();
     assert_layout_ok(
-        &setup::launch_layout_kdl_for(BIN_ABS, WASM, Some(&r), None, false),
+        &setup::launch_layout_kdl(BIN_ABS, WASM, Some(&r), false),
         "launch.kdl (eager most-recent tab)",
     );
+}
+
+/// #181, the whole width mechanism in one assertion. Every layout clave emits
+/// must declare BOTH geometries as swap layouts, sized as the two FIXED column
+/// constants (fixed panes refuse every resize, which is what makes the bar
+/// border un-draggable and the painted width exactly one of the two constants
+/// the bar compares against) — and with the geometry the tab WAS born in FIRST
+/// (#197), because `next_swap_layout` is relative and zellij hides the tab's
+/// own birth layout ahead of the declared pair: the first call lands on the
+/// first DECLARED geometry, and the bar has to spend that call to trade the
+/// unnameable birth position (`"BASE"`) for a name it can compare against the
+/// store. Same-width-first makes that call invisible; the opposite order made
+/// every cold start flash.
+#[test]
+fn every_layout_declares_both_swap_geometries_birth_width_first() {
+    let expected_order = |born_collapsed: bool| {
+        [
+            clave_types::swap_layout_name(born_collapsed),
+            clave_types::swap_layout_name(!born_collapsed),
+        ]
+    };
+    let check = |kdl: &str, what: &str, born_collapsed: bool| {
+        let sizes = swap_bar_sizes(kdl, what);
+        assert_eq!(
+            sizes.len(),
+            2,
+            "{what}: expected two swap geometries, got {sizes:?}"
+        );
+        let names: Vec<&str> = sizes.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            expected_order(born_collapsed),
+            "{what}: wrong swap order"
+        );
+        let fixed = |s: &SplitSize| match s {
+            SplitSize::Fixed(f) => *f,
+            // A `Percent` bar would let the border be dragged and its painted
+            // width drift off the two constants the bar reasons in — percent
+            // was only ever mandatory while the deleted resize seek needed a
+            // resizable pane (c8-cold-start 2026-07-18).
+            SplitSize::Percent(p) => panic!("{what}: bar sized {p}%, not fixed cols"),
+        };
+        let (expanded, collapsed) = if born_collapsed {
+            (fixed(&sizes[1].1), fixed(&sizes[0].1))
+        } else {
+            (fixed(&sizes[0].1), fixed(&sizes[1].1))
+        };
+        assert_eq!(expanded, clave_types::BAR_TARGET_COLS, "{what}");
+        assert_eq!(collapsed, clave_types::COLLAPSED_TARGET_COLS, "{what}");
+        // …and the two geometries must declare the SAME bar, so that switching
+        // between them moves the running one instead of spawning a second.
+        let runs = swap_bar_runs(kdl, what);
+        assert_eq!(
+            runs.len(),
+            2,
+            "{what}: expected two bar panes, got {runs:?}"
+        );
+        assert_eq!(
+            runs[0], runs[1],
+            "{what}: the two swap geometries declare DIFFERENT bars — a swap \
+             would no longer match the running pane"
+        );
+    };
+
+    check(&setup::layout_kdl(BIN_ABS, WASM), "layout.kdl", false);
+    for born_collapsed in [false, true] {
+        check(
+            &setup::launch_layout_kdl("clave", WASM, None, born_collapsed),
+            "launch.kdl",
+            born_collapsed,
+        );
+        check(
+            &add::tab_layout(BIN_ABS, WASM, "row", "u-1", "/tmp", born_collapsed),
+            "one-shot tab layout",
+            born_collapsed,
+        );
+    }
 }
 
 #[test]
@@ -400,7 +543,7 @@ fn add_tab_layout_parses_through_real_zellij_parser() {
     let label = add::sanitize_label("fix \"auth\"\nflow · main");
     let cwd = "/home/o/code/clave/.claude-worktrees/ab12cd34";
     add::validate_cwd(cwd).expect("test cwd must pass validate_cwd");
-    let kdl = add::tab_layout(BIN_ABS, WASM, &label, "u-1", cwd, None, false);
+    let kdl = add::tab_layout(BIN_ABS, WASM, &label, "u-1", cwd, false);
     assert_layout_ok(&kdl, "add/open one-shot tab layout");
 }
 
@@ -495,7 +638,6 @@ fn backslash_label_is_guarded_through_real_parser() {
         r"fix the \d regex",
         "u-1",
         "/home/o/x",
-        None,
         false,
     );
     assert!(
@@ -504,7 +646,7 @@ fn backslash_label_is_guarded_through_real_parser() {
     );
     // The guard: the same label THROUGH sanitize_label must parse clean.
     let label = add::sanitize_label(r"fix the \d regex");
-    let kdl = add::tab_layout(BIN_ABS, WASM, &label, "u-1", "/home/o/x", None, false);
+    let kdl = add::tab_layout(BIN_ABS, WASM, &label, "u-1", "/home/o/x", false);
     assert_layout_ok(&kdl, "add/open tab layout (backslash-bearing label)");
     // And a backslash-bearing cwd must be REFUSED, not baked.
     assert!(add::validate_cwd(r"/home/o/we\ird").is_err());
@@ -569,9 +711,9 @@ fn keybind_and_layout_plugin_configurations_match() {
     let agreed_keybind_config = kb[0].clone();
 
     let r = eager_record();
-    let launch_eager = setup::launch_layout_kdl_for(BIN_ABS, WASM, Some(&r), None, false);
-    let launch_empty = setup::launch_layout_kdl_for(BIN_ABS, WASM, None, None, false);
-    let one_shot = add::tab_layout(BIN_ABS, WASM, "lbl", "u-1", "/home/o/x", None, false);
+    let launch_eager = setup::launch_layout_kdl(BIN_ABS, WASM, Some(&r), false);
+    let launch_empty = setup::launch_layout_kdl(BIN_ABS, WASM, None, false);
+    let one_shot = add::tab_layout(BIN_ABS, WASM, "lbl", "u-1", "/home/o/x", false);
     let layout_kdl_text = setup::layout_kdl(BIN_ABS, WASM);
 
     for (what, text) in [

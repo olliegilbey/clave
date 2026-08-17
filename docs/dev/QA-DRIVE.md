@@ -58,6 +58,18 @@ per tab, woken rows show agent chips not terminal glyphs; after phase 5 —
 every tab a strip (or every tab wide), no width outliers. These stay human
 because every automated width/screen probe is a known liar.
 
+**Instance counting and the #178 gap** (settled 2026-08-15, #186): the
+sandbox fleet has the same topology as the real one — one bar per tab; every
+tab-creating path bakes the bar in (`setup.rs` tab template, `add.rs`
+one-shot layout). Never count instances via `list-panes` — the bar is
+non-selectable and invisible to it (the lone plugin it does list is zellij's
+own background `zellij:link`). The honest counter is fresh `clave-bar:
+loaded` lines in the zellij log since the mark. Phase 2 therefore has the
+right *structure* to catch #178's class but did not reproduce it because the
+sandbox lacks the field's load-latency aggravator (no MCP servers or LSPs
+slowing the newborn pane; the bar loads in under a second and the bind
+lands) — a timing gap, not a coverage lie.
+
 ## Scenario requirement
 
 Phases 2–4 need a fleet the current `c8-*` scenarios don't seed: **new

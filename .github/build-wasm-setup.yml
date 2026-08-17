@@ -3,6 +3,11 @@
 - name: Build clave-bar wasm
   run: |
     rustup target add wasm32-wasip1
+    # The tag is computed and EXPORTED BEFORE the wasm compiles: a value only
+    # written to $GITHUB_ENV reaches later steps, not this shell, so building
+    # first shipped an embedded bar reporting build=dev (#109's class, #167).
+    CLAVE_BUILD_TAG=$(git describe --tags --exact-match HEAD 2>/dev/null || git rev-parse --short HEAD)
+    export CLAVE_BUILD_TAG
     cargo build -p clave-bar --release --target wasm32-wasip1
     echo "CLAVE_BAR_WASM=$GITHUB_WORKSPACE/target/wasm32-wasip1/release/clave-bar.wasm" >> "$GITHUB_ENV"
-    echo "CLAVE_BUILD_TAG=$(git describe --tags --exact-match HEAD 2>/dev/null || git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+    echo "CLAVE_BUILD_TAG=$CLAVE_BUILD_TAG" >> "$GITHUB_ENV"

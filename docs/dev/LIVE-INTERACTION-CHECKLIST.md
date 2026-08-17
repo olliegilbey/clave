@@ -1,14 +1,23 @@
 # Live interaction checklist — the sidebar at 54 columns
 
-> **Partially run 2026-07-30, then invalidated by its own findings.** Item 1
-> passed decisively — six-plus toggles across three display widths, the pane
-> moved every time, so D21's bug is dead and D26's fix holds live. Item 5 was
-> started and surfaced the wrap bug that became D31. **Everything numeric below
-> was then superseded**: D33 took expanded 44 → 54, and D35 changed how the bar
-> is BORN, which changes every resting width. The numbers here are the new ones,
-> re-derived through the real `width_seek`; they have not themselves been seen
-> live yet. Item 1 is worth re-running only because the widths it observes are
-> different now, not because it failed.
+> **Partially run 2026-07-30, then invalidated twice.** Item 1 passed decisively
+> — six-plus toggles across three display widths, the pane moved every time.
+> Item 5 surfaced the wrap bug that became D31. **Everything numeric was then
+> superseded**: D33 took expanded 44 → 54, and D35 changed how the bar is born.
+>
+> **Then #181 deleted the width seek outright (LEDGER D39), and that is what
+> this run now validates.** Both widths are declared in the layout as swap
+> layouts and zellij switches between them; nothing measures a width, decides it
+> is wrong and resizes. So there is no seek to settle, no acceptance band, no
+> learned step and no drift re-arm — every item that used to ask you to wait for
+> convergence now asks you to confirm a single instant change. Two things about
+> that mechanism were called unverifiable here — **that a swap re-uses the
+> running bar rather than starting a second one, and which tab a plugin's switch
+> lands on**. The #197 review read `zellij-server` 0.44.3 and settled both from
+> source: the swap DOES re-use the running pane, and the switch lands on the
+> FOCUSED tab, not the asking one. Items 1, 2 and 6 still carry them, now as
+> confirmation rather than discovery — and **item 10 is what the source could
+> not settle**, five edges of the switch that only a live run can answer.
 
 The D28 gate-2 run: **Gate 1 validated the design by looking at it; this validates
 the behaviour by driving it.** Nothing below is covered by any automated tier.
@@ -42,7 +51,7 @@ observation below is void:
 
 - **Two bars in one tab.** The #44 symptom invalidates everything: executor
   election scrambles, nav half-dies, and Alt+c looks dead for a reason that has
-  nothing to do with the seek. Checked in setup step S5.
+  nothing to do with the geometry. Checked in setup step S5.
 - **The wrong binary answering.** The PATH shim is load-bearing, not tidiness
   (setup step S3). Without it the bar drives the sandbox with the *stable*
   release, and a version string will not give it away.
@@ -73,35 +82,34 @@ cheapest first:
    pinning to a number.
 
 Also record the **window width** once, in columns, because every expected number
-below is derived from it. Zellij resizes in ≈5%-of-display-area steps, so
-`step ≈ W × 5 / 100`. At W = 280 (the maintainer's usual), `step = 14`.
+below is derived from it. **There is no resize step any more.** Since D39 the two
+widths are whole percentages declared in the layout, so each one is
+`floor(percent × W / 100)` and it is the same number every time — there is
+nothing to converge to and no lattice to land on.
 
-**Since D35 the step no longer decides where the bar rests — birth does.** The
-bar is born at `birth_percent_for(W)` of the real terminal, which lands it within
-a column or two of 54, inside the acceptance band at any step. It therefore
-settles immediately and every later toggle returns to that same width. Predicted
-rests, derived through the real `width_seek` (not yet confirmed live — that is
-what this run is for):
+Both percentages are `round(target × 100 / W)`, chosen when the layout was
+written. Predicted widths (not yet confirmed live — that is what this run is
+for):
 
-| W | step | born | expanded rest (summary) | collapsed rest (summary) |
+| W | expanded % | expanded (summary) | collapsed % | collapsed (summary) |
 |---|---|---|---|---|
-| 120 | 6 | 54 | 54 (25) | 30 (7) |
-| 160 | 8 | 54 | 54 (25) | 30 (7) |
-| 200 | 10 | 54 | 54 (25) | 34 (11) |
-| 240 | 12 | 55 | 55 (26) | 31 (8) |
-| **280** | 14 | 53 | **53 (24)** | **25 (2)** |
-| 320 | 16 | 54 | 54 (25) | 38 (15) |
-| 400 | 20 | 56 | 56 (27) | 36 (13) |
+| 120 | 45 | 54 (22) | 25 | 30 (7) |
+| 160 | 34 | 54 (22) | 19 | 30 (7) |
+| 200 | 27 | 54 (22) | 15 | 30 (7) |
+| 240 | 23 | 55 (23) | 13 | 31 (8) |
+| **280** | 19 | **53 (21)** | 11 | **30 (7)** |
+| 320 | 17 | 54 (22) | 9 | 28 (5) |
+| 400 | 14 | 56 (24) | 8 | 32 (9) |
 
 54 is not exactly expressible as a whole percent of most displays — at 280 one
-percent is 2.8 columns — so 53 rather than 54 is correct, not a defect.
+percent is 2.8 columns — so 53 rather than 54 is correct, not a defect. Nothing
+closes that column any more, which is the point of D39.
 
-**The collapsed number at 280 is the one to look at with fresh eyes.** It was 33
-(summary 10) before this branch and is predicted at 25 (summary 2). The title
-chip and the 3-cell repo still fit (13 + 7 + 3 = 23), so the gutter reads; only
-the summary is nearly gone. If that is too thin, the lever is
-`COLLAPSED_TARGET_COLS` — around 36–39 selects the 39 lattice point instead
-(summary 16). **This is a design question for the maintainer, not a bug.**
+**The percentages are baked at LAYOUT-WRITE time, not at resize time.** Every
+number above assumes the window is the width it was when the session launched.
+Resize the window afterwards and both geometries shrink with it and stay shrunk —
+a known and accepted loss (D39, "what is given up"), not a finding. If the
+maintainer wants that changed it is a design decision, not a bug report.
 
 ## Setup
 
@@ -163,7 +171,7 @@ eagerly opens the single most-recent row and leaves the rest dormant, so expect
 | 6 | `KDL-GRD` / clave | dormant, worktree mark — this is the one whose cwd was deleted |
 | 7 | `README` / docs | dormant |
 
-Every dormant row shows the dormant mark **U+25CC** whatever its stored status:
+Every dormant row shows the dormant mark **U+25CB** whatever its stored status:
 dormancy outranks `Status` in the row-state order, so the seeded `NeedsYou`,
 `Failed` and `Working` values are not visible until those rows are opened.
 
@@ -198,102 +206,99 @@ it does not restore `~/.claude/settings.json`'s hook path.
 
 ## 1. Collapse and expand — the highest-value item
 
-This is where a real bug lived (D21) and was fixed (D26). The bug was that
-`Alt+c` emitted **zero** resizes on a wide display and the pane silently did not
-move.
+This is where a real bug lived (D21) and was fixed (D26), and it is now where the
+whole of D39 gets its only live proof. `Alt+c` is one `next_swap_layout()` call
+and nothing else: no arithmetic, no watching, and a second call only if zellij's
+own report says the tab is still in the wrong layout (D40).
 
-> **This item already PASSED, 2026-07-30**: six-plus toggles across three display
-> widths, clean every time, including a monitor change and a half-width window.
-> D21 is dead and D26's fix holds live. It is re-listed only because D33 and D35
-> changed every width it observes — the property is settled, the numbers are not.
+> **This item PASSED on the old machinery, 2026-07-30** — six-plus toggles across
+> three display widths, clean every time. That result does not carry: the
+> mechanism underneath it was replaced. Everything here is unconfirmed.
 
-**Do.** Press `Alt+c`. Wait until the bar stops moving. Press it again. Repeat for
-**at least six consecutive toggles**, one at a time, and count.
+**Do.** Press `Alt+c`, look, press it again. Repeat for **at least six
+consecutive toggles**, one at a time, and count. Then do it again in a
+**background** tab's view: switch to another tab, press `Alt+c`, and check what
+moved.
 
 **Correct.**
 
-- **The pane moves on every single toggle.** Six presses, six visible width
-  changes. This is the D26 property, and it is the whole point of the item.
-- It comes to rest somewhere and stays there — no pacing, no oscillation, no
-  crawl.
-- The rows render the collapsed profile the whole way: repo 3 characters with
-  **no ellipsis** (D18) and the summary simply shorter. Nothing over-runs the
-  pane at any point in the animation — and since D31 nothing *can*, so a row
-  wrapping onto a second line is now a hard finding rather than an expected
-  transient.
-- **The title chip now REFLOWS, 9 → 7, and that is correct** (D33). D17's
-  no-reflow-across-toggle property was retired deliberately when expanded took
-  the title to 9. Titles of 7 characters or fewer look identical either way, so
-  on the `ux-gate1` fleet you may not see it at all.
-- **Record the two rest widths.** At W = 280 the derivation predicts **53
-  expanded and 25 collapsed** — summary cells of **24 and 2**. Both differ from
-  the pre-D35 run (47 and 33), and for a different reason than before: the bar
-  is now born near target and the toggle lattice is anchored there.
-  - **53, not 54, is correct.** 54/280 is 19.29%, and a KDL size is a whole
-    percent, so 19% floors to 53.
-  - **Collapsed at 25 with a 2-cell summary is the number to judge with fresh
-    eyes.** It is above `Widths::COLLAPSED`'s 23-cell floor, so nothing clips —
-    the chip and repo are intact and only the summary is nearly gone. If it
-    reads as too thin, `COLLAPSED_TARGET_COLS` around 36–39 selects the 39
-    lattice point instead (summary 16). A design call, not a bug.
+- **The pane moves on every single toggle, instantly.** Six presses, six width
+  changes, each one arriving in a single step. Any animation, pacing or
+  crawl-toward-a-number is a finding — that shape belonged to the deleted seek.
+- **Exactly one bar in the tab afterwards.** A swap layout re-instantiating the
+  plugin instead of re-using the running one is the #1 unverifiable in D39, and
+  a second bar invalidates the whole run (see the global vacuity conditions).
+- **The switch lands on the tab you are looking at, and on no other.** After the
+  background-tab pass, visit the other tabs: their widths must be untouched.
+  This is D39's #2 unverifiable — zellij resolves a plugin's swap request against
+  the FOCUSED tab, and the bar is gated to only ask while its own tab is focused.
+- The rows render the collapsed profile: repo 3 characters with **no ellipsis**
+  (D18) and the summary simply shorter. A row wrapping onto a second line is a
+  hard finding (D31).
+- **The title chip REFLOWS, 9 → 7, and that is correct** (D33). Titles of 7
+  characters or fewer look identical either way, so on the `ux-gate1` fleet you
+  may not see it at all.
+- **Record the two widths.** At W = 280 the derivation predicts **53 expanded and
+  30 collapsed** — summary cells of **21 and 7**. 53, not 54, is correct: 54/280
+  is 19.29% and a KDL size is a whole percent.
 
 **Vacuous if.**
 
-- You toggled again before the previous seek settled. Every toggle re-arms the
-  machine, so a burst measures nothing — the rest width you record is an
-  intermediate. One press, wait, look, then press.
+- **You launched the session before this branch.** Both geometries are baked into
+  the layout file at session-create time. A session started with an older binary
+  has no swap layouts at all and `Alt+c` will do nothing. Relaunch.
+- You resized the window since launching. The percentages were computed for the
+  width at launch, so both widths will be off and neither number above applies.
 - You navigated during the test. A nav onto a dormant row arms a **peek**, which
-  renders and seeks the *expanded* profile for 0.9 s even while collapsed. Keep
-  hands off the arrow keys for this item.
-- Your window is around 400 columns wide. Above `MAX_LEARNABLE_STEP = 20`
-  (display ≈ 400) the seek enters a regime the proptest generator never reaches
-  and D26's census does not cover. Absence of a finding there proves nothing —
-  see *What this cannot test*.
-- You watched a bar in a **non-focused** tab. Every instance drives its own pane,
-  but only the tab you are looking at is being exercised.
+  switches to the expanded geometry for ~0.9 s even while collapsed. Keep hands
+  off the arrow keys for this item.
+- You watched a bar in a **non-focused** tab expecting it to move on its own. A
+  background bar deliberately issues nothing; it switches when its tab is next
+  looked at.
 
 ## 2. A new tab's first paint
 
-**This item tested the birth jank, and D35 is supposed to have removed it.** The
-percent is now derived from the real terminal at launch rather than a fictional
-200-column viewport, so the newborn should arrive at its rest width instead of
-healing toward it. The item is therefore inverted: it used to pin the jank, and
-now it pins the jank's ABSENCE.
+**This item pins the ABSENCE of birth jank, and it now has to do it three
+times** — because a tab can be created three ways and until this branch only one
+of them was sized correctly.
 
-**Do (a), wide window.** `Alt+t`. Watch the new tab's own bar on its first paints.
+**Do (a), a plain tab.** `Alt+t`. Watch the new tab's own bar on its first
+paints.
 
-**Correct (a).** At W = 280 the bar is born at **53** and **stays there — zero
-visible resizes**. Any shrink-then-settle is a finding now, not the expected
-behaviour: it means the percent reaching the layout is not the one derived from
-the terminal. Record the birth width and the number of steps.
+**Correct (a).** At W = 280 the bar is born at **53** and stays there — zero
+visible resizes. Any shrink-then-settle is a finding: it means the percent
+reaching the layout is not the one derived from the window.
 
-**Do (b), narrow window.** Resize the terminal to **≈ 115 columns**, then
-`Alt+t`.
+**Do (b), an agent tab from the picker.** `Alt+a`, pick a directory, choose
+`new`. Watch the new tab's bar.
 
-**Correct (b).** `birth_percent_for(115)` = 47%, which floors to **54** — still
-at target, still above `EXPANDED`'s `min_intact_cols()` floor (32 as of #105), so no over-run at all. The old
-expectation here was a deliberately clipped newborn healing upward; that regime
-is now only reachable on a display too narrow to hold 54, where the percent
-clamps to 100 and D31's clip keeps the rows inside the pane. **Ragged** clipping
-— agent rows and terminal rows disagreeing on width — remains a finding.
+**Correct (b).** The same **53**, indistinguishable from (a). **This is the
+regression this branch fixed and it is the highest-value observation on the
+page**: `clave add` used to hand the layout no width at all and got the
+200-column fiction, which on a 280-column display is **75** — visibly and
+permanently a third too wide. It now asks the session for the window. If you see
+75, the read failed and it silently fell back; say so.
+
+**Do (c), a dwell-opened tab.** Select a dormant row and press `Alt+Enter`.
+
+**Correct (c).** The same **53** again. All three paths, one width.
+
+**Do (d), collapsed.** `Alt+c`, then repeat any one of the above.
+
+**Correct (d).** The new tab is born **collapsed**, at 30 — not born expanded and
+then snapping. A visible wide-then-narrow flash on birth is a finding.
 
 **Vacuous if.**
 
-- **You launched the session before this branch.** The percent is baked into
-  `launch.kdl` at session-create time, so a session started with the old binary
-  carries the old percent whatever the code says. Relaunch, do not hot-reload.
-- **You resized the terminal after launching.** The template's percent was
-  correct for the width at launch; resizing changes the display area underneath
-  it, so a later `Alt+t` is born against the old ratio. That is expected, and it
-  is what item 6's drift re-arm exists to absorb.
-- **You opened the tab with `Alt+a` or by committing a dormant row.** Those go
-  through `clave open`, which builds a one-shot layout that bypasses the
-  template — and still uses the fiction (D35's named gap, task 7b′). Only
-  `Alt+t` exercises the fixed path.
-- You watched the *old* tab's bar. `Alt+t` focuses the new tab; the newborn is the
-  bar in it.
-- The bar was collapsed. Then the newborn seeks 30, not 54, and the arithmetic
-  above does not apply.
+- **You launched the session before this branch.** Percentages and swap layouts
+  are baked into `launch.kdl` at session-create time. Relaunch, do not
+  hot-reload.
+- **You resized the terminal after launching.** Every number above assumes the
+  launch width; a later tab is sized against the window as it is now, so (a) and
+  (b) can legitimately differ from each other. Do not run this item after a
+  resize.
+- You watched the *old* tab's bar. Each of these focuses the new tab; the newborn
+  is the bar in it.
 
 ## 3. The hook writing `title` and `summary` — the newest, least-tested path
 
@@ -494,38 +499,49 @@ anything else; worktree beats both.
 - You pressed `Alt+Enter` with the cursor on a live row (or no cursor at all).
   The commit acts only on a selected, non-stale, still-dormant row.
 
-## 6. Window resize — drift re-arm
+## 6. Window resize — the accepted loss, seen once
 
-Percent geometry moves under a window resize, so a resized window leaves the bar
-off-target and the seek must **re-arm** (#4) — under bounds that stop it fighting
-a mid-drag flicker or a thrashing layout.
+**This item no longer tests a mechanism, because there is no longer one.** The
+bar is a percentage of the window, so it shrinks with the window and nothing
+brings it back. The purpose of the item is now to let the maintainer **look at
+the loss and decide whether he can live with it** (LEDGER D39, "what is given
+up"). Nothing here is a bug report.
 
 **Do.** With the bar settled and expanded, resize the terminal window **by a
-lot** — halve its width, from ≈280 to ≈140 — then leave it alone and watch.
+lot** — halve its width, from ≈280 to ≈140 — then leave it alone and watch. Then
+widen it again.
 
-**Correct.** The bar's cols fall proportionally (≈47 → ≈23, which is under
-`EXPANDED`'s `min_intact_cols()` floor (32 as of #105), so expect a transient uniform CLIP — D31, not an over-run), the
-same off-target width is observed twice, the seek re-arms, and the bar grows back
-to ≈54 and stops. Then
-widen the window again and watch it come back down. No thrashing, no parking
-off-target, no fight with the layout.
+**Correct — meaning "as designed", not "good".**
+
+- The bar's columns fall proportionally, roughly **53 → 26**, and **stay there**.
+  Nothing grows it back. Widening restores it proportionally, and also stays.
+- 26 is under `EXPANDED`'s `min_intact_cols()` floor (32 since #105), so expect a
+  uniform CLIP — D31 — with every row cut at the same column. **Ragged** clipping,
+  rows disagreeing on width, is a real finding.
+- The bar must be visually still throughout: nothing on screen moves except
+  proportionally with the window. One **invisible** self-ask is expected and
+  by design: the snap-back arm cannot tell a window resize from a drag, so it
+  spends one switch at the new width — a re-apply that lands on the width the
+  pane already has. Visible movement, or the width walking anywhere the
+  window did not take it, is a real finding.
+- `Alt+c` still works at the new size and still moves the pane, and the collapsed
+  geometry is now proportionally narrower too — on a halved window it can be
+  narrower than the expanded bar was. That is arithmetic, not a defect.
+
+**Record the judgement, not just the numbers.** Is a bar that shrinks and stays
+shrunk acceptable? If not, the fix is a design decision with a real cost — it
+means reacting to window changes and issuing corrections, which is the pattern
+D39 deleted — and it belongs in the ledger as a new entry, not in an issue as a
+regression.
 
 **Vacuous if.**
 
-- You resized by a little. Gate B settles in place when the new width is within
-  one learned step of where the seek last acted — deliberately, because re-arming
-  there would chase its own in-flight resize forever. A small resize *should*
-  produce no movement; observing none proves nothing about drift.
-- The new width happens to fall inside the acceptance band. Same outcome, same
-  non-observation.
-- You were still dragging. Drift requires the **same** width twice; a mid-drag
-  flicker never confirms, by design. Let go, then watch.
-- **Watch for this one, it is a real open question:** re-arm needs a *second*
-  render at the stable new width, and renders are event-driven. If the bar sits
-  off-target after the resize, generate an event — `Alt+o`, or switch tabs — and
-  see whether it heals then. **If it heals only on the next event, the drift
-  confirmation is waiting for a render a quiet session may never deliver.** That
-  is a finding worth an issue, and nothing in the hermetic tiers can see it.
+- You resized by a little. The percentage is unchanged, so a small resize moves
+  the bar by a column or none at all and shows you nothing.
+- You were still dragging. Let go, then look.
+- You relaunched the session after resizing. A relaunch re-derives both
+  percentages from the new width, which is exactly the behaviour that still
+  works — and it hides the loss this item exists to show.
 
 ## 7. Terminal tabs
 
@@ -721,16 +737,140 @@ nothing in it can exec a real `claude --resume`.
 - **The store was wiped between the clear and the resurrection.** `live_session`
   lives in the store, so a wipe degrades this to the pre-fix path by design.
 
+## 10. The width switch's five edges (#197 review)
+
+These come out of the review of the swap-layout width switch, and they exist
+because reading zellij's source answered each of them only halfway. **The switch
+cycles through three positions, not the two we declare** — zellij hides the
+tab's own birth layout ahead of them — so a switch can land somewhere neither
+geometry asked for. **A tab zellij considers damaged** (a pane resized or
+closed, a border dragged with the mouse) **spends its next switch re-applying
+rather than advancing**, which is a way to get no movement at all.
+
+Since the 2026-08-17 rebuild the bar answers both from its PAINTED width: the
+two geometries are declared as fixed column counts (54 expanded, 30 collapsed),
+so the bar compares the width zellij paints it at against the constant its
+mode wants and asks for one switch on a mismatch — then goes DEAF until a
+0.15s cooldown judges the latest paint once (a swap's queued repaints echo the
+pre-swap width; judging them was the filmed infinite toggle loop), spending at
+most three asks per mode-intent (the cycle is three positions long) before it
+rests until the intent changes.
+The layout name zellij reports is read by NOTHING: zellij only computes it for
+tabs with two or more selectable panes, which no clave tab has (FOOTGUNS). And
+a border drag is REFUSED by zellij itself — fixed panes cannot be resized from
+either side — so snap-back is enforced at the source rather than corrected
+after. Everything below is a question about what that looks like from the
+chair. None of them has an automated test that could reach it.
+
+### 10a — Cold start into collapse
+
+**Do.** Collapse the sidebar (`Alt+c`), quit the session, relaunch it (S1–S3).
+Watch the bar on its very first paints, before touching anything. Then press
+`Alt+c` once.
+
+**Correct.** The bar is **born collapsed at 30 and never widens** — no frame at
+53, no snap back, and since the 2026-08-17 rebuild no switch at all: the launch
+layout carries the collapsed width as a fixed column count, the machine compares
+the painted 30 against the same constant, and they agree from the first paint.
+A frame at 53 means the launch layout was composed against the wrong store
+flag. And the first `Alt+c` after the launch must move the pane, in one press.
+
+**Vacuous if.** The store was not collapsed at kill time — check
+`clave dev status | jq .store.collapsed` is `true` before relaunching. Or you
+launched by hand instead of using the printed launch command: the fallback
+layout has no store to read and always births expanded, which is a known and
+accepted wrong, not this finding. Or you blinked — the flash is about one frame,
+so repeat it three times before recording a pass.
+
+### 10b — Six slow toggles, then six fast ones
+
+**Do.** On a tab you have not touched since it was born — no pane resized, none
+closed, no border dragged — press `Alt+c` six times, several seconds apart, and
+**record the column width after each press**. Then press it six times as fast as
+you can and record where it comes to rest.
+
+**Correct.** Six presses, six clean moves, alternating 53 / 30 / 53 / 30 / 53 /
+30. One press in three walks the cycle through the tab's hidden birth position,
+so a brief second step is possible; landing wrong and staying wrong is not.
+
+The fast run is the #197 regression: a rapid burst used to be able to desync the
+bar from its tab **permanently** — the pane stuck at one width while the store
+said the other, unrecoverable by further presses, by switching tabs, or by
+waiting. Whatever the burst leaves on screen, the width and the drawn profile
+must agree once it settles, and one further press must move the pane.
+
+**Vacuous if.** You navigated during the run: a peek expands the bar for ~0.9 s
+and hides the answer. Or the tab was already damaged when you started, which
+moves the awkward press somewhere else — use a tab you have just opened.
+
+### 10c — A dragged pane border is refused outright
+
+**Do.** Try to drag the border between the sidebar and the workspace with the
+mouse, in both directions. Then press `Alt+c` once and confirm the toggle
+still works.
+
+**Correct.** The border **does not move at all** — the bar pane is fixed-width
+(2026-08-17 rebuild), and zellij refuses resizes touching a fixed pane from
+either side. This is the 2026-08-15 snap-back ruling enforced at the source:
+there is no drag to undo, so there is no correction arm to watch. Zellij may
+flash a "FIXED!" notice on the pane — record whether it does and how it looks,
+that is the one unknown here. The `Alt+c` after the attempt must move the pane
+normally in one press (the drag attempt must not have damaged the tab into
+eating a switch — if it did, the press after that one must move it, and that
+is a finding to record).
+
+Record which you got: border immobile (correct), border moved at all
+(finding — the pane was not emitted fixed; check the generated layout), or a
+moved border that snapped back (finding — same, plus the corrector fired).
+
+### 10d — A floating pane over the bar
+
+**Do.** Open the directory picker (`Alt+a`), which is a floating pane. With it
+still open, press `Alt+c`. Then close it with Esc and look at the bar.
+
+**Correct.** The question is **not** whether the pane moved while the picker was
+up — it is whether the bar's drawing matches its width once the picker is gone.
+A collapsed profile drawn into a 53-column pane, or an expanded profile crammed
+into 30, is the finding: the mode changed and the geometry did not follow.
+Record both numbers — the width, and which profile is drawn. Known, and
+deliberately not fixed on this branch: the switch may simply do nothing at all
+while a floating pane is up. Say which happened.
+
+**Vacuous if.** You picked a directory or created an agent — that focuses a new
+tab, so the bar you are reading is a different one. Cancel with Esc. Or you
+toggled after closing the picker rather than during, which is item 1's test.
+
+### 10e — A mouse tab-switch, then a toggle
+
+**Do.** Click another tab on **zellij's own tab strip** at the top of the window
+— not a row in the clave sidebar — then press `Alt+c`. Afterwards check at least
+two other tabs' widths.
+
+**Correct.** The sidebar that moves is the one in the tab you just clicked into,
+and **no other tab's width changes at all**. Zellij resolves a plugin's switch
+request against whichever tab is focused rather than the one that asked, and the
+bar protects against that by only asking while it believes its own tab is
+focused — so a focus change arriving by a route the bar does not hear about is
+exactly how the wrong tab gets resized. If a background tab's sidebar moved,
+record which one and how you got there.
+
+**Vacuous if.** You switched tabs with `Alt+o` or by clicking a sidebar row.
+Both are routes the bar already hears about; the zellij tab strip is the whole
+point of this item. Or you toggled before the new tab had finished painting.
+
 ## What this checklist CANNOT test
 
 So that absence of a finding is not read as absence of a problem:
 
-- **Steps above `MAX_LEARNABLE_STEP`.** Real resize steps over 20 livelock the
-  seek in a re-arm/resize storm — 111,788 configurations on this branch, 50,576 on
-  `main`. It needs a display area around **400 columns**; a ~280-column window
-  cannot produce one. The proptest generator stops at 20, so nothing automated
-  will ever catch it either. Out of reach today, **not out of reach forever** —
-  a wider monitor or a projector re-opens it.
+- **Whether a swap layout re-uses the running bar.** Settled from
+  `zellij-server` 0.44.3 source in the #197 review — the applier matches existing
+  panes to the new layout's slots before creating anything — but that is a read of
+  one version, and item 1 still observes it on one machine. One clean observation
+  plus one source read is the best evidence available, and D39 says so.
+- **A window resized while a tab is in the background.** Both geometries are
+  percentages, so nothing is watching and nothing needs to be, but the interaction
+  between a background tab's stale geometry and the next switch has been reasoned
+  about rather than seen.
 - **The two surviving `Rgb::hex` mutants.** `hex()`'s only caller is
   `bar-preview.rs`, an excluded example, so it is unreachable from the plugin. No
   live observation can exercise it; the honest options remain a test or a
@@ -754,10 +894,10 @@ So that absence of a finding is not read as absence of a problem:
 
 ## What to do with a finding
 
-- **A prediction turning out wrong is a finding, not a disappointment.** D26's
-  four reservations and the Gate 1 list were written down *in order to be
-  falsified* here. "Collapsed rested at 33, not 30" and "the newborn healed in one
-  step, not three" are both results. Record the number either way.
+- **A prediction turning out wrong is a finding, not a disappointment.** Every
+  number on this page was written down *in order to be falsified* here.
+  "Collapsed came out at 33, not 30" and "the Alt+a tab was born at 75" are both
+  results. Record the number either way.
 - **A ruling or a design answer → `docs/ux/LEDGER.md`**, as the next numbered
   decision, dated, with its reasoning. A decision that is not yet in the code
   carries the `NOT YET IMPLEMENTED` banner.
@@ -778,18 +918,29 @@ Fill it in as you go; the numbers are the deliverable, not the ticks.
 
 | | observed |
 |---|---|
-| Window width (columns), and derived step | |
-| Expanded rest width / summary cells | |
-| Collapsed rest width / summary cells | |
+| Window width (columns) at launch | |
+| Expanded width / summary cells | |
+| Collapsed width / summary cells | |
 | Toggles driven, toggles that moved the pane | |
-| Newborn birth width, steps to rest (wide window) | |
-| Newborn birth width, over-run seen? (narrow window) | |
+| One bar per tab after six toggles? | |
+| A toggle in one tab left every other tab's width alone? | |
+| Birth width: `Alt+t` / `Alt+a` / `Alt+Enter` — all three equal? | |
+| Birth width while collapsed: born collapsed, no flash? | |
+| Resize: width after halving, and did anything move it back? | |
+| Resize: is the shrink-and-stay acceptable? (maintainer's call) | |
+| **10a** Collapsed cold start: born at 30, no flash to 53? | |
+| **10a** First `Alt+c` after that launch moved the pane? | |
+| **10b** Six slow widths in order? | |
+| **10b** Six FAST presses: settled width, profile agrees, next press moves? | |
+| **10c** Border drag refused (immobile)? FIXED! flash — how does it look? | |
+| **10c** `Alt+c` after the drag attempt moved in one press? | |
+| **10d** With the picker open: did it move? And which profile at which width after Esc? | |
+| **10e** After a zellij tab-strip click: which tab's sidebar moved? | |
 | Chip filled after `/rename` + one prompt? | |
 | Summary tier observed at each step | |
 | Provenance: blank / branch / worktree all correct? | |
 | New row with a non-`main` discoverable default → blank? | |
 | Selection never opened; `Alt+Enter` did; the ✗ row refused the commit | |
-| Resize healed unaided / healed on next event / parked | |
 | Terminal row: console mark, name, sort position | |
 | One bar per tab, one build tag | |
 | **#97** After `/clear`, the row still rises and its status updates | |

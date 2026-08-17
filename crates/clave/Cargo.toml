@@ -22,8 +22,6 @@ dirs.workspace = true
 fs4.workspace = true
 # Binary discovery beyond PATH (spec §Discovery).
 which.workspace = true
-# The launching terminal's real width (LEDGER D35).
-terminal_size.workspace = true
 # Local types (Agent, AgentSnapshot, Status).
 clave-types = { path = "../clave-types" }
 

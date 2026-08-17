@@ -131,7 +131,7 @@ lives in `render.rs`, and `Status::glyph()` keeps its current contract.
 | `Done` | `\u{25cf}` | `#98BB6C` springGreen |
 | `Idle` | `\u{25cf}` | `#54546D` sumiInk4 |
 | `Failed` | `\u{2716}` | `#E82424` samuraiRed |
-| `Dormant` | `\u{25cc}` | `#DCD7BA` fujiWhite |
+| `Dormant` | `\u{25cb}` | `#DCD7BA` fujiWhite |
 | `Opening` | `\u{21bb}` | `#E6C384` carpYellow |
 | `Stale` | `\u{2717}` | `#E82424` samuraiRed |
 
@@ -507,6 +507,186 @@ resting-width costs become dead paths:
   on `main`, 111,788 here. The proptest generator stops at 20, so nothing would
   ever catch it. Needs a display area around 400 columns; Ollie runs ~280, so it
   is out of reach today. **Not out of reach forever.**
+
+### D41 — Snap-back is a contract; the drag arm restores it with one remembered width (2026-08-15)
+
+**Ruled by Ollie, live QA of the #197 build:** dragging the sidebar border and
+releasing must snap the sidebar back to its set width, as the stable (v0.1.2)
+seek did as a byproduct. No new snap-back design — "revert to the old design if
+possible. KISS." The old *mechanism* is not the possible part (the seek is what
+ate 90% of his screen — #181, D39); the old *behaviour* is.
+
+**Why D40 alone cannot see a drag.** D40's rule compares layout NAMES, and a
+drag changes the width without changing the name — zellij still reports the
+same `active_swap_layout_name`. Reported truth is silent exactly where the drag
+lives; that silence was the regression.
+
+**What ships (amended same-day after the first cut thrashed live).** One
+remembered width per geometry, learned not predicted — but never from a width
+seen once. The first cut recorded the first agreed-name frame's width, and
+that frame carries the OLD width: a toggle's pane resize lands renders after
+its `TabUpdate`, so the arm poisoned its own memory, read the real width as a
+drag, spent a switch on an UNDAMAGED tab (which ADVANCES), and thrashed —
+Ollie, live: "the text on the bar couldn't decide where it should be."
+The amendment is v0.1.2's drift-confirmation gate, ported (the one piece of
+the deleted seek worth keeping): every decision waits for a STILL width, the
+same reading on two consecutive renders. Adopt a still width as the
+geometry's truth (refusing one that equals the OTHER geometry's width — the
+transitional frames show exactly that); call a still deviation a drag and
+spend one switch; and a spent-on width still standing two renders later is
+CONCEDED as the new truth (the window-resize face — zellij was asked and
+declined). The drag that moved the width also marked the tab damaged, and a
+damaged tab's switch RE-APPLIES its current position — verified live
+2026-08-16 on the sandbox: a bar mangled to 5% landed back on the declared
+percent in one switch, both directions. The machine never computes a target
+column. Same focus gate as D40.
+
+**Predicting the width was rejected** — the expected column count is derivable
+from the window width and the layout percentages, but only by re-implementing
+zellij's rounding; a prediction off by one asks forever. Learning the width
+from zellij makes rounding unfalsifiable by construction.
+
+**What is given up, all bounded.** (1) A window resize costs one dead re-apply
+(invisible — it lands on the width the pane already has) before the new width
+is conceded. (2) The snap fires on release, not during the drag, and needs one
+render after the width stops moving — in an idle session that render can wait
+for the next event, so a drag with the whole session dead-quiet may snap only
+on the next keypress or hook write. v0.1.2 had the same property and nobody
+ever filed it. (3) Under extreme delivery delay (two-plus renders between a
+switch's TabUpdate and its pane resize, all at a still width), one spurious
+flap can still happen; it self-corrects through the name arm and the
+concession rule, where the first cut looped forever.
+
+**Live runs owed: the drag round-trip through a real mouse** (checklist 10c).
+The re-apply-not-advance behaviour of a damaged tab is no longer owed — it was
+verified live on the sandbox 2026-08-16 (5% → declared percent, one switch,
+both directions), closing that debt for D40 as well.
+
+### D40 — The bar reads zellij's report of which layout its tab is in, and remembers nothing (2026-08-15)
+
+**This finishes D39 and retires the last of the watch-your-own-repaints pattern
+in this codebase.** D39 deleted the resize loop but kept its shape in miniature:
+the bar remembered which geometry it believed its tab was in, seeded that at
+hydration, confirmed each switch by watching the DIRECTION its own pane
+repainted in, and allowed two corrections per change. Nothing ever re-derived
+the belief.
+
+**What that cost, measured.** A rapid double-press could put the belief
+permanently at odds with the tab. The sandbox drive of 2026-08-15 found a tab
+resting at the collapsed width while the store said expanded, and it stayed
+there through twelve presses, several focus changes and a long idle — there was
+no path in the machine that could ever notice.
+
+**What ships instead.** Zellij puts `active_swap_layout_name` on every tab of
+every `TabUpdate`, and both geometries are declared with names, so the question
+"which layout is this tab in" has an authoritative answer already arriving. The
+rule is now: while the reported layout disagrees with the store's mode and this
+bar's own tab is focused, ask for one switch. The focus gate is untouched. The
+seeding, the direction check and the correction budget are gone, and the stuck
+class is unreachable rather than rarer: every frame re-derives the answer.
+
+**Two things this needed.** The layout generator now declares the BIRTH geometry
+first rather than the opposite one. Zellij hides the birth layout at cycle
+position 0 and reports it as `"BASE"` — a name that says nothing about width — so
+the bar must spend one switch to leave it for a position it can reason about;
+declaring the same width first makes that switch invisible instead of a
+cold-start flash. And a refused switch is not re-asked until the report or the
+mode moves: zellij answers every switch with a `TabUpdate` whether or not the
+switch achieved anything, so an unbounded rule would ask forever against a tab
+the user had manually resized.
+
+**What is given up.** That bound is a stall where the old budget was a burst: a
+tab that refuses its switch waits for the next press or the next focus change
+rather than being retried on the spot. Bounded and self-clearing, against a
+failure that was permanent.
+
+**Still owed: one live run**, same as D39's. `zellij-server` is not vendored, so
+the exact string reported at the birth position (`"BASE"` is what zellij's own
+serialization test uses) and the claim that a `TabUpdate` follows every switch
+are read from source anchors rather than watched. Both fail SAFE — an
+unrecognised name is treated as the birth position, which costs one switch.
+
+### D39 — The width seek is DELETED. Both widths are declared, and zellij switches between them (2026-08-14)
+
+**This retires D20, D21, D26, D34, D35 and most of D37, and it takes D22 off the
+shelf.** Everything those entries argue about — the learnable step, the
+acceptance band, the lattice, the birth anchor, the polarity — was in service of
+hitting an exact column count through an API that cannot express one. There is
+no longer a column count to hit.
+
+Ollie's call, and the brief verbatim: *"I really don't know why we fight with the
+sidebar sizing so much. Why it can't just be a set percentage width of the
+window, and toggles between two set percentages — with the text of the tabs
+changing when it does. The whole healing thing and trying to lock on the exact
+column width seems overkill."* And, on the mechanism: *"layout kdl files, don't
+they have percentage widths for panes? Can't we use those? Which yeah, sounds
+like the two layouts and swapping between them — wouldn't that be cleaner and
+trivial?"*
+
+**What ships.** Every generated layout declares both geometries as
+`swap_tiled_layout` nodes, `clave_expanded` and `clave_collapsed`, each a
+percent-sized bar pane. Alt+c, the store's authoritative heal and both edges of
+peek-on-nav all do one thing: `next_swap_layout()`. Zellij resolves the percent
+against the real window and applies it in a single relayout.
+
+**Why D22's recorded objection dissolves.** D22 shelved this because
+SUBSYSTEM-VALIDATION round 19 recorded swap layouts as dead on arrival — the
+tab's damage flag blocks the IMPLICIT relayout, and `resize_pane_with_id` is
+itself a damage-setter. This design issues no resizes at all, so nothing damages
+the layout, and the EXPLICIT switch is not damage-gated in the first place.
+
+**Three things that are load-bearing and are not obvious.**
+
+1. **Named `tab_template`s, not bare `tab` nodes.** With a `default_tab_template`
+   present, zellij expands every bare `tab` inside a `swap_tiled_layout` THROUGH
+   it (`kdl_layout_parser.rs:1906-1920`), stapling the template's bar pane on top
+   of the swap layout's own — a double bar at neither geometry. A node named
+   after a `tab_template` takes the other branch (`:1926-1938`) and is used
+   verbatim. Proved through zellij's real parser, not assumed.
+2. **Declaration order.** `next_swap_layout` is relative and the plugin API has
+   no absolute form. The cycle it walks is THREE positions long, not the two we
+   declare: zellij hides the tab's own birth layout ahead of them
+   (`swap_layouts.rs:38-56`, applied from `tab/mod.rs:889,967`), so a tab walks
+   birth → declared[0] → declared[1] → birth. **Superseded by D40:** declared[0]
+   is now the geometry the tab WAS born in, so the switch that trades the
+   unnameable birth position for a named one moves nothing the user can see.
+3. **The switch is checked on DIRECTION, never on a column count.** The
+   geometries are percentages, so both shrink with the window: an expanded bar on
+   a halved window is genuinely narrower than 30, and a check against the two
+   design widths would declare it collapsed and switch it. **Superseded by
+   D40:** the switch is not checked at all any more — zellij reports which
+   layout the tab is in, so no width is read and no direction inferred.
+
+**What is given up, both accepted in conversation.** Peek-on-nav is a layout
+switch rather than a nudge. And the bar is a whole percent of the window, so on a
+display where the target is not expressible as one (280 columns: 54 is 19.29%) it
+lands a column either side and stays there. Nothing corrects that any more, which
+is the point — `render_rows`' clip (D31) already lays the rows out against the
+columns zellij actually gave it.
+
+**A third thing was given up that the conversation did not name, and it is the
+one virtue Ollie asked to keep.** He asked that the bar never become uselessly
+thin on a narrow window. Half of that survives: a session LAUNCHED in a narrow
+window still gets a readable bar, because the birth percent is clamped at 100 and
+the bar simply takes what it needs of a small screen. Resizing the window
+afterwards does not. The two geometries are percentages of the window, so both
+shrink with it and nothing brings them back — halve the window and the expanded
+bar is narrower than the collapsed one was, and stays there until the mode is
+toggled or the session relaunched. Restoring it would mean reacting to window
+changes and issuing corrections, which is exactly the watch-and-correct pattern
+this entry deletes, so it is recorded as a loss and not fixed. **Ollie may want
+more than a note here; that call is his.** The floor that remains is
+`render_rows`' clip: below `min_intact_cols()` the rows drop cells rather than
+render garbage, so a shrunken bar is degraded and never broken.
+
+**Still owed: one live run.** The mechanism is traced end to end through the
+vendored parser and the plugin shim, and `next_swap_layout()` exists at
+`zellij-tile-0.44.3/src/shim.rs:1329`. But `zellij-server` is not vendored, so
+two things are unverifiable from source and must be watched on the first real
+session: whether the swap relayout re-uses the running plugin pane rather than
+starting a second one, and whether a plugin's switch applies to its own tab.
+D22's warning stands until then — this subsystem has a twenty-round history of
+paths that read correctly and behaved otherwise.
 
 ### D38 — The battery cell's width belongs to the profile, not the gutter (2026-08-11)
 

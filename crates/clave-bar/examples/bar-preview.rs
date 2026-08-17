@@ -483,8 +483,9 @@ fn collapsed() {
     let separation = DESIGN_COLS - cols;
     println!("\n  {dim}separation from {DESIGN_COLS}: {separation}{RESET}");
     println!(
-        "  {dim}LEDGER D15 requires separation > 10 (the widest `width_seek` \
-         acceptance half-band) \u{2014} {separation} clears it. D21: below the \
-         full band, so `width_seek` refuses the overlap outright.{RESET}"
+        "  {dim}LEDGER D39: the separation is now a DESIGN number, not a \
+         tolerance. Both widths are declared in the layout and zellij switches \
+         between them, so nothing has to tell the two apart by measuring \
+         \u{2014} what {separation} columns buys is a visibly different bar.{RESET}"
     );
 }
