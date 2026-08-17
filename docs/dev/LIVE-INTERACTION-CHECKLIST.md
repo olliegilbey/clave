@@ -620,11 +620,12 @@ genuinely new agent anyway.
   freezes at its pre-`/clear` value means `resolve_transcript` is falling back
   to the derived path — a different bug, and one the fix explicitly guards
   against by holding the old value rather than reading the abandoned file.
-- **After step 5 the row is NOT stamped by the nested run**, and
-  `~/.local/state/clave-dev/state/clave.log` gains a `declined … is not the
-  agent's` line naming both pids. A row whose `last_interacted` jumps when the
-  nested Claude finishes means `PidGate` failed open, which is the
-  ambient-authority bug the review caught before it shipped.
+- **(Historical — the PidGate is deleted, #180 ruling 2026-08-17.)** A nested
+  `claude` run by hand in the agent's shell now DOES stamp the row; that is
+  accepted, since one pane holds one Claude and agents do not nest them.
+  `clave dev`'s own seeding claude is the exception clave owns, and it scrubs
+  `CLAVE_AGENT_UUID` (`dev.rs::seed_transcript`) — a row stamped during
+  scenario seeding means that scrub regressed.
 
 ### Vacuous if
 
@@ -729,8 +730,8 @@ nothing in it can exec a real `claude --resume`.
 - **`live_session` was never written** (step 3 said `null`). The row's live
   pointer is what the fix reads; without it resurrection correctly falls back to
   the minted uuid, so you would reproduce the pre-fix answer while testing #97,
-  not #99. It is written only by a hook that fired AFTER the clear and passed
-  the pid gate.
+  not #99. It is written only by a hook that fired AFTER the clear from a pane
+  carrying the row's `CLAVE_AGENT_UUID` (env-only binding, #180).
 - **You asked the resurrected agent to *check* the number** (grep, a file, its
   own transcript). It will find it and answer correctly from the wrong
   conversation. Ask it what it REMEMBERS, with no tools.
@@ -945,5 +946,5 @@ Fill it in as you go; the numbers are the deliverable, not the ticks.
 | One bar per tab, one build tag | |
 | **#97** After `/clear`, the row still rises and its status updates | |
 | **#97** `title`/`summary` keep rolling from the NEW transcript | |
-| **#97** A nested `claude -p` does NOT stamp the row; decline logged | |
+| **#97/#180** A nested `claude -p` in the pane's shell DOES stamp the row (env uuid binds; accepted by the #180 ruling) | |
 | **#99** Which conversation a resurrected rotated tab comes back on | |

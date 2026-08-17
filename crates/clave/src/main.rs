@@ -383,22 +383,21 @@ fn main() -> Result<()> {
                 // but keeps the environment, and hooks are children of that
                 // process.
                 //
-                // `CLAVE_AGENT_PID` is what makes the uuid SAFE to act on.
-                // Env is inherited by every descendant, so a nested `claude`
-                // carries the uuid too and its unknown session id would take
-                // the same fallback — writing another agent's status, order
-                // and prose into THIS row. `process::id()` here is the agent
-                // Claude's own pid, because `exec` preserves it, and the hook
-                // compares it against Claude's `CLAUDE_PID`. Both verified
-                // rather than assumed (2026-07-31): a nested `claude`
-                // reported its own pid, not its parent's.
+                // The uuid is trusted on its own: one pane holds exactly one
+                // Claude — this exec IS it, nothing nests another (maintainer
+                // ruling on #180, 2026-08-17) — so whatever fires a hook in
+                // this pane speaks for this row. A pid gate
+                // (`CLAVE_AGENT_PID` vs Claude's `CLAUDE_PID`) used to guard
+                // this and was deleted: it defended against a nested `claude`
+                // that cannot occur, and failed CLOSED on any process-tree
+                // shape it did not predict — a permanent silent freeze, the
+                // very symptom it existed to fix.
                 //
-                // The identity env is wired ONCE rather than per arm, so a
-                // future third variable cannot land on one of them only. Only
-                // the FLAG varies by mode, and that match stays exhaustive
-                // over `SpawnMode` — no catch-all, so a variant added later
-                // fails to compile here rather than silently picking a
-                // behaviour. This is the exec that starts every agent.
+                // Only the FLAG varies by mode, and that match stays
+                // exhaustive over `SpawnMode` — no catch-all, so a variant
+                // added later fails to compile here rather than silently
+                // picking a behaviour. This is the exec that starts every
+                // agent.
                 let flag = match mode {
                     spawn::SpawnMode::Create => "--session-id",
                     spawn::SpawnMode::Resume => "--resume",
@@ -411,7 +410,6 @@ fn main() -> Result<()> {
                 // the case that used to lose work.
                 std::process::Command::new(&claude)
                     .env(clave_types::AGENT_UUID_ENV, &uuid)
-                    .env(clave_types::AGENT_PID_ENV, std::process::id().to_string())
                     .args([flag, &session])
                     .exec()
             };
