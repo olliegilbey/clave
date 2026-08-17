@@ -8,24 +8,26 @@ use std::io::Write;
 
 // The pure model lives in the LIB half of this crate (src/lib.rs → model.rs)
 // so it host-tests without linking this bin's wasm host-import shims.
-use clave_bar::model::{BarModel, BindStallState, Effect, PEEK_SINK_SECS, PaneMeta, TabMeta};
+use clave_bar::model::{
+    BarModel, BindStallState, Effect, PEEK_SINK_SECS, PaneMeta, TabMeta, WIDTH_COOLDOWN_SECS,
+};
 use clave_bar::plugin_config::resolve_binary;
 use clave_bar::render::{Row, render_rows};
 use zellij_tile::prelude::*;
 
+/// Event::Timer echoes the elapsed seconds, and the bar's two timer kinds sit
+/// either side of this line: the width cooldown (0.15s) below it, the peek
+/// sink (0.9s) above. The dwell era's classify_timer scheme, revived.
+const TIMER_KIND_CUTOFF_SECS: f64 = 0.5;
+
 #[derive(Default)]
 struct State {
     model: BarModel,
-    /// Our own plugin pane id (get_plugin_ids) — used to decide whether THIS
-    /// instance sits in the active tab. There is one bar instance per tab
-    /// (§6.6); render-side state converges via broadcast, but WRITE effects
-    /// (RenameTab, MarkRead) run on the active-tab instance only, so N
-    /// instances don't fire N duplicate renames / `clave focus` runs.
-    own_plugin_id: Option<u32>,
     /// Peek-on-nav timers in flight: each armed peek starts one
     /// set_timeout(1.0); only the LAST expiry sinks the bar, so a nav burst
-    /// keeps it expanded until ~1s after the final press. The ONLY timers
-    /// the bar arms (#100 deleted the dormant dwell).
+    /// keeps it expanded until ~1s after the final press. Since the
+    /// 2026-08-17 width-loop fix the width cooldown shares the Timer event
+    /// (classified by elapsed time, TIMER_KIND_CUTOFF_SECS).
     pending_peeks: u32,
     /// The pane height in lines, as of the last `render` — the only place
     /// zellij tells us (#148). A click carries a line of the VIEWPORT, so
@@ -56,7 +58,7 @@ impl State {
     /// may reach instances in any order).
     fn run_effects(&mut self, effects: Vec<Effect>) {
         // Nothing to gate. render() calls this every repaint with the width
-        // seek's usually-empty result, and both gates below build a pair of
+        // width machine's usually-empty result, and both gates below build a pair of
         // BTreeSets to test frame coherence — so without this the hottest path
         // in the plugin pays for an election it never uses.
         if effects.is_empty() {
@@ -169,25 +171,9 @@ impl State {
                     let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
                     run_command(&refs, BTreeMap::new());
                 }
-                // #137: UNGATED on purpose — every instance rate-limits its own
-                // pane, so every instance must be able to say so. Gating this to
-                // the executor would hide exactly the storms that only happen on
-                // the eleven bars nobody is looking at.
-                Effect::StormCapped {
-                    actions,
-                    cols,
-                    target,
-                } => {
-                    eprintln!(
-                        "clave-bar: WIDTH SEEK CAPPED after {actions} resizes without \
-                         settling — parking at cols={cols} (target {target}). This is the \
-                         storm brake (#137); something is re-arming the seek faster than \
-                         it can converge."
-                    );
-                }
-                // #178: UNGATED, for the same reason StormCapped is — the
-                // instance that goes silent is by definition not the one being
-                // watched, so every instance must be able to say so.
+                // #178: UNGATED on purpose — the instance that goes silent is by
+                // definition not the one being watched, so every instance must be
+                // able to say so.
                 Effect::BindStall {
                     state,
                     stranded,
@@ -229,23 +215,17 @@ impl State {
                         }
                     }
                 }
-                // C6 width-seek effects are SELF-targeted (round 20: every
-                // instance drives only its own pane, with render feedback).
-                Effect::ShrinkSelf => {
-                    if let Some(own) = self.own_plugin_id {
-                        resize_pane_with_id(
-                            ResizeStrategy::new(Resize::Decrease, Some(Direction::Right)),
-                            PaneId::Plugin(own),
-                        );
-                    }
-                }
-                Effect::GrowSelf => {
-                    if let Some(own) = self.own_plugin_id {
-                        resize_pane_with_id(
-                            ResizeStrategy::new(Resize::Increase, Some(Direction::Right)),
-                            PaneId::Plugin(own),
-                        );
-                    }
+                // #181: the width lives in the layout now. Each instance
+                // switches its OWN tab between the two declared geometries;
+                // there is no tab-targeted form of this command and none is
+                // wanted — collapse is a per-tab display mode that every
+                // instance flips for itself off the same store snapshot.
+                // The timer ends the ask's deafness: the swap's queued
+                // repaints echo the PRE-swap width, and judging them is the
+                // paint-speed toggle loop the 2026-08-17 QA drive filmed.
+                Effect::SwapWidth => {
+                    next_swap_layout();
+                    set_timeout(WIDTH_COOLDOWN_SECS);
                 }
                 // §6.6 C8 dormant nav (ungated — click reaches exactly one
                 // instance, nav effects are executor-only by construction,
@@ -256,29 +236,11 @@ impl State {
                     set_timeout(PEEK_SINK_SECS);
                 }
                 Effect::OpenAgent { uuid } => {
-                    // Task 7b′: the new tab's bar percent is derived from the
-                    // REAL display width, not the reference-viewport fiction.
-                    // `clave open` runs inside zellij, so it cannot read this
-                    // itself — a `terminal_size()` there reports the calling
-                    // pane. We can: `get_tab_info` is a synchronous host call
-                    // (zellij-tile-0.44.3 shim.rs:307). Measured live before
-                    // this fix, dwell-opened tabs rested at 27% against the
-                    // launch tab's 28% — one column apart, visible on every
-                    // tab switch. Collapse mode rides along for D36's reason.
-                    // Fail-closed since #55: an incoherent frame yields None
-                    // and we simply omit --display-cols, falling back to
-                    // `clave open`'s own default — strictly better than
-                    // measuring a DIFFERENT tab's width off a mismatched join.
-                    let cols = self
-                        .model
-                        .own_tab()
-                        .and_then(get_tab_info)
-                        .map(|t| t.display_area_columns);
-                    let cols_s = cols.map(|c| c.to_string());
+                    // Collapse mode rides along for D36's reason: the new tab
+                    // must be born in the mode the fleet is in. The width
+                    // needs no measuring — the layout `clave open` writes is
+                    // fixed-cols, applied exactly on any display.
                     let mut argv = vec![bin.as_str(), "open", &uuid];
-                    if let Some(c) = cols_s.as_deref() {
-                        argv.extend_from_slice(&["--display-cols", c]);
-                    }
                     if self.model.collapsed {
                         argv.push("--collapsed");
                     }
@@ -340,7 +302,7 @@ impl State {
     }
 
     /// Alt+c (round 20, collapse-in-place): flip the width target and let
-    /// the render-fed seek drive OWN pane width there. No hide_self /
+    /// the render-fed width machine switch OWN pane geometry there. No hide_self /
     /// show_self — suppress was structurally hostile (lossy re-insert,
     /// damage flag blocks swap-layout restores, resizes emit no events for
     /// hidden panes). Every instance stays visible, hears this pipe, and
@@ -359,9 +321,27 @@ impl State {
     /// One pipe message → model. Split out of pipe() so early returns here
     /// can't skip the unconditional unblock (dd38ace — see pipe()).
     fn handle_pipe(&mut self, message: PipeMessage) -> bool {
+        // zellij appends a blank message to EVERY CLI pipe (#45). It is not a
+        // delivery, and the `clave-toggle` arm below used to treat it as a
+        // press — so one scripted Alt+c arrived twice and flipped the bar back
+        // to where it started, while the keybind (which is not a CLI pipe)
+        // fired once. The drop line stays: those log lines are how pipe
+        // delivery is counted in the field (QA pipe-delivery P8).
+        if clave_bar::pipe::is_cli_blank_twin(
+            matches!(message.source, PipeSource::Cli(_)),
+            message.payload.as_deref(),
+        ) {
+            eprintln!(
+                "clave-bar: dropped {} pipe with empty payload",
+                message.name
+            );
+            return false;
+        }
         let name = message.name.as_str();
         let Some(payload) = message.payload.as_deref() else {
             // Toggle and organic carry no payload; everything else must.
+            // Reachable from a KEYBIND only — the guard above has already
+            // dropped the CLI's blank twin, which has the same shape.
             // A keybind MessagePlugin without a payload attribute delivers
             // payload=None, so a payload-less pipe NEVER reaches the named
             // match below — clave-organic sat dead there and the Alt+o
@@ -496,7 +476,7 @@ impl ZellijPlugin for State {
             );
             "clave".to_string()
         });
-        // D37: gate the width seek HERE, not when the snapshot is requested.
+        // D37: gate the width machine HERE, not when the snapshot is requested.
         // `load()` only ASKS for permission; the grant arrives later as an
         // event, and zellij renders this pane before then — so a gate set in
         // the `PermissionRequestResult` arm is set AFTER the first render has
@@ -533,13 +513,11 @@ impl ZellijPlugin for State {
         // directly (no focus-stealing first click) and MoveFocus skips it —
         // nothing the bar does needs focus (clicks, pipes, hide_self).
         set_selectable(false);
-        // `own_plugin_id` stays for ShrinkSelf/GrowSelf's resize_pane_with_id;
-        // the model gets the same id because identity resolution lives there
-        // now — this file is `test = false`, and RC-A shipped precisely
-        // because the frame join was written where nothing could assert on it.
-        let id = get_plugin_ids().plugin_id;
-        self.own_plugin_id = Some(id);
-        self.model.set_own_pane(id);
+        // The plugin's own pane id goes STRAIGHT to the model and is not kept
+        // here: identity resolution lives there, where it can be asserted on —
+        // this file is `test = false`, and RC-A shipped precisely because the
+        // frame join was written where nothing could see it.
+        self.model.set_own_pane(get_plugin_ids().plugin_id);
     }
 
     fn update(&mut self, event: Event) -> bool {
@@ -639,15 +617,31 @@ impl ZellijPlugin for State {
                 self.settle_identity(); // fresh manifest → own-tab joins resolvable
                 true
             }
-            Event::Timer(_elapsed) => {
-                // Peek sinks are the ONLY timers the bar arms (#100 deleted
-                // the dormant dwell, so the two-kind classify_timer split
-                // went with it). One expiry per armed peek; only the LAST
-                // sinks (nav burst = one visible expand, one sink).
-                // peek_expired() is false when a toggle already cancelled
-                // the peek — no repaint.
-                self.pending_peeks = self.pending_peeks.saturating_sub(1);
-                self.pending_peeks == 0 && self.model.peek_expired()
+            Event::Timer(elapsed) => {
+                // TWO timer kinds share this event again (the dwell era's
+                // classify_timer scheme, revived for the width cooldown):
+                // Timer echoes the ELAPSED seconds, and the two durations
+                // sit either side of the cutoff. The width leg runs on
+                // EVERY expiry — `width_cooldown_elapsed` is inert unless
+                // an ask is in flight, so a peek expiry (or a delayed
+                // width timer classified long) ending the deafness a few
+                // ms early is harmless, and no expiry can strand it.
+                let fx = self.model.width_cooldown_elapsed();
+                let width_moved = !fx.is_empty();
+                self.run_effects(fx);
+                // The peek leg is the one that must NOT run on a width
+                // expiry: it counts armed peeks, and a foreign decrement
+                // sinks a live peek early. One expiry per armed peek; only
+                // the LAST sinks (nav burst = one visible expand, one
+                // sink). peek_expired() is false when a toggle already
+                // cancelled the peek — no repaint.
+                let peek_sunk = if elapsed >= TIMER_KIND_CUTOFF_SECS && self.pending_peeks > 0 {
+                    self.pending_peeks -= 1;
+                    self.pending_peeks == 0 && self.model.peek_expired()
+                } else {
+                    false
+                };
+                width_moved || peek_sunk
             }
             Event::Mouse(Mouse::LeftClick(line, _col)) => {
                 // §6.6: rows are mouse-clickable. line is the rendered row.
@@ -687,18 +681,27 @@ impl ZellijPlugin for State {
         // render: they fire from apply_tabs (birth / clave-organic) and
         // apply_panes (the #162 reanchor debt) — both frame-witnessed — and
         // from the click/nav landings, which still emit AnnounceVisit.
-        // C6 width seek (round 20, collapse-in-place): each of our resizes
-        // triggers a repaint with the new cols (round 10) — this render
-        // chain is the seek's feedback loop. SELF-targeted and ungated:
-        // every instance is always visible and drives only its own pane.
-        let fx = self.model.width_seek(cols);
+        // #181/#197: the width machine. It compares the width zellij just
+        // PAINTED this pane at (`cols` — the one input zellij cannot
+        // withhold) with the fixed column count the store's mode declares,
+        // and asks for one switch while they differ; an ask defers all
+        // further judgement to its cooldown expiry (`width_effects` doc).
+        //
+        // It is NOT ungated, and an earlier comment here claiming every
+        // instance is always visible and switches only its own tab was wrong on
+        // both counts: hidden instances do render, and zellij resolves a
+        // plugin's swap-layout request against the FOCUSED tab, discarding the
+        // pane id the request carries (v0.44.3 — FOOTGUNS.md). The gate lives in
+        // `width_effects`, which holds the switch until this bar's own tab is
+        // the focused one.
+        let fx = self.model.width_effects(Some(cols));
         self.run_effects(fx);
         // One line per row, display-ordered. Everything visual — the column
         // arithmetic, the palette, the fade, the truncation — lives in
         // `render_rows` (design-lock; LEDGER D4/D5). This file stays zellij
         // plumbing: the profile comes from the model so it cannot drift from
-        // the width the seek above is chasing (D16), and `cols` is whatever
-        // zellij actually gave us rather than the target.
+        // the geometry the switch above asked for (D16), and `cols` is whatever
+        // zellij actually gave us rather than a design number.
         // #148: `rows` is the pane HEIGHT in lines. The renderer slices the row
         // list to it (the viewport); a bar that printed past the bottom drew
         // rows the user could reach with nav keys and never see. Remembered
@@ -706,7 +709,7 @@ impl ZellijPlugin for State {
         // do not carry it.
         self.pane_height = rows;
         let list: Vec<Row> = self.model.rows().into_iter().map(|(_, row)| row).collect();
-        let lines = render_rows(&list, cols, rows, self.model.widths());
+        let lines = render_rows(&list, cols, rows, self.model.widths_at(cols));
         // Final review 2026-08-11: emit the frame WITHOUT a trailing newline.
         // Once the viewport (#148) slices to exactly `rows` lines, the pane is
         // full at steady state; a trailing newline after the bottom row would

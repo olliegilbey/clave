@@ -19,9 +19,12 @@ here in the same change.**
 | Term | Means | Never means |
 |---|---|---|
 | **zellij session** | The multiplexer session — the thing `zellij attach` connects to. Its lifecycle belongs to the human, always. | a Claude conversation |
-| **tab** | A zellij tab. Identified by `tab_id` (stable, but zellij **recycles** ids) and by `position` (renumbers on close). One row of the sidebar. | a browser tab, a Claude session |
+| **tab** | A zellij tab. Identified by `tab_id` (stable, but zellij **recycles** ids) and by `position` (renumbers on close). One row of the sidebar. Two kinds, below. | a browser tab, a Claude session |
+| **terminal tab** | A tab with no agent session bound — a plain shell. Opened with `Alt+t`. | an agent tab whose bind failed (that is a defect, not a kind) |
+| **agent tab** | A tab hosting an agent session. Opened with `Alt+a` → pick repo → "new" or "resume". | any tab that merely has Claude running in it by hand |
 | **pane** | A zellij pane inside a tab. | a tab |
 | **plugin pane** | The pane running `clave-bar`, one per tab. Every tab has its own bar instance. | the sidebar as a concept |
+| **workspace** | The non-sidebar pane of a tab — where the terminal or the Claude runs. Both are "the terminal" underneath; the workspace is the UX word for that side of the split, in either tab kind. | a pane the sidebar owns |
 | **agent session** | One Claude Code conversation, identified by its minted **uuid**. Say "agent session" or "conversation" — never bare "session". | a zellij session |
 | **minted uuid** | The id `clave add` generates and passes as `--session-id`. The store's join key, **stable for the life of the row** — binds, the tab timeline and every wire field depend on it never moving. | the session id in a hook payload |
 | **live session id** | The id Claude is using *right now*, in the hook payload and in the transcript filename. Starts equal to the minted uuid and **changes** when the pane gets a fresh conversation — a `/clear` does it; a `--resume` does NOT (both measured, 2026-07-31, CLI v2.1.220: a resume continues the resumed transcript under its own id). Never the STORE's key — the minted uuid is that, always. It is a translation input: `AgentRecord::live_session` remembers it (`None` while the two are not known to disagree) because resurrection has to name a conversation before any Claude exists to report one, and `resume_candidates`, `live_uuid_union` and `open_is_live` map it back to the row it belongs to (#99). | the minted uuid |
@@ -39,7 +42,7 @@ here in the same change.**
 
 | Term | Means |
 |---|---|
-| **fleet** | All agent sessions clave knows about, live and dormant. The thing the sidebar shows. |
+| **fleet** | All agent sessions clave knows about, live and dormant. The thing the sidebar shows. A fleet is **launched, killed, seeded — never collapsed or expanded**: width states belong to the sidebar. |
 | **store** | The on-disk JSON that hooks write and the CLI reads. The single writer of truth; the plugin never reads it directly. |
 | **snapshot** | The full-replace payload the CLI pipes to the plugin. Carries **seq**, a monotonic counter — a consumer applies only strictly-newer seq and discards the rest. |
 | **bind** | Associating an agent session's uuid with a `tab_id`. Done once, by the agent tab's own bar instance. |
@@ -55,9 +58,20 @@ here in the same change.**
 > is the ruling and the reasoning; `cargo run -p clave-bar --example bar-preview`
 > draws it. If a word here is unclear, run the preview — it is one screen.
 
-The vertical bar itself is the **sidebar** (or **the bar**). Its two width
+The vertical bar itself is the **sidebar** (or **the bar**) — and in UX
+language it is **singular**: one continuous sidebar for the whole zellij
+session. That each tab carries its own plugin pane is implementation detail;
+the UX contract is that the instances are indistinguishable, and a user ever
+noticing a "per-tab bar" (mismatched widths, a tab out of step) is that
+abstraction leaking — a defect, not a nuance to document around.
+
+Its two width
 states are **expanded** and **collapsed** — never "mini", "wide" or "narrow".
-The process that drives the pane toward a target width is the **width seek**.
+Each is a **geometry**: a named layout in the generated KDL that zellij switches
+the tab between, and reports back by name. The **birth position** is the third,
+unnamed one zellij hides at the head of that cycle — the layout the tab was
+created from. (The **width seek**, the loop that used to step the pane toward a
+column target, was deleted at #181; the term survives only in the ledger.)
 
 ### 3.1 A row
 

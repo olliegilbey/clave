@@ -118,13 +118,13 @@ with a pre-marked line count is the log-read idiom throughout.
 **Guard today:** `collapsed` rides the seq-gated store snapshot (`clave-types/src/lib.rs:226`) — heal-at-birth and on every push.
 **Refs:** SUBSYSTEM-VALIDATION C8 (2026-07-19/20 finding); C6 round 20 known quirk.
 
-### B11 — Tab born expanded in a collapsed fleet
-**Seam:** a new tab's bar missed the collapse pipe that predates it — birth state came from the template, not fleet parity.
-**Preconditions:** fleet collapsed (`Alt+c`), then a new tab created.
-**Reproduce:** `Alt+c` (collapse all), then `Alt+t` (new tab).
+### B11 — Tab born expanded while the sidebar is collapsed
+**Seam:** a new tab's bar missed the collapse pipe that predates it — birth state came from the template, not the sidebar's current width.
+**Preconditions:** sidebar collapsed (`Alt+c`), then a new tab created.
+**Reproduce:** `Alt+c` (collapse the sidebar), then `Alt+t` (new terminal tab).
 **Healthy:** the newborn bar is born collapsed — it hydrates parity from the snapshot and `target_cols_for` (`clave-types/src/lib.rs:368`) seeks the collapsed width.
 **Broken:** new bar wide while every other tab shows a strip.
-**Drive assertion:** `HUMAN-ONLY: newborn bar matches fleet width`. Model tier: newborn-hydration tests around `target_cols_for` / birth seek.
+**Drive assertion:** `HUMAN-ONLY: newborn bar matches the sidebar width`. Model tier: newborn-hydration tests around `target_cols_for` / birth seek.
 **Guard today:** closed by B10's snapshot flag (collapse parity persists across birth and launch).
 **Refs:** SUBSYSTEM-VALIDATION C6 round 20 ("a tab created while collapsed is born expanded — fix later by carrying the collapsed flag in store snapshots"); B10.
 
@@ -228,12 +228,12 @@ with a pre-marked line count is the log-read idiom throughout.
 **Guard today:** executor-gated jumps (same gate as B20).
 **Refs:** C5/C6; FOOTGUNS:64; P16 in the pipe plane (the 6-target sibling failure).
 
-### B22 — Width runaway recurs on v0.1.3: bar at ~90% on a tab in #178's failure state (#181) [FIELD, OPEN]
+### B22 — Width runaway recurs on v0.1.3: bar at ~90% on a tab in #178's failure state (#181) [FIELD, RETIRED BY DESIGN — confirm on the next live run]
 **Seam:** the width seek vs a bar whose identity never resolves — first ~90% runaway sighted since B2's fix, on a build where `frames_coherent()` gating (PR #120) holds `own_tab()` at `None` and #178's binds never land.
-**Preconditions:** daily-driver-shaped fleet on v0.1.3; the affected tab was one whose bind never landed (#178). Whether the unbound state is causal or coincidental is THE open question.
-**Reproduce:** `Repro unknown — detection only:` not yet isolated. The #178 wake-ladder harness is the natural trap: after each wake, read the seek trace for the new tab's bar and get the human width check on the visible instance.
-**Healthy:** bar rests at target width (54 expanded / 30 collapsed — clave-types BAR_TARGET_COLS/COLLAPSED_TARGET_COLS) on every tab, bound or not.
-**Broken:** sidebar at ~90% of the terminal, agent pane squeezed to a sliver; all three known liars report normality (`dump-layout` 33/67, `dump-screen` empty, model `cols` belief ≠ pane truth).
-**Drive assertion:** QA drive phase 2 (wake ladder) gains a width assertion per wake: seek trace `cols` at rest == `tgt` for the affected bar, bounded wait ~10s; final truth `HUMAN-ONLY: screenshot`.
-**Guard today:** nothing for this recurrence — B2's learned-sign fix and B3's journey assertion are in place and did not prevent it, which is what makes it a new class rather than a B2 re-run.
-**Refs:** #181; #178 (same session, possibly same root); B2/#137 r2 (the shape), B4/#153 (the open mover); FOOTGUNS:157-160.
+**Preconditions:** daily-driver-shaped fleet on v0.1.3; the affected tab was one whose bind never landed (#178).
+**Why it is retired:** #181 DELETED the seek. There is no loop that observes a width, decides it is wrong and issues a resize, so there is nothing left to run away — the bar is a percentage zellij resolves, and the only command it ever issues is one layout switch per mode change, bounded at two. The open question this item carried (is the unbound state causal?) is moot: both candidate causes lived inside the machinery that is gone.
+**Healthy:** bar rests at target width (54 expanded / 30 collapsed — clave-types BAR_TARGET_COLS/COLLAPSED_TARGET_COLS) on every tab, bound or not. Since #181 a column either side of target is correct, not a defect: a whole percent of 280 columns cannot express 54 exactly.
+**Broken:** sidebar at ~90% of the terminal, agent pane squeezed to a sliver.
+**Drive assertion:** the live run #181 still owes (LIVE-INTERACTION-CHECKLIST items 1, 2 and 6) is the confirmation. Close this item when a real session shows the two rest widths stable across repeated toggles and a window resize.
+**Guard today:** structural — the model emits nothing outside the single render after a mode change (`an_untouched_bar_never_asks_for_anything`), and a layout that refuses to move costs two calls and then silence.
+**Refs:** #181, LEDGER D39; #178 (same session); B2/#137 r2 (the shape), B4/#153 (the open mover); FOOTGUNS:157-160.
