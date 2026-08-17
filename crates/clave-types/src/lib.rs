@@ -406,17 +406,17 @@ const _: () = assert!(
 pub const SHELL_FLOATING_X_PERCENT: usize = 0;
 
 /// Top edge. `y` is floored at the viewport's top exactly as `x` is at its left,
-/// but nothing sits above the viewport here, so the tenth lands where written
-/// and is paired by a tenth below.
-pub const SHELL_FLOATING_Y_PERCENT: usize = 10;
+/// but nothing sits above the viewport here, so the sliver lands where written
+/// and is paired by one below.
+pub const SHELL_FLOATING_Y_PERCENT: usize = 4;
 
 /// Nearly the whole non-bar width — the right edge stops a few columns short
 /// of the screen's (`adjust_coordinates` narrows an overflow to the viewport's
-/// right edge, so even 100 would be safe; 97 leaves the gap deliberate).
-pub const SHELL_FLOATING_WIDTH_PERCENT: usize = 97;
+/// right edge, so even 100 would be safe; 98 leaves the gap deliberate).
+pub const SHELL_FLOATING_WIDTH_PERCENT: usize = 98;
 
-/// Four-fifths of the non-bar height.
-pub const SHELL_FLOATING_HEIGHT_PERCENT: usize = 80;
+/// Nearly the whole non-bar height, margins matching the horizontal ones.
+pub const SHELL_FLOATING_HEIGHT_PERCENT: usize = 92;
 
 const _: () = assert!(
     SHELL_FLOATING_X_PERCENT + SHELL_FLOATING_WIDTH_PERCENT <= 100
