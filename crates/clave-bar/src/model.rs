@@ -40,11 +40,15 @@ pub struct PaneMeta {
 pub enum Effect {
     /// rename_tab_with_id(tab_id, name) — write clave's label on the real tab.
     RenameTab { tab_id: usize, name: String },
-    /// focus_pane_with_id(Terminal(pane_id)) — S2-proven; only for uuid jumps,
-    /// where the pane id is broadcast truth and duplicates are same-target.
+    /// focus_pane_with_id(Terminal(pane_id)) — S2-proven; uuid jumps and any
+    /// live pick on a tab with a registered agent pane. The pane id is
+    /// broadcast truth: position-immune (a starved executor's positions can
+    /// predate a close — the QA-drive nav wedge) and same-target across
+    /// duplicate instances.
     FocusPane { pane_id: u32 },
-    /// switch_tab_to(position + 1) — row/dir nav. All instances compute the
-    /// same target from replicated state, so duplicates are idempotent.
+    /// switch_tab_to(position + 1) — clicks and the nav fallback for tabs with
+    /// no registered pane. All instances compute the same target from
+    /// replicated state, so duplicates are idempotent.
     SwitchTab { position: usize },
     /// run_command zellij pipe clave-visited — converge the other instances
     /// after a single-instance jump (mouse click).
@@ -1741,7 +1745,11 @@ impl BarModel {
     /// the tab the user left, so the first press walks from there and re-anchors
     /// on landing. One stale press, one executor — the fail-closed trade this
     /// whole subsystem takes, since a repeated keypress costs less than a jump
-    /// to the wrong tab.
+    /// to the wrong tab. That trade only holds if the press LANDS somewhere:
+    /// a position-addressed switch from a starved executor can be silently
+    /// refused (out of range after a close) and heals nothing, which is why
+    /// live picks now land by pane id where one is registered (the QA-drive
+    /// phase-3 wedge; FOOTGUNS.md).
     pub fn nav_executor(&self) -> Option<usize> {
         let own = self.own_tab()?;
         (self.current_tab == Some(own)).then_some(own)
@@ -1880,19 +1888,33 @@ impl BarModel {
         match key {
             RowKey::Tab(tab_id) => {
                 self.cursor = None; // live landing: focus truth takes over
-                let Some(position) = self
-                    .tabs
-                    .iter()
-                    .find(|t| t.tab_id == tab_id)
-                    .map(|t| t.position)
-                else {
-                    return Vec::new();
+                // QA-drive phase-3 wedge (2026-08-17): this executor may be a
+                // starved background bar, so `self.tabs` positions can predate
+                // a close — a SwitchTab aimed one past the end is silently
+                // refused by zellij, and the AnnounceVisit below still
+                // broadcasts, re-electing the same stale executor forever.
+                // The store's uuid→pane join is broadcast truth and
+                // position-immune, so a tab with a registered agent pane lands
+                // there; position remains only for tabs with no pane to ride.
+                let jump = match self
+                    .agent_in_tab(tab_id)
+                    .and_then(|a| self.uuid_to_pane.get(&a.uuid))
+                {
+                    Some(&pane_id) => Effect::FocusPane { pane_id },
+                    None => {
+                        let Some(position) = self
+                            .tabs
+                            .iter()
+                            .find(|t| t.tab_id == tab_id)
+                            .map(|t| t.position)
+                        else {
+                            return Vec::new();
+                        };
+                        Effect::SwitchTab { position }
+                    }
                 };
                 self.beacon(tab_id); // executor hand-off hint; pipe echo confirms
-                vec![
-                    Effect::SwitchTab { position },
-                    Effect::AnnounceVisit { tab_id },
-                ]
+                vec![jump, Effect::AnnounceVisit { tab_id }]
             }
             RowKey::Dormant(uuid) => {
                 // #100 dwell-commit: EVERY dormant landing — dir walk and
@@ -3382,6 +3404,53 @@ mod tests {
         assert_eq!(m.nav("not json", Some(10)), Vec::<Effect>::new());
         assert_eq!(m.nav("{\"row\":9}", Some(10)), Vec::<Effect>::new());
         assert_eq!(m.click(9, TALL_PANE), Vec::<Effect>::new());
+    }
+
+    #[test]
+    fn a_stale_executor_lands_a_live_pick_by_pane_id_not_position() {
+        // The 2026-08-17 QA-drive phase-3 wedge: the elected executor was a
+        // starved background bar whose tab frame predated a close, so its
+        // position-based SwitchTab aimed one past the end and zellij silently
+        // refused it — and because its AnnounceVisit still broadcast, the same
+        // stale executor was re-elected on every further press. Positions are
+        // frame truth and frames starve (TabUpdate reaches only the active
+        // tab); the store's uuid→pane join is broadcast truth. So a live pick
+        // on a tab with a registered agent pane must land by pane id.
+        let mut m = starved_bar(11);
+        m.apply_snapshot(snap_full(
+            1,
+            vec![agent_at("u1", Status::Working, Some(12), 7)],
+            &[(12, 1000)],
+        ));
+        assert_eq!(
+            m.nav("{\"row\":1}", Some(11)),
+            vec![
+                Effect::FocusPane { pane_id: 7 },
+                Effect::AnnounceVisit { tab_id: 12 },
+            ],
+            "a bound live pick must ride the position-immune pane id"
+        );
+    }
+
+    #[test]
+    fn a_live_pick_with_no_registered_pane_falls_back_to_position() {
+        // The remainder the pane-id landing accepts: a bound row whose pane
+        // was never announced (and any plain terminal tab) has no stable id
+        // to ride, so position — fresh on the bar the user is reading, the
+        // common case — is the only address there is.
+        let mut m = starved_bar(11);
+        m.apply_snapshot(snap_full(
+            1,
+            vec![agent("u1", Status::Working, Some(12))],
+            &[(12, 1000)],
+        ));
+        assert_eq!(
+            m.nav("{\"row\":1}", Some(11)),
+            vec![
+                Effect::SwitchTab { position: 2 },
+                Effect::AnnounceVisit { tab_id: 12 },
+            ]
+        );
     }
 
     #[test]
