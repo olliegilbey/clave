@@ -64,7 +64,15 @@ pub struct TermFacts {
     pub cwd: Option<String>,
     /// The most recent foreground command that was not the shell itself —
     /// lingering after it finishes, which is what makes the summary read as
-    /// "most recently run" at an idle prompt.
+    /// "most recently run" at an idle prompt. Precisely: the most recent
+    /// command ZELLIJ NOTICED. Its foreground detection samples roughly once
+    /// a second, so a sub-second command (`ls`, `la`) starts and exits
+    /// between samples, emits no `CommandChanged`, and cannot be recovered
+    /// by any probe — the process is gone before anyone could ask the OS.
+    /// Ratified trade (Ollie, live 2026-08-18): commands that run long
+    /// enough to matter register; instant ones never displace the last one
+    /// that did. The alternatives — scrollback scraping or shell
+    /// integration — are scope cliffs refused for v0.2.0.
     pub last_cmd: Option<String>,
     /// Whether that command is in flight RIGHT NOW — the running/idle axis of
     /// the status glyph. Derived: the reported foreground is running unless it
