@@ -21,6 +21,19 @@ use zellij_tile::prelude::*;
 /// sink (0.9s) above. The dwell era's classify_timer scheme, revived.
 const TIMER_KIND_CUTOFF_SECS: f64 = 0.5;
 
+/// The term-facts poll (#206): zellij pushes `CommandChanged` when a
+/// foreground command STARTS but nothing when it exits back to the prompt
+/// (observed live 2026-08-18: `sleep 8`'s start delta arrived, its end never
+/// did), so a running row would stay "running" until an unrelated manifest.
+/// While — and only while — some terminal speaker is running, a slow timer
+/// re-probes; an idle fleet arms nothing, which is what the drive loop's
+/// quiescence assertion requires. Classified by elapsed like the other two
+/// timer kinds: width 0.15s < 0.5 ≤ peek 1.0s < 2.0 ≤ this. A peek expiry
+/// delayed past 2.0s under load would misclassify here and sink one expiry
+/// late — the same tolerance the width/peek split already accepts.
+const TERM_POLL_CUTOFF_SECS: f64 = 2.0;
+const TERM_POLL_SECS: f64 = 3.0;
+
 #[derive(Default)]
 struct State {
     model: BarModel,
@@ -38,6 +51,9 @@ struct State {
     /// the click map falls back to the pre-viewport identity mapping (line N
     /// selects row N) rather than misbehaving.
     pane_height: usize,
+    /// A term-facts poll timer is in flight (#206) — one at a time, re-armed
+    /// on expiry only while `term_poll_wanted()` holds.
+    term_poll_armed: bool,
     /// The CLI this bar shells out to, from plugin configuration (#44).
     /// Assigned in `load()`, which zellij invokes as its own wasm export
     /// before delivering any event (`register_plugin!`, zellij-tile-0.44.3
@@ -57,6 +73,43 @@ impl State {
     /// FocusPane is intentionally ungated (every instance computes the same
     /// target — focusing twice is idempotent, and the keybind MessagePlugin
     /// may reach instances in any order).
+    /// Ask the OS about every terminal-tab speaker and ingest the answers
+    /// (#206). A failed query is `None`, which `apply_pane_facts` treats as
+    /// "no answer", never as "clear". CHANGED-ONLY logging, here and in the
+    /// two event arms: the drive loop's quiescence assertion (TESTING.md §the
+    /// sandbox drive loop) reads these from zellij.log, and an idle fleet
+    /// must not grow the log. Plugin pixels are not machine-readable
+    /// (dump-screen is empty for plugin panes), so these lines ARE the
+    /// automatable evidence that the OS facts pipeline delivered.
+    fn probe_term_facts(&mut self) -> bool {
+        let probes: Vec<PaneProbe> = self
+            .model
+            .probe_targets()
+            .into_iter()
+            .map(|id| PaneProbe {
+                pane_id: id,
+                cwd: get_pane_cwd(PaneId::Terminal(id))
+                    .ok()
+                    .map(|p| p.to_string_lossy().into_owned()),
+                foreground: get_pane_running_command(PaneId::Terminal(id)).ok(),
+            })
+            .collect();
+        let changed = self.model.apply_pane_facts(probes);
+        if changed {
+            eprintln!("clave-bar: term-facts probe updated");
+        }
+        changed
+    }
+
+    /// One poll timer at a time, and only while a terminal speaker is
+    /// running (#206) — see TERM_POLL_CUTOFF_SECS for why it exists at all.
+    fn arm_term_poll(&mut self) {
+        if !self.term_poll_armed && self.model.term_poll_wanted() {
+            self.term_poll_armed = true;
+            set_timeout(TERM_POLL_SECS);
+        }
+    }
+
     fn run_effects(&mut self, effects: Vec<Effect>) {
         // Nothing to gate. render() calls this every repaint with the width
         // width machine's usually-empty result, and both gates below build a pair of
@@ -679,31 +732,9 @@ impl ZellijPlugin for State {
                 // Terminal-tab speakers get their OS facts probed on every
                 // manifest (#206): the events keep them fresh BETWEEN frames,
                 // but neither fires retroactively for a pane that was already
-                // at its prompt when this bar was born. A failed query is
-                // `None`, which `apply_pane_facts` treats as "no answer",
-                // never as "clear".
-                let probes: Vec<PaneProbe> = self
-                    .model
-                    .probe_targets()
-                    .into_iter()
-                    .map(|id| PaneProbe {
-                        pane_id: id,
-                        cwd: get_pane_cwd(PaneId::Terminal(id))
-                            .ok()
-                            .map(|p| p.to_string_lossy().into_owned()),
-                        foreground: get_pane_running_command(PaneId::Terminal(id)).ok(),
-                    })
-                    .collect();
-                // CHANGED-ONLY logging, here and in the two event arms below:
-                // the drive loop's quiescence assertion (TESTING.md §the
-                // sandbox drive loop) reads these from zellij.log, and an idle
-                // fleet must not grow the log. Plugin pixels are not
-                // machine-readable (dump-screen is empty for plugin panes),
-                // so these lines ARE the automatable evidence that the OS
-                // facts pipeline delivered.
-                if self.model.apply_pane_facts(probes) {
-                    eprintln!("clave-bar: term-facts probe updated");
-                }
+                // at its prompt when this bar was born.
+                self.probe_term_facts();
+                self.arm_term_poll();
                 true
             }
             // The between-frames halves of the #206 probes: zellij pushes cwd
@@ -733,6 +764,9 @@ impl ZellijPlugin for State {
                 if changed {
                     eprintln!("clave-bar: term-facts command delta pane {id}");
                 }
+                // The start delta is the only one zellij sends; the poll
+                // covers the exit (TERM_POLL_CUTOFF_SECS).
+                self.arm_term_poll();
                 changed
             }
             Event::CwdChanged(..) | Event::CommandChanged(..) => false,
@@ -748,6 +782,15 @@ impl ZellijPlugin for State {
                 let fx = self.model.width_cooldown_elapsed();
                 let width_moved = !fx.is_empty();
                 self.run_effects(fx);
+                // The term-poll leg (#206): re-probe, re-arm while wanted,
+                // and never touch the peek count — that is the whole reason
+                // it classifies ABOVE the peek band.
+                if elapsed >= TERM_POLL_CUTOFF_SECS {
+                    self.term_poll_armed = false;
+                    let changed = self.probe_term_facts();
+                    self.arm_term_poll();
+                    return width_moved || changed;
+                }
                 // The peek leg is the one that must NOT run on a width
                 // expiry: it counts armed peeks, and a foreign decrement
                 // sinks a live peek early. One expiry per armed peek; only

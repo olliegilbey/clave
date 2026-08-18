@@ -1634,6 +1634,14 @@ impl BarModel {
         changed
     }
 
+    /// Whether the term-facts poll should be armed (#206): some pane the bar
+    /// is tracking claims a running foreground command. zellij never pushes
+    /// the exit-side delta, so "running" is exactly the state that needs a
+    /// second look.
+    pub fn term_poll_wanted(&self) -> bool {
+        self.pane_facts.values().any(|f| f.running)
+    }
+
     /// The panes main.rs should ask the OS about after this manifest (#206):
     /// each terminal tab's speaker. Agent tabs are excluded — their row is the
     /// store's, and their panes' cwds are already store truth.
@@ -2596,8 +2604,11 @@ mod tests {
             terminal_row(&m),
             RowContent::Terminal { status: TermStatus::Running, command, .. } if command == "cargo test"
         ));
+        // A running speaker is exactly what the exit-side poll exists for.
+        assert!(m.term_poll_wanted());
         // Login shells report a dashed argv0; that is the prompt, not a command.
         assert!(m.apply_pane_facts(vec![probe(5, None, Some(&["-zsh"]))]));
+        assert!(!m.term_poll_wanted());
         assert!(matches!(
             terminal_row(&m),
             RowContent::Terminal { status: TermStatus::Idle, command, .. } if command == "cargo test"
