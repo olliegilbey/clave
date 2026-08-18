@@ -77,7 +77,7 @@ shows all of them.</sub>
 
 ```bash
 git clone https://github.com/olliegilbey/clave && cd clave
-git checkout v0.1.3        # `just release` refuses a dirty or untagged tree
+git checkout v0.2.0        # `just release` refuses a dirty or untagged tree
 just setup-toolchain       # adds the wasm32-wasip1 target, once
 just release               # builds, then installs the launcher and versioned artifacts
 
