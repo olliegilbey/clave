@@ -956,17 +956,24 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
             out.push(' '); // the space after the chip
             // The cwd's directory name through the same ink the agent rows
             // use — a terminal sitting in a fleet repo shares its colour
-            // without either knowing about the other (lock §4).
-            out.push_str(&ink(hue(*repo_ink)));
+            // without either knowing about the other (lock §4). An UNMATCHED
+            // cwd has no allocation, and UNTINTED read as disabled — nearly
+            // invisible on the selected row (Ollie, live 2026-08-18) — so the
+            // ink-less repo falls back to fujiWhite like the rest of the row.
+            match repo_ink {
+                Some(i) => out.push_str(&ink(hue(Some(*i)))),
+                None => out.push_str(&ink(DEFAULT_INK)),
+            }
             out.push_str(&clamp(repo.as_deref().unwrap_or(""), widths.repo));
             out.push_str(&o);
             out.push_str(&o);
             out.push(' '); // the space after the repo
-            // Same selected-row rule as the agent arm: fujiWhite unless
-            // selected, where the repo ink deliberately carries through.
-            if !row.selected {
-                out.push_str(&ink(DEFAULT_INK));
-            }
+            // UNCONDITIONALLY fujiWhite, selected or not (ratified): the
+            // agent arm's carry-the-repo-ink-through rule is an agent
+            // aesthetic, and on a terminal row it painted the selected
+            // summary in whatever the repo cell wore — gray, when unmatched
+            // (Ollie, live 2026-08-18).
+            out.push_str(&ink(DEFAULT_INK));
             out.push_str(&clamp(command, summary_w));
             out.push_str(&o);
         }
@@ -1850,7 +1857,7 @@ mod tests {
         let expected = [
             " \u{1b}[38;2;179;86;98m\u{25cf} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;180;154;109m105k             \u{1b}[38;2;102;125;172mclave   \u{1b}[38;2;173;169;150mI just passed the spe\u{2026} \u{1b}[0m ",
             "\u{1b}[38;2;45;79;103m\u{e0b6}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m\u{1b}[38;2;255;158;59m\u{25cf}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;220;215;186m\u{2502}\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;230;195;132m105k\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;126;156;216m\u{168c2}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;122;168;159m\u{1b}[38;2;22;22;29mS6-GUT   \u{1b}[0m\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;126;156;216mclave  \u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m picking the gutter set\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[0m\u{1b}[38;2;45;79;103m\u{e0b4}\u{1b}[0m",
-            " \u{1b}[38;2;173;169;150m\u{f018d} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;173;169;150mTERM   \u{1b}[48;2;24;24;32m\u{1b}[38;2;220;215;186mTab #16  \u{1b}[0m \u{1b}[38;2;71;71;92m        \u{1b}[38;2;173;169;150m                       \u{1b}[0m ",
+            " \u{1b}[38;2;173;169;150m\u{f018d} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;173;169;150mTERM   \u{1b}[48;2;24;24;32m\u{1b}[38;2;220;215;186mTab #16  \u{1b}[0m \u{1b}[38;2;173;169;150m        \u{1b}[38;2;173;169;150m                       \u{1b}[0m ",
         ];
         assert_eq!(render_all(&rows, DESIGN_COLS, Widths::EXPANDED), expected);
         // The same derived self-checks the COLLAPSED golden carries. A golden
@@ -1947,7 +1954,7 @@ mod tests {
         let expected = [
             " \u{1b}[38;2;179;86;98m\u{25cf} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;180;154;109m\u{f007c}           \u{1b}[38;2;102;125;172mcla \u{1b}[38;2;173;169;150mI just\u{2026} \u{1b}[0m ",
             "\u{1b}[38;2;45;79;103m\u{e0b6}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m\u{1b}[38;2;255;158;59m\u{25cf}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;220;215;186m\u{2502}\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;230;195;132m\u{f007c}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;126;156;216m\u{168c2}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;122;168;159m\u{1b}[38;2;22;22;29mS6-GUT \u{1b}[0m\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;126;156;216mcla\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m pickin\u{2026}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[0m\u{1b}[38;2;45;79;103m\u{e0b4}\u{1b}[0m",
-            " \u{1b}[38;2;173;169;150m\u{f018d} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;173;169;150m\u{f120}   \u{1b}[48;2;24;24;32m\u{1b}[38;2;220;215;186mTab #16\u{1b}[0m \u{1b}[38;2;71;71;92m    \u{1b}[38;2;173;169;150m        \u{1b}[0m ",
+            " \u{1b}[38;2;173;169;150m\u{f018d} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;173;169;150m\u{f120}   \u{1b}[48;2;24;24;32m\u{1b}[38;2;220;215;186mTab #16\u{1b}[0m \u{1b}[38;2;173;169;150m    \u{1b}[38;2;173;169;150m        \u{1b}[0m ",
         ];
         assert_eq!(
             render_all(&rows, COLLAPSED_DESIGN_COLS, Widths::COLLAPSED),
