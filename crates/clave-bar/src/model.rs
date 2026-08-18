@@ -1663,7 +1663,14 @@ impl BarModel {
         self.tabs
             .iter()
             .filter(|t| self.agent_in_tab(t.tab_id).is_none())
-            .filter_map(|t| self.speaker_pane(t.position).map(|p| p.pane_id))
+            .filter_map(|t| self.speaker_pane(t.position))
+            // An EXITED pane is never probed: both OS queries fail on a dead
+            // process, the all-None guard mints no entry, and the pane
+            // re-qualified as unknown on every manifest — two failing
+            // round-trips per press, forever (the residual nav lag,
+            // 2026-08-18). Its status and command are manifest truth anyway.
+            .filter(|p| !p.exited)
+            .map(|p| p.pane_id)
             .filter(|id| self.pane_facts.get(id).is_none_or(|f| f.running))
             .collect()
     }

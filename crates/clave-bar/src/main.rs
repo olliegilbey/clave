@@ -109,6 +109,12 @@ impl State {
     /// One poll timer at a time, and only while a terminal speaker is
     /// running (#206) — see TERM_POLL_CUTOFF_SECS for why it exists at all.
     fn arm_term_poll(&mut self) {
+        // Visibility-gated like the probe it schedules: a hidden instance
+        // with a stale running fact it can never probe away would otherwise
+        // re-arm a 3s timer forever.
+        if !self.model.own_tab_focused() {
+            return;
+        }
         if !self.term_poll_armed && self.model.term_poll_wanted() {
             self.term_poll_armed = true;
             set_timeout(TERM_POLL_SECS);
