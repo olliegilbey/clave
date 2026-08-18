@@ -60,6 +60,7 @@ fn agent(
             summary: String::from(summary),
         },
         selected: false,
+        dormant: matches!(status, RowStatus::Dormant | RowStatus::DormantSelected),
     }
 }
 
@@ -114,6 +115,7 @@ fn fleet() -> Vec<Row> {
                 name: String::from("Tab #16"),
             },
             selected: false,
+            dormant: false,
         },
         agent(
             RowStatus::Stale,
@@ -237,6 +239,7 @@ fn showcase() -> Vec<Row> {
                 name: String::from("shell"),
             },
             selected: false,
+            dormant: false,
         },
         agent(
             RowStatus::Idle,
@@ -261,6 +264,7 @@ fn showcase() -> Vec<Row> {
                 name: String::from("logs"),
             },
             selected: false,
+            dormant: false,
         },
         agent(
             RowStatus::Stale,

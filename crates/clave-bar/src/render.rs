@@ -239,6 +239,15 @@ pub const PALETTE: [(Rgb, &str); 8] = [
 /// insufficient. Fades at 8/12/15/20/30/40% were rendered and rejected.
 const FADE: f64 = 0.25;
 
+/// The dormant fade (#206). Deeper than [`FADE`] and UNCONDITIONAL — a dormant
+/// row dims whether or not anything is selected, because it marks what the row
+/// IS (no session behind it), not where focus sits. Before this the only
+/// dormant tell was the hollow gutter glyph, and the block read as live fleet
+/// at a glance. The glyph stays fujiWhite-based (#123's near-invisible
+/// sumiInk4 lesson), so even this deep it outreads the old ink. 0.5 was
+/// rendered first; Ollie ratified 0.6 against the ux-gate1 fleet (#210).
+const DORMANT_FADE: f64 = 0.6;
+
 // ── glyphs (lock §5) ────────────────────────────────────────────────────────
 
 const LCAP: char = '\u{e0b6}'; // powerline half-circle thick, left
@@ -327,8 +336,11 @@ impl RowStatus {
             RowStatus::Done => ('\u{25cf}', Rgb(0x98, 0xBB, 0x6C)),     // springGreen
             RowStatus::Idle => ('\u{25cf}', UNTINTED),
             RowStatus::Failed => ('\u{2716}', Rgb(0xE8, 0x24, 0x24)), // samuraiRed
-            // Hollow, not dim: sumiInk4 on the sumiInk3 bar was near-invisible
-            // (#123). The SHAPE carries "not running"; the ink stays legible.
+            // Hollow on the DEFAULT ink, never sumiInk4: that read as
+            // near-invisible against the bar (#123), and the shape alone
+            // carries "not running". #206's row-level fade is applied AFTER
+            // this table by `render_row`, so a legible base is what keeps the
+            // half-faded glyph above #123's floor.
             RowStatus::Dormant => ('\u{25cb}', DEFAULT_INK),
             RowStatus::DormantSelected => ('\u{23ce}', Rgb(0xE6, 0xC3, 0x84)), // carpYellow
             RowStatus::Opening => ('\u{21bb}', Rgb(0xE6, 0xC3, 0x84)),         // carpYellow
@@ -401,6 +413,12 @@ pub enum RowContent {
 pub struct Row {
     pub content: RowContent,
     pub selected: bool,
+    /// Block membership, carried SEPARATELY from the status glyph (#206):
+    /// `stale` and `opening` outrank `Dormant` in `agent_content`'s tier, so
+    /// the status alone cannot say which block the model placed the row in —
+    /// a stale dormant row wears ✗ and would read as live to any
+    /// status-derived fade (Codex, PR #210).
+    pub dormant: bool,
 }
 
 // ── measurement ─────────────────────────────────────────────────────────────
@@ -668,8 +686,25 @@ fn hue(ink: Option<u8>) -> Rgb {
 
 fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> String {
     // Nothing to recede FROM when nothing is selected, so an unfocused bar
-    // renders at full strength (lock §6).
-    let fade = if row.selected || !any_selected {
+    // renders at full strength (lock §6) — except a dormant-block row, whose
+    // fade is absolute rather than relative (#206). The flag, not the status:
+    // stale outranks Dormant in the glyph tier, and a stale dormant row must
+    // still recede (Codex, PR #210). Two escapes stay at full strength —
+    // `DormantSelected` lands in the `selected` arm, and `Opening` is the
+    // row the user JUST launched, mid-transition to live (⏎ → ↻, #100).
+    let dormant = row.dormant
+        && !matches!(
+            row.content,
+            RowContent::Agent {
+                status: RowStatus::Opening,
+                ..
+            }
+        );
+    let fade = if row.selected {
+        0.0
+    } else if dormant {
+        DORMANT_FADE
+    } else if !any_selected {
         0.0
     } else {
         FADE
@@ -985,6 +1020,9 @@ mod tests {
                 summary: String::from(summary),
             },
             selected: false,
+            // The helper mirrors the model's tier: a fixture asking for a
+            // dormant status is a dormant-block row unless the test overrides.
+            dormant: matches!(status, RowStatus::Dormant | RowStatus::DormantSelected),
         }
     }
 
@@ -1008,6 +1046,7 @@ mod tests {
                     name: String::from("Tab #16"),
                 },
                 selected: false,
+                dormant: false,
             },
             agent(RowStatus::Stale, Provenance::Branch, Some("KDL-GRD"), "x"),
             Row {
@@ -1023,6 +1062,7 @@ mod tests {
                     summary: String::new(),
                 },
                 selected: false,
+                dormant: true,
             },
         ];
         rows[1].selected = true;
@@ -1348,6 +1388,7 @@ mod tests {
                 name: String::from("Tab #16"),
             },
             selected: false,
+            dormant: false,
         };
         let bare =
             strip_sgr(&render_all(std::slice::from_ref(&row), DESIGN_COLS, Widths::EXPANDED)[0]);
@@ -1437,6 +1478,7 @@ mod tests {
             let unselected = agent(RowStatus::Working, Provenance::Branch, Some("S6-GUT"), "x");
             let selected = Row {
                 selected: true,
+                dormant: false,
                 ..unselected.clone()
             };
             // What the chip cell holds at this profile's title width —
@@ -1678,6 +1720,7 @@ mod tests {
             ),
             Row {
                 selected: true,
+                dormant: false,
                 ..agent(
                     RowStatus::Working,
                     Provenance::Worktree,
@@ -1690,6 +1733,7 @@ mod tests {
                     name: String::from("Tab #16"),
                 },
                 selected: false,
+                dormant: false,
             },
         ];
         let expected = [
@@ -1775,6 +1819,7 @@ mod tests {
             ),
             Row {
                 selected: true,
+                dormant: false,
                 ..agent(
                     RowStatus::Working,
                     Provenance::Worktree,
@@ -1787,6 +1832,7 @@ mod tests {
                     name: String::from("Tab #16"),
                 },
                 selected: false,
+                dormant: false,
             },
         ];
         let expected = [
@@ -1839,6 +1885,70 @@ mod tests {
         // springGreen at full strength, then faded 25% toward sumiInk3.
         assert!(unfocused.contains("\u{1b}[38;2;152;187;108m"));
         assert!(faded.contains("\u{1b}[38;2;122;148;91m"));
+    }
+
+    /// A dormant row's fade is ABSOLUTE (#206): deep toward the bar background
+    /// whether anything is selected or not, where live rows fade only
+    /// relatively (lock §6). The tell was previously the hollow glyph alone.
+    #[test]
+    fn a_dormant_row_dims_regardless_of_selection() {
+        let dormant = agent(RowStatus::Dormant, Provenance::Main, Some("T"), "s");
+        // fujiWhite `#DCD7BA` mixed 60% toward sumiInk3 `#1F1F28`:
+        // (106.6 -> 107, 104.6 -> 105, 98.4 -> 98).
+        let half = "\u{1b}[38;2;107;105;98m";
+        // The chip is the one BACKGROUND the fade touches (CodeRabbit, #210).
+        let chip_faded = hue(Some(5)).mix(BASE, DORMANT_FADE).bg();
+        let chip_full = hue(Some(5)).bg();
+        let alone = render_all(
+            std::slice::from_ref(&dormant),
+            DESIGN_COLS,
+            Widths::EXPANDED,
+        )
+        .remove(0);
+        assert!(alone.contains(half), "unselected bar: dormant still dims");
+        assert!(
+            !alone.contains("\u{1b}[38;2;220;215;186m"),
+            "no full-strength fujiWhite anywhere on a dormant row"
+        );
+        assert!(alone.contains(&chip_faded) && !alone.contains(&chip_full));
+        let mut live = agent(RowStatus::Working, Provenance::Main, None, "s");
+        live.selected = true;
+        let beside = &render_all(&[dormant, live], DESIGN_COLS, Widths::EXPANDED)[0];
+        assert!(
+            beside.contains(half) && !beside.contains("\u{1b}[38;2;173;169;150m"),
+            "a selection must not lift dormant to the shallower relative fade"
+        );
+    }
+
+    /// The fade keys off BLOCK membership, not the glyph: `stale` outranks
+    /// `Dormant` in `agent_content`'s tier, so a dormant row whose cwd
+    /// vanished wears ✗ — and must still recede (Codex, #210). `Opening` is
+    /// the deliberate exception: the row the user just launched is
+    /// mid-transition to live and reads at full strength (⏎ → ↻, #100).
+    #[test]
+    fn stale_dormant_dims_but_an_opening_row_does_not() {
+        let mut stale = agent(RowStatus::Stale, Provenance::Main, None, "s");
+        stale.dormant = true;
+        let row = render_all(std::slice::from_ref(&stale), DESIGN_COLS, Widths::EXPANDED).remove(0);
+        // samuraiRed `#E82424` mixed 60% toward sumiInk3: (111.4 -> 111,
+        // 33, 38.4 -> 38).
+        assert!(
+            row.contains("\u{1b}[38;2;111;33;38m"),
+            "a stale dormant row still recedes with its block"
+        );
+        let mut opening = agent(RowStatus::Opening, Provenance::Main, None, "s");
+        opening.dormant = true;
+        let row = render_all(
+            std::slice::from_ref(&opening),
+            DESIGN_COLS,
+            Widths::EXPANDED,
+        )
+        .remove(0);
+        // carpYellow `#E6C384` at full strength.
+        assert!(
+            row.contains("\u{1b}[38;2;230;195;132m"),
+            "a launching row must not dim mid-transition"
+        );
     }
 
     /// An ink index with no palette entry must fall back visibly, not wrap onto
@@ -1929,6 +2039,7 @@ mod tests {
         // in the preview's selected row.
         let selected = Row {
             selected: true,
+            dormant: false,
             ..row
         };
         let line = &render_all(&[selected], DESIGN_COLS, Widths::EXPANDED)[0];
@@ -1994,6 +2105,7 @@ mod tests {
                     name: format!("t{i:02}"),
                 },
                 selected: i == sel,
+                dormant: false,
             })
             .collect()
     }
@@ -2144,6 +2256,7 @@ mod tests {
                     name: String::from("fresh"),
                 },
                 selected: false,
+                dormant: false,
             },
         );
         let shifted: Vec<usize> = on_screen_at(&above, 5, DESIGN_COLS, Widths::EXPANDED);
