@@ -209,7 +209,6 @@ const DEFAULT_INK: Rgb = Rgb(0xDC, 0xD7, 0xBA);
 /// sumiInk0 — text ON a title chip. Public because the preview draws the same
 /// chip in its palette swatches (lock §4).
 pub const CHIP_INK: Rgb = Rgb(0x16, 0x16, 0x1D);
-const TERMINAL_INK: Rgb = Rgb(0x71, 0x7C, 0x7C); // a terminal tab's name
 
 /// The ink a row falls back to when it has no palette entry yet. Reachable:
 /// allocation is store-backed iterate-and-wrap (lock §4) and a row can render
@@ -254,7 +253,12 @@ const LCAP: char = '\u{e0b6}'; // powerline half-circle thick, left
 const RCAP: char = '\u{e0b4}'; // powerline half-circle thick, right
 const RULE: char = '\u{2502}'; // box drawings light vertical
 const ELLIPSIS: char = '\u{2026}';
-const CONSOLE: char = '\u{f018d}'; // nf-md-console — a terminal has no battery
+const CONSOLE: char = '\u{f018d}'; // nf-md-console — now the STATUS cell's mark (#206)
+/// The battery cell's terminal-class marker (#206): the word where an agent
+/// row shows its count, a glyph where it shows its ramp. `TERM` is four cells
+/// exactly — the full expanded battery cell, right-aligned like the digits.
+const TERM_MARK: &str = "TERM";
+const TERM_GLYPH: char = '\u{f120}'; // nf-fa-terminal — the rightward prompt, collapsed
 
 /// The S7 ramp (#62). Index is the context level: `0` is full, the last entry
 /// is empty and past the user's smart zone.
@@ -349,6 +353,31 @@ impl RowStatus {
     }
 }
 
+/// What a terminal row's status cell says — the terminal-tab counterpart of
+/// `RowStatus`, kept separate because the GLYPH never varies (always the
+/// console mark; a terminal has no lifecycle shapes) while the ink reuses the
+/// agent colour language: the COLOUR is the state (lock §5). `Done`/`Failed`
+/// can only arise on command panes — an interactive shell never exits while
+/// the tab lives, so its whole range is `Idle`/`Running`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TermStatus {
+    Idle,
+    Running,
+    Done,
+    Failed,
+}
+
+impl TermStatus {
+    fn ink(self) -> Rgb {
+        match self {
+            TermStatus::Idle => DEFAULT_INK,
+            TermStatus::Running => Rgb(0xFF, 0x9E, 0x3B), // roninYellow — Working's ink
+            TermStatus::Done => Rgb(0x98, 0xBB, 0x6C),    // springGreen — Done's ink
+            TermStatus::Failed => Rgb(0xE8, 0x24, 0x24),  // samuraiRed — Failed's ink
+        }
+    }
+}
+
 /// Three-state, not the two-state "worktree marker" S6 describes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Provenance {
@@ -373,9 +402,9 @@ impl Provenance {
 }
 
 /// A row's fields. `Terminal` is a variant rather than a bundle of `None`s
-/// because a terminal tab is a different thing: it has no agent record, so it
-/// renders its zellij name across the whole body and takes the console mark in
-/// the battery cell (lock §5, §7.1).
+/// because a terminal tab is a different thing: it has no agent record, so its
+/// zellij name is the chip, the console mark holds the status cell and `TERM`
+/// the battery cell (lock §5, §7.1; #206).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RowContent {
     Agent {
@@ -402,8 +431,41 @@ pub enum RowContent {
         summary: String,
     },
     Terminal {
+        /// The zellij tab name — the chip. Lock §7.1: this is the only row
+        /// kind that uses it, and a zellij rename IS the labelling mechanism.
         name: String,
+        status: TermStatus,
+        /// Prefix-matched from a store row whose checkout contains the pane's
+        /// cwd — reused verbatim, never computed here. `Main` (blank) when no
+        /// agent occupies the repo.
+        provenance: Provenance,
+        /// The cwd's final directory name, through the same ink allocation the
+        /// agent rows use — one repo is one colour everywhere (lock §4).
+        /// `None` blanks the cell: the bar never invents a location.
+        repo: Option<String>,
+        repo_ink: Option<u8>,
+        /// The focused pane's foreground command — live while it runs,
+        /// lingering as "most recently run" at the prompt. Empty until the
+        /// first command.
+        command: String,
     },
+}
+
+impl RowContent {
+    /// A terminal row before anything is known about its pane: idle, no
+    /// location, no command. Every field the pane facts fill in later has an
+    /// honest blank, so construction sites that only carry the tab name (and
+    /// every pre-#206 test fixture) stay one line.
+    pub fn terminal(name: impl Into<String>) -> RowContent {
+        RowContent::Terminal {
+            name: name.into(),
+            status: TermStatus::Idle,
+            provenance: Provenance::Main,
+            repo: None,
+            repo_ink: None,
+            command: String::new(),
+        }
+    }
 }
 
 /// Inks are `Option<u8>`, never a bare `u8` (LEDGER D7): `0` is `crystalBlue`,
@@ -738,25 +800,45 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
     // battery is one column in either profile (#105).
     let battery_w = widths.battery.width();
     match &row.content {
-        RowContent::Terminal { .. } => {
-            out.push_str(&o); // col 2 — no status; a terminal has no turn
-            out.push(' ');
+        RowContent::Terminal {
+            status,
+            provenance,
+            repo_ink,
+            ..
+        } => {
+            // The console mark moves to the STATUS cell (#206): the glyph is
+            // the row's kind, the colour its state — the same axis split every
+            // agent row already reads by (lock §5). Idle wears fujiWhite, not
+            // katanaGray: a terminal is a real row, not a disabled one.
+            out.push_str(&o);
+            out.push_str(&ink(status.ink()));
+            out.push(CONSOLE); // col 2
+            out.push_str(&o);
             push_rule(&mut out, &o, &ink); // cols 3–5
             out.push_str(&o);
-            // TERMINAL_INK, not UNTINTED: a terminal tab is a real row the
-            // user navigates to, and sumiInk4 read as disabled against the bar
-            // background rather than as "no battery here" (Ollie, live
-            // 2026-07-31). katanaGray is the same ink the tab's NAME already
-            // uses on this row, so the row now reads as one thing.
-            out.push_str(&ink(TERMINAL_INK));
-            // Right-aligned like the count it stands in for, so the battery
-            // cell has ONE alignment rule and a terminal row's mark lands on
-            // the same edge the digits do (#105). Identical to a bare `push`
-            // under `Glyph`, where the cell is one column.
-            out.push_str(&rjust(&CONSOLE.to_string(), battery_w));
+            out.push_str(&ink(DEFAULT_INK));
+            match widths.battery {
+                // `TERM` where an agent row shows its count — four cells,
+                // exactly, so the class marker lands on the digits' edge
+                // (#105) and terminal rows scan as a class.
+                BatteryCell::Count => out.push_str(&rjust(TERM_MARK, battery_w)),
+                BatteryCell::Glyph => out.push(TERM_GLYPH),
+            }
             out.push_str(&o);
+            out.push(' '); // the space after the battery cell
             out.push_str(&o);
-            out.push_str("  "); // no provenance yet (lock §7.2)
+            // Same rule as the agent arm: the one gutter cell permitted an
+            // arbitrary RGB, in the repo's ink (lock §4.1). The provenance is
+            // borrowed from the store row whose checkout holds this pane's
+            // cwd, so blank also means "no agent knows this repo".
+            match provenance.mark() {
+                Some(glyph) => {
+                    out.push_str(&ink(hue(*repo_ink)));
+                    out.push(glyph);
+                    out.push_str(&o);
+                }
+                None => out.push(' '),
+            }
         }
         RowContent::Agent {
             status,
@@ -852,10 +934,47 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
     let summary_w = body.saturating_sub(widths.title + widths.repo + 2);
 
     match &row.content {
-        RowContent::Terminal { name } => {
+        RowContent::Terminal {
+            name,
+            repo,
+            repo_ink,
+            command,
+            ..
+        } => {
+            // The tab NAME becomes the chip (#206): fujiWhite text on
+            // theme-black — the inversion of an agent chip (dark text on an
+            // allocated colour), which is exactly the semantics: a block no
+            // agent ink has claimed. `zellij action rename-tab` is the
+            // labelling mechanism; the default `Tab #N` wears the chip too.
+            // The block keeps its black on the selected row (ratified).
+            out.push_str(&CHIP_INK.mix(BASE, fade).bg());
+            out.push_str(&DEFAULT_INK.fg());
+            out.push_str(&clamp(name, widths.title));
+            out.push_str(RESET);
             out.push_str(&o);
-            out.push_str(&ink(TERMINAL_INK));
-            out.push_str(&clamp(name, body));
+            out.push_str(&o);
+            out.push(' '); // the space after the chip
+            // The cwd's directory name through the same ink the agent rows
+            // use — a terminal sitting in a fleet repo shares its colour
+            // without either knowing about the other (lock §4). An UNMATCHED
+            // cwd has no allocation, and UNTINTED read as disabled — nearly
+            // invisible on the selected row (Ollie, live 2026-08-18) — so the
+            // ink-less repo falls back to fujiWhite like the rest of the row.
+            match repo_ink {
+                Some(i) => out.push_str(&ink(hue(Some(*i)))),
+                None => out.push_str(&ink(DEFAULT_INK)),
+            }
+            out.push_str(&clamp(repo.as_deref().unwrap_or(""), widths.repo));
+            out.push_str(&o);
+            out.push_str(&o);
+            out.push(' '); // the space after the repo
+            // UNCONDITIONALLY fujiWhite, selected or not (ratified): the
+            // agent arm's carry-the-repo-ink-through rule is an agent
+            // aesthetic, and on a terminal row it painted the selected
+            // summary in whatever the repo cell wore — gray, when unmatched
+            // (Ollie, live 2026-08-18).
+            out.push_str(&ink(DEFAULT_INK));
+            out.push_str(&clamp(command, summary_w));
             out.push_str(&o);
         }
         RowContent::Agent {
@@ -1042,9 +1161,7 @@ mod tests {
                 "picking the gutter set",
             ),
             Row {
-                content: RowContent::Terminal {
-                    name: String::from("Tab #16"),
-                },
+                content: RowContent::terminal(String::from("Tab #16")),
                 selected: false,
                 dormant: false,
             },
@@ -1378,21 +1495,21 @@ mod tests {
         );
     }
 
-    /// A terminal row's console mark takes the battery cell (lock §7.1) and
-    /// aligns to the same right edge the digits do, so the cell has one
-    /// alignment rule rather than one per row kind.
+    /// The console mark sits in the STATUS cell (#206) — the glyph is the
+    /// row's kind, its colour the state — and the battery cell carries the
+    /// class marker instead: `TERM` filling the expanded cell to the digits'
+    /// right edge, the prompt glyph in the one-column collapsed cell.
     #[test]
-    fn a_terminal_marks_the_right_edge_of_the_battery_cell() {
+    fn a_terminal_marks_the_status_cell_and_says_term_in_the_battery_cell() {
         let row = Row {
-            content: RowContent::Terminal {
-                name: String::from("Tab #16"),
-            },
+            content: RowContent::terminal(String::from("Tab #16")),
             selected: false,
             dormant: false,
         };
         let bare =
             strip_sgr(&render_all(std::slice::from_ref(&row), DESIGN_COLS, Widths::EXPANDED)[0]);
-        assert_eq!(cell_slice(&bare, 5, 9), format!("   {CONSOLE}"));
+        assert_eq!(cell_slice(&bare, 1, 2), CONSOLE.to_string());
+        assert_eq!(cell_slice(&bare, 5, 9), TERM_MARK);
         let bare = strip_sgr(
             &render_all(
                 std::slice::from_ref(&row),
@@ -1400,7 +1517,56 @@ mod tests {
                 Widths::COLLAPSED,
             )[0],
         );
-        assert_eq!(cell_slice(&bare, 5, 6), CONSOLE.to_string());
+        assert_eq!(cell_slice(&bare, 1, 2), CONSOLE.to_string());
+        assert_eq!(cell_slice(&bare, 5, 6), TERM_GLYPH.to_string());
+    }
+
+    /// A POPULATED terminal row (#206) — the goldens and the test above both
+    /// use `RowContent::terminal`'s idle defaults, which left three of the
+    /// four status inks and the repo fallback unasserted. The console mark's
+    /// ink is the state; the repo cell wears its allocated ink when matched
+    /// and falls back to fujiWhite when not — never UNTINTED, which read as
+    /// disabled on the selected row (Ollie, live 2026-08-18).
+    #[test]
+    fn a_populated_terminal_row_inks_its_status_and_repo() {
+        let row = |status: TermStatus, repo_ink: Option<u8>| Row {
+            content: RowContent::Terminal {
+                name: String::from("Tab #16"),
+                status,
+                provenance: Provenance::Main,
+                repo: Some(String::from("clave")),
+                repo_ink,
+                command: String::from("cargo test"),
+            },
+            selected: false,
+            dormant: false,
+        };
+        for (status, band) in [
+            (TermStatus::Idle, DEFAULT_INK),
+            (TermStatus::Running, Rgb(0xFF, 0x9E, 0x3B)),
+            (TermStatus::Done, Rgb(0x98, 0xBB, 0x6C)),
+            (TermStatus::Failed, Rgb(0xE8, 0x24, 0x24)),
+        ] {
+            let line = &render_all(&[row(status, Some(0))], DESIGN_COLS, Widths::EXPANDED)[0];
+            assert!(
+                line.contains(&format!("{}{CONSOLE}", band.fg())),
+                "{status:?} lost its ink"
+            );
+        }
+        let inked = &render_all(
+            &[row(TermStatus::Idle, Some(0))],
+            DESIGN_COLS,
+            Widths::EXPANDED,
+        )[0];
+        assert!(inked.contains(&format!("{}clave", PALETTE[0].0.fg())));
+        let bare = &render_all(
+            &[row(TermStatus::Idle, None)],
+            DESIGN_COLS,
+            Widths::EXPANDED,
+        )[0];
+        assert!(bare.contains(&format!("{}clave", DEFAULT_INK.fg())));
+        assert!(!bare.contains(&format!("{}clave", UNTINTED.fg())));
+        assert!(strip_sgr(bare).contains("cargo test"));
     }
 
     /// The clip's boundary is inclusive on the PASS-THROUGH side: a pane at
@@ -1697,7 +1863,9 @@ mod tests {
     ///   25` behind a nine-cell gutter before #105; `7 + 1 + 7 + 1 + 17` = 44
     ///   before D19.)
     /// - Row 1 has no title, so cols 13–21 are blank; `clave` is padded to 7 at
-    ///   cols 23–29. Row 3 is a terminal, so its name runs the whole body.
+    ///   cols 23–29. Row 3 is a terminal (#206): the console mark in the status
+    ///   cell, `TERM` in the battery cell, the tab name as a chip on sumiInk0,
+    ///   and a blank repo/summary — nothing is known about its pane yet.
     /// - The battery cell is cols 6–9, right-aligned: `105k`, seven tenths of the
     ///   default smart zone, in the ramp's yellow band (#105).
     /// - The hues are crystalBlue `#7E9CD8`, waveRed `#E46876`, carpYellow
@@ -1729,9 +1897,7 @@ mod tests {
                 )
             },
             Row {
-                content: RowContent::Terminal {
-                    name: String::from("Tab #16"),
-                },
+                content: RowContent::terminal(String::from("Tab #16")),
                 selected: false,
                 dormant: false,
             },
@@ -1739,7 +1905,7 @@ mod tests {
         let expected = [
             " \u{1b}[38;2;179;86;98m\u{25cf} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;180;154;109m105k             \u{1b}[38;2;102;125;172mclave   \u{1b}[38;2;173;169;150mI just passed the spe\u{2026} \u{1b}[0m ",
             "\u{1b}[38;2;45;79;103m\u{e0b6}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m\u{1b}[38;2;255;158;59m\u{25cf}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;220;215;186m\u{2502}\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;230;195;132m105k\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;126;156;216m\u{168c2}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;122;168;159m\u{1b}[38;2;22;22;29mS6-GUT   \u{1b}[0m\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;126;156;216mclave  \u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m picking the gutter set\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[0m\u{1b}[38;2;45;79;103m\u{e0b4}\u{1b}[0m",
-            "   \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;92;101;103m   \u{f018d}   \u{1b}[38;2;92;101;103mTab #16                                  \u{1b}[0m ",
+            " \u{1b}[38;2;173;169;150m\u{f018d} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;173;169;150mTERM   \u{1b}[48;2;24;24;32m\u{1b}[38;2;220;215;186mTab #16  \u{1b}[0m \u{1b}[38;2;173;169;150m        \u{1b}[38;2;173;169;150m                       \u{1b}[0m ",
         ];
         assert_eq!(render_all(&rows, DESIGN_COLS, Widths::EXPANDED), expected);
         // The same derived self-checks the COLLAPSED golden carries. A golden
@@ -1765,7 +1931,7 @@ mod tests {
         // The count, not the glyph, and it starts where the glyph used to (#105).
         assert_eq!(battery(expected[0]), "105k");
         assert_eq!(battery(expected[1]), "105k");
-        assert_eq!(battery(expected[2]), format!("   {CONSOLE}"));
+        assert_eq!(battery(expected[2]), TERM_MARK);
         // Row 1 has no title: nine blank cells, and the repo still starts
         // exactly one space later (an absent chip must not pull the row left).
         assert_eq!(title(expected[0]), " ".repeat(w.title));
@@ -1828,9 +1994,7 @@ mod tests {
                 )
             },
             Row {
-                content: RowContent::Terminal {
-                    name: String::from("Tab #16"),
-                },
+                content: RowContent::terminal(String::from("Tab #16")),
                 selected: false,
                 dormant: false,
             },
@@ -1838,7 +2002,7 @@ mod tests {
         let expected = [
             " \u{1b}[38;2;179;86;98m\u{25cf} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;180;154;109m\u{f007c}           \u{1b}[38;2;102;125;172mcla \u{1b}[38;2;173;169;150mI just\u{2026} \u{1b}[0m ",
             "\u{1b}[38;2;45;79;103m\u{e0b6}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m\u{1b}[38;2;255;158;59m\u{25cf}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;220;215;186m\u{2502}\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;230;195;132m\u{f007c}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;126;156;216m\u{168c2}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;122;168;159m\u{1b}[38;2;22;22;29mS6-GUT \u{1b}[0m\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;126;156;216mcla\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m pickin\u{2026}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[0m\u{1b}[38;2;45;79;103m\u{e0b4}\u{1b}[0m",
-            "   \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;92;101;103m\u{f018d}   \u{1b}[38;2;92;101;103mTab #16             \u{1b}[0m ",
+            " \u{1b}[38;2;173;169;150m\u{f018d} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;173;169;150m\u{f120}   \u{1b}[48;2;24;24;32m\u{1b}[38;2;220;215;186mTab #16\u{1b}[0m \u{1b}[38;2;173;169;150m    \u{1b}[38;2;173;169;150m        \u{1b}[0m ",
         ];
         assert_eq!(
             render_all(&rows, COLLAPSED_DESIGN_COLS, Widths::COLLAPSED),
@@ -2101,9 +2265,7 @@ mod tests {
     fn numbered(n: usize, sel: usize) -> Vec<Row> {
         (0..n)
             .map(|i| Row {
-                content: RowContent::Terminal {
-                    name: format!("t{i:02}"),
-                },
+                content: RowContent::terminal(format!("t{i:02}")),
                 selected: i == sel,
                 dormant: false,
             })
@@ -2252,9 +2414,7 @@ mod tests {
         above.insert(
             0,
             Row {
-                content: RowContent::Terminal {
-                    name: String::from("fresh"),
-                },
+                content: RowContent::terminal(String::from("fresh")),
                 selected: false,
                 dormant: false,
             },
