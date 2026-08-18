@@ -99,11 +99,6 @@ const SHELLS: [&str; 9] = [
     "zsh", "bash", "fish", "sh", "dash", "nu", "ksh", "tcsh", "pwsh",
 ];
 
-/// The summary-cell text for a foreground argv, or `None` when it is the
-/// shell at its prompt. argv[0] arrives as a path (`/bin/zsh`) or a login
-/// shell's dashed name (`-zsh`); both normalise before the shell test, and
-/// the display keeps the basename — `cargo test`, not
-/// `/Users/x/.cargo/bin/cargo test`.
 /// Three-state (lock §5.1), and a main checkout renders NOTHING — that is the
 /// researched choice, and it is what makes the two marked states mean
 /// something. NO branch is the case the design did not name: an agent outside
@@ -149,6 +144,11 @@ fn provenance_of(a: &Agent) -> Provenance {
     }
 }
 
+/// The summary-cell text for a foreground argv, or `None` when it is the
+/// shell at its prompt. argv[0] arrives as a path (`/bin/zsh`) or a login
+/// shell's dashed name (`-zsh`); both normalise before the shell test, and
+/// the display keeps the basename — `cargo test`, not
+/// `/Users/x/.cargo/bin/cargo test`.
 fn command_display(argv: &[String]) -> Option<String> {
     let head = argv.first()?;
     let bin = basename(head).trim_start_matches('-');
@@ -1592,8 +1592,16 @@ impl BarModel {
         self.panes = panes;
         // A closed pane's facts must not survive it: pane ids are minted
         // monotonically by zellij, but a map that only grows is a leak in a
-        // bar that lives for the session.
-        let live: BTreeSet<u32> = self.panes.iter().map(|p| p.pane_id).collect();
+        // bar that lives for the session. Plugin panes are excluded from the
+        // live set — terminal and plugin ids are separate id spaces (the same
+        // fact `own_tab_position` is built on), so a plugin pane's id must
+        // not keep a dead terminal's facts alive for a reborn pane to inherit.
+        let live: BTreeSet<u32> = self
+            .panes
+            .iter()
+            .filter(|p| !p.is_plugin)
+            .map(|p| p.pane_id)
+            .collect();
         self.pane_facts.retain(|id, _| live.contains(id));
         // The frame that ends the Alt+f spawn window: from here shell_toggle
         // reads delivered truth again (see `shell_spawn_pending`).
@@ -1652,9 +1660,20 @@ impl BarModel {
     /// Whether the term-facts poll should be armed (#206): some pane the bar
     /// is tracking claims a running foreground command. zellij never pushes
     /// the exit-side delta, so "running" is exactly the state that needs a
-    /// second look.
+    /// second look. Scoped to `probe_targets`, not the whole facts map: only
+    /// a pane the next probe will actually visit can clear its own running
+    /// flag, and a pane that stopped being its tab's speaker (focus moved to
+    /// a sibling) would otherwise arm a 3s timer nothing can ever satisfy —
+    /// the unreachable-success retry loop FOOTGUNS.md records for exited
+    /// panes, reached by a second route. Its stale flag is harmless in
+    /// itself: only the speaker's facts reach a row, and speakership coming
+    /// back re-lists the pane here.
     pub fn term_poll_wanted(&self) -> bool {
-        self.pane_facts.values().any(|f| f.running)
+        // Membership alone is not enough — `probe_targets` also lists
+        // never-probed panes, which are not awaiting an exit.
+        self.probe_targets()
+            .iter()
+            .any(|id| self.pane_facts.get(id).is_some_and(|f| f.running))
     }
 
     /// The panes main.rs should ask the OS about after this manifest (#206):
@@ -2788,6 +2807,11 @@ mod tests {
         m.apply_pane_facts(vec![probe(5, Some("/tmp/x"), Some(&["cargo", "test"]))]);
         m.apply_panes(vec![pane(0, 6, false, true)]);
         m.apply_panes(vec![pane(0, 5, false, true)]);
+        // A probe where BOTH queries failed (pane mid-spawn, process gone)
+        // must mint nothing: an entry is "known", and a known-and-idle pane
+        // is never re-probed, so a birth failure would stick forever.
+        assert!(!m.apply_pane_facts(vec![probe(5, None, None)]));
+        assert_eq!(m.probe_targets(), vec![5]);
         assert!(matches!(
             terminal_row(&m),
             RowContent::Terminal {
@@ -2797,6 +2821,26 @@ mod tests {
                 ..
             } if command.is_empty()
         ));
+    }
+
+    /// A running fact whose pane stopped being the speaker must not keep the
+    /// exit-side poll armed: the poll only ever re-probes `probe_targets`, so
+    /// a flag no probe can clear would re-arm a 3s timer for as long as the
+    /// pane lives (the unreachable-success retry loop, FOOTGUNS.md).
+    #[test]
+    fn a_stranded_running_fact_does_not_arm_the_poll() {
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "Tab #1", true)]);
+        m.apply_panes(vec![pane(0, 5, false, true), pane(0, 6, false, false)]);
+        m.apply_pane_facts(vec![probe(5, None, Some(&["sleep", "999"]))]);
+        assert!(m.term_poll_wanted());
+        // Focus moves to the sibling: 6 speaks now, 5's flag is unreachable.
+        m.apply_panes(vec![pane(0, 5, false, false), pane(0, 6, false, true)]);
+        assert_eq!(m.probe_targets(), vec![6]);
+        assert!(!m.term_poll_wanted());
+        // Speakership coming back re-lists the pane, and the poll resumes.
+        m.apply_panes(vec![pane(0, 5, false, true), pane(0, 6, false, false)]);
+        assert!(m.term_poll_wanted());
     }
 
     // --- row projections ---------------------------------------------------

@@ -34,6 +34,15 @@ const TIMER_KIND_CUTOFF_SECS: f64 = 0.5;
 const TERM_POLL_CUTOFF_SECS: f64 = 2.0;
 const TERM_POLL_SECS: f64 = 3.0;
 
+// The Timer classifier reads elapsed seconds alone, so the three durations
+// must hold their bands or one kind silently eats another's expiry — nothing
+// would fail except a live session. Same shape as the collapsed<expanded
+// width guard.
+const _: () = assert!(WIDTH_COOLDOWN_SECS < TIMER_KIND_CUTOFF_SECS);
+const _: () = assert!(TIMER_KIND_CUTOFF_SECS <= PEEK_SINK_SECS);
+const _: () = assert!(PEEK_SINK_SECS < TERM_POLL_CUTOFF_SECS);
+const _: () = assert!(TERM_POLL_CUTOFF_SECS <= TERM_POLL_SECS);
+
 #[derive(Default)]
 struct State {
     model: BarModel,

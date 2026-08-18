@@ -402,9 +402,9 @@ impl Provenance {
 }
 
 /// A row's fields. `Terminal` is a variant rather than a bundle of `None`s
-/// because a terminal tab is a different thing: it has no agent record, so it
-/// renders its zellij name across the whole body and takes the console mark in
-/// the battery cell (lock §5, §7.1).
+/// because a terminal tab is a different thing: it has no agent record, so its
+/// zellij name is the chip, the console mark holds the status cell and `TERM`
+/// the battery cell (lock §5, §7.1; #206).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RowContent {
     Agent {
@@ -1519,6 +1519,54 @@ mod tests {
         );
         assert_eq!(cell_slice(&bare, 1, 2), CONSOLE.to_string());
         assert_eq!(cell_slice(&bare, 5, 6), TERM_GLYPH.to_string());
+    }
+
+    /// A POPULATED terminal row (#206) — the goldens and the test above both
+    /// use `RowContent::terminal`'s idle defaults, which left three of the
+    /// four status inks and the repo fallback unasserted. The console mark's
+    /// ink is the state; the repo cell wears its allocated ink when matched
+    /// and falls back to fujiWhite when not — never UNTINTED, which read as
+    /// disabled on the selected row (Ollie, live 2026-08-18).
+    #[test]
+    fn a_populated_terminal_row_inks_its_status_and_repo() {
+        let row = |status: TermStatus, repo_ink: Option<u8>| Row {
+            content: RowContent::Terminal {
+                name: String::from("Tab #16"),
+                status,
+                provenance: Provenance::Main,
+                repo: Some(String::from("clave")),
+                repo_ink,
+                command: String::from("cargo test"),
+            },
+            selected: false,
+            dormant: false,
+        };
+        for (status, band) in [
+            (TermStatus::Idle, DEFAULT_INK),
+            (TermStatus::Running, Rgb(0xFF, 0x9E, 0x3B)),
+            (TermStatus::Done, Rgb(0x98, 0xBB, 0x6C)),
+            (TermStatus::Failed, Rgb(0xE8, 0x24, 0x24)),
+        ] {
+            let line = &render_all(&[row(status, Some(0))], DESIGN_COLS, Widths::EXPANDED)[0];
+            assert!(
+                line.contains(&format!("{}{CONSOLE}", band.fg())),
+                "{status:?} lost its ink"
+            );
+        }
+        let inked = &render_all(
+            &[row(TermStatus::Idle, Some(0))],
+            DESIGN_COLS,
+            Widths::EXPANDED,
+        )[0];
+        assert!(inked.contains(&format!("{}clave", PALETTE[0].0.fg())));
+        let bare = &render_all(
+            &[row(TermStatus::Idle, None)],
+            DESIGN_COLS,
+            Widths::EXPANDED,
+        )[0];
+        assert!(bare.contains(&format!("{}clave", DEFAULT_INK.fg())));
+        assert!(!bare.contains(&format!("{}clave", UNTINTED.fg())));
+        assert!(strip_sgr(bare).contains("cargo test"));
     }
 
     /// The clip's boundary is inclusive on the PASS-THROUGH side: a pane at
