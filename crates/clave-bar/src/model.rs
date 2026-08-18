@@ -14,7 +14,9 @@ use std::collections::{BTreeMap, BTreeSet};
 // generators size the newborn pane from them — one definition, three artifacts.
 use clave_types::{Agent, AgentSnapshot, Status};
 
-use crate::render::{PALETTE, Provenance, Row, RowContent, RowStatus, Widths, viewport_top};
+use crate::render::{
+    PALETTE, Provenance, Row, RowContent, RowStatus, TermStatus, Widths, viewport_top,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TabMeta {
@@ -40,6 +42,117 @@ pub struct PaneMeta {
     /// presence on the active tab is what separates Alt+f's show from its
     /// spawn (#207) — respawning over a hidden shell is the stacking bug.
     pub is_floating: bool,
+    /// The launch command of a COMMAND pane (`zellij run`, layout `command`
+    /// nodes) — static, never the shell's current foreground. `None` for
+    /// ordinary shell panes, which is the case `TermFacts` exists for (#206).
+    pub terminal_command: Option<String>,
+    /// A finished command pane, and how it finished — the only place an exit
+    /// code exists (an interactive shell never exits while its tab lives), so
+    /// the only source of a terminal row's Done/Failed (#206).
+    pub exited: bool,
+    pub exit_status: Option<i32>,
+}
+
+/// What the bar has learned about a terminal pane beyond the manifest (#206):
+/// the cwd and foreground command are OS truths zellij only surrenders on
+/// request (`get_pane_cwd` / `get_pane_running_command`) or by subscription
+/// (`CwdChanged` / `CommandChanged`), so they live in a side map keyed by pane
+/// id rather than on `PaneMeta`, whose rows are rebuilt whole every manifest.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TermFacts {
+    /// The pane process's current working directory, as the OS reports it.
+    pub cwd: Option<String>,
+    /// The most recent foreground command that was not the shell itself —
+    /// lingering after it finishes, which is what makes the summary read as
+    /// "most recently run" at an idle prompt.
+    pub last_cmd: Option<String>,
+    /// Whether that command is in flight RIGHT NOW — the running/idle axis of
+    /// the status glyph. Derived: the reported foreground is running unless it
+    /// is the shell.
+    pub running: bool,
+}
+
+/// One OS answer about one pane, on its way into `TermFacts` (#206). Both
+/// fields are "answered or not asked" — see `apply_pane_facts`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PaneProbe {
+    pub pane_id: u32,
+    pub cwd: Option<String>,
+    /// The foreground argv exactly as the OS reported it; classification
+    /// (shell vs command) is `apply_pane_facts`'s job, not the caller's.
+    pub foreground: Option<Vec<String>>,
+}
+
+/// Foreground argvs that are the SHELL ITSELF, i.e. an idle prompt. Names,
+/// because that is all the OS report offers generically: an exotic shell not
+/// listed reads as an eternally running command, which is visible and
+/// harmless; the empty argv reads as idle.
+const SHELLS: [&str; 9] = [
+    "zsh", "bash", "fish", "sh", "dash", "nu", "ksh", "tcsh", "pwsh",
+];
+
+/// The summary-cell text for a foreground argv, or `None` when it is the
+/// shell at its prompt. argv[0] arrives as a path (`/bin/zsh`) or a login
+/// shell's dashed name (`-zsh`); both normalise before the shell test, and
+/// the display keeps the basename — `cargo test`, not
+/// `/Users/x/.cargo/bin/cargo test`.
+/// Three-state (lock §5.1), and a main checkout renders NOTHING — that is the
+/// researched choice, and it is what makes the two marked states mean
+/// something. NO branch is the case the design did not name: an agent outside
+/// a repo has none, and painting the branch glyph for it would assert a
+/// provenance nobody has — so it takes the blank.
+///
+/// `"-"` is the value that matters, NOT the empty string: the host writes
+/// `"-"` when `git rev-parse --abbrev-ref HEAD` fails (`add::run_add`'s
+/// fallback) and `record_branch` returns `"-"` for a detached-worktree
+/// resume. Nothing in the host ever writes an empty branch — every
+/// `branch: String::new()` in the tree is a test builder, so the empty clause
+/// is kept only to keep those honest. Verified against the writer, not
+/// against a fixture.
+///
+/// WHICH branch is the default is the repo's answer, never ours (#86). This
+/// used to test `main`/`master` as if they were exhaustive, so a `trunk`-,
+/// `develop`- or `dev`-default repository had its ORDINARY checkout marked as
+/// a branch — the one row §5.1 requires to be blank, mislabelled on naming
+/// convention alone. `default_branch` is resolved by the host
+/// (`add::resolve_default_branch`) and rides the snapshot. The name test
+/// survives only as the fallback for `None`, which is what an old store row
+/// and an undiscoverable default both deserialize to: no snapshot gets a
+/// WORSE answer than it got before the field existed.
+///
+/// A free function since #206: terminal rows borrow a matched agent's
+/// provenance, and a borrowed glyph must be computed by the same rules as the
+/// row it was borrowed from.
+fn provenance_of(a: &Agent) -> Provenance {
+    if a.worktree.is_some() {
+        Provenance::Worktree
+    } else if a.branch.is_empty() || a.branch == "-" {
+        Provenance::Main
+    } else if let Some(default) = a.default_branch.as_deref() {
+        if a.branch == default {
+            Provenance::Main
+        } else {
+            Provenance::Branch
+        }
+    } else if a.branch == "main" || a.branch == "master" {
+        Provenance::Main
+    } else {
+        Provenance::Branch
+    }
+}
+
+fn command_display(argv: &[String]) -> Option<String> {
+    let head = argv.first()?;
+    let bin = basename(head).trim_start_matches('-');
+    if bin.is_empty() || SHELLS.contains(&bin) {
+        return None;
+    }
+    let mut out = bin.to_string();
+    for a in &argv[1..] {
+        out.push(' ');
+        out.push_str(a);
+    }
+    Some(out)
 }
 
 /// Side effects for main.rs to execute — kept as data so tests assert them.
@@ -409,6 +522,12 @@ pub struct BarModel {
     /// reborn, so whatever write raced ahead belongs to the newborn.
     witnessed_dead: BTreeSet<usize>,
     panes: Vec<PaneMeta>,
+    /// pane id → what the OS said about it (#206). Written by
+    /// `apply_pane_facts` (main.rs probes and event deltas), pruned by
+    /// `apply_panes` when the manifest no longer carries the pane. Only
+    /// terminal-tab speaker panes are ever probed, but the map holds whatever
+    /// it is handed — the row build, not the ingest, decides relevance.
+    pane_facts: BTreeMap<u32, TermFacts>,
     /// tab_id → the commitment ORDINAL of the last USER COMMITMENT to that tab
     /// (§6.6 / S1). NOT owned here: the store is the one writer (`clave touch`
     /// RMW) and this copy is REPLACED wholesale from every seq-gated
@@ -1463,6 +1582,11 @@ impl BarModel {
     /// so the payment is frame-witnessed in the same sense the debt is.
     pub fn apply_panes(&mut self, panes: Vec<PaneMeta>) -> Vec<Effect> {
         self.panes = panes;
+        // A closed pane's facts must not survive it: pane ids are minted
+        // monotonically by zellij, but a map that only grows is a leak in a
+        // bar that lives for the session.
+        let live: BTreeSet<u32> = self.panes.iter().map(|p| p.pane_id).collect();
+        self.pane_facts.retain(|id, _| live.contains(id));
         // The frame that ends the Alt+f spawn window: from here shell_toggle
         // reads delivered truth again (see `shell_spawn_pending`).
         self.shell_spawn_pending = false;
@@ -1479,6 +1603,129 @@ impl BarModel {
             return vec![Effect::ReanchorVisit { tab_id: own }];
         }
         Vec::new()
+    }
+
+    /// One OS answer about one pane, as main.rs collected it (#206) — from a
+    /// `PaneUpdate` probe (both fields asked) or a `CwdChanged`/`CommandChanged`
+    /// delta (one field each). `None` means "not asked / no answer", never
+    /// "clear what you knew": a failed probe must not blank a row that was
+    /// telling the truth a frame ago.
+    pub fn apply_pane_facts(&mut self, probes: Vec<PaneProbe>) -> bool {
+        let mut changed = false;
+        for p in probes {
+            let f = self.pane_facts.entry(p.pane_id).or_default();
+            let before = f.clone();
+            if let Some(cwd) = p.cwd {
+                f.cwd = Some(cwd);
+            }
+            if let Some(argv) = p.foreground {
+                match command_display(&argv) {
+                    Some(cmd) => {
+                        f.last_cmd = Some(cmd);
+                        f.running = true;
+                    }
+                    // The shell itself: the prompt is idle, and the last
+                    // command LINGERS — that is what "most recently run" means.
+                    None => f.running = false,
+                }
+            }
+            changed |= *f != before;
+        }
+        changed
+    }
+
+    /// The panes main.rs should ask the OS about after this manifest (#206):
+    /// each terminal tab's speaker. Agent tabs are excluded — their row is the
+    /// store's, and their panes' cwds are already store truth.
+    pub fn probe_targets(&self) -> Vec<u32> {
+        self.tabs
+            .iter()
+            .filter(|t| self.agent_in_tab(t.tab_id).is_none())
+            .filter_map(|t| self.speaker_pane(t.position).map(|p| p.pane_id))
+            .collect()
+    }
+
+    /// The pane that speaks for a terminal tab's row (#206, ratified): the
+    /// tab's focused tiled terminal, falling back to its first. Plugin panes
+    /// never speak (the bar itself lives in one), and floating panes don't
+    /// either — the row describes the tab's resident content, not the scratch
+    /// shell hovering over it.
+    fn speaker_pane(&self, position: usize) -> Option<&PaneMeta> {
+        let resident = |p: &&PaneMeta| p.tab_position == position && !p.is_plugin && !p.is_floating;
+        self.panes
+            .iter()
+            .find(|p| resident(p) && p.is_focused)
+            .or_else(|| self.panes.iter().find(resident))
+    }
+
+    /// The row content for a terminal tab (#206): the tab name as the chip,
+    /// and everything else read off the speaker pane — status from its
+    /// command-pane exit or its foreground facts, location from its cwd
+    /// through the fleet's own checkouts, summary from its most recent
+    /// foreground command.
+    fn terminal_content(&self, t: &TabMeta, inks: &ProvisionalInks) -> RowContent {
+        let speaker = self.speaker_pane(t.position);
+        let facts = speaker.and_then(|p| self.pane_facts.get(&p.pane_id));
+        let status = match speaker {
+            // A command pane is the one terminal whose lifecycle is visible:
+            // running until it exits, then Done or Failed by exit code. A
+            // held pane (rerun pending) reads as its last exit, honestly.
+            Some(p) if p.terminal_command.is_some() => {
+                if !p.exited {
+                    TermStatus::Running
+                } else if p.exit_status.unwrap_or(0) == 0 {
+                    TermStatus::Done
+                } else {
+                    TermStatus::Failed
+                }
+            }
+            _ if facts.is_some_and(|f| f.running) => TermStatus::Running,
+            _ => TermStatus::Idle,
+        };
+        // The cwd through the fleet's checkouts (#206, ratified): a prefix
+        // match against an agent's checkout reuses that row's repo name, ink
+        // and provenance verbatim — correct by construction, no git reading.
+        // Unmatched cwds show their directory name untinted, provenance
+        // blank: "where it lives" is useful even outside the fleet.
+        let (repo, repo_ink, provenance) = match facts.and_then(|f| f.cwd.as_deref()) {
+            Some(cwd) => match self.checkout_of(cwd) {
+                Some(a) => (
+                    Some(basename(&a.repo_root).to_string()),
+                    inks.repo.get(&a.repo_root).copied(),
+                    provenance_of(a),
+                ),
+                None => (Some(basename(cwd).to_string()), None, Provenance::Main),
+            },
+            None => (None, None, Provenance::Main),
+        };
+        let command = facts
+            .and_then(|f| f.last_cmd.clone())
+            .or_else(|| speaker.and_then(|p| p.terminal_command.clone()))
+            .unwrap_or_default();
+        RowContent::Terminal {
+            name: t.name.clone(),
+            status,
+            provenance,
+            repo,
+            repo_ink,
+            command,
+        }
+    }
+
+    /// The agent whose checkout contains `cwd`, if any — worktree path when
+    /// the agent has one, repo root otherwise. Longest match wins: a worktree
+    /// under the main repo's tree must claim its own panes.
+    fn checkout_of(&self, cwd: &str) -> Option<&Agent> {
+        self.agents
+            .iter()
+            .filter_map(|a| {
+                let root = a.worktree.as_deref().unwrap_or(&a.repo_root);
+                (!root.is_empty()
+                    && (cwd == root || cwd.strip_prefix(root).is_some_and(|r| r.starts_with('/'))))
+                .then_some((root.len(), a))
+            })
+            .max_by_key(|(len, _)| *len)
+            .map(|(_, a)| a)
     }
 
     /// The row content for a live-or-dormant agent (lock §2). `dormant` and
@@ -1521,44 +1768,7 @@ impl BarModel {
                 Status::Failed => RowStatus::Failed,
             }
         };
-        // Three-state (lock §5.1), and a main checkout renders NOTHING — that
-        // is the researched choice, and it is what makes the two marked states
-        // mean something. NO branch is the case the design did not name: an
-        // agent outside a repo has none, and painting the branch glyph for it
-        // would assert a provenance nobody has — so it takes the blank.
-        //
-        // `"-"` is the value that matters, NOT the empty string: the host
-        // writes `"-"` when `git rev-parse --abbrev-ref HEAD` fails
-        // (`add::run_add`'s fallback) and `record_branch` returns `"-"` for a
-        // detached-worktree resume. Nothing in the host ever writes an empty
-        // branch — every `branch: String::new()` in the tree is a test builder,
-        // so the empty clause is kept only to keep those honest. Verified
-        // against the writer, not against a fixture.
-        //
-        // WHICH branch is the default is the repo's answer, never ours (#86).
-        // This used to test `main`/`master` as if they were exhaustive, so a
-        // `trunk`-, `develop`- or `dev`-default repository had its ORDINARY
-        // checkout marked as a branch — the one row §5.1 requires to be blank,
-        // mislabelled on naming convention alone. `default_branch` is resolved
-        // by the host (`add::resolve_default_branch`) and rides the snapshot.
-        // The name test survives only as the fallback for `None`, which is what
-        // an old store row and an undiscoverable default both deserialize to:
-        // no snapshot gets a WORSE answer than it got before the field existed.
-        let provenance = if a.worktree.is_some() {
-            Provenance::Worktree
-        } else if a.branch.is_empty() || a.branch == "-" {
-            Provenance::Main
-        } else if let Some(default) = a.default_branch.as_deref() {
-            if a.branch == default {
-                Provenance::Main
-            } else {
-                Provenance::Branch
-            }
-        } else if a.branch == "main" || a.branch == "master" {
-            Provenance::Main
-        } else {
-            Provenance::Branch
-        };
+        let provenance = provenance_of(a);
         let title = a.title.clone();
         RowContent::Agent {
             status,
@@ -1673,9 +1883,7 @@ impl BarModel {
             // second, drifting copy of the label.
             let content = match self.agent_in_tab(t.tab_id) {
                 Some(a) => self.agent_content(a, false, false, &inks),
-                None => RowContent::Terminal {
-                    name: t.name.clone(),
-                },
+                None => self.terminal_content(t, &inks),
             };
             live.push((
                 self.live_ord(t),
@@ -2350,7 +2558,193 @@ mod tests {
             is_plugin: plugin,
             is_focused: focused,
             is_floating: false,
+            terminal_command: None,
+            exited: false,
+            exit_status: None,
         }
+    }
+
+    // --- #206 terminal rows: speakers, facts, borrowed provenance ----------
+
+    /// The first terminal row's content — terminal-row tests care about THE
+    /// terminal row, wherever recency sorted it.
+    fn terminal_row(m: &BarModel) -> RowContent {
+        m.rows()
+            .into_iter()
+            .map(|(_, r)| r.content)
+            .find(|c| matches!(c, RowContent::Terminal { .. }))
+            .expect("no terminal row")
+    }
+
+    fn probe(pane_id: u32, cwd: Option<&str>, foreground: Option<&[&str]>) -> PaneProbe {
+        PaneProbe {
+            pane_id,
+            cwd: cwd.map(String::from),
+            foreground: foreground.map(|a| a.iter().map(|s| s.to_string()).collect()),
+        }
+    }
+
+    /// A foreground command runs; the shell coming back to its prompt goes
+    /// idle but the command LINGERS — that is what "most recently run" means.
+    #[test]
+    fn a_shell_at_its_prompt_keeps_its_last_command() {
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "Tab #1", true)]);
+        m.apply_panes(vec![pane(0, 5, false, true)]);
+        assert!(m.apply_pane_facts(vec![probe(5, None, Some(&["cargo", "test"]))]));
+        assert!(matches!(
+            terminal_row(&m),
+            RowContent::Terminal { status: TermStatus::Running, command, .. } if command == "cargo test"
+        ));
+        // Login shells report a dashed argv0; that is the prompt, not a command.
+        assert!(m.apply_pane_facts(vec![probe(5, None, Some(&["-zsh"]))]));
+        assert!(matches!(
+            terminal_row(&m),
+            RowContent::Terminal { status: TermStatus::Idle, command, .. } if command == "cargo test"
+        ));
+        // A full-path argv0 is a command like any other, shown by basename.
+        assert!(m.apply_pane_facts(vec![probe(5, None, Some(&["/usr/bin/git", "status"]))]));
+        assert!(matches!(
+            terminal_row(&m),
+            RowContent::Terminal { status: TermStatus::Running, command, .. } if command == "git status"
+        ));
+    }
+
+    /// The cwd through the fleet's checkouts: inside an agent's worktree the
+    /// terminal borrows that row's repo name, ink and provenance verbatim;
+    /// outside the fleet it shows its directory name, untinted, unmarked.
+    #[test]
+    fn a_terminal_cwd_borrows_a_matching_agents_repo_ink_and_provenance() {
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "Tab #1", true), tab(11, 1, "agent", false)]);
+        m.apply_panes(vec![pane(0, 5, false, true), pane(1, 6, false, true)]);
+        let a = Agent {
+            repo_root: "/r/clave".into(),
+            worktree: Some("/w/clave-wt".into()),
+            branch: "feat".into(),
+            ..agent_at("u1", Status::Idle, Some(11), 6)
+        };
+        m.apply_snapshot(snap(1, vec![a]));
+        m.apply_pane_facts(vec![probe(5, Some("/w/clave-wt/crates"), None)]);
+        let agent_ink = m
+            .rows()
+            .into_iter()
+            .find_map(|(_, r)| match r.content {
+                RowContent::Agent { repo_ink, .. } => Some(repo_ink),
+                _ => None,
+            })
+            .expect("no agent row");
+        match terminal_row(&m) {
+            RowContent::Terminal {
+                repo,
+                repo_ink,
+                provenance,
+                ..
+            } => {
+                assert_eq!(repo.as_deref(), Some("clave"));
+                assert_eq!(repo_ink, agent_ink);
+                assert_eq!(provenance, Provenance::Worktree);
+            }
+            c => panic!("not a terminal row: {c:?}"),
+        }
+        // Outside every checkout: directory name, no ink, no provenance. A
+        // sibling path sharing the checkout's PREFIX must not match — the
+        // boundary is a path component, not a byte prefix.
+        m.apply_pane_facts(vec![probe(5, Some("/w/clave-wt-other"), None)]);
+        assert!(matches!(
+            terminal_row(&m),
+            RowContent::Terminal { repo: Some(r), repo_ink: None, provenance: Provenance::Main, .. }
+                if r == "clave-wt-other"
+        ));
+    }
+
+    /// A command pane is the one terminal with a visible lifecycle: running
+    /// until it exits, then Done or Failed by exit code, its launch command
+    /// standing in for the summary until any foreground fact arrives.
+    #[test]
+    fn a_command_pane_reports_done_or_failed_by_exit_code() {
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "Tab #1", true)]);
+        let cmd_pane = |exited: bool, code: Option<i32>| PaneMeta {
+            terminal_command: Some("cargo test --workspace".into()),
+            exited,
+            exit_status: code,
+            ..pane(0, 5, false, true)
+        };
+        m.apply_panes(vec![cmd_pane(false, None)]);
+        assert!(matches!(
+            terminal_row(&m),
+            RowContent::Terminal { status: TermStatus::Running, command, .. }
+                if command == "cargo test --workspace"
+        ));
+        m.apply_panes(vec![cmd_pane(true, Some(0))]);
+        assert!(matches!(
+            terminal_row(&m),
+            RowContent::Terminal {
+                status: TermStatus::Done,
+                ..
+            }
+        ));
+        m.apply_panes(vec![cmd_pane(true, Some(101))]);
+        assert!(matches!(
+            terminal_row(&m),
+            RowContent::Terminal {
+                status: TermStatus::Failed,
+                ..
+            }
+        ));
+    }
+
+    /// The speaker is the focused tiled terminal, falling back to the first;
+    /// plugin panes (the bar itself) and floating panes (the Alt+f scratch
+    /// shell) never speak. Agent tabs are not probed at all — their row is
+    /// the store's.
+    #[test]
+    fn the_speaker_is_the_focused_tiled_terminal_and_agent_tabs_are_not_probed() {
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "Tab #1", true), tab(11, 1, "agent", false)]);
+        m.apply_snapshot(snap(1, vec![agent_at("u1", Status::Idle, Some(11), 9)]));
+        let floating = PaneMeta {
+            is_floating: true,
+            ..pane(0, 7, false, true)
+        };
+        m.apply_panes(vec![
+            pane(0, 1, true, false), // the bar
+            pane(0, 5, false, false),
+            pane(0, 6, false, true),
+            floating,
+            pane(1, 9, false, true), // the agent's pane
+        ]);
+        assert_eq!(m.probe_targets(), vec![6]);
+        // No tiled pane focused (focus sits on the floating shell): first
+        // tiled terminal speaks.
+        m.apply_panes(vec![
+            pane(0, 1, true, false),
+            pane(0, 5, false, false),
+            pane(0, 6, false, false),
+        ]);
+        assert_eq!(m.probe_targets(), vec![5]);
+    }
+
+    /// A closed pane's facts must not survive it — and a pane id reborn later
+    /// must start blank, not inherit a dead shell's history.
+    #[test]
+    fn pane_facts_die_with_their_pane() {
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "Tab #1", true)]);
+        m.apply_panes(vec![pane(0, 5, false, true)]);
+        m.apply_pane_facts(vec![probe(5, Some("/tmp/x"), Some(&["cargo", "test"]))]);
+        m.apply_panes(vec![pane(0, 6, false, true)]);
+        m.apply_panes(vec![pane(0, 5, false, true)]);
+        assert!(matches!(
+            terminal_row(&m),
+            RowContent::Terminal {
+                status: TermStatus::Idle,
+                repo: None,
+                command,
+                ..
+            } if command.is_empty()
+        ));
     }
 
     // --- row projections ---------------------------------------------------
@@ -2374,7 +2768,7 @@ mod tests {
         m.rows()
             .into_iter()
             .map(|(k, r)| match r.content {
-                RowContent::Terminal { name } => name,
+                RowContent::Terminal { name, .. } => name,
                 RowContent::Agent { .. } => panic!("{k:?} is an agent row, not a terminal"),
             })
             .collect()
@@ -2550,12 +2944,7 @@ mod tests {
         ));
         // The bound tab renders as an AGENT, so the zellij tab name is gone
         // (lock §7.1); the unbound one is still a terminal and keeps it.
-        assert_eq!(
-            p.1.content,
-            RowContent::Terminal {
-                name: "plain".into()
-            }
-        );
+        assert_eq!(p.1.content, RowContent::terminal("plain"));
         // An UNBOUND agent (bind not landed yet) decorates nothing.
         let mut m2 = BarModel::default();
         m2.apply_tabs(vec![tab(10, 0, "agent-tab", false)]);
@@ -3866,6 +4255,9 @@ mod tests {
             is_plugin: false,
             is_focused: false,
             is_floating: true,
+            terminal_command: None,
+            exited: false,
+            exit_status: None,
         });
         m.apply_panes(panes);
         assert_eq!(
@@ -3923,6 +4315,9 @@ mod tests {
             is_plugin: false,
             is_focused: false,
             is_floating: true,
+            terminal_command: None,
+            exited: false,
+            exit_status: None,
         });
         m.apply_panes(panes);
         assert_eq!(m.shell_toggle(), vec![Effect::ShellShow]);
@@ -5107,12 +5502,7 @@ mod tests {
         // Lock §7.1: the zellij tab name is used ONLY for a terminal tab.
         let mut m = BarModel::default();
         m.apply_tabs(vec![tab(10, 0, "Tab #16", false)]);
-        assert_eq!(
-            content_at(&m, 0),
-            RowContent::Terminal {
-                name: "Tab #16".into()
-            }
-        );
+        assert_eq!(content_at(&m, 0), RowContent::terminal("Tab #16"));
     }
 
     #[test]
@@ -7224,6 +7614,9 @@ mod tests {
                                         is_plugin: true,
                                         is_focused: false,
                                         is_floating: false,
+                                        terminal_command: None,
+                                        exited: false,
+                                        exit_status: None,
                                     },
                                     PaneMeta {
                                         tab_position: pos,
@@ -7231,6 +7624,9 @@ mod tests {
                                         is_plugin: false,
                                         is_focused: false,
                                         is_floating: false,
+                                        terminal_command: None,
+                                        exited: false,
+                                        exit_status: None,
                                     },
                                 ]
                             })

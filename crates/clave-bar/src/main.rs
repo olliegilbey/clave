@@ -9,7 +9,8 @@ use std::io::Write;
 // The pure model lives in the LIB half of this crate (src/lib.rs → model.rs)
 // so it host-tests without linking this bin's wasm host-import shims.
 use clave_bar::model::{
-    BarModel, BindStallState, Effect, PEEK_SINK_SECS, PaneMeta, TabMeta, WIDTH_COOLDOWN_SECS,
+    BarModel, BindStallState, Effect, PEEK_SINK_SECS, PaneMeta, PaneProbe, TabMeta,
+    WIDTH_COOLDOWN_SECS,
 };
 use clave_bar::plugin_config::resolve_binary;
 use clave_bar::render::{Row, render_rows};
@@ -549,6 +550,11 @@ impl ZellijPlugin for State {
         subscribe(&[
             EventType::TabUpdate,
             EventType::PaneUpdate,
+            // The #206 terminal-row deltas: cwd and foreground-command pushes
+            // between manifests. Per-pane and quiet — nothing like
+            // InputReceived's per-keystroke storm (see below).
+            EventType::CwdChanged,
+            EventType::CommandChanged,
             EventType::Mouse,
             EventType::RunCommandResult,
             EventType::PermissionRequestResult,
@@ -655,6 +661,9 @@ impl ZellijPlugin for State {
                             is_plugin: p.is_plugin,
                             is_focused: p.is_focused,
                             is_floating: p.is_floating,
+                            terminal_command: p.terminal_command.clone(),
+                            exited: p.exited,
+                            exit_status: p.exit_status,
                         });
                     }
                 }
@@ -667,8 +676,66 @@ impl ZellijPlugin for State {
                 let fx = self.model.apply_panes(metas);
                 self.run_effects(fx);
                 self.settle_identity(); // fresh manifest → own-tab joins resolvable
+                // Terminal-tab speakers get their OS facts probed on every
+                // manifest (#206): the events keep them fresh BETWEEN frames,
+                // but neither fires retroactively for a pane that was already
+                // at its prompt when this bar was born. A failed query is
+                // `None`, which `apply_pane_facts` treats as "no answer",
+                // never as "clear".
+                let probes: Vec<PaneProbe> = self
+                    .model
+                    .probe_targets()
+                    .into_iter()
+                    .map(|id| PaneProbe {
+                        pane_id: id,
+                        cwd: get_pane_cwd(PaneId::Terminal(id))
+                            .ok()
+                            .map(|p| p.to_string_lossy().into_owned()),
+                        foreground: get_pane_running_command(PaneId::Terminal(id)).ok(),
+                    })
+                    .collect();
+                // CHANGED-ONLY logging, here and in the two event arms below:
+                // the drive loop's quiescence assertion (TESTING.md §the
+                // sandbox drive loop) reads these from zellij.log, and an idle
+                // fleet must not grow the log. Plugin pixels are not
+                // machine-readable (dump-screen is empty for plugin panes),
+                // so these lines ARE the automatable evidence that the OS
+                // facts pipeline delivered.
+                if self.model.apply_pane_facts(probes) {
+                    eprintln!("clave-bar: term-facts probe updated");
+                }
                 true
             }
+            // The between-frames halves of the #206 probes: zellij pushes cwd
+            // and foreground-command deltas per pane. Each maps onto the same
+            // `PaneProbe` the manifest probe uses — one ingest path, one
+            // classification. A background command's delta is ignored: the
+            // row speaks for what the prompt is doing, and is_foreground=false
+            // says the prompt isn't doing this.
+            Event::CwdChanged(PaneId::Terminal(id), cwd, _) => {
+                let changed = self.model.apply_pane_facts(vec![PaneProbe {
+                    pane_id: id,
+                    cwd: Some(cwd.to_string_lossy().into_owned()),
+                    foreground: None,
+                }]);
+                if changed {
+                    eprintln!("clave-bar: term-facts cwd delta pane {id}");
+                }
+                changed
+            }
+            Event::CommandChanged(PaneId::Terminal(id), argv, is_foreground, _) => {
+                let changed = is_foreground
+                    && self.model.apply_pane_facts(vec![PaneProbe {
+                        pane_id: id,
+                        cwd: None,
+                        foreground: Some(argv),
+                    }]);
+                if changed {
+                    eprintln!("clave-bar: term-facts command delta pane {id}");
+                }
+                changed
+            }
+            Event::CwdChanged(..) | Event::CommandChanged(..) => false,
             Event::Timer(elapsed) => {
                 // TWO timer kinds share this event again (the dwell era's
                 // classify_timer scheme, revived for the width cooldown):

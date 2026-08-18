@@ -26,7 +26,7 @@
 
 use clave_bar::render::{
     CHIP_INK, COLLAPSED_DESIGN_COLS, DESIGN_COLS, PALETTE, Provenance, RESET, Rgb, Row, RowContent,
-    RowStatus, Widths, display_cells, render_rows, strip_sgr,
+    RowStatus, TermStatus, Widths, display_cells, render_rows, strip_sgr,
 };
 
 const BOLD: &str = "\u{1b}[1m";
@@ -61,6 +61,31 @@ fn agent(
         },
         selected: false,
         dormant: matches!(status, RowStatus::Dormant | RowStatus::DormantSelected),
+    }
+}
+
+/// A terminal row with its pane facts filled in (#206): the tab name is the
+/// chip, the cwd's directory name rides the repo ink allocation, and the
+/// summary carries the focused pane's most recent foreground command.
+/// `RowContent::terminal(name)` remains the nothing-known-yet default.
+fn terminal(
+    name: &str,
+    status: TermStatus,
+    provenance: Provenance,
+    repo: Option<(&str, u8)>,
+    command: &str,
+) -> Row {
+    Row {
+        content: RowContent::Terminal {
+            name: String::from(name),
+            status,
+            provenance,
+            repo: repo.map(|(r, _)| String::from(r)),
+            repo_ink: repo.map(|(_, i)| i),
+            command: String::from(command),
+        },
+        selected: false,
+        dormant: false,
     }
 }
 
@@ -110,10 +135,17 @@ fn fleet() -> Vec<Row> {
             Some(("UX-DOC", 6)),
             "there was a stale anchor",
         ),
+        terminal(
+            "Tab #16",
+            TermStatus::Running,
+            Provenance::Worktree,
+            Some(("clave", CLAVE)),
+            "cargo test --workspace",
+        ),
+        // The nothing-known-yet default: a freshly opened tab, at its prompt,
+        // before any pane fact has arrived.
         Row {
-            content: RowContent::Terminal {
-                name: String::from("Tab #16"),
-            },
+            content: RowContent::terminal("Tab #3"),
             selected: false,
             dormant: false,
         },
@@ -234,13 +266,13 @@ fn showcase() -> Vec<Row> {
             Some(("CART-99", 6)),
             "Fix cart total rounding mismatch",
         ),
-        Row {
-            content: RowContent::Terminal {
-                name: String::from("shell"),
-            },
-            selected: false,
-            dormant: false,
-        },
+        terminal(
+            "shell",
+            TermStatus::Running,
+            Provenance::Worktree,
+            Some(("clave", CLAVE)),
+            "just gates",
+        ),
         agent(
             RowStatus::Idle,
             Some((9, 141_000)),
@@ -259,13 +291,13 @@ fn showcase() -> Vec<Row> {
             Some(("DNS-TTL", 1)),
             "Debug staging rollout DNS timeout",
         ),
-        Row {
-            content: RowContent::Terminal {
-                name: String::from("logs"),
-            },
-            selected: false,
-            dormant: false,
-        },
+        terminal(
+            "logs",
+            TermStatus::Failed,
+            Provenance::Main,
+            Some(("infra", INFRA)),
+            "kubectl logs -f api-7d9",
+        ),
         agent(
             RowStatus::Stale,
             Some((10, 412_000)),
