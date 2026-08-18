@@ -53,11 +53,12 @@ pub fn launch_layout_path(dir: &std::path::Path) -> PathBuf {
 /// §6.6's exact permission set. Keep THIS list, load()'s request_permission
 /// call, and the seeded cache in lockstep — a partial cache match raises the
 /// unanswerable prompt and withholds everything.
-pub const BAR_PERMISSIONS: [&str; 4] = [
+pub const BAR_PERMISSIONS: [&str; 5] = [
     "ReadCliPipes",
     "ChangeApplicationState",
     "ReadApplicationState",
     "RunCommands",
+    "OpenTerminalsOrPlugins",
 ];
 
 /// The clave session config: Alt keybinds in shared_among normal+locked
@@ -100,30 +101,21 @@ pub fn config_kdl(binary: &str, wasm: &str) -> String {
         w = clave_types::FLOATING_WIDTH_PERCENT,
         h = clave_types::FLOATING_HEIGHT_PERCENT,
     ));
-    // Alt+f is zellij's OWN default (`ToggleFloatingPanes`, default.kdl:187),
-    // and a toggle takes no geometry — so its first pane got
-    // `half_size_middle_geom`, half of an area the bar has already shrunk, the
-    // unusable sliver of #188. Binding it here is the only way to give it a
-    // size, and `Run` is the only keybind form that carries floating
-    // coordinates at all: `NewPane`'s KDL branch parses string ARGUMENTS only
-    // and ignores a child block entirely (kdl/mod.rs:552,1695), so
-    // `NewPane { floating true; x …; }` silently drops the geometry.
-    //
-    // Cost of the swap: `Alt f` in normal+locked no longer hides an open
-    // floating set, it opens another scratch shell. The toggle survives in
-    // every other mode (stock is `shared_except "locked"`, we override two).
-    //
-    // `sh -c` because Run needs a real command and the shell to open is the
-    // user's, resolved at keypress from the session's env rather than baked at
-    // `clave setup` time — one config that keeps working after a chsh, and over
-    // SSH where the generating shell need not be the using one.
+    // Alt+f evicts zellij's own `ToggleFloatingPanes` (default.kdl:187) in
+    // normal+locked and routes the press to the bar, which spawns the scratch
+    // shell sized on first press and shows/hides it after (#207 — #188's
+    // sized `Run` opened a NEW shell every press). Plugin-routed because no
+    // KDL form can do all three: a bare toggle's first spawn is the sliver, a
+    // `Run` cannot toggle, and a `swap_floating_layout` resolves x from
+    // absolute column zero and parks the shell OVER the bar (the two clamp
+    // paths differ — FOOTGUNS, #207 live probe 2026-08-17). Only
+    // `open_terminal_floating`'s coordinates path floors x at the viewport's
+    // left edge, and only the bar can call it. Same shape as Alt+c; the
+    // `{key}` config must match the loaded bar's or zellij boots a second
+    // instance (FOOTGUNS on plugin identity).
     binds.push_str(&format!(
-        "        bind \"Alt f\" {{ Run \"sh\" \"-c\" \"exec ${{SHELL:-/bin/sh}}\" {{ floating true; \
-         close_on_exit true; name \"shell\"; x \"{x}%\"; y \"{y}%\"; width \"{w}%\"; height \"{h}%\"; }}; }}\n",
-        x = clave_types::SHELL_FLOATING_X_PERCENT,
-        y = clave_types::SHELL_FLOATING_Y_PERCENT,
-        w = clave_types::SHELL_FLOATING_WIDTH_PERCENT,
-        h = clave_types::SHELL_FLOATING_HEIGHT_PERCENT,
+        "        bind \"Alt f\" {{ MessagePlugin \"file:{wasm}\" {{ name \"clave-shell\"; {key} \"{binary}\"; }}; }}\n",
+        key = clave_types::CLAVE_BINARY_KEY
     ));
     binds.push_str(&format!(
         "        bind \"Alt c\" {{ MessagePlugin \"file:{wasm}\" {{ name \"clave-toggle\"; {key} \"{binary}\"; }}; }}\n",
@@ -300,6 +292,12 @@ pub fn swap_layouts_kdl(binary: &str, wasm: &str, collapsed: bool) -> String {
             name = template_name(mode),
         ));
     }
+    // NO `swap_floating_layout` here, and none may return: it looks like the
+    // obvious home for the Alt+f shell's geometry and was probed live
+    // (2026-08-17): the layout clamp path resolves `x "0%"` from ABSOLUTE
+    // column zero and caps x+width at the bar-reduced viewport, so the pane
+    // lands over the bar and flush-right-of-bar is inexpressible. The shell
+    // spawns through the bar's coordinate path instead (#207).
     out
 }
 

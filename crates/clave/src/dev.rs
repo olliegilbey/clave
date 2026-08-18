@@ -1605,6 +1605,7 @@ mod tests {
                     position: i,
                     name: format!("tab-{i}"),
                     active: i == 0,
+                    floating_visible: false,
                 })
                 .collect(),
         );
