@@ -239,6 +239,14 @@ pub const PALETTE: [(Rgb, &str); 8] = [
 /// insufficient. Fades at 8/12/15/20/30/40% were rendered and rejected.
 const FADE: f64 = 0.25;
 
+/// The dormant fade (#206). Deeper than [`FADE`] and UNCONDITIONAL — a dormant
+/// row dims whether or not anything is selected, because it marks what the row
+/// IS (no session behind it), not where focus sits. Before this the only
+/// dormant tell was the hollow gutter glyph, and the block read as live fleet
+/// at a glance. The glyph stays fujiWhite-based (#123's near-invisible
+/// sumiInk4 lesson), so even at half strength it outreads the old ink.
+const DORMANT_FADE: f64 = 0.5;
+
 // ── glyphs (lock §5) ────────────────────────────────────────────────────────
 
 const LCAP: char = '\u{e0b6}'; // powerline half-circle thick, left
@@ -668,8 +676,22 @@ fn hue(ink: Option<u8>) -> Rgb {
 
 fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> String {
     // Nothing to recede FROM when nothing is selected, so an unfocused bar
-    // renders at full strength (lock §6).
-    let fade = if row.selected || !any_selected {
+    // renders at full strength (lock §6) — except a dormant row, whose fade is
+    // absolute rather than relative (#206). `DormantSelected` is a different
+    // status and lands in the `selected` arm: the ⏎ affordance invites a
+    // launch and must read at full strength.
+    let dormant = matches!(
+        row.content,
+        RowContent::Agent {
+            status: RowStatus::Dormant,
+            ..
+        }
+    );
+    let fade = if row.selected {
+        0.0
+    } else if dormant {
+        DORMANT_FADE
+    } else if !any_selected {
         0.0
     } else {
         FADE
@@ -1839,6 +1861,35 @@ mod tests {
         // springGreen at full strength, then faded 25% toward sumiInk3.
         assert!(unfocused.contains("\u{1b}[38;2;152;187;108m"));
         assert!(faded.contains("\u{1b}[38;2;122;148;91m"));
+    }
+
+    /// A dormant row's fade is ABSOLUTE (#206): half toward the bar background
+    /// whether anything is selected or not, where live rows fade only
+    /// relatively (lock §6). The tell was previously the hollow glyph alone.
+    #[test]
+    fn a_dormant_row_dims_regardless_of_selection() {
+        let dormant = agent(RowStatus::Dormant, Provenance::Main, None, "s");
+        // fujiWhite `#DCD7BA` mixed 50% toward sumiInk3 `#1F1F28`:
+        // (125.5 -> 126 ties-to-even, 123, 113).
+        let half = "\u{1b}[38;2;126;123;113m";
+        let alone = render_all(
+            std::slice::from_ref(&dormant),
+            DESIGN_COLS,
+            Widths::EXPANDED,
+        )
+        .remove(0);
+        assert!(alone.contains(half), "unselected bar: dormant still dims");
+        assert!(
+            !alone.contains("\u{1b}[38;2;220;215;186m"),
+            "no full-strength fujiWhite anywhere on a dormant row"
+        );
+        let mut live = agent(RowStatus::Working, Provenance::Main, None, "s");
+        live.selected = true;
+        let beside = &render_all(&[dormant, live], DESIGN_COLS, Widths::EXPANDED)[0];
+        assert!(
+            beside.contains(half) && !beside.contains("\u{1b}[38;2;173;169;150m"),
+            "a selection must not lift dormant to the shallower relative fade"
+        );
     }
 
     /// An ink index with no palette entry must fall back visibly, not wrap onto
