@@ -1,12 +1,14 @@
-# Status — terminal tab rows: built, QA-driven, lag fixed; next is PR → review → v0.2.0
+# Status — terminal tab rows: PR #211 open; next is review loop → merge → v0.2.0
 
 You are the shipping engineer for clave's terminal-row feature (#206, second
 half), fluent in the bar's render vocabulary (gutter · cell · ink · chip ·
 provenance) and the sandbox drive SOP. The design conversation is OVER —
 every decision below is ratified live by Ollie, including two rounds of
-performance fixes his own drive flushed out. Your job is the PR, the
-CodeRabbit/Codex loop, re-running the two stale verifications, the knowledge
-write-downs, and handing Ollie the v0.2.0 tag. Do not reopen design.
+performance fixes his own drive flushed out and the sub-second-command
+sampling trade (his words: "Happy with that trade"). **PR #211 is OPEN**
+with the full design/evidence body. Your job is the review loop, re-running
+the two stale verifications, the knowledge write-downs, and handing Ollie
+the merge + v0.2.0 tag. Do not reopen design.
 
 ## Task Overview
 
@@ -75,10 +77,11 @@ now, nav is crisp again."
   → the 3s while-running poll exists. `CwdChanged` never fired at all in
   practice; probes/poll carry cwd.
 - **Sub-second commands are invisible by construction**: zellij samples
-  foreground ~1/s, so `ls` never registers. Ollie hit this ("typed command
-  doesn't show"); `sleep 5` proven to flow. RATIFIED-PENDING: told Ollie
-  scrollback-scraping/shell-integration are scope cliffs to refuse for
-  v0.2.0 — document in PR body as known behaviour; he had not yet replied.
+  foreground ~1/s, so `ls`/`la` never register and never displace the last
+  command that did (`sleep 5` proven to flow; his `la` proven not to).
+  RATIFIED — "Happy with that trade". Documented on `TermFacts::last_cmd`
+  and in the PR body; scrollback scraping and shell integration are refused
+  scope cliffs for v0.2.0. If a reviewer raises it, point at the ledger.
 - **Perf lessons (the nav-lag saga, three commits)**: synchronous host
   calls multiply across hidden bar instances (5 instances × 2 calls × tabs
   per PaneUpdate, serialized in the server); EXITED panes can never mint a
@@ -93,9 +96,10 @@ now, nav is crisp again."
 
 ## Next Steps
 
-1. Push branch, open PR closing #206 — body: design summary, the ratified
-   ledger below, the sub-second-command limitation, QA evidence. End body
-   with the session link per repo convention.
+1. DONE: branch pushed, **PR #211 open**
+   (https://github.com/olliegilbey/clave/pull/211) — body carries the design
+   summary, gates evidence, and the sampling trade. The trade is also a doc
+   comment on `TermFacts::last_cmd` (commit at HEAD).
 2. Re-run `just mutants` and the 70s quiescence window at final HEAD.
 3. Review loop: fix findings, reply "Ollie's Agent Speaking:", resolve —
    never silent-resolve; `@coderabbitai full review` (plain `review` fails).
