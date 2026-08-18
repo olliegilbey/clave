@@ -1613,6 +1613,13 @@ impl BarModel {
     pub fn apply_pane_facts(&mut self, probes: Vec<PaneProbe>) -> bool {
         let mut changed = false;
         for p in probes {
+            // An all-None probe (both OS queries failed — a pane mid-spawn,
+            // a process already gone) must not mint an entry: an entry is
+            // "known", and known-and-idle panes are never re-probed, so a
+            // transient failure at birth would otherwise stick forever.
+            if p.cwd.is_none() && p.foreground.is_none() {
+                continue;
+            }
             let f = self.pane_facts.entry(p.pane_id).or_default();
             let before = f.clone();
             if let Some(cwd) = p.cwd {
@@ -1645,11 +1652,19 @@ impl BarModel {
     /// The panes main.rs should ask the OS about after this manifest (#206):
     /// each terminal tab's speaker. Agent tabs are excluded — their row is the
     /// store's, and their panes' cwds are already store truth.
+    ///
+    /// A speaker already known and idle is not listed at all (first sandbox
+    /// drive, 2026-08-18, nav lag): the steady state is ZERO probes per
+    /// manifest, with freshness between probes the events' and the
+    /// while-running poll's job. The companion gate — only the VISIBLE bar
+    /// probes — lives at the call site on `own_tab_focused`, because tests
+    /// drive this listing without establishing an identity.
     pub fn probe_targets(&self) -> Vec<u32> {
         self.tabs
             .iter()
             .filter(|t| self.agent_in_tab(t.tab_id).is_none())
             .filter_map(|t| self.speaker_pane(t.position).map(|p| p.pane_id))
+            .filter(|id| self.pane_facts.get(id).is_none_or(|f| f.running))
             .collect()
     }
 
@@ -2063,7 +2078,12 @@ impl BarModel {
     /// only focus signal a background instance cannot fake (a frozen instance's
     /// own tab frame claims itself active, FOOTGUNS.md) — but the answer here is
     /// about permission to touch the FOCUSED tab, not about electing anybody.
-    fn own_tab_focused(&self) -> bool {
+    /// Pub since #206: the term-facts probe is gated on it — five hidden
+    /// bars each firing synchronous OS round-trips per manifest made nav
+    /// drag on the first sandbox drive (2026-08-18); only the bar being
+    /// LOOKED AT pays for OS truth, and a hidden bar converges the moment it
+    /// is seen.
+    pub fn own_tab_focused(&self) -> bool {
         self.own_tab()
             .is_some_and(|own| self.current_tab == Some(own))
     }
@@ -2726,6 +2746,12 @@ mod tests {
             floating,
             pane(1, 9, false, true), // the agent's pane
         ]);
+        assert_eq!(m.probe_targets(), vec![6]);
+        // Known and idle → not listed (the zero-steady-state gate); running
+        // → listed again, because the exit-side poll needs a second look.
+        m.apply_pane_facts(vec![probe(6, Some("/tmp"), Some(&["zsh"]))]);
+        assert_eq!(m.probe_targets(), Vec::<u32>::new());
+        m.apply_pane_facts(vec![probe(6, None, Some(&["cargo", "build"]))]);
         assert_eq!(m.probe_targets(), vec![6]);
         // No tiled pane focused (focus sits on the floating shell): first
         // tiled terminal speaks.

@@ -82,6 +82,11 @@ impl State {
     /// (dump-screen is empty for plugin panes), so these lines ARE the
     /// automatable evidence that the OS facts pipeline delivered.
     fn probe_term_facts(&mut self) -> bool {
+        // Only the bar being looked at pays for OS truth (nav-lag fix,
+        // 2026-08-18) — see `own_tab_focused`.
+        if !self.model.own_tab_focused() {
+            return false;
+        }
         let probes: Vec<PaneProbe> = self
             .model
             .probe_targets()
