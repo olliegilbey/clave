@@ -244,8 +244,9 @@ const FADE: f64 = 0.25;
 /// IS (no session behind it), not where focus sits. Before this the only
 /// dormant tell was the hollow gutter glyph, and the block read as live fleet
 /// at a glance. The glyph stays fujiWhite-based (#123's near-invisible
-/// sumiInk4 lesson), so even at half strength it outreads the old ink.
-const DORMANT_FADE: f64 = 0.5;
+/// sumiInk4 lesson), so even this deep it outreads the old ink. 0.5 was
+/// rendered first; Ollie ratified 0.6 against the ux-gate1 fleet (#210).
+const DORMANT_FADE: f64 = 0.6;
 
 // ── glyphs (lock §5) ────────────────────────────────────────────────────────
 
@@ -1886,15 +1887,15 @@ mod tests {
         assert!(faded.contains("\u{1b}[38;2;122;148;91m"));
     }
 
-    /// A dormant row's fade is ABSOLUTE (#206): half toward the bar background
+    /// A dormant row's fade is ABSOLUTE (#206): deep toward the bar background
     /// whether anything is selected or not, where live rows fade only
     /// relatively (lock §6). The tell was previously the hollow glyph alone.
     #[test]
     fn a_dormant_row_dims_regardless_of_selection() {
         let dormant = agent(RowStatus::Dormant, Provenance::Main, Some("T"), "s");
-        // fujiWhite `#DCD7BA` mixed 50% toward sumiInk3 `#1F1F28`:
-        // (125.5 -> 126 ties-to-even, 123, 113).
-        let half = "\u{1b}[38;2;126;123;113m";
+        // fujiWhite `#DCD7BA` mixed 60% toward sumiInk3 `#1F1F28`:
+        // (106.6 -> 107, 104.6 -> 105, 98.4 -> 98).
+        let half = "\u{1b}[38;2;107;105;98m";
         // The chip is the one BACKGROUND the fade touches (CodeRabbit, #210).
         let chip_faded = hue(Some(5)).mix(BASE, DORMANT_FADE).bg();
         let chip_full = hue(Some(5)).bg();
@@ -1929,10 +1930,10 @@ mod tests {
         let mut stale = agent(RowStatus::Stale, Provenance::Main, None, "s");
         stale.dormant = true;
         let row = render_all(std::slice::from_ref(&stale), DESIGN_COLS, Widths::EXPANDED).remove(0);
-        // samuraiRed `#E82424` mixed 50% toward sumiInk3: (131.5 -> 132
-        // ties-to-even, 33.5 -> 34, 38).
+        // samuraiRed `#E82424` mixed 60% toward sumiInk3: (111.4 -> 111,
+        // 33, 38.4 -> 38).
         assert!(
-            row.contains("\u{1b}[38;2;132;34;38m"),
+            row.contains("\u{1b}[38;2;111;33;38m"),
             "a stale dormant row still recedes with its block"
         );
         let mut opening = agent(RowStatus::Opening, Provenance::Main, None, "s");
