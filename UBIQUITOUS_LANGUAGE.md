@@ -99,6 +99,12 @@ name; a tab name has no field structure and cannot fill fixed-width columns.
 Only a terminal tab, which has no store record, renders its tab name. Ruled in
 the design lock §7.1.
 
+**speaker** — the pane that speaks for a terminal tab's row: the tab's focused
+tiled terminal, falling back to its first. Plugin panes never speak (the bar
+lives in one) and floating panes don't either — the row describes the tab's
+resident content. Status, the cwd-derived repo cell, borrowed provenance and
+the command summary are all read off the speaker (#206).
+
 ### 3.2 A row's parts
 
 ```text
@@ -116,8 +122,8 @@ status rule battery │     title    repo        summary
 | **rule** | The vertical line separating the status cell from the rest, so the status hue is not read against the battery hue. |
 | **cap** | The powerline half-circle at each end of the **selected row**. Its column is reserved on every row so nothing shifts. |
 | **text area** | Everything right of the gutter: title, repo, summary. |
-| **status glyph** | The dot. Its **colour** is the state — the shape barely varies. |
-| **battery** | How much of its **smart zone** that agent session has spent. Two readings of one number: the expanded view prints the **count** — thousands of tokens, right-aligned, inked with the ramp's band (`105k`, `1.1m`) — and the collapsed view shows the **ramp glyph**, which empties a tenth at a time. A terminal tab shows the console mark in this cell instead, because a terminal has no context window. |
+| **status glyph** | The dot. Its **colour** is the state — the shape barely varies. On a terminal tab the glyph is the console mark instead, coloured the same way: Running / Done / Failed for a command pane, Idle / Running for a shell — an interactive shell never exits while its tab lives, so it has no Done or Failed. A shell binary absent from `SHELLS` degrades to always-Running, its argv reading as a command that never finishes (#206). |
+| **battery** | How much of its **smart zone** that agent session has spent. Two readings of one number: the expanded view prints the **count** — thousands of tokens, right-aligned, inked with the ramp's band (`105k`, `1.1m`) — and the collapsed view shows the **ramp glyph**, which empties a tenth at a time. A terminal tab has no context window; its battery cell shows `TERM` expanded and the prompt glyph collapsed, and the console mark lives in the status cell (#206 — this moved; it used to sit here). |
 | **smart zone** | How many tokens of context *this user* trusts a model to stay sharp within — set once, globally, in `CLAVE_AGENT_SMART_ZONE_TOKENS` (default 150,000). Explicitly **not** the model's context window: the window is where Claude auto-compacts, which is not a thing anyone steers by, and the same smart zone holds across a 200k model, a 1M model, or a future non-Claude agent. It is where the battery turns **red** — not where the ramp ends. |
 | **provenance** | Whether the row's checkout is a **worktree**, on a **branch**, or a **main checkout**. Rendered as a glyph tinted with the repo ink; a main checkout shows nothing. |
 
@@ -141,7 +147,7 @@ These three are constantly confused. They are not interchangeable.
 |---|---|
 | **ink** | A colour drawn from the palette and assigned to something. **repo ink** is keyed by repo root — one repo, one colour, forever. **title ink** is keyed per title *within* its repo — two tabs of the same repo never share one. |
 | **palette** | The fixed, ordered set of hues. Allocated **round-robin** — never hashed. |
-| **chip** | Text on a filled background. Only the title is a chip. |
+| **chip** | Text on a filled background. Two chips exist: an agent row's title (title-ink background) and a terminal tab's name — fujiWhite on black, black meaning *unclaimed by agent ink*, and it stays black on the selected row (#206). |
 | **tint** | Foreground colour on text or a glyph, no background. |
 | **fade** | Rendering a row blended toward the bar background. Unselected rows are faded; **selection is by recession**, not by ornament. |
 
