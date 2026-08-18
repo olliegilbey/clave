@@ -1686,6 +1686,7 @@ impl BarModel {
                         content,
                         // A dormant selection steals the highlight from every tab.
                         selected: selected_dormant.is_none() && t.active,
+                        dormant: false,
                     },
                 ),
             ));
@@ -1710,6 +1711,10 @@ impl BarModel {
                             &inks,
                         ),
                         selected: selected_dormant == Some(a.uuid.as_str()),
+                        // Block membership for the renderer's #206 fade —
+                        // carried on the Row because stale/opening outrank
+                        // Dormant in the status tier above.
+                        dormant: true,
                     },
                 ),
             ));
