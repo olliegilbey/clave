@@ -49,6 +49,9 @@ here in the same change.**
 | **bind** | Associating an agent session's uuid with a `tab_id`. Done once, by the agent tab's own bar instance. |
 | **hook** | A Claude Code lifecycle callback that writes into the store. The source of status and recency. |
 | **agent** | One record in the store / one entry in a snapshot. The data; a **row** is its rendering. |
+| **frecency** | The default row-order score: Σ commitment count × `0.5^(age_days × 24 / half_life_hours)` over a row's day buckets. Ranks invested threads above whatever was merely touched last. `OrderMode::Recency` is the pure-ordinal alternative, still selectable (`clave order recency`). |
+| **day bucket** | `unix_day → commitment count`, where frecency's weight is banked. Written twice per commitment, same doubling as `tab_order`/`commit_ord`: on the `AgentRecord` (uuid-keyed, survives dormancy) and on `Store.tab_buckets` (tab-keyed, covers terminal tabs). Pruned to the trailing 7 days on every write. |
+| **opener** | The tab a newborn row's buckets are copied from at creation: the tab holding the max `tab_order` ordinal, a store-native proxy for "the one you were just working in". Identical buckets plus the existing position tiebreak land the newborn directly below its opener. |
 
 > **The canon rule** (maintainer ruling, 2026-08-17): **Claude's jsonl is the
 > canon of conversations; clave's store is a disposable snapshot of panes.** A

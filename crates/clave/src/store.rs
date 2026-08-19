@@ -1866,6 +1866,11 @@ mod tests {
             read_store(&p).unwrap().order,
             clave_types::OrderMode::Recency
         );
+        // seq bumps unconditionally (§5 pipe contract), not just on a mode
+        // toggle — pins `+=` against a `*=`/no-op mutant.
+        assert_eq!(snap.seq, 1);
+        let snap2 = apply_order(&p, clave_types::OrderMode::Recency).unwrap();
+        assert_eq!(snap2.seq, 2);
     }
 
     #[test]
