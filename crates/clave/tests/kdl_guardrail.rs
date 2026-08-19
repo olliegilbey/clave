@@ -202,6 +202,7 @@ fn eager_record() -> AgentRecord {
         context_tokens: None,
         context_level: None,
         live_session: None,
+        buckets: Default::default(),
     }
 }
 

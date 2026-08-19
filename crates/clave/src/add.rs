@@ -2,7 +2,7 @@
 //! tab. The INTERACTIVE weave (fzf) lives in run_add; everything decidable
 //! is a pure function above it so it can be unit-tested.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -1063,6 +1063,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
             // `..row.clone()`, which is what keeps a re-added rotated agent
             // pointing at its live conversation (#99).
             live_session: None,
+            buckets: BTreeMap::new(),
         };
         // Note `merge_resume_record` PRESERVES an existing row's
         // `default_branch` along with everything else, so a row written before
@@ -1112,6 +1113,7 @@ mod tests {
             context_tokens: None,
             context_level: None,
             live_session: None,
+            buckets: BTreeMap::new(),
         }
     }
 

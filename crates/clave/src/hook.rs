@@ -891,6 +891,7 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     // Local copy of the Task 2 `rec()` shape: label "x · main", cwd "/x",
     // branch "main", source FirstPrompt — the pre-labelled starting record.
@@ -916,6 +917,7 @@ mod tests {
             context_tokens: None,
             context_level: None,
             live_session: None,
+            buckets: BTreeMap::new(),
         }
     }
 
