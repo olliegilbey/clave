@@ -377,10 +377,19 @@ fn rank_desc(a: &Ranked, b: &Ranked) -> std::cmp::Ordering {
 /// what makes the newborn-adjacency tie exact. Future-dated buckets (clock
 /// skew) clamp to age 0. half_life_hours == 0 is clamped to 1 (zero half-life
 /// is possible via CLI or wire).
+///
+/// Buckets outside [`clave_types::BUCKET_RETAIN_DAYS`] score ZERO at every
+/// dial (maintainer ruling, 2026-08-19): the store prunes them lazily — only
+/// on a row's next bump — so a long-dormant row can still carry stale days,
+/// and without this cut a huge dial (999h) would resurrect them. "Fully
+/// decayed at 7 days" is the semantic; skipping the `powf` is the bonus.
 fn frecency_millis(buckets: &BTreeMap<u32, u32>, today: u32, half_life_hours: u32) -> u64 {
     let hl = half_life_hours.max(1) as f64;
     let sum: f64 = buckets
         .iter()
+        // Same window arithmetic as the store's `bump_bucket` prune (strict:
+        // day + RETAIN > today keeps today-6..=today, seven days inclusive).
+        .filter(|&(&day, _)| day + clave_types::BUCKET_RETAIN_DAYS > today)
         .map(|(&day, &count)| {
             let age_days = today.saturating_sub(day) as f64;
             count as f64 * 0.5_f64.powf(age_days * 24.0 / hl)
@@ -3096,8 +3105,10 @@ mod tests {
     #[test]
     fn frecency_millis_decays_by_half_lives() {
         let b: BTreeMap<u32, u32> = [(100, 4), (99, 4), (93, 4)].into();
-        // today=100, hl=24h: 4*1000 + 4*500 + 4*7.8125 = 6031 (floor)
-        assert_eq!(frecency_millis(&b, 100, 24), 6031);
+        // today=100, hl=24h: 4*1000 + 4*500; day 93 is exactly 7 days old —
+        // outside the retention window, so it scores ZERO, mirroring the
+        // store prune that would have dropped it on the row's next bump.
+        assert_eq!(frecency_millis(&b, 100, 24), 6000);
         assert_eq!(frecency_millis(&BTreeMap::new(), 100, 24), 0);
         let future: BTreeMap<u32, u32> = [(105, 2)].into();
         assert_eq!(frecency_millis(&future, 100, 24), 2000); // clamp, not panic
@@ -3118,6 +3129,19 @@ mod tests {
         s.today = 100;
         m.apply_snapshot(s);
         m
+    }
+
+    /// Maintainer ruling (2026-08-19): "fully decayed at 7 days" is a
+    /// semantic, at EVERY dial. The store prunes lazily — only on a row's
+    /// next bump — so a long-dormant row still carries stale days, and
+    /// without the scoring cut a 999h dial would resurrect them.
+    #[test]
+    fn a_bucket_past_retention_scores_zero_at_every_dial() {
+        let stale: BTreeMap<u32, u32> = [(93, 1000)].into(); // exactly 7 days old
+        assert_eq!(frecency_millis(&stale, 100, 999), 0);
+        assert_eq!(frecency_millis(&stale, 100, 1), 0);
+        let edge: BTreeMap<u32, u32> = [(94, 4)].into(); // today-6: last day in
+        assert!(frecency_millis(&edge, 100, 999) > 0);
     }
 
     /// Frecency mode: more decayed weight ranks higher, regardless of who

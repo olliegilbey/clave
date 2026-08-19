@@ -232,9 +232,9 @@ impl Store {
     }
 }
 
-/// Buckets older than this contribute <1% at the default half-life; at
-/// half-life → ∞ this pruning IS the spec's rolling 7-day window.
-pub const BUCKET_RETAIN_DAYS: u32 = 7;
+/// The shared window: the bar's scoring cuts to zero outside it too, so the
+/// two sides cannot drift (clave-types is the single source).
+pub use clave_types::BUCKET_RETAIN_DAYS;
 
 /// Unix seconds → unix day. The one place the day arithmetic lives.
 pub fn unix_day(unix_secs: u64) -> u32 {
@@ -450,8 +450,22 @@ pub(crate) fn touch_in(s: &mut Store, tab_id: usize) -> u64 {
     // on vacancy, so a tab already tracking its own buckets is never
     // re-seeded and the newborn's own stamp can't shift the opener it
     // copies from. EXACT copy, no +1 — the tie IS the adjacency mechanism.
+    //
+    // A tab already BOUND to an agent seeds EMPTY instead (maintainer
+    // ruling, 2026-08-19 post-drive): waking an existing dormant agent must
+    // re-enter it at its own decayed score, not the opener's — the E2E
+    // drive caught a woken row borrowing the opener's buckets through its
+    // fresh tab twin. Inheritance belongs to true newborns (whose own
+    // record carries the copy via `mint_record`) and to terminal tabs,
+    // which never bind. `apply_bind` clears the twin for the other arrival
+    // order of the touch/bind race.
     if !s.tab_buckets.contains_key(&tab_id) {
-        let inherited = opener_buckets(s);
+        let bound = s.agents.values().any(|r| r.tab_id == Some(tab_id));
+        let inherited = if bound {
+            BTreeMap::new()
+        } else {
+            opener_buckets(s)
+        };
         s.tab_buckets.insert(tab_id, inherited);
     }
     let ord = s.mint_ord();
@@ -507,6 +521,13 @@ pub fn apply_bind(paths: &StorePaths, uuid: &str, tab_id: usize) -> Result<Optio
         if let Some(r) = s.agents.get_mut(uuid) {
             r.tab_id = Some(tab_id);
         }
+        // An agent-bound tab's twin never holds inherited buckets (maintainer
+        // ruling, 2026-08-19 post-drive): the row must rank on the agent's own
+        // decayed score. Insert EMPTY rather than remove — an occupied key is
+        // what stops a birth `clave touch` landing after this bind from
+        // re-seeding the opener's copy (`touch_in` seeds only on vacancy).
+        // Commitment stamps landing after this rebuild the twin organically.
+        s.tab_buckets.insert(tab_id, BTreeMap::new());
         s.seq += 1; // monotonic pipe contract (§5)
         Some(snapshot_from(s))
     })
@@ -1854,6 +1875,49 @@ mod tests {
         s.agents.get_mut("u1").unwrap().buckets = [(101, 9)].into();
         touch_in(&mut s, 11);
         assert_eq!(s.tab_buckets.get(&11), Some(&[(100u32, 5u32)].into()));
+    }
+
+    #[test]
+    fn waking_a_bound_tab_never_inherits_the_opener_in_either_arrival_order() {
+        // Maintainer ruling (2026-08-19, caught by the PR #218 live drive): a
+        // woken EXISTING agent re-enters at its own decayed score. Before the
+        // guard, the fresh tab's birth touch copied the opener's buckets into
+        // the twin and the woken row rendered at the opener's rank. The birth
+        // touch and the bind genuinely race in both orders, so both are pinned.
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            let mut opener = rec("op");
+            opener.tab_id = Some(1);
+            opener.buckets = [(100, 8)].into();
+            s.agents.insert("op".into(), opener);
+            s.tab_order.insert(1, 50);
+            s.agents.insert("woken".into(), rec("woken"));
+        })
+        .unwrap();
+
+        // Touch BEFORE bind (the common birth race): the twin briefly holds
+        // the inherited copy, and the bind must clear it.
+        with_store_mut(&p, |s| {
+            touch_in(s, 2);
+            assert_eq!(s.tab_buckets.get(&2), Some(&[(100u32, 8u32)].into()));
+        })
+        .unwrap();
+        apply_bind(&p, "woken", 2).unwrap().expect("bound");
+        assert_eq!(
+            read_store(&p).unwrap().tab_buckets.get(&2),
+            Some(&BTreeMap::new())
+        );
+
+        // Bind BEFORE touch: the bind's empty insert occupies the key, and
+        // the later birth touch must not re-seed (vacancy-only), while a
+        // touch on a tab bound by a direct store write seeds empty too.
+        apply_bind(&p, "woken", 3).unwrap().expect("rebound");
+        with_store_mut(&p, |s| {
+            touch_in(s, 3);
+            assert_eq!(s.tab_buckets.get(&3), Some(&BTreeMap::new()));
+        })
+        .unwrap();
     }
 
     #[test]

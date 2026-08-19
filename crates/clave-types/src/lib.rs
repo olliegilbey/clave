@@ -93,7 +93,7 @@ pub enum OrderMode {
     Recency,
     /// Decayed-commitment score: Σ count × 0.5^(age_days × 24 / half_life).
     /// half-life → 0 behaves like Recency; → ∞ like a 7-day rolling
-    /// investment count (buckets are pruned at 7 days regardless).
+    /// investment count ([`BUCKET_RETAIN_DAYS`] caps both sides).
     Frecency { half_life_hours: u32 },
 }
 
@@ -104,6 +104,14 @@ impl Default for OrderMode {
         }
     }
 }
+
+/// The day-bucket window, shared by both sides of the wire (maintainer
+/// ruling, 2026-08-19 post-drive): the store prunes a row's buckets past
+/// this on every bump, and the bar scores an out-of-window bucket as ZERO
+/// at every dial — "fully decayed at 7 days" is a semantic, not a numeric
+/// accident of the half-life, and it caps per-frame scoring work however
+/// stale a long-dormant row's stored buckets are.
+pub const BUCKET_RETAIN_DAYS: u32 = 7;
 
 /// One agent row as the plugin renders it. Mirrors the store record's
 /// display-relevant fields (spec §5); the plugin never sees the store, only
