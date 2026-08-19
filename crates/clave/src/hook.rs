@@ -694,8 +694,10 @@ pub fn apply_hook_event(
     // the §6.6 row order share one counter (see Store::mint_ord).
     let ord = s.mint_ord();
     if commitment {
+        let today = crate::store::unix_day(now);
         if let Some(tab_id) = commit_tab {
             s.tab_order.insert(tab_id, ord);
+            crate::store::bump_bucket(s.tab_buckets.entry(tab_id).or_default(), today);
         }
         if let Some(rec) = s.agents.get_mut(uuid) {
             // Set on the AGENT too, not only the tab: an unbound agent (RC-B,
@@ -703,6 +705,7 @@ pub fn apply_hook_event(
             // commitment, so the dormant row it becomes on close sorts right
             // even if the prune never lands.
             rec.commit_ord = ord;
+            crate::store::bump_bucket(&mut rec.buckets, today);
         }
     }
     true
@@ -1384,6 +1387,52 @@ mod tests {
             true
         ));
         assert_eq!(s.seq, seq);
+    }
+
+    #[test]
+    fn a_prompt_buckets_one_commitment_on_record_and_bound_tab() {
+        // A prompt is one commitment: +1 in the record's day bucket AND the
+        // bound tab's twin — the same doubled bookkeeping as commit_ord/tab_order.
+        let mut s = crate::store::Store::default();
+        let mut r = rec("u1");
+        r.tab_id = Some(4);
+        s.agents.insert("u1".into(), r);
+        let p = HookPayload {
+            session_id: Some("u1".into()),
+            prompt: None,
+            message: None,
+            transcript_path: None,
+        };
+        assert!(apply_hook_event(
+            &mut s,
+            "u1",
+            "UserPromptSubmit",
+            &p,
+            None,
+            1700,
+            true
+        ));
+        let today = crate::store::unix_day(1700);
+        assert_eq!(s.agents["u1"].buckets.get(&today), Some(&1));
+        assert_eq!(s.tab_buckets.get(&4).and_then(|m| m.get(&today)), Some(&1));
+    }
+
+    #[test]
+    fn non_commitment_events_write_no_buckets() {
+        // Stop/Notification/SessionEnd are not commitments — no bucket moves.
+        let mut s = crate::store::Store::default();
+        let mut r = rec("u1");
+        r.tab_id = Some(4);
+        s.agents.insert("u1".into(), r);
+        let p = HookPayload {
+            session_id: Some("u1".into()),
+            prompt: None,
+            message: None,
+            transcript_path: None,
+        };
+        apply_hook_event(&mut s, "u1", "Stop", &p, None, 1700, true);
+        assert!(s.agents["u1"].buckets.is_empty());
+        assert!(s.tab_buckets.get(&4).is_none_or(|m| m.is_empty()));
     }
 
     #[test]

@@ -243,9 +243,6 @@ pub fn unix_day(unix_secs: u64) -> u32 {
 
 /// +1 commitment today, and prune everything out of retention. Both maps
 /// (record and tab twin) go through here, so retention cannot skew.
-/// Unused until the UserPromptSubmit wiring in `hook.rs` (Task 4) calls it —
-/// this task only lays the schema and the birth-touch seed.
-#[allow(dead_code)]
 pub(crate) fn bump_bucket(map: &mut BTreeMap<u32, u32>, today: u32) {
     *map.entry(today).or_insert(0) += 1;
     // Strict `>`, not `>=`: a day exactly BUCKET_RETAIN_DAYS back (today's
