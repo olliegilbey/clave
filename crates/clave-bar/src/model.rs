@@ -375,8 +375,8 @@ fn rank_desc(a: &Ranked, b: &Ranked) -> std::cmp::Ordering {
 /// ×1000, floored. Millipoints keep the comparator integral; identical bucket
 /// maps produce identical sums (BTreeMap order is deterministic), which is
 /// what makes the newborn-adjacency tie exact. Future-dated buckets (clock
-/// skew) clamp to age 0. half_life_hours == 0 is treated as 1 (the CLI can't
-/// produce 0, but the wire could).
+/// skew) clamp to age 0. half_life_hours == 0 is clamped to 1 (zero half-life
+/// is possible via CLI or wire).
 fn frecency_millis(buckets: &BTreeMap<u32, u32>, today: u32, half_life_hours: u32) -> u64 {
     let hl = half_life_hours.max(1) as f64;
     let sum: f64 = buckets

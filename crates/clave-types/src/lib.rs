@@ -255,8 +255,8 @@ pub struct AgentSnapshot {
     pub order: OrderMode,
     /// Unix DAY at projection time, stamped by the host — the bar never
     /// reads a clock (wasm). Frecency ages every bucket against this.
-    /// `default` (0) makes all ages huge → scores ~0 → the ordinal
-    /// fallback carries, which is exactly the pre-snapshot cold state.
+    /// `default` (0) carries no buckets (pre-frecency payload has none),
+    /// so all scores are 0 → the ordinal fallback carries.
     #[serde(default)]
     pub today: u32,
     /// tab_id → commitment day-buckets: the tab-keyed twin of
