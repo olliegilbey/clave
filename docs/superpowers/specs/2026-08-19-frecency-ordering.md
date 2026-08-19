@@ -52,6 +52,22 @@ newborn DIRECTLY BELOW its opener until real commitments diverge them.
 This is a contextual prior (empirical-Bayes cold start) + Chrome's
 insert-adjacent-to-opener, in one bucket copy.
 
+**Wake initialisation (ruled 2026-08-19, from the PR #218 live drive):**
+inheritance is for NEW rows only. Waking an existing dormant agent
+re-enters it at its **own decayed score** — the frecency computation
+simply continues as if the row had zero interactions while dormant, so
+an accidentally closed tab woken immediately returns to the rank it
+held. A row dormant past the retention window has fully decayed and
+wakes at the bottom (zero-score ordinal floor). Mechanically: an
+agent-bound tab's twin never holds inherited buckets — `touch_in` seeds
+empty when the tab is bound, `apply_bind` clears the twin, covering
+both orders of the birth-touch/bind race. The retention window
+(`clave_types::BUCKET_RETAIN_DAYS`) is also a **hard scoring cutoff at
+every dial**: the store prunes lazily (only on a row's next bump), so
+the bar zeroes out-of-window buckets rather than letting a 999h dial
+resurrect them — and skips their computation entirely, keeping
+long-dormant fleets free per frame.
+
 **Deviation from the grilled agreement, needs Ollie's ratification:**
 the agreement said opener = "the tab focused when the new tab was
 created". Focus is not in the store (the visited beacon is a
