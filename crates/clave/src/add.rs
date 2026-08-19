@@ -2,7 +2,7 @@
 //! tab. The INTERACTIVE weave (fzf) lives in run_add; everything decidable
 //! is a pure function above it so it can be unit-tested.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -494,6 +494,73 @@ pub fn merge_resume_record(existing: Option<&AgentRecord>, fresh: AgentRecord) -
         },
         None => fresh,
     }
+}
+
+/// The fields `run_add` has already resolved by the time it locks the store
+/// for the record write (step 7) — everything the fresh-record literal needs
+/// beyond what the lock itself supplies (the ordinal, any existing row).
+pub(crate) struct FreshRecordInputs<'a> {
+    pub uuid: &'a str,
+    pub cwd: &'a str,
+    pub repo_root: &'a str,
+    pub branch: &'a str,
+    pub label: &'a str,
+    pub worktree: Option<String>,
+    pub default_branch: Option<String>,
+}
+
+/// The S1 mint + merge-resume-or-insert sequence `run_add` runs under the
+/// store lock (§6.3 step 7). Extracted from the `with_store_mut` closure so
+/// this — the same path a real `clave add` takes — is directly unit-testable
+/// without fzf/zellij: `run_add` and the tests below both drive it.
+///
+/// Spec (2026-08-19): a newborn inherits the opener's buckets — an exact
+/// copy, so identical scores + the position tiebreak put it directly below
+/// its opener until real commitments diverge them. A resumed row keeps its
+/// own earned buckets via `merge_resume_record`'s `..row.clone()`.
+pub(crate) fn mint_record(s: &mut Store, inputs: FreshRecordInputs) -> AgentRecord {
+    let ord = s.mint_ord();
+    let inherited = crate::store::opener_buckets(s);
+    let fresh = AgentRecord {
+        uuid: inputs.uuid.to_string(),
+        cwd: inputs.cwd.to_string(),
+        repo_root: inputs.repo_root.to_string(),
+        branch: inputs.branch.to_string(),
+        label: inputs.label.to_string(),
+        status: clave_types::Status::Idle,
+        last_interacted: now_unix(),
+        commit_ord: ord,
+        last_visited: 0,
+        worktree: inputs.worktree,
+        label_source: LabelSource::FirstPrompt,
+        tab_id: None,
+        pane_id: None,
+        stale: false,
+        title: None,
+        summary: String::new(),
+        default_branch: inputs.default_branch,
+        context_tokens: None,
+        context_level: None,
+        // A fresh row is by definition still on its minted uuid. An
+        // EXISTING row's live id survives this via `merge_resume_record`'s
+        // `..row.clone()`, which is what keeps a re-added rotated agent
+        // pointing at its live conversation (#99).
+        live_session: None,
+        buckets: inherited,
+    };
+    // Note `merge_resume_record` PRESERVES an existing row's
+    // `default_branch` along with everything else, so a row written before
+    // #86 keeps `None` and the bar keeps its heuristic for it. Deliberate:
+    // the merge's whole contract is that a re-add means "it is on screen
+    // again" and resets nothing but status, and the fallback already makes
+    // that row no worse than it was.
+    let mut merged = merge_resume_record(s.agents.get(inputs.uuid), fresh);
+    // A resume opens a brand-new tab, which birth-touches to the top
+    // anyway; giving the ROW the same ordinal keeps the two consistent and
+    // stops the row plunging if that tab is closed before any prompt.
+    merged.commit_ord = ord;
+    s.agents.insert(inputs.uuid.to_string(), merged.clone());
+    merged
 }
 
 // ── interactive weave ───────────────────────────────────────────────────────
@@ -1037,46 +1104,20 @@ pub fn run_add(worktree: bool) -> Result<()> {
         // S1: a new row is a user commitment, so it is minted an ordinal from
         // this same locked write and enters at the top. Before S1 a new row
         // inherited no order at all and could sink below every dormant row.
-        let ord = s.mint_ord(); // replaces the `s.seq += 1` this write used to do
-        let fresh = AgentRecord {
-            uuid: uuid.clone(),
-            cwd: agent_cwd.clone(),
-            repo_root: resume_root.clone().unwrap_or_else(|| repo_root.clone()),
-            branch: agent_branch.clone(),
-            label: label.clone(),
-            status: clave_types::Status::Idle,
-            last_interacted: now_unix(),
-            commit_ord: ord,
-            last_visited: 0,
-            worktree: worktree_path.clone(),
-            label_source: LabelSource::FirstPrompt,
-            tab_id: None,
-            pane_id: None,
-            stale: false,
-            title: None,
-            summary: String::new(),
-            default_branch: default_branch.clone(),
-            context_tokens: None,
-            context_level: None,
-            // A fresh row is by definition still on its minted uuid. An
-            // EXISTING row's live id survives this via `merge_resume_record`'s
-            // `..row.clone()`, which is what keeps a re-added rotated agent
-            // pointing at its live conversation (#99).
-            live_session: None,
-            buckets: BTreeMap::new(),
-        };
-        // Note `merge_resume_record` PRESERVES an existing row's
-        // `default_branch` along with everything else, so a row written before
-        // #86 keeps `None` and the bar keeps its heuristic for it. Deliberate:
-        // the merge's whole contract is that a re-add means "it is on screen
-        // again" and resets nothing but status, and the fallback already makes
-        // that row no worse than it was.
-        let mut merged = merge_resume_record(s.agents.get(&uuid), fresh);
-        // A resume opens a brand-new tab, which birth-touches to the top
-        // anyway; giving the ROW the same ordinal keeps the two consistent and
-        // stops the row plunging if that tab is closed before any prompt.
-        merged.commit_ord = ord;
-        s.agents.insert(uuid.clone(), merged);
+        // See `mint_record` for the ordinal mint, the newborn's inherited
+        // buckets, and the resume-preserving merge.
+        mint_record(
+            s,
+            FreshRecordInputs {
+                uuid: &uuid,
+                cwd: &agent_cwd,
+                repo_root: resume_root.as_deref().unwrap_or(&repo_root),
+                branch: &agent_branch,
+                label: &label,
+                worktree: worktree_path.clone(),
+                default_branch: default_branch.clone(),
+            },
+        );
         snapshot_from(s)
     })?;
     push_snapshot(&snap);
@@ -1088,6 +1129,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
 mod tests {
     use super::*;
     use clave_types::Status;
+    use std::collections::BTreeMap;
 
     // Local copy of the Task 2 `rec()` shape (see store.rs / hook.rs): the
     // pre-labelled starting record. Tests override the fields they care about.
@@ -1115,6 +1157,50 @@ mod tests {
             live_session: None,
             buckets: BTreeMap::new(),
         }
+    }
+
+    /// Drive `mint_record` — the same record-mint path `run_add` uses — with
+    /// only a uuid, filling every other input with the `rec()` shape's
+    /// placeholders (irrelevant to the buckets assertions below).
+    fn mint_record_under_test(s: &mut Store, uuid: &str) -> AgentRecord {
+        mint_record(
+            s,
+            FreshRecordInputs {
+                uuid,
+                cwd: "/x",
+                repo_root: "/x",
+                branch: "main",
+                label: "x · main",
+                worktree: None,
+                default_branch: None,
+            },
+        )
+    }
+
+    /// Spec: newborn initialisation. A fresh row inherits the opener's
+    /// buckets — exact copy, so the tie + position tiebreak lands it
+    /// directly below its opener in frecency mode.
+    #[test]
+    fn a_fresh_row_inherits_the_openers_buckets() {
+        let mut s = Store::default();
+        let mut opener = rec("u-opener");
+        opener.tab_id = Some(4);
+        opener.buckets = [(100, 6)].into();
+        s.agents.insert("u-opener".into(), opener);
+        s.tab_order = [(4, 90)].into();
+        let merged = mint_record_under_test(&mut s, "u-new");
+        assert_eq!(merged.buckets, [(100u32, 6u32)].into());
+    }
+
+    /// Resume must never overwrite earned history with an inherited copy.
+    #[test]
+    fn merge_resume_record_keeps_the_existing_rows_buckets() {
+        let mut existing = rec("u1");
+        existing.buckets = [(99, 42)].into();
+        let mut fresh = rec("u1");
+        fresh.buckets = [(100, 1)].into(); // whatever add would seed
+        let merged = merge_resume_record(Some(&existing), fresh);
+        assert_eq!(merged.buckets, [(99u32, 42u32)].into());
     }
 
     #[test]
