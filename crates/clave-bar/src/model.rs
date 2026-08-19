@@ -3114,6 +3114,63 @@ mod tests {
         assert_eq!(frecency_millis(&future, 100, 24), 2000); // clamp, not panic
     }
 
+    /// Accelerated time: a hand-computed week of daily driving, two live
+    /// agents, 24h dial. The maintainer cannot wall-clock this before living
+    /// with it, so the regimes are pinned here: burst wins day 0; steady
+    /// daily use overtakes a stale burst by day 3; the burst exits the 7-day
+    /// window and survives only on the ordinal floor; by day 10 everything
+    /// has decayed and the ordinal fallback quietly flips the order back.
+    /// Days 7 and 10 re-rank on IDENTICAL buckets — only `snapshot.today`
+    /// moves, which is exactly what an idle fleet's midnight rollover does
+    /// (today is host-computed per push; the bar never reads a clock).
+    #[test]
+    fn a_week_of_daily_driving_reranks_only_by_decay_and_the_window() {
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(1, 0, "burst", false), tab(2, 1, "steady", false)]);
+        let mut burst = agent("u-burst", Status::Idle, Some(1));
+        let mut steady = agent("u-steady", Status::Idle, Some(2));
+        // Ordinals for the fully-decayed endgame: burst committed last long
+        // ago (tab 1 ord 9 > tab 2 ord 5).
+        let ords: &[(usize, u64)] = &[(1, 9), (2, 5)];
+
+        // Day 100: five prompts into burst, one into steady. 5000 > 1000.
+        burst.buckets = [(100, 5)].into();
+        steady.buckets = [(100, 1)].into();
+        let mut snap = snap_full(1, vec![burst.clone(), steady.clone()], ords);
+        snap.today = 100;
+        m.apply_snapshot(snap);
+        assert_eq!(keys(&m), vec![RowKey::Tab(1), RowKey::Tab(2)]);
+
+        // Day 103: steady prompted once each day, burst went silent.
+        // burst 5*0.5^3 = 625; steady 125+250+500+1000 = 1875.
+        steady.buckets = [(100, 1), (101, 1), (102, 1), (103, 1)].into();
+        let mut snap = snap_full(2, vec![burst.clone(), steady.clone()], ords);
+        snap.today = 103;
+        m.apply_snapshot(snap);
+        assert_eq!(frecency_millis(&burst.buckets, 103, 24), 625);
+        assert_eq!(frecency_millis(&steady.buckets, 103, 24), 1875);
+        assert_eq!(keys(&m), vec![RowKey::Tab(2), RowKey::Tab(1)]);
+
+        // Day 107, nobody prompted since: burst's day-100 bucket is now 7
+        // days old — out of the window, score ZERO, alive on the ordinal
+        // floor only. steady still carries 15.625+31.25+62.5, floored = 109.
+        let mut snap = snap_full(3, vec![burst.clone(), steady.clone()], ords);
+        snap.today = 107;
+        m.apply_snapshot(snap);
+        assert_eq!(frecency_millis(&burst.buckets, 107, 24), 0);
+        assert_eq!(frecency_millis(&steady.buckets, 107, 24), 109);
+        assert_eq!(keys(&m), vec![RowKey::Tab(2), RowKey::Tab(1)]);
+
+        // Day 110, same buckets again: steady's history has left the window
+        // too. Both zero → ordinal fallback, and the order flips back to
+        // burst (ord 9 > 5) with no interaction having happened at all.
+        let mut snap = snap_full(4, vec![burst.clone(), steady.clone()], ords);
+        snap.today = 110;
+        m.apply_snapshot(snap);
+        assert_eq!(frecency_millis(&steady.buckets, 110, 24), 0);
+        assert_eq!(keys(&m), vec![RowKey::Tab(1), RowKey::Tab(2)]);
+    }
+
     /// Two live agent tabs: `u-big` invested 10 commitments today but committed
     /// FIRST (ordinal 5, position 1); `u-latest` one commitment, the most
     /// recent (ordinal 9, position 0). The two modes must disagree about them.
