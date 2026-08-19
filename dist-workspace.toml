@@ -18,6 +18,13 @@ targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-
 # GitHub artifact attestations: provenance beats cargo install, which has no
 # crate-level attestations (spec §Distribution).
 github-attestations = true
+# Build `-p clave` alone, not `--workspace`: `dist = false` on clave-bar only
+# excludes its ARTIFACTS, and the default unified workspace build still
+# compiled the wasm-only bar for the native musl targets — where
+# zellij-tile → isahc → curl → openssl-sys has no OpenSSL and the v0.2.0
+# release run died twice (macOS runners survived on Homebrew's). The bar the
+# CLI ships is the embedded one from github-build-setup, not this build.
+precise-builds = true
 # Injected into dist's build job BEFORE cargo build: compiles the bar wasm and
 # exports CLAVE_BAR_WASM so build.rs embeds it (spec §Distribution).
 # Path is relative to .github/workflows/, so `../` keeps the fragment OUTSIDE
