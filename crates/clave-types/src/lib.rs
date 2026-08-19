@@ -99,7 +99,9 @@ pub enum OrderMode {
 
 impl Default for OrderMode {
     fn default() -> Self {
-        OrderMode::Frecency { half_life_hours: 24 }
+        OrderMode::Frecency {
+            half_life_hours: 24,
+        }
     }
 }
 
@@ -870,7 +872,9 @@ mod tests {
     fn order_mode_defaults_to_frecency_24h() {
         assert_eq!(
             OrderMode::default(),
-            OrderMode::Frecency { half_life_hours: 24 }
+            OrderMode::Frecency {
+                half_life_hours: 24
+            }
         );
     }
 
@@ -887,7 +891,10 @@ mod tests {
 
     #[test]
     fn order_mode_round_trips_both_variants() {
-        for m in [OrderMode::Recency, OrderMode::Frecency { half_life_hours: 6 }] {
+        for m in [
+            OrderMode::Recency,
+            OrderMode::Frecency { half_life_hours: 6 },
+        ] {
             let json = serde_json::to_string(&m).unwrap();
             assert_eq!(serde_json::from_str::<OrderMode>(&json).unwrap(), m);
         }
