@@ -44,7 +44,8 @@ present-tense why, not the story of how we learned it.
 almost never type a `clave` subcommand. Describe capabilities ("an agent on
 its own branch in its own worktree") and let the keybind table carry the
 interface. CLI invocations belong in CONTRIBUTING and the docs, with one
-exception: the install and launch lines themselves.
+exception: the install story (the installer line, `clave` itself, and
+`clave doctor` as its repair pointer).
 
 **KISS install.** The install story is the fewest lines that work (today:
 the curl one-liner, then `clave`). Upgrade is two lines. Build-from-source is
@@ -82,5 +83,5 @@ section needs none.
 - The rendered page checked (GitHub preview or a rendered markdown view):
   no boxes, no monochrome dots, tables lay out
 - No issue numbers, no em-dashes, no `clave` subcommands outside the
-  install block
+  install story
 - `unslop` pass done on changed prose

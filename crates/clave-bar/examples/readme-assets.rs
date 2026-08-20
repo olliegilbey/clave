@@ -54,7 +54,11 @@ fn find_font(env: &str, candidates: &[&str]) -> Option<Font> {
         .ok()
         .map(PathBuf::from)
         .into_iter()
-        .chain(candidates.iter().map(|c| PathBuf::from(c.replace('~', &home))))
+        .chain(
+            candidates
+                .iter()
+                .map(|c| PathBuf::from(c.replace('~', &home))),
+        )
         .find(|p| p.exists())
         .map(|path| Font {
             data: std::fs::read(&path)
@@ -364,31 +368,28 @@ fn hero_svg(fonts: &[Font]) -> String {
 
     // Dedupe outlines: one def per (font, char), `<use>` per placement.
     let mut defs = String::new();
-    let mut seen: std::collections::BTreeMap<char, (usize, f32)> = std::collections::BTreeMap::new();
+    let mut seen: std::collections::BTreeMap<char, (usize, f32)> =
+        std::collections::BTreeMap::new();
     let mut body = String::new();
     for (r, line) in lines.iter().enumerate() {
         let (spans, bgs) = parse_row(line);
         let top = pad + r as f32 * cell_h;
         for (start, len, bg) in bgs {
-            let _ = write!(
+            let _ = writeln!(
                 body,
-                "<rect x=\"{:.1}\" y=\"{top:.1}\" width=\"{:.1}\" height=\"{cell_h:.1}\" fill=\"{}\"/>\n",
+                "<rect x=\"{:.1}\" y=\"{top:.1}\" width=\"{:.1}\" height=\"{cell_h:.1}\" fill=\"{}\"/>",
                 pad + start as f32 * advance,
                 len as f32 * advance,
                 hex(bg),
             );
         }
         for s in spans {
-            if !seen.contains_key(&s.ch) {
-                let t = trace(fonts, s.ch)
-                    .unwrap_or_else(|| panic!("no font here carries {:?}", s.ch));
+            if let std::collections::btree_map::Entry::Vacant(e) = seen.entry(s.ch) {
+                let t =
+                    trace(fonts, s.ch).unwrap_or_else(|| panic!("no font here carries {:?}", s.ch));
                 let scale = font_px / t.units_per_em;
-                let _ = write!(
-                    defs,
-                    "<path id=\"g{:x}\" d=\"{}\"/>\n",
-                    s.ch as u32, t.d
-                );
-                seen.insert(s.ch, (t.font, scale));
+                let _ = writeln!(defs, "<path id=\"g{:x}\" d=\"{}\"/>", s.ch as u32, t.d);
+                e.insert((t.font, scale));
             }
             let (_, scale) = seen[&s.ch];
             // Center wide glyphs across their display cells; baseline sits
@@ -396,10 +397,10 @@ fn hero_svg(fonts: &[Font]) -> String {
             let x = pad + s.cell as f32 * advance;
             let y = top + ascent;
             let ink = s.fg.map_or_else(|| hex(Rgb(0xDC, 0xD7, 0xBA)), hex);
-            let _ = write!(
+            let _ = writeln!(
                 body,
                 "<use href=\"#g{:x}\" fill=\"{ink}\" \
-                 transform=\"translate({x:.1} {y:.1}) scale({scale:.4} -{scale:.4})\"/>\n",
+                 transform=\"translate({x:.1} {y:.1}) scale({scale:.4} -{scale:.4})\"/>",
                 s.ch as u32,
             );
             let _ = s.width;

@@ -38,7 +38,6 @@ const BOLD: &str = "\u{1b}[1m";
 /// design; it is the graph paper the design is drawn on.
 const DIM: Rgb = Rgb(0x71, 0x7C, 0x7C);
 
-
 fn fleet() -> Vec<Row> {
     let mut rows = vec![
         agent(
@@ -156,7 +155,6 @@ fn bar(rows: &[Row], cols: usize, widths: Widths, label: &str) {
     }
     println!("  {dim}\u{2514}{rule}\u{2518}{RESET}");
 }
-
 
 /// Bare rows, nothing else on stdout. The width assertion still runs — a
 /// screenshot of a ragged bar would be worse than no screenshot.
