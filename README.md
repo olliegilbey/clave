@@ -67,7 +67,7 @@ Rust (stable) and [`just`](https://just.systems), then:
 
 ```bash
 git clone https://github.com/olliegilbey/clave && cd clave
-git checkout v0.2.0        # `just release` refuses a dirty or untagged tree
+git checkout v0.2.1        # `just release` refuses a dirty or untagged tree
 just setup-toolchain       # adds the wasm32-wasip1 target, once
 just release               # builds, then installs the launcher and versioned artifacts
 
