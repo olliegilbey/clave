@@ -162,6 +162,12 @@ pub struct AgentRecord {
     /// refuses a value shaped like a flag, before it reaches argv.
     #[serde(default)]
     pub live_session: Option<String>,
+    /// Commitment day-buckets (unix day → count) — the frecency numerator.
+    /// Store twin of `clave_types::Agent::buckets`, which carries the
+    /// rationale. Written on UserPromptSubmit; seeded at row creation from
+    /// the opener; pruned past [`BUCKET_RETAIN_DAYS`] on every bump.
+    #[serde(default)]
+    pub buckets: BTreeMap<u32, u32>,
 }
 
 /// The whole store file. `seq` is the monotonic snapshot counter of the §5
@@ -195,6 +201,17 @@ pub struct Store {
     /// every push. `default` (expanded) keeps pre-field store files loading.
     #[serde(default)]
     pub collapsed: bool,
+    /// tab_id → commitment day-buckets: the tab-keyed twin of the record's
+    /// `buckets`, exactly as `tab_order` twins `commit_ord` — it covers
+    /// terminal tabs and the pre-bind window, and the bar max-merges the
+    /// two (R2: same rank live or dormant). Session-scoped like
+    /// `tab_order`: cleared on session recreate, pruned with dead tabs.
+    #[serde(default)]
+    pub tab_buckets: BTreeMap<usize, BTreeMap<u32, u32>>,
+    /// Row-ordering mode + dial — see `clave_types::OrderMode`. Store
+    /// state under the `collapsed` doctrine: one writer, rides every push.
+    #[serde(default)]
+    pub order: clave_types::OrderMode,
 }
 
 impl Store {
@@ -213,6 +230,43 @@ impl Store {
         self.seq += 1;
         self.seq
     }
+}
+
+/// The shared window: the bar's scoring cuts to zero outside it too, so the
+/// two sides cannot drift (clave-types is the single source).
+pub use clave_types::BUCKET_RETAIN_DAYS;
+
+/// Unix seconds → unix day. The one place the day arithmetic lives.
+pub fn unix_day(unix_secs: u64) -> u32 {
+    (unix_secs / 86_400) as u32
+}
+
+/// +1 commitment today, and prune everything out of retention. Both maps
+/// (record and tab twin) go through here, so retention cannot skew.
+pub(crate) fn bump_bucket(map: &mut BTreeMap<u32, u32>, today: u32) {
+    *map.entry(today).or_insert(0) += 1;
+    // Strict `>`, not `>=`: a day exactly BUCKET_RETAIN_DAYS back (today's
+    // 8th day counting inclusively) is out of the rolling window — the test
+    // pins today=100 pruning day=93 (100-93=7).
+    map.retain(|day, _| *day + BUCKET_RETAIN_DAYS > today);
+}
+
+/// The newborn-inheritance source (spec: newborn initialisation): the
+/// buckets of the most-recently-COMMITTED tab — max `tab_order` ordinal,
+/// preferring the agent bound to that tab over the tab twin. A store-native
+/// proxy for "the tab focused at creation"; the two diverge only when the
+/// user focuses a tab and adds without prompting first.
+pub(crate) fn opener_buckets(s: &Store) -> BTreeMap<u32, u32> {
+    let Some((&tab_id, _)) = s.tab_order.iter().max_by_key(|(_, ord)| **ord) else {
+        return BTreeMap::new();
+    };
+    s.agents
+        .values()
+        .find(|r| r.tab_id == Some(tab_id))
+        .map(|r| r.buckets.clone())
+        .filter(|b| !b.is_empty())
+        .or_else(|| s.tab_buckets.get(&tab_id).cloned())
+        .unwrap_or_default()
 }
 
 pub struct StorePaths {
@@ -291,6 +345,9 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
         seq: store.seq,
         tab_order: store.tab_order.clone(),
         collapsed: store.collapsed,
+        tab_buckets: store.tab_buckets.clone(),
+        order: store.order,
+        today: unix_day(now_unix()),
         agents: store
             .agents
             .values()
@@ -322,6 +379,10 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
                 // It is also what makes a dormant row free.
                 context_tokens: r.context_tokens,
                 context_level: r.context_level,
+                // The frecency numerator (2026-08-19 spec) — copied, not
+                // recomputed, for the same reason context_level is: this
+                // runs inside whichever agent's hook fired.
+                buckets: r.buckets.clone(),
             })
             .collect(),
     }
@@ -385,6 +446,28 @@ pub fn apply_touch(paths: &StorePaths, tab_id: usize) -> Result<AgentSnapshot> {
 /// ordinal it minted. `mint_ord` bumps `seq` itself, so this IS the pipe
 /// contract's one bump for the write (§5); callers must not bump again.
 pub(crate) fn touch_in(s: &mut Store, tab_id: usize) -> u64 {
+    // Newborn-inheritance seed (spec): computed BEFORE the mint, and only
+    // on vacancy, so a tab already tracking its own buckets is never
+    // re-seeded and the newborn's own stamp can't shift the opener it
+    // copies from. EXACT copy, no +1 — the tie IS the adjacency mechanism.
+    //
+    // A tab already BOUND to an agent seeds EMPTY instead (maintainer
+    // ruling, 2026-08-19 post-drive): waking an existing dormant agent must
+    // re-enter it at its own decayed score, not the opener's — the E2E
+    // drive caught a woken row borrowing the opener's buckets through its
+    // fresh tab twin. Inheritance belongs to true newborns (whose own
+    // record carries the copy via `mint_record`) and to terminal tabs,
+    // which never bind. `apply_bind` clears the twin for the other arrival
+    // order of the touch/bind race.
+    if !s.tab_buckets.contains_key(&tab_id) {
+        let bound = s.agents.values().any(|r| r.tab_id == Some(tab_id));
+        let inherited = if bound {
+            BTreeMap::new()
+        } else {
+            opener_buckets(s)
+        };
+        s.tab_buckets.insert(tab_id, inherited);
+    }
     let ord = s.mint_ord();
     s.tab_order.insert(tab_id, ord);
     ord
@@ -438,6 +521,13 @@ pub fn apply_bind(paths: &StorePaths, uuid: &str, tab_id: usize) -> Result<Optio
         if let Some(r) = s.agents.get_mut(uuid) {
             r.tab_id = Some(tab_id);
         }
+        // An agent-bound tab's twin never holds inherited buckets (maintainer
+        // ruling, 2026-08-19 post-drive): the row must rank on the agent's own
+        // decayed score. Insert EMPTY rather than remove — an occupied key is
+        // what stops a birth `clave touch` landing after this bind from
+        // re-seeding the opener's copy (`touch_in` seeds only on vacancy).
+        // Commitment stamps landing after this rebuild the twin organically.
+        s.tab_buckets.insert(tab_id, BTreeMap::new());
         s.seq += 1; // monotonic pipe contract (§5)
         Some(snapshot_from(s))
     })
@@ -541,6 +631,11 @@ pub(crate) fn prune_in(s: &mut Store, stale_ids: &[usize]) -> bool {
     let before = s.tab_order.len();
     s.tab_order.retain(|id, _| !stale_ids.contains(id));
     changed |= s.tab_order.len() != before;
+    // tab_buckets is tab_order's frecency twin: a dead tab's day-buckets
+    // must not keep contributing once its ordinal entry is gone.
+    for id in stale_ids {
+        s.tab_buckets.remove(id);
+    }
     changed
 }
 
@@ -558,6 +653,17 @@ pub fn apply_collapse(paths: &StorePaths, collapsed: bool) -> Result<Option<Agen
         s.collapsed = collapsed;
         s.seq += 1; // monotonic pipe contract (§5)
         Some(snapshot_from(s))
+    })
+}
+
+/// `clave order <mode>`: persist the ordering mode and push. Same shape
+/// as apply_collapse; unconditional because the whole point of the write
+/// is the fleet-wide re-sort.
+pub fn apply_order(paths: &StorePaths, mode: clave_types::OrderMode) -> Result<AgentSnapshot> {
+    with_store_mut(paths, |s| {
+        s.order = mode;
+        s.seq += 1; // monotonic pipe contract (§5)
+        snapshot_from(s)
     })
 }
 
@@ -639,6 +745,7 @@ pub fn clear_session_order(paths: &StorePaths) -> Result<()> {
         let mut changed = false;
         if !s.tab_order.is_empty() || bound {
             s.tab_order.clear();
+            s.tab_buckets.clear();
             s.agents.values_mut().for_each(|r| {
                 r.tab_id = None;
                 r.pane_id = None;
@@ -753,6 +860,7 @@ mod tests {
             context_tokens: None,
             context_level: None,
             live_session: None,
+            buckets: BTreeMap::new(),
         }
     }
 
@@ -1119,6 +1227,11 @@ mod tests {
             let mut dead = rec("u-dead");
             dead.tab_id = Some(11); // its tab just closed
             s.agents.insert("u-dead".into(), dead);
+            // tab_buckets is tab_order's frecency twin (2026-08-19 spec):
+            // it must be pruned in lockstep or a dead tab's day-buckets
+            // would keep contributing to frecency forever.
+            s.tab_buckets.insert(10, [(100, 1)].into());
+            s.tab_buckets.insert(11, [(100, 1)].into());
         })
         .unwrap();
         apply_touch(&p, 10).unwrap();
@@ -1132,6 +1245,14 @@ mod tests {
         assert_eq!(s.agents["u-dead"].tab_id, None, "dead bind cleared");
         assert!(s.tab_order.contains_key(&10));
         assert!(!s.tab_order.contains_key(&11), "stale timeline dropped");
+        assert!(
+            s.tab_buckets.contains_key(&10),
+            "live tab_buckets untouched"
+        );
+        assert!(
+            !s.tab_buckets.contains_key(&11),
+            "dead tab's buckets dropped alongside its timeline entry"
+        );
         assert!(snap.agents.iter().all(|a| a.tab_id != Some(11)));
         // §5: the push must be STRICTLY newer than what the bars hold, or
         // `apply_snapshot`'s `seq <= self.seq` gate discards it — and the bar
@@ -1413,10 +1534,18 @@ mod tests {
         .unwrap();
         apply_touch(&p, 4).unwrap();
         apply_bind(&p, "u1", 4).unwrap();
+        with_store_mut(&p, |s| {
+            s.tab_buckets.insert(4, [(100, 1)].into());
+        })
+        .unwrap();
         clear_session_order(&p).unwrap();
         let s = read_store(&p).unwrap();
         assert!(s.tab_order.is_empty());
         assert_eq!(s.agents["u1"].tab_id, None);
+        assert!(
+            s.tab_buckets.is_empty(),
+            "tab_buckets is session-scoped like tab_order and must clear with it"
+        );
     }
 
     #[test]
@@ -1697,6 +1826,129 @@ mod tests {
             before + 1,
             "§5 forbids no-op pushes"
         );
+    }
+
+    #[test]
+    fn bump_bucket_increments_today_and_prunes_past_retention() {
+        let mut m: BTreeMap<u32, u32> = [(100, 3), (93, 9)].into();
+        bump_bucket(&mut m, 100);
+        assert_eq!(m.get(&100), Some(&4));
+        assert!(!m.contains_key(&93)); // 100 - 7 = 93 is out of retention
+    }
+
+    #[test]
+    fn opener_buckets_prefers_the_max_ordinal_tabs_agent() {
+        let mut s = Store::default();
+        let mut a = rec("u1");
+        a.tab_id = Some(7);
+        a.buckets = [(100, 5)].into();
+        s.agents.insert("u1".into(), a);
+        s.tab_order = [(7, 50), (9, 40)].into();
+        s.tab_buckets.insert(9, [(100, 2)].into());
+        // tab 7 holds the max ordinal and hosts u1 → u1's buckets win.
+        assert_eq!(opener_buckets(&s), [(100u32, 5u32)].into());
+    }
+
+    #[test]
+    fn opener_buckets_falls_back_to_tab_buckets_then_empty() {
+        let mut s = Store {
+            tab_order: [(9, 40)].into(),
+            ..Store::default()
+        };
+        s.tab_buckets.insert(9, [(100, 2)].into());
+        assert_eq!(opener_buckets(&s), [(100u32, 2u32)].into());
+        assert!(opener_buckets(&Store::default()).is_empty());
+    }
+
+    #[test]
+    fn birth_touch_seeds_tab_buckets_from_the_opener_copy_only() {
+        let mut s = Store::default();
+        let mut a = rec("u1");
+        a.tab_id = Some(7);
+        a.buckets = [(100, 5)].into();
+        s.agents.insert("u1".into(), a);
+        s.tab_order = [(7, 50)].into();
+        touch_in(&mut s, 11);
+        // EXACT copy — no +1. The tie IS the adjacency mechanism (spec).
+        assert_eq!(s.tab_buckets.get(&11), Some(&[(100u32, 5u32)].into()));
+        // A second touch on a seeded tab never re-seeds.
+        s.agents.get_mut("u1").unwrap().buckets = [(101, 9)].into();
+        touch_in(&mut s, 11);
+        assert_eq!(s.tab_buckets.get(&11), Some(&[(100u32, 5u32)].into()));
+    }
+
+    #[test]
+    fn waking_a_bound_tab_never_inherits_the_opener_in_either_arrival_order() {
+        // Maintainer ruling (2026-08-19, caught by the PR #218 live drive): a
+        // woken EXISTING agent re-enters at its own decayed score. Before the
+        // guard, the fresh tab's birth touch copied the opener's buckets into
+        // the twin and the woken row rendered at the opener's rank. The birth
+        // touch and the bind genuinely race in both orders, so both are pinned.
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            let mut opener = rec("op");
+            opener.tab_id = Some(1);
+            opener.buckets = [(100, 8)].into();
+            s.agents.insert("op".into(), opener);
+            s.tab_order.insert(1, 50);
+            s.agents.insert("woken".into(), rec("woken"));
+        })
+        .unwrap();
+
+        // Touch BEFORE bind (the common birth race): the twin briefly holds
+        // the inherited copy, and the bind must clear it.
+        with_store_mut(&p, |s| {
+            touch_in(s, 2);
+            assert_eq!(s.tab_buckets.get(&2), Some(&[(100u32, 8u32)].into()));
+        })
+        .unwrap();
+        apply_bind(&p, "woken", 2).unwrap().expect("bound");
+        assert_eq!(
+            read_store(&p).unwrap().tab_buckets.get(&2),
+            Some(&BTreeMap::new())
+        );
+
+        // Bind BEFORE touch: the bind's empty insert occupies the key, and
+        // the later birth touch must not re-seed (vacancy-only), while a
+        // touch on a tab bound by a direct store write seeds empty too.
+        apply_bind(&p, "woken", 3).unwrap().expect("rebound");
+        with_store_mut(&p, |s| {
+            touch_in(s, 3);
+            assert_eq!(s.tab_buckets.get(&3), Some(&BTreeMap::new()));
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn apply_order_persists_and_snapshots_the_mode() {
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        let snap = apply_order(&p, clave_types::OrderMode::Recency).unwrap();
+        assert_eq!(snap.order, clave_types::OrderMode::Recency);
+        assert_eq!(
+            read_store(&p).unwrap().order,
+            clave_types::OrderMode::Recency
+        );
+        // seq bumps unconditionally (§5 pipe contract), not just on a mode
+        // toggle — pins `+=` against a `*=`/no-op mutant.
+        assert_eq!(snap.seq, 1);
+        let snap2 = apply_order(&p, clave_types::OrderMode::Recency).unwrap();
+        assert_eq!(snap2.seq, 2);
+    }
+
+    #[test]
+    fn snapshot_carries_buckets_tab_buckets_order_and_today() {
+        let mut s = Store::default();
+        let mut a = rec("u1");
+        a.buckets = [(100, 5)].into();
+        s.agents.insert("u1".into(), a);
+        s.tab_buckets.insert(3, [(100, 1)].into());
+        let snap = snapshot_from(&s);
+        assert_eq!(snap.agents[0].buckets, [(100u32, 5u32)].into());
+        assert_eq!(snap.tab_buckets.get(&3), Some(&[(100u32, 1u32)].into()));
+        assert_eq!(snap.order, clave_types::OrderMode::default());
+        assert_eq!(snap.today, unix_day(now_unix()));
     }
 
     /// The ordinal invariants, quantified rather than exemplified (S1 §5.3).

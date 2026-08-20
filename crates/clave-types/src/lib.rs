@@ -83,6 +83,36 @@ impl Status {
     }
 }
 
+/// How the bar ranks rows (2026-08-19 spec). Semi-persistent store state
+/// riding every snapshot — the `collapsed` doctrine: one store writer,
+/// instances hydrate at birth and heal on every push.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrderMode {
+    /// The shipped S1 ordering: commitment ordinal descending.
+    Recency,
+    /// Decayed-commitment score: Σ count × 0.5^(age_days × 24 / half_life).
+    /// half-life → 0 behaves like Recency; → ∞ like a 7-day rolling
+    /// investment count ([`BUCKET_RETAIN_DAYS`] caps both sides).
+    Frecency { half_life_hours: u32 },
+}
+
+impl Default for OrderMode {
+    fn default() -> Self {
+        OrderMode::Frecency {
+            half_life_hours: 24,
+        }
+    }
+}
+
+/// The day-bucket window, shared by both sides of the wire (maintainer
+/// ruling, 2026-08-19 post-drive): the store prunes a row's buckets past
+/// this on every bump, and the bar scores an out-of-window bucket as ZERO
+/// at every dial — "fully decayed at 7 days" is a semantic, not a numeric
+/// accident of the half-life, and it caps per-frame scoring work however
+/// stale a long-dormant row's stored buckets are.
+pub const BUCKET_RETAIN_DAYS: u32 = 7;
+
 /// One agent row as the plugin renders it. Mirrors the store record's
 /// display-relevant fields (spec §5); the plugin never sees the store, only
 /// this snapshot.
@@ -190,6 +220,12 @@ pub struct Agent {
     /// project. `default` keeps pre-field payloads parseable.
     #[serde(default)]
     pub context_level: Option<u8>,
+    /// Commitment day-buckets: unix day → count of user commitments that
+    /// day. The frecency numerator; written by the hook on UserPromptSubmit,
+    /// seeded at birth from the opener (spec: newborn initialisation),
+    /// pruned past 7 days. `default` keeps pre-field payloads parseable.
+    #[serde(default)]
+    pub buckets: std::collections::BTreeMap<u32, u32>,
 }
 
 /// The full-replace snapshot `clave` pushes to `clave-bar` on every change
@@ -220,6 +256,24 @@ pub struct AgentSnapshot {
     /// matches the born-expanded default.
     #[serde(default)]
     pub collapsed: bool,
+    /// Row-ordering mode + dial (2026-08-19 spec). Store state like
+    /// `collapsed` above, same doctrine. `default` keeps pre-field
+    /// payloads parseable.
+    #[serde(default)]
+    pub order: OrderMode,
+    /// Unix DAY at projection time, stamped by the host — the bar never
+    /// reads a clock (wasm). Frecency ages every bucket against this.
+    /// `default` (0) carries no buckets (pre-frecency payload has none),
+    /// so all scores are 0 → the ordinal fallback carries.
+    #[serde(default)]
+    pub today: u32,
+    /// tab_id → commitment day-buckets: the tab-keyed twin of
+    /// `Agent::buckets`, exactly as `tab_order` twins `commit_ord` —
+    /// covers terminal tabs and the pre-bind window; session-scoped and
+    /// pruned with `tab_order`. `default` keeps pre-field payloads
+    /// parseable.
+    #[serde(default)]
+    pub tab_buckets: std::collections::BTreeMap<usize, std::collections::BTreeMap<u32, u32>>,
 }
 
 /// The `clave-register` payload a pane's `clave spawn` pipes to the plugin so it
@@ -515,6 +569,7 @@ mod tests {
             default_branch: None,
             context_tokens: None,
             context_level: None,
+            buckets: Default::default(),
         };
         assert!(!serde_json::to_string(&a).unwrap().contains("archived"));
     }
@@ -525,6 +580,9 @@ mod tests {
             seq: 7,
             tab_order: Default::default(),
             collapsed: false,
+            order: OrderMode::default(),
+            today: 0,
+            tab_buckets: Default::default(),
             agents: vec![Agent {
                 uuid: "u1".into(),
                 cwd: "/Users/x/code/clave".into(),
@@ -544,6 +602,7 @@ mod tests {
                 default_branch: None,
                 context_tokens: None,
                 context_level: None,
+                buckets: Default::default(),
             }],
         };
         let json = serde_json::to_string(&snap).unwrap();
@@ -576,6 +635,7 @@ mod tests {
             default_branch: None,
             context_tokens: None,
             context_level: None,
+            buckets: Default::default(),
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert_eq!(back.tab_id, Some(4));
@@ -610,6 +670,7 @@ mod tests {
             default_branch: None,
             context_tokens: None,
             context_level: None,
+            buckets: Default::default(),
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert!(back.stale);
@@ -646,6 +707,7 @@ mod tests {
             default_branch: None,
             context_tokens: None,
             context_level: None,
+            buckets: Default::default(),
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert_eq!(back.title.as_deref(), Some("CLA-MAIN"));
@@ -696,6 +758,7 @@ mod tests {
             default_branch: Some("trunk".into()),
             context_tokens: None,
             context_level: None,
+            buckets: Default::default(),
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert_eq!(back.default_branch.as_deref(), Some("trunk"));
@@ -720,6 +783,9 @@ mod tests {
             agents: vec![],
             tab_order: std::collections::BTreeMap::from([(4usize, 12u64)]),
             collapsed: false,
+            order: OrderMode::default(),
+            today: 0,
+            tab_buckets: Default::default(),
         };
         let json = serde_json::to_string(&snap).unwrap();
         let back: AgentSnapshot = serde_json::from_str(&json).unwrap();
@@ -770,6 +836,7 @@ mod tests {
             default_branch: None,
             context_tokens: None,
             context_level: None,
+            buckets: Default::default(),
         };
         let mut v: serde_json::Value = serde_json::to_value(&a).unwrap();
         v.as_object_mut().unwrap().remove("commit_ord");
@@ -788,6 +855,9 @@ mod tests {
             agents: vec![],
             tab_order: Default::default(),
             collapsed: true,
+            order: OrderMode::default(),
+            today: 0,
+            tab_buckets: Default::default(),
         };
         let back: AgentSnapshot =
             serde_json::from_str(&serde_json::to_string(&snap).unwrap()).unwrap();
@@ -804,5 +874,37 @@ mod tests {
         };
         let back: Register = serde_json::from_str(&serde_json::to_string(&reg).unwrap()).unwrap();
         assert_eq!(reg, back);
+    }
+
+    #[test]
+    fn order_mode_defaults_to_frecency_24h() {
+        assert_eq!(
+            OrderMode::default(),
+            OrderMode::Frecency {
+                half_life_hours: 24
+            }
+        );
+    }
+
+    /// Pre-field payloads must keep parsing — the repo-wide `serde(default)`
+    /// doctrine, pinned here for the four new fields at once.
+    #[test]
+    fn pre_frecency_snapshot_payload_still_parses() {
+        let old = r#"{"seq":1,"agents":[]}"#;
+        let snap: AgentSnapshot = serde_json::from_str(old).unwrap();
+        assert_eq!(snap.order, OrderMode::default());
+        assert_eq!(snap.today, 0);
+        assert!(snap.tab_buckets.is_empty());
+    }
+
+    #[test]
+    fn order_mode_round_trips_both_variants() {
+        for m in [
+            OrderMode::Recency,
+            OrderMode::Frecency { half_life_hours: 6 },
+        ] {
+            let json = serde_json::to_string(&m).unwrap();
+            assert_eq!(serde_json::from_str::<OrderMode>(&json).unwrap(), m);
+        }
     }
 }

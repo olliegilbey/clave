@@ -29,7 +29,7 @@ struct Cli {
     command: Option<Command>,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 enum Command {
     /// Add a new agent: pick a directory (zoxide), open a tab, spawn Claude.
     Add {
@@ -162,6 +162,18 @@ enum Command {
         collapsed: bool,
     },
 
+    /// Set (or print) the sidebar row-ordering mode.
+    /// `clave order` prints; `clave order recency` | `clave order
+    /// frecency [HALF_LIFE_HOURS]` set and push fleet-wide.
+    Order {
+        /// "recency" or "frecency"
+        #[arg(value_parser = ["recency", "frecency"])]
+        mode: Option<String>,
+        /// Frecency half-life in hours (default 24). Dial: small ≈
+        /// recency, huge ≈ 7-day rolling investment count.
+        half_life: Option<u32>,
+    },
+
     /// Prepare the machine: generate config/layout, merge Claude hooks,
     /// pre-seed the Zellij permission cache (§6.8/§7). Idempotent.
     Setup,
@@ -210,7 +222,7 @@ enum Command {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 enum DevAction {
     /// Seed a named scenario and print the launch command.
     Scenario { name: String },
@@ -559,6 +571,26 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Some(Command::Order { mode, half_life }) => {
+            let paths = store::store_paths()?;
+            let Some(mode) = mode else {
+                println!("{:?}", store::read_store(&paths)?.order);
+                return Ok(());
+            };
+            let mode = match mode.as_str() {
+                "recency" => clave_types::OrderMode::Recency,
+                "frecency" => clave_types::OrderMode::Frecency {
+                    half_life_hours: half_life.unwrap_or(24),
+                },
+                // Unreachable behind clap's value_parser; kept so the match
+                // stays exhaustive when a future mode string lands.
+                other => anyhow::bail!("unknown order mode {other:?} (recency|frecency)"),
+            };
+            let snap = store::apply_order(&paths, mode)?;
+            hook::push_snapshot(&snap);
+            clave::evlog::log_event("order", &format!("{mode:?}"));
+            Ok(())
+        }
         Some(Command::Setup) => setup::run_setup(),
         Some(Command::Doctor { json }) => clave::doctor::run_doctor(json),
         Some(Command::Open { uuid, collapsed }) => open::run_open(&uuid, collapsed),
@@ -718,6 +750,28 @@ mod tests {
                 }) => assert_eq!(dry_run, want),
                 _ => panic!("parsed into the wrong command"),
             }
+        }
+    }
+
+    #[test]
+    fn order_cli_parses_mode_and_optional_half_life() {
+        let bare = Cli::parse_from(["clave", "order"]);
+        match bare.command {
+            Some(Command::Order {
+                mode: None,
+                half_life: None,
+            }) => {}
+            other => panic!("bare order misparsed: {other:?}"),
+        }
+        let full = Cli::parse_from(["clave", "order", "frecency", "12"]);
+        match full.command {
+            Some(Command::Order {
+                mode: Some(m),
+                half_life: Some(12),
+            }) => {
+                assert_eq!(m, "frecency")
+            }
+            other => panic!("full order misparsed: {other:?}"),
         }
     }
 }

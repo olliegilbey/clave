@@ -169,6 +169,7 @@ mod tests {
     use super::*;
     use crate::store::{AgentRecord, LabelSource};
     use clave_types::Status;
+    use std::collections::BTreeMap;
 
     fn rec(uuid: &str) -> AgentRecord {
         AgentRecord {
@@ -192,6 +193,7 @@ mod tests {
             context_tokens: None,
             context_level: None,
             live_session: None,
+            buckets: BTreeMap::new(),
         }
     }
 

@@ -126,6 +126,9 @@ Zellij's keys still belong to Zellij.
   and whether it failed.
 - **Running agents sit above closed ones**, so the fleet you're actually
   working stays a short cycle however many conversations you've accumulated.
+- **The running list orders itself by attention.** Every prompt banks a
+  little weight, and that weight fades over a day, so the conversations you
+  keep returning to hold the top while a tab you only poked sinks back down.
 - **Worktrees are first class.** An agent can have its own branch in its own
   directory, so two agents in one repo never fight over your working tree.
 
