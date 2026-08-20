@@ -46,4 +46,13 @@ exclude_re = [
     # `session_exists` for the reconciliation — which is where the decisions
     # actually live. Covering the seam needs tier 2 (#47), not a unit test.
     "launch_session",
+    # `launch_session`'s backfill seam, same argument one layer down: it
+    # resolves the AMBIENT store paths and claude dir, takes the store lock,
+    # and prints — all process-global, none observable from a unit test
+    # without racing env vars (see smart_zone's note on why those tests are
+    # forbidden). Every decision it forwards to — `backfill_store`'s
+    # seed-only walk, `derive_for_row`'s probing, the parser — is mutated
+    # and killed directly. The seam itself is a live-run check: the
+    # `clave: seeded frecency…` line on the next version refresh.
+    "run_on_version_refresh",
 ]
