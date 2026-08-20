@@ -889,6 +889,11 @@ pub fn launch_session() -> Result<()> {
                 env!("CARGO_PKG_VERSION")
             );
             run_setup()?;
+            // The once-per-version moment: rows that predate frecency (or
+            // lost their buckets to a pre-field writer, #106) re-derive
+            // their last week from the jsonl source of truth. Seed-only and
+            // best-effort — see `backfill::run_on_version_refresh`.
+            crate::backfill::run_on_version_refresh();
         }
     }
     // Discovered once, used for every zellij invocation in this launch —

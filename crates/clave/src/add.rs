@@ -507,6 +507,12 @@ pub(crate) struct FreshRecordInputs<'a> {
     pub label: &'a str,
     pub worktree: Option<String>,
     pub default_branch: Option<String>,
+    /// A RESUMED conversation's buckets, derived from its own transcript
+    /// (maintainer ruling 2026-08-20: the jsonl is the source of truth, so a
+    /// row with real history enters at its real weight, not its opener's
+    /// echo). `None` — no transcript yet — is the brand-new case, which
+    /// keeps the ratified opener inheritance.
+    pub own_buckets: Option<std::collections::BTreeMap<u32, u32>>,
 }
 
 /// The S1 mint + merge-resume-or-insert sequence `run_add` runs under the
@@ -514,13 +520,18 @@ pub(crate) struct FreshRecordInputs<'a> {
 /// this — the same path a real `clave add` takes — is directly unit-testable
 /// without fzf/zellij: `run_add` and the tests below both drive it.
 ///
-/// Spec (2026-08-19): a newborn inherits the opener's buckets — an exact
-/// copy, so identical scores + the position tiebreak put it directly below
-/// its opener until real commitments diverge them. A resumed row keeps its
-/// own earned buckets via `merge_resume_record`'s `..row.clone()`.
+/// Spec (2026-08-19, amended 2026-08-20): a brand-new conversation inherits
+/// the opener's buckets — an exact copy, so identical scores + the position
+/// tiebreak put it directly below its opener until real commitments diverge
+/// them. A conversation resumed FROM ITS TRANSCRIPT enters at its own
+/// derived weight instead (`own_buckets`), and a resumed row already in the
+/// store keeps its earned buckets via `merge_resume_record`'s
+/// `..row.clone()`.
 pub(crate) fn mint_record(s: &mut Store, inputs: FreshRecordInputs) -> AgentRecord {
     let ord = s.mint_ord();
-    let inherited = crate::store::opener_buckets(s);
+    let seeded = inputs
+        .own_buckets
+        .unwrap_or_else(|| crate::store::opener_buckets(s));
     let fresh = AgentRecord {
         uuid: inputs.uuid.to_string(),
         cwd: inputs.cwd.to_string(),
@@ -546,7 +557,7 @@ pub(crate) fn mint_record(s: &mut Store, inputs: FreshRecordInputs) -> AgentReco
         // `..row.clone()`, which is what keeps a re-added rotated agent
         // pointing at its live conversation (#99).
         live_session: None,
-        buckets: inherited,
+        buckets: seeded,
     };
     // Note `merge_resume_record` PRESERVES an existing row's
     // `default_branch` along with everything else, so a row written before
@@ -1100,6 +1111,22 @@ pub fn run_add(worktree: bool) -> Result<()> {
     //    keeps everything and resets only status. The authoritative
     //    existing-row lookup happens HERE, inside the lock (the step-4 copy
     //    was lock-free and only derived layout inputs).
+    // A resumed conversation's own history, read OUTSIDE the store lock (a
+    // transcript can be tens of MB; the lock protects the store, not this
+    // read). Probes the transcript's possible homes (#139: not always the
+    // cwd); None = brand-new = opener inheritance in `mint_record`.
+    let own_buckets = crate::env::claude_config_dir().ok().and_then(|dir| {
+        crate::backfill::derive_for_row(
+            &dir,
+            &[
+                agent_cwd.as_str(),
+                resume_root.as_deref().unwrap_or(&repo_root),
+            ],
+            &uuid,
+            None,
+            crate::store::unix_day(now_unix()),
+        )
+    });
     let snap = with_store_mut(&paths, |s| {
         // S1: a new row is a user commitment, so it is minted an ordinal from
         // this same locked write and enters at the top. Before S1 a new row
@@ -1116,6 +1143,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
                 label: &label,
                 worktree: worktree_path.clone(),
                 default_branch: default_branch.clone(),
+                own_buckets: own_buckets.clone(),
             },
         );
         snapshot_from(s)
@@ -1173,6 +1201,7 @@ mod tests {
                 label: "x · main",
                 worktree: None,
                 default_branch: None,
+                own_buckets: None,
             },
         )
     }
@@ -1190,6 +1219,33 @@ mod tests {
         s.tab_order = [(4, 90)].into();
         let merged = mint_record_under_test(&mut s, "u-new");
         assert_eq!(merged.buckets, [(100u32, 6u32)].into());
+    }
+
+    /// Amendment (2026-08-20): a conversation resumed from its transcript
+    /// enters at its OWN derived weight — the opener's echo is only for
+    /// rows with no history of their own.
+    #[test]
+    fn own_transcript_buckets_beat_the_openers_echo() {
+        let mut s = Store::default();
+        let mut opener = rec("u-opener");
+        opener.tab_id = Some(4);
+        opener.buckets = [(100, 6)].into();
+        s.agents.insert("u-opener".into(), opener);
+        s.tab_order = [(4, 90)].into();
+        let merged = mint_record(
+            &mut s,
+            FreshRecordInputs {
+                uuid: "u-resumed",
+                cwd: "/x",
+                repo_root: "/x",
+                branch: "main",
+                label: "x · main",
+                worktree: None,
+                default_branch: None,
+                own_buckets: Some([(99, 3)].into()),
+            },
+        );
+        assert_eq!(merged.buckets, [(99u32, 3u32)].into());
     }
 
     /// Resume must never overwrite earned history with an inherited copy.
