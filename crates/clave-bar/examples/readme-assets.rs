@@ -24,8 +24,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use clave_bar::render::{
-    BASE, BATTERY, CONSOLE, DESIGN_COLS, PALETTE, Provenance, Rgb, RowStatus, TermStatus, Widths,
-    display_cells, render_rows, strip_sgr,
+    BASE, BATTERY, CONSOLE, DEFAULT_INK, DESIGN_COLS, PALETTE, Provenance, Rgb, RowStatus,
+    TermStatus, Widths, display_cells, render_rows, strip_sgr,
 };
 
 #[path = "shared/showcase_fixture.rs"]
@@ -239,7 +239,7 @@ fn write_icons(fonts: &[Font], dir: &Path) {
         );
     }
     // Provenance marks ride the default ink, like the bar renders them.
-    let ink = Rgb(0xDC, 0xD7, 0xBA);
+    let ink = DEFAULT_INK;
     for (name, p) in [
         ("mark-branch", Provenance::Branch),
         ("mark-worktree", Provenance::Worktree),
@@ -396,7 +396,7 @@ fn hero_svg(fonts: &[Font]) -> String {
             // `ascent` below the row top.
             let x = pad + s.cell as f32 * advance;
             let y = top + ascent;
-            let ink = s.fg.map_or_else(|| hex(Rgb(0xDC, 0xD7, 0xBA)), hex);
+            let ink = s.fg.map_or_else(|| hex(DEFAULT_INK), hex);
             let _ = writeln!(
                 body,
                 "<use href=\"#g{:x}\" fill=\"{ink}\" \

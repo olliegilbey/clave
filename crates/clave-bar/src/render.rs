@@ -207,7 +207,8 @@ pub const BASE: Rgb = Rgb(0x1F, 0x1F, 0x28); // sumiInk3 — the bar background
 const SEL_BG: Rgb = Rgb(0x2D, 0x4F, 0x67); // waveBlue2 — the selected row
 /// fujiWhite — kanagawa's default foreground. Inks the rule, the summary, and
 /// the dormant glyph, which was sumiInk4 and all but invisible against `BASE`.
-const DEFAULT_INK: Rgb = Rgb(0xDC, 0xD7, 0xBA);
+/// Pub for the `readme-assets` example, like `BASE` above.
+pub const DEFAULT_INK: Rgb = Rgb(0xDC, 0xD7, 0xBA);
 /// sumiInk0 — text ON a title chip. Public because the preview draws the same
 /// chip in its palette swatches (lock §4).
 pub const CHIP_INK: Rgb = Rgb(0x16, 0x16, 0x1D);

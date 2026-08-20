@@ -15,22 +15,22 @@ who is working, and who finished while you were looking elsewhere.
      renderer, so it can only change by changing the design. -->
 <img src="docs/assets/sidebar.svg" alt="The clave sidebar: nine rows, each a coloured status mark, a context battery, an optional branch or worktree mark, a rename chip, the repo name, and a one-line description." width="720">
 
-### The whole vocabulary
+## The whole vocabulary
 
 Colour is the state; the shape only changes where a row isn't a live
 conversation. Left to right, the cells of a row:
 
 | status | battery | mark | chip | repo | text |
 |---|---|---|---|---|---|
-| <img src="docs/assets/glyphs/status-needs-you.svg" width="14"> waiting on you | `105k` context spent, in tokens | *blank*, a plain checkout | your `/rename` | one colour per repo, wherever it appears | Claude's own description of the session, not your prompt |
-| <img src="docs/assets/glyphs/status-working.svg" width="14"> working | <img src="docs/assets/glyphs/battery-00.svg" width="14"><img src="docs/assets/glyphs/battery-06.svg" width="14"><img src="docs/assets/glyphs/battery-08.svg" width="14"><img src="docs/assets/glyphs/battery-10.svg" width="14"> the same reading as a glyph, when the bar is collapsed | <img src="docs/assets/glyphs/mark-branch.svg" width="14"> on a branch | blank until you rename | <img src="docs/assets/glyphs/repo-0.svg" width="14"><img src="docs/assets/glyphs/repo-1.svg" width="14"><img src="docs/assets/glyphs/repo-4.svg" width="14"><img src="docs/assets/glyphs/repo-6.svg" width="14"> | on a terminal row, the last command it ran |
-| <img src="docs/assets/glyphs/status-done.svg" width="14"> finished while you were away | `TERM`, a terminal tab | <img src="docs/assets/glyphs/mark-worktree.svg" width="14"> in its own git worktree | on a terminal row, the tab's name | | |
-| <img src="docs/assets/glyphs/status-idle.svg" width="14"> idle | | | | | |
-| <img src="docs/assets/glyphs/status-failed.svg" width="14"> last turn failed | | | | | |
-| <img src="docs/assets/glyphs/status-stale.svg" width="14"> its directory is gone | | | | | |
-| <img src="docs/assets/glyphs/status-dormant.svg" width="14"> dormant, half-faded. No process; opens where it left off | | | | | |
-| <img src="docs/assets/glyphs/status-opening.svg" width="14"> opening | | | | | |
-| <img src="docs/assets/glyphs/term-running.svg" width="14"> a terminal tab. Same colour language | | | | | |
+| <img alt="" src="docs/assets/glyphs/status-needs-you.svg" width="14"> waiting on you | `105k` context spent, in tokens | *blank*, a plain checkout | your `/rename` | one colour per repo, wherever it appears | Claude's own description of the session, not your prompt |
+| <img alt="" src="docs/assets/glyphs/status-working.svg" width="14"> working | <img alt="" src="docs/assets/glyphs/battery-00.svg" width="14"><img alt="" src="docs/assets/glyphs/battery-06.svg" width="14"><img alt="" src="docs/assets/glyphs/battery-08.svg" width="14"><img alt="" src="docs/assets/glyphs/battery-10.svg" width="14"> the same reading as a glyph, when the bar is collapsed | <img alt="" src="docs/assets/glyphs/mark-branch.svg" width="14"> on a branch | blank until you rename | <img alt="" src="docs/assets/glyphs/repo-0.svg" width="14"><img alt="" src="docs/assets/glyphs/repo-1.svg" width="14"><img alt="" src="docs/assets/glyphs/repo-4.svg" width="14"><img alt="" src="docs/assets/glyphs/repo-6.svg" width="14"> | on a terminal row, the last command it ran |
+| <img alt="" src="docs/assets/glyphs/status-done.svg" width="14"> finished while you were away | `TERM`, a terminal tab | <img alt="" src="docs/assets/glyphs/mark-worktree.svg" width="14"> in its own git worktree | on a terminal row, the tab's name | | |
+| <img alt="" src="docs/assets/glyphs/status-idle.svg" width="14"> idle | | | | | |
+| <img alt="" src="docs/assets/glyphs/status-failed.svg" width="14"> last turn failed | | | | | |
+| <img alt="" src="docs/assets/glyphs/status-stale.svg" width="14"> its directory is gone | | | | | |
+| <img alt="" src="docs/assets/glyphs/status-dormant.svg" width="14"> dormant, half-faded. No process; opens where it left off | | | | | |
+| <img alt="" src="docs/assets/glyphs/status-opening.svg" width="14"> opening | | | | | |
+| <img alt="" src="docs/assets/glyphs/term-running.svg" width="14"> a terminal tab. Same colour language | | | | | |
 
 **The battery reads against your smart zone, not the model's window.** The
 window is where Claude auto-compacts; the smart zone is how far you trust a
