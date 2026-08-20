@@ -150,6 +150,13 @@ one-directional.
   closed list (or jump there with a number key) and the arrows walk that list
   instead; click back to a running agent and they walk the top list again.
   Waking a closed conversation always takes `Alt+Enter`.
+- **Rows order by frecency, not raw recency.** Each prompt banks weight that
+  decays with age (24h half-life by default), so a thread you're actually
+  invested in outranks whatever tab you merely poked last; a row with no
+  weight yet keeps its plain arrival order. `clave order recency` reverts to
+  last-touched-on-top; `clave order frecency [HOURS]` restores frecency and
+  can widen or sharpen the half-life; `clave order` alone prints the current
+  mode.
 - **Worktrees are first class.** `clave add --worktree` puts an agent on its own
   branch in its own directory, so two agents in one repo never fight over your
   working tree.

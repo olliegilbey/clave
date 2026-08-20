@@ -806,6 +806,9 @@ fn agent_record(
         // `scenario_rotated_uuid(n)`, and this is where the row learns to
         // point at it, exactly as a real `/clear` would leave behind.
         live_session: a.rotated.then(|| scenario_rotated_uuid(n)),
+        // Not seeded: the sandbox exercises the real birth-touch inheritance
+        // path (touch_in/opener_buckets) rather than a scenario-typed value.
+        buckets: Default::default(),
     }
 }
 
