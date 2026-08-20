@@ -24,8 +24,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use clave_bar::render::{
-    BASE, BATTERY, CONSOLE, DEFAULT_INK, DESIGN_COLS, PALETTE, Provenance, Rgb, RowStatus,
-    TermStatus, Widths, display_cells, render_rows, strip_sgr,
+    BASE, BATTERY, COLLAPSED_DESIGN_COLS, CONSOLE, DEFAULT_INK, DESIGN_COLS, PALETTE, Provenance,
+    Rgb, RowStatus, TermStatus, Widths, display_cells, render_rows, strip_sgr,
 };
 
 #[path = "shared/showcase_fixture.rs"]
@@ -341,12 +341,14 @@ fn parse_row(line: &str) -> (Vec<Span>, Vec<(usize, usize, Rgb)>) {
     (spans, bgs)
 }
 
-fn hero_svg(fonts: &[Font]) -> String {
+/// The same fleet in either state: `cols`/`widths` are the only difference
+/// between the expanded and collapsed frames, exactly as in the plugin.
+fn hero_svg(fonts: &[Font], cols: usize, widths: Widths) -> String {
     let rows = showcase();
-    let lines = render_rows(&rows, DESIGN_COLS, rows.len(), Widths::EXPANDED);
+    let lines = render_rows(&rows, cols, rows.len(), widths);
     for (line, row) in lines.iter().zip(&rows) {
         let width = display_cells(&strip_sgr(line));
-        assert_eq!(width, DESIGN_COLS, "row is {width} cells: {row:?}");
+        assert_eq!(width, cols, "row is {width} cells: {row:?}");
     }
 
     // Cell geometry from the mono face itself, at a fixed pixel size.
@@ -363,7 +365,7 @@ fn hero_svg(fonts: &[Font]) -> String {
     let descent = -face.descender() as f32 / upem * font_px;
     let cell_h = (ascent + descent) * 1.06;
     let pad = 12.0;
-    let width = DESIGN_COLS as f32 * advance + pad * 2.0;
+    let width = cols as f32 * advance + pad * 2.0;
     let height = lines.len() as f32 * cell_h + pad * 2.0;
 
     // Dedupe outlines: one def per (font, char), `<use>` per placement.
@@ -429,5 +431,12 @@ fn main() {
     std::fs::create_dir_all(&glyphs).expect("creating docs/assets/glyphs");
     let fonts = load_fonts();
     write_icons(&fonts, &glyphs);
-    write_file(&root.join("docs/assets/sidebar.svg"), &hero_svg(&fonts));
+    write_file(
+        &root.join("docs/assets/sidebar-expanded.svg"),
+        &hero_svg(&fonts, DESIGN_COLS, Widths::EXPANDED),
+    );
+    write_file(
+        &root.join("docs/assets/sidebar-collapsed.svg"),
+        &hero_svg(&fonts, COLLAPSED_DESIGN_COLS, Widths::COLLAPSED),
+    );
 }

@@ -1,6 +1,7 @@
 # clave 🥁
 
-**Conduct a fleet of Claude Code agents from a Zellij sidebar.**
+**Run many Claude Code agents at once and see, at a glance, exactly who
+needs you. In your terminal, where you already live.**
 
 Run three agents and you can hold it in your head. Run eight and you can't.
 You start tabbing through them to find the one that asked you a question ten
@@ -8,44 +9,43 @@ minutes ago. clave gives the fleet one vertical bar: every agent is a Zellij
 tab running the real Claude TUI, and a glance tells you who needs an answer,
 who is working, and who finished while you were looking elsewhere.
 
-<!-- Regenerate this frame and every icon below with
+<!-- Regenerate these frames and every icon below with
      `cargo run -q -p clave-bar --example readme-assets`. The fleet is the
      showcase fixture in crates/clave-bar/examples/shared/showcase_fixture.rs.
      Edit it there, never here: the SVG is traced from the plugin's own
      renderer, so it can only change by changing the design. -->
-<img src="docs/assets/sidebar.svg" alt="The clave sidebar: nine rows, each a coloured status mark, a context battery, an optional branch or worktree mark, a rename chip, the repo name, and a one-line description." width="720">
+The sidebar sits to the left of your terminal, one row per agent. Expand it
+when you want the detail; collapse it to a strip when you don't. Same fleet,
+both states:
 
-## The whole vocabulary
+| expanded | collapsed |
+|---|---|
+| <img src="docs/assets/sidebar-expanded.svg" alt="The expanded clave sidebar: nine rows, each a coloured status mark, a token count, an optional branch or worktree mark, a rename chip, the repo name, and a one-line description." width="620"> | <img src="docs/assets/sidebar-collapsed.svg" alt="The same nine rows collapsed to a strip: the token count becomes a battery glyph and the text truncates." width="300"> |
 
-Colour is the state; the shape only changes where a row isn't a live
-conversation. Left to right, the cells of a row:
+## What the colours and glyphs mean
+
+Each row is one conversation. The coloured dot is its state, and you mostly
+never need more than that; the rest of the row fills in the detail. Left to
+right:
 
 | | |
 |---|---|
-| **status** | <img alt="" src="docs/assets/glyphs/status-needs-you.svg" width="18"> waiting on you · <img alt="" src="docs/assets/glyphs/status-working.svg" width="18"> working · <img alt="" src="docs/assets/glyphs/status-done.svg" width="18"> finished while you were away · <img alt="" src="docs/assets/glyphs/status-idle.svg" width="18"> idle · <img alt="" src="docs/assets/glyphs/status-failed.svg" width="18"> last turn failed · <img alt="" src="docs/assets/glyphs/status-stale.svg" width="18"> its directory is gone · <img alt="" src="docs/assets/glyphs/status-dormant.svg" width="18"> dormant, half-faded; opens where it left off · <img alt="" src="docs/assets/glyphs/status-opening.svg" width="18"> opening · <img alt="" src="docs/assets/glyphs/term-running.svg" width="18"> a terminal tab, same colour language |
+| **status** | <img alt="" src="docs/assets/glyphs/status-needs-you.svg" width="18"> waiting on you · <img alt="" src="docs/assets/glyphs/status-working.svg" width="18"> working · <img alt="" src="docs/assets/glyphs/status-done.svg" width="18"> finished while you were away · <img alt="" src="docs/assets/glyphs/status-idle.svg" width="18"> idle · <img alt="" src="docs/assets/glyphs/status-failed.svg" width="18"> last turn failed · <img alt="" src="docs/assets/glyphs/status-stale.svg" width="18"> its directory is gone · <img alt="" src="docs/assets/glyphs/status-dormant.svg" width="18"> dormant, half-faded; opens where it left off · <img alt="" src="docs/assets/glyphs/status-opening.svg" width="18"> opening · <img alt="" src="docs/assets/glyphs/term-running.svg" width="18"> a terminal tab (colours mean the same) |
 | **battery** | `105k` context spent, in tokens<br><img alt="" src="docs/assets/glyphs/battery-00.svg" width="18"><img alt="" src="docs/assets/glyphs/battery-06.svg" width="18"><img alt="" src="docs/assets/glyphs/battery-08.svg" width="18"><img alt="" src="docs/assets/glyphs/battery-10.svg" width="18"> the same reading as a glyph, when the bar is collapsed<br>`TERM`, a terminal tab |
-| **mark** | *blank*, a plain checkout · <img alt="" src="docs/assets/glyphs/mark-branch.svg" width="18"> on a branch · <img alt="" src="docs/assets/glyphs/mark-worktree.svg" width="18"> in its own git worktree |
-| **chip** | your `/rename`, blank until you rename<br>on a terminal row, the tab's name |
+| **mark** | *blank*, the repo's ordinary checkout · <img alt="" src="docs/assets/glyphs/mark-branch.svg" width="18"> on a branch · <img alt="" src="docs/assets/glyphs/mark-worktree.svg" width="18"> in its own git worktree |
+| **chip** | the name you gave the session with `/rename`; blank until you do<br>on a terminal row, the tab's name |
 | **repo** | <img alt="" src="docs/assets/glyphs/repo-0.svg" width="18"><img alt="" src="docs/assets/glyphs/repo-1.svg" width="18"><img alt="" src="docs/assets/glyphs/repo-4.svg" width="18"><img alt="" src="docs/assets/glyphs/repo-6.svg" width="18"> one colour per repo, wherever it appears |
 | **text** | Claude's own description of the session, not your prompt<br>on a terminal row, the last command it ran |
 
-**The battery reads against your smart zone, not the model's window.** The
-window is where Claude auto-compacts; the smart zone is how far you trust a
-model to stay sharp, whatever it advertises. It defaults to 150,000 tokens.
-Set your own in your shell config:
+The battery is how much context the conversation has used: a token count
+when the bar is expanded, a battery glyph when it's collapsed. It turns red
+at your **smart zone**, the point where you stop trusting a model to stay
+sharp, whatever context window it advertises. Set your own in your shell
+config:
 
 ```bash
-export CLAVE_AGENT_SMART_ZONE_TOKENS=150000
+export CLAVE_AGENT_SMART_ZONE_TOKENS=150000   # the default
 ```
-
-The colour moves through four bands and turns red at your zone, then stays
-there. The count refreshes each turn, and a row that just `/clear`ed reads
-full again, correctly: the battery measures the conversation the row is in,
-never its history.
-
-<sub>The bar renders these marks with your terminal's Nerd Font. The worktree
-mark comes from Noto Sans Bamum, which macOS ships; on Linux, install it if
-that one cell shows a box.</sub>
 
 ## Try it
 
