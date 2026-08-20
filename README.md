@@ -1,79 +1,69 @@
 # clave 🥁
 
-**Conduct a fleet of Claude Code agents from a Zellij sidebar.**
+## Terminal sidebar for agent orchestration
 
-Run three agents and you can hold it in your head. Run eight and you can't — you
-start tabbing through them to find the one that asked you a question ten minutes
-ago. clave gives the fleet one vertical bar: every agent is a Zellij tab running
-the real Claude TUI, and a glance tells you who needs an answer, who is working,
-and who finished while you were looking elsewhere.
+**Coordinate your many agents with ease from a terminal sidebar - giving you glanceable information and quick navigation - where you are right at home already.**
 
-<!-- Regenerate: `cargo run -q -p clave-bar --example bar-preview -- --showcase`,
-     screenshot the output, replace docs/assets/sidebar.png. The fleet is the
-     `showcase()` fixture in that example — edit it there, not here, so the
-     frame always comes from the real `render_rows`. -->
-<img src="docs/assets/sidebar.png" alt="The clave sidebar: nine rows, each a coloured status dot, an optional branch or worktree mark, a rename chip, the repo name, and a one-line description. Red is waiting on you, amber working, green done, grey idle; a red cross has failed, a hollow ring is dormant, and two rows are plain terminal tabs." width="720">
+Stop dealing with everyone creating yet another Electron app to manage agents and just do it from your favourite place. We've come to love vertical tabs in a browser, and chatbot interfaces, now it's in your terminal - where you can see what state each agent is in and visually distinguish between them. And you can still have terminals interleaved between your agents.
 
-### The whole vocabulary
+<!-- Regenerate these frames and every icon below with
+     `cargo run -q -p clave-bar --example readme-assets`. The fleet is the
+     showcase fixture in crates/clave-bar/examples/shared/showcase_fixture.rs.
+     Edit it there, never here: the SVG is traced from the plugin's own
+     renderer, so it can only change by changing the design. -->
 
-**Colour is the state.** The shape only changes where a row isn't a live
-conversation.
+The `clave` sidebar has an expanded and collapsed view:
 
-| | | | |
-|---|---|---|---|
-| `●` red | waiting on you | `✖` | last turn failed |
-| `●` amber | working | `✗` | its directory is gone |
-| `●` green | finished while you were away | `○` | dormant — no process, opens where it left off |
-| `●` grey | idle | `↻` | opening |
+| expanded                                                                                                                                                                                                                                         | collapsed                                                                                                                                                                |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| <img src="docs/assets/sidebar-expanded.svg" alt="The expanded clave sidebar: nine rows, each a coloured status mark, a token count, an optional branch or worktree mark, a rename chip, the repo name, and a one-line description." width="620"> | <img src="docs/assets/sidebar-collapsed.svg" alt="The same nine rows collapsed to a strip: the token count becomes a battery glyph and the text truncates." width="300"> |
 
-Then, left to right across the row:
+## What the colours and glyphs mean
 
-| | |
-|---|---|
-| *nothing* | a plain checkout — the common case, so it stays quiet |
-| `󰘬` | on a branch |
-| `𖣂` | in its own git worktree |
-| `󰆍` | a terminal tab rather than an agent — the bar is the whole session |
-| `105k` | the **battery** — how much context that session has spent, in tokens |
-| **chip** | your `/rename`; blank until you rename |
-| **repo** | one colour per repo, wherever it appears |
-| **text** | Claude's own description of the session, not your prompt |
+<table>
+<tr><td><b>status</b></td><td><img alt="" src="docs/assets/glyphs/status-needs-you.svg" width="18"> waiting on you · <img alt="" src="docs/assets/glyphs/status-working.svg" width="18"> working · <img alt="" src="docs/assets/glyphs/status-done.svg" width="18"> finished while you were away · <img alt="" src="docs/assets/glyphs/status-idle.svg" width="18"> idle · <img alt="" src="docs/assets/glyphs/status-failed.svg" width="18"> last turn failed · <img alt="" src="docs/assets/glyphs/status-stale.svg" width="18"> its directory is gone · <img alt="" src="docs/assets/glyphs/status-dormant.svg" width="18"> dormant, half-faded; opens where it left off · <img alt="" src="docs/assets/glyphs/status-opening.svg" width="18"> opening · <img alt="" src="docs/assets/glyphs/term-running.svg" width="18"> a terminal tab (colours mean the same)</td></tr>
+<tr><td><b>battery</b></td><td><code>105k</code> context spent, in tokens<br><img alt="" src="docs/assets/glyphs/battery-00.svg" width="18"><img alt="" src="docs/assets/glyphs/battery-06.svg" width="18"><img alt="" src="docs/assets/glyphs/battery-08.svg" width="18"><img alt="" src="docs/assets/glyphs/battery-10.svg" width="18"> the same reading as a glyph, when the bar is collapsed<br><code>TERM</code>, a terminal tab</td></tr>
+<tr><td><b>mark</b></td><td><i>blank</i>, the repo's ordinary checkout · <img alt="" src="docs/assets/glyphs/mark-branch.svg" width="18"> on a branch · <img alt="" src="docs/assets/glyphs/mark-worktree.svg" width="18"> in its own git worktree</td></tr>
+<tr><td><b>chip</b></td><td>the name you gave the session with <code>/rename</code>; blank until you do<br>on a terminal row, the tab's name</td></tr>
+<tr><td><b>repo</b></td><td><img alt="" src="docs/assets/glyphs/repo-0.svg" width="18"><img alt="" src="docs/assets/glyphs/repo-1.svg" width="18"><img alt="" src="docs/assets/glyphs/repo-4.svg" width="18"><img alt="" src="docs/assets/glyphs/repo-6.svg" width="18"> one colour per repo, wherever it appears</td></tr>
+<tr><td><b>text</b></td><td>Claude's own description of the session, not your prompt<br>on a terminal row, the last command it ran</td></tr>
+</table>
 
-**The battery reads against your smart zone, not the model's window.** The
-window is where Claude auto-compacts; the smart zone is how far *you* trust a
-model to stay sharp, and it's the same number whether that model advertises 200k
-or a million. It defaults to 150,000 tokens — set your own in your shell config:
+Seeing used context per agent is powerful - in expanded view, you'll see the token count, when collapsed you'll see a battery icon.
+You can set when you want the battery to run out, and the corresponding colours based on where you believe the smart zone of your model ends:
 
 ```bash
-export CLAVE_AGENT_SMART_ZONE_TOKENS=150000
+export CLAVE_AGENT_SMART_ZONE_TOKENS=150000   # the default
 ```
 
-The expanded bar prints the figure; collapse the bar and it becomes a glyph
-(`󰁹`→`󰂎`) that empties a tenth at a time so you can watch it descend.
-Either way the colour moves in four coarser bands, so a glance tells you enough
-without reading the number. It turns red *at* your zone, and stays there — past
-that point the glyph's reading is "out", not "how far out", which is the other
-reason the expanded bar spells the count. A row that just `/clear`ed reads full
-again, correctly: the battery measures the conversation the row is in, never its
-history.
-
-The count refreshes per turn (`Stop` / prompt-submit hooks), so a row mid-turn
-shows the *previous* turn's figure — four digits expose that lag in a way the
-glyph's coarser bands mostly hid.
-
-<sub>These marks may show as boxes here on GitHub — they render in your
-terminal. The branch and terminal marks are Nerd Font glyphs; the worktree mark
-is U+168C2, which no Nerd Font carries — install Noto Sans Bamum (or any font
-with Bamum coverage) as a fallback, or that one row shows a box. The screenshot
-shows all of them.</sub>
+Pairs well with [rot-reducer](https://github.com/olliegilbey/rot-reducer), a plugin that informs Claude itself when its context is running low.
 
 ## Try it
 
-**Runtime:** `zellij` (0.44.3 is what's tested), `claude`, `git`, plus `fzf` and
-`zoxide` for the directory picker. macOS and Linux. A
-[Nerd Font](https://www.nerdfonts.com/) for the branch and terminal marks.
+You need [`zellij`](https://zellij.dev) (0.44.3 is what's tested), `claude`,
+`git`, plus `fzf` and `zoxide` for the directory picker, and a
+[Nerd Font](https://www.nerdfonts.com/) in your terminal. macOS and Linux.
 
-**To build:** Rust (stable) and [`just`](https://just.systems).
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/olliegilbey/clave/releases/latest/download/clave-installer.sh | sh
+
+clave   # from a terminal OUTSIDE zellij; clave makes its own session
+```
+
+First launch sets the machine up: Zellij config and keybinds, clave's status
+hooks in `~/.claude/settings.json` (additive, your own hooks are left alone),
+and the plugin permission cache. That's what lets an agent report its own
+state. `clave doctor` explains anything that didn't land.
+
+Then `Alt+a`, pick a directory, choose `new`. That's your first agent.
+
+**Upgrading?** Re-run the installer, quit every running clave session, start
+fresh.
+
+<details>
+<summary><b>Building from source</b></summary>
+
+Rust (stable) and [`just`](https://just.systems), then:
 
 ```bash
 git clone https://github.com/olliegilbey/clave && cd clave
@@ -81,107 +71,50 @@ git checkout v0.2.0        # `just release` refuses a dirty or untagged tree
 just setup-toolchain       # adds the wasm32-wasip1 target, once
 just release               # builds, then installs the launcher and versioned artifacts
 
-# Put the launcher on your PATH — in your SHELL CONFIG, not just this shell,
-# or `clave` is gone the next time you open a terminal. Pick YOUR shell's file:
+# Put the launcher on your PATH in your SHELL CONFIG, not just this shell.
 echo 'export PATH="$HOME/.local/share/clave/bin:$PATH"' >> ~/.zshrc    # zsh
 echo 'export PATH="$HOME/.local/share/clave/bin:$PATH"' >> ~/.bashrc   # bash
-exec $SHELL                # reload, so this shell sees it too
-
-clave                      # from a terminal OUTSIDE zellij — clave makes its own session
+exec $SHELL
 ```
 
-No packaged release yet; building from a tag is the supported path. Take the tag
-literally — earlier ones predate the launcher this puts on your PATH.
+</details>
 
-**Upgrading? Quit every running clave session first, and start it fresh
-afterwards.** `just release` regenerates Zellij's keybinds, and Zellij swaps
-those into sessions that are already running — but a sidebar that is already
-loaded keeps the identity it booted with, so the next keypress opens a *second*
-sidebar beside the first. A cold restart is the whole fix.
+## The keys
 
-`just release` also registers clave's status hooks in `~/.claude/settings.json`
-(additive — your own hooks are left alone) and seeds Zellij's plugin permission
-cache. That's what lets an agent report its own state. `clave doctor` explains
-anything that didn't land.
+|                                      |                                                                                                     |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------- |
+| `Alt+a`                              | add an agent: pick a directory, then `new` or `resume`                                              |
+| `Alt+↑` `Alt+↓` (or `Alt+k` `Alt+j`) | walk the running agents                                                                             |
+| `Alt+1`…`Alt+9`                      | jump straight to a row, running or closed                                                           |
+| `Alt+Enter`                          | wake the selected closed row                                                                        |
+| `Alt+o`                              | back to where you were                                                                              |
+| `Alt+c`                              | toggle collapsed or expanded view of the sidebar                                                    |
+| `Alt+t` `Alt+w`                      | new terminal tab, close tab                                                                         |
+| `Alt+f`                              | toggle a floating shell over the current tab, great for your terminal based editor at the same time |
 
-Then `Alt+a`, pick a directory, choose `new`. That's your first agent.
-
-| | |
-|---|---|
-| `Alt+a` | add an agent — pick a directory, then new or resume |
-| `Alt+↑` `Alt+↓` (or `Alt+k` `Alt+j`) | walk the running agents |
-| `Alt+1`…`Alt+9` | jump straight to a row, running or closed |
-| `Alt+Enter` | wake the selected closed row |
-| `Alt+o` | back to where you were |
-| `Alt+c` | collapse the bar to a strip, or expand it |
-| `Alt+t` `Alt+w` | new tab, close tab |
-| `Alt+f` | a scratch shell floating over the fleet — press again to tuck it away, leave it to close it |
-
-`Alt` is clave's namespace. Five stock Zellij bindings that Claude Code needs
-are unbound for you (`Ctrl+g/t/o/b/q`); the rest of Zellij's `Ctrl` keys still
-belong to Zellij ([#24](../../issues/24)). `Alt+f` is the one stock key clave
-takes over rather than unbinds: Zellij's own `Alt+f` toggles floating panes,
-but opens the first one at a size nothing chose, tiny enough to need resizing
-every time. Clave routes the press to the sidebar instead, which spawns your
-shell at a fixed, workable size — flush against the bar's edge and reaching
-almost all the way to the screen's right — and tucks it away or brings it back
-on every press after ([#188](../../issues/188), [#207](../../issues/207)).
-Nothing is spawned until the first press. One cost: `Alt+f` used to reach the
-program you were typing in, where it is readline's "forward one word", and clave
-now takes it — `Alt+b` still moves back a word, so word motion in a prompt is
-one-directional.
+Everything clave binds lives on `Alt`. Five stock Zellij `Ctrl` bindings that
+Claude Code needs (`Ctrl+g/t/o/b/q`) are unbound for you; the rest of
+Zellij's keys still belong to Zellij.
 
 ## How it works
 
-- **One agent = one Zellij tab**, running the actual `claude` binary — vim mode,
-  slash commands, MCP servers, all of it. clave never reimplements the TUI. It
-  just always knows where each conversation is.
-- **Status comes from [Claude Code hooks](https://code.claude.com/docs/en/hooks)**,
-  not screen-scraping. Each agent reports its own turn lifecycle, so a row
-  changes the moment the agent does.
-- **Conversations survive restarts.** Every pane runs an idempotent
-  resume-or-create. A cold start reopens your most recent agent and brings the
-  rest back as dormant rows — open one and it picks up where it left off,
-  including the ones you've `/clear`ed, which start a fresh session id
-  underneath.
-- **Running agents sit above closed ones**, in their own list, and `Alt+j`/
-  `Alt+k` walk one list at a time — so the fleet you're actually working stays a
-  short cycle however many conversations you've accumulated. Click into the
-  closed list (or jump there with a number key) and the arrows walk that list
-  instead; click back to a running agent and they walk the top list again.
-  Waking a closed conversation always takes `Alt+Enter`.
-- **Rows order by frecency, not raw recency.** Each prompt banks weight that
-  decays with age (24h half-life by default), so a thread you're actually
-  invested in outranks whatever tab you merely poked last; a row with no
-  weight yet keeps its plain arrival order. `clave order recency` reverts to
-  last-touched-on-top; `clave order frecency [HOURS]` restores frecency and
-  can widen or sharpen the half-life; `clave order` alone prints the current
-  mode.
-- **Worktrees are first class.** `clave add --worktree` puts an agent on its own
-  branch in its own directory, so two agents in one repo never fight over your
-  working tree.
+- Each tab is a terminal. As usual. But with extra info shown in the tab text.
+- If the terminal is an agent TUI (like Claude Code), the sidebar is populated with rich information about the agent state.
+- Sidebar state comes from either [Claude Code hooks](https://code.claude.com/docs/en/hooks), or from your `.claude` `jsonl` store that Claude Code already keeps.
+- **Conversations survive restarts.** A cold start brings the fleet back as dormant rows; open one (with `Alt+Enter`) and it picks up where it left off.
+- **Running tabs sit above closed ones**, so the agents and terminals you're using are quick to cycle through (with `Alt+↑` `Alt+↓`).
+- **The tab list orders itself by attention.** A modified "frecency" algorithm is used to keep the tabs you're most likely to reuse at the top.
 
-**What it isn't:** a wrapper around Claude, a scheduler, or something you
-configure. There is no config file — the bar's layout is a ratified design, not
-a preference, and clave's job is to get out of the way of the agents.
+## Contributing
 
-## Status
-
-🚧 Early, and its author's daily driver — clave is developed from inside a clave
-session, which is why the rough edges get found fast. If something breaks,
-[open an issue](../../issues); that's the most useful thing you can do right now.
-
-Design and rationale:
-[the orchestrator design spec](docs/superpowers/specs/2026-06-30-clave-orchestrator-design.md).
-Want to work on it? [CONTRIBUTING](CONTRIBUTING.md) — start there rather than
-here, especially before you install anything over a running session.
+Want to work on it? Start with [CONTRIBUTING](CONTRIBUTING.md). Something broke? [Open an issue](../../issues).
 
 ## Why "clave"?
 
-The **clave** is the foundational rhythm an entire ensemble locks to — the part
-everything else syncs around. It's also Spanish for *key* / *keystone* (it's
-keyboard-driven), and the archaic past tense of *cleave*, to split — as in
-splitting the screen into panes. Logo: the two-stick percussion instrument.
+The **clave** is the foundational rhythm an entire ensemble locks to, the
+part everything else syncs around. It's also Spanish for _key_ / _keystone_
+(it's keyboard-driven), and the archaic past tense of _cleave_, to split, as
+in splitting the screen into panes.
 
 ## License
 

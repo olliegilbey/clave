@@ -45,3 +45,6 @@ unicode-width = { workspace = true }
 # consumer.
 [dev-dependencies]
 proptest = "1"
+# The `readme-assets` example only: traces font glyph outlines into the SVG
+# icons and hero frame the README embeds. Host-only, like proptest above.
+ttf-parser = "0.25"

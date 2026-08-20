@@ -187,7 +187,7 @@ impl Rgb {
     /// `round()`, which is round-half-to-even. One channel landing on `.5` is
     /// enough to make the port off-by-one against the design that was signed
     /// off, and `#DCD7BA` faded onto `#1F1F28` puts blue on exactly `149.5`.
-    fn mix(self, other: Rgb, t: f64) -> Rgb {
+    pub fn mix(self, other: Rgb, t: f64) -> Rgb {
         let ch = |a: u8, b: u8| {
             (f64::from(a) + (f64::from(b) - f64::from(a)) * t).round_ties_even() as u8
         };
@@ -201,11 +201,14 @@ impl Rgb {
 
 pub const RESET: &str = "\u{1b}[0m";
 
-const BASE: Rgb = Rgb(0x1F, 0x1F, 0x28); // sumiInk3 — the bar background
+/// Pub for the `readme-assets` example: the README's generated frame paints
+/// this canvas rather than copying the hex.
+pub const BASE: Rgb = Rgb(0x1F, 0x1F, 0x28); // sumiInk3 — the bar background
 const SEL_BG: Rgb = Rgb(0x2D, 0x4F, 0x67); // waveBlue2 — the selected row
 /// fujiWhite — kanagawa's default foreground. Inks the rule, the summary, and
 /// the dormant glyph, which was sumiInk4 and all but invisible against `BASE`.
-const DEFAULT_INK: Rgb = Rgb(0xDC, 0xD7, 0xBA);
+/// Pub for the `readme-assets` example, like `BASE` above.
+pub const DEFAULT_INK: Rgb = Rgb(0xDC, 0xD7, 0xBA);
 /// sumiInk0 — text ON a title chip. Public because the preview draws the same
 /// chip in its palette swatches (lock §4).
 pub const CHIP_INK: Rgb = Rgb(0x16, 0x16, 0x1D);
@@ -245,7 +248,9 @@ const FADE: f64 = 0.25;
 /// at a glance. The glyph stays fujiWhite-based (#123's near-invisible
 /// sumiInk4 lesson), so even this deep it outreads the old ink. 0.5 was
 /// rendered first; Ollie ratified 0.6 against the ux-gate1 fleet (#210).
-const DORMANT_FADE: f64 = 0.6;
+/// Pub for the README asset generator: the dormant icon must carry the same
+/// fade `render_row` applies, not the raw mark ink.
+pub const DORMANT_FADE: f64 = 0.6;
 
 // ── glyphs (lock §5) ────────────────────────────────────────────────────────
 
@@ -253,7 +258,10 @@ const LCAP: char = '\u{e0b6}'; // powerline half-circle thick, left
 const RCAP: char = '\u{e0b4}'; // powerline half-circle thick, right
 const RULE: char = '\u{2502}'; // box drawings light vertical
 const ELLIPSIS: char = '\u{2026}';
-const CONSOLE: char = '\u{f018d}'; // nf-md-console — now the STATUS cell's mark (#206)
+/// Pub for the `readme-assets` example (as are `BATTERY` and the `mark`/`ink`
+/// tables below): the README's icons are generated from these values, never
+/// copied.
+pub const CONSOLE: char = '\u{f018d}'; // nf-md-console — now the STATUS cell's mark (#206)
 /// The battery cell's terminal-class marker (#206): the word where an agent
 /// row shows its count, a glyph where it shows its ramp. `TERM` is four cells
 /// exactly — the full expanded battery cell, right-aligned like the digits.
@@ -280,7 +288,7 @@ const TERM_GLYPH: char = '\u{f120}'; // nf-fa-terminal — the rightward prompt,
 /// `md-battery_90`…`md-battery_10` (U+F0082 down to U+F007A — note they run
 /// BACKWARDS through the codepoints), `md-battery_outline` (U+F008E). Written as
 /// escapes, never literals: design-lock §5.4, load-bearing.
-const BATTERY: [(char, Rgb); clave_types::BATTERY_LEVELS as usize] = [
+pub const BATTERY: [(char, Rgb); clave_types::BATTERY_LEVELS as usize] = [
     ('\u{f0079}', GREEN),  // full        · below a tenth spent
     ('\u{f0082}', GREEN),  // nine tenths
     ('\u{f0081}', GREEN),  // eight
@@ -333,7 +341,7 @@ impl RowStatus {
     /// things, and easy to transpose (FOOTGUNS). `DormantSelected` is U+23CE
     /// RETURN SYMBOL in the Opening tint — the ⏎ affordance IS the first
     /// frame of the launch lifecycle it invites (⏎ → ↻ → status, #100).
-    fn mark(self) -> (char, Rgb) {
+    pub fn mark(self) -> (char, Rgb) {
         match self {
             RowStatus::NeedsYou => ('\u{25cf}', Rgb(0xE4, 0x68, 0x76)), // waveRed
             RowStatus::Working => ('\u{25cf}', Rgb(0xFF, 0x9E, 0x3B)),  // roninYellow
@@ -368,7 +376,7 @@ pub enum TermStatus {
 }
 
 impl TermStatus {
-    fn ink(self) -> Rgb {
+    pub fn ink(self) -> Rgb {
         match self {
             TermStatus::Idle => DEFAULT_INK,
             TermStatus::Running => Rgb(0xFF, 0x9E, 0x3B), // roninYellow — Working's ink
@@ -392,7 +400,7 @@ impl Provenance {
     /// a glyph, and blanking the most common row is what makes the two marked
     /// states mean something (lock §5.1). The worktree glyph is an invention —
     /// there is no worktree glyph anywhere (lock §5.2).
-    fn mark(self) -> Option<char> {
+    pub fn mark(self) -> Option<char> {
         match self {
             Provenance::Main => None,
             Provenance::Branch => Some('\u{f062c}'), // nf-md-source_branch (lazygit's)

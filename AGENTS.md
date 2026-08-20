@@ -26,6 +26,8 @@ a `vX.Y.Z` tag plus `just release` is the promotion event.
 
 [CONTRIBUTING.md](CONTRIBUTING.md) | the two environments (stable vs sandbox), the release model, the PR flow, where work is tracked — **and "The one leak"**, the PATH hazard that broke v0.1.1 in the field (#43, #44)
 
+[docs/dev/README-SOP.md](docs/dev/README-SOP.md) | touching README.md? The ratified rules, layout and exemplar every README change is written from and checked against
+
 [docs/dev/TESTING.md](docs/dev/TESTING.md) | the three verification tiers, the risk taxonomy (change class → required verification), the escape record, and the live-validation SOP
 
 [SUBSYSTEM-VALIDATION.md](docs/superpowers/spikes/SUBSYSTEM-VALIDATION.md) | the C-section for the subsystem you are about to change — the ledger of approaches tried and _why they failed_. Read it first; every forbidden path was expensive to learn
