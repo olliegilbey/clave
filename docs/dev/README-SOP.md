@@ -5,7 +5,7 @@ the one document a stranger reads before deciding to try clave. Every change
 to README.md is written from these rules and checked against them before the
 PR opens.
 
-Exemplar: _commit TBD, set when the v0.2.1 rewrite lands._ When these rules
+Exemplar: `60d3770` (the README rewrite, #220). When these rules
 and the exemplar disagree, the exemplar shows intent; update whichever is
 stale and say so in the PR.
 
