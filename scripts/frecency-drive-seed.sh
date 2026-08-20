@@ -3,7 +3,9 @@
 # docs/superpowers/plans/2026-08-19-frecency-e2e-drive.md). Idempotent; run
 # after `just sandbox` (staging rewrites the store) and before launch.
 set -euo pipefail
-STATE=/Users/olliegilbey/.local/state/clave-dev-frecency-735d/state
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CLAVE_BIN="${CLAVE_BIN:-$ROOT/target/release/clave}"
+STATE="$("$CLAVE_BIN" dev instance --field state)"
 STORE="$STATE/agents.json"
 T=$(( $(date +%s) / 86400 ))
 A=00000000-0000-4000-8000-c85c00000001

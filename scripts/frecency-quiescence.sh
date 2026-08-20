@@ -4,10 +4,14 @@
 # check). Prints both readings either way, per TESTING.md — a moving reading
 # is a finding to attribute, not an automatic red.
 set -euo pipefail
-STATE=/Users/olliegilbey/.local/state/clave-dev-frecency-735d/state
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CLAVE_BIN="${CLAVE_BIN:-$ROOT/target/release/clave}"
+STATE="$("$CLAVE_BIN" dev instance --field state)"
 seq_now() { jq -r '.seq' "$STATE/agents.json"; }
 ev_now()  { wc -l < "$STATE/clave.log" | tr -d ' '; }
-bar_now() { grep -c 'clave-bar' "${TMPDIR%/}/zellij-$(id -u)/zellij-log/zellij.log"; }
+# grep -c exits 1 on zero matches, which `set -e` would turn into an abort —
+# and "no bar lines yet" is a reading to print, not a reason to stop.
+bar_now() { grep -c 'clave-bar' "${TMPDIR%/}/zellij-$(id -u)/zellij-log/zellij.log" || true; }
 S0=$(seq_now); E0=$(ev_now); B0=$(bar_now)
 echo "t0: seq=$S0 evlog=$E0 barlog=$B0"
 sleep 60

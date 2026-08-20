@@ -3112,6 +3112,11 @@ mod tests {
         assert_eq!(frecency_millis(&BTreeMap::new(), 100, 24), 0);
         let future: BTreeMap<u32, u32> = [(105, 2)].into();
         assert_eq!(frecency_millis(&future, 100, 24), 2000); // clamp, not panic
+        // A zero dial is reachable from the CLI and the wire; it must behave
+        // as a 1-hour half-life, not as a division by zero.
+        let b0: BTreeMap<u32, u32> = [(100, 4), (99, 4)].into();
+        assert_eq!(frecency_millis(&b0, 100, 0), frecency_millis(&b0, 100, 1));
+        assert!(frecency_millis(&b0, 100, 0) >= 4000);
     }
 
     /// Accelerated time: a hand-computed week of daily driving, two live

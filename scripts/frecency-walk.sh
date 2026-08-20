@@ -5,7 +5,7 @@
 # drive's machine-readable read-back of rows() order (dump-screen returns
 # nothing for plugin panes — FOOTGUNS).
 set -uo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 ANCHOR="${1:?usage: frecency-walk.sh <anchor-tab-id> <row-count>}"
 ROWS="${2:?usage: frecency-walk.sh <anchor-tab-id> <row-count>}"
 

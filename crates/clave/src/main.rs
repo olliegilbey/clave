@@ -167,6 +167,7 @@ enum Command {
     /// frecency [HALF_LIFE_HOURS]` set and push fleet-wide.
     Order {
         /// "recency" or "frecency"
+        #[arg(value_parser = ["recency", "frecency"])]
         mode: Option<String>,
         /// Frecency half-life in hours (default 24). Dial: small ≈
         /// recency, huge ≈ 7-day rolling investment count.
@@ -581,6 +582,8 @@ fn main() -> Result<()> {
                 "frecency" => clave_types::OrderMode::Frecency {
                     half_life_hours: half_life.unwrap_or(24),
                 },
+                // Unreachable behind clap's value_parser; kept so the match
+                // stays exhaustive when a future mode string lands.
                 other => anyhow::bail!("unknown order mode {other:?} (recency|frecency)"),
             };
             let snap = store::apply_order(&paths, mode)?;

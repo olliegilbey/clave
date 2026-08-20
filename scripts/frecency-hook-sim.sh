@@ -9,11 +9,13 @@ set -euo pipefail
 UUID="${1:?usage: frecency-hook-sim.sh <agent-uuid> [event]}"
 EVENT="${2:-UserPromptSubmit}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-STATE=/Users/olliegilbey/.local/state/clave-dev-frecency-735d/state
-DATA=/Users/olliegilbey/.local/state/clave-dev-frecency-735d/data
+CLAVE_BIN="${CLAVE_BIN:-$ROOT/target/release/clave}"
+STATE="$("$CLAVE_BIN" dev instance --field state)"
+DATA="$("$CLAVE_BIN" dev instance --field data)"
+SESSION="$("$CLAVE_BIN" dev instance --field session)"
 echo '{}' | env -u ZELLIJ -u ZELLIJ_PANE_ID \
-  ZELLIJ_SESSION_NAME=clave-test-frecency-735d \
+  ZELLIJ_SESSION_NAME="$SESSION" \
   CLAVE_AGENT_UUID="$UUID" \
   CLAVE_STATE_DIR="$STATE" CLAVE_DATA_DIR="$DATA" \
-  "$ROOT/target/release/clave" hook "$EVENT"
+  "$CLAVE_BIN" hook "$EVENT"
 jq -c --arg u "$UUID" '{seq, ord: .agents[$u].commit_ord, buckets: .agents[$u].buckets}' "$STATE/agents.json"

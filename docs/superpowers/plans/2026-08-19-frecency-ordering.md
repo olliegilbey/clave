@@ -2,6 +2,12 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Historical record.** This plan was executed; its task bodies predate the
+> 2026-08-19 maintainer ruling that made `BUCKET_RETAIN_DAYS` a hard scoring
+> cutoff (Task 6's sketch and expected values still count out-of-window
+> buckets). Where this file and the shipped code differ, the code and
+> `docs/superpowers/specs/2026-08-19-frecency-ordering.md` are authoritative.
+
 **Goal:** Sidebar rows rank by a decayed-commitment (frecency) score by default, switchable back to the shipped ordinal-recency ordering via `clave order`.
 
 **Architecture:** Every commitment (already: UserPromptSubmit, row creation, birth touch) additionally increments a per-day bucket count; buckets live on the `AgentRecord` (uuid-keyed) and in a tab-keyed twin map, mirroring the existing `commit_ord`/`tab_order` doubled bookkeeping. The bar computes `Σ count × 0.5^(age_days × 24 / half_life_hours)` at render time from a host-stamped `today`, and feeds it through the existing two-block, one-comparator `rows()` pipeline with a widened primary key. Newborn rows cold-start by copying the opener's buckets (opener := tab with max `tab_order` ordinal).
