@@ -187,7 +187,7 @@ impl Rgb {
     /// `round()`, which is round-half-to-even. One channel landing on `.5` is
     /// enough to make the port off-by-one against the design that was signed
     /// off, and `#DCD7BA` faded onto `#1F1F28` puts blue on exactly `149.5`.
-    fn mix(self, other: Rgb, t: f64) -> Rgb {
+    pub fn mix(self, other: Rgb, t: f64) -> Rgb {
         let ch = |a: u8, b: u8| {
             (f64::from(a) + (f64::from(b) - f64::from(a)) * t).round_ties_even() as u8
         };
@@ -248,7 +248,9 @@ const FADE: f64 = 0.25;
 /// at a glance. The glyph stays fujiWhite-based (#123's near-invisible
 /// sumiInk4 lesson), so even this deep it outreads the old ink. 0.5 was
 /// rendered first; Ollie ratified 0.6 against the ux-gate1 fleet (#210).
-const DORMANT_FADE: f64 = 0.6;
+/// Pub for the README asset generator: the dormant icon must carry the same
+/// fade `render_row` applies, not the raw mark ink.
+pub const DORMANT_FADE: f64 = 0.6;
 
 // ── glyphs (lock §5) ────────────────────────────────────────────────────────
 

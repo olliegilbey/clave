@@ -24,8 +24,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use clave_bar::render::{
-    BASE, BATTERY, COLLAPSED_DESIGN_COLS, CONSOLE, DEFAULT_INK, DESIGN_COLS, PALETTE, Provenance,
-    Rgb, RowStatus, TermStatus, Widths, display_cells, render_rows, strip_sgr,
+    BASE, BATTERY, COLLAPSED_DESIGN_COLS, CONSOLE, DEFAULT_INK, DESIGN_COLS, DORMANT_FADE, PALETTE,
+    Provenance, Rgb, RowStatus, TermStatus, Widths, display_cells, render_rows, strip_sgr,
 };
 
 #[path = "shared/showcase_fixture.rs"]
@@ -224,7 +224,13 @@ fn write_icons(fonts: &[Font], dir: &Path) {
         ("status-opening", RowStatus::Opening),
     ];
     for (name, s) in status {
-        let (ch, ink) = s.mark();
+        let (ch, mut ink) = s.mark();
+        // `render_row` fades an unselected dormant row's ink toward BASE
+        // after the mark table; the icon must match the rendered row.
+        // DormantSelected is exempt: selection zeroes the fade in the bar.
+        if s == RowStatus::Dormant {
+            ink = ink.mix(BASE, DORMANT_FADE);
+        }
         write_file(&dir.join(format!("{name}.svg")), &icon_svg(fonts, ch, ink));
     }
     for (name, t) in [
