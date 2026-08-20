@@ -64,7 +64,8 @@ The ratified skeleton. Reorder only with Ollie's sign-off; trimming within a
 section needs none.
 
 1. Title, one-line pitch, the fleet-scale paragraph
-2. Hero image (generated frame of the showcase fixture)
+2. Hero images (generated frames of the showcase fixture, expanded and
+   collapsed side by side)
 3. Vocabulary: one anatomy table, columns in on-screen row order
    (status | battery | mark | chip | repo | description), short prose beneath
    for the smart zone and anything else needing a sentence
