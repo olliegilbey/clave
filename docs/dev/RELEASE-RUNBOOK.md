@@ -114,6 +114,15 @@ loop.
    equal to the default", so any backfill is a guess, and a wrong guess is
    unrecoverable where a default merely falls back.
 
+   *The one sanctioned exception (v0.2.1, #221):* a field whose truth lives in
+   Claude's transcripts may re-derive from them — the jsonl is the source of
+   truth (CLAUDE.md). Frecency buckets qualify on both counts this paragraph
+   turns on: empty-vs-populated IS distinguishable (a bucketed row is never
+   legitimately empty-by-default within its window), and the derivation reads
+   ground truth rather than guessing. Note it still obeys the cold-restart
+   rule — `launch_session` runs it in the NEW binary at version refresh,
+   never through the old hooks.
+
    *v0.1.2 instance:* `AgentRecord::live_session` (#99). A row that was
    `/clear`ed since its last resurrection resumes its minted uuid once, so it
    reopens the pre-clear conversation. Rows that never rotated are unaffected —
