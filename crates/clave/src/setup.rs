@@ -759,6 +759,17 @@ pub fn run_setup() -> Result<()> {
     if let Some(copy) = launcher_src {
         crate::release::install_launcher(&dir.join("bin"), &copy)?;
     }
+    // Backfill LAST, and from here rather than launch's refresh branch
+    // (which calls this function): the refresh fires only when THIS
+    // version's wasm is missing, and the maintainer flow never qualifies —
+    // `clave release` installs the wasm before the first cold start, so the
+    // machine that cuts a release skipped the backfill on the v0.2.1 cut
+    // (found live, Part C, 2026-08-21). Every setup path wants it anyway:
+    // upgrade-refresh (via this call), a fresh install (no-op: no rows), and
+    // the sanctioned idempotent `clave setup` — which makes it reachable on
+    // demand. Seed-only + best-effort, so re-running is free and a failure
+    // cannot break setup.
+    crate::backfill::run_on_version_refresh();
     Ok(())
 }
 
@@ -889,11 +900,6 @@ pub fn launch_session() -> Result<()> {
                 env!("CARGO_PKG_VERSION")
             );
             run_setup()?;
-            // The once-per-version moment: rows that predate frecency (or
-            // lost their buckets to a pre-field writer, #106) re-derive
-            // their last week from the jsonl source of truth. Seed-only and
-            // best-effort — see `backfill::run_on_version_refresh`.
-            crate::backfill::run_on_version_refresh();
         }
     }
     // Discovered once, used for every zellij invocation in this launch —

@@ -157,7 +157,10 @@ pub fn backfill_store(s: &mut Store, claude_dir: &Path, today: u32) -> usize {
     seeded
 }
 
-/// Launch-time entry, fired by `setup::launch_session` on version refresh.
+/// Fired at the tail of every `setup::run_setup` (first run, upgrade
+/// refresh, and the idempotent `clave setup` — the maintainer flow's only
+/// reachable path, since `clave release` pre-installs the wasm and the
+/// launch refresh therefore never fires on the cutting machine).
 /// Best-effort by design: a failed backfill must never block a launch (the
 /// same zero-risk stance as the evlog). Quiet when there was nothing to do —
 /// most refreshes find a fully-earned store.
