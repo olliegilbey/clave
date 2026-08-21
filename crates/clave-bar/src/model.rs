@@ -2235,12 +2235,7 @@ impl BarModel {
         // Under the gate, own tab == the tab the user is looking at, and the
         // frames are coherent — both lookups below resolve against the same
         // delivered pair.
-        let visible = self.own_tab().is_some_and(|own| {
-            self.tabs
-                .iter()
-                .any(|t| t.tab_id == own && t.floating_visible)
-        });
-        if visible {
+        if self.own_tab_floating_visible() {
             return vec![Effect::ShellHide];
         }
         let has_floating = self.own_tab_position().is_some_and(|pos| {
@@ -2256,6 +2251,17 @@ impl BarModel {
                 cwd: self.shell_spawn_cwd(),
             }]
         }
+    }
+
+    /// Whether the bar's own tab currently shows its floating set (#207,
+    /// #208). Meaningful only under the focus gate, where the delivered
+    /// frame is the one the user is looking at.
+    fn own_tab_floating_visible(&self) -> bool {
+        self.own_tab().is_some_and(|own| {
+            self.tabs
+                .iter()
+                .any(|t| t.tab_id == own && t.floating_visible)
+        })
     }
 
     /// Where the Alt+f shell should open (#215): the active tab's location,
@@ -2585,6 +2591,15 @@ impl BarModel {
             return Vec::new();
         };
         self.last_painted = Some(cols);
+        // #208: while this tab's floating set is visible, zellij routes a
+        // swap-layout switch to the FLOATING ring, not the tiled one
+        // (`Tab::next_swap_layout`, zellij-server 0.44.3 tab/mod.rs:1151) —
+        // an ask cannot move this pane, only spend the walk budget against
+        // the shell's layer. Hold judgement; the TabUpdate that reports the
+        // hide re-renders, and that paint settles the disagreement.
+        if self.own_tab_floating_visible() {
+            return Vec::new();
+        }
         // Deaf: an ask is in flight and its repaint echoes prove nothing.
         // The cooldown expiry judges `last_painted` once, in this instant's
         // place.
@@ -5411,6 +5426,40 @@ mod tests {
         // rests. One press, one ask, episode over.
         assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
         assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
+    }
+
+    /// #208: while this tab's floating set is visible, zellij routes a
+    /// swap-layout switch to the FLOATING ring, not the tiled one
+    /// (`Tab::next_swap_layout`, zellij-server 0.44.3 tab/mod.rs:1151) — an
+    /// ask cannot move this pane, only spend the walk budget against the
+    /// shell's layer. So paints under a shown shell judge nothing and spend
+    /// nothing; the TabUpdate that reports the hide repaints, and THAT paint
+    /// spends the first ask.
+    #[test]
+    fn a_visible_floating_set_holds_the_ask_and_the_hide_releases_it() {
+        let mut m = focused_bar();
+        // The Alt+f shell is shown on the bar's own tab.
+        m.apply_tabs(vec![
+            tab(10, 0, "a", false),
+            TabMeta {
+                floating_visible: true,
+                ..tab(11, 1, "b", true)
+            },
+            tab(12, 2, "c", false),
+        ]);
+        m.toggle(); // wants collapsed
+        // However many paints arrive while the shell is up, none asks and
+        // none spends budget — the pre-fix machine burned all three asks
+        // here, each one relayouting the floating ring.
+        for _ in 0..4 {
+            assert_eq!(m.width_effects(Some(EXP_W)), Vec::<Effect>::new());
+        }
+        // Alt+f hides the shell; the TabUpdate repaints and judgement
+        // resumes with the full budget.
+        frame(&mut m, 11);
+        assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
+        assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
     }
 
     /// A width zellij cannot produce (a window too narrow for the target)
