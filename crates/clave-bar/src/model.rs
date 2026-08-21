@@ -245,7 +245,11 @@ pub enum Effect {
     /// (pane_size.rs `adjust_coordinates`); a swap_floating_layout resolves
     /// the same percents from absolute column 0 and puts the shell over the
     /// bar (#207 live probe, 2026-08-17).
-    ShellSpawn,
+    /// `cwd` is the active tab's location (#215): store truth for an agent
+    /// tab, the speaker pane's OS-reported cwd for a terminal tab, `None`
+    /// (→ the bar's `initial_cwd`) when neither is known. Decided here so
+    /// tests reach it; main.rs only translates `None`.
+    ShellSpawn { cwd: Option<String> },
     /// run_command(["clave","open",uuid]) — §6.3. Fired ONLY by the Alt+Enter
     /// commit (#100 dwell-commit: selection and launch are separate acts);
     /// the model has already marked the uuid in-flight (↻).
@@ -2248,8 +2252,32 @@ impl BarModel {
             vec![Effect::ShellShow]
         } else {
             self.shell_spawn_pending = true;
-            vec![Effect::ShellSpawn]
+            vec![Effect::ShellSpawn {
+                cwd: self.shell_spawn_cwd(),
+            }]
         }
+    }
+
+    /// Where the Alt+f shell should open (#215): the active tab's location,
+    /// by the same rules its row reads — an agent tab's cwd is store truth
+    /// (agent tabs are never probed, #206), a terminal tab's is its speaker
+    /// pane's OS-reported cwd. `None` when neither source knows; the adapter
+    /// falls back to the bar's own `initial_cwd`, the pre-#215 behaviour.
+    /// Ratified trade: a `cd` in an idle shell lands only on the next probe,
+    /// so a just-moved speaker may seed the old cwd — accepted, not re-probed.
+    fn shell_spawn_cwd(&self) -> Option<String> {
+        let own = self.own_tab()?;
+        if let Some(a) = self.agent_in_tab(own) {
+            return Some(a.cwd.clone()).filter(|c| !c.is_empty());
+        }
+        let speaker = self.speaker_pane(self.own_tab_position()?)?;
+        // Same emptiness filter as the agent branch: an empty-but-successful
+        // OS probe must fall back to initial_cwd, not spawn at "".
+        self.pane_facts
+            .get(&speaker.pane_id)?
+            .cwd
+            .clone()
+            .filter(|c| !c.is_empty())
     }
 
     /// Does the beacon name a tab that is not in the last delivered tab set?
@@ -4687,7 +4715,7 @@ mod tests {
         m.beacon(11); // the user is looking at our tab
         assert_eq!(
             m.shell_toggle(),
-            vec![Effect::ShellSpawn],
+            vec![Effect::ShellSpawn { cwd: None }],
             "no floating pane on the active tab: the press must spawn the shell"
         );
         // A floating pane now exists on our tab (position 1) but the tab frame
@@ -4727,6 +4755,53 @@ mod tests {
     }
 
     #[test]
+    fn alt_f_seeds_the_shell_with_the_terminal_tabs_speaker_cwd() {
+        // #215: the scratch shell must open where the tab lives, not where
+        // the bar was born. A terminal tab's location is its speaker pane's
+        // OS-reported cwd (#206 pane facts) — the same truth its row shows.
+        let mut m = fleet_of_three(11);
+        m.beacon(11);
+        m.apply_pane_facts(vec![probe(6, Some("/w/clave"), None)]);
+        assert_eq!(
+            m.shell_toggle(),
+            vec![Effect::ShellSpawn {
+                cwd: Some("/w/clave".into())
+            }],
+            "the speaker pane's cwd must seed the spawn"
+        );
+        // An empty-but-successful probe must fall back (None → initial_cwd
+        // in the adapter), never spawn at "" — same filter as the agent
+        // branch (CodeRabbit, PR #222). Fresh model: the first toggle above
+        // left a spawn pending, which swallows a second press by design.
+        let mut m2 = fleet_of_three(11);
+        m2.beacon(11);
+        m2.apply_pane_facts(vec![probe(6, Some(""), None)]);
+        assert_eq!(m2.shell_toggle(), vec![Effect::ShellSpawn { cwd: None }]);
+    }
+
+    #[test]
+    fn alt_f_on_an_agent_tab_seeds_from_store_truth() {
+        // #215: agent tabs are never probed (#206 — their cwd is store
+        // truth), so the spawn reads the snapshot-bound agent's cwd instead.
+        let mut m = fleet_of_three(11);
+        m.beacon(11);
+        m.apply_snapshot(snap(
+            1,
+            vec![Agent {
+                cwd: "/w/clave-wt".into(),
+                ..agent("u1", Status::Idle, Some(11))
+            }],
+        ));
+        assert_eq!(
+            m.shell_toggle(),
+            vec![Effect::ShellSpawn {
+                cwd: Some("/w/clave-wt".into())
+            }],
+            "an agent tab's spawn must open in the agent's store cwd"
+        );
+    }
+
+    #[test]
     fn a_second_press_before_the_pane_frame_never_spawns_twice() {
         // Key-repeat on Alt+f: presses land faster than zellij's PaneUpdate,
         // so every one of them reads "no floating pane" — without the latch,
@@ -4736,7 +4811,7 @@ mod tests {
         // not wedged.
         let mut m = fleet_of_three(11);
         m.beacon(11);
-        assert_eq!(m.shell_toggle(), vec![Effect::ShellSpawn]);
+        assert_eq!(m.shell_toggle(), vec![Effect::ShellSpawn { cwd: None }]);
         assert_eq!(
             m.shell_toggle(),
             Vec::<Effect>::new(),
@@ -4746,7 +4821,7 @@ mod tests {
         m.apply_panes(panes_at(&FLEET_PANES));
         assert_eq!(
             m.shell_toggle(),
-            vec![Effect::ShellSpawn],
+            vec![Effect::ShellSpawn { cwd: None }],
             "any pane frame reopens the decision; a failed spawn must not \
              wedge Alt+f forever"
         );

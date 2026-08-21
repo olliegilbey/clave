@@ -322,14 +322,15 @@ impl State {
                 Effect::ShellShow => {
                     let _ = show_floating_panes(None);
                 }
-                Effect::ShellSpawn => {
+                Effect::ShellSpawn { cwd } => {
                     // Coordinates, not a layout: this is the one geometry
                     // path that floors x at the viewport's left edge, i.e.
                     // flush against the bar (#207 probe). The cwd is the
-                    // bar's own — the session cwd it was born with, same
-                    // shell-in-the-session semantics the #188 Run bind had.
+                    // model's per-tab answer (#215); `None` falls back to
+                    // the bar's own birth cwd, the pre-#215 behaviour.
                     open_terminal_floating(
-                        get_plugin_ids().initial_cwd,
+                        cwd.map(std::path::PathBuf::from)
+                            .unwrap_or_else(|| get_plugin_ids().initial_cwd),
                         FloatingPaneCoordinates::new(
                             Some(format!("{}%", clave_types::SHELL_FLOATING_X_PERCENT)),
                             Some(format!("{}%", clave_types::SHELL_FLOATING_Y_PERCENT)),
