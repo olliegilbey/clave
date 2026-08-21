@@ -2271,7 +2271,13 @@ impl BarModel {
             return Some(a.cwd.clone()).filter(|c| !c.is_empty());
         }
         let speaker = self.speaker_pane(self.own_tab_position()?)?;
-        self.pane_facts.get(&speaker.pane_id)?.cwd.clone()
+        // Same emptiness filter as the agent branch: an empty-but-successful
+        // OS probe must fall back to initial_cwd, not spawn at "".
+        self.pane_facts
+            .get(&speaker.pane_id)?
+            .cwd
+            .clone()
+            .filter(|c| !c.is_empty())
     }
 
     /// Does the beacon name a tab that is not in the last delivered tab set?
@@ -4763,6 +4769,14 @@ mod tests {
             }],
             "the speaker pane's cwd must seed the spawn"
         );
+        // An empty-but-successful probe must fall back (None → initial_cwd
+        // in the adapter), never spawn at "" — same filter as the agent
+        // branch (CodeRabbit, PR #222). Fresh model: the first toggle above
+        // left a spawn pending, which swallows a second press by design.
+        let mut m2 = fleet_of_three(11);
+        m2.beacon(11);
+        m2.apply_pane_facts(vec![probe(6, Some(""), None)]);
+        assert_eq!(m2.shell_toggle(), vec![Effect::ShellSpawn { cwd: None }]);
     }
 
     #[test]
