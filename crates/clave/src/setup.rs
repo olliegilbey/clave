@@ -457,7 +457,16 @@ pub fn is_clave_hook_command(cmd: &str, event: &str) -> bool {
 
 /// The §6.5 state machine's input events — hook registration AND doctor's
 /// exactly-one-entry check key off the same list.
-pub const HOOK_EVENTS: [&str; 4] = ["UserPromptSubmit", "Stop", "Notification", "SessionEnd"];
+pub const HOOK_EVENTS: [&str; 5] = [
+    "UserPromptSubmit",
+    "Stop",
+    "Notification",
+    "SessionEnd",
+    // #226 live adoption: fires on startup/resume/clear/compact, so a
+    // hand-run claude joins (or re-joins) the fleet before its first prompt.
+    // Maps to no status transition — its job is the pane register + mint.
+    "SessionStart",
+];
 
 /// Merge clave's hook registrations into a settings.json value, keyed on
 /// `clave_bin` (the command path to bake — bare `clave` for dev, the
@@ -995,6 +1004,16 @@ pub fn launch_session() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #226 live adoption: `SessionStart` is what makes a hand-run
+    /// `claude --resume` flip its tab BEFORE the first prompt — the four
+    /// original events are the self-healing backstop, not the front door.
+    /// The const is the feature: hook registration AND doctor's
+    /// exactly-one-entry check both key off this list.
+    #[test]
+    fn session_start_is_a_registered_hook_event() {
+        assert!(HOOK_EVENTS.contains(&"SessionStart"));
+    }
 
     #[test]
     fn session_is_live_reads_zellij_list_sessions() {

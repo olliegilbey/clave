@@ -57,6 +57,11 @@ pub struct HookPayload {
     /// [`resolve_transcript`], never straight to the filesystem.
     #[serde(default)]
     pub transcript_path: Option<String>,
+    /// The session's working directory, carried by every hook event. Read
+    /// only on the #226 adoption path — the one mint input the payload must
+    /// supply — and canonicalized (S0b) before it touches the store.
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 /// §6.5's transition table. Latest-wins, with ONE status-aware exception
@@ -711,6 +716,79 @@ pub fn apply_hook_event(
     true
 }
 
+/// The mint half of #226 live adoption: an unknown session speaking from a
+/// verified clave pane becomes a row, keyed by its own session id (which IS
+/// the minted uuid for an adopted row — no rotation-following needed: a
+/// `/clear` mints the successor and the bind eviction hands the tab over).
+/// Delegates to `add::mint_record`, the same mint every `clave add` runs, so
+/// the ordinal, opener-inheritance/own-buckets seeding and the racing-mint
+/// preserve path (`merge_resume_record`) are shared, not re-derived. The
+/// label is the byte-exact `<dir> · <branch>` base form run_add mints —
+/// `refresh_label` reconstructs that prefix to gate the first-prompt upgrade.
+/// Callers hold the store lock; all derivation (git, transcript read) happens
+/// outside it.
+pub fn mint_adopted(
+    s: &mut Store,
+    session: &str,
+    cwd: &str,
+    repo_root: &str,
+    branch: &str,
+    own_buckets: Option<std::collections::BTreeMap<u32, u32>>,
+) -> String {
+    let dir_name = cwd.rsplit('/').next().unwrap_or(cwd);
+    let label = crate::add::sanitize_label(&format!("{dir_name} · {branch}"));
+    crate::add::mint_record(
+        s,
+        crate::add::FreshRecordInputs {
+            uuid: session,
+            cwd,
+            repo_root,
+            branch,
+            label: &label,
+            worktree: None,
+            default_branch: None,
+            own_buckets,
+        },
+    );
+    session.to_string()
+}
+
+/// The pane half of a hook write (#226 live adoption): the association facts,
+/// kept apart from [`apply_hook_event`]'s event facts on purpose — they answer
+/// different questions ("what is the session doing" vs "where is it running")
+/// and only this one needs the verified pane. `pane` is [`adoption_pane`]'s
+/// output: already proven to be a pane of clave's own zellij session, which is
+/// the ownership test — a claude speaking from a clave pane IS where the row
+/// runs, `clave spawn` or not (the S17 reversal). Change-gated; bumps `seq`
+/// itself on a real write because the bar renders and joins from `pane_id`
+/// (unlike `live_session`, which pushes no pixel).
+pub fn apply_hook_pane(s: &mut Store, uuid: &str, event: &str, pane: Option<u32>) -> bool {
+    let Some(pane) = pane else {
+        return false; // unverified pane: never write, never erase
+    };
+    let Some(rec) = s.agents.get_mut(uuid) else {
+        return false; // raced a prune — fine
+    };
+    if event == "SessionEnd" {
+        // Exit reverts the tab to a terminal tab — but only the pane the row
+        // OWNS may say so. A `/clear` needs no carve-out here: its SessionEnd
+        // unbinds and the successor session's mint re-claims the tab.
+        if rec.pane_id != Some(pane) {
+            return false;
+        }
+        rec.pane_id = None;
+        rec.tab_id = None;
+        s.seq += 1; // monotonic pipe contract (§5)
+        return true;
+    }
+    if rec.pane_id == Some(pane) {
+        return false; // re-registration of the same pane: free
+    }
+    rec.pane_id = Some(pane);
+    s.seq += 1; // monotonic pipe contract (§5)
+    true
+}
+
 /// Which store row does this hook event belong to? (#97)
 ///
 /// The payload's `session_id` is authoritative WHEN IT IS A ROW — that is the
@@ -742,6 +820,32 @@ pub fn apply_hook_event(
 ///
 /// Pure and total: map lookups, no I/O, so it is safe on the §6.5 fast path
 /// and testable without a store on disk.
+/// The firing pane's identity, trusted only inside clave's OWN zellij session
+/// (#226). Pane ids are session-scoped — a claude in another zellij session
+/// (or under no zellij) would contribute a foreign id that the bar's pane→tab
+/// join resolves against a stranger, so both legs fail closed. Pure kernel,
+/// env.rs-style: the env reader stays thin so tests never touch real env vars.
+pub fn adoption_pane_from(
+    zellij_session: Option<String>,
+    zellij_pane: Option<String>,
+    own_session: &str,
+) -> Option<u32> {
+    if zellij_session.as_deref() != Some(own_session) {
+        return None;
+    }
+    zellij_pane?.parse().ok()
+}
+
+/// Env half of [`adoption_pane_from`] — two `getenv` calls, safe on the §6.5
+/// fast path and always done OUTSIDE the store lock.
+fn adoption_pane() -> Option<u32> {
+    adoption_pane_from(
+        std::env::var("ZELLIJ_SESSION_NAME").ok(),
+        std::env::var("ZELLIJ_PANE_ID").ok(),
+        &crate::env::session_name(),
+    )
+}
+
 pub fn resolve_row(store: &Store, session: Option<&str>, env_uuid: Option<&str>) -> Option<String> {
     session
         .filter(|s| store.agents.contains_key(*s))
@@ -823,6 +927,46 @@ pub fn resolve_transcript(
     }
 }
 
+/// The #226 mint inputs, derived OUTSIDE the store lock: git identity is a
+/// subprocess and the buckets read a whole transcript — neither belongs under
+/// the flock (§6.5). `None` = the cwd is gone or unusable; adoption declines
+/// and the hook stays a no-op, never an error.
+struct AdoptionInputs {
+    cwd: String,
+    repo_root: String,
+    branch: String,
+    own_buckets: Option<std::collections::BTreeMap<u32, u32>>,
+}
+
+fn adoption_inputs(raw_cwd: &str, claude_dir: &Path, session: &str) -> Option<AdoptionInputs> {
+    // Canonicalize FIRST (S0b) — everything downstream keys off the physical
+    // path, exactly as run_add does for a picked dir.
+    let physical = std::fs::canonicalize(raw_cwd).ok()?;
+    let cwd = physical.to_str()?.to_string();
+    let git = crate::discover::tool_path(crate::discover::ToolId::Git);
+    let repo_root = crate::add::cmd_stdout(&git, &["-C", &cwd, "rev-parse", "--show-toplevel"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| cwd.clone()); // non-repo dirs are fine
+    let branch = crate::add::cmd_stdout(&git, &["-C", &cwd, "rev-parse", "--abbrev-ref", "HEAD"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "-".to_string());
+    // The jsonl is the source of truth: an adopted conversation enters at its
+    // own transcript-derived weight, same ruling as the resume picker's mint.
+    let own_buckets = crate::backfill::derive_for_row(
+        claude_dir,
+        &[cwd.as_str(), repo_root.as_str()],
+        session,
+        None,
+        crate::store::unix_day(now_unix()),
+    );
+    Some(AdoptionInputs {
+        cwd,
+        repo_root,
+        branch,
+        own_buckets,
+    })
+}
+
 /// The whole hook flow. Errors bubble up ONLY so main can log them to
 /// stderr — main exits 0 no matter what (Global Constraint).
 pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
@@ -833,16 +977,50 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
     // clave must never serialize unrelated sessions' hooks behind its lock.
     // `resolve_row` keeps that property — map lookups, no I/O. A session
     // outside the fleet carries no `CLAVE_AGENT_UUID` and its id names no
-    // row, so it never reaches the lock.
+    // row, so it never reaches the lock — UNLESS it speaks from a verified
+    // clave pane, which is #226's adoption gate: a claude the user ran by
+    // hand inside the clave session joins the fleet instead of being ignored.
+    // Claudes elsewhere on the box keep the lock-free exit unchanged.
     let env_uuid = std::env::var(clave_types::AGENT_UUID_ENV).ok();
+    let pane = adoption_pane();
     let store = read_store(&paths)?;
-    let Some(uuid) = resolve_row(&store, session.as_deref(), env_uuid.as_deref()) else {
+    let resolved = resolve_row(&store, session.as_deref(), env_uuid.as_deref());
+    let adopting = resolved.is_none() && pane.is_some();
+    let Some(uuid) = resolved.or_else(|| adopting.then(|| session.clone()).flatten()) else {
         return Ok(());
     };
     // §6.9: claude_config_dir() (not raw home) so the sandbox override
     // reaches the same jsonl tree real claude processes write to.
     let claude_dir = crate::env::claude_config_dir().unwrap_or_default();
+    // Adoption derivation (git, transcript read) runs OUTSIDE the lock; a
+    // missing/unusable cwd declines the mint and the hook stays a no-op.
+    let mint = if adopting {
+        let Some(m) = payload
+            .cwd
+            .as_deref()
+            .and_then(|c| adoption_inputs(c, &claude_dir, &uuid))
+        else {
+            return Ok(());
+        };
+        Some(m)
+    } else {
+        None
+    };
     let snap = with_store_mut(&paths, |s| {
+        if let Some(m) = &mint {
+            // Re-checked under the flock: a racing hook may have minted first,
+            // in which case mint_adopted lands on the preserve path anyway.
+            if !s.agents.contains_key(&uuid) {
+                mint_adopted(
+                    s,
+                    &uuid,
+                    &m.cwd,
+                    &m.repo_root,
+                    &m.branch,
+                    m.own_buckets.clone(),
+                );
+            }
+        }
         // The tail read is gated on the EVENT only — no longer on
         // `label_source`. `title` and `summary` roll for the whole life of a
         // row (design-lock §7.1), so gating the read on "the label has not
@@ -874,7 +1052,7 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
             )
             .and_then(|path| read_tail(&path, 64 * 1024))
         });
-        apply_hook_event(
+        let mut changed = apply_hook_event(
             s,
             &uuid,
             event,
@@ -882,8 +1060,13 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
             tail.as_deref(),
             now_unix(),
             env_uuid.as_deref() == Some(uuid.as_str()),
-        )
-        .then(|| snapshot_from(s))
+        );
+        // The pane half (#226): register on any event, revert on SessionEnd —
+        // pane-verified, change-gated, and the bar renders from it. A fresh
+        // mint always lands here too (row pane None → Some), so an adoption
+        // pushes even when the event itself moved nothing.
+        changed |= apply_hook_pane(s, &uuid, event, pane);
+        changed.then(|| snapshot_from(s))
     })?;
     if let Some(snap) = snap {
         push_snapshot(&snap);
@@ -1215,6 +1398,7 @@ mod tests {
             prompt: None,
             message: None,
             transcript_path: None,
+            cwd: None,
         };
         // One real commitment first, so there is a rank to preserve.
         assert!(apply_hook_event(
@@ -1237,6 +1421,7 @@ mod tests {
             prompt: None,
             message: Some("needs your permission".into()),
             transcript_path: None,
+            cwd: None,
         };
         for (event, payload, expected) in [
             ("Stop", &p, Status::Done),
@@ -1294,12 +1479,14 @@ mod tests {
             prompt: None,
             message: None,
             transcript_path: None,
+            cwd: None,
         };
         let pb = HookPayload {
             session_id: Some("u-b".into()),
             prompt: None,
             message: None,
             transcript_path: None,
+            cwd: None,
         };
         apply_hook_event(&mut s, "u-a", "UserPromptSubmit", &pa, None, 1000, true);
         apply_hook_event(&mut s, "u-b", "UserPromptSubmit", &pb, None, 1000, true);
@@ -1335,6 +1522,7 @@ mod tests {
             prompt: None,
             message: None,
             transcript_path: None,
+            cwd: None,
         };
         assert!(apply_hook_event(
             &mut s,
@@ -1402,6 +1590,7 @@ mod tests {
             prompt: None,
             message: None,
             transcript_path: None,
+            cwd: None,
         };
         assert!(apply_hook_event(
             &mut s,
@@ -1429,6 +1618,7 @@ mod tests {
             prompt: None,
             message: None,
             transcript_path: None,
+            cwd: None,
         };
         apply_hook_event(&mut s, "u1", "Stop", &p, None, 1700, true);
         assert!(s.agents["u1"].buckets.is_empty());
@@ -1857,6 +2047,7 @@ mod tests {
             prompt: Some("fix the flaky auth test".into()),
             message: None,
             transcript_path: None,
+            cwd: None,
         };
         assert!(refresh_label(&mut r, "UserPromptSubmit", &p, None));
         assert_eq!(r.label, "x · main · fix the flaky auth");
@@ -1885,6 +2076,7 @@ mod tests {
             prompt: Some("<task-notification> <task-id>bai</task-notification>".into()),
             message: None,
             transcript_path: None,
+            cwd: None,
         };
         assert!(!refresh_label(&mut r, "UserPromptSubmit", &injected, None));
         assert_eq!(r.label, "x · main"); // unchanged — still the bare prefix
@@ -1896,6 +2088,7 @@ mod tests {
             prompt: Some("fix the flaky auth test".into()),
             message: None,
             transcript_path: None,
+            cwd: None,
         };
         assert!(refresh_label(&mut r, "UserPromptSubmit", &real, None));
         assert_eq!(r.label, "x · main · fix the flaky auth");
@@ -1916,6 +2109,7 @@ mod tests {
                 prompt: Some(injected_text.clone()),
                 message: None,
                 transcript_path: None,
+                cwd: None,
             };
             assert!(
                 !refresh_label(&mut r, "UserPromptSubmit", &p, None),
@@ -2074,6 +2268,7 @@ mod tests {
             prompt: Some("a prompt that must not win".into()),
             message: None,
             transcript_path: None,
+            cwd: None,
         };
         let mut r = rec("u1");
         let tail = format!(
@@ -2099,6 +2294,7 @@ mod tests {
             prompt: Some("a later prompt".into()),
             message: None,
             transcript_path: None,
+            cwd: None,
         };
         refresh_label(&mut r, "UserPromptSubmit", &p2, None);
         assert_eq!(r.summary, "a prompt that must not win");
@@ -2168,6 +2364,7 @@ mod tests {
             prompt: Some("a prompt that must not win".into()),
             message: None,
             transcript_path: None,
+            cwd: None,
         };
         refresh_label(&mut r, "UserPromptSubmit", &prompted, None);
         assert_eq!(r.summary, "the recap");
@@ -2304,6 +2501,7 @@ mod tests {
             prompt: Some(r#"fix the \d "regex" now"#.into()),
             message: None,
             transcript_path: None,
+            cwd: None,
         };
         assert!(refresh_label(&mut r, "UserPromptSubmit", &p, None));
         assert!(
@@ -2311,5 +2509,150 @@ mod tests {
             "unsanitized label: {}",
             r.label
         );
+    }
+
+    /// #226 adoption gate: a pane identity is trusted only when the hook fired
+    /// INSIDE clave's own zellij session — pane ids are session-scoped, so a
+    /// claude in another session (or under no zellij) must contribute nothing.
+    #[test]
+    fn adoption_pane_requires_the_own_session_and_a_parseable_pane() {
+        let pane = |sess: Option<&str>, pane: Option<&str>| {
+            adoption_pane_from(sess.map(str::to_string), pane.map(str::to_string), "clave")
+        };
+        assert_eq!(pane(Some("clave"), Some("7")), Some(7));
+        assert_eq!(pane(Some("clave-test"), Some("7")), None, "foreign session");
+        assert_eq!(pane(None, Some("7")), None, "no zellij at all");
+        assert_eq!(pane(Some("clave"), None), None, "no pane id");
+        assert_eq!(pane(Some("clave"), Some("plugin:x")), None, "unparseable");
+    }
+
+    /// #226 live adoption, register half: a hook firing from a verified clave
+    /// pane writes that pane onto its row — the only pane-id producer besides
+    /// `clave spawn`, which is what lets a hand-resumed claude's tab bind (and
+    /// a mis-pruned row heal, #195). Change-gated like `apply_register`; the
+    /// bar renders/joins from `pane_id`, so a real write bumps `seq`.
+    #[test]
+    fn a_hook_from_a_clave_pane_registers_it_and_re_registration_is_free() {
+        let mut s = Store::default();
+        s.agents.insert("u1".into(), rec("u1"));
+        let before = s.seq;
+        assert!(apply_hook_pane(&mut s, "u1", "Notification", Some(7)));
+        assert_eq!(s.agents["u1"].pane_id, Some(7));
+        assert_eq!(s.seq, before + 1, "pane_id is bar-rendered: seq bumps");
+        assert!(
+            !apply_hook_pane(&mut s, "u1", "Notification", Some(7)),
+            "re-registration of the same pane is free"
+        );
+        assert!(
+            !apply_hook_pane(&mut s, "u1", "Notification", None),
+            "no verified pane, no write"
+        );
+        assert_eq!(
+            s.agents["u1"].pane_id,
+            Some(7),
+            "an absent pane never erases"
+        );
+        // Last-writer-wins (#226 ruling): resuming the same session in a second
+        // pane steals the register; the old tab reverts via the bind eviction.
+        assert!(apply_hook_pane(&mut s, "u1", "Notification", Some(9)));
+        assert_eq!(s.agents["u1"].pane_id, Some(9));
+    }
+
+    /// #226 live adoption, revert half: exiting claude drops the pane to its
+    /// shell, so a `SessionEnd` from the pane the row OWNS clears the register
+    /// and the bind — the tab renders as a terminal tab again, the row goes
+    /// dormant, and a later `claude --resume` in that shell re-adopts (the
+    /// closed loop). Pane-match is the test: any other pane's `SessionEnd`
+    /// (or one with no verified pane) must not strip a live association.
+    #[test]
+    fn session_end_from_the_owning_pane_reverts_the_tab_to_terminal() {
+        let mut s = Store::default();
+        let mut r = rec("u1");
+        r.pane_id = Some(7);
+        r.tab_id = Some(3);
+        s.agents.insert("u1".into(), r);
+        // A stranger pane's SessionEnd (pane 9) clears nothing.
+        assert!(!apply_hook_pane(&mut s, "u1", "SessionEnd", Some(9)));
+        assert_eq!(s.agents["u1"].pane_id, Some(7));
+        assert_eq!(s.agents["u1"].tab_id, Some(3));
+        // No verified pane: also nothing.
+        assert!(!apply_hook_pane(&mut s, "u1", "SessionEnd", None));
+        assert_eq!(s.agents["u1"].tab_id, Some(3));
+        // The owning pane's SessionEnd reverts — both halves, one seq bump.
+        let before = s.seq;
+        assert!(apply_hook_pane(&mut s, "u1", "SessionEnd", Some(7)));
+        assert_eq!(s.agents["u1"].pane_id, None);
+        assert_eq!(s.agents["u1"].tab_id, None);
+        assert_eq!(s.seq, before + 1);
+        // Idempotent: a second SessionEnd finds nothing to clear.
+        assert!(!apply_hook_pane(&mut s, "u1", "SessionEnd", Some(7)));
+    }
+
+    /// #226 live adoption, mint half: a session clave has never seen, speaking
+    /// from a verified clave pane, becomes a row — the jsonl is the source of
+    /// truth, so any claude the user runs by hand joins the fleet. The mint is
+    /// MINIMAL (uuid + cwd + the base label); richness arrives through the
+    /// same refresh machinery every row uses. Label must be the byte-exact
+    /// `<dir> · <branch>` base form — `refresh_label` reconstructs that prefix
+    /// to gate the first-prompt upgrade (the run_add cross-task coupling).
+    #[test]
+    fn an_unknown_session_from_a_clave_pane_mints_a_minimal_row() {
+        let mut s = Store::default();
+        let uuid = mint_adopted(
+            &mut s,
+            "sess-1",
+            "/home/u/proj",
+            "/home/u/proj",
+            "main",
+            None,
+        );
+        assert_eq!(uuid, "sess-1");
+        let r = &s.agents["sess-1"];
+        assert_eq!(r.cwd, "/home/u/proj");
+        assert_eq!(r.label, "proj · main");
+        assert_eq!(r.status, Status::Idle);
+        assert_eq!((r.tab_id, r.pane_id), (None, None), "register/bind follow");
+        // Racing hooks both pass the mint gate under their own lock turns: the
+        // second mint must land on merge_resume_record's preserve path, not
+        // clobber what the first (or an old row) already earned.
+        let earned = {
+            let r = s.agents.get_mut("sess-1").unwrap();
+            r.title = Some("DJ".into());
+            r.buckets.insert(1, 4);
+            r.buckets.clone()
+        };
+        mint_adopted(
+            &mut s,
+            "sess-1",
+            "/home/u/proj",
+            "/home/u/proj",
+            "main",
+            None,
+        );
+        let r = &s.agents["sess-1"];
+        assert_eq!(r.title.as_deref(), Some("DJ"), "existing row preserved");
+        assert_eq!(r.buckets, earned, "earned buckets preserved");
+    }
+
+    /// #226 mutants escape: the mint derivation must actually derive — a
+    /// `None`-swallowed `adoption_inputs` silently declines every adoption
+    /// and no other test notices. Contract pinned: an existing cwd mints
+    /// (canonicalized, S0b), fallbacks are non-empty, no transcript means no
+    /// derived weight, and a vanished cwd declines.
+    #[test]
+    fn adoption_inputs_canonicalize_the_cwd_and_decline_a_missing_one() {
+        let dir = std::env::temp_dir().join("clave-adopt-inputs-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let m = adoption_inputs(
+            dir.to_str().unwrap(),
+            Path::new("/nonexistent-claude-dir"),
+            "sess-x",
+        )
+        .expect("an existing cwd yields mint inputs");
+        let physical = std::fs::canonicalize(&dir).unwrap();
+        assert_eq!(m.cwd, physical.to_str().unwrap());
+        assert!(!m.repo_root.is_empty() && !m.branch.is_empty());
+        assert_eq!(m.own_buckets, None, "no transcript → no derived weight");
+        assert!(adoption_inputs("/definitely/not/a/dir", Path::new("/x"), "s").is_none());
     }
 }

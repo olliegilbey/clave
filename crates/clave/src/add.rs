@@ -53,6 +53,52 @@ pub fn live_uuids(dump_layout: &str) -> Vec<String> {
     out
 }
 
+/// Canonicalize one dump-layout token to a row uuid (#226). A `--resume`
+/// token can be a row's minted uuid, a rotated conversation's live id (#99) —
+/// or, since `claude --resume <name>` resolves a NAME on Claude's side, a
+/// session TITLE, which is not unique: the original DJ bug read a title as a
+/// session id, matched nothing, and the false-dead row invited a
+/// double-attach. Titles resolve to their most-recently-interacted holder
+/// (ratified #226); a token naming nothing returns None and contributes
+/// nothing — never a false-dead, never a false-live. All three scan
+/// consumers (`live_uuid_union`, `open_is_live`, `protected_from_dump`) go
+/// through here so the translation can't skew.
+pub fn resolve_scan_token(store: &Store, token: &str) -> Option<String> {
+    if store.agents.contains_key(token) {
+        return Some(token.to_string());
+    }
+    if let Some(r) = store
+        .agents
+        .values()
+        .find(|r| r.live_session.as_deref() == Some(token))
+    {
+        return Some(r.uuid.clone());
+    }
+    store
+        .agents
+        .values()
+        .filter(|r| r.title.as_deref() == Some(token))
+        .max_by_key(|r| r.last_interacted)
+        .map(|r| r.uuid.clone())
+}
+
+/// Every scan token of a dump, canonicalized — the deduped set the liveness
+/// consumers share (#226). A token the resolver cannot place is carried RAW,
+/// not dropped: it can name a jsonl-only session the store has never minted,
+/// and the picker marks those live by that very id — dropping it would read
+/// the pane dead and re-open the double-attach. A carried title that matched
+/// no row is equally harmless: nothing downstream is keyed by titles.
+pub fn resolved_scan_uuids(store: &Store, dump_layout: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in live_uuids(dump_layout) {
+        let u = resolve_scan_token(store, &t).unwrap_or(t);
+        if !out.contains(&u) {
+            out.push(u);
+        }
+    }
+    out
+}
+
 /// §6.3 liveness (issue #6): the uuids the STORE currently binds to a live
 /// tab. The bind is set by the agent tab's own bar via a pane-id join (S2) and
 /// PRUNED when the tab closes (§6.6 / `clave prune-tabs`), so a Some tab_id
@@ -85,12 +131,10 @@ pub fn bound_live_uuids(store: &Store) -> Vec<String> {
 /// silently blind for exactly the panes #99 fixed.
 pub fn live_uuid_union(store: &Store, dump_layout: &str) -> Vec<String> {
     let mut live = bound_live_uuids(store);
-    for u in live_uuids(dump_layout) {
-        let u = store
-            .agents
-            .values()
-            .find(|r| r.live_session.as_deref() == Some(u.as_str()))
-            .map_or(u, |r| r.uuid.clone());
+    // Scan tokens arrive canonicalized (#226): live-session AND title tokens
+    // land on their row's minted uuid; a token naming nothing is dropped
+    // rather than carried as an id that can never match.
+    for u in resolved_scan_uuids(store, dump_layout) {
         if !live.contains(&u) {
             live.push(u);
         }
@@ -115,15 +159,13 @@ pub fn live_uuid_union(store: &Store, dump_layout: &str) -> Vec<String> {
 /// invisible row is an unprotected one, so `clave prune` deletes the sidebar
 /// row of an agent the user is looking at.
 pub fn protected_from_dump(store: &Store, dump_layout: &str) -> BTreeSet<String> {
-    let live = live_uuids(dump_layout);
-    store
-        .agents
-        .values()
-        .filter(|r| {
-            live.iter()
-                .any(|u| *u == r.uuid || Some(u.as_str()) == r.live_session.as_deref())
-        })
-        .map(|r| r.uuid.clone())
+    // Same canonicalization as the union (#226): a name-resumed pane's row is
+    // hosted by the running session too, and unprotected meant deletable.
+    // Intersected with the store — this set's contract is ROWS never to
+    // retire, so carried-raw tokens that name no row stay out of it.
+    resolved_scan_uuids(store, dump_layout)
+        .into_iter()
+        .filter(|u| store.agents.contains_key(u))
         .collect()
 }
 
@@ -601,7 +643,7 @@ fn fzf_pick(lines: &[String], prompt: &str) -> Result<Option<String>> {
     Ok((!picked.is_empty()).then_some(picked))
 }
 
-fn cmd_stdout(cmd: impl AsRef<std::ffi::OsStr>, args: &[&str]) -> Result<String> {
+pub(crate) fn cmd_stdout(cmd: impl AsRef<std::ffi::OsStr>, args: &[&str]) -> Result<String> {
     let cmd = cmd.as_ref();
     let out = Command::new(cmd)
         .args(args)
@@ -1185,6 +1227,58 @@ mod tests {
             live_session: None,
             buckets: BTreeMap::new(),
         }
+    }
+
+    /// #226: `claude --resume <name>` resolves a NAME on Claude's side, so a
+    /// dump-layout token can be a session TITLE, which collides — the original
+    /// DJ bug read "DJ" as a session id, matched nothing, and the false-dead
+    /// row invited a double-attach. Resolution order: minted uuid, live
+    /// session id (#99), then title with the most-recently-interacted holder
+    /// winning; a token naming nothing contributes nothing.
+    #[test]
+    fn scan_tokens_resolve_uuid_then_live_session_then_title_by_recency() {
+        let mut s = Store::default();
+        s.agents.insert("u1".into(), rec("u1"));
+        let mut rotated = rec("u2");
+        rotated.live_session = Some("rot-2".into());
+        s.agents.insert("u2".into(), rotated);
+        let mut dj_old = rec("u3");
+        dj_old.title = Some("DJ".into());
+        dj_old.last_interacted = 100;
+        s.agents.insert("u3".into(), dj_old);
+        let mut dj_new = rec("u4");
+        dj_new.title = Some("DJ".into());
+        dj_new.last_interacted = 200;
+        s.agents.insert("u4".into(), dj_new);
+
+        assert_eq!(resolve_scan_token(&s, "u1").as_deref(), Some("u1"));
+        assert_eq!(resolve_scan_token(&s, "rot-2").as_deref(), Some("u2"));
+        assert_eq!(
+            resolve_scan_token(&s, "DJ").as_deref(),
+            Some("u4"),
+            "title collision: most-recently-interacted holder wins"
+        );
+        assert_eq!(resolve_scan_token(&s, "nobody"), None);
+    }
+
+    /// #226: the picker's live set and prune's protected set both see a
+    /// name-resumed pane — "DJ" in the dump marks the title's most-recent
+    /// holder live (a jump, not a second attach) and protects it from prune.
+    #[test]
+    fn a_name_resumed_pane_reaches_the_union_and_the_protected_set() {
+        let mut s = Store::default();
+        let mut dj = rec("u-dj");
+        dj.title = Some("DJ".into());
+        s.agents.insert("u-dj".into(), dj);
+        let dump = "tab {\n  pane command=\"claude\" {\n    args \"--resume\" \"DJ\"\n  }\n}";
+        assert_eq!(live_uuid_union(&s, dump), vec!["u-dj".to_string()]);
+        assert!(protected_from_dump(&s, dump).contains("u-dj"));
+        // A token naming no row is CARRIED in the union (it can be a
+        // jsonl-only session the picker knows by exactly that id) but never
+        // enters the protected set, whose contract is store rows only.
+        let dump = "tab {\n  pane command=\"claude\" {\n    args \"--resume\" \"ghost\"\n  }\n}";
+        assert_eq!(live_uuid_union(&s, dump), vec!["ghost".to_string()]);
+        assert!(protected_from_dump(&s, dump).is_empty());
     }
 
     /// Drive `mint_record` — the same record-mint path `run_add` uses — with
