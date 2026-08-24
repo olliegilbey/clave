@@ -686,6 +686,18 @@ pub fn install_cli_copy(dir: &Path, exe: &Path, version: &str) -> Result<PathBuf
 /// `clave` (PATH = the dev binary) and the unversioned working-tree wasm.
 /// Stable machines are prepared by `just release` (→ `run_release`), which
 /// bakes versioned paths instead. Idempotent.
+/// True iff a non-embedded (dev) binary's `setup` is aimed at a data dir that
+/// already holds a release install — any `clave-v<digit>…` CLI copy among the
+/// `bin/` siblings. Digit required after the prefix, same discipline and
+/// reason as `release::binary_resolution_is_anomalous`. Pure over the sibling
+/// list so it tests without a filesystem.
+fn dev_setup_hits_release_install(siblings: &[String]) -> bool {
+    siblings.iter().any(|n| {
+        n.strip_prefix("clave-v")
+            .is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit()))
+    })
+}
+
 pub fn run_setup() -> Result<()> {
     let dir = data_dir()?;
     std::fs::create_dir_all(&dir)?;
@@ -735,6 +747,29 @@ pub fn run_setup() -> Result<()> {
     } else {
         // Dev/sandbox: bare `clave` deliberately — PATH resolves to the
         // freshly cargo-installed dev binary, which is what should run there.
+        // But never aimed at a RELEASE install: there the keybinds would bake
+        // the bare identity while the launch layout carries the versioned one,
+        // zellij's (location, configuration) match misses, and every keybind
+        // press starts a second bar. Lived once: a dev binary's setup ran
+        // without CLAVE_DATA_DIR during the v0.2.1 cut (2026-08-21). The
+        // versioned copies under bin/ are the release install's fingerprint.
+        let siblings: Vec<String> = std::fs::read_dir(dir.join("bin"))
+            .ok()
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        anyhow::ensure!(
+            !dev_setup_hits_release_install(&siblings),
+            "{dir} holds a release install; a dev binary's setup would bake the \
+             bare `clave` identity into its config.kdl and split plugin identity \
+             (second sidebar on every keybind). Set CLAVE_DATA_DIR to a sandbox \
+             (`just sandbox` does), or run the installed launcher instead: \
+             {dir}/bin/clave setup",
+            dir = dir.display()
+        );
         "clave".to_string()
     };
     let wasm = wasm_path()?; // prefers the versioned artifact just extracted
@@ -995,6 +1030,25 @@ pub fn launch_session() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dev_setup_refuses_a_release_install_but_not_foreign_siblings() {
+        let s = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        // A versioned CLI copy is the release install's fingerprint: refuse.
+        assert!(dev_setup_hits_release_install(&s(&["clave-v0.2.1"])));
+        assert!(dev_setup_hits_release_install(&s(&[
+            "clave",
+            "clave-v0.1.0"
+        ])));
+        // No bin/, an empty bin/, or a launcher alone: a sandbox — proceed.
+        assert!(!dev_setup_hits_release_install(&s(&[])));
+        assert!(!dev_setup_hits_release_install(&s(&["clave"])));
+        // Foreign `clave-v…` names without a digit are not ours (#44 discipline).
+        assert!(!dev_setup_hits_release_install(&s(&[
+            "clave-vault",
+            "clave-verify"
+        ])));
+    }
 
     #[test]
     fn session_is_live_reads_zellij_list_sessions() {
