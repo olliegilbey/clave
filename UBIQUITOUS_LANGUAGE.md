@@ -149,7 +149,8 @@ These three are constantly confused. They are not interchangeable.
 | Term | Means |
 |---|---|
 | **ink** | A colour drawn from the palette and assigned to something. **repo ink** is keyed by repo root — one repo, one colour, forever. **title ink** is keyed per title *within* its repo — two tabs of the same repo never share one. |
-| **palette** | The fixed, ordered set of hues. Allocated **round-robin** — never hashed. |
+| **palette** | The fixed, ordered set of hues. Allocated **round-robin** — never hashed. Always eight entries, under any theme. |
+| **theme** | The user's zellij theme, mapped onto the bar's colour roles (`Theme`, LEDGER D42). **Theme-following** colours (backgrounds, inks, palette) repaint with it; **fixed semantic** colours (status marks, battery bands) never do — red means failed everywhere. The default theme is the curated kanagawa design. |
 | **chip** | Text on a filled background. Two chips exist: an agent row's title (title-ink background) and a terminal tab's name — fujiWhite on black, black meaning *unclaimed by agent ink*, and it stays black on the selected row (#206). |
 | **tint** | Foreground colour on text or a glyph, no background. |
 | **fade** | Rendering a row blended toward the bar background. Unselected rows are faded; **selection is by recession**, not by ornament. |

@@ -24,6 +24,12 @@ fs4.workspace = true
 which.workspace = true
 # Local types (Agent, AgentSnapshot, Status).
 clave-types = { path = "../clave-types" }
+# Theme passthrough (#145): setup copies the user's `theme`/`themes`/
+# `theme_dir` nodes into the generated config — `--config` replaces the
+# user's config.kdl wholesale (FOOTGUNS/#122), so the selection must ride
+# along. Same EXACT pin as the guardrail dev-dep below and as zellij's own
+# lock: node extraction must round-trip through the parser zellij runs.
+kdl = "=4.7.1"
 
 [dev-dependencies]
 # Store tests write to throwaway dirs, never the real ~/.local/state/clave.
@@ -53,7 +59,8 @@ clave-types = { path = "../clave-types" }
 # resolver = "3" (per-target, dev-dep-isolated feature unification) — if that
 # resolver setting ever changes, re-verify the wasm build's dep tree.
 zellij-utils = "=0.44.3"
-kdl = "=4.7.1"
+# (kdl "=4.7.1" moved to [dependencies] for the theme slice — same pin, same
+# rationale, now needed at runtime.)
 # Proves the ux-gate1 dev scenario renders the locked visual design (#85
 # follow-up): the SAME render_rows the plugin uses, fed the scenario's own
 # AgentRecords. One-directional dep only — clave-bar never depends back on

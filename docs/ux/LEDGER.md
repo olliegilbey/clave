@@ -508,6 +508,43 @@ resting-width costs become dead paths:
   ever catch it. Needs a display area around 400 columns; Ollie runs ~280, so it
   is out of reach today. **Not out of reach forever.**
 
+### D42 — The zellij theme passes through; status stays semantic (2026-08-24, #145)
+
+Grilled and ratified with Ollie. The bar's colour language splits in two, and
+`crates/clave-bar/src/theme.rs` is now the one home for every visual variable
+(#145 half one — "tailwind for the bar"):
+
+- **Theme-following** (`Theme`, from `ModeUpdate`'s `Styling`): the bar
+  background, selected-row background, default ink, chip ink, untinted grey,
+  and the eight repo inks. Mapping is semantic — `text_unselected` for
+  base/ink, `list_selected.background` for selection (the bar IS a list) —
+  because zellij's theme format has no palette, only per-component slots.
+- **Fixed semantic** (consts): the status marks (D10's table) and the battery
+  risk bands. Red means failed under every theme.
+
+Consequences, all accepted at the grill:
+
+- Repo inks HARVEST: `multiplayer_user_colors` first (the format's only
+  "distinguishable identity hues" concept), emphasis slots as top-up; dedupe,
+  skip hues within 48/255 luminance of the bar background or equal to the
+  default ink; pad to eight by cycling. Deterministic per theme, so a repo
+  keeps its colour across restarts. Palette length is FIXED at eight (D7's
+  `Option<u8>` indices persist in the store).
+- Stock `DEFAULT_STYLES` ⇒ curated kanagawa (`Theme::default()`, byte-identical
+  to the pre-#145 constants — every golden pins it). An unthemed user keeps
+  today's exact bar; a deliberate `theme "default"` gets kanagawa too, accepted.
+- Under zellij's OWN kanagawa the bar shifts subtly — zellij's kanagawa picked
+  autumnGreen/autumnRed where the lock picked springGreen/waveRed, and
+  selection becomes green-backed (`list_selected`). Ollie: "the subtle shift
+  should be fine." The lock's §4/§6 hex values now describe the DEFAULT theme.
+- Delivery: `zellij --config` discards the user's config (FOOTGUNS/#122), so
+  `clave setup` copies the user's `theme`/`themes`/`theme_dir` nodes into the
+  generated config (`theme_slice_from`). Theme changes land at the next clave
+  launch; #114's layout channel supersedes the copy when it lands.
+- Rejected: reading the terminal's (ghostty's) palette — the bar is truecolor
+  by D8 and fades can't `mix` indexed colours; for a zellij plugin the zellij
+  theme IS the passthrough layer.
+
 ### D41 — Snap-back is a contract; the drag arm restores it with one remembered width (2026-08-15)
 
 **Ruled by Ollie, live QA of the #197 build:** dragging the sidebar border and

@@ -160,159 +160,21 @@ impl Widths {
     }
 }
 
-// ── colour ──────────────────────────────────────────────────────────────────
+// ── colour and glyphs ───────────────────────────────────────────────────────
+//
+// Every VALUE lives in `theme.rs` — one home for every visual variable
+// (#145). This module keeps the arithmetic; the re-export keeps render as the
+// visual surface's façade, so the tests below, the two examples and clave's
+// dev preview reach the vocabulary through the module that uses it.
 
-/// 24-bit truecolor, not ANSI-16 (LEDGER D8): the kanagawa palette has no
-/// ANSI-16 equivalent, and lock §4.1 grants the provenance cell an arbitrary
-/// RGB on purpose. `Status::glyph()` in clave-types keeps its `u8` ANSI
-/// contract for the host CLI — the bar owns its own palette (D10).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Rgb(pub u8, pub u8, pub u8);
-
-impl Rgb {
-    pub fn fg(self) -> String {
-        format!("\u{1b}[38;2;{};{};{}m", self.0, self.1, self.2)
-    }
-
-    pub fn bg(self) -> String {
-        format!("\u{1b}[48;2;{};{};{}m", self.0, self.1, self.2)
-    }
-
-    pub fn hex(self) -> String {
-        format!("#{:02X}{:02X}{:02X}", self.0, self.1, self.2)
-    }
-
-    /// Blend toward `other` by `t`. Ties round to EVEN — not away from zero —
-    /// because the ratified preview's captured output was produced by Python's
-    /// `round()`, which is round-half-to-even. One channel landing on `.5` is
-    /// enough to make the port off-by-one against the design that was signed
-    /// off, and `#DCD7BA` faded onto `#1F1F28` puts blue on exactly `149.5`.
-    pub fn mix(self, other: Rgb, t: f64) -> Rgb {
-        let ch = |a: u8, b: u8| {
-            (f64::from(a) + (f64::from(b) - f64::from(a)) * t).round_ties_even() as u8
-        };
-        Rgb(
-            ch(self.0, other.0),
-            ch(self.1, other.1),
-            ch(self.2, other.2),
-        )
-    }
-}
-
-pub const RESET: &str = "\u{1b}[0m";
-
-/// Pub for the `readme-assets` example: the README's generated frame paints
-/// this canvas rather than copying the hex.
-pub const BASE: Rgb = Rgb(0x1F, 0x1F, 0x28); // sumiInk3 — the bar background
-const SEL_BG: Rgb = Rgb(0x2D, 0x4F, 0x67); // waveBlue2 — the selected row
-/// fujiWhite — kanagawa's default foreground. Inks the rule, the summary, and
-/// the dormant glyph, which was sumiInk4 and all but invisible against `BASE`.
-/// Pub for the `readme-assets` example, like `BASE` above.
-pub const DEFAULT_INK: Rgb = Rgb(0xDC, 0xD7, 0xBA);
-/// sumiInk0 — text ON a title chip. Public because the preview draws the same
-/// chip in its palette swatches (lock §4).
-pub const CHIP_INK: Rgb = Rgb(0x16, 0x16, 0x1D);
-
-/// The ink a row falls back to when it has no palette entry yet. Reachable:
-/// allocation is store-backed iterate-and-wrap (lock §4) and a row can render
-/// before its colour exists.
-const UNTINTED: Rgb = Rgb(0x54, 0x54, 0x6D); // sumiInk4
-
-/// Eight kanagawa hues, allocated round-robin and keyed by repo root, so one
-/// repo is one colour everywhere forever (lock §4). Twelve was rendered first
-/// and rejected: they start colliding after the fifth. Hashing is overruled
-/// twice over — `DefaultHasher` is not stable across toolchains, and the
-/// maintainer rejected collisions outright.
-pub const PALETTE: [(Rgb, &str); 8] = [
-    (Rgb(0x7E, 0x9C, 0xD8), "crystalBlue"),
-    (Rgb(0x98, 0xBB, 0x6C), "springGreen"),
-    (Rgb(0xE6, 0xC3, 0x84), "carpYellow"),
-    (Rgb(0xE4, 0x68, 0x76), "waveRed"),
-    (Rgb(0x95, 0x7F, 0xB8), "oniViolet"),
-    (Rgb(0x7A, 0xA8, 0x9F), "waveAqua2"),
-    (Rgb(0xFF, 0xA0, 0x66), "surimiOrange"),
-    (Rgb(0xD2, 0x7E, 0x99), "sakuraPink"),
-];
-
-/// Unselected rows recede 25% toward the bar background (lock §6). Selection by
-/// recession costs zero columns and gets MORE effective as the fleet grows,
-/// which is the opposite of a background tint — a tint competes with the title
-/// chips and repo inks for the same channel, which is why it read as
-/// insufficient. Fades at 8/12/15/20/30/40% were rendered and rejected.
-const FADE: f64 = 0.25;
-
-/// The dormant fade (#206). Deeper than [`FADE`] and UNCONDITIONAL — a dormant
-/// row dims whether or not anything is selected, because it marks what the row
-/// IS (no session behind it), not where focus sits. Before this the only
-/// dormant tell was the hollow gutter glyph, and the block read as live fleet
-/// at a glance. The glyph stays fujiWhite-based (#123's near-invisible
-/// sumiInk4 lesson), so even this deep it outreads the old ink. 0.5 was
-/// rendered first; Ollie ratified 0.6 against the ux-gate1 fleet (#210).
-/// Pub for the README asset generator: the dormant icon must carry the same
-/// fade `render_row` applies, not the raw mark ink.
-pub const DORMANT_FADE: f64 = 0.6;
-
-// ── glyphs (lock §5) ────────────────────────────────────────────────────────
-
-const LCAP: char = '\u{e0b6}'; // powerline half-circle thick, left
-const RCAP: char = '\u{e0b4}'; // powerline half-circle thick, right
-const RULE: char = '\u{2502}'; // box drawings light vertical
-const ELLIPSIS: char = '\u{2026}';
-/// Pub for the `readme-assets` example (as are `BATTERY` and the `mark`/`ink`
-/// tables below): the README's icons are generated from these values, never
-/// copied.
-pub const CONSOLE: char = '\u{f018d}'; // nf-md-console — now the STATUS cell's mark (#206)
-/// The battery cell's terminal-class marker (#206): the word where an agent
-/// row shows its count, a glyph where it shows its ramp. `TERM` is four cells
-/// exactly — the full expanded battery cell, right-aligned like the digits.
-const TERM_MARK: &str = "TERM";
-const TERM_GLYPH: char = '\u{f120}'; // nf-fa-terminal — the rightward prompt, collapsed
-
-/// The S7 ramp (#62). Index is the context level: `0` is full, the last entry
-/// is empty and past the user's smart zone.
-///
-/// TWO AXES AT DIFFERENT RESOLUTIONS, deliberately. The GLYPH carries magnitude
-/// finely — one step per tenth of the zone, so the cell reads as a gauge you can
-/// watch descend. The INK carries risk coarsely — four bands, for the glance
-/// that never resolves a glyph at all. They cannot contradict each other because
-/// both are functions of the same index.
-///
-/// The ink bands are green below six tenths, yellow to eight, orange to the
-/// zone, and red AT it. The zone is where the battery turns red rather than
-/// where the ramp ends, so the last entry is also the clamp: four times over
-/// reads the same as one token over, and #105's token text carries the
-/// magnitude the glyph has stopped resolving.
-///
-/// Glyphs are the Material Design battery family, verified against the installed
-/// patched font's glyph-name table rather than assumed: `md-battery` (U+F0079),
-/// `md-battery_90`…`md-battery_10` (U+F0082 down to U+F007A — note they run
-/// BACKWARDS through the codepoints), `md-battery_outline` (U+F008E). Written as
-/// escapes, never literals: design-lock §5.4, load-bearing.
-pub const BATTERY: [(char, Rgb); clave_types::BATTERY_LEVELS as usize] = [
-    ('\u{f0079}', GREEN),  // full        · below a tenth spent
-    ('\u{f0082}', GREEN),  // nine tenths
-    ('\u{f0081}', GREEN),  // eight
-    ('\u{f0080}', GREEN),  // seven
-    ('\u{f007f}', GREEN),  // six
-    ('\u{f007e}', GREEN),  // five        · half the zone gone
-    ('\u{f007d}', YELLOW), // four
-    ('\u{f007c}', YELLOW), // three
-    ('\u{f007b}', ORANGE), // two
-    ('\u{f007a}', ORANGE), // one tenth
-    ('\u{f008e}', RED),    // empty       · at or past the zone
-];
-
-// These four are byte-identical to `PALETTE` entries 1, 2, 3 and 6
-// (springGreen, carpYellow, waveRed, surimiOrange), and the duplication is
-// deliberate rather than an oversight. `PALETTE` is the REPO ink table, keyed
-// by repo root and allocated round-robin; sharing an entry would mean
-// reordering the repo palette silently re-colours the battery, which is two
-// unrelated meanings on one constant. #145 is where every visual variable gets
-// one home — that is the right place to unify these, not here.
-const GREEN: Rgb = Rgb(0x98, 0xBB, 0x6C);
-const YELLOW: Rgb = Rgb(0xE6, 0xC3, 0x84);
-const ORANGE: Rgb = Rgb(0xFF, 0xA0, 0x66);
-const RED: Rgb = Rgb(0xE4, 0x68, 0x76);
+pub use crate::theme::{
+    BASE, BATTERY, CHIP_INK, CONSOLE, DEFAULT_INK, DORMANT_FADE, FADE, GREEN, ORANGE, PALETTE, RED,
+    RESET, Rgb, SEL_BG, Theme, UNTINTED, YELLOW,
+};
+use crate::theme::{
+    DONE_INK, ELLIPSIS, FAILED_INK, LCAP, NEEDS_YOU_INK, OPENING_INK, RCAP, RULE, TERM_GLYPH,
+    TERM_MARK, WORKING_INK,
+};
 
 // ── the row ─────────────────────────────────────────────────────────────────
 
@@ -341,22 +203,27 @@ impl RowStatus {
     /// things, and easy to transpose (FOOTGUNS). `DormantSelected` is U+23CE
     /// RETURN SYMBOL in the Opening tint — the ⏎ affordance IS the first
     /// frame of the launch lifecycle it invites (⏎ → ↻ → status, #100).
-    pub fn mark(self) -> (char, Rgb) {
+    ///
+    /// Takes the theme for its two NON-semantic inks only: `Idle`'s untinted
+    /// grey and `Dormant`'s default ink follow the user's theme, while the
+    /// lifecycle hues stay the fixed consts — red means failed under every
+    /// theme (#145).
+    pub fn mark(self, theme: &Theme) -> (char, Rgb) {
         match self {
-            RowStatus::NeedsYou => ('\u{25cf}', Rgb(0xE4, 0x68, 0x76)), // waveRed
-            RowStatus::Working => ('\u{25cf}', Rgb(0xFF, 0x9E, 0x3B)),  // roninYellow
-            RowStatus::Done => ('\u{25cf}', Rgb(0x98, 0xBB, 0x6C)),     // springGreen
-            RowStatus::Idle => ('\u{25cf}', UNTINTED),
-            RowStatus::Failed => ('\u{2716}', Rgb(0xE8, 0x24, 0x24)), // samuraiRed
+            RowStatus::NeedsYou => ('\u{25cf}', NEEDS_YOU_INK),
+            RowStatus::Working => ('\u{25cf}', WORKING_INK),
+            RowStatus::Done => ('\u{25cf}', DONE_INK),
+            RowStatus::Idle => ('\u{25cf}', theme.untinted),
+            RowStatus::Failed => ('\u{2716}', FAILED_INK),
             // Hollow on the DEFAULT ink, never sumiInk4: that read as
             // near-invisible against the bar (#123), and the shape alone
             // carries "not running". #206's row-level fade is applied AFTER
             // this table by `render_row`, so a legible base is what keeps the
             // half-faded glyph above #123's floor.
-            RowStatus::Dormant => ('\u{25cb}', DEFAULT_INK),
-            RowStatus::DormantSelected => ('\u{23ce}', Rgb(0xE6, 0xC3, 0x84)), // carpYellow
-            RowStatus::Opening => ('\u{21bb}', Rgb(0xE6, 0xC3, 0x84)),         // carpYellow
-            RowStatus::Stale => ('\u{2717}', Rgb(0xE8, 0x24, 0x24)),           // samuraiRed
+            RowStatus::Dormant => ('\u{25cb}', theme.default_ink),
+            RowStatus::DormantSelected => ('\u{23ce}', OPENING_INK),
+            RowStatus::Opening => ('\u{21bb}', OPENING_INK),
+            RowStatus::Stale => ('\u{2717}', FAILED_INK),
         }
     }
 }
@@ -376,12 +243,14 @@ pub enum TermStatus {
 }
 
 impl TermStatus {
-    pub fn ink(self) -> Rgb {
+    /// Same split as [`RowStatus::mark`]: `Idle` follows the theme's default
+    /// ink, the lifecycle hues stay fixed semantic (#145).
+    pub fn ink(self, theme: &Theme) -> Rgb {
         match self {
-            TermStatus::Idle => DEFAULT_INK,
-            TermStatus::Running => Rgb(0xFF, 0x9E, 0x3B), // roninYellow — Working's ink
-            TermStatus::Done => Rgb(0x98, 0xBB, 0x6C),    // springGreen — Done's ink
-            TermStatus::Failed => Rgb(0xE8, 0x24, 0x24),  // samuraiRed — Failed's ink
+            TermStatus::Idle => theme.default_ink,
+            TermStatus::Running => WORKING_INK, // roninYellow — Working's ink
+            TermStatus::Done => DONE_INK,       // springGreen — Done's ink
+            TermStatus::Failed => FAILED_INK,   // samuraiRed — Failed's ink
         }
     }
 }
@@ -724,7 +593,13 @@ pub fn viewport_top(len: usize, selected: Option<usize>, height: usize) -> usize
 /// per-row function cannot know that without a parameter that re-states what
 /// the slice already knows. It is also the unit a golden test should assert —
 /// the picture, not a fragment.
-pub fn render_rows(rows: &[Row], cols: usize, height: usize, widths: Widths) -> Vec<String> {
+pub fn render_rows(
+    rows: &[Row],
+    cols: usize,
+    height: usize,
+    widths: Widths,
+    theme: &Theme,
+) -> Vec<String> {
     // The viewport (#148): the pane height is a hard budget, and a bar that
     // printed past it drew rows zellij clipped away — nav-reachable, invisible.
     let top = viewport_top(rows.len(), rows.iter().position(|r| r.selected), height);
@@ -734,7 +609,7 @@ pub fn render_rows(rows: &[Row], cols: usize, height: usize, widths: Widths) -> 
     // is equivalent to computing it over the whole list.
     let any_selected = rows.iter().any(|r| r.selected);
     rows.iter()
-        .map(|row| render_row(row, cols, widths, any_selected))
+        .map(|row| render_row(row, cols, widths, any_selected, theme))
         // Below the floor the row was built wider than the pane on purpose;
         // `clip_to_cells` is what stops the terminal WRAPPING that over-run
         // into a second, blank line. Above the floor the row is already
@@ -749,12 +624,12 @@ pub fn render_rows(rows: &[Row], cols: usize, height: usize, widths: Widths) -> 
         .collect()
 }
 
-fn hue(ink: Option<u8>) -> Rgb {
-    ink.and_then(|i| PALETTE.get(usize::from(i)))
-        .map_or(UNTINTED, |(c, _)| *c)
+fn hue(ink: Option<u8>, theme: &Theme) -> Rgb {
+    ink.and_then(|i| theme.palette.get(usize::from(i)))
+        .map_or(theme.untinted, |c| *c)
 }
 
-fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> String {
+fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool, theme: &Theme) -> String {
     // Nothing to recede FROM when nothing is selected, so an unfocused bar
     // renders at full strength (lock §6) — except a dormant-block row, whose
     // fade is absolute rather than relative (#206). The flag, not the status:
@@ -784,11 +659,11 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
     // SGR state across the row, and a background that lapses for one cell is
     // exactly the ragged selection lock §6 forbids.
     let o = if row.selected {
-        SEL_BG.bg()
+        theme.sel_bg.bg()
     } else {
         String::new()
     };
-    let ink = |c: Rgb| c.mix(BASE, fade).fg();
+    let ink = |c: Rgb| c.mix(theme.base, fade).fg();
 
     let mut out = String::new();
 
@@ -797,7 +672,7 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
     // the selected row's content does not sit one column right of its
     // neighbours (lock §2.2).
     if row.selected {
-        out.push_str(&SEL_BG.fg());
+        out.push_str(&theme.sel_bg.fg());
         out.push(LCAP);
         out.push_str(&o);
     } else {
@@ -819,12 +694,12 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
             // agent row already reads by (lock §5). Idle wears fujiWhite, not
             // katanaGray: a terminal is a real row, not a disabled one.
             out.push_str(&o);
-            out.push_str(&ink(status.ink()));
+            out.push_str(&ink(status.ink(theme)));
             out.push(CONSOLE); // col 2
             out.push_str(&o);
-            push_rule(&mut out, &o, &ink); // cols 3–5
+            push_rule(&mut out, &o, &ink, theme.default_ink); // cols 3–5
             out.push_str(&o);
-            out.push_str(&ink(DEFAULT_INK));
+            out.push_str(&ink(theme.default_ink));
             match widths.battery {
                 // `TERM` where an agent row shows its count — four cells,
                 // exactly, so the class marker lands on the digits' edge
@@ -841,7 +716,7 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
             // cwd, so blank also means "no agent knows this repo".
             match provenance.mark() {
                 Some(glyph) => {
-                    out.push_str(&ink(hue(*repo_ink)));
+                    out.push_str(&ink(hue(*repo_ink, theme)));
                     out.push(glyph);
                     out.push_str(&o);
                 }
@@ -856,12 +731,12 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
             repo_ink,
             ..
         } => {
-            let (glyph, colour) = status.mark();
+            let (glyph, colour) = status.mark(theme);
             out.push_str(&o);
             out.push_str(&ink(colour));
             out.push(glyph); // col 2
             out.push_str(&o);
-            push_rule(&mut out, &o, &ink); // cols 3–5
+            push_rule(&mut out, &o, &ink, theme.default_ink); // cols 3–5
             out.push_str(&o);
             // CLAMPED, not indexed. The host already clamps, so an
             // out-of-range level cannot arise from this version — but the wire
@@ -891,7 +766,7 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
                 // would be inventing a measurement.
                 BatteryCell::Count => match tokens {
                     Some(t) => {
-                        out.push_str(&ink(battery.map_or(DEFAULT_INK, |i| BATTERY[i].1)));
+                        out.push_str(&ink(battery.map_or(theme.default_ink, |i| BATTERY[i].1)));
                         out.push_str(&rjust(&token_text(*t), battery_w));
                         out.push_str(&o);
                     }
@@ -906,7 +781,7 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
             // colour in the text (lock §4.1).
             match provenance.mark() {
                 Some(glyph) => {
-                    out.push_str(&ink(hue(*repo_ink)));
+                    out.push_str(&ink(hue(*repo_ink, theme)));
                     out.push(glyph);
                     out.push_str(&o);
                 }
@@ -955,8 +830,8 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
             // agent ink has claimed. `zellij action rename-tab` is the
             // labelling mechanism; the default `Tab #N` wears the chip too.
             // The block keeps its black on the selected row (ratified).
-            out.push_str(&CHIP_INK.mix(BASE, fade).bg());
-            out.push_str(&DEFAULT_INK.fg());
+            out.push_str(&theme.chip_ink.mix(theme.base, fade).bg());
+            out.push_str(&theme.default_ink.fg());
             out.push_str(&clamp(name, widths.title));
             out.push_str(RESET);
             out.push_str(&o);
@@ -969,8 +844,8 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
             // invisible on the selected row (Ollie, live 2026-08-18) — so the
             // ink-less repo falls back to fujiWhite like the rest of the row.
             match repo_ink {
-                Some(i) => out.push_str(&ink(hue(Some(*i)))),
-                None => out.push_str(&ink(DEFAULT_INK)),
+                Some(i) => out.push_str(&ink(hue(Some(*i), theme))),
+                None => out.push_str(&ink(theme.default_ink)),
             }
             out.push_str(&clamp(repo.as_deref().unwrap_or(""), widths.repo));
             out.push_str(&o);
@@ -981,7 +856,7 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
             // aesthetic, and on a terminal row it painted the selected
             // summary in whatever the repo cell wore — gray, when unmatched
             // (Ollie, live 2026-08-18).
-            out.push_str(&ink(DEFAULT_INK));
+            out.push_str(&ink(theme.default_ink));
             out.push_str(&clamp(command, summary_w));
             out.push_str(&o);
         }
@@ -998,8 +873,8 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
             // one (lock §4). Blank when the session was never renamed.
             match title {
                 Some(title) => {
-                    out.push_str(&hue(*title_ink).mix(BASE, fade).bg());
-                    out.push_str(&CHIP_INK.fg());
+                    out.push_str(&hue(*title_ink, theme).mix(BASE, fade).bg());
+                    out.push_str(&theme.chip_ink.fg());
                     out.push_str(&clamp(title, widths.title));
                     out.push_str(RESET);
                     out.push_str(&o);
@@ -1013,7 +888,7 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
             out.push(' '); // the space after the chip
             // Tinted TEXT, keyed by repo root — one repo is one colour
             // everywhere, forever (lock §4).
-            out.push_str(&ink(hue(*repo_ink)));
+            out.push_str(&ink(hue(*repo_ink, theme)));
             out.push_str(&clamp(repo, widths.repo));
             out.push_str(&o);
             out.push_str(&o);
@@ -1026,7 +901,7 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
             // fades by 0), which silently painted every summary its repo colour
             // until the moment a row was selected.
             if !row.selected {
-                out.push_str(&ink(DEFAULT_INK));
+                out.push_str(&ink(theme.default_ink));
             }
             out.push_str(&clamp(summary, summary_w));
             out.push_str(&o);
@@ -1037,7 +912,7 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool) -> Str
     out.push(' '); // the right margin
     out.push_str(RESET);
     if row.selected {
-        out.push_str(&SEL_BG.fg());
+        out.push_str(&theme.sel_bg.fg());
         out.push(RCAP); // the right cap, col `cols`
         out.push_str(RESET);
     } else {
@@ -1103,10 +978,10 @@ fn token_text(tokens: u32) -> String {
 
 /// Cols 3–5: space, rule, space. The rule separates the status hue from the
 /// battery hue so two adjacent coloured dots do not read as one signal.
-fn push_rule(out: &mut String, o: &str, ink: &impl Fn(Rgb) -> String) {
+fn push_rule(out: &mut String, o: &str, ink: &impl Fn(Rgb) -> String, default_ink: Rgb) {
     out.push_str(o);
     out.push(' ');
-    out.push_str(&ink(DEFAULT_INK));
+    out.push_str(&ink(default_ink));
     out.push(RULE);
     out.push_str(o);
     out.push(' ');
@@ -1121,7 +996,7 @@ mod tests {
     /// regime every golden below was written against. Viewport behaviour is
     /// asserted by the `on_screen` tests, which pass a real pane height.
     fn render_all(rows: &[Row], cols: usize, widths: Widths) -> Vec<String> {
-        render_rows(rows, cols, rows.len(), widths)
+        render_rows(rows, cols, rows.len(), widths, &Theme::default())
     }
 
     fn agent(status: RowStatus, provenance: Provenance, title: Option<&str>, summary: &str) -> Row {
@@ -1593,14 +1468,14 @@ mod tests {
 
         for (clipped, direct) in render_all(&rows, floor, Widths::EXPANDED).iter().zip(
             rows.iter()
-                .map(|r| render_row(r, floor, Widths::EXPANDED, any)),
+                .map(|r| render_row(r, floor, Widths::EXPANDED, any, &Theme::default())),
         ) {
             assert_eq!(*clipped, direct, "the floor took the clip path");
         }
 
         let under = floor - 1;
         let clipped = &render_all(&rows, under, Widths::EXPANDED)[0];
-        let direct = render_row(&rows[0], under, Widths::EXPANDED, any);
+        let direct = render_row(&rows[0], under, Widths::EXPANDED, any, &Theme::default());
         assert_ne!(
             *clipped, direct,
             "one cell below the floor the clip must engage"
@@ -2069,8 +1944,8 @@ mod tests {
         // (106.6 -> 107, 104.6 -> 105, 98.4 -> 98).
         let half = "\u{1b}[38;2;107;105;98m";
         // The chip is the one BACKGROUND the fade touches (CodeRabbit, #210).
-        let chip_faded = hue(Some(5)).mix(BASE, DORMANT_FADE).bg();
-        let chip_full = hue(Some(5)).bg();
+        let chip_faded = hue(Some(5), &Theme::default()).mix(BASE, DORMANT_FADE).bg();
+        let chip_full = hue(Some(5), &Theme::default()).bg();
         let alone = render_all(
             std::slice::from_ref(&dormant),
             DESIGN_COLS,
@@ -2127,9 +2002,9 @@ mod tests {
     /// a real hue (LEDGER D7).
     #[test]
     fn an_unset_or_out_of_range_ink_falls_back_to_untinted() {
-        assert_eq!(hue(None), UNTINTED);
-        assert_eq!(hue(Some(99)), UNTINTED);
-        assert_eq!(hue(Some(0)), PALETTE[0].0);
+        assert_eq!(hue(None, &Theme::default()), UNTINTED);
+        assert_eq!(hue(Some(99), &Theme::default()), UNTINTED);
+        assert_eq!(hue(Some(0), &Theme::default()), PALETTE[0].0);
     }
 
     /// Ties round to even, as Python's `round()` does — the ratified preview's
@@ -2173,7 +2048,11 @@ mod tests {
             (RowStatus::Stale, '\u{2717}', samurai_red), // BALLOT x — a flag, not a Status
         ];
         for (status, glyph, colour) in table {
-            assert_eq!(status.mark(), (glyph, colour), "{status:?}");
+            assert_eq!(
+                status.mark(&Theme::default()),
+                (glyph, colour),
+                "{status:?}"
+            );
             // Every marker is exactly one cell: the gutter is position-locked
             // (lock §2.1), so a two-cell glyph shifts the whole row right.
             assert_eq!(glyph.width(), Some(1), "{status:?} is not one cell wide");
@@ -2184,8 +2063,8 @@ mod tests {
         }
         // The two easy to transpose are genuinely different glyphs.
         assert_ne!(
-            RowStatus::Failed.mark().0,
-            RowStatus::Stale.mark().0,
+            RowStatus::Failed.mark(&Theme::default()).0,
+            RowStatus::Stale.mark(&Theme::default()).0,
             "U+2716 and U+2717 must not collapse"
         );
     }
@@ -2285,7 +2164,7 @@ mod tests {
     /// this way rather than the offset behind it — zero-padded names so `t01`
     /// is never a substring of `t12`.
     fn on_screen_at(rows: &[Row], height: usize, cols: usize, widths: Widths) -> Vec<usize> {
-        render_rows(rows, cols, height, widths)
+        render_rows(rows, cols, height, widths, &Theme::default())
             .iter()
             .map(|line| {
                 let bare = strip_sgr(line);
@@ -2376,13 +2255,22 @@ mod tests {
     /// because lookahead never costs the selection its own place.
     #[test]
     fn degenerate_pane_heights_stay_total() {
-        assert!(render_rows(&numbered(10, 3), DESIGN_COLS, 0, Widths::EXPANDED).is_empty());
+        assert!(
+            render_rows(
+                &numbered(10, 3),
+                DESIGN_COLS,
+                0,
+                Widths::EXPANDED,
+                &Theme::default()
+            )
+            .is_empty()
+        );
         assert_eq!(on_screen(&numbered(10, 6), 1), vec![6]);
         assert_eq!(on_screen(&numbered(10, 9), 1), vec![9]);
         // Two lines afford ONE row of lookahead, not two — the pane's room for
         // it is what caps it.
         assert_eq!(on_screen(&numbered(10, 5), 2), vec![5, 6]);
-        assert!(render_rows(&[], DESIGN_COLS, 4, Widths::EXPANDED).is_empty());
+        assert!(render_rows(&[], DESIGN_COLS, 4, Widths::EXPANDED, &Theme::default()).is_empty());
     }
 
     /// Collapsed is a WIDTH profile (LEDGER D16): narrowing the bar must not

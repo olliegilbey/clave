@@ -206,6 +206,80 @@ pub fn config_kdl(binary: &str, wasm: &str) -> String {
     )
 }
 
+/// The user's theme selection, extracted from their zellij config text
+/// (#145 half two's delivery channel; grill 2026-08-24).
+///
+/// `zellij --config <generated>` DISCARDS the user's own config.kdl entirely
+/// (FOOTGUNS/#122), so their `theme "…"` never reaches a clave session and
+/// the bar hardcoded kanagawa regardless. Theme DEFINITIONS need no help —
+/// even under `--config`, zellij still merges its built-in themes and the
+/// user themes dir (`apply_themes_to_config`, zellij-utils setup.rs:318-341)
+/// — so the whole passthrough is these three top-level nodes, copied
+/// verbatim: `theme` (the selection), `themes` (inline definitions) and
+/// `theme_dir` (a non-default definitions dir). First match per name, which
+/// is the read zellij itself performs (`KdlDocument::get` — FIRST match only,
+/// the same kdl 4.7.1 fact the unbind node in [`config_kdl`] leans on).
+///
+/// An unparseable config yields nothing rather than an error: zellij would
+/// refuse that file for the user's own sessions too, and a clave launch that
+/// fails on someone else's syntax error helps nobody. Superseded by #114's
+/// layout channel (the user's whole config surviving) when that lands.
+///
+/// Pub for the KDL guardrail: the appended artifact must parse through the
+/// real zellij parser like every other generated KDL.
+pub fn theme_slice_from(user_config: &str) -> String {
+    let Ok(doc) = user_config.parse::<kdl::KdlDocument>() else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for name in ["theme", "themes", "theme_dir"] {
+        if let Some(node) = doc.nodes().iter().find(|n| n.name().value() == name) {
+            // Shallow trivia strip: the node's own leading whitespace and
+            // comments belong to the USER's file, not the generated one.
+            // Child formatting (a themes block's indentation) stays — it is
+            // inside the node and harmless.
+            let mut node = node.clone();
+            node.clear_fmt();
+            out.push_str(node.to_string().trim());
+            out.push('\n');
+        }
+    }
+    if !out.is_empty() {
+        out.insert_str(
+            0,
+            "// User theme passthrough (#145): copied from the user's zellij\n\
+             // config, which `--config` otherwise replaces wholesale.\n",
+        );
+    }
+    out
+}
+
+/// [`theme_slice_from`] over the user's actual config file, resolved the way
+/// zellij resolves it when clave execs it: `$ZELLIJ_CONFIG_FILE` wins, else
+/// `config.kdl` under the first existing candidate dir — `$ZELLIJ_CONFIG_DIR`,
+/// `~/.config/zellij`, `$XDG_CONFIG_HOME/zellij` (zellij-utils home.rs
+/// `default_config_dirs`; the system dir is omitted as it never carries a
+/// per-user theme). No file, no slice.
+fn user_theme_slice() -> String {
+    let path = std::env::var_os("ZELLIJ_CONFIG_FILE")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            let dirs = [
+                std::env::var_os("ZELLIJ_CONFIG_DIR").map(std::path::PathBuf::from),
+                dirs::home_dir().map(|h| h.join(".config/zellij")),
+                std::env::var_os("XDG_CONFIG_HOME")
+                    .map(|x| std::path::PathBuf::from(x).join("zellij")),
+            ];
+            dirs.into_iter()
+                .flatten()
+                .find(|d| d.exists())
+                .map(|d| d.join("config.kdl"))
+        });
+    path.and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|text| theme_slice_from(&text))
+        .unwrap_or_default()
+}
+
 /// One bar pane, at a FIXED column count (a bare `size=N` in zellij KDL).
 ///
 /// Fixed and no longer a percent: the percent mandate existed so the deleted
@@ -627,7 +701,13 @@ fn read_settings(path: &std::path::Path) -> Result<serde_json::Value> {
 /// unversioned wasm); release = (versioned CLI absolute path, versioned
 /// wasm). Everything version-shaped stays in the caller (§2).
 pub fn write_generated(dir: &std::path::Path, binary: &str, wasm: &str) -> Result<()> {
-    std::fs::write(dir.join("config.kdl"), config_kdl(binary, wasm))?;
+    // The theme slice rides the generated config (#145): appended top-level
+    // nodes, which merge like any other config node — clave's own config
+    // defines no theme, so there is nothing to collide with. Re-read on every
+    // setup, so a theme change lands at the next clave launch.
+    let mut config = config_kdl(binary, wasm);
+    config.push_str(&user_theme_slice());
+    std::fs::write(dir.join("config.kdl"), config)?;
     std::fs::write(dir.join("layout.kdl"), layout_kdl(binary, wasm))?;
 
     // Hooks: read-merge-write $CLAUDE_CONFIG_DIR/settings.json. The path may
@@ -1058,6 +1138,46 @@ pub fn launch_session() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    mod theme_slice {
+        use crate::setup::theme_slice_from;
+
+        #[test]
+        fn copies_selection_inline_definitions_and_dir_nothing_else() {
+            let user = "// the user's own comment\n\
+                        theme \"kanagawa\"\n\
+                        keybinds clear-defaults=true { }\n\
+                        themes {\n    custom {\n        fg 220 215 186\n    }\n}\n\
+                        theme_dir \"/tmp/themes\"\n";
+            let slice = theme_slice_from(user);
+            assert!(slice.contains("theme \"kanagawa\""), "{slice}");
+            assert!(slice.contains("themes {"), "{slice}");
+            assert!(slice.contains("theme_dir \"/tmp/themes\""), "{slice}");
+            // Only the three theme nodes ride: keybinds are #114's problem,
+            // and the user's own trivia stays in the user's file.
+            assert!(!slice.contains("keybinds"), "{slice}");
+            assert!(!slice.contains("own comment"), "{slice}");
+        }
+
+        #[test]
+        fn no_theme_nodes_or_unparseable_config_yield_an_empty_slice() {
+            assert_eq!(theme_slice_from("keybinds { }"), "");
+            assert_eq!(theme_slice_from(""), "");
+            // zellij would refuse this file for the user's own sessions too;
+            // clave must not fail their launch on it.
+            assert_eq!(theme_slice_from("theme \"a\" { unclosed"), "");
+        }
+
+        /// zellij reads config nodes via `KdlDocument::get`, FIRST match only
+        /// (the same kdl 4.7.1 fact the unbind node leans on) — the copy must
+        /// carry the node zellij would actually honour.
+        #[test]
+        fn takes_the_first_theme_node_like_zellij_would() {
+            let slice = theme_slice_from("theme \"first\"\ntheme \"second\"\n");
+            assert!(slice.contains("\"first\""), "{slice}");
+            assert!(!slice.contains("\"second\""), "{slice}");
+        }
+    }
+
     use super::*;
 
     /// #226 live adoption: `SessionStart` is what makes a hand-run
