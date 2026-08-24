@@ -213,16 +213,15 @@ the maintainer's live session.
 **Guard today:** canonicalize-before-munge enforced at the call site (main.rs:263-268), rationale in `munge.rs:11`; covered by unit tests around `munge_cwd` (munge.rs:20).
 **Refs:** `crates/clave/src/munge.rs:11-20`; `crates/clave/src/main.rs:263-268`; FOOTGUNS.md "`munge_cwd` must be fed the CANONICAL cwd".
 
-### S17 — Out-of-band resume orphans the row (#180) [RULED 2026-08-17]
-**Seam:** `hook.rs::resolve_row`'s two admission routes vs a Claude that clave did not exec — a manual `claude --resume` carries a rotated session id (not a store key) and no spawn-set `CLAVE_AGENT_UUID`, so every hook declines.
-**Ruling:** the PidGate is DELETED (env uuid alone binds — one pane, one Claude), which removes the gate-shaped half of this freeze for every clave-spawned pane. The out-of-band case itself is UNSUPPORTED BY DESIGN: recovery is in-band — close the pane, Alt+Enter the row. The env one-liner heal below remains the documented emergency path (`CLAVE_AGENT_PID` in it is now inert).
-**Preconditions:** a spawned agent whose pane Claude was replaced out of band. The field driver is the Ctrl-Z trap: `clave spawn` execs claude as the pane's own process, so a suspended claude has no shell to `fg` it — Ctrl-C plus manual `claude --resume <name>` is the only exit, and it is exactly the resume clave cannot see.
+### S17 — Out-of-band resume orphans the row (#180 → #226) [RESOLVED 2026-08-24]
+**Seam:** `hook.rs::resolve_row`'s admission routes vs a Claude that clave did not exec — a manual `claude --resume` carries a rotated session id and no spawn-set `CLAVE_AGENT_UUID`.
+**Resolution:** #226 (PR #227) made the hook itself the admission route: a hook speaking from a verified clave pane (`adoption_pane_from` — `ZELLIJ_SESSION_NAME` matches clave's own session, pane id parses) is an ownership proof. A known session re-registers and binds; an unknown one mints through the same `mint_record` path `clave add` uses. The 2026-08-17 "unsupported by design" ruling is superseded; the `CLAVE_AGENT_UUID=<uuid> exec claude --resume` emergency heal is obsolete (harmless, no longer needed).
+**Preconditions:** any claude started or replaced out of band in a clave pane — the Ctrl-Z/Ctrl-C trap, a bare `claude --resume`, a `/clear` rotation, a fresh `claude` in a terminal tab.
 **Reproduce:**
 1. Sandbox row live in a tab (any `c8-*` scenario).
-2. In the pane: Ctrl-C claude; from the surviving shell run bare `claude --resume <name>` (no clave env).
-3. Drive a turn; probe `jq '.agents["<uuid>"] | {context_tokens, last_interacted, status}' <state-dir>/agents.json`.
-**Healthy (desired, undesigned):** the row re-adopts the resumed conversation — tokens/status/title resume tracking.
-**Broken (current, by design):** the row freezes at its pre-suspend values while the transcript appends; renames fired while orphaned never land. Measured on the daily driver 2026-08-12: frozen at 28,606 tokens while the session ran past 65k.
-**Drive assertion:** after step 3, `last_interacted` must rise within 10s — red today; goes green with whatever re-adoption path #180 rules in.
-**Guard today:** in-band recovery (close pane, Alt+Enter) plus the validated manual heal: `CLAVE_AGENT_UUID=<uuid> exec claude --resume <name>` (the env var alone passes `resolve_row`; the missed `custom-title` re-stamps from the transcript tail on the first accepted hook).
-**Refs:** #180 (the ruling); `crates/clave/src/hook.rs` (`resolve_row`); S1 (the guarded rotation class this is the residual of); S3 (the gate's deletion record); FOOTGUNS.md title re-stamp measurement.
+2. In the pane: Ctrl-C claude; from the surviving shell run bare `claude --resume <name>` (no clave env). **Sandbox PATH trap:** re-export the shim first (`export PATH="<sandbox>/shim:$PATH"`) — the interactive shell's rc re-prepends the stable install, and the hook then silently measures the wrong binary (FOOTGUNS, 2026-08-24).
+3. Probe `jq '.agents["<uuid>"] | {pane_id, tab_id, last_interacted, status}' <state-dir>/agents.json` — registration lands on SessionStart, before the first prompt.
+**Healthy (designed, since #226):** the row re-adopts — register + bind flip the tab live; SessionEnd from the owning pane reverts it; an unverified SessionEnd is a no-op.
+**Drive assertion:** after step 3, the row's `pane_id`/`tab_id` register within 10s and `last_interacted` rises on the first turn.
+**Validated live 2026-08-24 (adopt-226 sandbox drive):** the adjacent adoption loop end-to-end — fresh-`claude` mint with byte-exact `dir · branch` label before first prompt, `/clear` successor mint + hand-over, SessionEnd revert, `--continue` re-adopt with no duplicate mint, unverified-SessionEnd no-op, 60s quiescence. This exact spawned-row Ctrl-C reproduction is re-admitted to the QA drive (was excluded as known-red).
+**Refs:** #226 / PR #227 (`hook.rs::adoption_pane_from`, `mint_adopted`, `apply_hook_pane`); #180 (the superseded ruling); S1 (the rotation class); S3 (the gate's deletion record).
