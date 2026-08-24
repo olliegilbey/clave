@@ -733,6 +733,7 @@ pub fn mint_adopted(
     cwd: &str,
     repo_root: &str,
     branch: &str,
+    default_branch: Option<String>,
     own_buckets: Option<std::collections::BTreeMap<u32, u32>>,
 ) -> String {
     let dir_name = cwd.rsplit('/').next().unwrap_or(cwd);
@@ -746,7 +747,7 @@ pub fn mint_adopted(
             branch,
             label: &label,
             worktree: None,
-            default_branch: None,
+            default_branch,
             own_buckets,
         },
     );
@@ -935,6 +936,7 @@ struct AdoptionInputs {
     cwd: String,
     repo_root: String,
     branch: String,
+    default_branch: Option<String>,
     own_buckets: Option<std::collections::BTreeMap<u32, u32>>,
 }
 
@@ -943,6 +945,10 @@ fn adoption_inputs(raw_cwd: &str, claude_dir: &Path, session: &str) -> Option<Ad
     // path, exactly as run_add does for a picked dir.
     let physical = std::fs::canonicalize(raw_cwd).ok()?;
     let cwd = physical.to_str()?.to_string();
+    // A cwd `validate_cwd` would refuse to bake must decline ADOPTION too:
+    // the adopted row becomes the newest, so launch's eager pick would reject
+    // the stored cwd on every later `clave` start (#227 review).
+    crate::add::validate_cwd(&cwd).ok()?;
     let git = crate::discover::tool_path(crate::discover::ToolId::Git);
     let repo_root = crate::add::cmd_stdout(&git, &["-C", &cwd, "rev-parse", "--show-toplevel"])
         .map(|s| s.trim().to_string())
@@ -950,6 +956,10 @@ fn adoption_inputs(raw_cwd: &str, claude_dir: &Path, session: &str) -> Option<Ad
     let branch = crate::add::cmd_stdout(&git, &["-C", &cwd, "rev-parse", "--abbrev-ref", "HEAD"])
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| "-".to_string());
+    // Same derivation as `clave add` (#227 review): without it a `trunk`
+    // repo's ordinary checkout renders as a branch glyph only on adopted
+    // rows. `None` stays a real answer (non-repo, local-only repo).
+    let default_branch = crate::add::resolve_default_branch(&git, &repo_root);
     // The jsonl is the source of truth: an adopted conversation enters at its
     // own transcript-derived weight, same ruling as the resume picker's mint.
     let own_buckets = crate::backfill::derive_for_row(
@@ -963,6 +973,7 @@ fn adoption_inputs(raw_cwd: &str, claude_dir: &Path, session: &str) -> Option<Ad
         cwd,
         repo_root,
         branch,
+        default_branch,
         own_buckets,
     })
 }
@@ -1017,6 +1028,7 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
                     &m.cwd,
                     &m.repo_root,
                     &m.branch,
+                    m.default_branch.clone(),
                     m.own_buckets.clone(),
                 );
             }
@@ -2605,6 +2617,7 @@ mod tests {
             "/home/u/proj",
             "main",
             None,
+            None,
         );
         assert_eq!(uuid, "sess-1");
         let r = &s.agents["sess-1"];
@@ -2627,6 +2640,7 @@ mod tests {
             "/home/u/proj",
             "/home/u/proj",
             "main",
+            None,
             None,
         );
         let r = &s.agents["sess-1"];
@@ -2653,6 +2667,39 @@ mod tests {
         assert_eq!(m.cwd, physical.to_str().unwrap());
         assert!(!m.repo_root.is_empty() && !m.branch.is_empty());
         assert_eq!(m.own_buckets, None, "no transcript → no derived weight");
+        assert_eq!(m.default_branch, None, "non-repo dir has no default branch");
         assert!(adoption_inputs("/definitely/not/a/dir", Path::new("/x"), "s").is_none());
+    }
+
+    /// #227 review: a cwd that `validate_cwd` would refuse to bake must
+    /// decline ADOPTION too — the adopted row becomes the newest, launch's
+    /// eager pick then rejects the stored cwd, and one hand-started claude in
+    /// a quote-named directory wedges every later `clave` start.
+    #[test]
+    fn adoption_inputs_decline_a_kdl_unsafe_cwd() {
+        let dir = std::env::temp_dir().join("clave-adopt-\"unsafe\"-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(
+            adoption_inputs(dir.to_str().unwrap(), Path::new("/x"), "s").is_none(),
+            "a KDL-unsafe cwd must decline the mint, not persist"
+        );
+    }
+
+    /// #227 review: adoption derives `default_branch` like `clave add` does —
+    /// a `trunk` repo's ordinary checkout must not render as a branch glyph
+    /// only on adopted rows.
+    #[test]
+    fn mint_adopted_carries_the_default_branch() {
+        let mut s = Store::default();
+        mint_adopted(
+            &mut s,
+            "sess-db",
+            "/home/u/proj",
+            "/home/u/proj",
+            "trunk",
+            Some("trunk".into()),
+            None,
+        );
+        assert_eq!(s.agents["sess-db"].default_branch.as_deref(), Some("trunk"));
     }
 }

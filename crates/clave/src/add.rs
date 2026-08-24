@@ -740,7 +740,7 @@ pub fn record_branch(resumed: bool, cand_branch: Option<&str>, picked_branch: &s
 /// `None` is a real answer, not a failure — the bar falls back to its
 /// `main`/`master` heuristic for it, so behaviour is never WORSE than before
 /// this field existed.
-fn resolve_default_branch(git: &Path, repo_root: &str) -> Option<String> {
+pub(crate) fn resolve_default_branch(git: &Path, repo_root: &str) -> Option<String> {
     let head = cmd_stdout(
         git,
         &[
