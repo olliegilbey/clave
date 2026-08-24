@@ -20,6 +20,10 @@ done
 STORE="${STORE:-${CLAVE_STATE_DIR:-$HOME/.local/state/clave}/agents.json}"
 TODAY=$(( $(date +%s) / 86400 ))
 HL=$(jq -r '.order.frecency.half_life_hours // 24' "$STORE")
+# A zero dial is reachable via CLI/wire; the bar clamps it to one hour
+# (model.rs frecency_millis, `half_life_hours.max(1)`). Mirror that, or
+# every weight below divides by zero.
+if [ "$HL" -eq 0 ]; then HL=1; fi
 
 # column -t drops empty fields (strtok semantics), so pad blanks with a space.
 hdr="score\tblock\ttab\ttitle\trepo\tsummary"

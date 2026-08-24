@@ -686,16 +686,43 @@ pub fn install_cli_copy(dir: &Path, exe: &Path, version: &str) -> Result<PathBuf
 /// `clave` (PATH = the dev binary) and the unversioned working-tree wasm.
 /// Stable machines are prepared by `just release` (→ `run_release`), which
 /// bakes versioned paths instead. Idempotent.
-/// True iff a non-embedded (dev) binary's `setup` is aimed at a data dir that
-/// already holds a release install — any `clave-v<digit>…` CLI copy among the
-/// `bin/` siblings. Digit required after the prefix, same discipline and
-/// reason as `release::binary_resolution_is_anomalous`. Pure over the sibling
+/// The forcing scenario (FOOTGUNS §PATH and version coherence, lived
+/// 2026-08-21): a dev (non-embedded) binary's `setup` aimed at a release
+/// install bakes `clave_binary "clave"` into config.kdl while the launch
+/// layout carries the versioned path — zellij compares plugin identity
+/// `(location, configuration)` exactly (#44), so every keybind press starts a
+/// second sidebar. Any `clave-v<digit>…` CLI copy among the `bin/` siblings
+/// is a release install's fingerprint, and this predicate is what refuses the
+/// setup. Digit required after the prefix for the same reason as
+/// `release::binary_resolution_is_anomalous`: a foreign `clave-vault` sibling
+/// must not fire the refusal — a guard that cries wolf gets ignored, the
+/// exact failure #44's announcement exists to prevent. Pure over the sibling
 /// list so it tests without a filesystem.
 fn dev_setup_hits_release_install(siblings: &[String]) -> bool {
     siblings.iter().any(|n| {
         n.strip_prefix("clave-v")
             .is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit()))
     })
+}
+
+/// The `bin/` file names feeding the guard above. Fails CLOSED (#228 review):
+/// a missing `bin/` is a fresh sandbox and reads as empty, but any other
+/// enumeration error — permissions, I/O — aborts setup rather than reading as
+/// "no release install here", because an empty answer is exactly the state
+/// that licenses baking the bare identity.
+fn bin_siblings(dir: &std::path::Path) -> Result<Vec<String>> {
+    let bin = dir.join("bin");
+    let rd = match std::fs::read_dir(&bin) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e).context(format!("enumerating {}", bin.display())),
+    };
+    let mut names = Vec::new();
+    for entry in rd {
+        let entry = entry.with_context(|| format!("enumerating {}", bin.display()))?;
+        names.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    Ok(names)
 }
 
 pub fn run_setup() -> Result<()> {
@@ -753,14 +780,7 @@ pub fn run_setup() -> Result<()> {
         // press starts a second bar. Lived once: a dev binary's setup ran
         // without CLAVE_DATA_DIR during the v0.2.1 cut (2026-08-21). The
         // versioned copies under bin/ are the release install's fingerprint.
-        let siblings: Vec<String> = std::fs::read_dir(dir.join("bin"))
-            .ok()
-            .map(|rd| {
-                rd.filter_map(|e| e.ok())
-                    .filter_map(|e| e.file_name().into_string().ok())
-                    .collect()
-            })
-            .unwrap_or_default();
+        let siblings = bin_siblings(&dir)?;
         anyhow::ensure!(
             !dev_setup_hits_release_install(&siblings),
             "{dir} holds a release install; a dev binary's setup would bake the \
@@ -1048,6 +1068,27 @@ mod tests {
             "clave-vault",
             "clave-verify"
         ])));
+    }
+
+    #[test]
+    fn bin_siblings_reads_missing_bin_as_empty_but_fails_closed_on_io_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Missing bin/: a fresh sandbox — empty, not an error.
+        assert!(bin_siblings(tmp.path()).unwrap().is_empty());
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        std::fs::write(bin.join("clave-v0.2.1"), b"").unwrap();
+        assert_eq!(bin_siblings(tmp.path()).unwrap(), vec!["clave-v0.2.1"]);
+        // Any OTHER enumeration failure aborts setup rather than reading as
+        // "no release install here" — an empty answer is the state that
+        // licenses baking the bare identity (#228 review, fail closed).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o000)).unwrap();
+            assert!(bin_siblings(tmp.path()).is_err());
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
     }
 
     #[test]

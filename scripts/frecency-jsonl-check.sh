@@ -27,8 +27,12 @@ while IFS=$'\t' read -r uuid session cwd root tab store_buckets summary; do
     echo "NO-TRANSCRIPT tab=$tab store=$store_buckets  $summary"
     continue
   fi
-  jsonl_buckets=$(jq -cs --argjson today "$TODAY" '
-    [ .[] | select(.type=="user")
+  # -Rs + fromjson?: backfill.rs skips malformed transcript lines (its
+  # `let Ok(v) = … else continue`); a slurp that aborts on one bad line
+  # would diverge from the thing this script exists to mirror.
+  jsonl_buckets=$(jq -Rsc --argjson today "$TODAY" '
+    [ split("\n")[] | fromjson? ]
+    | [ .[] | select(.type=="user")
       | select((.isMeta // false) | not) | select((.isSidechain // false) | not)
       | select((.message.content | type) == "string"
                or ((.message.content | type) == "array"
