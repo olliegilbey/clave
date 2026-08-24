@@ -2015,6 +2015,7 @@ mod tests {
                         prompt: None,
                         message: Some("needs your permission".into()),
                         transcript_path: None,
+                        cwd: None,
                     };
                     if apply_hook_event(s, &uuid, event, &p, None, 1000, true) {
                         // Any accepted write mints exactly one ordinal, which is

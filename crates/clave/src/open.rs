@@ -29,19 +29,21 @@ pub enum OpenDecision {
 /// dwell-open spawned a DUPLICATE tab. The intended dwell path opens a DORMANT
 /// row (tab_id None), so the bind check is a pure safety add there.
 ///
-/// The scan is matched against the row's LIVE session id as well as its uuid
-/// (#99). A resurrected rotated pane runs `claude --resume <live-id>`, so the
-/// dump names the conversation, not the row — and this fallback exists for
-/// precisely the case where `tab_id` is None, so reading it literally would
-/// call a live agent dormant and dwell-open a SECOND tab on it. That is the
-/// double-attach this function was written to prevent, reintroduced by the
-/// thing that fixed the resurrection. `add::live_uuid_union` is the same
-/// translation for the picker; this one keeps a single row's answer local.
-pub fn open_is_live(row: &AgentRecord, dump_layout: &str) -> bool {
+/// The scan goes through `add::resolve_scan_token`'s canonicalization (#226),
+/// which folds in the two translations this function used to do by hand and
+/// one it could not: a rotated pane's `--resume <live-id>` lands on its row
+/// (#99), and a name-resume's `--resume <title>` lands on the title's
+/// most-recently-interacted holder — read literally either would call a live
+/// agent dormant and dwell-open a SECOND tab on it, the double-attach this
+/// function was written to prevent. `add::live_uuid_union` is the same
+/// translation for the picker.
+pub fn open_is_live(store: &crate::store::Store, row: &AgentRecord, dump_layout: &str) -> bool {
+    // `pane_id` counts too (#226): an adopted session is registered by its
+    // first hook and bound only when the owning bar's join lands — keying on
+    // the bind alone would read the row dead inside that window.
     row.tab_id.is_some()
-        || crate::add::live_uuids(dump_layout)
-            .iter()
-            .any(|u| *u == row.uuid || Some(u.as_str()) == row.live_session.as_deref())
+        || row.pane_id.is_some()
+        || crate::add::resolved_scan_uuids(store, dump_layout).contains(&row.uuid)
 }
 
 pub fn open_decision(_row: &AgentRecord, is_live: bool, cwd_exists: bool) -> OpenDecision {
@@ -99,7 +101,7 @@ pub fn run_open(uuid: &str, collapsed: bool) -> Result<()> {
     };
     // Issue #6: bind-first liveness (dump-layout scan is the additive
     // fallback) — `open_is_live` fixes the MCP-blind duplicate-tab spawn.
-    let is_live = open_is_live(row, &dump);
+    let is_live = open_is_live(&store, row, &dump);
     // A missing baked cwd is not stale when the conversation demonstrably
     // MOVED somewhere spawnable (#139, #143 review): the removed-worktree
     // wake was otherwise rejected here before spawn's relocation recovery
@@ -205,27 +207,66 @@ mod tests {
         // MCP-child serialization that made live_uuids miss a live agent and
         // dwell-open spawn a duplicate tab). The dump-layout scan stays only as
         // an ADDITIVE fallback for a non-MCP agent whose bind hasn't landed.
+        let mut s = crate::store::Store::default();
         let mut bound = rec("u1");
         bound.tab_id = Some(3);
-        assert!(open_is_live(&bound, "layout { tab { pane } }")); // bind wins, scan empty
+        s.agents.insert("u1".into(), bound.clone());
+        assert!(open_is_live(&s, &bound, "layout { tab { pane } }")); // bind wins, scan empty
         let unbound = rec("u2"); // tab_id None
-        assert!(!open_is_live(&unbound, "layout { tab { pane } }"));
+        s.agents.insert("u2".into(), unbound.clone());
+        assert!(!open_is_live(&s, &unbound, "layout { tab { pane } }"));
         // Fallback: an unbound row still visible in dump-layout (non-MCP agent,
         // bind lag) reads live via the command scan (args on its own line, the
         // real dump-layout shape live_uuids parses).
         let dump = "tab {\n  pane command=\"claude\" {\n    args \"--resume\" \"u2\"\n  }\n}";
-        assert!(open_is_live(&unbound, dump));
+        assert!(open_is_live(&s, &unbound, dump));
         // …and the fallback survives ROTATION (#99): the resurrected pane runs
         // `--resume <live-id>`, which is not the row's uuid. Read literally,
         // this unbound-but-live row would be dwell-opened a SECOND time.
         let mut rotated = rec("u3");
         rotated.live_session = Some("rot-3".into());
+        s.agents.insert("u3".into(), rotated.clone());
         let dump = "tab {\n  pane command=\"claude\" {\n    args \"--resume\" \"rot-3\"\n  }\n}";
-        assert!(open_is_live(&rotated, dump));
+        assert!(open_is_live(&s, &rotated, dump));
         assert!(
-            !open_is_live(&rec("u3"), dump),
+            !open_is_live(&s, &rec("u9"), dump),
             "a stranger's id is not this row"
         );
+    }
+
+    /// #226: `claude --resume DJ` resolves a NAME — the dump token must reach
+    /// the title's most-recently-interacted holder, and ONLY that holder: the
+    /// newest reads live (no dwell-open double-attach in the pre-hook window),
+    /// while an older row sharing the title stays dead and resumable.
+    #[test]
+    fn open_is_live_resolves_a_name_resumed_pane_to_the_newest_title_holder() {
+        let mut s = crate::store::Store::default();
+        let mut dj_old = rec("u-old");
+        dj_old.title = Some("DJ".into());
+        dj_old.last_interacted = 100;
+        s.agents.insert("u-old".into(), dj_old.clone());
+        let mut dj_new = rec("u-new");
+        dj_new.title = Some("DJ".into());
+        dj_new.last_interacted = 200;
+        s.agents.insert("u-new".into(), dj_new.clone());
+        let dump = "tab {\n  pane command=\"claude\" {\n    args \"--resume\" \"DJ\"\n  }\n}";
+        assert!(open_is_live(&s, &dj_new, dump));
+        assert!(
+            !open_is_live(&s, &dj_old, dump),
+            "older holder stays resumable"
+        );
+    }
+
+    /// #226: a hook-registered pane is live BEFORE the bar's bind lands —
+    /// `open_is_live` keyed on `tab_id` alone would dwell-open a second tab
+    /// on an adopted session inside the register→bind window.
+    #[test]
+    fn open_is_live_counts_a_registered_pane_before_the_bind_lands() {
+        let mut adopted = rec("u4");
+        adopted.pane_id = Some(12); // registered, not yet bound
+        let mut s = crate::store::Store::default();
+        s.agents.insert("u4".into(), adopted.clone());
+        assert!(open_is_live(&s, &adopted, "layout { tab { pane } }"));
     }
 
     #[test]
