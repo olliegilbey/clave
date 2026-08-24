@@ -29,11 +29,13 @@ in review/CI.
 - **P9 / #178** — wake binds never land beyond a session's early tabs
   (v0.1.3 held on it; QA-DRIVE phase 2 is its harness). Scope extended
   2026-08-12: the resume/auto-heal path fails identically.
-- **S17 / #180** — out-of-band resume orphans the row. Ruled 2026-08-17: the
-  PidGate is deleted (`CLAVE_AGENT_UUID` alone binds — one pane, one Claude),
-  which un-freezes every clave-spawned pane whatever its process tree; a
-  claude started OUTSIDE `clave spawn` stays unsupported by design (recovery
-  is in-band: close the pane, Alt+Enter the row).
+- **S17 / #180 → #226** — out-of-band resume orphans the row. RESOLVED
+  2026-08-24 (PR #227): a hook from a verified clave pane is an ownership
+  proof — known sessions re-register and bind, unknown ones mint through
+  `clave add`'s own path, and a SessionEnd from the owning pane reverts the
+  tab. The 2026-08-17 "unsupported by design" ruling is superseded; the
+  adoption loop was drive-validated 2026-08-24 and S17's exact reproduction
+  re-enters the QA drive.
 - **B22 / #181** — width runaway recurs on v0.1.3 (~90%), on a tab in
   #178's failure state; causality vs coincidence is the open question.
 - **B4 / #153** — external mover walks the bar off target.

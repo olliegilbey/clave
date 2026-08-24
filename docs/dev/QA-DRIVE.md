@@ -81,9 +81,12 @@ deterministic `c85c` uuids. The rotated row is FAITHFUL: a second minted
 jsonl-exists gate prefers the live session id instead of silently falling
 through. No viewport-clip requirement — host window size is not
 programmable, and viewport behaviour is the `tall` scenario's job; phase 1
-records the geometry each run actually got. S17 (#180) stays OUT of the
-drive until a re-adoption path exists — a release gate must not carry a
-known-red.
+records the geometry each run actually got. S17 (#180 → #226) is BACK IN the
+drive: the adoption path shipped (PR #227, loop drive-validated 2026-08-24),
+so its assertion — registration within 10s of an out-of-band resume — is
+expected green. One trap when driving it: re-export the sandbox shim in the
+pane's shell before launching claude by hand, or the hook silently measures
+the stable binary (FOOTGUNS, 2026-08-24).
 
 ## Agent protocol (the runbook for a drive session)
 
