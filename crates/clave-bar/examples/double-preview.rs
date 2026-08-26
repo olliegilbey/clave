@@ -10,6 +10,12 @@
 //! layout moves into `render_rows` and this file becomes the preview of the
 //! new lock.
 //!
+//! Round 9: the 38-col card is ratified as the COLLAPSED profile, and this
+//! file now renders the EXPANDED candidate beside it for comparison — same
+//! card, +10 columns: a branch cell beside the repo on line 2 (blank on a
+//! default checkout, same "blank is the meaning" rule as the prov glyph)
+//! and a wider summary flex on line 1. Nothing else moves.
+//!
 //! Round 6 state: the layout is settled — rounded-corner bracket ╭╰,
 //! two-line card, full glass (no painted backgrounds but the selection),
 //! token count top-right of line 1 in ramp ink:
@@ -61,6 +67,9 @@ const CHIP_W: usize = 7;
 // the PR number starts late and the model→elapsed gap stays closed.
 const REPO_W: usize = 9;
 const MODEL_W: usize = 6;
+// The expanded profile's branch cell (round 9): mirrors REPO_W so line 2
+// reads repo · branch as two matched columns. 0 = collapsed, no cell.
+const BRANCH_W: usize = 9;
 
 #[derive(Clone, Copy)]
 enum Provider {
@@ -101,6 +110,9 @@ struct R {
     chip: Option<(&'static str, Option<usize>)>,
     repo: &'static str,
     repo_ink: usize,
+    /// The checkout's branch — expanded profile only; "" on a default
+    /// checkout (blank is the meaning, like the prov glyph).
+    branch: &'static str,
     pr: Option<u32>,
     provider: Option<Provider>,
     model: &'static str,
@@ -120,6 +132,8 @@ struct FV {
     cols: usize,
     top: char,
     bot: char,
+    /// Branch cell width on line 2; 0 renders the collapsed card (no cell).
+    branch_w: usize,
 }
 
 /// The bracket's alternating pair — two quiet kanagawa inks, cool and warm,
@@ -246,6 +260,14 @@ fn render_f_pair(r: &R, v: &FV, zebra_paint: bool) -> (String, String) {
         ink(PALETTE[r.repo_ink].0),
         &format!(" {}", pad(r.repo, REPO_W)),
     ));
+    // Round 9, expanded only: the branch beside the repo, in meta ink so the
+    // repo's palette ink keeps carrying the identity.
+    if v.branch_w > 0 {
+        l2.push_str(&seg(
+            ink(META_INK),
+            &format!(" {}", pad(r.branch, v.branch_w)),
+        ));
+    }
     let pr = r.pr.map(|n| format!("#{n}")).unwrap_or_default();
     l2.push_str(&seg(ink(PR_INK), &format!(" {}", pad(&pr, 5))));
     match r.provider {
@@ -270,24 +292,36 @@ fn render_f_pair(r: &R, v: &FV, zebra_paint: bool) -> (String, String) {
 
 fn fleet() -> Vec<R> {
     use RowStatus::*;
-    let a =
-        |status, prov, chip, pal, repo, repo_ink, pr, provider, model, tokens, elapsed, summary| {
-            R {
-                status,
-                prov,
-                chip: Some((chip, pal)),
-                repo,
-                repo_ink,
-                pr,
-                provider: Some(provider),
-                model,
-                tokens: Some(tokens),
-                elapsed,
-                summary,
-                selected: false,
-                dormant: false,
-            }
-        };
+    let a = |status,
+             prov,
+             chip,
+             pal,
+             repo,
+             repo_ink,
+             branch,
+             pr,
+             provider,
+             model,
+             tokens,
+             elapsed,
+             summary| {
+        R {
+            status,
+            prov,
+            chip: Some((chip, pal)),
+            repo,
+            repo_ink,
+            branch,
+            pr,
+            provider: Some(provider),
+            model,
+            tokens: Some(tokens),
+            elapsed,
+            summary,
+            selected: false,
+            dormant: false,
+        }
+    };
     let mut rows = vec![
         a(
             NeedsYou,
@@ -296,6 +330,7 @@ fn fleet() -> Vec<R> {
             Some(2),
             "hermes",
             2,
+            "",
             None,
             Provider::Claude,
             "fable",
@@ -310,6 +345,7 @@ fn fleet() -> Vec<R> {
             Some(6),
             "hermes",
             2,
+            "",
             None,
             Provider::Claude,
             "opus",
@@ -324,6 +360,7 @@ fn fleet() -> Vec<R> {
             Some(1),
             "hermes",
             2,
+            "",
             None,
             Provider::Claude,
             "fable",
@@ -338,6 +375,7 @@ fn fleet() -> Vec<R> {
             Some(3),
             "clave",
             0,
+            "",
             None,
             Provider::Claude,
             "fable",
@@ -352,6 +390,7 @@ fn fleet() -> Vec<R> {
             Some(3),
             "clave",
             0,
+            "drive-launch",
             Some(204),
             Provider::Claude,
             "sonnet",
@@ -366,6 +405,7 @@ fn fleet() -> Vec<R> {
             Some(5),
             "clave",
             0,
+            "colour",
             None,
             Provider::Claude,
             "fable",
@@ -379,6 +419,7 @@ fn fleet() -> Vec<R> {
             chip: Some(("Tab #12", None)),
             repo: "clave",
             repo_ink: 0,
+            branch: "",
             pr: None,
             provider: None,
             model: "",
@@ -395,6 +436,7 @@ fn fleet() -> Vec<R> {
             Some(4),
             "clave",
             0,
+            "v022-prep",
             Some(225),
             Provider::Claude,
             "fable",
@@ -409,6 +451,7 @@ fn fleet() -> Vec<R> {
             Some(4),
             "hermes",
             2,
+            "",
             None,
             Provider::OpenAi,
             "gpt-5",
@@ -424,6 +467,7 @@ fn fleet() -> Vec<R> {
             chip: None,
             repo: "hermes",
             repo_ink: 2,
+            branch: "",
             pr: None,
             provider: Some(Provider::Claude),
             model: "opus",
@@ -440,6 +484,7 @@ fn fleet() -> Vec<R> {
             Some(0),
             "nalu",
             5,
+            "gtm-pass",
             Some(31),
             Provider::Claude,
             "haiku",
@@ -455,6 +500,7 @@ fn fleet() -> Vec<R> {
             chip: Some(("Tab #3", None)),
             repo: "clave",
             repo_ink: 0,
+            branch: "double-rows",
             pr: Some(232),
             provider: None,
             model: "",
@@ -471,6 +517,7 @@ fn fleet() -> Vec<R> {
             chip: Some(("Tab #7", None)),
             repo: "resumaker",
             repo_ink: 7,
+            branch: "resume-fix",
             pr: None,
             provider: None,
             model: "",
@@ -487,6 +534,7 @@ fn fleet() -> Vec<R> {
             chip: None,
             repo: "clave-website",
             repo_ink: 6,
+            branch: "hero-copy",
             pr: Some(12),
             provider: Some(Provider::OpenAi),
             model: "gpt-5",
@@ -504,6 +552,7 @@ fn fleet() -> Vec<R> {
             Some(3),
             "market-scanner",
             1,
+            "pg17-migrate",
             Some(88),
             Provider::Claude,
             "sonnet",
@@ -520,6 +569,7 @@ fn fleet() -> Vec<R> {
         Some(0),
         "resumaker",
         7,
+        "",
         None,
         Provider::Claude,
         "opus",
@@ -534,24 +584,36 @@ fn fleet() -> Vec<R> {
 
 fn main() {
     let dim = Rgb(0x71, 0x7C, 0x7C);
-    let v = FV {
-        name: "FINAL — light arc, alternating brackets, chipless flex, TERM pill",
-        cols: 38,
-        top: '\u{256d}',
-        bot: '\u{2570}',
-    };
-    println!("\n{}{}{RESET}\n", dim.fg(), v.name);
-    for (i, r) in fleet().iter().enumerate() {
-        let (l1, l2) = render_f_pair(r, &v, i % 2 == 1);
-        for l in [&l1, &l2] {
-            let w = display_cells(&strip_sgr(l));
-            assert_eq!(
-                w, v.cols,
-                "{}: row {i} rendered {w} cells, want {}",
-                v.name, v.cols
-            );
+    let variants = [
+        FV {
+            name: "COLLAPSED — the ratified 38-col card",
+            cols: 38,
+            top: '\u{256d}',
+            bot: '\u{2570}',
+            branch_w: 0,
+        },
+        FV {
+            name: "EXPANDED — +10: branch beside repo, wider summary",
+            cols: 48,
+            top: '\u{256d}',
+            bot: '\u{2570}',
+            branch_w: BRANCH_W,
+        },
+    ];
+    for v in &variants {
+        println!("\n{}{}{RESET}\n", dim.fg(), v.name);
+        for (i, r) in fleet().iter().enumerate() {
+            let (l1, l2) = render_f_pair(r, v, i % 2 == 1);
+            for l in [&l1, &l2] {
+                let w = display_cells(&strip_sgr(l));
+                assert_eq!(
+                    w, v.cols,
+                    "{}: row {i} rendered {w} cells, want {}",
+                    v.name, v.cols
+                );
+            }
+            println!("{l1}\n{l2}");
         }
-        println!("{l1}\n{l2}");
     }
     println!();
 }
