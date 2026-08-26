@@ -873,7 +873,7 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool, theme:
             // one (lock §4). Blank when the session was never renamed.
             match title {
                 Some(title) => {
-                    out.push_str(&hue(*title_ink, theme).mix(BASE, fade).bg());
+                    out.push_str(&hue(*title_ink, theme).mix(theme.base, fade).bg());
                     out.push_str(&theme.chip_ink.fg());
                     out.push_str(&clamp(title, widths.title));
                     out.push_str(RESET);
