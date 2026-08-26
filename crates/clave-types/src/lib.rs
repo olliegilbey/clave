@@ -381,6 +381,56 @@ pub fn target_cols_for(collapsed: bool) -> usize {
     }
 }
 
+/// Which row geometry the bar renders — the #232 flag. `Double` is the
+/// two-line card (the default); `Single` is the legacy one-line row,
+/// retained intact behind this flag. Chosen per LAUNCH: the launch layout
+/// bakes both the pane sizes and the plugin-config key from it, so the
+/// geometry zellij gives the pane and the geometry the bar draws can never
+/// disagree mid-session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RowHeight {
+    Single,
+    #[default]
+    Double,
+}
+
+/// The zellij plugin-config key carrying the mode into the bar (same
+/// mechanism as [`CLAVE_BINARY_KEY`], #44).
+pub const ROW_HEIGHT_KEY: &str = "row_height";
+
+impl RowHeight {
+    /// The width the seek machinery asks for in this mode — the card
+    /// budgets ratified in #232, or the legacy pair for `Single`.
+    pub fn target_cols(self, collapsed: bool) -> usize {
+        match (self, collapsed) {
+            (RowHeight::Double, false) => 48,
+            (RowHeight::Double, true) => 38,
+            (RowHeight::Single, false) => BAR_TARGET_COLS,
+            (RowHeight::Single, true) => COLLAPSED_TARGET_COLS,
+        }
+    }
+
+    /// Terminal lines one row occupies — the `/2` the viewport and click
+    /// conversions share (#148 discipline: derived once, here).
+    pub fn lines_per_row(self) -> usize {
+        match self {
+            RowHeight::Single => 1,
+            RowHeight::Double => 2,
+        }
+    }
+
+    /// Parse the plugin-config value, failing CLOSED to the default: a
+    /// typo'd or absent key must render the default design, never a
+    /// surprise legacy mode.
+    pub fn from_config_value(v: Option<&str>) -> RowHeight {
+        match v {
+            Some("single") => RowHeight::Single,
+            _ => RowHeight::Double,
+        }
+    }
+}
+
 // ── floating pane geometry ──────────────────────────────────────────────────
 //
 // ONE geometry for every floating pane clave's own UI opens: the `Alt a`
@@ -906,5 +956,49 @@ mod tests {
             let json = serde_json::to_string(&m).unwrap();
             assert_eq!(serde_json::from_str::<OrderMode>(&json).unwrap(), m);
         }
+    }
+
+    #[test]
+    fn row_height_defaults_to_double_and_maps_its_targets() {
+        assert_eq!(RowHeight::default(), RowHeight::Double);
+        // Double: the ratified card budgets (#232). Single: the legacy pair,
+        // which MUST keep reading the existing constants so the old design
+        // cannot drift from the flag's legacy arm.
+        assert_eq!(RowHeight::Double.target_cols(false), 48);
+        assert_eq!(RowHeight::Double.target_cols(true), 38);
+        assert_eq!(RowHeight::Single.target_cols(false), BAR_TARGET_COLS);
+        assert_eq!(RowHeight::Single.target_cols(true), COLLAPSED_TARGET_COLS);
+        assert_eq!(RowHeight::Double.lines_per_row(), 2);
+        assert_eq!(RowHeight::Single.lines_per_row(), 1);
+    }
+
+    #[test]
+    fn row_height_parses_its_config_value_failing_closed_to_double() {
+        assert_eq!(
+            RowHeight::from_config_value(Some("single")),
+            RowHeight::Single
+        );
+        assert_eq!(
+            RowHeight::from_config_value(Some("double")),
+            RowHeight::Double
+        );
+        // Absent, empty, or junk → the default. A typo must not strand a user
+        // in a mode they didn't ask for.
+        assert_eq!(RowHeight::from_config_value(None), RowHeight::Double);
+        assert_eq!(RowHeight::from_config_value(Some("")), RowHeight::Double);
+        assert_eq!(
+            RowHeight::from_config_value(Some("tall")),
+            RowHeight::Double
+        );
+    }
+
+    #[test]
+    fn row_height_serde_is_lowercase_and_defaultable() {
+        assert_eq!(
+            serde_json::to_string(&RowHeight::Single).unwrap(),
+            "\"single\""
+        );
+        let d: RowHeight = serde_json::from_str("\"double\"").unwrap();
+        assert_eq!(d, RowHeight::Double);
     }
 }
