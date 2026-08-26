@@ -852,6 +852,18 @@ pub fn run_scenario(name: &str) -> Result<()> {
         // -b main: pin the branch — else init.defaultBranch (maybe `master`)
         // would disagree with the store row's hardcoded `branch: "main"`.
         run_in(&repo, "git", &["init", "-q", "-b", "main"])?;
+        // HERMETIC, like the ensure_worktree test fixture below: a scenario
+        // repo is a throwaway fixture, and the seed commit must not read the
+        // operator's ~/.gitconfig — the maintainer signs every commit
+        // globally, so an unconfigured seed blocks `just sandbox` on a
+        // 1Password fingerprint per repo (2026-08-26, staging the #231 drive).
+        for (k, v) in [
+            ("user.email", "seed@clave.invalid"),
+            ("user.name", "clave scenario"),
+            ("commit.gpgsign", "false"),
+        ] {
+            run_in(&repo, "git", &["config", k, v])?;
+        }
         run_in(
             &repo,
             "git",
