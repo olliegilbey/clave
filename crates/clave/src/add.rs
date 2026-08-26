@@ -10,10 +10,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result};
 
 use crate::hook::push_snapshot;
-// Only `wasm_path` is consumed here (the layout needs the bar's wasm location);
-// `data_dir` from the same module is unused, so it is intentionally NOT
-// imported — an unused import would be a warning (see task-7 adaptation note).
-use crate::setup::wasm_path;
+use crate::setup::{data_dir, session_row_height, wasm_path};
 use crate::store::{
     AgentRecord, LabelSource, Store, now_unix, snapshot_from, store_paths, with_store_mut,
 };
@@ -1139,14 +1136,15 @@ pub fn run_add(worktree: bool) -> Result<()> {
     validate_cwd(&agent_cwd)?;
     let wasm = wasm_path()?.to_str().context("wasm path")?.to_string();
     let binary = crate::release::runtime_binary();
+    // The SESSION's own mode, not the store's (finding 2, #232 review):
+    // `clave rows` only takes effect at the next launch, so a tab minted
+    // mid-session must match the plugin identity the running config.kdl's
+    // keybinds already address — reading `store.row_height` here would bake
+    // a tab whose bar registers under a configuration no keybind matches
+    // (a deaf bar; second-bar if every launch-era tab has since closed).
+    let row_height = session_row_height(&data_dir()?);
     let layout = tab_layout(
-        &binary,
-        &wasm,
-        &label,
-        &uuid,
-        &agent_cwd,
-        collapsed,
-        store.row_height,
+        &binary, &wasm, &label, &uuid, &agent_cwd, collapsed, row_height,
     );
     let tmp = std::env::temp_dir().join(format!("clave-{uuid}.kdl"));
     std::fs::write(&tmp, layout)?;

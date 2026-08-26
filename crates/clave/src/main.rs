@@ -620,7 +620,19 @@ fn main() -> Result<()> {
             store::set_row_height(&paths, parsed)?;
             // No pipe push (store::set_row_height doc): geometry is
             // launch-baked, so a running bar has nothing to hydrate here.
-            println!("row height set to {mode_str} — takes effect on the next clave launch");
+            // But config.kdl on disk is STALE the instant this write lands
+            // (setup only regenerates it on first run / version refresh,
+            // setup::run_setup) — a relaunch would then have a bar pane
+            // baking the NEW mode while every keybind pipe still addresses
+            // the OLD `configuration` map, so the first Alt+j/k/c/f/o after
+            // relaunch spawns a second bar (review finding 1, #232). Rerun
+            // setup here — idempotent, re-reads the store it just wrote and
+            // regenerates config.kdl+layout.kdl together so both artifacts
+            // agree on the SAME value before the user ever launches again.
+            setup::run_setup()?;
+            println!(
+                "row height set to {mode_str} — setup regenerated; takes effect on the next clave launch"
+            );
             clave::evlog::log_event("rows", &mode_str);
             Ok(())
         }

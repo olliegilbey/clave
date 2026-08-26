@@ -50,6 +50,34 @@ pub fn launch_layout_path(dir: &std::path::Path) -> PathBuf {
     dir.join("launch.kdl")
 }
 
+/// Pull the `row_height "<value>"` string out of already-read KDL text —
+/// pure, so it's unit-testable without touching the filesystem. `None` when
+/// the key is absent (pre-#232 file, or the key text simply isn't there).
+fn parse_row_height(text: &str) -> Option<&str> {
+    let key = format!("{} \"", clave_types::ROW_HEIGHT_KEY);
+    let (_, rest) = text.split_once(&key)?;
+    rest.split('"').next()
+}
+
+/// The row-height mode the CURRENTLY RUNNING session was actually born
+/// with — read from the stable launch layout (`launch_layout_path`,
+/// rewritten by every `launch_session`), never the store.
+///
+/// Finding 2 (#232 review): `clave rows` only takes effect at the next
+/// launch, so between that write and the next relaunch the store and the
+/// live session's baked plugin-config disagree on purpose. `clave add`/`clave
+/// open` mint a new tab's bar identity from THIS session, not the store's
+/// current preference — reading the store there would bake a tab whose
+/// plugin `configuration` map matches no keybind in the running config.kdl
+/// (a deaf bar; second-bar sub-case if every launch-era tab has since
+/// closed). A missing file or key (pre-upgrade session that predates this
+/// mechanism) fails closed to `Double` via `from_config_value`, same as
+/// every other reader of this key.
+pub fn session_row_height(dir: &std::path::Path) -> clave_types::RowHeight {
+    let text = std::fs::read_to_string(launch_layout_path(dir)).unwrap_or_default();
+    clave_types::RowHeight::from_config_value(parse_row_height(&text))
+}
+
 /// §6.6's exact permission set. Keep THIS list, load()'s request_permission
 /// call, and the seeded cache in lockstep — a partial cache match raises the
 /// unanswerable prompt and withholds everything.
@@ -1379,6 +1407,52 @@ mod tests {
             !p.to_string_lossy()
                 .contains(&std::process::id().to_string())
         );
+    }
+
+    #[test]
+    fn session_row_height_reads_the_launch_layout_not_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        // Absent file (never launched, or a pre-#232 install): fails closed.
+        assert_eq!(
+            session_row_height(dir.path()),
+            clave_types::RowHeight::Double
+        );
+
+        // Present, single.
+        std::fs::write(
+            launch_layout_path(dir.path()),
+            "pane { plugin { row_height \"single\" } }",
+        )
+        .unwrap();
+        assert_eq!(
+            session_row_height(dir.path()),
+            clave_types::RowHeight::Single
+        );
+
+        // Present, double.
+        std::fs::write(
+            launch_layout_path(dir.path()),
+            "pane { plugin { row_height \"double\" } }",
+        )
+        .unwrap();
+        assert_eq!(
+            session_row_height(dir.path()),
+            clave_types::RowHeight::Double
+        );
+
+        // File present, key absent: fails closed too.
+        std::fs::write(launch_layout_path(dir.path()), "pane { plugin { } }").unwrap();
+        assert_eq!(
+            session_row_height(dir.path()),
+            clave_types::RowHeight::Double
+        );
+    }
+
+    #[test]
+    fn parse_row_height_is_the_pure_core_of_the_reader() {
+        assert_eq!(parse_row_height(r#"row_height "single""#), Some("single"));
+        assert_eq!(parse_row_height(r#"row_height "double""#), Some("double"));
+        assert_eq!(parse_row_height("no key in this text"), None);
     }
 
     /// The birth size is a CONSTANT of the mode, independent of any width —

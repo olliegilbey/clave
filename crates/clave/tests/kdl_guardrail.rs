@@ -838,3 +838,73 @@ fn keybind_and_layout_plugin_configurations_match() {
         }
     }
 }
+
+#[test]
+fn plugin_configurations_from_different_modes_are_detectably_different() {
+    // The desync class itself, proven detectable: config.kdl baked from ONE
+    // mode against a layout baked from the OTHER must NOT match — otherwise
+    // the equality assertions above (and in the regeneration test below)
+    // would be vacuous, passing even if the row_height key were silently
+    // dropped from the comparison. This is the non-vacuity half of #232
+    // finding 1's guardrail: prove the checker CAN fail before trusting that
+    // it doesn't.
+    let cfg_single = setup::config_kdl(BIN_ABS, WASM, clave_types::RowHeight::Single);
+    let layout_double = setup::layout_kdl(BIN_ABS, WASM, clave_types::RowHeight::Double);
+
+    let kb = keybind_pipe_configs(&cfg_single, "config.kdl (single)");
+    let plugins = layout_plugin_configs(&layout_double, "layout.kdl (double)");
+    assert!(!kb.is_empty(), "config.kdl (single) produced no keybinds");
+    assert!(
+        !plugins.is_empty(),
+        "layout.kdl (double) produced no plugin panes"
+    );
+    for p in &plugins {
+        assert_ne!(
+            p, &kb[0],
+            "a config.kdl and layout.kdl baked from DIFFERENT row_height \
+             modes compared EQUAL — the desync class #232 finding 1 fixes is \
+             undetectable by this suite:\nlayout={p:?}\nkeybind={:?}",
+            kb[0]
+        );
+    }
+}
+
+#[test]
+fn rows_write_then_regenerate_keeps_config_and_layout_in_sync() {
+    // #232 finding 1: `clave rows <mode>` writes the store, then main.rs's
+    // `Rows` arm reruns `setup::run_setup()` — which calls `write_generated`,
+    // whose contract is "read the store ONCE, feed the SAME value to both
+    // config_kdl and layout_kdl" (setup.rs:751-766). This test drives that
+    // exact sequence at the store layer — write, write again (as `clave rows`
+    // does on a second call), re-read, bake both artifacts from the one
+    // read — and proves the pair can never disagree, which is what makes the
+    // shipped fix sufficient rather than merely plausible.
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = clave::store::StorePaths {
+        dir: tmp.path().to_path_buf(),
+        data: tmp.path().join("agents.json"),
+        lock: tmp.path().join("agents.lock"),
+    };
+    // Fleet launched in Single a while ago; `clave rows double` flips it.
+    clave::store::set_row_height(&paths, clave_types::RowHeight::Single).unwrap();
+    clave::store::set_row_height(&paths, clave_types::RowHeight::Double).unwrap();
+
+    // write_generated's one-read-both-artifacts contract, exercised directly.
+    let row_height = clave::store::read_store(&paths).unwrap().row_height;
+    assert_eq!(row_height, clave_types::RowHeight::Double);
+    let cfg = setup::config_kdl(BIN_ABS, WASM, row_height);
+    let layout = setup::layout_kdl(BIN_ABS, WASM, row_height);
+
+    let kb = keybind_pipe_configs(&cfg, "config.kdl (post-`rows double`)");
+    let plugins = layout_plugin_configs(&layout, "layout.kdl (post-`rows double`)");
+    assert!(!kb.is_empty(), "config.kdl produced no keybinds");
+    assert!(!plugins.is_empty(), "layout.kdl produced no plugin panes");
+    for p in &plugins {
+        assert_eq!(
+            p, &kb[0],
+            "the shipped `clave rows` regeneration sequence desynced \
+             config.kdl and layout.kdl (#232 finding 1):\nlayout={p:?}\nkeybind={:?}",
+            kb[0]
+        );
+    }
+}
