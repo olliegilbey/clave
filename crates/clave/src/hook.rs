@@ -394,6 +394,38 @@ pub fn tokens_from_tail(tail: &str) -> Option<u32> {
         .or(post_tokens)
 }
 
+/// The newest assistant line's `message.model` — the raw model id, e.g.
+/// `claude-fable-5`. Nested under `message`, so `last_tail_field` (top-level
+/// fields only) cannot read it. Same reverse-scan, skip-malformed,
+/// skip-empty discipline.
+pub fn model_from_tail(tail: &str) -> Option<String> {
+    tail.lines().rev().find_map(|l| {
+        let v: serde_json::Value = serde_json::from_str(l).ok()?;
+        if v.get("type")?.as_str()? != "assistant" {
+            return None;
+        }
+        let s = v.get("message")?.get("model")?.as_str()?.trim();
+        (!s.is_empty()).then(|| s.to_string())
+    })
+}
+
+/// Display form of a model id: for Claude ids, the FAMILY word (`fable`,
+/// `opus`, `sonnet`, `haiku`) — the segment after the vendor prefix that
+/// isn't a version number; anything else passes through untouched (open
+/// strings — other providers name their own). The store carries this SHORT
+/// form: the card's model cell is 6 columns and the raw id is unreadable
+/// there, and a dumb renderer (truncate, never munge) is the lock's style.
+pub fn short_model(raw: &str) -> String {
+    match raw.strip_prefix("claude-") {
+        Some(rest) => rest
+            .split('-')
+            .find(|seg| !seg.chars().all(|c| c.is_ascii_digit()))
+            .unwrap_or(rest)
+            .to_string(),
+        None => raw.to_string(),
+    }
+}
+
 /// The agent's smart zone in tokens: [`clave_types::SMART_ZONE_ENV`], else the
 /// default. Junk, or zero, falls back rather than failing — a hook must never
 /// fail hard (§6.5), and a zero zone has no ramp to divide.
@@ -664,6 +696,19 @@ pub fn apply_hook_event(
     // reading — §5.4 fail-closed. Never invent a measurement.
     if let Some(tokens) = jsonl_tail.and_then(tokens_from_tail) {
         rec.context_tokens = Some(tokens);
+    }
+    // #232: the card's model cell. Same source and cadence as the token
+    // reading — the tail the hook already took. Provider is "claude" by
+    // construction here: this tail IS a Claude Code transcript. Other
+    // providers arrive with their own hook path, not a guess.
+    if let Some(raw) = jsonl_tail.and_then(model_from_tail) {
+        let short = short_model(&raw);
+        changed |= rec.model.as_deref() != Some(short.as_str());
+        rec.model = Some(short);
+        if rec.provider.as_deref() != Some("claude") {
+            rec.provider = Some("claude".to_string());
+            changed = true;
+        }
     }
     // Bucketed HERE, in the row's own agent's process, for two reasons: this is
     // where `SMART_ZONE_ENV` means the right thing, and stamping it makes a
@@ -2712,5 +2757,55 @@ mod tests {
             None,
         );
         assert_eq!(s.agents["sess-db"].default_branch.as_deref(), Some("trunk"));
+    }
+
+    // ── #232, the card's model cell ─────────────────────────────────────────
+
+    #[test]
+    fn model_from_tail_reads_the_newest_assistant_lines_nested_model() {
+        let tail = concat!(
+            r#"{"type":"assistant","message":{"model":"claude-opus-5","usage":{"input_tokens":5}}}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"model":"claude-fable-5","usage":{"input_tokens":9}}}"#,
+            "\n",
+        );
+        assert_eq!(model_from_tail(tail).as_deref(), Some("claude-fable-5"));
+        assert_eq!(model_from_tail(r#"{"type":"user"}"#), None);
+        // A malformed line scans PAST, not fails — same discipline as
+        // last_tail_field.
+        let dirty = format!("not-json\n{tail}");
+        assert_eq!(model_from_tail(&dirty).as_deref(), Some("claude-fable-5"));
+    }
+
+    #[test]
+    fn short_model_derives_the_family_word() {
+        // The display forms the ratified example renders: fable / opus /
+        // sonnet / haiku / gpt-5.
+        assert_eq!(short_model("claude-fable-5"), "fable");
+        assert_eq!(short_model("claude-opus-5"), "opus");
+        assert_eq!(short_model("claude-sonnet-5"), "sonnet");
+        assert_eq!(short_model("claude-haiku-4-5-20251001"), "haiku");
+        assert_eq!(short_model("claude-3-5-sonnet-20241022"), "sonnet");
+        // Unknown vendors pass through untouched — open strings, never enums.
+        assert_eq!(short_model("gpt-5"), "gpt-5");
+        assert_eq!(short_model("sol-2"), "sol-2");
+    }
+
+    #[test]
+    fn a_stop_event_stamps_model_and_provider() {
+        // Pattern: the s7_* tests build a store + payload and call
+        // apply_hook_event with a synthetic tail. Reuse rec()/capture().
+        let mut s = Store::default();
+        s.agents.insert("minted".into(), rec("minted"));
+        let tail = r#"{"type":"assistant","message":{"model":"claude-fable-5","usage":{"input_tokens":1000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#;
+        let p = HookPayload {
+            session_id: Some("minted".into()),
+            ..Default::default()
+        };
+        apply_hook_event(&mut s, "minted", "Stop", &p, Some(tail), 100, true);
+        assert_eq!(s.agents["minted"].model.as_deref(), Some("fable"));
+        assert_eq!(s.agents["minted"].provider.as_deref(), Some("claude"));
     }
 }
