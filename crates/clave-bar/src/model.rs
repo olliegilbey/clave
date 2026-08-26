@@ -348,7 +348,8 @@ pub const WIDTH_COOLDOWN_SECS: f64 = 0.15;
 pub const WALK_ASK_CAP: u8 = 3;
 
 /// Manifests a pane sits out after a probe both OS queries failed on (see
-/// `probe_backoff`). Three keeps a genuinely slow pane off the 100ms-timeout
+/// `probe_backoff`; FOOTGUNS — the running-latch probe retry, 2026-08-25/26).
+/// Three keeps a genuinely slow pane off the 100ms-timeout
 /// treadmill (the 3s exit poll stretches to ~12s effective) while a pane
 /// mid-spawn — the all-None guard's original case — is back in reach within
 /// a few frames; its first answered delta clears the stand-down early anyway.
@@ -1711,8 +1712,10 @@ impl BarModel {
             .map(|p| p.pane_id)
             .collect();
         self.pane_facts.retain(|id, _| live.contains(id));
-        // Stand-downs decay one delivered manifest at a time and die with
-        // their pane, like the facts they gate.
+        // Stand-downs decay here, not on a clock: the manifest is what
+        // re-arms a probe pass, so a delivered manifest is the one honest
+        // unit of "retry skipped" (FOOTGUNS — the running-latch probe
+        // retry). Dead panes drop with their facts above.
         self.probe_backoff.retain(|id, n| {
             *n -= 1;
             *n > 0 && live.contains(id)
