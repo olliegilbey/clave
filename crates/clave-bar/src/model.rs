@@ -347,6 +347,13 @@ pub const WIDTH_COOLDOWN_SECS: f64 = 0.15;
 /// same runaway the QA drive filmed, just slower.
 pub const WALK_ASK_CAP: u8 = 3;
 
+/// Manifests a pane sits out after a probe both OS queries failed on (see
+/// `probe_backoff`). Three keeps a genuinely slow pane off the 100ms-timeout
+/// treadmill (the 3s exit poll stretches to ~12s effective) while a pane
+/// mid-spawn — the all-None guard's original case — is back in reach within
+/// a few frames; its first answered delta clears the stand-down early anyway.
+pub const PROBE_FAILURE_STANDDOWN: u8 = 3;
+
 /// A row that has never received a user commitment (S1). Sorts below every row
 /// that has. Reachable for a LIVE tab only when its birth touch never landed —
 /// that is RC-B/S0's defect, deliberately NOT papered over with a sentinel that
@@ -568,6 +575,15 @@ pub struct BarModel {
     /// terminal-tab speaker panes are ever probed, but the map holds whatever
     /// it is handed — the row build, not the ingest, decides relevance.
     pane_facts: BTreeMap<u32, TermFacts>,
+    /// pane id → manifests left to skip after a probe both OS queries failed
+    /// on (all-None). The all-None guard mints no facts entry — correctly, a
+    /// failure is not knowledge — which left "retry until known" with no
+    /// can-this-ever-succeed test: one pane burned four hours of 100ms query
+    /// timeouts, re-qualifying on every manifest (2026-08-25). Entries decay
+    /// one per delivered manifest in `apply_panes`, die with their pane, and
+    /// are cleared outright by any answered probe — a stand-down, never a
+    /// blacklist.
+    probe_backoff: BTreeMap<u32, u8>,
     /// tab_id → the commitment ORDINAL of the last USER COMMITMENT to that tab
     /// (§6.6 / S1). NOT owned here: the store is the one writer (`clave touch`
     /// RMW) and this copy is REPLACED wholesale from every seq-gated
@@ -1695,6 +1711,12 @@ impl BarModel {
             .map(|p| p.pane_id)
             .collect();
         self.pane_facts.retain(|id, _| live.contains(id));
+        // Stand-downs decay one delivered manifest at a time and die with
+        // their pane, like the facts they gate.
+        self.probe_backoff.retain(|id, n| {
+            *n -= 1;
+            *n > 0 && live.contains(id)
+        });
         // The frame that ends the Alt+f spawn window: from here shell_toggle
         // reads delivered truth again (see `shell_spawn_pending`).
         self.shell_spawn_pending = false;
@@ -1726,8 +1748,14 @@ impl BarModel {
             // "known", and known-and-idle panes are never re-probed, so a
             // transient failure at birth would otherwise stick forever.
             if p.cwd.is_none() && p.foreground.is_none() {
+                // …and it stands the pane down (see `probe_backoff`): without
+                // this, an unanswerable pane re-qualifies on every manifest.
+                self.probe_backoff
+                    .insert(p.pane_id, PROBE_FAILURE_STANDDOWN);
                 continue;
             }
+            // An answered probe is the can-succeed proof; drop any stand-down.
+            self.probe_backoff.remove(&p.pane_id);
             let f = self.pane_facts.entry(p.pane_id).or_default();
             let before = f.clone();
             if let Some(cwd) = p.cwd {
@@ -1779,6 +1807,17 @@ impl BarModel {
     /// probes — lives at the call site on `own_tab_focused`, because tests
     /// drive this listing without establishing an identity.
     pub fn probe_targets(&self) -> Vec<u32> {
+        // Before hydration the agent list is empty, so the filter below would
+        // read EVERY tab as a terminal — the newborn visible bar then
+        // serially interrogated the whole session, blocking round-trips
+        // queuing ahead of the very snapshot result that shrinks this list
+        // (live capture 2026-08-26 09:44: five full passes in 3.1s while the
+        // bar rendered all-TERM). A bar that cannot yet tell agents from
+        // terminals asks the OS about no one; either snapshot path clears
+        // the flag, and the next store write heals a failed hydrate.
+        if self.awaiting_hydration {
+            return Vec::new();
+        }
         self.tabs
             .iter()
             .filter(|t| self.agent_in_tab(t.tab_id).is_none())
@@ -1791,6 +1830,10 @@ impl BarModel {
             .filter(|p| !p.exited)
             .map(|p| p.pane_id)
             .filter(|id| self.pane_facts.get(id).is_none_or(|f| f.running))
+            // A stood-down pane sits out its remaining manifests (see
+            // `probe_backoff`); this also silences `term_poll_wanted`, which
+            // derives from this listing.
+            .filter(|id| !self.probe_backoff.contains_key(id))
             .collect()
     }
 
@@ -2814,6 +2857,72 @@ mod tests {
         ));
     }
 
+    /// The newborn probe storm (live capture 2026-08-26 09:44): before
+    /// hydration the agent list is empty, so every tab reads as a terminal
+    /// and a freshly loaded visible bar serially interrogated the whole
+    /// session — blocking round-trips that queue ahead of the very snapshot
+    /// result that would have shrunk the list. A bar that cannot yet tell
+    /// agents from terminals asks the OS about no one.
+    #[test]
+    fn a_hydrating_bar_probes_no_one() {
+        let mut m = BarModel::default();
+        m.await_hydration();
+        m.apply_tabs(vec![
+            tab(10, 0, "Tab #1", true),
+            tab(11, 1, "Tab #2", false),
+        ]);
+        m.apply_panes(vec![pane(0, 5, false, true), pane(1, 6, false, true)]);
+        assert_eq!(
+            m.probe_targets(),
+            Vec::<u32>::new(),
+            "an unhydrated bar must not probe"
+        );
+        // Either snapshot path — the hydrate result or a live push — ends
+        // the wait; a bar whose `clave snapshot` failed is healed by the
+        // next store write like every other starved instance.
+        m.apply_snapshot(snap(1, vec![]));
+        assert_eq!(m.probe_targets(), vec![5, 6], "hydration re-opens probing");
+    }
+
+    /// The unanswerable-pane loop (live capture 2026-08-25: one pane, four
+    /// hours of 100ms query timeouts): a pane whose running flag was latched
+    /// by an event delta while both sync queries fail re-qualified on every
+    /// manifest — the all-None guard deliberately mints no entry, so "retry
+    /// until known" had no can-this-ever-succeed test. A failed probe now
+    /// stands the pane down for the next few manifests; any real answer
+    /// clears the stand-down at once.
+    #[test]
+    fn a_failed_probe_stands_its_pane_down() {
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "Tab #1", true)]);
+        let manifest = vec![pane(0, 5, false, true)];
+        m.apply_panes(manifest.clone());
+        // The delta latches running; both sync queries then fail (all-None).
+        m.apply_pane_facts(vec![probe(5, None, Some(&["cargo", "build"]))]);
+        m.apply_pane_facts(vec![probe(5, None, None)]);
+        assert_eq!(
+            m.probe_targets(),
+            Vec::<u32>::new(),
+            "a just-failed pane is not re-listed"
+        );
+        assert!(
+            !m.term_poll_wanted(),
+            "the exit poll must not re-arm on a stood-down pane"
+        );
+        // Each manifest decays the stand-down; the pane re-qualifies after
+        // three — a delay, never a blacklist.
+        m.apply_panes(manifest.clone());
+        m.apply_panes(manifest.clone());
+        assert_eq!(m.probe_targets(), Vec::<u32>::new());
+        m.apply_panes(manifest.clone());
+        assert_eq!(m.probe_targets(), vec![5]);
+        // A real answer clears the stand-down immediately.
+        m.apply_pane_facts(vec![probe(5, None, None)]);
+        assert_eq!(m.probe_targets(), Vec::<u32>::new());
+        m.apply_pane_facts(vec![probe(5, None, Some(&["cargo", "build"]))]);
+        assert_eq!(m.probe_targets(), vec![5]);
+    }
+
     /// The cwd through the fleet's checkouts: inside an agent's worktree the
     /// terminal borrows that row's repo name, ink and provenance verbatim;
     /// outside the fleet it shows its directory name, untinted, unmarked.
@@ -2950,6 +3059,13 @@ mod tests {
         // must mint nothing: an entry is "known", and a known-and-idle pane
         // is never re-probed, so a birth failure would stick forever.
         assert!(!m.apply_pane_facts(vec![probe(5, None, None)]));
+        // The failure stands the pane down rather than re-listing it (see
+        // `probe_backoff`); the birth-failure RETRY the no-mint rule protects
+        // still happens, one stand-down later.
+        assert_eq!(m.probe_targets(), Vec::<u32>::new());
+        for _ in 0..PROBE_FAILURE_STANDDOWN {
+            m.apply_panes(vec![pane(0, 5, false, true)]);
+        }
         assert_eq!(m.probe_targets(), vec![5]);
         assert!(matches!(
             terminal_row(&m),
