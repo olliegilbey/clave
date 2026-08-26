@@ -18,6 +18,8 @@
 //! and branch share one collective budget — the branch sits one space after
 //! the repo NAME (not its padded cell) and takes the leftover columns, with
 //! a guaranteed minimum; a long repo truncates before a branch does.
+//! RATIFIED 2026-08-26 ("that's the one"): both profiles are now final —
+//! this file is the visual spec for #232 in its entirety.
 //!
 //! Round 6 state: the layout is settled — rounded-corner bracket ╭╰,
 //! two-line card, full glass (no painted backgrounds but the selection),
