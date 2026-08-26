@@ -35,6 +35,7 @@ use clave_bar::render::{
     BASE, CHIP_INK, CONSOLE, DEFAULT_INK, DORMANT_FADE, PALETTE, RESET, Rgb, RowStatus,
     display_cells, strip_sgr,
 };
+use clave_bar::theme::Theme;
 
 // Mirrors of render.rs internals a candidate needs but the lock keeps private.
 const SEL_BG: Rgb = Rgb(0x2D, 0x4F, 0x67); // waveBlue2 — the selected row
@@ -188,7 +189,7 @@ fn render_f_pair(r: &R, v: &FV, zebra_paint: bool) -> (String, String) {
     let (mark, mark_ink) = if terminal {
         (CONSOLE, DEFAULT_INK)
     } else {
-        r.status.mark()
+        r.status.mark(&Theme::default())
     };
     let mut l1 = String::new();
     l1.push_str(&seg(ink(mark_ink), &format!(" {mark} ")));
