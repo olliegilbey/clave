@@ -12,9 +12,12 @@
 //!
 //! Round 9: the 38-col card is ratified as the COLLAPSED profile, and this
 //! file now renders the EXPANDED candidate beside it for comparison — same
-//! card, +10 columns: a branch cell beside the repo on line 2 (blank on a
+//! card, +10 columns: a branch beside the repo on line 2 (blank on a
 //! default checkout, same "blank is the meaning" rule as the prov glyph)
-//! and a wider summary flex on line 1. Nothing else moves.
+//! and a wider summary flex on line 1. Nothing else moves. Round 9b: repo
+//! and branch share one collective budget — the branch sits one space after
+//! the repo NAME (not its padded cell) and takes the leftover columns, with
+//! a guaranteed minimum; a long repo truncates before a branch does.
 //!
 //! Round 6 state: the layout is settled — rounded-corner bracket ╭╰,
 //! two-line card, full glass (no painted backgrounds but the selection),
@@ -67,8 +70,9 @@ const CHIP_W: usize = 7;
 // the PR number starts late and the model→elapsed gap stays closed.
 const REPO_W: usize = 9;
 const MODEL_W: usize = 6;
-// The expanded profile's branch cell (round 9): mirrors REPO_W so line 2
-// reads repo · branch as two matched columns. 0 = collapsed, no cell.
+// The expanded profile's branch MINIMUM (round 9b): repo and branch share
+// a collective REPO_W + 1 + BRANCH_W budget, branch taking whatever the
+// repo name leaves, never less than this. 0 = collapsed, no branch.
 const BRANCH_W: usize = 9;
 
 #[derive(Clone, Copy)]
@@ -256,17 +260,35 @@ fn render_f_pair(r: &R, v: &FV, zebra_paint: bool) -> (String, String) {
     let prov = r.prov.mark().map(|g| g.to_string()).unwrap_or(" ".into());
     l2.push_str(&seg(prov_ink, &format!(" {prov} ")));
     l2.push_str(&seg(bracket_ink, &format!("{} ", v.bot)));
-    l2.push_str(&seg(
-        ink(PALETTE[r.repo_ink].0),
-        &format!(" {}", pad(r.repo, REPO_W)),
-    ));
-    // Round 9, expanded only: the branch beside the repo, in meta ink so the
-    // repo's palette ink keeps carrying the identity.
-    if v.branch_w > 0 {
+    // Round 9, expanded only: repo and branch share ONE collective budget
+    // (round 9b) — the branch starts right after the repo name and claims
+    // every column the repo doesn't use, in meta ink so the repo's palette
+    // ink keeps carrying the identity. Branch names run longer than repo
+    // names, so the branch is guaranteed its `branch_w` minimum: a long
+    // repo truncates first. The PR column never moves.
+    if v.branch_w == 0 {
         l2.push_str(&seg(
-            ink(META_INK),
-            &format!(" {}", pad(r.branch, v.branch_w)),
+            ink(PALETTE[r.repo_ink].0),
+            &format!(" {}", pad(r.repo, REPO_W)),
         ));
+    } else {
+        let total = REPO_W + 1 + v.branch_w;
+        if r.branch.is_empty() {
+            l2.push_str(&seg(
+                ink(PALETTE[r.repo_ink].0),
+                &format!(" {}", pad(r.repo, total)),
+            ));
+        } else {
+            let repo_w = display_cells(r.repo).min(total - v.branch_w - 1);
+            l2.push_str(&seg(
+                ink(PALETTE[r.repo_ink].0),
+                &format!(" {}", pad(r.repo, repo_w)),
+            ));
+            l2.push_str(&seg(
+                ink(META_INK),
+                &format!(" {}", pad(r.branch, total - repo_w - 1)),
+            ));
+        }
     }
     let pr = r.pr.map(|n| format!("#{n}")).unwrap_or_default();
     l2.push_str(&seg(ink(PR_INK), &format!(" {}", pad(&pr, 5))));
