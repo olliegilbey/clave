@@ -429,8 +429,10 @@ pub const ROW_HEIGHT_KEY: &str = "row_height";
 
 impl RowHeight {
     /// The width the seek machinery asks for in this mode — the card
-    /// budgets ratified in #232, or the legacy pair for `Single`.
-    pub fn target_cols(self, collapsed: bool) -> usize {
+    /// budgets ratified in #232, or the legacy pair for `Single`. `const` so
+    /// the bar's test-mod width-target pins (`EXP_W`/`COL_W`) can compute
+    /// off it at compile time instead of duplicating the numbers.
+    pub const fn target_cols(self, collapsed: bool) -> usize {
         match (self, collapsed) {
             (RowHeight::Double, false) => 48,
             (RowHeight::Double, true) => 38,

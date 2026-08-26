@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 // The two width targets live in `clave-types` (S8 §3.3): the renderer draws
 // against the same numbers the layout sizes the pane to, and `clave`'s KDL
 // generators size the newborn pane from them — one definition, three artifacts.
-use clave_types::{Agent, AgentSnapshot, OrderMode, Status};
+use clave_types::{Agent, AgentSnapshot, OrderMode, RowHeight, Status};
 
 use crate::render::{
     PALETTE, Provenance, Row, RowContent, RowStatus, TermStatus, Widths, viewport_top,
@@ -632,10 +632,10 @@ pub struct BarModel {
     ///
     /// A switch is DERIVED: it is owed whenever the width zellij paints this
     /// pane at is not the width the mode declares
-    /// (`clave_types::target_cols_for` — a fixed column count the layouts
-    /// carry verbatim, so the comparison is equality against a constant).
-    /// There is no queue to replay, only an end state to reach; a mode that
-    /// leaves and returns owes nothing.
+    /// (`self.row_height.target_cols` — a fixed column count, per #232's
+    /// mode, that the layouts carry verbatim, so the comparison is equality
+    /// against a constant). There is no queue to replay, only an end state
+    /// to reach; a mode that leaves and returns owes nothing.
     ///
     /// `swap_in_flight`: an ask has been sent and its cooldown timer has not
     /// fired yet. While set the machine records paints but judges none of
@@ -735,6 +735,17 @@ pub struct BarModel {
     /// #92's read timer takes over the same invalidation role.
     #[allow(dead_code)]
     cursor_gen: u64,
+    /// Which row geometry this bar renders (#232) — set once at `load()`
+    /// from `plugin_config::resolve_row_height`, never afterward: the launch
+    /// layout bakes both the pane sizes and this config key from the same
+    /// choice, so a bar cannot disagree with the geometry zellij actually
+    /// gave its pane mid-session. Every width ask (`widths_at`,
+    /// `width_effects`) reads the target through `RowHeight::target_cols`
+    /// instead of a raw `BAR_TARGET_COLS`/`COLLAPSED_TARGET_COLS` constant,
+    /// so the two arms of the flag share one seek machine. Defaults to
+    /// `RowHeight::default()` (`Double`) so existing tests that never call
+    /// `set_row_height` keep testing the shipping default.
+    row_height: RowHeight,
 }
 
 impl BarModel {
@@ -976,6 +987,14 @@ impl BarModel {
     /// Record OUR plugin pane id. `main.rs`'s `load()` is the one caller.
     pub fn set_own_pane(&mut self, plugin_pane_id: u32) {
         self.own_pane = Some(plugin_pane_id);
+    }
+
+    /// Sets the row-height mode this bar renders — `main.rs`'s `load()`
+    /// calls it once, right after resolving it from plugin configuration
+    /// (#232). See the `row_height` field doc for why this is the only
+    /// writer.
+    pub fn set_row_height(&mut self, row_height: RowHeight) {
+        self.row_height = row_height;
     }
 
     /// Our own tab position, per the LAST PaneUpdate. Plugin and terminal pane
@@ -2012,7 +2031,7 @@ impl BarModel {
     /// This carves NO exception into D16's state-not-cols lock — a hydrated
     /// bar (every peek, every toggle) still chooses by state alone.
     pub fn widths_at(&self, cols: usize) -> Widths {
-        if self.awaiting_hydration && cols == clave_types::COLLAPSED_TARGET_COLS {
+        if self.awaiting_hydration && cols == self.row_height.target_cols(true) {
             return Widths::COLLAPSED;
         }
         self.widths()
@@ -2559,8 +2578,9 @@ impl BarModel {
     /// the store's mode declares, and this bar's own tab is the focused one,
     /// ask for one switch per judged paint — and an ask defers all judgement
     /// to its cooldown expiry.** The declared widths are fixed column
-    /// counts ([`clave_types::target_cols_for`]) carried verbatim by the
-    /// layouts and applied exactly by layout application, so "which geometry
+    /// counts ([`clave_types::RowHeight::target_cols`], read through
+    /// `self.row_height`) carried verbatim by the layouts and applied
+    /// exactly by layout application, so "which geometry
     /// am I in" is one equality against a constant — the same shape as the
     /// battery cell's one-bit read of the mode, pointed at the supply side.
     ///
@@ -2653,7 +2673,7 @@ impl BarModel {
             return Vec::new();
         }
         let want = self.showing_collapsed();
-        if cols == clave_types::target_cols_for(want) {
+        if cols == self.row_height.target_cols(want) {
             self.walk_spent = None;
             return Vec::new();
         }
@@ -5487,9 +5507,21 @@ mod tests {
 
     /// The two widths the layouts declare, verbatim (fixed column counts since
     /// the 2026-08-17 rebuild — the machine compares painted width against
-    /// these constants and nothing else).
-    const EXP_W: usize = clave_types::BAR_TARGET_COLS;
-    const COL_W: usize = clave_types::COLLAPSED_TARGET_COLS;
+    /// these constants and nothing else). Pinned to the `Double` arm (#232's
+    /// shipping default, and every `BarModel::default()` model's mode below)
+    /// — a test that needs to pin `Single` builds its own model via
+    /// `model_with_row_height(RowHeight::Single)` instead of this pair.
+    const EXP_W: usize = RowHeight::Double.target_cols(false);
+    const COL_W: usize = RowHeight::Double.target_cols(true);
+
+    /// Test-only constructor for a model whose row-height mode is not the
+    /// default (#232) — mirrors production's `set_row_height`, called from
+    /// `main.rs::load()` after `resolve_row_height`.
+    fn model_with_row_height(row_height: RowHeight) -> BarModel {
+        let mut m = BarModel::default();
+        m.set_row_height(row_height);
+        m
+    }
 
     /// The one width property that matters: **a mode change moves the pane,
     /// and the pane ARRIVING at the mode's width is what ends the episode.**
@@ -6293,6 +6325,17 @@ mod tests {
         m.apply_snapshot(s);
         // Hydrated: state rules again, whatever width a stale paint claims.
         assert_eq!(m.widths_at(EXP_W), Widths::COLLAPSED);
+    }
+
+    /// The hydration-window collapse check (above) must ask the MODE, not a
+    /// hardcoded constant: a double-mode bar's collapsed target is 38, not
+    /// `Single`'s 30 — painting at 30 must NOT be read as "born collapsed".
+    #[test]
+    fn hydration_collapse_detection_follows_the_mode() {
+        let mut m = model_with_row_height(RowHeight::Double);
+        m.awaiting_hydration = true;
+        assert_eq!(m.widths_at(38), Widths::COLLAPSED);
+        assert_eq!(m.widths_at(30), m.widths());
     }
 
     // --- PROVISIONAL ink allocation (delete with `ProvisionalInks`) --------

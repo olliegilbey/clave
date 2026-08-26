@@ -12,7 +12,7 @@ use clave_bar::model::{
     BarModel, BindStallState, Effect, PEEK_SINK_SECS, PaneMeta, PaneProbe, TabMeta,
     WIDTH_COOLDOWN_SECS,
 };
-use clave_bar::plugin_config::resolve_binary;
+use clave_bar::plugin_config::{resolve_binary, resolve_row_height};
 use clave_bar::render::{Row, render_rows};
 use clave_bar::theme::Theme;
 use zellij_tile::prelude::*;
@@ -606,6 +606,27 @@ impl ZellijPlugin for State {
             );
             "clave".to_string()
         });
+        // #232: resolve which row geometry this bar renders, from the same
+        // plugin configuration `resolve_binary` just read. Every layout since
+        // Task 5 bakes `row_height` alongside `clave_binary`, so a present key
+        // is the steady state; an absent one (pre-#232 layout, hand-edited
+        // config) fails CLOSED to `Double` inside `resolve_row_height` — no
+        // warning owed, unlike the binary path, because there is no wrong
+        // subprocess to run, only a design default to draw.
+        let row_height = resolve_row_height(&config);
+        eprintln!(
+            "clave-bar: row_height: {} ({})",
+            match row_height {
+                clave_types::RowHeight::Single => "single",
+                clave_types::RowHeight::Double => "double",
+            },
+            if config.contains_key(clave_types::ROW_HEIGHT_KEY) {
+                "from plugin config"
+            } else {
+                "default; key absent"
+            }
+        );
+        self.model.set_row_height(row_height);
         // D37: gate the width machine HERE, not when the snapshot is requested.
         // `load()` only ASKS for permission; the grant arrives later as an
         // event, and zellij renders this pane before then — so a gate set in
