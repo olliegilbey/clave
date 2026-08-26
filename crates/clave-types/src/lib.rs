@@ -226,6 +226,26 @@ pub struct Agent {
     /// pruned past 7 days. `default` keeps pre-field payloads parseable.
     #[serde(default)]
     pub buckets: std::collections::BTreeMap<u32, u32>,
+    /// The model handle this agent is running (e.g. "sonnet", "opus",
+    /// "fable") — the double-height card's second row (#232). `None` = no
+    /// reading yet, renders blank — the bar never invents a model name.
+    /// `default` keeps pre-field payloads parseable.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// The provider running `model` above (e.g. "claude"). Kept separate
+    /// from `model` rather than folded into one string: AGENTS.md commits
+    /// clave to other CLI-based agents down the line, and a future provider
+    /// may reuse a model NAME clave already knows under a different one.
+    /// `None` = no reading yet. `default` keeps pre-field payloads parseable.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// The open PR number for this row's branch, host-resolved (#232).
+    /// `None` = no open PR found, or not looked up yet — the bar renders the
+    /// same blank chip either way; the lookup's cache bookkeeping
+    /// (`AgentRecord::pr_checked`/`pr_branch`) stays host-side and never
+    /// rides the wire. `default` keeps pre-field payloads parseable.
+    #[serde(default)]
+    pub pr_number: Option<u32>,
 }
 
 /// The full-replace snapshot `clave` pushes to `clave-bar` on every change
@@ -274,6 +294,14 @@ pub struct AgentSnapshot {
     /// parseable.
     #[serde(default)]
     pub tab_buckets: std::collections::BTreeMap<usize, std::collections::BTreeMap<u32, u32>>,
+    /// tab_id → unix seconds of the last USER interaction with that tab —
+    /// the wall-clock twin of `tab_order` above, which is ordinal-only and
+    /// cannot say "how long ago" (#232's double-height card wants an age).
+    /// Stamped in `touch_in` and in `apply_hook_event`'s commit path, so
+    /// agent tabs and terminal tabs share one truth; pruned everywhere
+    /// `tab_order` is pruned. `default` keeps pre-field payloads parseable.
+    #[serde(default)]
+    pub tab_touched: std::collections::BTreeMap<usize, u64>,
 }
 
 /// The `clave-register` payload a pane's `clave spawn` pipes to the plugin so it
@@ -620,6 +648,9 @@ mod tests {
             context_tokens: None,
             context_level: None,
             buckets: Default::default(),
+            model: None,
+            provider: None,
+            pr_number: None,
         };
         assert!(!serde_json::to_string(&a).unwrap().contains("archived"));
     }
@@ -633,6 +664,7 @@ mod tests {
             order: OrderMode::default(),
             today: 0,
             tab_buckets: Default::default(),
+            tab_touched: Default::default(),
             agents: vec![Agent {
                 uuid: "u1".into(),
                 cwd: "/Users/x/code/clave".into(),
@@ -653,6 +685,9 @@ mod tests {
                 context_tokens: None,
                 context_level: None,
                 buckets: Default::default(),
+                model: None,
+                provider: None,
+                pr_number: None,
             }],
         };
         let json = serde_json::to_string(&snap).unwrap();
@@ -686,6 +721,9 @@ mod tests {
             context_tokens: None,
             context_level: None,
             buckets: Default::default(),
+            model: None,
+            provider: None,
+            pr_number: None,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert_eq!(back.tab_id, Some(4));
@@ -721,6 +759,9 @@ mod tests {
             context_tokens: None,
             context_level: None,
             buckets: Default::default(),
+            model: None,
+            provider: None,
+            pr_number: None,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert!(back.stale);
@@ -758,6 +799,9 @@ mod tests {
             context_tokens: None,
             context_level: None,
             buckets: Default::default(),
+            model: None,
+            provider: None,
+            pr_number: None,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert_eq!(back.title.as_deref(), Some("CLA-MAIN"));
@@ -809,6 +853,9 @@ mod tests {
             context_tokens: None,
             context_level: None,
             buckets: Default::default(),
+            model: None,
+            provider: None,
+            pr_number: None,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert_eq!(back.default_branch.as_deref(), Some("trunk"));
@@ -836,6 +883,7 @@ mod tests {
             order: OrderMode::default(),
             today: 0,
             tab_buckets: Default::default(),
+            tab_touched: Default::default(),
         };
         let json = serde_json::to_string(&snap).unwrap();
         let back: AgentSnapshot = serde_json::from_str(&json).unwrap();
@@ -887,6 +935,9 @@ mod tests {
             context_tokens: None,
             context_level: None,
             buckets: Default::default(),
+            model: None,
+            provider: None,
+            pr_number: None,
         };
         let mut v: serde_json::Value = serde_json::to_value(&a).unwrap();
         v.as_object_mut().unwrap().remove("commit_ord");
@@ -908,6 +959,7 @@ mod tests {
             order: OrderMode::default(),
             today: 0,
             tab_buckets: Default::default(),
+            tab_touched: Default::default(),
         };
         let back: AgentSnapshot =
             serde_json::from_str(&serde_json::to_string(&snap).unwrap()).unwrap();

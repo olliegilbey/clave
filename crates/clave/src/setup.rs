@@ -1403,6 +1403,11 @@ mod tests {
             context_level: None,
             live_session: None,
             buckets: Default::default(),
+            model: None,
+            provider: None,
+            pr_number: None,
+            pr_checked: 0,
+            pr_branch: String::new(),
         };
         let kdl = launch_layout_kdl("clave", "/w.wasm", Some(&r), false);
         assert!(kdl.contains("default_tab_template")); // native new-tabs still barred
@@ -1458,6 +1463,11 @@ mod tests {
             context_level: None,
             live_session: None,
             buckets: Default::default(),
+            model: None,
+            provider: None,
+            pr_number: None,
+            pr_checked: 0,
+            pr_branch: String::new(),
         };
         // Most-recent row's cwd is GONE; the older row's cwd exists.
         let mut store = Store::default();
@@ -1637,6 +1647,11 @@ mod tests {
             context_level: None,
             live_session: None,
             buckets: Default::default(),
+            model: None,
+            provider: None,
+            pr_number: None,
+            pr_checked: 0,
+            pr_branch: String::new(),
         };
         let lay = launch_layout_kdl(abs, "/w.wasm", Some(&r), false);
         assert!(lay.contains(&format!("command=\"{abs}\"")));
@@ -1945,6 +1960,11 @@ mod tests {
             context_level: None,
             live_session: None,
             buckets: Default::default(),
+            model: None,
+            provider: None,
+            pr_number: None,
+            pr_checked: 0,
+            pr_branch: String::new(),
         };
         let cfg = config_kdl(binary, wasm);
         let lay = layout_kdl(binary, wasm);

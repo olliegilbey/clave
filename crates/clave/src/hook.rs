@@ -702,6 +702,10 @@ pub fn apply_hook_event(
         let today = crate::store::unix_day(now);
         if let Some(tab_id) = commit_tab {
             s.tab_order.insert(tab_id, ord);
+            // #232: the wall-clock twin of the ordinal above, stamped at the
+            // same site so agent tabs and terminal tabs (`touch_in`) share
+            // one truth for "how long ago".
+            s.tab_touched.insert(tab_id, now);
             crate::store::bump_bucket(s.tab_buckets.entry(tab_id).or_default(), today);
         }
         if let Some(rec) = s.agents.get_mut(uuid) {
@@ -1116,6 +1120,11 @@ mod tests {
             context_level: None,
             live_session: None,
             buckets: BTreeMap::new(),
+            model: None,
+            provider: None,
+            pr_number: None,
+            pr_checked: 0,
+            pr_branch: String::new(),
         }
     }
 

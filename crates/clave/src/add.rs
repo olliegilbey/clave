@@ -600,6 +600,11 @@ pub(crate) fn mint_record(s: &mut Store, inputs: FreshRecordInputs) -> AgentReco
         // pointing at its live conversation (#99).
         live_session: None,
         buckets: seeded,
+        model: None,
+        provider: None,
+        pr_number: None,
+        pr_checked: 0,
+        pr_branch: String::new(),
     };
     // Note `merge_resume_record` PRESERVES an existing row's
     // `default_branch` along with everything else, so a row written before
@@ -1226,6 +1231,11 @@ mod tests {
             context_level: None,
             live_session: None,
             buckets: BTreeMap::new(),
+            model: None,
+            provider: None,
+            pr_number: None,
+            pr_checked: 0,
+            pr_branch: String::new(),
         }
     }
 

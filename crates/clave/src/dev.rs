@@ -809,6 +809,13 @@ fn agent_record(
         // Not seeded: the sandbox exercises the real birth-touch inheritance
         // path (touch_in/opener_buckets) rather than a scenario-typed value.
         buckets: Default::default(),
+        // #232: not yet wired into ScenarioAgent — out of scope here, the
+        // sandbox simply seeds "never looked up".
+        model: None,
+        provider: None,
+        pr_number: None,
+        pr_checked: 0,
+        pr_branch: String::new(),
     }
 }
 

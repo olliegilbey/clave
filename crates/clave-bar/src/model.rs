@@ -2712,6 +2712,9 @@ mod tests {
             default_branch: None,
             context_tokens: None,
             context_level: None,
+            model: None,
+            provider: None,
+            pr_number: None,
         }
     }
 
@@ -2749,6 +2752,9 @@ mod tests {
             default_branch: None,
             context_tokens: None,
             context_level: None,
+            model: None,
+            provider: None,
+            pr_number: None,
         }
     }
 
@@ -2757,6 +2763,7 @@ mod tests {
             order: OrderMode::default(),
             today: 0,
             tab_buckets: Default::default(),
+            tab_touched: Default::default(),
             collapsed: false,
             seq,
             agents,
@@ -2771,6 +2778,7 @@ mod tests {
             order: OrderMode::default(),
             today: 0,
             tab_buckets: Default::default(),
+            tab_touched: Default::default(),
             collapsed: false,
             seq,
             agents: vec![],
@@ -3157,6 +3165,7 @@ mod tests {
             order: OrderMode::default(),
             today: 0,
             tab_buckets: Default::default(),
+            tab_touched: Default::default(),
             collapsed: false,
             seq: 1,
             agents: vec![a],
@@ -3188,6 +3197,7 @@ mod tests {
             order: OrderMode::default(),
             today: 0,
             tab_buckets: Default::default(),
+            tab_touched: Default::default(),
             collapsed: false,
             seq: 1,
             agents,
@@ -3702,6 +3712,7 @@ mod tests {
             order: OrderMode::default(),
             today: 0,
             tab_buckets: Default::default(),
+            tab_touched: Default::default(),
             collapsed: false,
             seq,
             agents,
@@ -6395,6 +6406,7 @@ mod tests {
             order: OrderMode::default(),
             today: 0,
             tab_buckets: Default::default(),
+            tab_touched: Default::default(),
             collapsed: false,
             seq: 1,
             agents: vec![a],
@@ -6448,6 +6460,7 @@ mod tests {
             order: OrderMode::default(),
             today: 0,
             tab_buckets: Default::default(),
+            tab_touched: Default::default(),
             collapsed: false,
             seq: 1,
             agents: vec![old, new],
@@ -6676,6 +6689,7 @@ mod tests {
             order: OrderMode::default(),
             today: 0,
             tab_buckets: Default::default(),
+            tab_touched: Default::default(),
             collapsed: false,
             seq: 1,
             agents: vec![agent("u1", Status::Working, Some(7))], // bound → live
@@ -6691,6 +6705,7 @@ mod tests {
             order: OrderMode::default(),
             today: 0,
             tab_buckets: Default::default(),
+            tab_touched: Default::default(),
             collapsed: false,
             seq: 1,
             agents: vec![agent_at("u2", Status::Working, None, 42)],
@@ -6715,6 +6730,7 @@ mod tests {
             order: OrderMode::default(),
             today: 0,
             tab_buckets: Default::default(),
+            tab_touched: Default::default(),
             collapsed: false,
             seq: 1,
             agents,
@@ -6817,6 +6833,7 @@ mod tests {
             order: OrderMode::default(),
             today: 0,
             tab_buckets: Default::default(),
+            tab_touched: Default::default(),
             collapsed: false,
             seq: 2,
             agents: vec![agent("u-d", Status::Working, Some(2))],
@@ -6866,6 +6883,7 @@ mod tests {
             order: OrderMode::default(),
             today: 0,
             tab_buckets: Default::default(),
+            tab_touched: Default::default(),
             collapsed: false,
             seq: 1,
             agents,
@@ -7176,6 +7194,7 @@ mod tests {
             order: OrderMode::default(),
             today: 0,
             tab_buckets: Default::default(),
+            tab_touched: Default::default(),
             // Issue #5: snapshots now carry the store's collapse mode; after
             // the toggle above, the real flow's store says collapsed too —
             // `false` here would (correctly!) heal the bar back to expanded.
@@ -7204,6 +7223,7 @@ mod tests {
             order: OrderMode::default(),
             today: 0,
             tab_buckets: Default::default(),
+            tab_touched: Default::default(),
             collapsed: false,
             seq: 1,
             agents: vec![a],
@@ -7217,6 +7237,7 @@ mod tests {
             order: OrderMode::default(),
             today: 0,
             tab_buckets: Default::default(),
+            tab_touched: Default::default(),
             collapsed: false,
             seq: 1,
             agents: vec![agent("u2", Status::Idle, None)],
@@ -7267,6 +7288,7 @@ mod tests {
             order: OrderMode::default(),
             today: 0,
             tab_buckets: Default::default(),
+            tab_touched: Default::default(),
             collapsed: false,
             seq: 2,
             agents: vec![agent("u-d", Status::Working, Some(2))],
@@ -7303,6 +7325,7 @@ mod tests {
             order: OrderMode::default(),
             today: 0,
             tab_buckets: Default::default(),
+            tab_touched: Default::default(),
             collapsed: false,
             seq: 1,
             agents: vec![a],
@@ -7374,6 +7397,7 @@ mod tests {
             order: OrderMode::default(),
             today: 0,
             tab_buckets: Default::default(),
+            tab_touched: Default::default(),
             collapsed: false,
             seq: 2,
             agents: vec![a],
@@ -7478,6 +7502,7 @@ mod tests {
             order: OrderMode::default(),
             today: 0,
             tab_buckets: Default::default(),
+            tab_touched: Default::default(),
             collapsed,
             seq,
             agents: vec![],
@@ -7586,669 +7611,678 @@ mod tests {
         use proptest::prelude::*;
 
         proptest! {
-                    // Each case drives a full feedback loop; 128 keeps CI modest while
-                    // still covering the start×step×floor×interrupt space densely.
-                    #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
+                            // Each case drives a full feedback loop; 128 keeps CI modest while
+                            // still covering the start×step×floor×interrupt space densely.
+                            #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
 
-                    /// Property 2 — focus never reorders (§6.6: focus is a beacon, not a
-                    /// commitment). Any assignment of the active flag, plus a beacon on
-                    /// that tab, leaves rows() order identical.
-                    ///
-                    /// Extended for S1 with the status-only leg: a `Stop`/`SessionEnd`
-                    /// shaped snapshot — statuses change, ordinals do not — must also
-                    /// leave the order untouched. That is the bar-side mirror of the
-                    /// maintainer's ruling; the host-side half is
-                    /// `prop_only_prompts_change_the_order`.
-                    #[test]
-                    fn prop_focus_never_reorders(
-                        n in 1usize..=5,
-                        timeline in prop::collection::vec(0u64..1000, 5),
-                    ) {
-                        let ids: Vec<usize> = (0..n).map(|i| 10 + i).collect();
-                        let build = |active: usize| {
-                            let mut m = BarModel::default();
-                            let tabs: Vec<_> = ids
-                                .iter()
-                                .enumerate()
-                                .map(|(i, &id)| tab(id, i, &format!("t{id}"), i == active))
-                                .collect();
-                            m.apply_tabs(tabs);
-                            let tl: std::collections::BTreeMap<usize, u64> = ids
-                                .iter()
-                                .enumerate()
-                                .map(|(i, &id)| (id, timeline[i]))
-                                .collect();
-                            m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 1, agents: vec![], tab_order: tl, order: OrderMode::default(), today: 0, tab_buckets: Default::default() });
-                            m
-                        };
-                        let baseline: Vec<RowKey> =
-                            build(0).rows().into_iter().map(|(k, _)| k).collect();
-                        for (active, &id) in ids.iter().enumerate() {
-                            let mut m = build(active);
-                            m.beacon(id); // live-focus truth on a different tab
-                            let order: Vec<RowKey> = m.rows().into_iter().map(|(k, _)| k).collect();
-                            prop_assert_eq!(&order, &baseline, "focus reordered rows");
-                        }
+                            /// Property 2 — focus never reorders (§6.6: focus is a beacon, not a
+                            /// commitment). Any assignment of the active flag, plus a beacon on
+                            /// that tab, leaves rows() order identical.
+                            ///
+                            /// Extended for S1 with the status-only leg: a `Stop`/`SessionEnd`
+                            /// shaped snapshot — statuses change, ordinals do not — must also
+                            /// leave the order untouched. That is the bar-side mirror of the
+                            /// maintainer's ruling; the host-side half is
+                            /// `prop_only_prompts_change_the_order`.
+                            #[test]
+                            fn prop_focus_never_reorders(
+                                n in 1usize..=5,
+                                timeline in prop::collection::vec(0u64..1000, 5),
+                            ) {
+                                let ids: Vec<usize> = (0..n).map(|i| 10 + i).collect();
+                                let build = |active: usize| {
+                                    let mut m = BarModel::default();
+                                    let tabs: Vec<_> = ids
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(i, &id)| tab(id, i, &format!("t{id}"), i == active))
+                                        .collect();
+                                    m.apply_tabs(tabs);
+                                    let tl: std::collections::BTreeMap<usize, u64> = ids
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(i, &id)| (id, timeline[i]))
+                                        .collect();
+                                    m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 1, agents: vec![], tab_order: tl, order: OrderMode::default(), today: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
+                                    m
+                                };
+                                let baseline: Vec<RowKey> =
+                                    build(0).rows().into_iter().map(|(k, _)| k).collect();
+                                for (active, &id) in ids.iter().enumerate() {
+                                    let mut m = build(active);
+                                    m.beacon(id); // live-focus truth on a different tab
+                                    let order: Vec<RowKey> = m.rows().into_iter().map(|(k, _)| k).collect();
+                                    prop_assert_eq!(&order, &baseline, "focus reordered rows");
+                                }
 
-                        // A status-only push: same tab order, agents whose statuses have
-                        // all moved. Nothing may shift.
-                        let mut m = build(0);
-                        let before: Vec<RowKey> = m.rows().into_iter().map(|(k, _)| k).collect();
-                        let tl: std::collections::BTreeMap<usize, u64> =
-                            ids.iter().enumerate().map(|(i, &id)| (id, timeline[i])).collect();
-                        // Each push needs a STRICTLY newer seq or the §5 gate discards
-                        // it — `build(0)` already applied seq 1, so a constant seq 2
-                        // here would land only the first status and silently re-assert
-                        // the same state twice (CodeRabbit, PR #135). A leg that cannot
-                        // fail is worse than no leg: it reads as three statuses covered.
-                        for (i, status) in [Status::Done, Status::Idle, Status::Failed]
-                            .into_iter()
-                            .enumerate()
-                        {
-                            m.apply_snapshot(AgentSnapshot {
-        order: OrderMode::default(),
-        today: 0,
-        tab_buckets: Default::default(),
-                                collapsed: false,
-                                seq: 2 + i as u64,
-                                agents: ids
-                                    .iter()
-                                    .map(|&id| agent(&format!("u{id}"), status, Some(id)))
-                                    .collect(),
-                                tab_order: tl.clone(),
-                            });
-                            let after: Vec<RowKey> = m.rows().into_iter().map(|(k, _)| k).collect();
-                            prop_assert_eq!(&after, &before, "a status-only change reordered rows");
-                        }
-                    }
-
-                    /// Property 3 — rows() is deterministic and ordinal-ordered in TWO
-                    /// BLOCKS (#112): every live row precedes every dormant one, and
-                    /// within each block the ordinal is non-increasing. Live tabs key
-                    /// on the STORE's tab order (NOT the bound agent's last_interacted
-                    /// — the round-6 divergence), dormant rows on their commitment
-                    /// ordinal.
-                    ///
-                    /// Non-increasing ACROSS the join is exactly what segregation
-                    /// gives up: a dormant row may outrank the live row above it, and
-                    /// the generators here produce that case freely.
-                    ///
-                    /// S1 retargeted both dormant legs from `last_interacted` to
-                    /// `commit_ord`. Every agent here carries a wall clock that
-                    /// CONTRADICTS its ordinal, so a comparator that fell back to the
-                    /// clock fails this rather than passing for the wrong reason.
-                    #[test]
-                    fn prop_rows_deterministic_and_recency_desc(
-                        n in 1usize..=4,
-                        tl_vals in prop::collection::vec(0u64..500, 4),
-                        li_vals in prop::collection::vec(0u64..500, 4),
-                        dormant_ords in prop::collection::vec(0u64..500, 0..4),
-                    ) {
-                        let mut m = BarModel::default();
-                        let ids: Vec<usize> = (0..n).map(|i| 10 + i).collect();
-                        let tabs: Vec<_> = ids
-                            .iter()
-                            .enumerate()
-                            .map(|(i, &id)| tab(id, i, &format!("t{id}"), i == 0))
-                            .collect();
-                        m.apply_tabs(tabs);
-                        // Each live tab carries a bound agent whose last_interacted is
-                        // INDEPENDENT of its timeline stamp — the case that separates a
-                        // timeline sort from a last_interacted sort (round 6).
-                        let mut agents: Vec<Agent> = ids
-                            .iter()
-                            .enumerate()
-                            .map(|(i, &id)| {
-                                let mut a = agent(&format!("bound{id}"), Status::Working, Some(id));
-                                a.last_interacted = li_vals[i];
-                                a
-                            })
-                            .collect();
-                        let mut ord_by_uuid: std::collections::BTreeMap<String, u64> = Default::default();
-                        for (j, ord) in dormant_ords.iter().enumerate() {
-                            let mut a = agent(&format!("d{j}"), Status::Idle, None);
-                            a.commit_ord = *ord;
-                            // Adversarial clock: inverted relative to the ordinal, so a
-                            // last_interacted fallback cannot pass this property.
-                            a.last_interacted = 500 - *ord;
-                            ord_by_uuid.insert(a.uuid.clone(), *ord);
-                            agents.push(a);
-                        }
-                        let timeline: std::collections::BTreeMap<usize, u64> = ids
-                            .iter()
-                            .enumerate()
-                            .map(|(i, &id)| (id, tl_vals[i]))
-                            .collect();
-                        m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 1, agents, tab_order: timeline.clone(), order: OrderMode::default(), today: 0, tab_buckets: Default::default() });
-
-                        // Determinism: identical inputs → identical rows.
-                        prop_assert_eq!(m.rows(), m.rows());
-
-                        let rows = m.rows();
-                        let ts_of = |k: &RowKey| -> u64 {
-                            match k {
-                                RowKey::Tab(id) => timeline.get(id).copied().unwrap_or(0),
-                                RowKey::Dormant(u) => ord_by_uuid.get(u).copied().unwrap_or(0),
+                                // A status-only push: same tab order, agents whose statuses have
+                                // all moved. Nothing may shift.
+                                let mut m = build(0);
+                                let before: Vec<RowKey> = m.rows().into_iter().map(|(k, _)| k).collect();
+                                let tl: std::collections::BTreeMap<usize, u64> =
+                                    ids.iter().enumerate().map(|(i, &id)| (id, timeline[i])).collect();
+                                // Each push needs a STRICTLY newer seq or the §5 gate discards
+                                // it — `build(0)` already applied seq 1, so a constant seq 2
+                                // here would land only the first status and silently re-assert
+                                // the same state twice (CodeRabbit, PR #135). A leg that cannot
+                                // fail is worse than no leg: it reads as three statuses covered.
+                                for (i, status) in [Status::Done, Status::Idle, Status::Failed]
+                                    .into_iter()
+                                    .enumerate()
+                                {
+                                    m.apply_snapshot(AgentSnapshot {
+                order: OrderMode::default(),
+                today: 0,
+                tab_buckets: Default::default(),
+        tab_touched: Default::default(),
+                                        collapsed: false,
+                                        seq: 2 + i as u64,
+                                        agents: ids
+                                            .iter()
+                                            .map(|&id| agent(&format!("u{id}"), status, Some(id)))
+                                            .collect(),
+                                        tab_order: tl.clone(),
+                                    });
+                                    let after: Vec<RowKey> = m.rows().into_iter().map(|(k, _)| k).collect();
+                                    prop_assert_eq!(&after, &before, "a status-only change reordered rows");
+                                }
                             }
-                        };
-                        // The blocks are contiguous, and the live one holds every tab.
-                        let live_len = BarModel::live_block_len(&rows);
-                        prop_assert_eq!(
-                            live_len, n,
-                            "every live tab belongs to the leading block"
-                        );
-                        prop_assert!(
-                            rows[live_len..]
-                                .iter()
-                                .all(|(k, _)| matches!(k, RowKey::Dormant(_))),
-                            "a live row rendered below a dormant one"
-                        );
-                        // Ordinal non-increasing WITHIN each block. Deliberately not
-                        // asserted across the join — see the doc comment.
-                        for block in [&rows[..live_len], &rows[live_len..]] {
-                            for w in block.windows(2) {
+
+                            /// Property 3 — rows() is deterministic and ordinal-ordered in TWO
+                            /// BLOCKS (#112): every live row precedes every dormant one, and
+                            /// within each block the ordinal is non-increasing. Live tabs key
+                            /// on the STORE's tab order (NOT the bound agent's last_interacted
+                            /// — the round-6 divergence), dormant rows on their commitment
+                            /// ordinal.
+                            ///
+                            /// Non-increasing ACROSS the join is exactly what segregation
+                            /// gives up: a dormant row may outrank the live row above it, and
+                            /// the generators here produce that case freely.
+                            ///
+                            /// S1 retargeted both dormant legs from `last_interacted` to
+                            /// `commit_ord`. Every agent here carries a wall clock that
+                            /// CONTRADICTS its ordinal, so a comparator that fell back to the
+                            /// clock fails this rather than passing for the wrong reason.
+                            #[test]
+                            fn prop_rows_deterministic_and_recency_desc(
+                                n in 1usize..=4,
+                                tl_vals in prop::collection::vec(0u64..500, 4),
+                                li_vals in prop::collection::vec(0u64..500, 4),
+                                dormant_ords in prop::collection::vec(0u64..500, 0..4),
+                            ) {
+                                let mut m = BarModel::default();
+                                let ids: Vec<usize> = (0..n).map(|i| 10 + i).collect();
+                                let tabs: Vec<_> = ids
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, &id)| tab(id, i, &format!("t{id}"), i == 0))
+                                    .collect();
+                                m.apply_tabs(tabs);
+                                // Each live tab carries a bound agent whose last_interacted is
+                                // INDEPENDENT of its timeline stamp — the case that separates a
+                                // timeline sort from a last_interacted sort (round 6).
+                                let mut agents: Vec<Agent> = ids
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, &id)| {
+                                        let mut a = agent(&format!("bound{id}"), Status::Working, Some(id));
+                                        a.last_interacted = li_vals[i];
+                                        a
+                                    })
+                                    .collect();
+                                let mut ord_by_uuid: std::collections::BTreeMap<String, u64> = Default::default();
+                                for (j, ord) in dormant_ords.iter().enumerate() {
+                                    let mut a = agent(&format!("d{j}"), Status::Idle, None);
+                                    a.commit_ord = *ord;
+                                    // Adversarial clock: inverted relative to the ordinal, so a
+                                    // last_interacted fallback cannot pass this property.
+                                    a.last_interacted = 500 - *ord;
+                                    ord_by_uuid.insert(a.uuid.clone(), *ord);
+                                    agents.push(a);
+                                }
+                                let timeline: std::collections::BTreeMap<usize, u64> = ids
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, &id)| (id, tl_vals[i]))
+                                    .collect();
+                                m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 1, agents, tab_order: timeline.clone(), order: OrderMode::default(), today: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
+
+                                // Determinism: identical inputs → identical rows.
+                                prop_assert_eq!(m.rows(), m.rows());
+
+                                let rows = m.rows();
+                                let ts_of = |k: &RowKey| -> u64 {
+                                    match k {
+                                        RowKey::Tab(id) => timeline.get(id).copied().unwrap_or(0),
+                                        RowKey::Dormant(u) => ord_by_uuid.get(u).copied().unwrap_or(0),
+                                    }
+                                };
+                                // The blocks are contiguous, and the live one holds every tab.
+                                let live_len = BarModel::live_block_len(&rows);
+                                prop_assert_eq!(
+                                    live_len, n,
+                                    "every live tab belongs to the leading block"
+                                );
                                 prop_assert!(
-                                    ts_of(&w[0].0) >= ts_of(&w[1].0),
-                                    "recency inverted between {:?} and {:?}",
-                                    w[0].0, w[1].0
+                                    rows[live_len..]
+                                        .iter()
+                                        .all(|(k, _)| matches!(k, RowKey::Dormant(_))),
+                                    "a live row rendered below a dormant one"
+                                );
+                                // Ordinal non-increasing WITHIN each block. Deliberately not
+                                // asserted across the join — see the doc comment.
+                                for block in [&rows[..live_len], &rows[live_len..]] {
+                                    for w in block.windows(2) {
+                                        prop_assert!(
+                                            ts_of(&w[0].0) >= ts_of(&w[1].0),
+                                            "recency inverted between {:?} and {:?}",
+                                            w[0].0, w[1].0
+                                        );
+                                    }
+                                }
+                            }
+
+                            /// Property 4 — the §5 seq gate: a snapshot with seq ≤ current is
+                            /// fully discarded (C5 round 5), leaving rows() AND the timeline
+                            /// untouched.
+                            #[test]
+                            fn prop_stale_snapshot_is_a_full_noop(
+                                cur_seq in 1u64..=50,
+                                stale_delta in 0u64..=50,
+                                tl0 in prop::collection::btree_map(0usize..8, 0u64..500, 0..5),
+                                tl1 in prop::collection::btree_map(0usize..8, 0u64..500, 0..5),
+                            ) {
+                                let stale_seq = cur_seq.saturating_sub(stale_delta); // ≤ cur_seq
+                                let mut m = BarModel::default();
+                                m.apply_tabs(vec![tab(0, 0, "a", true), tab(1, 1, "b", false)]);
+                                m.apply_snapshot(AgentSnapshot {
+                order: OrderMode::default(),
+                today: 0,
+                tab_buckets: Default::default(),
+        tab_touched: Default::default(),
+                                    collapsed: false,
+                                    seq: cur_seq,
+                                    agents: vec![agent("u1", Status::Working, Some(0))],
+                                    tab_order: tl0,
+                                });
+                                let rows0 = m.rows();
+                                let timeline0 = m.tab_order.clone();
+                                m.apply_snapshot(AgentSnapshot {
+                order: OrderMode::default(),
+                today: 0,
+                tab_buckets: Default::default(),
+        tab_touched: Default::default(),
+                                    collapsed: false,
+                                    seq: stale_seq,
+                                    agents: vec![agent("u2", Status::Failed, Some(1))],
+                                    tab_order: tl1,
+                                });
+                                prop_assert_eq!(m.rows(), rows0, "stale snapshot mutated rows");
+                                prop_assert_eq!(m.tab_order.clone(), timeline0, "stale snapshot mutated timeline");
+                            }
+
+                            /// Property 5 — the timeline is REPLACED wholesale, never merged
+                            /// (C5 round 5: per-instance merges diverged). After a strictly
+                            /// newer snapshot with timeline T, the model's timeline == T exactly,
+                            /// regardless of prior state.
+                            #[test]
+                            fn prop_timeline_is_replaced_wholesale(
+                                tl0 in prop::collection::btree_map(0usize..8, 0u64..500, 0..5),
+                                tl1 in prop::collection::btree_map(0usize..8, 0u64..500, 0..5),
+                            ) {
+                                let mut m = BarModel::default();
+                                m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 1, agents: vec![], tab_order: tl0, order: OrderMode::default(), today: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
+                                m.apply_snapshot(AgentSnapshot {
+                order: OrderMode::default(),
+                today: 0,
+                tab_buckets: Default::default(),
+        tab_touched: Default::default(),
+                                    collapsed: false,
+                                    seq: 2,
+                                    agents: vec![agent("u1", Status::Working, Some(3))],
+                                    tab_order: tl1.clone(),
+                                });
+                                prop_assert_eq!(m.tab_order.clone(), tl1);
+                            }
+
+                            /// Property 6 — no two RENDERED rows share a non-zero ordinal
+                            /// (S1 §3.2, stated honestly).
+                            ///
+                            /// The `0` class is excluded deliberately, and this is the whole
+                            /// reason the property is phrased this way rather than as "no ties
+                            /// ever": rows that never received a commitment all sit at 0, which
+                            /// is a reachable and correct state. Claiming the stronger property
+                            /// would be false and would make this proptest a lie.
+                            #[test]
+                            fn prop_rows_no_duplicate_nonzero_ordinal(
+                                n in 1usize..=4,
+                                tl_vals in prop::collection::vec(0u64..40, 4),
+                                dormant_ords in prop::collection::vec(0u64..40, 0..4),
+                            ) {
+                                let mut m = BarModel::default();
+                                let ids: Vec<usize> = (0..n).map(|i| 10 + i).collect();
+                                m.apply_tabs(
+                                    ids.iter()
+                                        .enumerate()
+                                        .map(|(i, &id)| tab(id, i, &format!("t{id}"), i == 0))
+                                        .collect(),
+                                );
+                                // Live tabs draw ordinals from the generated map. Dormant rows
+                                // are UNBOUND (tab_id: None), which is what excludes the RC-A
+                                // eviction shape by construction — an agent can never be both
+                                // dormant and holding a live tab's id here.
+                                let mut agents: Vec<Agent> = Vec::new();
+                                for (j, ord) in dormant_ords.iter().enumerate() {
+                                    let mut a = agent(&format!("d{j}"), Status::Idle, None);
+                                    a.commit_ord = *ord;
+                                    agents.push(a);
+                                }
+                                let timeline: std::collections::BTreeMap<usize, u64> =
+                                    ids.iter().enumerate().map(|(i, &id)| (id, tl_vals[i])).collect();
+                                m.apply_snapshot(AgentSnapshot {
+                order: OrderMode::default(),
+                today: 0,
+                tab_buckets: Default::default(),
+        tab_touched: Default::default(),
+                                    collapsed: false,
+                                    seq: 1,
+                                    agents,
+                                    tab_order: timeline.clone(),
+                                });
+
+                                // Duplicates are only a defect above zero — but the ordinals
+                                // here are GENERATED, not minted, so a collision is possible by
+                                // construction. Skip those draws rather than assert a falsehood.
+                                let mut all: Vec<u64> = timeline.values().copied().collect();
+                                all.extend(dormant_ords.iter().copied());
+                                let nonzero: Vec<u64> = all.iter().copied().filter(|v| *v != 0).collect();
+                                let mut uniq = nonzero.clone();
+                                uniq.sort_unstable();
+                                uniq.dedup();
+                                prop_assume!(uniq.len() == nonzero.len());
+
+                                // With distinct inputs, no two rendered rows may share a key.
+                                let mut seen = std::collections::BTreeSet::new();
+                                for (k, _) in m.rows() {
+                                    let ord = match &k {
+                                        RowKey::Tab(id) => timeline.get(id).copied().unwrap_or(0),
+                                        RowKey::Dormant(u) => {
+                                            m.agents.iter().find(|a| &a.uuid == u).map(|a| a.commit_ord).unwrap_or(0)
+                                        }
+                                    };
+                                    if ord != 0 {
+                                        prop_assert!(seen.insert(ord), "two rows share ordinal {}", ord);
+                                    }
+                                }
+                            }
+
+                            /// Property 7 — THE HEADLINE PROPERTY. Closing a tab preserves the
+                            /// relative order of everything else (R2, as amended by #116).
+                            ///
+                            /// For arbitrary tabs, ordinals and a chosen tab to close: the
+                            /// sequence of surviving row keys after the close equals the
+                            /// sequence before it, with the closed tab's row removed. Run twice
+                            /// — once with the store's prune applied, once WITHOUT it — so both
+                            /// legs of the carry are covered: the durable one and the
+                            /// render-side one that must hold on the very first repaint.
+                            ///
+                            /// Relative order, never a literal index: #112's live/dormant
+                            /// segregation will move indices by design, and this property must
+                            /// survive it untouched.
+                            #[test]
+                            fn prop_close_preserves_relative_order(
+                                n in 2usize..=4,
+                                tl_vals in prop::collection::vec(1u64..40, 4),
+                                // Each agent's OWN ordinal, generated independently of its
+                                // tab's. They diverge for real: `clave add` creates the tab
+                                // before it writes the row, so the birth touch and the row's
+                                // mint can arrive in either order (Codex, PR #135). Generating
+                                // them together would have hidden that entirely — as the first
+                                // version of this property did.
+                                own_vals in prop::collection::vec(0u64..40, 4),
+                                victim in 0usize..4,
+                                pruned in prop::bool::ANY,
+                            ) {
+                                let ids: Vec<usize> = (0..n).map(|i| 10 + i).collect();
+                                let victim = victim % n;
+                                let victim_id = ids[victim];
+                                // Distinct ordinals only — ties are the `0`/eviction residual
+                                // covered by property 6, not this one.
+                                let vals: Vec<u64> = tl_vals.iter().take(n).copied().collect();
+                                let owns: Vec<u64> = own_vals.iter().take(n).copied().collect();
+                                // A row's rank is the higher of its two ordinals. Ties between
+                                // ROWS are the `0`/eviction residual covered by property 6, not
+                                // this one, so only distinct effective ranks are considered.
+                                let ranks: Vec<u64> = vals
+                                    .iter()
+                                    .zip(&owns)
+                                    .map(|(t, o)| *t.max(o))
+                                    .collect();
+                                let mut uniq = ranks.clone();
+                                uniq.sort_unstable();
+                                uniq.dedup();
+                                prop_assume!(uniq.len() == ranks.len());
+
+                                let timeline: std::collections::BTreeMap<usize, u64> =
+                                    ids.iter().enumerate().map(|(i, &id)| (id, vals[i])).collect();
+                                // Every tab hosts an agent, so every close produces a dormant
+                                // row. Each agent carries its OWN ordinal, independent of its
+                                // tab's — including the case where the row's is higher, which
+                                // is what `clave add`'s tab-before-row sequencing produces.
+                                let agents: Vec<Agent> = ids
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, &id)| {
+                                        let mut a = agent(&format!("u{id}"), Status::Idle, Some(id));
+                                        a.commit_ord = owns[i];
+                                        a
+                                    })
+                                    .collect();
+
+                                let mut m = BarModel::default();
+                                m.apply_tabs(
+                                    ids.iter()
+                                        .enumerate()
+                                        .map(|(i, &id)| tab(id, i, &format!("t{id}"), i == 0))
+                                        .collect(),
+                                );
+                                m.apply_snapshot(AgentSnapshot {
+                order: OrderMode::default(),
+                today: 0,
+                tab_buckets: Default::default(),
+        tab_touched: Default::default(),
+                                    collapsed: false,
+                                    seq: 1,
+                                    agents: agents.clone(),
+                                    tab_order: timeline.clone(),
+                                });
+                                let before: Vec<RowKey> = m
+                                    .rows()
+                                    .into_iter()
+                                    .map(|(k, _)| k)
+                                    .filter(|k| k != &RowKey::Tab(victim_id))
+                                    .collect();
+                                // The rank the row holds while it is still LIVE. Comparing this
+                                // against its dormant rank below is what makes the property see
+                                // a live/dormant key mismatch at all — comparing only survivors
+                                // cannot, because they are all still live and all still keyed
+                                // the same way (Codex, PR #135).
+                                let victim_tab = m
+                                    .tabs
+                                    .iter()
+                                    .find(|t| t.tab_id == victim_id)
+                                    .expect("victim tab")
+                                    .clone();
+                                let live_rank = m.live_ord(&victim_tab);
+
+                                // The close. The tab leaves the tab list either way; the store
+                                // echo may or may not have landed yet.
+                                m.apply_tabs(
+                                    ids.iter()
+                                        .filter(|&&id| id != victim_id)
+                                        .enumerate()
+                                        .map(|(i, &id)| tab(id, i, &format!("t{id}"), i == 0))
+                                        .collect(),
+                                );
+                                if pruned {
+                                    let carried = timeline[&victim_id];
+                                    let agents: Vec<Agent> = agents
+                                        .iter()
+                                        .cloned()
+                                        .map(|mut a| {
+                                            if a.tab_id == Some(victim_id) {
+                                                a.tab_id = None;
+                                                // `max`, mirroring the store's carry — an
+                                                // assignment here would model a demotion the
+                                                // real prune refuses to perform.
+                                                a.commit_ord = a.commit_ord.max(carried);
+                                            }
+                                            a
+                                        })
+                                        .collect();
+                                    let mut tl = timeline.clone();
+                                    tl.remove(&victim_id);
+                                    m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 2, agents, tab_order: tl, order: OrderMode::default(), today: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
+                                }
+
+                                let closed = RowKey::Dormant(format!("u{victim_id}"));
+                                let after: Vec<RowKey> = m
+                                    .rows()
+                                    .into_iter()
+                                    .map(|(k, _)| k)
+                                    .filter(|k| k != &closed)
+                                    .collect();
+                                prop_assert_eq!(
+                                    &after, &before,
+                                    "close reordered survivors (pruned={})", pruned
+                                );
+                                // …and the closed row is still present.
+                                prop_assert!(m.rows().iter().any(|(k, _)| k == &closed));
+                                // The substantive half: the closed row's ORDERING KEY is the
+                                // ordinal its tab held. Asserting the key rather than an index
+                                // is what makes this survive #112's segregation — under either
+                                // layout the row is ranked by the same number — while still
+                                // failing loudly if either leg of the carry is dropped.
+                                let row = m
+                                    .agents
+                                    .iter()
+                                    .find(|a| a.uuid == format!("u{victim_id}"))
+                                    .expect("the closed tab's agent");
+                                prop_assert_eq!(
+                                    m.dormant_ord(row),
+                                    ranks[victim],
+                                    "the closed row's rank changed on close (pruned={})", pruned
+                                );
+                                // The same claim stated as the identity that actually matters:
+                                // closing a tab must not change WHICH NUMBER ranks the row.
+                                // This is segregation-proof — it is about the key, not the
+                                // position — and it is the assertion that catches a live_ord
+                                // and dormant_ord that disagree.
+                                prop_assert_eq!(
+                                    live_rank,
+                                    m.dormant_ord(row),
+                                    "live and dormant rank the same row differently (pruned={})", pruned
                                 );
                             }
-                        }
-                    }
 
-                    /// Property 4 — the §5 seq gate: a snapshot with seq ≤ current is
-                    /// fully discarded (C5 round 5), leaving rows() AND the timeline
-                    /// untouched.
-                    #[test]
-                    fn prop_stale_snapshot_is_a_full_noop(
-                        cur_seq in 1u64..=50,
-                        stale_delta in 0u64..=50,
-                        tl0 in prop::collection::btree_map(0usize..8, 0u64..500, 0..5),
-                        tl1 in prop::collection::btree_map(0usize..8, 0u64..500, 0..5),
-                    ) {
-                        let stale_seq = cur_seq.saturating_sub(stale_delta); // ≤ cur_seq
-                        let mut m = BarModel::default();
-                        m.apply_tabs(vec![tab(0, 0, "a", true), tab(1, 1, "b", false)]);
-                        m.apply_snapshot(AgentSnapshot {
-        order: OrderMode::default(),
-        today: 0,
-        tab_buckets: Default::default(),
-                            collapsed: false,
-                            seq: cur_seq,
-                            agents: vec![agent("u1", Status::Working, Some(0))],
-                            tab_order: tl0,
-                        });
-                        let rows0 = m.rows();
-                        let timeline0 = m.tab_order.clone();
-                        m.apply_snapshot(AgentSnapshot {
-        order: OrderMode::default(),
-        today: 0,
-        tab_buckets: Default::default(),
-                            collapsed: false,
-                            seq: stale_seq,
-                            agents: vec![agent("u2", Status::Failed, Some(1))],
-                            tab_order: tl1,
-                        });
-                        prop_assert_eq!(m.rows(), rows0, "stale snapshot mutated rows");
-                        prop_assert_eq!(m.tab_order.clone(), timeline0, "stale snapshot mutated timeline");
-                    }
-
-                    /// Property 5 — the timeline is REPLACED wholesale, never merged
-                    /// (C5 round 5: per-instance merges diverged). After a strictly
-                    /// newer snapshot with timeline T, the model's timeline == T exactly,
-                    /// regardless of prior state.
-                    #[test]
-                    fn prop_timeline_is_replaced_wholesale(
-                        tl0 in prop::collection::btree_map(0usize..8, 0u64..500, 0..5),
-                        tl1 in prop::collection::btree_map(0usize..8, 0u64..500, 0..5),
-                    ) {
-                        let mut m = BarModel::default();
-                        m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 1, agents: vec![], tab_order: tl0, order: OrderMode::default(), today: 0, tab_buckets: Default::default() });
-                        m.apply_snapshot(AgentSnapshot {
-        order: OrderMode::default(),
-        today: 0,
-        tab_buckets: Default::default(),
-                            collapsed: false,
-                            seq: 2,
-                            agents: vec![agent("u1", Status::Working, Some(3))],
-                            tab_order: tl1.clone(),
-                        });
-                        prop_assert_eq!(m.tab_order.clone(), tl1);
-                    }
-
-                    /// Property 6 — no two RENDERED rows share a non-zero ordinal
-                    /// (S1 §3.2, stated honestly).
-                    ///
-                    /// The `0` class is excluded deliberately, and this is the whole
-                    /// reason the property is phrased this way rather than as "no ties
-                    /// ever": rows that never received a commitment all sit at 0, which
-                    /// is a reachable and correct state. Claiming the stronger property
-                    /// would be false and would make this proptest a lie.
-                    #[test]
-                    fn prop_rows_no_duplicate_nonzero_ordinal(
-                        n in 1usize..=4,
-                        tl_vals in prop::collection::vec(0u64..40, 4),
-                        dormant_ords in prop::collection::vec(0u64..40, 0..4),
-                    ) {
-                        let mut m = BarModel::default();
-                        let ids: Vec<usize> = (0..n).map(|i| 10 + i).collect();
-                        m.apply_tabs(
-                            ids.iter()
-                                .enumerate()
-                                .map(|(i, &id)| tab(id, i, &format!("t{id}"), i == 0))
-                                .collect(),
-                        );
-                        // Live tabs draw ordinals from the generated map. Dormant rows
-                        // are UNBOUND (tab_id: None), which is what excludes the RC-A
-                        // eviction shape by construction — an agent can never be both
-                        // dormant and holding a live tab's id here.
-                        let mut agents: Vec<Agent> = Vec::new();
-                        for (j, ord) in dormant_ords.iter().enumerate() {
-                            let mut a = agent(&format!("d{j}"), Status::Idle, None);
-                            a.commit_ord = *ord;
-                            agents.push(a);
-                        }
-                        let timeline: std::collections::BTreeMap<usize, u64> =
-                            ids.iter().enumerate().map(|(i, &id)| (id, tl_vals[i])).collect();
-                        m.apply_snapshot(AgentSnapshot {
-        order: OrderMode::default(),
-        today: 0,
-        tab_buckets: Default::default(),
-                            collapsed: false,
-                            seq: 1,
-                            agents,
-                            tab_order: timeline.clone(),
-                        });
-
-                        // Duplicates are only a defect above zero — but the ordinals
-                        // here are GENERATED, not minted, so a collision is possible by
-                        // construction. Skip those draws rather than assert a falsehood.
-                        let mut all: Vec<u64> = timeline.values().copied().collect();
-                        all.extend(dormant_ords.iter().copied());
-                        let nonzero: Vec<u64> = all.iter().copied().filter(|v| *v != 0).collect();
-                        let mut uniq = nonzero.clone();
-                        uniq.sort_unstable();
-                        uniq.dedup();
-                        prop_assume!(uniq.len() == nonzero.len());
-
-                        // With distinct inputs, no two rendered rows may share a key.
-                        let mut seen = std::collections::BTreeSet::new();
-                        for (k, _) in m.rows() {
-                            let ord = match &k {
-                                RowKey::Tab(id) => timeline.get(id).copied().unwrap_or(0),
-                                RowKey::Dormant(u) => {
-                                    m.agents.iter().find(|a| &a.uuid == u).map(|a| a.commit_ord).unwrap_or(0)
-                                }
-                            };
-                            if ord != 0 {
-                                prop_assert!(seen.insert(ord), "two rows share ordinal {}", ord);
-                            }
-                        }
-                    }
-
-                    /// Property 7 — THE HEADLINE PROPERTY. Closing a tab preserves the
-                    /// relative order of everything else (R2, as amended by #116).
-                    ///
-                    /// For arbitrary tabs, ordinals and a chosen tab to close: the
-                    /// sequence of surviving row keys after the close equals the
-                    /// sequence before it, with the closed tab's row removed. Run twice
-                    /// — once with the store's prune applied, once WITHOUT it — so both
-                    /// legs of the carry are covered: the durable one and the
-                    /// render-side one that must hold on the very first repaint.
-                    ///
-                    /// Relative order, never a literal index: #112's live/dormant
-                    /// segregation will move indices by design, and this property must
-                    /// survive it untouched.
-                    #[test]
-                    fn prop_close_preserves_relative_order(
-                        n in 2usize..=4,
-                        tl_vals in prop::collection::vec(1u64..40, 4),
-                        // Each agent's OWN ordinal, generated independently of its
-                        // tab's. They diverge for real: `clave add` creates the tab
-                        // before it writes the row, so the birth touch and the row's
-                        // mint can arrive in either order (Codex, PR #135). Generating
-                        // them together would have hidden that entirely — as the first
-                        // version of this property did.
-                        own_vals in prop::collection::vec(0u64..40, 4),
-                        victim in 0usize..4,
-                        pruned in prop::bool::ANY,
-                    ) {
-                        let ids: Vec<usize> = (0..n).map(|i| 10 + i).collect();
-                        let victim = victim % n;
-                        let victim_id = ids[victim];
-                        // Distinct ordinals only — ties are the `0`/eviction residual
-                        // covered by property 6, not this one.
-                        let vals: Vec<u64> = tl_vals.iter().take(n).copied().collect();
-                        let owns: Vec<u64> = own_vals.iter().take(n).copied().collect();
-                        // A row's rank is the higher of its two ordinals. Ties between
-                        // ROWS are the `0`/eviction residual covered by property 6, not
-                        // this one, so only distinct effective ranks are considered.
-                        let ranks: Vec<u64> = vals
-                            .iter()
-                            .zip(&owns)
-                            .map(|(t, o)| *t.max(o))
-                            .collect();
-                        let mut uniq = ranks.clone();
-                        uniq.sort_unstable();
-                        uniq.dedup();
-                        prop_assume!(uniq.len() == ranks.len());
-
-                        let timeline: std::collections::BTreeMap<usize, u64> =
-                            ids.iter().enumerate().map(|(i, &id)| (id, vals[i])).collect();
-                        // Every tab hosts an agent, so every close produces a dormant
-                        // row. Each agent carries its OWN ordinal, independent of its
-                        // tab's — including the case where the row's is higher, which
-                        // is what `clave add`'s tab-before-row sequencing produces.
-                        let agents: Vec<Agent> = ids
-                            .iter()
-                            .enumerate()
-                            .map(|(i, &id)| {
-                                let mut a = agent(&format!("u{id}"), Status::Idle, Some(id));
-                                a.commit_ord = owns[i];
-                                a
-                            })
-                            .collect();
-
-                        let mut m = BarModel::default();
-                        m.apply_tabs(
-                            ids.iter()
-                                .enumerate()
-                                .map(|(i, &id)| tab(id, i, &format!("t{id}"), i == 0))
-                                .collect(),
-                        );
-                        m.apply_snapshot(AgentSnapshot {
-        order: OrderMode::default(),
-        today: 0,
-        tab_buckets: Default::default(),
-                            collapsed: false,
-                            seq: 1,
-                            agents: agents.clone(),
-                            tab_order: timeline.clone(),
-                        });
-                        let before: Vec<RowKey> = m
-                            .rows()
-                            .into_iter()
-                            .map(|(k, _)| k)
-                            .filter(|k| k != &RowKey::Tab(victim_id))
-                            .collect();
-                        // The rank the row holds while it is still LIVE. Comparing this
-                        // against its dormant rank below is what makes the property see
-                        // a live/dormant key mismatch at all — comparing only survivors
-                        // cannot, because they are all still live and all still keyed
-                        // the same way (Codex, PR #135).
-                        let victim_tab = m
-                            .tabs
-                            .iter()
-                            .find(|t| t.tab_id == victim_id)
-                            .expect("victim tab")
-                            .clone();
-                        let live_rank = m.live_ord(&victim_tab);
-
-                        // The close. The tab leaves the tab list either way; the store
-                        // echo may or may not have landed yet.
-                        m.apply_tabs(
-                            ids.iter()
-                                .filter(|&&id| id != victim_id)
-                                .enumerate()
-                                .map(|(i, &id)| tab(id, i, &format!("t{id}"), i == 0))
-                                .collect(),
-                        );
-                        if pruned {
-                            let carried = timeline[&victim_id];
-                            let agents: Vec<Agent> = agents
-                                .iter()
-                                .cloned()
-                                .map(|mut a| {
-                                    if a.tab_id == Some(victim_id) {
-                                        a.tab_id = None;
-                                        // `max`, mirroring the store's carry — an
-                                        // assignment here would model a demotion the
-                                        // real prune refuses to perform.
-                                        a.commit_ord = a.commit_ord.max(carried);
+                            /// Property 5b — collapse hydration converges (issue #5, C8
+                            /// parity-desync): under any interleaving of seq-fresh
+                            /// snapshots, LOCAL toggles, and stale snapshots, the model
+                            /// follows the pending-ledger contract: stale snapshots write
+                            /// nothing (the seq gate); with no debt pending, a fresh
+                            /// snapshot imposes the store flag; while a toggle's write is
+                            /// owed, a confirming flag settles the debt, the first
+                            /// contradiction is absorbed (user truth kept, one re-assert),
+                            /// and a second contradiction yields to the store. The fold
+                            /// below IS that spec restated — the mutation-catching burden
+                            /// for each branch sits with the example tests around
+                            /// `out_of_order_write_is_reasserted_once_then_store_wins`.
+                            #[test]
+                            fn prop_collapse_follows_last_accepted_writer(
+                                ops in prop::collection::vec(
+                                    prop_oneof![
+                                        prop::bool::ANY.prop_map(Some), // fresh snapshot carrying f
+                                        Just(None),                            // local toggle
+                                    ],
+                                    1..=16,
+                                ),
+                                stale_at in prop::collection::vec(prop::bool::ANY, 1..=16),
+                            ) {
+                                let mut m = BarModel::default();
+                                let mut seq = 0u64;
+                                let mut expected = false; // born expanded
+                                // The spec-fold's ledger mirror: what the store is owed.
+                                let mut pending: Option<bool> = None;
+                                let mut reasserted = false;
+                                for (op, inject_stale) in ops.iter().zip(stale_at.iter()) {
+                                    match op {
+                                        Some(flag) => {
+                                            seq += 1;
+                                            m.apply_snapshot(AgentSnapshot {
+                order: OrderMode::default(),
+                today: 0,
+                tab_buckets: Default::default(),
+        tab_touched: Default::default(),
+                                                collapsed: *flag,
+                                                seq,
+                                                agents: vec![],
+                                                tab_order: Default::default(),
+                                            });
+                                            match pending {
+                                                Some(w) if *flag == w => pending = None,
+                                                Some(_) if !reasserted => reasserted = true,
+                                                // #137: no give-up arm. While a write is owed,
+                                                // the store's flag is ignored — the press stands.
+                                                Some(_) => {}
+                                                None => expected = *flag,
+                                            }
+                                        }
+                                        None => {
+                                            m.toggle();
+                                            expected = !expected;
+                                            pending = Some(expected);
+                                            // One re-assert per press: a press is always allowed
+                                            // to repair a store that disagrees with it, however
+                                            // the previous burst ended. Writes stay bounded
+                                            // because the give-up arm above is gone, not because
+                                            // the repair is rationed across presses (Codex P2 on
+                                            // PR #152 — rationing it wedged the ledger).
+                                            reasserted = false;
+                                        }
                                     }
-                                    a
-                                })
-                                .collect();
-                            let mut tl = timeline.clone();
-                            tl.remove(&victim_id);
-                            m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 2, agents, tab_order: tl, order: OrderMode::default(), today: 0, tab_buckets: Default::default() });
-                        }
-
-                        let closed = RowKey::Dormant(format!("u{victim_id}"));
-                        let after: Vec<RowKey> = m
-                            .rows()
-                            .into_iter()
-                            .map(|(k, _)| k)
-                            .filter(|k| k != &closed)
-                            .collect();
-                        prop_assert_eq!(
-                            &after, &before,
-                            "close reordered survivors (pruned={})", pruned
-                        );
-                        // …and the closed row is still present.
-                        prop_assert!(m.rows().iter().any(|(k, _)| k == &closed));
-                        // The substantive half: the closed row's ORDERING KEY is the
-                        // ordinal its tab held. Asserting the key rather than an index
-                        // is what makes this survive #112's segregation — under either
-                        // layout the row is ranked by the same number — while still
-                        // failing loudly if either leg of the carry is dropped.
-                        let row = m
-                            .agents
-                            .iter()
-                            .find(|a| a.uuid == format!("u{victim_id}"))
-                            .expect("the closed tab's agent");
-                        prop_assert_eq!(
-                            m.dormant_ord(row),
-                            ranks[victim],
-                            "the closed row's rank changed on close (pruned={})", pruned
-                        );
-                        // The same claim stated as the identity that actually matters:
-                        // closing a tab must not change WHICH NUMBER ranks the row.
-                        // This is segregation-proof — it is about the key, not the
-                        // position — and it is the assertion that catches a live_ord
-                        // and dormant_ord that disagree.
-                        prop_assert_eq!(
-                            live_rank,
-                            m.dormant_ord(row),
-                            "live and dormant rank the same row differently (pruned={})", pruned
-                        );
-                    }
-
-                    /// Property 5b — collapse hydration converges (issue #5, C8
-                    /// parity-desync): under any interleaving of seq-fresh
-                    /// snapshots, LOCAL toggles, and stale snapshots, the model
-                    /// follows the pending-ledger contract: stale snapshots write
-                    /// nothing (the seq gate); with no debt pending, a fresh
-                    /// snapshot imposes the store flag; while a toggle's write is
-                    /// owed, a confirming flag settles the debt, the first
-                    /// contradiction is absorbed (user truth kept, one re-assert),
-                    /// and a second contradiction yields to the store. The fold
-                    /// below IS that spec restated — the mutation-catching burden
-                    /// for each branch sits with the example tests around
-                    /// `out_of_order_write_is_reasserted_once_then_store_wins`.
-                    #[test]
-                    fn prop_collapse_follows_last_accepted_writer(
-                        ops in prop::collection::vec(
-                            prop_oneof![
-                                prop::bool::ANY.prop_map(Some), // fresh snapshot carrying f
-                                Just(None),                            // local toggle
-                            ],
-                            1..=16,
-                        ),
-                        stale_at in prop::collection::vec(prop::bool::ANY, 1..=16),
-                    ) {
-                        let mut m = BarModel::default();
-                        let mut seq = 0u64;
-                        let mut expected = false; // born expanded
-                        // The spec-fold's ledger mirror: what the store is owed.
-                        let mut pending: Option<bool> = None;
-                        let mut reasserted = false;
-                        for (op, inject_stale) in ops.iter().zip(stale_at.iter()) {
-                            match op {
-                                Some(flag) => {
-                                    seq += 1;
-                                    m.apply_snapshot(AgentSnapshot {
-        order: OrderMode::default(),
-        today: 0,
-        tab_buckets: Default::default(),
-                                        collapsed: *flag,
-                                        seq,
-                                        agents: vec![],
-                                        tab_order: Default::default(),
-                                    });
-                                    match pending {
-                                        Some(w) if *flag == w => pending = None,
-                                        Some(_) if !reasserted => reasserted = true,
-                                        // #137: no give-up arm. While a write is owed,
-                                        // the store's flag is ignored — the press stands.
-                                        Some(_) => {}
-                                        None => expected = *flag,
+                                    if *inject_stale {
+                                        // A replayed/out-of-order snapshot (seq <= current)
+                                        // carrying the OPPOSITE flag must change nothing —
+                                        // not even the pending ledger.
+                                        m.apply_snapshot(AgentSnapshot {
+                order: OrderMode::default(),
+                today: 0,
+                tab_buckets: Default::default(),
+        tab_touched: Default::default(),
+                                            collapsed: !expected,
+                                            seq,
+                                            agents: vec![],
+                                            tab_order: Default::default(),
+                                        });
                                     }
-                                }
-                                None => {
-                                    m.toggle();
-                                    expected = !expected;
-                                    pending = Some(expected);
-                                    // One re-assert per press: a press is always allowed
-                                    // to repair a store that disagrees with it, however
-                                    // the previous burst ended. Writes stay bounded
-                                    // because the give-up arm above is gone, not because
-                                    // the repair is rationed across presses (Codex P2 on
-                                    // PR #152 — rationing it wedged the ledger).
-                                    reasserted = false;
+                                    prop_assert_eq!(m.collapsed, expected);
                                 }
                             }
-                            if *inject_stale {
-                                // A replayed/out-of-order snapshot (seq <= current)
-                                // carrying the OPPOSITE flag must change nothing —
-                                // not even the pending ledger.
+
+                            /// Property 6 — nav closure (§6.6 C8), scoped precisely (fugu
+                            /// review 2026-07-20): with the executor pinned to its birth tab
+                            /// (as below — a single-instance view), every nav bumps
+                            /// cursor_gen exactly once (its consumer is #92's read timer,
+                            /// post-#100), and — the #112 invariant — a dir walk NEVER
+                            /// leaves the live block however long it runs.
+                            ///
+                            /// That last leg replaces "a dormant cursor names a displayed
+                            /// row", which a live-only ring makes vacuous: the walk can no
+                            /// longer set a cursor at all, so asserting about one would be a
+                            /// test that cannot fail. Every generated case here has at least
+                            /// one live tab; the zero-live fallback is a unit test.
+                            ///
+                            /// Walk PROGRESSION across focus-following executors (the live
+                            /// multi-instance behavior, where own_tab moves with focus) is
+                            /// deliberately not modeled here — that is live-validation
+                            /// territory (TESTING.md).
+                            #[test]
+                            fn prop_nav_closure(
+                                n in 1usize..=4,
+                                dormant in 0usize..=3,
+                                dirs in prop::collection::vec(any::<bool>(), 1..=12),
+                            ) {
+                                let mut m = BarModel::default();
+                                let ids: Vec<usize> = (0..n).map(|i| 10 + i).collect();
+                                let tabs: Vec<_> = ids
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, &id)| tab(id, i, &format!("t{id}"), i == 0))
+                                    .collect();
+                                m.apply_tabs(tabs);
+                                let mut agents = vec![];
+                                for j in 0..dormant {
+                                    let mut a = agent(&format!("d{j}"), Status::Idle, None);
+                                    a.last_interacted = 100 + j as u64; // distinct, all dormant
+                                    agents.push(a);
+                                }
                                 m.apply_snapshot(AgentSnapshot {
-        order: OrderMode::default(),
-        today: 0,
-        tab_buckets: Default::default(),
-                                    collapsed: !expected,
-                                    seq,
-                                    agents: vec![],
-                                    tab_order: Default::default(),
+                order: OrderMode::default(),
+                today: 0,
+                tab_buckets: Default::default(),
+        tab_touched: Default::default(),
+                                    collapsed: false,
+                                    seq: 1,
+                                    agents,
+                                    tab_order: ids.iter().map(|&id| (id, 50u64)).collect(),
                                 });
+                                m.beacon(ids[0]);
+                                let own = ids[0];
+                                for d in dirs {
+                                    let before = m.cursor_gen;
+                                    let payload = if d { "{\"dir\":\"next\"}" } else { "{\"dir\":\"prev\"}" };
+                                    m.nav(payload, Some(own));
+                                    // Rows are non-empty (≥1 live tab) → every dir lands once.
+                                    prop_assert_eq!(m.cursor_gen, before + 1, "gen did not bump once per nav");
+                                    // #112: the ring is the live block. However many dormant
+                                    // rows are rendered below it, a walk never reaches one —
+                                    // so it never leaves a selection behind, and it always
+                                    // ends on a live tab.
+                                    prop_assert!(
+                                        m.cursor.is_none(),
+                                        "a dir walk fell into the dormant block: {:?}",
+                                        m.cursor
+                                    );
+                                    prop_assert!(
+                                        m.current_tab.is_some_and(|t| ids.contains(&t)),
+                                        "the walk landed outside the live block: {:?}",
+                                        m.current_tab
+                                    );
+                                }
                             }
-                            prop_assert_eq!(m.collapsed, expected);
-                        }
-                    }
 
-                    /// Property 6 — nav closure (§6.6 C8), scoped precisely (fugu
-                    /// review 2026-07-20): with the executor pinned to its birth tab
-                    /// (as below — a single-instance view), every nav bumps
-                    /// cursor_gen exactly once (its consumer is #92's read timer,
-                    /// post-#100), and — the #112 invariant — a dir walk NEVER
-                    /// leaves the live block however long it runs.
-                    ///
-                    /// That last leg replaces "a dormant cursor names a displayed
-                    /// row", which a live-only ring makes vacuous: the walk can no
-                    /// longer set a cursor at all, so asserting about one would be a
-                    /// test that cannot fail. Every generated case here has at least
-                    /// one live tab; the zero-live fallback is a unit test.
-                    ///
-                    /// Walk PROGRESSION across focus-following executors (the live
-                    /// multi-instance behavior, where own_tab moves with focus) is
-                    /// deliberately not modeled here — that is live-validation
-                    /// territory (TESTING.md).
-                    #[test]
-                    fn prop_nav_closure(
-                        n in 1usize..=4,
-                        dormant in 0usize..=3,
-                        dirs in prop::collection::vec(any::<bool>(), 1..=12),
-                    ) {
-                        let mut m = BarModel::default();
-                        let ids: Vec<usize> = (0..n).map(|i| 10 + i).collect();
-                        let tabs: Vec<_> = ids
-                            .iter()
-                            .enumerate()
-                            .map(|(i, &id)| tab(id, i, &format!("t{id}"), i == 0))
-                            .collect();
-                        m.apply_tabs(tabs);
-                        let mut agents = vec![];
-                        for j in 0..dormant {
-                            let mut a = agent(&format!("d{j}"), Status::Idle, None);
-                            a.last_interacted = 100 + j as u64; // distinct, all dormant
-                            agents.push(a);
-                        }
-                        m.apply_snapshot(AgentSnapshot {
-        order: OrderMode::default(),
-        today: 0,
-        tab_buckets: Default::default(),
-                            collapsed: false,
-                            seq: 1,
-                            agents,
-                            tab_order: ids.iter().map(|&id| (id, 50u64)).collect(),
-                        });
-                        m.beacon(ids[0]);
-                        let own = ids[0];
-                        for d in dirs {
-                            let before = m.cursor_gen;
-                            let payload = if d { "{\"dir\":\"next\"}" } else { "{\"dir\":\"prev\"}" };
-                            m.nav(payload, Some(own));
-                            // Rows are non-empty (≥1 live tab) → every dir lands once.
-                            prop_assert_eq!(m.cursor_gen, before + 1, "gen did not bump once per nav");
-                            // #112: the ring is the live block. However many dormant
-                            // rows are rendered below it, a walk never reaches one —
-                            // so it never leaves a selection behind, and it always
-                            // ends on a live tab.
-                            prop_assert!(
-                                m.cursor.is_none(),
-                                "a dir walk fell into the dormant block: {:?}",
-                                m.cursor
-                            );
-                            prop_assert!(
-                                m.current_tab.is_some_and(|t| ids.contains(&t)),
-                                "the walk landed outside the live block: {:?}",
-                                m.current_tab
-                            );
-                        }
-                    }
+                            /// Property 8 (#55) — the invariant RC-A violates, stated
+                            /// directly: a `Bind` never names a tab that does not hold the
+                            /// agent's registered pane.
+                            ///
+                            /// The strong claim is scoped to frames delivered from the SAME
+                            /// world version, which is exactly the scope the coherence witness
+                            /// can defend. A position-preserving identity permutation (close
+                            /// the lowest tab, create one in the same window) satisfies the
+                            /// witness across two different worlds — the documented residual
+                            /// — so asserting over it would be asserting a property the data
+                            /// cannot support. The unscoped half is still universal and is
+                            /// asserted alongside: nothing is ever emitted from an incoherent
+                            /// frame.
+                            #[test]
+                            fn prop_bind_never_names_a_tab_that_does_not_hold_the_pane(
+                                ops in prop::collection::vec(0u8..6, 1..40),
+                            ) {
+                                let mut w = IdentityWorld::new();
+                                for op in ops {
+                                    w.step(op)?;
+                                }
+                            }
 
-                    /// Property 8 (#55) — the invariant RC-A violates, stated
-                    /// directly: a `Bind` never names a tab that does not hold the
-                    /// agent's registered pane.
-                    ///
-                    /// The strong claim is scoped to frames delivered from the SAME
-                    /// world version, which is exactly the scope the coherence witness
-                    /// can defend. A position-preserving identity permutation (close
-                    /// the lowest tab, create one in the same window) satisfies the
-                    /// witness across two different worlds — the documented residual
-                    /// — so asserting over it would be asserting a property the data
-                    /// cannot support. The unscoped half is still universal and is
-                    /// asserted alongside: nothing is ever emitted from an incoherent
-                    /// frame.
-                    #[test]
-                    fn prop_bind_never_names_a_tab_that_does_not_hold_the_pane(
-                        ops in prop::collection::vec(0u8..6, 1..40),
-                    ) {
-                        let mut w = IdentityWorld::new();
-                        for op in ops {
-                            w.step(op)?;
+                            /// Property 9 (#55) — the anti-storm rule as a universal: a bind
+                            /// is never re-emitted until the store makes PROGRESS or our own
+                            /// identity changes. Frames, renders, pipes and timers do not
+                            /// advance `seq`, so a quiescent store costs zero subprocesses
+                            /// however many events arrive — which is precisely what keeps the
+                            /// self-healing retry out of the C5 rd-4 echo-gated storm class
+                            /// (that guard re-fired per TabUpdate and exhausted the zellij
+                            /// server's file descriptors). Asserted inside `settle`, where the
+                            /// (own tab, seq) pair each emission happened under is known.
+                            #[test]
+                            fn prop_binds_never_repeat_without_store_progress(
+                                ops in prop::collection::vec(0u8..6, 1..40),
+                            ) {
+                                let mut w = IdentityWorld::new();
+                                for op in ops {
+                                    w.step(op)?;
+                                }
+                            }
                         }
-                    }
-
-                    /// Property 9 (#55) — the anti-storm rule as a universal: a bind
-                    /// is never re-emitted until the store makes PROGRESS or our own
-                    /// identity changes. Frames, renders, pipes and timers do not
-                    /// advance `seq`, so a quiescent store costs zero subprocesses
-                    /// however many events arrive — which is precisely what keeps the
-                    /// self-healing retry out of the C5 rd-4 echo-gated storm class
-                    /// (that guard re-fired per TabUpdate and exhausted the zellij
-                    /// server's file descriptors). Asserted inside `settle`, where the
-                    /// (own tab, seq) pair each emission happened under is known.
-                    #[test]
-                    fn prop_binds_never_repeat_without_store_progress(
-                        ops in prop::collection::vec(0u8..6, 1..40),
-                    ) {
-                        let mut w = IdentityWorld::new();
-                        for op in ops {
-                            w.step(op)?;
-                        }
-                    }
-                }
 
         /// A tiny zellij + store world for properties 8 and 9. Tabs live at
         /// their vector index (position), each carrying one bar pane and one
@@ -8400,6 +8434,7 @@ mod tests {
                             order: OrderMode::default(),
                             today: 0,
                             tab_buckets: Default::default(),
+                            tab_touched: Default::default(),
                             collapsed: false,
                             seq: self.seq,
                             agents: vec![
