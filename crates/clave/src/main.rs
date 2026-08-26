@@ -174,6 +174,19 @@ enum Command {
         half_life: Option<u32>,
     },
 
+    /// Set (or print) the sidebar row-height mode (#232). `clave rows`
+    /// prints the current value; `clave rows single|double` persists it.
+    /// UNLIKE `order`, this pushes NO snapshot: geometry is baked into the
+    /// layout at LAUNCH (`launch_layout_kdl`) from the store's value, and a
+    /// live bar pane can neither resize itself nor swap its own plugin
+    /// config — there is nothing for a running instance to react to. The
+    /// new mode takes effect on the next `clave` launch.
+    Rows {
+        /// "single" or "double"
+        #[arg(value_parser = ["single", "double"])]
+        mode: Option<String>,
+    },
+
     /// Prepare the machine: generate config/layout, merge Claude hooks,
     /// pre-seed the Zellij permission cache (§6.8/§7). Idempotent.
     Setup,
@@ -591,6 +604,26 @@ fn main() -> Result<()> {
             clave::evlog::log_event("order", &format!("{mode:?}"));
             Ok(())
         }
+        Some(Command::Rows { mode }) => {
+            let paths = store::store_paths()?;
+            let Some(mode_str) = mode else {
+                println!("{:?}", store::read_store(&paths)?.row_height);
+                return Ok(());
+            };
+            let parsed = match mode_str.as_str() {
+                "single" => clave_types::RowHeight::Single,
+                "double" => clave_types::RowHeight::Double,
+                // Unreachable behind clap's value_parser; kept so the match
+                // stays exhaustive when a future mode string lands.
+                other => anyhow::bail!("unknown row height {other:?} (single|double)"),
+            };
+            store::set_row_height(&paths, parsed)?;
+            // No pipe push (store::set_row_height doc): geometry is
+            // launch-baked, so a running bar has nothing to hydrate here.
+            println!("row height set to {mode_str} — takes effect on the next clave launch");
+            clave::evlog::log_event("rows", &mode_str);
+            Ok(())
+        }
         Some(Command::Setup) => setup::run_setup(),
         Some(Command::Doctor { json }) => clave::doctor::run_doctor(json),
         Some(Command::Open { uuid, collapsed }) => open::run_open(&uuid, collapsed),
@@ -773,5 +806,24 @@ mod tests {
             }
             other => panic!("full order misparsed: {other:?}"),
         }
+    }
+
+    #[test]
+    fn rows_cli_parses_optional_mode_and_rejects_junk() {
+        let bare = Cli::parse_from(["clave", "rows"]);
+        match bare.command {
+            Some(Command::Rows { mode: None }) => {}
+            other => panic!("bare rows misparsed: {other:?}"),
+        }
+        for m in ["single", "double"] {
+            let full = Cli::parse_from(["clave", "rows", m]);
+            match full.command {
+                Some(Command::Rows { mode: Some(v) }) => assert_eq!(v, m),
+                other => panic!("rows {m} misparsed: {other:?}"),
+            }
+        }
+        // clap's value_parser rejects anything else before it ever reaches
+        // the handler — the two valid values are named in ITS own error.
+        assert!(Cli::try_parse_from(["clave", "rows", "tall"]).is_err());
     }
 }

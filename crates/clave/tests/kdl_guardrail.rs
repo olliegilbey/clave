@@ -222,9 +222,12 @@ fn config_kdl_parses_through_real_zellij_parser() {
     // Both binary forms: bare `clave` (dev/sandbox PATH) and the versioned
     // absolute path (stable) — the generator is pure over the binary, so a
     // regression could hide in either interpolation.
-    assert_config_ok(&setup::config_kdl("clave", WASM), "config.kdl (dev binary)");
     assert_config_ok(
-        &setup::config_kdl(BIN_ABS, WASM),
+        &setup::config_kdl("clave", WASM, clave_types::RowHeight::Double),
+        "config.kdl (dev binary)",
+    );
+    assert_config_ok(
+        &setup::config_kdl(BIN_ABS, WASM, clave_types::RowHeight::Double),
         "config.kdl (stable versioned binary)",
     );
 }
@@ -256,7 +259,7 @@ fn config_with_theme_slice_parses_and_carries_the_selection() {
                 theme_dir \"/tmp/does-not-need-to-exist\"\n";
     let cfg = format!(
         "{}{}",
-        setup::config_kdl("clave", WASM),
+        setup::config_kdl("clave", WASM, clave_types::RowHeight::Double),
         setup::theme_slice_from(user)
     );
     let parsed = match Config::from_kdl(&cfg, None) {
@@ -294,8 +297,11 @@ fn config_kdl_unbinds_claude_code_keys_in_every_mode() {
     use zellij_utils::data::{BareKey, InputMode, KeyWithModifier};
 
     let base = Config::from_default_assets().expect("stock zellij 0.44.3 defaults must parse");
-    let merged = Config::from_kdl(&setup::config_kdl("clave", WASM), Some(base))
-        .expect("clave config.kdl must merge over stock defaults");
+    let merged = Config::from_kdl(
+        &setup::config_kdl("clave", WASM, clave_types::RowHeight::Double),
+        Some(base),
+    )
+    .expect("clave config.kdl must merge over stock defaults");
 
     // Ctrl-modified char keys, spelled as the stock binds are (default.kdl:
     // `Ctrl g/t/o/b/q`). Keybinds.0 is the public HashMap<InputMode, …> that
@@ -353,8 +359,11 @@ fn alt_a_carries_the_shared_floating_geometry() {
     use zellij_utils::input::actions::Action;
     use zellij_utils::input::layout::PercentOrFixed;
 
-    let config =
-        Config::from_kdl(&setup::config_kdl("clave", WASM), None).expect("config.kdl must parse");
+    let config = Config::from_kdl(
+        &setup::config_kdl("clave", WASM, clave_types::RowHeight::Double),
+        None,
+    )
+    .expect("config.kdl must parse");
     let alt_a = KeyWithModifier::new(BareKey::Char('a')).with_alt_modifier();
     let actions = config
         .keybinds
@@ -410,8 +419,11 @@ fn alt_f_pipes_the_press_to_the_bar_alone() {
     use zellij_utils::data::{BareKey, InputMode, KeyWithModifier};
 
     let base = Config::from_default_assets().expect("stock zellij 0.44.3 defaults must parse");
-    let merged = Config::from_kdl(&setup::config_kdl("clave", WASM), Some(base))
-        .expect("clave config.kdl must merge over stock defaults");
+    let merged = Config::from_kdl(
+        &setup::config_kdl("clave", WASM, clave_types::RowHeight::Double),
+        Some(base),
+    )
+    .expect("clave config.kdl must merge over stock defaults");
     let alt_f = KeyWithModifier::new(BareKey::Char('f')).with_alt_modifier();
 
     for mode in [InputMode::Normal, InputMode::Locked] {
@@ -449,14 +461,17 @@ fn alt_f_pipes_the_press_to_the_bar_alone() {
 }
 #[test]
 fn layout_kdl_parses_through_real_zellij_parser() {
-    assert_layout_ok(&setup::layout_kdl(BIN_ABS, WASM), "layout.kdl");
+    assert_layout_ok(
+        &setup::layout_kdl(BIN_ABS, WASM, clave_types::RowHeight::Double),
+        "layout.kdl",
+    );
 }
 
 #[test]
 fn launch_layout_kdl_parses_in_both_branches() {
     // Empty store → bar-only (template + one plain `clave` tab).
     assert_layout_ok(
-        &setup::launch_layout_kdl("clave", WASM, None, false),
+        &setup::launch_layout_kdl("clave", WASM, None, false, clave_types::RowHeight::Double),
         "launch.kdl (empty store, bar-only)",
     );
     // Non-empty store → the eager most-recent branch, which composes in
@@ -464,7 +479,13 @@ fn launch_layout_kdl_parses_in_both_branches() {
     // that the empty branch never touches.
     let r = eager_record();
     assert_layout_ok(
-        &setup::launch_layout_kdl(BIN_ABS, WASM, Some(&r), false),
+        &setup::launch_layout_kdl(
+            BIN_ABS,
+            WASM,
+            Some(&r),
+            false,
+            clave_types::RowHeight::Double,
+        ),
         "launch.kdl (eager most-recent tab)",
     );
 }
@@ -531,15 +552,38 @@ fn every_layout_declares_both_swap_geometries_birth_width_first() {
         );
     };
 
-    check(&setup::layout_kdl(BIN_ABS, WASM), "layout.kdl", false);
+    // Pinned to Single (#232): `check` asserts the LEGACY constants —
+    // `BAR_TARGET_COLS`/`COLLAPSED_TARGET_COLS` — which are exactly
+    // `RowHeight::Single`'s pair. Double's budgets are covered in setup.rs's
+    // unit tests; this guardrail is about the swap MECHANISM (order, fixed
+    // sizing, matching bar identity across the pair), not the mode.
+    check(
+        &setup::layout_kdl(BIN_ABS, WASM, clave_types::RowHeight::Single),
+        "layout.kdl",
+        false,
+    );
     for born_collapsed in [false, true] {
         check(
-            &setup::launch_layout_kdl("clave", WASM, None, born_collapsed),
+            &setup::launch_layout_kdl(
+                "clave",
+                WASM,
+                None,
+                born_collapsed,
+                clave_types::RowHeight::Single,
+            ),
             "launch.kdl",
             born_collapsed,
         );
         check(
-            &add::tab_layout(BIN_ABS, WASM, "row", "u-1", "/tmp", born_collapsed),
+            &add::tab_layout(
+                BIN_ABS,
+                WASM,
+                "row",
+                "u-1",
+                "/tmp",
+                born_collapsed,
+                clave_types::RowHeight::Single,
+            ),
             "one-shot tab layout",
             born_collapsed,
         );
@@ -555,7 +599,15 @@ fn add_tab_layout_parses_through_real_zellij_parser() {
     let label = add::sanitize_label("fix \"auth\"\nflow · main");
     let cwd = "/home/o/code/clave/.claude-worktrees/ab12cd34";
     add::validate_cwd(cwd).expect("test cwd must pass validate_cwd");
-    let kdl = add::tab_layout(BIN_ABS, WASM, &label, "u-1", cwd, false);
+    let kdl = add::tab_layout(
+        BIN_ABS,
+        WASM,
+        &label,
+        "u-1",
+        cwd,
+        false,
+        clave_types::RowHeight::Double,
+    );
     assert_layout_ok(&kdl, "add/open one-shot tab layout");
 }
 
@@ -622,7 +674,7 @@ fn guardrail_rejects_broken_layout_kdl() {
     //    2026-07-20): the quirk is about ANY `}`-closed child node inside a
     //    bind block, so un-terminating that one is as load-bearing as the
     //    MessagePlugin lines Task 9 C1 originally caught it on.
-    let real = setup::config_kdl("clave", WASM);
+    let real = setup::config_kdl("clave", WASM, clave_types::RowHeight::Double);
     assert_config_ok(&real, "trailing-`;` differential twin (unmutated)");
     let broken = real.replacen("}; }", "} }", 1);
     assert_ne!(
@@ -651,6 +703,7 @@ fn backslash_label_is_guarded_through_real_parser() {
         "u-1",
         "/home/o/x",
         false,
+        clave_types::RowHeight::Double,
     );
     assert!(
         Layout::from_str(&raw, "guardrail:raw-backslash".into(), None, None).is_err(),
@@ -658,7 +711,15 @@ fn backslash_label_is_guarded_through_real_parser() {
     );
     // The guard: the same label THROUGH sanitize_label must parse clean.
     let label = add::sanitize_label(r"fix the \d regex");
-    let kdl = add::tab_layout(BIN_ABS, WASM, &label, "u-1", "/home/o/x", false);
+    let kdl = add::tab_layout(
+        BIN_ABS,
+        WASM,
+        &label,
+        "u-1",
+        "/home/o/x",
+        false,
+        clave_types::RowHeight::Double,
+    );
     assert_layout_ok(&kdl, "add/open tab layout (backslash-bearing label)");
     // And a backslash-bearing cwd must be REFUSED, not baked.
     assert!(add::validate_cwd(r"/home/o/we\ird").is_err());
@@ -678,7 +739,7 @@ fn keybind_and_layout_plugin_configurations_match() {
     // (setup.rs:708-711) and the one-shot add/open tab layout (open.rs:122,
     // add.rs:726). layout.kdl is generated but never passed to zellij, so it
     // is checked as a bonus, not as the contract.
-    let cfg = setup::config_kdl(BIN_ABS, WASM);
+    let cfg = setup::config_kdl(BIN_ABS, WASM, clave_types::RowHeight::Double);
     let kb = keybind_pipe_configs(&cfg, "config.kdl");
 
     // Non-vacuity FIRST (adversarial review, 2026-07-22): the per-element
@@ -722,11 +783,29 @@ fn keybind_and_layout_plugin_configurations_match() {
     }
     let agreed_keybind_config = kb[0].clone();
 
+    // Same mode as the config.kdl generated above (#232): the whole point of
+    // this test is that the two sides AGREE, so both must be baked from one
+    // value, exactly as `write_generated` baked them from one `read_store`.
     let r = eager_record();
-    let launch_eager = setup::launch_layout_kdl(BIN_ABS, WASM, Some(&r), false);
-    let launch_empty = setup::launch_layout_kdl(BIN_ABS, WASM, None, false);
-    let one_shot = add::tab_layout(BIN_ABS, WASM, "lbl", "u-1", "/home/o/x", false);
-    let layout_kdl_text = setup::layout_kdl(BIN_ABS, WASM);
+    let launch_eager = setup::launch_layout_kdl(
+        BIN_ABS,
+        WASM,
+        Some(&r),
+        false,
+        clave_types::RowHeight::Double,
+    );
+    let launch_empty =
+        setup::launch_layout_kdl(BIN_ABS, WASM, None, false, clave_types::RowHeight::Double);
+    let one_shot = add::tab_layout(
+        BIN_ABS,
+        WASM,
+        "lbl",
+        "u-1",
+        "/home/o/x",
+        false,
+        clave_types::RowHeight::Double,
+    );
+    let layout_kdl_text = setup::layout_kdl(BIN_ABS, WASM, clave_types::RowHeight::Double);
 
     for (what, text) in [
         ("launch.kdl (eager most-recent tab)", &launch_eager),

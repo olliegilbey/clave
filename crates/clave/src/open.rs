@@ -142,6 +142,7 @@ pub fn run_open(uuid: &str, collapsed: bool) -> Result<()> {
                 uuid,
                 open_cwd,
                 collapsed,
+                store.row_height,
             );
             let tmp = std::env::temp_dir().join(format!("clave-open-{uuid}.kdl"));
             std::fs::write(&tmp, layout)?;

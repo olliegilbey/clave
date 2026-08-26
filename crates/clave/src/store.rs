@@ -246,6 +246,16 @@ pub struct Store {
     /// session recreate). `default` keeps pre-field store files loading.
     #[serde(default)]
     pub tab_touched: BTreeMap<usize, u64>,
+    /// Which row geometry the NEXT `clave` launch bakes (#232). Read once by
+    /// `launch_layout_kdl` at session-create time — never rides the pipe
+    /// (unlike `collapsed`/`order`): geometry is launch-baked into fixed pane
+    /// sizes and a plugin-config line, and a LIVE bar can neither resize its
+    /// own pane nor swap its own plugin config, so there is nothing for a
+    /// running instance to react to. `default` (Double, matching
+    /// `RowHeight`'s own default) keeps pre-field store files loading and is
+    /// exactly the fresh-install behaviour: nothing set → double.
+    #[serde(default)]
+    pub row_height: clave_types::RowHeight,
 }
 
 impl Store {
@@ -714,6 +724,20 @@ pub fn apply_order(paths: &StorePaths, mode: clave_types::OrderMode) -> Result<A
     })
 }
 
+/// `clave rows <single|double>`: persist the launch row-height mode.
+/// Deliberately UNLIKE `apply_order`/`apply_collapse`: no `seq` bump and no
+/// snapshot returned to push. Geometry is launch-baked (#232) — the pane
+/// sizes and the plugin-config line are both written once, at session
+/// create, by `launch_layout_kdl` reading this field — so a running bar has
+/// no mechanism to act on a mid-session change; the value takes effect at
+/// the NEXT `clave` launch, and pushing a snapshot for it would be pipe
+/// traffic nothing downstream ever reads.
+pub fn set_row_height(paths: &StorePaths, mode: clave_types::RowHeight) -> Result<()> {
+    with_store_mut(paths, |s| {
+        s.row_height = mode;
+    })
+}
+
 /// `clave open` outcome (§6.3, 2026-07-17): record whether the row's cwd was
 /// missing. Snapshot back only on CHANGE (a repeated stale open must not
 /// generate pipe traffic); None for unknown uuids.
@@ -1129,6 +1153,26 @@ mod tests {
         assert_eq!(snap.tab_order.get(&4), Some(&1700));
         // §6.6 Design B: the uuid→tab bind rides it too (glyph join key).
         assert_eq!(snap.agents[0].tab_id, Some(4));
+    }
+
+    /// `clave rows`: persists WITHOUT bumping `seq` or handing back a
+    /// snapshot — the opposite of every `apply_*` above, and deliberately so
+    /// (#232): geometry is launch-baked, so a live bar has nothing to react
+    /// to and a pipe push would be traffic with no reader.
+    #[test]
+    fn set_row_height_persists_without_bumping_seq_or_pushing() {
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        assert_eq!(
+            read_store(&p).unwrap().row_height,
+            clave_types::RowHeight::Double,
+            "fresh install defaults to double"
+        );
+        let seq0 = read_store(&p).unwrap().seq;
+        set_row_height(&p, clave_types::RowHeight::Single).unwrap();
+        let s = read_store(&p).unwrap();
+        assert_eq!(s.row_height, clave_types::RowHeight::Single);
+        assert_eq!(s.seq, seq0, "no seq bump — nothing to push for a live bar");
     }
 
     #[test]
