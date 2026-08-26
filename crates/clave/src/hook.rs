@@ -1556,6 +1556,7 @@ mod tests {
         ));
         assert_eq!(s.agents["u1"].last_interacted, 1700); // the clock
         assert_eq!(s.tab_order.get(&4), Some(&1)); // the ordinal — seq, not now
+        assert_eq!(s.tab_touched.get(&4), Some(&1700)); // the wall-clock twin
         assert_eq!(s.agents["u1"].commit_ord, 1); // same value on both halves
         assert_eq!(s.seq, 1); // one bump for the whole atomic change
         // Unbound agent: interaction still recorded, no stamp to place.
@@ -1570,6 +1571,7 @@ mod tests {
         ));
         assert_eq!(s.agents["u2"].last_interacted, 1800);
         assert_eq!(s.tab_order.len(), 1);
+        assert_eq!(s.tab_touched.len(), 1); // only u1's tab has a touch stamp
         // The RC-B case: unbound, so nothing to stamp on a tab — but the ROW
         // still records its ordinal, so the dormant row it becomes sorts right
         // even if no bind or prune ever lands.
