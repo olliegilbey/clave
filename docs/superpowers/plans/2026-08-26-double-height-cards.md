@@ -23,6 +23,8 @@
 - Never touch the maintainer's live zellij session; live checks go through the per-worktree sandbox (`clave dev instance`, docs/dev/TESTING.md).
 - Max logging on render/viewport/click decision points (maintainer: "all the logs possible").
 - Commit messages end with `Claude-Session: https://claude.ai/code/session_01G9ciynQVsqu6q9XK9VCjpR`.
+- This work ships as **v0.3.0** (the tag and `just release` are the maintainer's to run; the PR body names the version).
+- The elapsed cell means **time since the user last interacted** — a prompt to an agent session, a touch of a terminal tab — never agent activity, never focus.
 
 ---
 
@@ -145,10 +147,19 @@ impl RowHeight {
 
 **Interfaces:**
 - Produces on wire `Agent` AND `AgentRecord`: `pub model: Option<String>`, `pub provider: Option<String>`, `pub pr_number: Option<u32>` — all `#[serde(default)]`. On `AgentRecord` only: `pub pr_checked: u64` (unix secs of last lookup attempt, 0 = never), `pub pr_branch: String` (the branch the cached `pr_number` was resolved for) — both `#[serde(default)]`, host-side cache bookkeeping the bar never sees.
+- Produces on `Store` AND `AgentSnapshot`: `pub tab_touched: BTreeMap<usize, u64>` `#[serde(default)]` — unix secs of the last USER interaction per tab, the wall-clock twin of `tab_order` (which is ordinal-only and cannot say "how long ago"). Stamped in `touch_in` (store.rs:448 — take `now: u64` alongside, or `now_unix()` inside matching `apply_touch`'s style) and in `apply_hook_event`'s `commit_tab` path (hook.rs, where a prompt stamps the bound tab's order) so agent tabs and terminal tabs share one truth. Pruned wherever `tab_order` is pruned (dead tabs, session recreate — grep `tab_order.remove` / `.clear` and mirror each site).
 
 - [ ] **Step 1: Write the failing test** (store.rs test mod; mirror the existing projection test style):
 
 ```rust
+#[test]
+fn touch_stamps_the_tabs_wall_clock_and_the_snapshot_carries_it() {
+    let mut s = Store::default();
+    touch_in(&mut s, 4); // plus however `now` reaches it per the interface note
+    assert!(s.tab_touched.get(&4).copied().unwrap_or(0) > 0);
+    assert_eq!(snapshot_from(&s).tab_touched, s.tab_touched);
+}
+
 #[test]
 fn snapshot_projects_model_provider_and_pr_but_not_the_cache_bookkeeping() {
     let mut s = Store::default();
@@ -436,7 +447,7 @@ fn hydration_collapse_detection_follows_the_mode() {
 - Consumes: wire fields (Task 2).
 - Produces: the exact `RowContent` shape Task 8's card renderer consumes; `pub(crate) fn elapsed_label(now: u64, then: u64) -> Option<String>`.
 
-Elapsed design (the KISS reading of the spec): `now` enters the model the way the snapshot's `today` already does — the SHELL stamps it. `main.rs` passes `wall_now()` (a `std::time::SystemTime::now()` wrapper; WASI provides the clock — VERIFY in the Task 11 sandbox drive, it is on the checklist) into the render call path, and the existing `TERM_POLL_SECS` timer cadence (main.rs line ~135) already re-renders, which keeps the minutes honest. Branch for agents: `a.branch`, blanked when it equals the repo's default (`a.default_branch`, falling back to the `main`/`master` heuristic exactly as the provenance glyph decides `Prov::Main` — same rule, same site, share the predicate). Terminal elapsed: `None` for now — no wall-clock source exists for tab activity and the bar never invents a measurement (deviation from the mock's `7m`, noted for the maintainer in the PR body).
+Elapsed semantics (maintainer ruling): **time since the USER last interacted**, for agents and terminals alike — never agent activity, never focus. Agents: `a.last_interacted` (bumped only on UserPromptSubmit — already exactly this meaning). Terminals: `snapshot.tab_touched[tab_id]` (Task 2's wall-clock twin of the touch ordinal); absent entry → blank. `now` enters via the shell: `main.rs` passes `wall_now()` (a `std::time::SystemTime::now()` wrapper; WASI provides the clock — VERIFY in the Task 11 sandbox drive, it is on the checklist) into the render call path, and the existing `TERM_POLL_SECS` timer cadence (main.rs line ~135) already re-renders, which keeps the minutes honest. Branch for agents: `a.branch`, blanked when it equals the repo's default (`a.default_branch`, falling back to the `main`/`master` heuristic exactly as the provenance glyph decides `Prov::Main` — same rule, same site, share the predicate).
 
 - [ ] **Step 1: Failing tests:**
 
@@ -682,8 +693,10 @@ fn pr_staleness_is_ttl_or_branch_change() {
 - Create: `docs/superpowers/specs/2026-08-26-double-height-card-lock.md` (the ledger entry / lock revision superseding the affected sections of `2026-07-25-sidebar-visual-design-lock.md`, which gets a superseded-by pointer at top)
 - Modify: `UBIQUITOUS_LANGUAGE.md` — **card** (a row's two-line rendering; line 1 status/title/tokens, line 2 identity/model/elapsed), noting row stays the data-side word
 - Modify: `crates/clave-bar/examples/double-preview.rs` — header note flips from "candidate explorer" to "preview of the 2026-08-26 lock"; it now renders via the REAL `render_card` (delete the mirrored geometry, keep the mock fleet) so example and renderer can never drift
-- Modify: `README.md` ONLY per docs/dev/README-SOP.md if user-facing behavior needs it (`clave rows`)
+- Modify: `README.md` per docs/dev/README-SOP.md — re-rendered assets + `clave rows`
+- Modify: `crates/clave-bar/examples/readme-assets.rs` + `examples/shared/showcase_fixture.rs` — the SVG generator renders through `render_rows` (its header says so), so it follows the flag: pass `RowHeight::Double`, regenerate `docs/assets/sidebar-expanded.svg` / `sidebar-collapsed.svg` as CARD renders (48/38), refresh any glyph-vocabulary additions (provider icons). The README shows ONLY the two-row card images, plus one small line noting the single-row mode remains available via `clave rows single`.
 
+- [ ] **Step 0:** Regenerate the README assets (`cargo run -p clave-bar --example readme-assets`) after the fixture/mode changes above; eyeball the SVGs render as cards; update README image usage and add the single-row-mode line.
 - [ ] **Step 1:** Write the lock revision: the two profiles' cell tables (copy budgets from card.rs consts), the ratified decisions list (arc alternation IS the zebra; glass; blank-is-the-meaning for prov/branch/PR; rejected paths list carried over from #232 Out of Scope).
 - [ ] **Step 2:** Rewire the example onto `render_card`; run it; its width assertions still pass.
 - [ ] **Step 3:** `cargo mutants -p clave-bar --file src/card.rs --file src/render.rs -- --workspace false` and `cargo mutants -p clave --file src/pr.rs --file src/hook.rs` (scope to touched files; triage survivors — kill or justify each in the PR body).
@@ -695,5 +708,5 @@ fn pr_staleness_is_ttl_or_branch_change() {
 ## Self-Review (done at write time)
 
 - **Spec coverage:** stories 1–2 (model/provider) → T3/T4/T7/T8; 3 (elapsed) → T7; 4/17 (PR) → T10; 5 (tokens ramp) → T8; 6/7 (chipless, TERM) → T8 port; 8/9 (prov ink, blank main) → T8; 10–12 (glass, selection, zebra) → T8; 13–15 (click, viewport, odd line) → T9; 16 (backfill) → T4; 18 (blank cells) → T3/T7/T8/T10; 19 (theme) → T8 table; 20 (open strings) → T2/T3/T8 `provider_mark`; 21 (logging) → T6/T9; 22 (dormant fade) → T8; 23–25 (branch cell, wider flex, two budgets) → T8; 26 (flag) → T1/T5/T6/T9.
-- **Known deviation:** terminal-row elapsed renders blank (no honest source) — surfaced to maintainer in Task 11's PR body.
+- **Terminal elapsed:** honest source added (`tab_touched`, Task 2) — no deviation remains; a tab never touched renders blank.
 - **Type consistency:** `RowHeight` (T1) consumed by T5/T6/T9; `render_card(row, cols, any_selected, theme) -> (String, String)` (T8) consumed by T9; store fields (T2) consumed by T3/T4/T7/T10; `elapsed_label` name used consistently.
