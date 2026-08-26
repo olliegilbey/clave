@@ -1571,7 +1571,7 @@ mod tests {
         // the state the maintainer's fleet is in for the actual review.
         use clave_bar::model::{BarModel, TabMeta};
         use clave_bar::render::{
-            COLLAPSED_DESIGN_COLS, DESIGN_COLS, Provenance, RowContent, RowStatus, Widths,
+            COLLAPSED_DESIGN_COLS, DESIGN_COLS, Provenance, RowContent, RowStatus, Theme, Widths,
             display_cells, render_rows, strip_sgr,
         };
 
@@ -1648,7 +1648,7 @@ mod tests {
             // (bar-preview.rs does the same measurement) — INCLUDING the
             // selected row, whose caps and full-width background are the
             // easiest thing to render one cell wide.
-            let lines = render_rows(&rows, cols, rows.len(), widths);
+            let lines = render_rows(&rows, cols, rows.len(), widths, &Theme::default());
             for (line, row) in lines.iter().zip(&rows) {
                 let width = display_cells(&strip_sgr(line));
                 assert_eq!(width, cols, "row is {width} cells at {cols}: {row:?}");
@@ -1674,11 +1674,13 @@ mod tests {
             // faded self. `mix` rounds ties to even (a ported Python detail) —
             // a fade that silently stopped applying would leave these
             // byte-identical.
-            for (faded, plain) in
-                lines
-                    .iter()
-                    .zip(render_rows(&unfaded, cols, unfaded.len(), widths))
-            {
+            for (faded, plain) in lines.iter().zip(render_rows(
+                &unfaded,
+                cols,
+                unfaded.len(),
+                widths,
+                &Theme::default(),
+            )) {
                 assert_ne!(*faded, plain, "recession did not change this row at {cols}");
             }
         }

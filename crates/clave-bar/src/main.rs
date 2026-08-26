@@ -14,6 +14,7 @@ use clave_bar::model::{
 };
 use clave_bar::plugin_config::resolve_binary;
 use clave_bar::render::{Row, render_rows};
+use clave_bar::theme::Theme;
 use zellij_tile::prelude::*;
 
 /// Event::Timer echoes the elapsed seconds, and the bar's two timer kinds sit
@@ -63,6 +64,11 @@ struct State {
     /// A term-facts poll timer is in flight (#206) — one at a time, re-armed
     /// on expiry only while `term_poll_wanted()` holds.
     term_poll_armed: bool,
+    /// The user's zellij theme, mapped onto the bar's colour roles (#145).
+    /// Arrives via `ModeUpdate` (`ModeInfo.style.colors`); `Default` — the
+    /// curated kanagawa — stands until the first one lands, which also keeps
+    /// frame zero on the design the goldens pin.
+    theme: Theme,
     /// The CLI this bar shells out to, from plugin configuration (#44).
     /// Assigned in `load()`, which zellij invokes as its own wasm export
     /// before delivering any event (`register_plugin!`, zellij-tile-0.44.3
@@ -624,6 +630,10 @@ impl ZellijPlugin for State {
         subscribe(&[
             EventType::TabUpdate,
             EventType::PaneUpdate,
+            // The user's theme (#145): zellij sends one on subscribe and again
+            // whenever the mode/style changes, so the bar repaints on a theme
+            // switch without polling. Covered by ReadApplicationState above.
+            EventType::ModeUpdate,
             // The #206 terminal-row deltas: cwd and foreground-command pushes
             // between manifests. Per-pane and quiet — nothing like
             // InputReceived's per-keystroke storm (see below).
@@ -688,6 +698,19 @@ impl ZellijPlugin for State {
                     }
                     Err(_) => false, // not a snapshot (e.g. clave focus) — fine
                 }
+            }
+            Event::ModeUpdate(mode_info) => {
+                // The theme mapping lives in the host-tested lib
+                // (`theme::Theme::from_styling`); this arm only stores and
+                // repaints, and only when the mapped theme actually moved —
+                // ModeUpdate also fires on every input-mode change, which
+                // must not repaint an unchanged bar.
+                let theme = Theme::from_styling(&mode_info.style.colors);
+                if theme == self.theme {
+                    return false;
+                }
+                self.theme = theme;
+                true
             }
             Event::TabUpdate(tabs) => {
                 let metas: Vec<TabMeta> = tabs
@@ -892,7 +915,7 @@ impl ZellijPlugin for State {
         // do not carry it.
         self.pane_height = rows;
         let list: Vec<Row> = self.model.rows().into_iter().map(|(_, row)| row).collect();
-        let lines = render_rows(&list, cols, rows, self.model.widths_at(cols));
+        let lines = render_rows(&list, cols, rows, self.model.widths_at(cols), &self.theme);
         // Final review 2026-08-11: emit the frame WITHOUT a trailing newline.
         // Once the viewport (#148) slices to exactly `rows` lines, the pane is
         // full at steady state; a trailing newline after the bottom row would

@@ -224,6 +224,56 @@ fn config_kdl_parses_through_real_zellij_parser() {
     );
 }
 
+/// The theme passthrough (#145): `write_generated` appends the user's
+/// `theme`/`themes`/`theme_dir` nodes to config.kdl, and an appended slice
+/// that zellij's parser refuses would kill SESSION LAUNCH — exactly the
+/// failure class this suite exists to catch. So the concatenated artifact
+/// goes through the real parser, and the selection/definitions must come out
+/// the other side as config values, not merely parse.
+#[test]
+fn config_with_theme_slice_parses_and_carries_the_selection() {
+    // A realistic user config: built-in selection, an inline definition in
+    // the modern styling form (transcribed shape of zellij's own theme
+    // assets), and a custom definitions dir.
+    let user = "theme \"kanagawa\"\n\
+                themes {\n\
+                    mytheme {\n\
+                        text_unselected {\n\
+                            base 220 215 186\n\
+                            background 22 22 29\n\
+                            emphasis_0 255 160 102\n\
+                            emphasis_1 127 180 202\n\
+                            emphasis_2 118 148 106\n\
+                            emphasis_3 149 127 184\n\
+                        }\n\
+                    }\n\
+                }\n\
+                theme_dir \"/tmp/does-not-need-to-exist\"\n";
+    let cfg = format!(
+        "{}{}",
+        setup::config_kdl("clave", WASM),
+        setup::theme_slice_from(user)
+    );
+    let parsed = match Config::from_kdl(&cfg, None) {
+        Ok(c) => c,
+        Err(e) => panic!("config.kdl + theme slice failed zellij's parser: {e:?}\n---\n{cfg}"),
+    };
+    assert_eq!(
+        parsed.options.theme.as_deref(),
+        Some("kanagawa"),
+        "the theme selection must survive the round-trip:\n{cfg}"
+    );
+    assert!(
+        parsed.themes.get_theme("mytheme").is_some(),
+        "the inline theme definition must survive the round-trip:\n{cfg}"
+    );
+    assert_eq!(
+        parsed.options.theme_dir.as_deref(),
+        Some(std::path::Path::new("/tmp/does-not-need-to-exist")),
+        "theme_dir must survive the round-trip:\n{cfg}"
+    );
+}
+
 #[test]
 fn config_kdl_unbinds_claude_code_keys_in_every_mode() {
     // #28 semantic guardrail: a substring check proves the `unbind` node is

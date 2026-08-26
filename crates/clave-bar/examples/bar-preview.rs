@@ -26,7 +26,7 @@
 
 use clave_bar::render::{
     CHIP_INK, COLLAPSED_DESIGN_COLS, DESIGN_COLS, PALETTE, Provenance, RESET, Rgb, Row, RowContent,
-    RowStatus, TermStatus, Widths, display_cells, render_rows, strip_sgr,
+    RowStatus, TermStatus, Theme, Widths, display_cells, render_rows, strip_sgr,
 };
 
 #[path = "shared/showcase_fixture.rs"]
@@ -144,7 +144,10 @@ fn bar(rows: &[Row], cols: usize, widths: Widths, label: &str) {
     let rule = "\u{2500}".repeat(cols);
     println!("\n  {BOLD}{label}{RESET}");
     println!("  {dim}{ruler}\n  \u{250c}{rule}\u{2510}{RESET}");
-    for (line, row) in render_rows(rows, cols, rows.len(), widths).iter().zip(rows) {
+    for (line, row) in render_rows(rows, cols, rows.len(), widths, &Theme::default())
+        .iter()
+        .zip(rows)
+    {
         // The lock CLAIMS every row is exactly `cols` cells. Prove it rather
         // than asserting it in prose: strip the SGR sequences and measure the
         // remainder in display cells. A miscounted glyph fails the preview
@@ -160,9 +163,15 @@ fn bar(rows: &[Row], cols: usize, widths: Widths, label: &str) {
 /// screenshot of a ragged bar would be worse than no screenshot.
 fn print_showcase() {
     let rows = showcase();
-    for (line, row) in render_rows(&rows, DESIGN_COLS, rows.len(), Widths::EXPANDED)
-        .iter()
-        .zip(&rows)
+    for (line, row) in render_rows(
+        &rows,
+        DESIGN_COLS,
+        rows.len(),
+        Widths::EXPANDED,
+        &Theme::default(),
+    )
+    .iter()
+    .zip(&rows)
     {
         let width = display_cells(&strip_sgr(line));
         assert_eq!(width, DESIGN_COLS, "row is {width} cells: {row:?}");

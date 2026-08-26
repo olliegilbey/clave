@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 
 use clave_bar::render::{
     BASE, BATTERY, COLLAPSED_DESIGN_COLS, CONSOLE, DEFAULT_INK, DESIGN_COLS, DORMANT_FADE, PALETTE,
-    Provenance, Rgb, RowStatus, TermStatus, Widths, display_cells, render_rows, strip_sgr,
+    Provenance, Rgb, RowStatus, TermStatus, Theme, Widths, display_cells, render_rows, strip_sgr,
 };
 
 #[path = "shared/showcase_fixture.rs"]
@@ -224,7 +224,7 @@ fn write_icons(fonts: &[Font], dir: &Path) {
         ("status-opening", RowStatus::Opening),
     ];
     for (name, s) in status {
-        let (ch, mut ink) = s.mark();
+        let (ch, mut ink) = s.mark(&Theme::default());
         // `render_row` fades an unselected dormant row's ink toward BASE
         // after the mark table; the icon must match the rendered row.
         // DormantSelected is exempt: selection zeroes the fade in the bar.
@@ -241,7 +241,7 @@ fn write_icons(fonts: &[Font], dir: &Path) {
     ] {
         write_file(
             &dir.join(format!("{name}.svg")),
-            &icon_svg(fonts, CONSOLE, t.ink()),
+            &icon_svg(fonts, CONSOLE, t.ink(&Theme::default())),
         );
     }
     // Provenance marks ride the default ink, like the bar renders them.
@@ -351,7 +351,7 @@ fn parse_row(line: &str) -> (Vec<Span>, Vec<(usize, usize, Rgb)>) {
 /// between the expanded and collapsed frames, exactly as in the plugin.
 fn hero_svg(fonts: &[Font], cols: usize, widths: Widths) -> String {
     let rows = showcase();
-    let lines = render_rows(&rows, cols, rows.len(), widths);
+    let lines = render_rows(&rows, cols, rows.len(), widths, &Theme::default());
     for (line, row) in lines.iter().zip(&rows) {
         let width = display_cells(&strip_sgr(line));
         assert_eq!(width, cols, "row is {width} cells: {row:?}");
