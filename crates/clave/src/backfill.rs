@@ -112,15 +112,28 @@ pub fn derive_for_row(
     live_session: Option<&str>,
     today: u32,
 ) -> Option<BTreeMap<u32, u32>> {
+    let text = read_transcript_text(claude_dir, cwds, uuid, live_session)?;
+    let derived = buckets_from_transcript(&text, today);
+    (!derived.is_empty()).then_some(derived)
+}
+
+/// The transcript text for one row, wherever it lives — the same path
+/// resolution `derive_for_row` uses, factored out so `backfill_store` can
+/// also read the newest assistant line's model off the identical text
+/// (one file read, two derivations).
+fn read_transcript_text(
+    claude_dir: &Path,
+    cwds: &[&str],
+    uuid: &str,
+    live_session: Option<&str>,
+) -> Option<String> {
     let session = live_session.unwrap_or(uuid);
     let path = cwds
         .iter()
         .map(|cwd| crate::spawn::jsonl_path(claude_dir, cwd, session))
         .find(|p| p.exists())
         .or_else(|| scan_projects_for(claude_dir, session))?;
-    let text = std::fs::read_to_string(path).ok()?;
-    let derived = buckets_from_transcript(&text, today);
-    (!derived.is_empty()).then_some(derived)
+    std::fs::read_to_string(path).ok()
 }
 
 /// `projects/*/<session>.jsonl`, wherever it lives.
@@ -133,25 +146,36 @@ fn scan_projects_for(claude_dir: &Path, session: &str) -> Option<std::path::Path
 }
 
 /// The fleet-wide one-shot: seed every row whose buckets are EMPTY from its
-/// own transcript. Earned buckets are never touched, so re-running is free —
-/// which is what lets `launch_session` fire it on every version refresh
-/// without bookkeeping. Returns the number of rows seeded.
+/// own transcript, buckets AND model/provider together. Earned buckets are
+/// never touched, so re-running is free — which is what lets
+/// `launch_session` fire it on every version refresh without bookkeeping.
+/// Returns the number of rows seeded.
 pub fn backfill_store(s: &mut Store, claude_dir: &Path, today: u32) -> usize {
     let mut seeded = 0;
     for rec in s.agents.values_mut() {
         if !rec.buckets.is_empty() {
             continue;
         }
-        let Some(derived) = derive_for_row(
+        let Some(text) = read_transcript_text(
             claude_dir,
             &[rec.cwd.as_str(), rec.repo_root.as_str()],
             &rec.uuid,
             rec.live_session.as_deref(),
-            today,
         ) else {
             continue;
         };
+        let derived = buckets_from_transcript(&text, today);
+        if derived.is_empty() {
+            continue;
+        }
         rec.buckets = derived;
+        // Same transcript text, same reverse-scan the hook uses for a live
+        // tail (Task 3): the newest assistant line's model, short form.
+        // Backfill reads Claude's own projects tree, so a model found here
+        // is by construction a Claude model — provider is never invented
+        // beyond that (no assistant line yet -> both stay None).
+        rec.model = crate::hook::model_from_tail(&text).map(|m| crate::hook::short_model(&m));
+        rec.provider = rec.model.is_some().then(|| "claude".to_string());
         seeded += 1;
     }
     seeded
@@ -353,6 +377,42 @@ mod tests {
         );
         assert_eq!(backfill_store(&mut s, dir.path(), 20685), 1);
         assert_eq!(s.agents["u-wt"].buckets, [(20685u32, 1u32)].into());
+    }
+
+    #[test]
+    fn backfill_seeds_model_and_provider_from_the_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Store::default();
+        s.agents.insert("u-model".into(), rec("u-model", "/x"));
+        write_transcript(
+            dir.path(),
+            "/x",
+            "u-model",
+            &[
+                line("2026-08-20", r#""hey""#, ""),
+                r#"{"type":"assistant","timestamp":"2026-08-20T10:00:01.000Z","message":{"model":"claude-opus-5","usage":{"input_tokens":10}}}"#.into(),
+            ]
+            .join("\n"),
+        );
+        assert_eq!(backfill_store(&mut s, dir.path(), 20685), 1);
+        assert_eq!(s.agents["u-model"].model, Some("opus".to_string()));
+        assert_eq!(s.agents["u-model"].provider, Some("claude".to_string()));
+    }
+
+    #[test]
+    fn backfill_never_invents_a_model_without_an_assistant_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Store::default();
+        s.agents.insert("u-nomodel".into(), rec("u-nomodel", "/x"));
+        write_transcript(
+            dir.path(),
+            "/x",
+            "u-nomodel",
+            &line("2026-08-20", r#""hey""#, ""),
+        );
+        assert_eq!(backfill_store(&mut s, dir.path(), 20685), 1);
+        assert_eq!(s.agents["u-nomodel"].model, None);
+        assert_eq!(s.agents["u-nomodel"].provider, None);
     }
 
     #[test]
