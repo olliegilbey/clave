@@ -145,11 +145,13 @@ fn scan_projects_for(claude_dir: &Path, session: &str) -> Option<std::path::Path
         .find(|p| p.exists())
 }
 
-/// The fleet-wide one-shot: seed every row whose buckets are EMPTY from its
-/// own transcript, buckets AND model/provider together. Earned buckets are
-/// never touched, so re-running is free — which is what lets
-/// `launch_session` fire it on every version refresh without bookkeeping.
-/// Returns the number of rows seeded.
+/// The fleet-wide one-shot: seed every row with EMPTY buckets, and seed
+/// model/provider independently from the transcript tail. Earned buckets are
+/// never touched, so re-running is free — which is what lets `launch_session`
+/// fire it on every version refresh without bookkeeping. Model/provider are
+/// seeded only if the row's model is None (i.e., backfill is a seeder, never
+/// an updater). A row counts as seeded if either buckets or model/provider
+/// were written. Returns the number of rows seeded.
 pub fn backfill_store(s: &mut Store, claude_dir: &Path, today: u32) -> usize {
     let mut seeded = 0;
     for rec in s.agents.values_mut() {
@@ -164,19 +166,29 @@ pub fn backfill_store(s: &mut Store, claude_dir: &Path, today: u32) -> usize {
         ) else {
             continue;
         };
+        let mut changed = false;
+
+        // Seed buckets only if derived buckets are non-empty.
         let derived = buckets_from_transcript(&text, today);
-        if derived.is_empty() {
-            continue;
+        if !derived.is_empty() {
+            rec.buckets = derived;
+            changed = true;
         }
-        rec.buckets = derived;
-        // Same transcript text, same reverse-scan the hook uses for a live
-        // tail (Task 3): the newest assistant line's model, short form.
-        // Backfill reads Claude's own projects tree, so a model found here
-        // is by construction a Claude model — provider is never invented
-        // beyond that (no assistant line yet -> both stay None).
-        rec.model = crate::hook::model_from_tail(&text).map(|m| crate::hook::short_model(&m));
-        rec.provider = rec.model.is_some().then(|| "claude".to_string());
-        seeded += 1;
+
+        // Seed model/provider independently, unconditional on bucket emptiness,
+        // only if rec.model is None (backfill is a seeder, never an updater).
+        if rec.model.is_none()
+            && let Some(model) =
+                crate::hook::model_from_tail(&text).map(|m| crate::hook::short_model(&m))
+        {
+            rec.model = Some(model);
+            rec.provider = Some("claude".to_string());
+            changed = true;
+        }
+
+        if changed {
+            seeded += 1;
+        }
     }
     seeded
 }
@@ -413,6 +425,34 @@ mod tests {
         assert_eq!(backfill_store(&mut s, dir.path(), 20685), 1);
         assert_eq!(s.agents["u-nomodel"].model, None);
         assert_eq!(s.agents["u-nomodel"].provider, None);
+    }
+
+    #[test]
+    fn an_out_of_window_only_transcript_seeds_model_from_the_tail() {
+        // A dormant conversation whose only commitments are outside the 7-day
+        // window derives EMPTY buckets, but if the tail carries a valid
+        // assistant line, model/provider are seeded nonetheless — the
+        // source-of-truth principle protects these long-dormant rows from
+        // starting cold.
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Store::default();
+        s.agents.insert("u-dormant".into(), rec("u-dormant", "/x"));
+        write_transcript(
+            dir.path(),
+            "/x",
+            "u-dormant",
+            &[
+                line("2026-08-01", r#""long ago""#, ""),
+                r#"{"type":"assistant","timestamp":"2026-08-01T10:00:01.000Z","message":{"model":"claude-sonnet-4","usage":{"input_tokens":10}}}"#.into(),
+            ]
+            .join("\n"),
+        );
+        assert_eq!(backfill_store(&mut s, dir.path(), 20685), 1);
+        // Buckets stay empty — all commitments are outside the window.
+        assert!(s.agents["u-dormant"].buckets.is_empty());
+        // But model/provider are seeded from the tail's assistant line.
+        assert_eq!(s.agents["u-dormant"].model, Some("sonnet".to_string()));
+        assert_eq!(s.agents["u-dormant"].provider, Some("claude".to_string()));
     }
 
     #[test]
