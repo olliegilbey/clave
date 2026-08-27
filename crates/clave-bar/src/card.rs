@@ -291,27 +291,30 @@ pub(crate) fn render_card(
     let prov = c.prov.map_or_else(|| " ".to_string(), String::from);
     l2.push_str(&seg(ink(c.repo_ink), &format!(" {prov} ")));
     l2.push_str(&seg(bracket_ink, &format!("{CARD_BOT} ")));
-    if branch_w == 0 {
-        l2.push_str(&seg(ink(c.repo_ink), &format!(" {}", pad(c.repo, REPO_W))));
+    // Round 9b, amended by the 2026-08-27 drive: repo and branch share ONE
+    // budget, and a card with no PR folds the PR cell's columns into it —
+    // blank was the meaning, but six dead cells beside a truncated name were
+    // waste. The PR column never moves WHERE A PR EXISTS; only absent PRs
+    // yield their columns. In the collapsed profile the reclaimed columns are
+    // what lets a branch render at all.
+    let pr_extra = if c.pr.is_none() { PR_W + 1 } else { 0 };
+    let total = REPO_W + pr_extra + if branch_w > 0 { 1 + branch_w } else { 0 };
+    if c.branch.is_empty() || total == REPO_W {
+        l2.push_str(&seg(ink(c.repo_ink), &format!(" {}", pad(c.repo, total))));
     } else {
-        // Round 9b: repo and branch share ONE budget. The branch starts one
-        // space after the repo NAME (not its padded cell) and claims every
-        // column the repo does not use, in meta ink so the repo's palette ink
-        // keeps carrying the identity. The PR column never moves.
-        let total = REPO_W + 1 + branch_w;
-        if c.branch.is_empty() {
-            l2.push_str(&seg(ink(c.repo_ink), &format!(" {}", pad(c.repo, total))));
-        } else {
-            let repo_w = display_cells(c.repo).min(total - branch_w - 1);
-            l2.push_str(&seg(ink(c.repo_ink), &format!(" {}", pad(c.repo, repo_w))));
-            l2.push_str(&seg(
-                ink(META_INK),
-                &format!(" {}", pad(c.branch, total - repo_w - 1)),
-            ));
-        }
+        // The branch starts one space after the repo NAME (not its padded
+        // cell) and claims every column the repo does not use, in meta ink so
+        // the repo's palette ink keeps carrying the identity.
+        let repo_w = display_cells(c.repo).min(REPO_W);
+        l2.push_str(&seg(ink(c.repo_ink), &format!(" {}", pad(c.repo, repo_w))));
+        l2.push_str(&seg(
+            ink(META_INK),
+            &format!(" {}", pad(c.branch, total - repo_w - 1)),
+        ));
     }
-    let pr = c.pr.map(|n| format!("#{n}")).unwrap_or_default();
-    l2.push_str(&seg(ink(PR_INK), &format!(" {}", pad(&pr, PR_W))));
+    if let Some(n) = c.pr {
+        l2.push_str(&seg(ink(PR_INK), &format!(" {}", pad(&format!("#{n}"), PR_W))));
+    }
     match c.provider {
         // Two spaces before the icon (round 8c): the extra column between the
         // PR number and the model name.
@@ -873,13 +876,16 @@ mod tests {
                 " \u{f062c} \u{2570}  clave double-rows   #232               3m ".to_string(),
             )
         );
+        // No PR on this tab, so the PR cell's columns flow into the shared
+        // budget (2026-08-27 drive): collapsed gains a truncated branch,
+        // expanded shows `resume-fix` whole.
         assert_eq!(
             pin(&f[12], 38).1,
-            " \u{168c2} \u{2570}  resumaker                    1h "
+            " \u{168c2} \u{2570}  resumaker resu\u{2026}              1h "
         );
         assert_eq!(
             pin(&f[12], 48).1,
-            " \u{168c2} \u{2570}  resumaker resume-f\u{2026}                    1h "
+            " \u{168c2} \u{2570}  resumaker resume-fix                   1h "
         );
     }
 
@@ -914,14 +920,37 @@ mod tests {
     #[test]
     fn collapsed_renders_no_branch_and_expanded_shares_the_collective_budget() {
         let f = fleet();
-        // repo "clave", branch "drive-launch": absent at 38, in FULL one space
-        // after the repo NAME at 48.
+        // repo "clave", branch "drive-launch", PR #204: the PR holds its
+        // columns, so the branch is absent at 38 and in FULL one space after
+        // the repo NAME at 48.
         assert!(!pin(&f[4], 38).1.contains("drive-launch"));
         assert!(pin(&f[4], 48).1.contains(" clave drive-launch "));
         // A 14-cell repo truncates to nine with an ellipsis, and its branch
         // still gets its nine.
         let l2 = pin(&f[14], 48).1;
         assert!(l2.contains("market-s\u{2026} pg17-mig\u{2026}"), "{l2}");
+    }
+
+    /// A card with NO PR folds the PR cell's six columns into the repo/branch
+    /// budget (2026-08-27 drive): the COLOUR worktree row gains its branch even
+    /// in the collapsed profile, and a PR-less row with no branch gives the
+    /// whole widened budget to a long repo name. The PR column itself never
+    /// moves where a PR exists — f[4] above is that half of the invariant.
+    #[test]
+    fn a_card_without_a_pr_flows_its_columns_into_repo_and_branch() {
+        let f = fleet();
+        assert!(pin(&f[5], 38).1.contains(" clave colour "), "{}", pin(&f[5], 38).1);
+        assert!(pin(&f[5], 48).1.contains(" clave colour "), "{}", pin(&f[5], 48).1);
+        // Same row with a PR: collapsed hides the branch again.
+        let row = A {
+            prov: Provenance::Worktree,
+            branch: "colour",
+            pr: Some(9),
+            ..A::default()
+        }
+        .row();
+        let (_, l2) = render_card(&row, 38, true, false, &Theme::default());
+        assert!(!strip_sgr(&l2).contains("colour"), "{}", strip_sgr(&l2));
     }
 
     /// The token cell wears the RAMP's band, not an approximation of it: the

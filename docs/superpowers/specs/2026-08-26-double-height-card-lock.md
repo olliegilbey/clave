@@ -75,10 +75,14 @@ expanded profile). The branch starts one space after the repo *name*, not after
 its padded cell, and claims every column the repo does not use — with a
 guaranteed minimum of **9**, so a long repo truncates before a branch does.
 Branch names run longer than repo names, which is the whole reason the minimum
-sits on the branch. A branchless checkout gives the whole 19 to the repo. The PR
-column never moves.
+sits on the branch. A branchless checkout gives the whole budget to the repo.
+The PR column never moves *where a PR exists* — but a card with **no PR folds
+the PR cell's six columns into this budget** (amended at the 2026-08-27 live
+drive: six dead cells beside a truncated name were waste).
 
-Collapsed has no branch cell at all, and the repo takes its flat 9.
+Collapsed has no branch cell of its own, and the repo takes its flat 9 — unless
+the card has no PR, in which case the reclaimed columns widen the budget to 15
+and a branch renders there too.
 
 ## 4. Ratified decisions
 
