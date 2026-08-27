@@ -71,6 +71,48 @@ pub fn terminal(
     }
 }
 
+/// The card-only cells (#232): model, provider, PR, branch and elapsed. The
+/// single-line row ignores every one of them and the two-line card draws them
+/// all, so one fixture feeds both renderers and the README's card frames are
+/// full rather than half-blank. A terminal row borrows the checkout's PR,
+/// branch and elapsed, and has no model or provider of its own.
+pub fn detail(
+    mut row: Row,
+    model: &str,
+    provider: &str,
+    pr: Option<u32>,
+    branch: &str,
+    elapsed: &str,
+) -> Row {
+    match &mut row.content {
+        RowContent::Agent {
+            model: m,
+            provider: p,
+            pr: n,
+            branch: b,
+            elapsed: e,
+            ..
+        } => {
+            *m = Some(String::from(model));
+            *p = Some(String::from(provider));
+            *n = pr;
+            *b = String::from(branch);
+            *e = Some(String::from(elapsed));
+        }
+        RowContent::Terminal {
+            pr: n,
+            branch: b,
+            elapsed: e,
+            ..
+        } => {
+            *n = pr;
+            *b = String::from(branch);
+            *e = Some(String::from(elapsed));
+        }
+    }
+    row
+}
+
 /// One repo is one ink forever (lock §4); these indices stand in for the
 /// store-backed round-robin allocation that will assign them for real.
 pub const CLAVE: u8 = 0;
@@ -103,82 +145,145 @@ pub const WEBAPP: u8 = 5;
 /// truncate, which is the honest common case.
 pub fn showcase() -> Vec<Row> {
     let mut rows = vec![
-        agent(
-            RowStatus::NeedsYou,
-            Some((3, 52_000)),
-            Provenance::Branch,
-            "api-svc",
-            API_SVC,
-            Some(("AUTH-7", 3)),
-            "Rotate the signing keys",
+        detail(
+            agent(
+                RowStatus::NeedsYou,
+                Some((3, 52_000)),
+                Provenance::Branch,
+                "api-svc",
+                API_SVC,
+                Some(("AUTH-7", 3)),
+                "Rotate the signing keys",
+            ),
+            "opus",
+            "claude",
+            Some(184),
+            "key-rotation",
+            "4m",
         ),
-        agent(
-            RowStatus::Working,
-            Some((7, 108_000)),
-            Provenance::Worktree,
-            "clave",
-            CLAVE,
-            Some(("S6-GUT", 5)),
-            "Wire the status column into render_rows",
+        detail(
+            agent(
+                RowStatus::Working,
+                Some((7, 108_000)),
+                Provenance::Worktree,
+                "clave",
+                CLAVE,
+                Some(("S6-GUT", 5)),
+                "Wire the status column into render_rows",
+            ),
+            "sonnet",
+            "claude",
+            Some(232),
+            "double-rows",
+            "12m",
         ),
-        agent(
-            RowStatus::Done,
-            Some((1, 18_000)),
-            Provenance::Main,
-            "webapp",
-            WEBAPP,
-            Some(("CART-99", 6)),
-            "Fix cart total rounding mismatch",
-        ),
-        terminal(
-            "shell",
-            TermStatus::Running,
-            Provenance::Worktree,
-            Some(("clave", CLAVE)),
-            "just gates",
-        ),
-        agent(
-            RowStatus::Idle,
-            Some((9, 141_000)),
-            Provenance::Main,
-            "clave",
-            CLAVE,
+        detail(
+            agent(
+                RowStatus::Done,
+                Some((1, 18_000)),
+                Provenance::Main,
+                "webapp",
+                WEBAPP,
+                Some(("CART-99", 6)),
+                "Fix cart total rounding mismatch",
+            ),
+            "haiku",
+            "claude",
             None,
-            "Review the spawn identity gate",
+            "",
+            "1h",
         ),
-        agent(
-            RowStatus::Failed,
-            Some((5, 79_000)),
-            Provenance::Branch,
-            "infra",
-            INFRA,
-            Some(("DNS-TTL", 1)),
-            "Debug staging rollout DNS timeout",
+        detail(
+            terminal(
+                "shell",
+                TermStatus::Running,
+                Provenance::Worktree,
+                Some(("clave", CLAVE)),
+                "just gates",
+            ),
+            "",
+            "",
+            Some(232),
+            "double-rows",
+            "2m",
         ),
-        terminal(
-            "logs",
-            TermStatus::Failed,
-            Provenance::Main,
-            Some(("infra", INFRA)),
-            "kubectl logs -f api-7d9",
+        detail(
+            agent(
+                RowStatus::Idle,
+                Some((9, 141_000)),
+                Provenance::Main,
+                "clave",
+                CLAVE,
+                None,
+                "Review the spawn identity gate",
+            ),
+            "opus",
+            "claude",
+            None,
+            "",
+            "25m",
         ),
-        agent(
-            RowStatus::Stale,
-            Some((10, 412_000)),
-            Provenance::Worktree,
-            "clave",
-            CLAVE,
-            Some(("KDL-GRD", 7)),
-            "Validate generated KDL artifacts",
+        detail(
+            agent(
+                RowStatus::Failed,
+                Some((5, 79_000)),
+                Provenance::Branch,
+                "infra",
+                INFRA,
+                Some(("DNS-TTL", 1)),
+                "Debug staging rollout DNS timeout",
+            ),
+            "gpt-5",
+            "openai",
+            Some(77),
+            "dns-timeout",
+            "3h",
         ),
-        agent(
-            RowStatus::Dormant,
-            Some((6, 93_000)),
-            Provenance::Main,
-            "notes",
-            DOTFILES,
-            Some(("ZSH", 2)),
-            "Tidy the shell startup files",
+        detail(
+            terminal(
+                "logs",
+                TermStatus::Failed,
+                Provenance::Main,
+                Some(("infra", INFRA)),
+                "kubectl logs -f api-7d9",
+            ),
+            "",
+            "",
+            None,
+            "",
+            "8m",
+        ),
+        detail(
+            agent(
+                RowStatus::Stale,
+                Some((10, 412_000)),
+                Provenance::Worktree,
+                "clave",
+                CLAVE,
+                Some(("KDL-GRD", 7)),
+                "Validate generated KDL artifacts",
+            ),
+            "sonnet",
+            "claude",
+            Some(219),
+            "kdl-guard",
+            "1d",
+        ),
+        detail(
+            agent(
+                RowStatus::Dormant,
+                Some((6, 93_000)),
+                Provenance::Main,
+                "notes",
+                DOTFILES,
+                Some(("ZSH", 2)),
+                "Tidy the shell startup files",
+            ),
+            "haiku",
+            "claude",
+            None,
+            "",
+            "2w",
         ),
     ];
     rows[1].selected = true;

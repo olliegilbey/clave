@@ -10,7 +10,9 @@
 //!   each a uniform square on the bar's own background.
 //! - `docs/assets/sidebar.svg` — the hero frame: the shared showcase fixture
 //!   rendered through `render_rows` (the plugin's own renderer), its ANSI
-//!   parsed into positioned, coloured glyph outlines.
+//!   parsed into positioned, coloured glyph outlines. It renders in
+//!   `RowHeight::Double` at the card's own two width targets, because that is
+//!   what a fresh install draws (#232).
 //!
 //! Colours come from `clave_bar::render` (`RowStatus::mark`, `BATTERY`,
 //! `PALETTE`, `BASE`, …), never copied, so the assets cannot drift from the
@@ -19,14 +21,21 @@
 //! (macOS ships it in the system Supplemental fonts). Override discovery with
 //! `CLAVE_ASSET_FONT` / `CLAVE_ASSET_FONT_BAMUM` / `CLAVE_ASSET_FONT_EXTRA`
 //! (extra = fallback for symbols the mono font lacks).
+//!
+//! It PANICS rather than dropping a glyph no font here carries — an asset that
+//! quietly omits a cell is a lie about the design. The open case is the
+//! provider marks: `cod-claude` U+EC82 and `cod-openai` U+EC81 are in Nerd
+//! Fonts' `glyphnames.json` but not in the released 3.4.0 fonts, whose codicon
+//! block stops at U+EC1E, so these frames cannot be regenerated until the
+//! marks resolve to codepoints a shipped Nerd Font carries (FOOTGUNS, §Text).
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use clave_bar::render::{
-    BASE, BATTERY, COLLAPSED_DESIGN_COLS, CONSOLE, DEFAULT_INK, DESIGN_COLS, DORMANT_FADE, PALETTE,
-    Provenance, Rgb, RowHeight, RowStatus, TermStatus, Theme, Widths, display_cells, render_rows,
-    strip_sgr,
+    BASE, BATTERY, CLAUDE_GLYPH, CLAUDE_INK, CONSOLE, DEFAULT_INK, DORMANT_FADE, OPENAI_GLYPH,
+    OPENAI_INK, PALETTE, Provenance, Rgb, RowHeight, RowStatus, TermStatus, Theme, Widths,
+    display_cells, render_rows, strip_sgr,
 };
 
 #[path = "shared/showcase_fixture.rs"]
@@ -254,6 +263,17 @@ fn write_icons(fonts: &[Font], dir: &Path) {
         let ch = p.mark().expect("marked provenance has a glyph");
         write_file(&dir.join(format!("{name}.svg")), &icon_svg(fonts, ch, ink));
     }
+    // The provider marks (#232), each in its own brand ink — fixed colours, so
+    // they never repaint with a theme.
+    for (name, ch, brand) in [
+        ("provider-claude", CLAUDE_GLYPH, CLAUDE_INK),
+        ("provider-openai", OPENAI_GLYPH, OPENAI_INK),
+    ] {
+        write_file(
+            &dir.join(format!("{name}.svg")),
+            &icon_svg(fonts, ch, brand),
+        );
+    }
     for (i, (ch, ink)) in BATTERY.iter().enumerate() {
         write_file(
             &dir.join(format!("battery-{i:02}.svg")),
@@ -352,19 +372,21 @@ fn parse_row(line: &str) -> (Vec<Span>, Vec<(usize, usize, Rgb)>) {
 /// between the expanded and collapsed frames, exactly as in the plugin.
 fn hero_svg(fonts: &[Font], cols: usize, widths: Widths) -> String {
     let rows = showcase();
-    // `RowHeight::Single` for now: task 11 flips the README assets to the card
-    // geometry, and a half-converted asset set would ship two designs.
+    // The default height: what a fresh install draws. `height` is a count of
+    // TERMINAL LINES, so a frame showing the whole fleet asks for two per card.
+    let height = rows.len() * RowHeight::Double.lines_per_row();
     let lines = render_rows(
         &rows,
         cols,
-        rows.len(),
+        height,
         widths,
         &Theme::default(),
-        RowHeight::Single,
+        RowHeight::Double,
     );
-    for (line, row) in lines.iter().zip(&rows) {
+    assert_eq!(lines.len(), height, "the frame drops cards");
+    for (i, line) in lines.iter().enumerate() {
         let width = display_cells(&strip_sgr(line));
-        assert_eq!(width, cols, "row is {width} cells: {row:?}");
+        assert_eq!(width, cols, "line {i} is {width} cells: {line:?}");
     }
 
     // Cell geometry from the mono face itself, at a fixed pixel size.
@@ -449,10 +471,18 @@ fn main() {
     write_icons(&fonts, &glyphs);
     write_file(
         &root.join("docs/assets/sidebar-expanded.svg"),
-        &hero_svg(&fonts, DESIGN_COLS, Widths::EXPANDED),
+        &hero_svg(
+            &fonts,
+            RowHeight::Double.target_cols(false),
+            Widths::EXPANDED,
+        ),
     );
     write_file(
         &root.join("docs/assets/sidebar-collapsed.svg"),
-        &hero_svg(&fonts, COLLAPSED_DESIGN_COLS, Widths::COLLAPSED),
+        &hero_svg(
+            &fonts,
+            RowHeight::Double.target_cols(true),
+            Widths::COLLAPSED,
+        ),
     );
 }
