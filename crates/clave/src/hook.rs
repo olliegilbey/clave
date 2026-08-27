@@ -599,6 +599,80 @@ fn refresh_row_fields(
     changed
 }
 
+/// The lifetime bound a status-push child carries (#233). The hook process
+/// exits right after spawning, so the bound must live INSIDE the spawned
+/// process tree — nothing outside it survives long enough to reap.
+enum PipeBound {
+    /// `timeout`/`gtimeout` found: `<path> <secs> zellij pipe …`.
+    Coreutils(std::path::PathBuf),
+    /// No coreutils (stock macOS): perl `alarm` — pending alarms survive
+    /// exec (POSIX) and SIGALRM's default action terminates, so this bounds
+    /// the real pipe client, not a wrapper. Same script as scripts/ct.sh.
+    PerlAlarm(std::path::PathBuf),
+    /// No wrapper on the machine: today's bare spawn. A push is never
+    /// sacrificed to the bound.
+    Unbounded,
+}
+
+/// Pure half of rung discovery (#233): first hit wins, ct.sh's order.
+/// The IO shell gathers the probes; this decides.
+fn pipe_bound_ladder(
+    timeout: Option<std::path::PathBuf>,
+    gtimeout: Option<std::path::PathBuf>,
+    perl: Option<std::path::PathBuf>,
+) -> PipeBound {
+    match (timeout.or(gtimeout), perl) {
+        (Some(w), _) => PipeBound::Coreutils(w),
+        (None, Some(p)) => PipeBound::PerlAlarm(p),
+        (None, None) => PipeBound::Unbounded,
+    }
+}
+
+/// IO shell of rung discovery: global-PATH probes only (cwd must never
+/// satisfy a probe — same discipline as discover.rs), then the pure ladder.
+fn discover_pipe_bound() -> PipeBound {
+    pipe_bound_ladder(
+        which::which_global("timeout").ok(),
+        which::which_global("gtimeout").ok(),
+        which::which_global("perl").ok(),
+    )
+}
+
+/// Pure builder for the push child (#233): wraps the `zellij pipe`
+/// invocation in the discovered process-level bound. The payload and pipe
+/// name pass through untouched; only the outer wrapper varies by rung.
+fn bounded_pipe_command(zellij: &Path, payload: &str, bound: &PipeBound, secs: u32) -> Command {
+    let pipe_args = ["pipe", "--name", "clave-status", "--", payload];
+    match bound {
+        PipeBound::Coreutils(wrapper) => {
+            let mut cmd = Command::new(wrapper);
+            cmd.arg(secs.to_string()).arg(zellij).args(pipe_args);
+            cmd
+        }
+        PipeBound::PerlAlarm(perl) => {
+            let mut cmd = Command::new(perl);
+            cmd.args([
+                "-e",
+                "alarm shift @ARGV; exec @ARGV or die \"exec failed: $!\\n\"",
+            ])
+            .arg(secs.to_string())
+            .arg(zellij)
+            .args(pipe_args);
+            cmd
+        }
+        PipeBound::Unbounded => {
+            let mut cmd = Command::new(zellij);
+            cmd.args(pipe_args);
+            cmd
+        }
+    }
+}
+
+/// Seconds a push child may live (#233). A healthy pipe completes in
+/// milliseconds; the footgun-112 orphan spun for days. Matches ct.sh's
+/// default — anything seconds-scale kills the defect.
+const PUSH_BOUND_SECS: u32 = 15;
+
 /// Fire-and-forget snapshot push (§5). Spawn WITHOUT waiting: `zellij pipe`
 /// can dawdle (S1) and a global hook must never block Claude on it. The
 /// child inherits ZELLIJ env vars from the pane, targeting the right session;
@@ -611,8 +685,8 @@ pub fn push_snapshot(snap: &AgentSnapshot) {
     // whose env may lack the interactive PATH — an off-PATH zellij made every
     // status push a silent no-op. Fire-and-forget stays: failure here must
     // never become a hook failure (§6.5 zero-risk citizen).
-    let _ = Command::new(crate::discover::tool_path(crate::discover::ToolId::Zellij))
-        .args(["pipe", "--name", "clave-status", "--", &payload])
+    let zellij = crate::discover::tool_path(crate::discover::ToolId::Zellij);
+    let _ = bounded_pipe_command(&zellij, &payload, &discover_pipe_bound(), PUSH_BOUND_SECS)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1154,6 +1228,141 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    fn args_of(cmd: &Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|a| a.to_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// No coreutils (stock macOS): a pending perl `alarm` survives exec and
+    /// SIGALRM terminates by default, so the alarm bounds the REAL pipe
+    /// client, not a wrapper. Expected script is ct.sh's ratified ladder.
+    #[test]
+    fn the_perl_rung_alarms_the_real_pipe_client_not_a_wrapper() {
+        let cmd = bounded_pipe_command(
+            Path::new("/opt/zellij"),
+            "p",
+            &PipeBound::PerlAlarm(PathBuf::from("/usr/bin/perl")),
+            15,
+        );
+        assert_eq!(cmd.get_program(), "/usr/bin/perl");
+        assert_eq!(
+            args_of(&cmd),
+            [
+                "-e",
+                "alarm shift @ARGV; exec @ARGV or die \"exec failed: $!\\n\"",
+                "15",
+                "/opt/zellij",
+                "pipe",
+                "--name",
+                "clave-status",
+                "--",
+                "p"
+            ]
+        );
+    }
+
+    /// The arg-shape tests above prove what WOULD be spawned; this proves
+    /// the bound is real: the machine's own discovered rung, a fake pipe
+    /// client that sleeps forever, a 1-second bound — the child must die.
+    /// (The footgun-112 orphan spun for TWO DAYS; this is its coffin lid.)
+    #[test]
+    fn the_bound_actually_kills_a_wedged_pipe_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("wedged-zellij");
+        std::fs::write(&fake, "#!/bin/sh\nsleep 300\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let bound = discover_pipe_bound();
+        assert!(
+            !matches!(bound, PipeBound::Unbounded),
+            "dev/CI machines must discover a rung (perl at minimum)"
+        );
+
+        let mut child = bounded_pipe_command(&fake, "p", &bound, 1)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                break; // bounded: the wedged client died on its own
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = child.kill();
+                panic!("bound did not fire: wedged pipe client still alive after 10s");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// The rung order is ct.sh's: timeout → gtimeout → perl → bare. Each
+    /// row removes the preferred rung and the choice slides down one.
+    #[test]
+    fn the_ladder_prefers_timeout_then_gtimeout_then_perl_then_bare() {
+        let t = || Some(PathBuf::from("/t"));
+        let g = || Some(PathBuf::from("/g"));
+        let p = || Some(PathBuf::from("/p"));
+        assert!(matches!(
+            pipe_bound_ladder(t(), g(), p()),
+            PipeBound::Coreutils(w) if w == Path::new("/t")
+        ));
+        assert!(matches!(
+            pipe_bound_ladder(None, g(), p()),
+            PipeBound::Coreutils(w) if w == Path::new("/g")
+        ));
+        assert!(matches!(
+            pipe_bound_ladder(None, None, p()),
+            PipeBound::PerlAlarm(w) if w == Path::new("/p")
+        ));
+        assert!(matches!(
+            pipe_bound_ladder(None, None, None),
+            PipeBound::Unbounded
+        ));
+    }
+
+    /// A machine with no wrapper at all keeps TODAY's behavior — a status
+    /// push is never sacrificed to the bound (#233 story 5).
+    #[test]
+    fn no_rung_degrades_to_the_bare_unbounded_pipe() {
+        let cmd = bounded_pipe_command(Path::new("/opt/zellij"), "p", &PipeBound::Unbounded, 15);
+        assert_eq!(cmd.get_program(), "/opt/zellij");
+        assert_eq!(args_of(&cmd), ["pipe", "--name", "clave-status", "--", "p"]);
+    }
+
+    /// Fix 2 (#233): the push child must carry its own lifetime bound —
+    /// the hook process exits immediately, so nothing outside the child's
+    /// process tree can reap it. Coreutils rung: `timeout <secs> zellij …`.
+    #[test]
+    fn a_coreutils_rung_wraps_the_pipe_in_a_process_level_bound() {
+        let cmd = bounded_pipe_command(
+            Path::new("/opt/zellij"),
+            r#"{"agents":[]}"#,
+            &PipeBound::Coreutils(PathBuf::from("/usr/bin/timeout")),
+            15,
+        );
+        assert_eq!(cmd.get_program(), "/usr/bin/timeout");
+        assert_eq!(
+            args_of(&cmd),
+            [
+                "15",
+                "/opt/zellij",
+                "pipe",
+                "--name",
+                "clave-status",
+                "--",
+                r#"{"agents":[]}"#
+            ]
+        );
+    }
 
     // Local copy of the Task 2 `rec()` shape: label "x · main", cwd "/x",
     // branch "main", source FirstPrompt — the pre-labelled starting record.

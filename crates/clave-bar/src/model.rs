@@ -1639,6 +1639,19 @@ impl BarModel {
                 self.current_tab = Some(active_id);
                 effects.push(Effect::ReanchorVisit { tab_id: active_id });
             }
+        } else if stranded && let Some(own) = self.own_tab() {
+            // #236 flagless arm: the close race can deliver a frame naming NO
+            // active tab, and it may be the last frame the session sends —
+            // this same frame witnesses the stranding, so deferring is the
+            // 90-second nav outage. When the frame declines to name a focus,
+            // receipt-plus-coherence is the only witness left: the bar the
+            // coherent pair resolves as US re-anchors to its own tab (the
+            // mirror of apply_panes' flagless payment). Starved bars cannot
+            // reach here — their frozen frame flags their own tab active, so
+            // the `find(active)` arm above takes them.
+            self.organic_pending = false;
+            self.current_tab = Some(own);
+            effects.push(Effect::ReanchorVisit { tab_id: own });
         }
         // The debt `apply_panes` pays (#162). Re-derived rather than copied
         // from `stranded` because the branches above may have MOVED the beacon
@@ -1801,9 +1814,20 @@ impl BarModel {
         // reads delivered truth again (see `shell_spawn_pending`).
         self.shell_spawn_pending = false;
         self.prune_opening();
+        // #236: `elects_confirmed` OR the flagless-world fallback. The close
+        // race can deliver a tab frame naming NO active tab (the same zellij
+        // artifact the birth latch documents), and the flagged frame that
+        // would normally follow may be starved — under the old gate the debt
+        // was minted and never payable, and nav stayed dead until a mouse
+        // click re-seeded the beacon. When the frame declines to name a
+        // focus, receipt-plus-coherence is the only focus witness left, so
+        // the bar the coherent pair resolves as US pays to its own tab.
+        // Starved bars cannot trip this: their frozen pair flags their own
+        // tab active, so the all-flagless arm is never true of them, and the
+        // debt itself is only ever minted from a delivered frame.
         if self.reanchor_owed
-            && self.elects_confirmed()
             && let Some(own) = self.own_tab()
+            && (self.elects_confirmed() || self.tabs.iter().all(|t| !t.active))
         {
             self.reanchor_owed = false;
             // Answered by the send, like every other trigger since #162 — an
@@ -4769,6 +4793,138 @@ mod tests {
                 Effect::AnnounceVisit { tab_id: 12 },
             ]
         );
+    }
+
+    #[test]
+    fn a_flagless_close_race_still_reanchors_once_the_pair_is_coherent() {
+        // #236, the fixable escape from the 2026-08-26 capture family: the
+        // close's TabUpdate arrives carrying NO active flag (the mid-handoff
+        // race frame — the same zellij artifact the birth latch already
+        // documents), and the flagged frame that would normally follow is
+        // starved. Every recovery gate demanded the active flag, so the debt
+        // was minted and never payable: nav dead until a mouse click.
+        //
+        // The sound witness that remains: the pane frame restores COHERENCE,
+        // the beacon is frame-witnessed stranded, and the flagless frame
+        // declines to name a focus — receipt is then the only focus signal
+        // there is, and the bar the coherent pair resolves as US pays the
+        // debt to its own tab.
+        let mut m = fleet_of_three(10); // we are bar 11; user on 10; beacon 10
+        // Tab 10 closes; the race frame has no active tab. Mint, no emit —
+        // nobody can prove focus on this frame.
+        let fx = m.apply_tabs(vec![tab(11, 0, "b", false), tab(12, 1, "c", false)]);
+        assert!(
+            fx.iter().all(|e| !matches!(
+                e,
+                Effect::AnnounceVisit { .. } | Effect::ReanchorVisit { .. }
+            )),
+            "a flagless frame with a stale manifest proves nothing — no emit"
+        );
+        // The close's manifest broadcast lands: the pair is now coherent,
+        // the beacon still names the dead tab, and no flagged frame is
+        // coming. The debt must pay HERE.
+        let fx = m.apply_panes(panes_at(&FLEET_PANES_AFTER_CLOSE));
+        assert!(
+            fx.contains(&Effect::ReanchorVisit { tab_id: 11 }),
+            "the coherent flagless world must still re-anchor the beacon"
+        );
+        assert_eq!(m.current_tab(), Some(11));
+        assert_eq!(
+            m.nav_executor(),
+            Some(11),
+            "nav is alive again without a mouse click"
+        );
+        // Consumed on execution, both frame kinds — no storm.
+        for fx in [
+            m.apply_panes(panes_at(&FLEET_PANES_AFTER_CLOSE)),
+            m.apply_tabs(vec![tab(11, 0, "b", false), tab(12, 1, "c", false)]),
+        ] {
+            assert!(
+                fx.iter().all(|e| !matches!(
+                    e,
+                    Effect::AnnounceVisit { .. } | Effect::ReanchorVisit { .. }
+                )),
+                "no re-fire once the beacon is live again"
+            );
+        }
+    }
+
+    #[test]
+    fn a_flagless_tab_frame_arriving_last_pays_on_its_own_delivery() {
+        // #236, the mirrored order: the close's manifest broadcast lands
+        // FIRST (nothing strands yet — the frozen tab frame still shows the
+        // dead tab), then the flagless race frame arrives and is the LAST
+        // frame the session sends. The stranding and the coherence are both
+        // witnessed on that one delivery, so it must mint and pay together —
+        // deferring to a next frame that never comes is the 90-second outage.
+        let mut m = fleet_of_three(10);
+        let fx = m.apply_panes(panes_at(&FLEET_PANES_AFTER_CLOSE));
+        assert!(
+            fx.iter().all(|e| !matches!(
+                e,
+                Effect::AnnounceVisit { .. } | Effect::ReanchorVisit { .. }
+            )),
+            "an incoherent manifest alone proves nothing — no emit"
+        );
+        let fx = m.apply_tabs(vec![tab(11, 0, "b", false), tab(12, 1, "c", false)]);
+        assert!(
+            fx.contains(&Effect::ReanchorVisit { tab_id: 11 }),
+            "the frame that completes the coherent flagless world pays on arrival"
+        );
+        assert_eq!(m.current_tab(), Some(11));
+        assert_eq!(m.nav_executor(), Some(11), "nav is alive without a click");
+    }
+
+    #[test]
+    fn a_flagless_world_reaching_two_bars_converges_instead_of_storming() {
+        // #236's accepted hazard, pinned: a flagless frame cannot say which
+        // bar the user is looking at, so if delivery ever hands the flagless
+        // close world to TWO coherent bars, each re-anchors to its own tab —
+        // divergent pipes. The broadcast bounds it: every bar pipes at most
+        // once (the emit moves its local beacon), the last landed beacon
+        // wins everywhere, and the fleet ends wrong-but-consistent with ONE
+        // executor — the same trade `pending_collapse` already ratified
+        // ("wrong-but-consistent beats a storm"). The next real focus event
+        // re-seeds the true tab.
+        let mut bars = vec![fleet_bar(11, 10), fleet_bar(12, 10)];
+        let mut fx = Vec::new();
+        for m in &mut bars {
+            fx.extend(m.apply_tabs(vec![tab(11, 0, "b", false), tab(12, 1, "c", false)]));
+            fx.extend(m.apply_panes(panes_at(&FLEET_PANES_AFTER_CLOSE)));
+        }
+        let reanchors = fx
+            .iter()
+            .filter(|e| matches!(e, Effect::ReanchorVisit { .. }))
+            .count();
+        assert!(
+            reanchors <= bars.len(),
+            "each bar pipes at most once — {reanchors} re-anchors from {} bars",
+            bars.len()
+        );
+        fan_beacons(&mut bars, &fx.clone());
+        let beacons: BTreeSet<_> = bars.iter().map(|m| m.current_tab()).collect();
+        assert_eq!(beacons.len(), 1, "the fleet converges on one beacon");
+        assert_eq!(
+            nav_executors(&bars).len(),
+            1,
+            "exactly one executor after convergence — nav is alive"
+        );
+        // And the settled world is silent: further frames of both kinds on
+        // every bar emit nothing.
+        for m in &mut bars {
+            for fx in [
+                m.apply_tabs(vec![tab(11, 0, "b", false), tab(12, 1, "c", false)]),
+                m.apply_panes(panes_at(&FLEET_PANES_AFTER_CLOSE)),
+            ] {
+                assert!(
+                    fx.iter().all(|e| !matches!(
+                        e,
+                        Effect::AnnounceVisit { .. } | Effect::ReanchorVisit { .. }
+                    )),
+                    "no re-fire in the settled world"
+                );
+            }
+        }
     }
 
     #[test]
