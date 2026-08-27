@@ -394,6 +394,38 @@ pub fn tokens_from_tail(tail: &str) -> Option<u32> {
         .or(post_tokens)
 }
 
+/// The newest assistant line's `message.model` — the raw model id, e.g.
+/// `claude-fable-5`. Nested under `message`, so `last_tail_field` (top-level
+/// fields only) cannot read it. Same reverse-scan, skip-malformed,
+/// skip-empty discipline.
+pub fn model_from_tail(tail: &str) -> Option<String> {
+    tail.lines().rev().find_map(|l| {
+        let v: serde_json::Value = serde_json::from_str(l).ok()?;
+        if v.get("type")?.as_str()? != "assistant" {
+            return None;
+        }
+        let s = v.get("message")?.get("model")?.as_str()?.trim();
+        (!s.is_empty()).then(|| s.to_string())
+    })
+}
+
+/// Display form of a model id: for Claude ids, the FAMILY word (`fable`,
+/// `opus`, `sonnet`, `haiku`) — the segment after the vendor prefix that
+/// isn't a version number; anything else passes through untouched (open
+/// strings — other providers name their own). The store carries this SHORT
+/// form: the card's model cell is 6 columns and the raw id is unreadable
+/// there, and a dumb renderer (truncate, never munge) is the lock's style.
+pub fn short_model(raw: &str) -> String {
+    match raw.strip_prefix("claude-") {
+        Some(rest) => rest
+            .split('-')
+            .find(|seg| !seg.chars().all(|c| c.is_ascii_digit()))
+            .unwrap_or(rest)
+            .to_string(),
+        None => raw.to_string(),
+    }
+}
+
 /// The agent's smart zone in tokens: [`clave_types::SMART_ZONE_ENV`], else the
 /// default. Junk, or zero, falls back rather than failing — a hook must never
 /// fail hard (§6.5), and a zero zone has no ramp to divide.
@@ -567,6 +599,80 @@ fn refresh_row_fields(
     changed
 }
 
+/// The lifetime bound a status-push child carries (#233). The hook process
+/// exits right after spawning, so the bound must live INSIDE the spawned
+/// process tree — nothing outside it survives long enough to reap.
+enum PipeBound {
+    /// `timeout`/`gtimeout` found: `<path> <secs> zellij pipe …`.
+    Coreutils(std::path::PathBuf),
+    /// No coreutils (stock macOS): perl `alarm` — pending alarms survive
+    /// exec (POSIX) and SIGALRM's default action terminates, so this bounds
+    /// the real pipe client, not a wrapper. Same script as scripts/ct.sh.
+    PerlAlarm(std::path::PathBuf),
+    /// No wrapper on the machine: today's bare spawn. A push is never
+    /// sacrificed to the bound.
+    Unbounded,
+}
+
+/// Pure half of rung discovery (#233): first hit wins, ct.sh's order.
+/// The IO shell gathers the probes; this decides.
+fn pipe_bound_ladder(
+    timeout: Option<std::path::PathBuf>,
+    gtimeout: Option<std::path::PathBuf>,
+    perl: Option<std::path::PathBuf>,
+) -> PipeBound {
+    match (timeout.or(gtimeout), perl) {
+        (Some(w), _) => PipeBound::Coreutils(w),
+        (None, Some(p)) => PipeBound::PerlAlarm(p),
+        (None, None) => PipeBound::Unbounded,
+    }
+}
+
+/// IO shell of rung discovery: global-PATH probes only (cwd must never
+/// satisfy a probe — same discipline as discover.rs), then the pure ladder.
+fn discover_pipe_bound() -> PipeBound {
+    pipe_bound_ladder(
+        which::which_global("timeout").ok(),
+        which::which_global("gtimeout").ok(),
+        which::which_global("perl").ok(),
+    )
+}
+
+/// Pure builder for the push child (#233): wraps the `zellij pipe`
+/// invocation in the discovered process-level bound. The payload and pipe
+/// name pass through untouched; only the outer wrapper varies by rung.
+fn bounded_pipe_command(zellij: &Path, payload: &str, bound: &PipeBound, secs: u32) -> Command {
+    let pipe_args = ["pipe", "--name", "clave-status", "--", payload];
+    match bound {
+        PipeBound::Coreutils(wrapper) => {
+            let mut cmd = Command::new(wrapper);
+            cmd.arg(secs.to_string()).arg(zellij).args(pipe_args);
+            cmd
+        }
+        PipeBound::PerlAlarm(perl) => {
+            let mut cmd = Command::new(perl);
+            cmd.args([
+                "-e",
+                "alarm shift @ARGV; exec @ARGV or die \"exec failed: $!\\n\"",
+            ])
+            .arg(secs.to_string())
+            .arg(zellij)
+            .args(pipe_args);
+            cmd
+        }
+        PipeBound::Unbounded => {
+            let mut cmd = Command::new(zellij);
+            cmd.args(pipe_args);
+            cmd
+        }
+    }
+}
+
+/// Seconds a push child may live (#233). A healthy pipe completes in
+/// milliseconds; the footgun-112 orphan spun for days. Matches ct.sh's
+/// default — anything seconds-scale kills the defect.
+const PUSH_BOUND_SECS: u32 = 15;
+
 /// Fire-and-forget snapshot push (§5). Spawn WITHOUT waiting: `zellij pipe`
 /// can dawdle (S1) and a global hook must never block Claude on it. The
 /// child inherits ZELLIJ env vars from the pane, targeting the right session;
@@ -579,8 +685,8 @@ pub fn push_snapshot(snap: &AgentSnapshot) {
     // whose env may lack the interactive PATH — an off-PATH zellij made every
     // status push a silent no-op. Fire-and-forget stays: failure here must
     // never become a hook failure (§6.5 zero-risk citizen).
-    let _ = Command::new(crate::discover::tool_path(crate::discover::ToolId::Zellij))
-        .args(["pipe", "--name", "clave-status", "--", &payload])
+    let zellij = crate::discover::tool_path(crate::discover::ToolId::Zellij);
+    let _ = bounded_pipe_command(&zellij, &payload, &discover_pipe_bound(), PUSH_BOUND_SECS)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -665,6 +771,19 @@ pub fn apply_hook_event(
     if let Some(tokens) = jsonl_tail.and_then(tokens_from_tail) {
         rec.context_tokens = Some(tokens);
     }
+    // #232: the card's model cell. Same source and cadence as the token
+    // reading — the tail the hook already took. Provider is "claude" by
+    // construction here: this tail IS a Claude Code transcript. Other
+    // providers arrive with their own hook path, not a guess.
+    if let Some(raw) = jsonl_tail.and_then(model_from_tail) {
+        let short = short_model(&raw);
+        changed |= rec.model.as_deref() != Some(short.as_str());
+        rec.model = Some(short);
+        if rec.provider.as_deref() != Some("claude") {
+            rec.provider = Some("claude".to_string());
+            changed = true;
+        }
+    }
     // Bucketed HERE, in the row's own agent's process, for two reasons: this is
     // where `SMART_ZONE_ENV` means the right thing, and stamping it makes a
     // dormant row free forever after — `snapshot_from` only copies. The fleet's
@@ -702,6 +821,10 @@ pub fn apply_hook_event(
         let today = crate::store::unix_day(now);
         if let Some(tab_id) = commit_tab {
             s.tab_order.insert(tab_id, ord);
+            // #232: the wall-clock twin of the ordinal above, stamped at the
+            // same site so agent tabs and terminal tabs (`touch_in`) share
+            // one truth for "how long ago".
+            s.tab_touched.insert(tab_id, now);
             crate::store::bump_bucket(s.tab_buckets.entry(tab_id).or_default(), today);
         }
         if let Some(rec) = s.agents.get_mut(uuid) {
@@ -1017,7 +1140,7 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
     } else {
         None
     };
-    let snap = with_store_mut(&paths, |s| {
+    let (snap, pr_stale) = with_store_mut(&paths, |s| {
         if let Some(m) = &mint {
             // Re-checked under the flock: a racing hook may have minted first,
             // in which case mint_adopted lands on the preserve path anyway.
@@ -1078,10 +1201,25 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
         // mint always lands here too (row pane None → Some), so an adoption
         // pushes even when the event itself moved nothing.
         changed |= apply_hook_pane(s, &uuid, event, pane);
-        changed.then(|| snapshot_from(s))
+        // Read-only (#232): comparing two integers/strings against the row
+        // this same write just touched. NOT a network call — that discipline
+        // is the whole point (§6.5) — just the decision whether one is owed.
+        let pr_stale = s
+            .agents
+            .get(&uuid)
+            .is_some_and(|rec| crate::pr::pr_is_stale(rec, now_unix()));
+        (changed.then(|| snapshot_from(s)), pr_stale)
     })?;
     if let Some(snap) = snap {
         push_snapshot(&snap);
+    }
+    // Spawned OUTSIDE the flock — `with_store_mut` above has already
+    // returned, so `pr-sync` (its own locked RMW) can never deadlock against
+    // this hook's lock. `pr-sync` re-checks staleness itself, so a hook that
+    // fires again before `pr-sync` has answered spawns harmlessly again;
+    // the TTL is what keeps `gh` from being asked twice for the same answer.
+    if pr_stale {
+        crate::pr::spawn_pr_sync(&uuid);
     }
     Ok(())
 }
@@ -1090,6 +1228,141 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    fn args_of(cmd: &Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|a| a.to_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// No coreutils (stock macOS): a pending perl `alarm` survives exec and
+    /// SIGALRM terminates by default, so the alarm bounds the REAL pipe
+    /// client, not a wrapper. Expected script is ct.sh's ratified ladder.
+    #[test]
+    fn the_perl_rung_alarms_the_real_pipe_client_not_a_wrapper() {
+        let cmd = bounded_pipe_command(
+            Path::new("/opt/zellij"),
+            "p",
+            &PipeBound::PerlAlarm(PathBuf::from("/usr/bin/perl")),
+            15,
+        );
+        assert_eq!(cmd.get_program(), "/usr/bin/perl");
+        assert_eq!(
+            args_of(&cmd),
+            [
+                "-e",
+                "alarm shift @ARGV; exec @ARGV or die \"exec failed: $!\\n\"",
+                "15",
+                "/opt/zellij",
+                "pipe",
+                "--name",
+                "clave-status",
+                "--",
+                "p"
+            ]
+        );
+    }
+
+    /// The arg-shape tests above prove what WOULD be spawned; this proves
+    /// the bound is real: the machine's own discovered rung, a fake pipe
+    /// client that sleeps forever, a 1-second bound — the child must die.
+    /// (The footgun-112 orphan spun for TWO DAYS; this is its coffin lid.)
+    #[test]
+    fn the_bound_actually_kills_a_wedged_pipe_client() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("wedged-zellij");
+        std::fs::write(&fake, "#!/bin/sh\nsleep 300\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let bound = discover_pipe_bound();
+        assert!(
+            !matches!(bound, PipeBound::Unbounded),
+            "dev/CI machines must discover a rung (perl at minimum)"
+        );
+
+        let mut child = bounded_pipe_command(&fake, "p", &bound, 1)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                break; // bounded: the wedged client died on its own
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = child.kill();
+                panic!("bound did not fire: wedged pipe client still alive after 10s");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// The rung order is ct.sh's: timeout → gtimeout → perl → bare. Each
+    /// row removes the preferred rung and the choice slides down one.
+    #[test]
+    fn the_ladder_prefers_timeout_then_gtimeout_then_perl_then_bare() {
+        let t = || Some(PathBuf::from("/t"));
+        let g = || Some(PathBuf::from("/g"));
+        let p = || Some(PathBuf::from("/p"));
+        assert!(matches!(
+            pipe_bound_ladder(t(), g(), p()),
+            PipeBound::Coreutils(w) if w == Path::new("/t")
+        ));
+        assert!(matches!(
+            pipe_bound_ladder(None, g(), p()),
+            PipeBound::Coreutils(w) if w == Path::new("/g")
+        ));
+        assert!(matches!(
+            pipe_bound_ladder(None, None, p()),
+            PipeBound::PerlAlarm(w) if w == Path::new("/p")
+        ));
+        assert!(matches!(
+            pipe_bound_ladder(None, None, None),
+            PipeBound::Unbounded
+        ));
+    }
+
+    /// A machine with no wrapper at all keeps TODAY's behavior — a status
+    /// push is never sacrificed to the bound (#233 story 5).
+    #[test]
+    fn no_rung_degrades_to_the_bare_unbounded_pipe() {
+        let cmd = bounded_pipe_command(Path::new("/opt/zellij"), "p", &PipeBound::Unbounded, 15);
+        assert_eq!(cmd.get_program(), "/opt/zellij");
+        assert_eq!(args_of(&cmd), ["pipe", "--name", "clave-status", "--", "p"]);
+    }
+
+    /// Fix 2 (#233): the push child must carry its own lifetime bound —
+    /// the hook process exits immediately, so nothing outside the child's
+    /// process tree can reap it. Coreutils rung: `timeout <secs> zellij …`.
+    #[test]
+    fn a_coreutils_rung_wraps_the_pipe_in_a_process_level_bound() {
+        let cmd = bounded_pipe_command(
+            Path::new("/opt/zellij"),
+            r#"{"agents":[]}"#,
+            &PipeBound::Coreutils(PathBuf::from("/usr/bin/timeout")),
+            15,
+        );
+        assert_eq!(cmd.get_program(), "/usr/bin/timeout");
+        assert_eq!(
+            args_of(&cmd),
+            [
+                "15",
+                "/opt/zellij",
+                "pipe",
+                "--name",
+                "clave-status",
+                "--",
+                r#"{"agents":[]}"#
+            ]
+        );
+    }
 
     // Local copy of the Task 2 `rec()` shape: label "x · main", cwd "/x",
     // branch "main", source FirstPrompt — the pre-labelled starting record.
@@ -1116,6 +1389,11 @@ mod tests {
             context_level: None,
             live_session: None,
             buckets: BTreeMap::new(),
+            model: None,
+            provider: None,
+            pr_number: None,
+            pr_checked: 0,
+            pr_branch: String::new(),
         }
     }
 
@@ -1547,6 +1825,7 @@ mod tests {
         ));
         assert_eq!(s.agents["u1"].last_interacted, 1700); // the clock
         assert_eq!(s.tab_order.get(&4), Some(&1)); // the ordinal — seq, not now
+        assert_eq!(s.tab_touched.get(&4), Some(&1700)); // the wall-clock twin
         assert_eq!(s.agents["u1"].commit_ord, 1); // same value on both halves
         assert_eq!(s.seq, 1); // one bump for the whole atomic change
         // Unbound agent: interaction still recorded, no stamp to place.
@@ -1561,6 +1840,7 @@ mod tests {
         ));
         assert_eq!(s.agents["u2"].last_interacted, 1800);
         assert_eq!(s.tab_order.len(), 1);
+        assert_eq!(s.tab_touched.len(), 1); // only u1's tab has a touch stamp
         // The RC-B case: unbound, so nothing to stamp on a tab — but the ROW
         // still records its ordinal, so the dormant row it becomes sorts right
         // even if no bind or prune ever lands.
@@ -2701,5 +2981,55 @@ mod tests {
             None,
         );
         assert_eq!(s.agents["sess-db"].default_branch.as_deref(), Some("trunk"));
+    }
+
+    // ── #232, the card's model cell ─────────────────────────────────────────
+
+    #[test]
+    fn model_from_tail_reads_the_newest_assistant_lines_nested_model() {
+        let tail = concat!(
+            r#"{"type":"assistant","message":{"model":"claude-opus-5","usage":{"input_tokens":5}}}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"model":"claude-fable-5","usage":{"input_tokens":9}}}"#,
+            "\n",
+        );
+        assert_eq!(model_from_tail(tail).as_deref(), Some("claude-fable-5"));
+        assert_eq!(model_from_tail(r#"{"type":"user"}"#), None);
+        // A malformed line scans PAST, not fails — same discipline as
+        // last_tail_field.
+        let dirty = format!("not-json\n{tail}");
+        assert_eq!(model_from_tail(&dirty).as_deref(), Some("claude-fable-5"));
+    }
+
+    #[test]
+    fn short_model_derives_the_family_word() {
+        // The display forms the ratified example renders: fable / opus /
+        // sonnet / haiku / gpt-5.
+        assert_eq!(short_model("claude-fable-5"), "fable");
+        assert_eq!(short_model("claude-opus-5"), "opus");
+        assert_eq!(short_model("claude-sonnet-5"), "sonnet");
+        assert_eq!(short_model("claude-haiku-4-5-20251001"), "haiku");
+        assert_eq!(short_model("claude-3-5-sonnet-20241022"), "sonnet");
+        // Unknown vendors pass through untouched — open strings, never enums.
+        assert_eq!(short_model("gpt-5"), "gpt-5");
+        assert_eq!(short_model("sol-2"), "sol-2");
+    }
+
+    #[test]
+    fn a_stop_event_stamps_model_and_provider() {
+        // Pattern: the s7_* tests build a store + payload and call
+        // apply_hook_event with a synthetic tail. Reuse rec()/capture().
+        let mut s = Store::default();
+        s.agents.insert("minted".into(), rec("minted"));
+        let tail = r#"{"type":"assistant","message":{"model":"claude-fable-5","usage":{"input_tokens":1000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#;
+        let p = HookPayload {
+            session_id: Some("minted".into()),
+            ..Default::default()
+        };
+        apply_hook_event(&mut s, "minted", "Stop", &p, Some(tail), 100, true);
+        assert_eq!(s.agents["minted"].model.as_deref(), Some("fable"));
+        assert_eq!(s.agents["minted"].provider.as_deref(), Some("claude"));
     }
 }

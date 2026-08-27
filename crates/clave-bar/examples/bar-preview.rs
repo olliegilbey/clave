@@ -26,7 +26,7 @@
 
 use clave_bar::render::{
     CHIP_INK, COLLAPSED_DESIGN_COLS, DESIGN_COLS, PALETTE, Provenance, RESET, Rgb, Row, RowContent,
-    RowStatus, TermStatus, Theme, Widths, display_cells, render_rows, strip_sgr,
+    RowHeight, RowStatus, TermStatus, Theme, Widths, display_cells, render_rows, strip_sgr,
 };
 
 #[path = "shared/showcase_fixture.rs"]
@@ -144,9 +144,16 @@ fn bar(rows: &[Row], cols: usize, widths: Widths, label: &str) {
     let rule = "\u{2500}".repeat(cols);
     println!("\n  {BOLD}{label}{RESET}");
     println!("  {dim}{ruler}\n  \u{250c}{rule}\u{2510}{RESET}");
-    for (line, row) in render_rows(rows, cols, rows.len(), widths, &Theme::default())
-        .iter()
-        .zip(rows)
+    for (line, row) in render_rows(
+        rows,
+        cols,
+        rows.len(),
+        widths,
+        &Theme::default(),
+        RowHeight::Single,
+    )
+    .iter()
+    .zip(rows)
     {
         // The lock CLAIMS every row is exactly `cols` cells. Prove it rather
         // than asserting it in prose: strip the SGR sequences and measure the
@@ -169,6 +176,7 @@ fn print_showcase() {
         rows.len(),
         Widths::EXPANDED,
         &Theme::default(),
+        RowHeight::Single,
     )
     .iter()
     .zip(&rows)

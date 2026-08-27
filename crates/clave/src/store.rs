@@ -168,6 +168,32 @@ pub struct AgentRecord {
     /// the opener; pruned past [`BUCKET_RETAIN_DAYS`] on every bump.
     #[serde(default)]
     pub buckets: BTreeMap<u32, u32>,
+    /// Wire twin of `clave_types::Agent::model`, which carries the
+    /// rationale (#232). `None` = no reading yet. `default` keeps pre-field
+    /// store files loading.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Wire twin of `clave_types::Agent::provider` (#232). `default` keeps
+    /// pre-field store files loading.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Wire twin of `clave_types::Agent::pr_number` (#232) — the cached
+    /// answer the bar renders. `default` keeps pre-field store files
+    /// loading.
+    #[serde(default)]
+    pub pr_number: Option<u32>,
+    /// Unix seconds of the last PR lookup attempt for this row, whether or
+    /// not it found one; 0 = never checked. Host-side cache bookkeeping —
+    /// gates how often `clave` re-asks the git host, never rides the wire.
+    #[serde(default)]
+    pub pr_checked: u64,
+    /// The branch `pr_number` was resolved FOR. A branch switch invalidates
+    /// the cached number without forcing an immediate re-lookup; comparing
+    /// this against the row's current `branch` is how staleness is
+    /// detected. Empty string reads as "never resolved", matching
+    /// `pr_checked == 0`. `default` keeps pre-field store files loading.
+    #[serde(default)]
+    pub pr_branch: String,
 }
 
 /// The whole store file. `seq` is the monotonic snapshot counter of the §5
@@ -212,6 +238,24 @@ pub struct Store {
     /// state under the `collapsed` doctrine: one writer, rides every push.
     #[serde(default)]
     pub order: clave_types::OrderMode,
+    /// tab_id → unix seconds of the last USER interaction with that tab —
+    /// the wall-clock twin of `tab_order` above, which is ordinal-only and
+    /// cannot say "how long ago" (#232). Stamped in `touch_in` and in
+    /// `apply_hook_event`'s commit path, so agent tabs and terminal tabs
+    /// share one truth; pruned everywhere `tab_order` is pruned (dead tabs,
+    /// session recreate). `default` keeps pre-field store files loading.
+    #[serde(default)]
+    pub tab_touched: BTreeMap<usize, u64>,
+    /// Which row geometry the NEXT `clave` launch bakes (#232). Read once by
+    /// `launch_layout_kdl` at session-create time — never rides the pipe
+    /// (unlike `collapsed`/`order`): geometry is launch-baked into fixed pane
+    /// sizes and a plugin-config line, and a LIVE bar can neither resize its
+    /// own pane nor swap its own plugin config, so there is nothing for a
+    /// running instance to react to. `default` (Double, matching
+    /// `RowHeight`'s own default) keeps pre-field store files loading and is
+    /// exactly the fresh-install behaviour: nothing set → double.
+    #[serde(default)]
+    pub row_height: clave_types::RowHeight,
 }
 
 impl Store {
@@ -348,6 +392,7 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
         tab_buckets: store.tab_buckets.clone(),
         order: store.order,
         today: unix_day(now_unix()),
+        tab_touched: store.tab_touched.clone(),
         agents: store
             .agents
             .values()
@@ -383,6 +428,11 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
                 // recomputed, for the same reason context_level is: this
                 // runs inside whichever agent's hook fired.
                 buckets: r.buckets.clone(),
+                // #232. `pr_checked`/`pr_branch` stay host-side: cache
+                // bookkeeping the bar has no use for.
+                model: r.model.clone(),
+                provider: r.provider.clone(),
+                pr_number: r.pr_number,
             })
             .collect(),
     }
@@ -437,7 +487,7 @@ pub fn apply_focus(paths: &StorePaths, uuid: &str, now: u64) -> Result<Option<Ag
 /// clock reads. That race is now impossible, not merely absorbed (S1 §3.1).
 pub fn apply_touch(paths: &StorePaths, tab_id: usize) -> Result<AgentSnapshot> {
     with_store_mut(paths, |s| {
-        touch_in(s, tab_id);
+        touch_in(s, tab_id, now_unix());
         snapshot_from(s)
     })
 }
@@ -445,7 +495,10 @@ pub fn apply_touch(paths: &StorePaths, tab_id: usize) -> Result<AgentSnapshot> {
 /// The pure half of [`apply_touch`] — mint and stamp, no I/O. Returns the
 /// ordinal it minted. `mint_ord` bumps `seq` itself, so this IS the pipe
 /// contract's one bump for the write (§5); callers must not bump again.
-pub(crate) fn touch_in(s: &mut Store, tab_id: usize) -> u64 {
+/// `now` also stamps `tab_touched` — the wall-clock twin of the ordinal this
+/// function mints, taken as a parameter (rather than read via `now_unix()`
+/// inside) so the total-order proptest below can drive it deterministically.
+pub(crate) fn touch_in(s: &mut Store, tab_id: usize, now: u64) -> u64 {
     // Newborn-inheritance seed (spec): computed BEFORE the mint, and only
     // on vacancy, so a tab already tracking its own buckets is never
     // re-seeded and the newborn's own stamp can't shift the opener it
@@ -470,6 +523,7 @@ pub(crate) fn touch_in(s: &mut Store, tab_id: usize) -> u64 {
     }
     let ord = s.mint_ord();
     s.tab_order.insert(tab_id, ord);
+    s.tab_touched.insert(tab_id, now);
     ord
 }
 
@@ -635,6 +689,9 @@ pub(crate) fn prune_in(s: &mut Store, stale_ids: &[usize]) -> bool {
     // must not keep contributing once its ordinal entry is gone.
     for id in stale_ids {
         s.tab_buckets.remove(id);
+        // tab_touched (#232) rides the same lifetime as tab_order — a dead
+        // tab's wall-clock stamp must not survive it either.
+        s.tab_touched.remove(id);
     }
     changed
 }
@@ -664,6 +721,20 @@ pub fn apply_order(paths: &StorePaths, mode: clave_types::OrderMode) -> Result<A
         s.order = mode;
         s.seq += 1; // monotonic pipe contract (§5)
         snapshot_from(s)
+    })
+}
+
+/// `clave rows <single|double>`: persist the launch row-height mode.
+/// Deliberately UNLIKE `apply_order`/`apply_collapse`: no `seq` bump and no
+/// snapshot returned to push. Geometry is launch-baked (#232) — the pane
+/// sizes and the plugin-config line are both written once, at session
+/// create, by `launch_layout_kdl` reading this field — so a running bar has
+/// no mechanism to act on a mid-session change; the value takes effect at
+/// the NEXT `clave` launch, and pushing a snapshot for it would be pipe
+/// traffic nothing downstream ever reads.
+pub fn set_row_height(paths: &StorePaths, mode: clave_types::RowHeight) -> Result<()> {
+    with_store_mut(paths, |s| {
+        s.row_height = mode;
     })
 }
 
@@ -746,6 +817,7 @@ pub fn clear_session_order(paths: &StorePaths) -> Result<()> {
         if !s.tab_order.is_empty() || bound {
             s.tab_order.clear();
             s.tab_buckets.clear();
+            s.tab_touched.clear();
             s.agents.values_mut().for_each(|r| {
                 r.tab_id = None;
                 r.pane_id = None;
@@ -861,6 +933,11 @@ mod tests {
             context_level: None,
             live_session: None,
             buckets: BTreeMap::new(),
+            model: None,
+            provider: None,
+            pr_number: None,
+            pr_checked: 0,
+            pr_branch: String::new(),
         }
     }
 
@@ -1076,6 +1153,26 @@ mod tests {
         assert_eq!(snap.tab_order.get(&4), Some(&1700));
         // §6.6 Design B: the uuid→tab bind rides it too (glyph join key).
         assert_eq!(snap.agents[0].tab_id, Some(4));
+    }
+
+    /// `clave rows`: persists WITHOUT bumping `seq` or handing back a
+    /// snapshot — the opposite of every `apply_*` above, and deliberately so
+    /// (#232): geometry is launch-baked, so a live bar has nothing to react
+    /// to and a pipe push would be traffic with no reader.
+    #[test]
+    fn set_row_height_persists_without_bumping_seq_or_pushing() {
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        assert_eq!(
+            read_store(&p).unwrap().row_height,
+            clave_types::RowHeight::Double,
+            "fresh install defaults to double"
+        );
+        let seq0 = read_store(&p).unwrap().seq;
+        set_row_height(&p, clave_types::RowHeight::Single).unwrap();
+        let s = read_store(&p).unwrap();
+        assert_eq!(s.row_height, clave_types::RowHeight::Single);
+        assert_eq!(s.seq, seq0, "no seq bump — nothing to push for a live bar");
     }
 
     #[test]
@@ -1732,6 +1829,44 @@ mod tests {
     }
 
     #[test]
+    fn touch_stamps_the_tabs_wall_clock_and_the_snapshot_carries_it() {
+        let mut s = Store::default();
+        touch_in(&mut s, 4, 1_756_200_000);
+        assert_eq!(s.tab_touched.get(&4).copied(), Some(1_756_200_000));
+        assert_eq!(snapshot_from(&s).tab_touched, s.tab_touched);
+    }
+
+    #[test]
+    fn snapshot_projects_model_provider_and_pr_but_not_the_cache_bookkeeping() {
+        let mut s = Store::default();
+        let mut r = rec("u1");
+        r.model = Some("fable".into());
+        r.provider = Some("claude".into());
+        r.pr_number = Some(232);
+        r.pr_checked = 1_756_200_000;
+        r.pr_branch = "double-rows".into();
+        s.agents.insert("u1".into(), r);
+        let snap = snapshot_from(&s);
+        let a = &snap.agents[0];
+        assert_eq!(a.model.as_deref(), Some("fable"));
+        assert_eq!(a.provider.as_deref(), Some("claude"));
+        assert_eq!(a.pr_number, Some(232));
+    }
+
+    #[test]
+    fn pre_field_payloads_still_parse() {
+        // serde(default) is the compat contract every store field carries.
+        let a: clave_types::Agent = serde_json::from_str(
+            r#"{"uuid":"u","cwd":"/","repo_root":"/","branch":"main",
+            "label":"l","status":"idle","last_interacted":0,"last_visited":0}"#,
+        )
+        .unwrap();
+        assert_eq!(a.model, None);
+        assert_eq!(a.provider, None);
+        assert_eq!(a.pr_number, None);
+    }
+
+    #[test]
     fn backfill_lifts_the_words_segment_out_of_an_existing_label() {
         // Rows written before `summary` existed carry it only inside `label`.
         // refresh_label returns early forever once label_source == Summary
@@ -1868,12 +2003,12 @@ mod tests {
         a.buckets = [(100, 5)].into();
         s.agents.insert("u1".into(), a);
         s.tab_order = [(7, 50)].into();
-        touch_in(&mut s, 11);
+        touch_in(&mut s, 11, 1000);
         // EXACT copy — no +1. The tie IS the adjacency mechanism (spec).
         assert_eq!(s.tab_buckets.get(&11), Some(&[(100u32, 5u32)].into()));
         // A second touch on a seeded tab never re-seeds.
         s.agents.get_mut("u1").unwrap().buckets = [(101, 9)].into();
-        touch_in(&mut s, 11);
+        touch_in(&mut s, 11, 1000);
         assert_eq!(s.tab_buckets.get(&11), Some(&[(100u32, 5u32)].into()));
     }
 
@@ -1899,7 +2034,7 @@ mod tests {
         // Touch BEFORE bind (the common birth race): the twin briefly holds
         // the inherited copy, and the bind must clear it.
         with_store_mut(&p, |s| {
-            touch_in(s, 2);
+            touch_in(s, 2, 1000);
             assert_eq!(s.tab_buckets.get(&2), Some(&[(100u32, 8u32)].into()));
         })
         .unwrap();
@@ -1914,7 +2049,7 @@ mod tests {
         // touch on a tab bound by a direct store write seeds empty too.
         apply_bind(&p, "woken", 3).unwrap().expect("rebound");
         with_store_mut(&p, |s| {
-            touch_in(s, 3);
+            touch_in(s, 3, 1000);
             assert_eq!(s.tab_buckets.get(&3), Some(&BTreeMap::new()));
         })
         .unwrap();
@@ -2004,7 +2139,7 @@ mod tests {
 
         fn run(s: &mut Store, op: &Op, minted: &mut Vec<u64>) {
             match op {
-                Op::Touch(id) => minted.push(touch_in(s, *id)),
+                Op::Touch(id) => minted.push(touch_in(s, *id, 1000)),
                 Op::Prune(ids) => {
                     prune_in(s, ids);
                 }
@@ -2066,7 +2201,7 @@ mod tests {
                 let mut s = seeded();
                 // Seed one real commitment so there is a non-trivial order to
                 // preserve, then never prompt again.
-                touch_in(&mut s, 0);
+                touch_in(&mut s, 0, 1000);
                 let mut minted = Vec::new();
                 run(&mut s, &Op::Event("UserPromptSubmit", 1), &mut minted);
 

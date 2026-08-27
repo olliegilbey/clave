@@ -135,6 +135,12 @@ pub fn run_open(uuid: &str, collapsed: bool) -> Result<()> {
             let wasm = crate::setup::wasm_path()?;
             let binary = crate::release::runtime_binary();
             let label = crate::add::sanitize_label(&row.label);
+            // The SESSION's own mode, not the store's (finding 2, #232
+            // review) — see add.rs's identical read for the full rationale:
+            // a mid-session `clave rows` write only takes effect at the next
+            // launch, so a tab minted now must match the plugin identity the
+            // running config.kdl's keybinds already address.
+            let row_height = crate::setup::session_row_height(&crate::setup::data_dir()?);
             let layout = crate::add::tab_layout(
                 &binary,
                 wasm.to_str().context("wasm path")?,
@@ -142,6 +148,7 @@ pub fn run_open(uuid: &str, collapsed: bool) -> Result<()> {
                 uuid,
                 open_cwd,
                 collapsed,
+                row_height,
             );
             let tmp = std::env::temp_dir().join(format!("clave-open-{uuid}.kdl"));
             std::fs::write(&tmp, layout)?;
@@ -196,6 +203,11 @@ mod tests {
             context_level: None,
             live_session: None,
             buckets: BTreeMap::new(),
+            model: None,
+            provider: None,
+            pr_number: None,
+            pr_checked: 0,
+            pr_branch: String::new(),
         }
     }
 

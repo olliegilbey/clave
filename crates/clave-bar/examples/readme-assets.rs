@@ -10,22 +10,33 @@
 //!   each a uniform square on the bar's own background.
 //! - `docs/assets/sidebar.svg` — the hero frame: the shared showcase fixture
 //!   rendered through `render_rows` (the plugin's own renderer), its ANSI
-//!   parsed into positioned, coloured glyph outlines.
+//!   parsed into positioned, coloured glyph outlines. It renders in
+//!   `RowHeight::Double` at the card's own two width targets, because that is
+//!   what a fresh install draws (#232).
 //!
 //! Colours come from `clave_bar::render` (`RowStatus::mark`, `BATTERY`,
 //! `PALETTE`, `BASE`, …), never copied, so the assets cannot drift from the
 //! shipped palette. Fonts are the ones the design was ratified against:
 //! JetBrainsMono Nerd Font Mono, plus Noto Sans Bamum for the worktree mark
 //! (macOS ships it in the system Supplemental fonts). Override discovery with
-//! `CLAVE_ASSET_FONT` / `CLAVE_ASSET_FONT_BAMUM` / `CLAVE_ASSET_FONT_EXTRA`
-//! (extra = fallback for symbols the mono font lacks).
+//! `CLAVE_ASSET_FONT` / `CLAVE_ASSET_FONT_BAMUM` / `CLAVE_ASSET_FONT_SYMBOLS` /
+//! `CLAVE_ASSET_FONT_EXTRA` (extra = fallback for symbols the mono font lacks).
+//!
+//! **Nerd Fonts 3.5 or newer is required** for the provider marks: `cod-claude`
+//! U+EC82 and `cod-openai` U+EC81 landed in 3.5, and a 3.4 patched font's
+//! codicon block stops at U+EC1E. If the mono font here is older, drop Nerd
+//! Fonts' Symbols-Only face beside it (or name it in `CLAVE_ASSET_FONT_SYMBOLS`)
+//! and it fills the gap. This generator PANICS rather than dropping a glyph no
+//! font carries — an asset that quietly omits a cell is a lie about the design.
+//! (FOOTGUNS, §Text.)
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use clave_bar::render::{
-    BASE, BATTERY, COLLAPSED_DESIGN_COLS, CONSOLE, DEFAULT_INK, DESIGN_COLS, DORMANT_FADE, PALETTE,
-    Provenance, Rgb, RowStatus, TermStatus, Theme, Widths, display_cells, render_rows, strip_sgr,
+    BASE, BATTERY, CLAUDE_GLYPH, CLAUDE_INK, CONSOLE, DEFAULT_INK, DORMANT_FADE, OPENAI_GLYPH,
+    OPENAI_INK, PALETTE, Provenance, Rgb, RowHeight, RowStatus, TermStatus, Theme, Widths,
+    display_cells, render_rows, strip_sgr,
 };
 
 #[path = "shared/showcase_fixture.rs"]
@@ -87,6 +98,22 @@ fn load_fonts() -> Vec<Font> {
     )
     .expect("Noto Sans Bamum not found; set CLAVE_ASSET_FONT_BAMUM");
     let mut fonts = vec![mono, bamum];
+    // Nerd Fonts' Symbols-Only face, for glyphs newer than the patched mono
+    // font installed here. The provider marks are the live case: they landed in
+    // Nerd Fonts 3.5 and a 3.4 JetBrainsMono stops at U+EC1E. Optional and
+    // consulted only when it is needed — `trace` takes the FIRST face that has
+    // the glyph, so a current mono font makes this a no-op.
+    if let Some(symbols) = find_font(
+        "CLAVE_ASSET_FONT_SYMBOLS",
+        &[
+            "~/Library/Fonts/SymbolsNerdFontMono-Regular.ttf",
+            "/Library/Fonts/SymbolsNerdFontMono-Regular.ttf",
+            "~/.local/share/fonts/SymbolsNerdFontMono-Regular.ttf",
+            "/usr/share/fonts/truetype/nerd-fonts/SymbolsNerdFontMono-Regular.ttf",
+        ],
+    ) {
+        fonts.push(symbols);
+    }
     // Symbols the mono font does not carry (✖ and ↻ live outside the Nerd
     // Font patch ranges); the terminal solves this with system fallback, we
     // solve it with every extra face that exists. `CLAVE_ASSET_FONT_EXTRA`
@@ -253,6 +280,17 @@ fn write_icons(fonts: &[Font], dir: &Path) {
         let ch = p.mark().expect("marked provenance has a glyph");
         write_file(&dir.join(format!("{name}.svg")), &icon_svg(fonts, ch, ink));
     }
+    // The provider marks (#232), each in its own brand ink — fixed colours, so
+    // they never repaint with a theme.
+    for (name, ch, brand) in [
+        ("provider-claude", CLAUDE_GLYPH, CLAUDE_INK),
+        ("provider-openai", OPENAI_GLYPH, OPENAI_INK),
+    ] {
+        write_file(
+            &dir.join(format!("{name}.svg")),
+            &icon_svg(fonts, ch, brand),
+        );
+    }
     for (i, (ch, ink)) in BATTERY.iter().enumerate() {
         write_file(
             &dir.join(format!("battery-{i:02}.svg")),
@@ -322,6 +360,14 @@ fn parse_row(line: &str) -> (Vec<Span>, Vec<(usize, usize, Rgb)>) {
                         }
                     }
                     1 => {} // bold: the outline font is the weight we trace
+                    // Glass (#232): the card re-asserts the DEFAULT background
+                    // on every unselected segment rather than painting one, so
+                    // the terminal's own backdrop shows through. In an SVG the
+                    // frame's own rounded rect is that backdrop, so "no bg" is
+                    // exactly the right thing to record. 39 is its foreground
+                    // twin; the renderer does not emit it today.
+                    49 => pen.bg = None,
+                    39 => pen.fg = None,
                     other => panic!("unexpected SGR code {other} in rendered row"),
                 }
             }
@@ -351,10 +397,21 @@ fn parse_row(line: &str) -> (Vec<Span>, Vec<(usize, usize, Rgb)>) {
 /// between the expanded and collapsed frames, exactly as in the plugin.
 fn hero_svg(fonts: &[Font], cols: usize, widths: Widths) -> String {
     let rows = showcase();
-    let lines = render_rows(&rows, cols, rows.len(), widths, &Theme::default());
-    for (line, row) in lines.iter().zip(&rows) {
+    // The default height: what a fresh install draws. `height` is a count of
+    // TERMINAL LINES, so a frame showing the whole fleet asks for two per card.
+    let height = rows.len() * RowHeight::Double.lines_per_row();
+    let lines = render_rows(
+        &rows,
+        cols,
+        height,
+        widths,
+        &Theme::default(),
+        RowHeight::Double,
+    );
+    assert_eq!(lines.len(), height, "the frame drops cards");
+    for (i, line) in lines.iter().enumerate() {
         let width = display_cells(&strip_sgr(line));
-        assert_eq!(width, cols, "row is {width} cells: {row:?}");
+        assert_eq!(width, cols, "line {i} is {width} cells: {line:?}");
     }
 
     // Cell geometry from the mono face itself, at a fixed pixel size.
@@ -369,7 +426,10 @@ fn hero_svg(fonts: &[Font], cols: usize, widths: Widths) -> String {
         * font_px;
     let ascent = face.ascender() as f32 / upem * font_px;
     let descent = -face.descender() as f32 / upem * font_px;
-    let cell_h = (ascent + descent) * 1.06;
+    // No extra leading (#232): a terminal cell has none, and the card's whole
+    // idea is the arc BINDING its two lines — six percent of slack between the
+    // rows is enough to break the join and leave two disconnected brackets.
+    let cell_h = ascent + descent;
     let pad = 12.0;
     let width = cols as f32 * advance + pad * 2.0;
     let height = lines.len() as f32 * cell_h + pad * 2.0;
@@ -439,10 +499,18 @@ fn main() {
     write_icons(&fonts, &glyphs);
     write_file(
         &root.join("docs/assets/sidebar-expanded.svg"),
-        &hero_svg(&fonts, DESIGN_COLS, Widths::EXPANDED),
+        &hero_svg(
+            &fonts,
+            RowHeight::Double.target_cols(false),
+            Widths::EXPANDED,
+        ),
     );
     write_file(
         &root.join("docs/assets/sidebar-collapsed.svg"),
-        &hero_svg(&fonts, COLLAPSED_DESIGN_COLS, Widths::COLLAPSED),
+        &hero_svg(
+            &fonts,
+            RowHeight::Double.target_cols(true),
+            Widths::COLLAPSED,
+        ),
     );
 }

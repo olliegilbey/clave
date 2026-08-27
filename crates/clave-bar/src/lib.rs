@@ -3,7 +3,8 @@
 //! logic that unit-tests on the host — `model` (the state machine),
 //! `plugin_config` (the #44 binary resolver plus its shellout guard) and
 //! `render` (the 44-column row renderer, plus the preview example that is
-//! driven by it so the two cannot diverge).
+//! driven by it so the two cannot diverge) and `card` (its two-line
+//! double-height counterpart, #232).
 //!
 //! Why the split is load-bearing: the bin references wasm host-import shims
 //! (`host_run_plugin_command`, via `focus_pane_with_id`/`run_command`/…) that
@@ -15,6 +16,7 @@
 //! `zellij-utils::data`, pure serde structs with host symbols — which is what
 //! lets the theme mapping be host-tested instead of living in this bin.)
 
+pub mod card;
 pub mod model;
 pub mod pipe;
 pub mod plugin_config;

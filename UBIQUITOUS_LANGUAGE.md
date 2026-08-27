@@ -90,11 +90,22 @@ column target, was deleted at #181; the term survives only in the ledger.)
 
 ### 3.1 A row
 
-**Row** — one rendered line. Three kinds:
+**Row** — one entry of the fleet as the bar draws it. Three kinds:
 
 - **live row** — an agent session with a zellij tab open.
 - **dormant row** — an agent session with no tab open.
 - **terminal tab** — a zellij tab with no agent session bound to it.
+
+**Row is the data-side word — a row is what gets rendered, never the shape it is
+rendered in.** The shape is the **row height**, and there are two:
+
+| Term | Means |
+|---|---|
+| **card** | A row's **two-line** rendering, the default since #232. Line 1 is status, chip and token count; line 2 is identity — provenance, repo, branch, PR, provider, model and elapsed. The two lines are one unit: one click target, one viewport slot, one zebra parity. Locked in `docs/superpowers/specs/2026-08-26-double-height-card-lock.md`. |
+| **single-line row** | The original one-line rendering, retained behind `clave rows single` and locked in `docs/superpowers/specs/2026-07-25-sidebar-visual-design-lock.md`. Its geometry is §3.2 below. |
+
+Both come in the same two **width states**, expanded and collapsed; height and
+width are independent choices.
 
 **Live and dormant rows both take their text from the STORE record** — title,
 repo and summary as separate fields. A live row does *not* render the zellij tab

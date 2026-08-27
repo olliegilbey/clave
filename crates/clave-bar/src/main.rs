@@ -12,7 +12,7 @@ use clave_bar::model::{
     BarModel, BindStallState, Effect, PEEK_SINK_SECS, PaneMeta, PaneProbe, TabMeta,
     WIDTH_COOLDOWN_SECS,
 };
-use clave_bar::plugin_config::resolve_binary;
+use clave_bar::plugin_config::{resolve_binary, resolve_row_height};
 use clave_bar::render::{Row, render_rows};
 use clave_bar::theme::Theme;
 use zellij_tile::prelude::*;
@@ -43,6 +43,30 @@ const _: () = assert!(WIDTH_COOLDOWN_SECS < TIMER_KIND_CUTOFF_SECS);
 const _: () = assert!(TIMER_KIND_CUTOFF_SECS <= PEEK_SINK_SECS);
 const _: () = assert!(PEEK_SINK_SECS < TERM_POLL_CUTOFF_SECS);
 const _: () = assert!(TERM_POLL_CUTOFF_SECS <= TERM_POLL_SECS);
+
+/// The shell's wall clock (#232): UNIX-epoch seconds, read once per render
+/// and fed to `BarModel::tick` so `elapsed_label` has a `now` to subtract
+/// against. model.rs stays a pure state machine driven entirely by values
+/// handed to it, so the one syscall this feature needs lives here instead.
+/// 0-safe rather than panicking if the platform clock is ever unavailable
+/// (renders as "never interacted" instead of crashing the bar) — WASI is
+/// expected to give a real one; VERIFY in the sandbox drive (#232 task 11).
+fn wall_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Verbose per-frame logging, off unless `CLAVE_BAR_DEBUG` is set to something
+/// other than `0` in the zellij server's environment (#232). Read ONCE — a
+/// render fires on every event this plugin subscribes to, and an env lookup per
+/// frame is a syscall per frame for a line nobody usually wants. Clicks are
+/// rare enough to log unconditionally; frames are not.
+fn dbg_log() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("CLAVE_BAR_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0"))
+}
 
 #[derive(Default)]
 struct State {
@@ -606,6 +630,24 @@ impl ZellijPlugin for State {
             );
             "clave".to_string()
         });
+        // #232: resolve which row geometry this bar renders, from the same
+        // plugin configuration `resolve_binary` just read. Every layout since
+        // Task 5 bakes `row_height` alongside `clave_binary`, so a present key
+        // is the steady state; an absent one (pre-#232 layout, hand-edited
+        // config) fails CLOSED to `Double` inside `resolve_row_height` — no
+        // warning owed, unlike the binary path, because there is no wrong
+        // subprocess to run, only a design default to draw.
+        let row_height = resolve_row_height(&config);
+        eprintln!(
+            "clave-bar: row_height: {} ({})",
+            row_height.as_config_value(),
+            if config.contains_key(clave_types::ROW_HEIGHT_KEY) {
+                "from plugin config"
+            } else {
+                "default; key absent"
+            }
+        );
+        self.model.set_row_height(row_height);
         // D37: gate the width machine HERE, not when the snapshot is requested.
         // `load()` only ASKS for permission; the grant arrives later as an
         // event, and zellij renders this pane before then — so a gate set in
@@ -914,8 +956,41 @@ impl ZellijPlugin for State {
         // because the mouse-click map needs the same height, and Mouse events
         // do not carry it.
         self.pane_height = rows;
+        // #232: the elapsed cell's `now`. The TERM_POLL_SECS-cadenced timer
+        // (and every other event this bar already re-renders on) keeps the
+        // minutes honest between store pushes.
+        self.model.tick(wall_now());
         let list: Vec<Row> = self.model.rows().into_iter().map(|(_, row)| row).collect();
-        let lines = render_rows(&list, cols, rows, self.model.widths_at(cols), &self.theme);
+        let row_height = self.model.row_height();
+        let lines = render_rows(
+            &list,
+            cols,
+            rows,
+            self.model.widths_at(cols),
+            &self.theme,
+            row_height,
+        );
+        // #232, the maintainer's resilience ask: one line per frame naming the
+        // geometry, the pane and the slice. Gated — a render fires on every
+        // event, and an ungated line here would drown the CLICK line (which is
+        // not gated) that the next #148 will actually be debugged from.
+        //
+        // `top` re-runs `viewport_top` rather than reimplementing it, through
+        // the same `lines_per_row()` divisor `render_rows` and `click` both
+        // use — no second copy of the follow rule, which is the one thing this
+        // log line must not become.
+        if dbg_log() {
+            eprintln!(
+                "clave-bar render: mode={row_height:?} cols={cols} height={rows} rows={} top={} shown={}",
+                list.len(),
+                clave_bar::render::viewport_top(
+                    list.len(),
+                    list.iter().position(|r| r.selected),
+                    rows / row_height.lines_per_row(),
+                ),
+                lines.len(),
+            );
+        }
         // Final review 2026-08-11: emit the frame WITHOUT a trailing newline.
         // Once the viewport (#148) slices to exactly `rows` lines, the pane is
         // full at steady state; a trailing newline after the bottom row would

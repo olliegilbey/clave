@@ -671,8 +671,16 @@ mod tests {
             std::fs::write(p, b"x").unwrap();
         }
 
-        let cfg = crate::setup::config_kdl(a.cli.to_str().unwrap(), a.wasm.to_str().unwrap());
-        let lay = crate::setup::layout_kdl(a.cli.to_str().unwrap(), a.wasm.to_str().unwrap());
+        let cfg = crate::setup::config_kdl(
+            a.cli.to_str().unwrap(),
+            a.wasm.to_str().unwrap(),
+            clave_types::RowHeight::Double,
+        );
+        let lay = crate::setup::layout_kdl(
+            a.cli.to_str().unwrap(),
+            a.wasm.to_str().unwrap(),
+            clave_types::RowHeight::Double,
+        );
         for (name, text) in [("config", &cfg), ("layout", &lay)] {
             let refs = referenced_paths(text, &root);
             assert!(!refs.is_empty(), "{name}.kdl referenced no installed path");
