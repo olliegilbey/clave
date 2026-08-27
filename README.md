@@ -12,25 +12,31 @@ Stop dealing with everyone creating yet another Electron app to manage agents an
      Edit it there, never here: the SVG is traced from the plugin's own
      renderer, so it can only change by changing the design. -->
 
-The `clave` sidebar has an expanded and collapsed view:
+Every agent is a two-line card, and the sidebar has an expanded and a collapsed view:
 
-| expanded                                                                                                                                                                                                                                         | collapsed                                                                                                                                                                |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| <img src="docs/assets/sidebar-expanded.svg" alt="The expanded clave sidebar: nine rows, each a coloured status mark, a token count, an optional branch or worktree mark, a rename chip, the repo name, and a one-line description." width="620"> | <img src="docs/assets/sidebar-collapsed.svg" alt="The same nine rows collapsed to a strip: the token count becomes a battery glyph and the text truncates." width="300"> |
+| expanded                                                                                                                                                                                                                                                                                     | collapsed                                                                                                                                                                             |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| <img src="docs/assets/sidebar-expanded.svg" alt="The expanded clave sidebar: nine two-line cards. Each card shows a coloured status mark, a rename chip, a description and a token count on its top line, then a branch or worktree mark, the repo, the branch, a PR number, a provider icon, the model and time since you last touched it." width="560"> | <img src="docs/assets/sidebar-collapsed.svg" alt="The same nine cards collapsed to a strip: the branch name drops and the description truncates, everything else stays put." width="440"> |
+
+Prefer one line per agent? `clave rows single` gives you the classic dense list, where the token count becomes a battery glyph (<img alt="" src="docs/assets/glyphs/battery-00.svg" width="16"><img alt="" src="docs/assets/glyphs/battery-06.svg" width="16"><img alt="" src="docs/assets/glyphs/battery-08.svg" width="16"><img alt="" src="docs/assets/glyphs/battery-10.svg" width="16">) when the bar is collapsed. It takes effect at your next launch.
 
 ## What the colours and glyphs mean
 
 <table>
 <tr><td><b>status</b></td><td><img alt="" src="docs/assets/glyphs/status-needs-you.svg" width="18"> waiting on you · <img alt="" src="docs/assets/glyphs/status-working.svg" width="18"> working · <img alt="" src="docs/assets/glyphs/status-done.svg" width="18"> finished while you were away · <img alt="" src="docs/assets/glyphs/status-idle.svg" width="18"> idle · <img alt="" src="docs/assets/glyphs/status-failed.svg" width="18"> last turn failed · <img alt="" src="docs/assets/glyphs/status-stale.svg" width="18"> its directory is gone · <img alt="" src="docs/assets/glyphs/status-dormant.svg" width="18"> dormant, half-faded; opens where it left off · <img alt="" src="docs/assets/glyphs/status-opening.svg" width="18"> opening · <img alt="" src="docs/assets/glyphs/term-running.svg" width="18"> a terminal tab (colours mean the same)</td></tr>
-<tr><td><b>battery</b></td><td><code>105k</code> context spent, in tokens<br><img alt="" src="docs/assets/glyphs/battery-00.svg" width="18"><img alt="" src="docs/assets/glyphs/battery-06.svg" width="18"><img alt="" src="docs/assets/glyphs/battery-08.svg" width="18"><img alt="" src="docs/assets/glyphs/battery-10.svg" width="18"> the same reading as a glyph, when the bar is collapsed<br><code>TERM</code>, a terminal tab</td></tr>
+<tr><td><b>battery</b></td><td><code>105k</code> context spent, in tokens, coloured by how much of your smart zone is gone<br><code>TERM</code>, a terminal tab<br><i>blank</i>, nothing measured yet</td></tr>
 <tr><td><b>mark</b></td><td><i>blank</i>, the repo's ordinary checkout · <img alt="" src="docs/assets/glyphs/mark-branch.svg" width="18"> on a branch · <img alt="" src="docs/assets/glyphs/mark-worktree.svg" width="18"> in its own git worktree</td></tr>
 <tr><td><b>chip</b></td><td>the name you gave the session with <code>/rename</code>; blank until you do<br>on a terminal row, the tab's name</td></tr>
 <tr><td><b>repo</b></td><td><img alt="" src="docs/assets/glyphs/repo-0.svg" width="18"><img alt="" src="docs/assets/glyphs/repo-1.svg" width="18"><img alt="" src="docs/assets/glyphs/repo-4.svg" width="18"><img alt="" src="docs/assets/glyphs/repo-6.svg" width="18"> one colour per repo, wherever it appears</td></tr>
 <tr><td><b>text</b></td><td>Claude's own description of the session, not your prompt<br>on a terminal row, the last command it ran</td></tr>
+<tr><td><b>branch</b></td><td>the branch this checkout is on, beside the repo; expanded view only<br><i>blank</i>, an ordinary checkout</td></tr>
+<tr><td><b>PR</b></td><td><code>#232</code>, the pull request this branch is driving, looked up in the background<br><i>blank</i>, there isn't one</td></tr>
+<tr><td><b>agent</b></td><td><img alt="" src="docs/assets/glyphs/provider-claude.svg" width="18"> <img alt="" src="docs/assets/glyphs/provider-openai.svg" width="18"> who is running the conversation, in their own colour, and the model beside it (<code>opus</code>, <code>sonnet</code>)</td></tr>
+<tr><td><b>elapsed</b></td><td>how long since you last spoke to this agent (<code>4m</code>, <code>3h</code>, <code>2w</code>)</td></tr>
 </table>
 
-Seeing used context per agent is powerful - in expanded view, you'll see the token count, when collapsed you'll see a battery icon.
-You can set when you want the battery to run out, and the corresponding colours based on where you believe the smart zone of your model ends:
+Seeing used context per agent is powerful, so the token count sits on every card in both views, coloured by how close that conversation is to the end of its useful thinking.
+You can set where you believe the smart zone of your model ends, which is where the count turns red:
 
 ```bash
 export CLAVE_AGENT_SMART_ZONE_TOKENS=150000   # the default
@@ -42,7 +48,8 @@ Pairs well with [rot-reducer](https://github.com/olliegilbey/rot-reducer), a plu
 
 You need [`zellij`](https://zellij.dev) (0.44.3 is what's tested), `claude`,
 `git`, plus `fzf` and `zoxide` for the directory picker, and a
-[Nerd Font](https://www.nerdfonts.com/) in your terminal. macOS and Linux.
+[Nerd Font](https://www.nerdfonts.com/) in your terminal, version 3.5 or newer
+so the provider icons have glyphs. macOS and Linux.
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/olliegilbey/clave/releases/latest/download/clave-installer.sh | sh

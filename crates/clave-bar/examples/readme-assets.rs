@@ -19,15 +19,16 @@
 //! shipped palette. Fonts are the ones the design was ratified against:
 //! JetBrainsMono Nerd Font Mono, plus Noto Sans Bamum for the worktree mark
 //! (macOS ships it in the system Supplemental fonts). Override discovery with
-//! `CLAVE_ASSET_FONT` / `CLAVE_ASSET_FONT_BAMUM` / `CLAVE_ASSET_FONT_EXTRA`
-//! (extra = fallback for symbols the mono font lacks).
+//! `CLAVE_ASSET_FONT` / `CLAVE_ASSET_FONT_BAMUM` / `CLAVE_ASSET_FONT_SYMBOLS` /
+//! `CLAVE_ASSET_FONT_EXTRA` (extra = fallback for symbols the mono font lacks).
 //!
-//! It PANICS rather than dropping a glyph no font here carries — an asset that
-//! quietly omits a cell is a lie about the design. The open case is the
-//! provider marks: `cod-claude` U+EC82 and `cod-openai` U+EC81 are in Nerd
-//! Fonts' `glyphnames.json` but not in the released 3.4.0 fonts, whose codicon
-//! block stops at U+EC1E, so these frames cannot be regenerated until the
-//! marks resolve to codepoints a shipped Nerd Font carries (FOOTGUNS, §Text).
+//! **Nerd Fonts 3.5 or newer is required** for the provider marks: `cod-claude`
+//! U+EC82 and `cod-openai` U+EC81 landed in 3.5, and a 3.4 patched font's
+//! codicon block stops at U+EC1E. If the mono font here is older, drop Nerd
+//! Fonts' Symbols-Only face beside it (or name it in `CLAVE_ASSET_FONT_SYMBOLS`)
+//! and it fills the gap. This generator PANICS rather than dropping a glyph no
+//! font carries — an asset that quietly omits a cell is a lie about the design.
+//! (FOOTGUNS, §Text.)
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -97,6 +98,22 @@ fn load_fonts() -> Vec<Font> {
     )
     .expect("Noto Sans Bamum not found; set CLAVE_ASSET_FONT_BAMUM");
     let mut fonts = vec![mono, bamum];
+    // Nerd Fonts' Symbols-Only face, for glyphs newer than the patched mono
+    // font installed here. The provider marks are the live case: they landed in
+    // Nerd Fonts 3.5 and a 3.4 JetBrainsMono stops at U+EC1E. Optional and
+    // consulted only when it is needed — `trace` takes the FIRST face that has
+    // the glyph, so a current mono font makes this a no-op.
+    if let Some(symbols) = find_font(
+        "CLAVE_ASSET_FONT_SYMBOLS",
+        &[
+            "~/Library/Fonts/SymbolsNerdFontMono-Regular.ttf",
+            "/Library/Fonts/SymbolsNerdFontMono-Regular.ttf",
+            "~/.local/share/fonts/SymbolsNerdFontMono-Regular.ttf",
+            "/usr/share/fonts/truetype/nerd-fonts/SymbolsNerdFontMono-Regular.ttf",
+        ],
+    ) {
+        fonts.push(symbols);
+    }
     // Symbols the mono font does not carry (✖ and ↻ live outside the Nerd
     // Font patch ranges); the terminal solves this with system fallback, we
     // solve it with every extra face that exists. `CLAVE_ASSET_FONT_EXTRA`
@@ -343,6 +360,14 @@ fn parse_row(line: &str) -> (Vec<Span>, Vec<(usize, usize, Rgb)>) {
                         }
                     }
                     1 => {} // bold: the outline font is the weight we trace
+                    // Glass (#232): the card re-asserts the DEFAULT background
+                    // on every unselected segment rather than painting one, so
+                    // the terminal's own backdrop shows through. In an SVG the
+                    // frame's own rounded rect is that backdrop, so "no bg" is
+                    // exactly the right thing to record. 39 is its foreground
+                    // twin; the renderer does not emit it today.
+                    49 => pen.bg = None,
+                    39 => pen.fg = None,
                     other => panic!("unexpected SGR code {other} in rendered row"),
                 }
             }
@@ -401,7 +426,10 @@ fn hero_svg(fonts: &[Font], cols: usize, widths: Widths) -> String {
         * font_px;
     let ascent = face.ascender() as f32 / upem * font_px;
     let descent = -face.descender() as f32 / upem * font_px;
-    let cell_h = (ascent + descent) * 1.06;
+    // No extra leading (#232): a terminal cell has none, and the card's whole
+    // idea is the arc BINDING its two lines — six percent of slack between the
+    // rows is enough to break the join and leave two disconnected brackets.
+    let cell_h = ascent + descent;
     let pad = 12.0;
     let width = cols as f32 * advance + pad * 2.0;
     let height = lines.len() as f32 * cell_h + pad * 2.0;
