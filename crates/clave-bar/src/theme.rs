@@ -139,6 +139,39 @@ pub const YELLOW: Rgb = Rgb(0xE6, 0xC3, 0x84);
 pub const ORANGE: Rgb = Rgb(0xFF, 0xA0, 0x66);
 pub const RED: Rgb = Rgb(0xE4, 0x68, 0x76);
 
+// ── the card's fixed hues (#232) ────────────────────────────────────────────
+//
+// The two-line card's own inks, fixed under every theme for the same reason
+// the status marks are: each one is a MEANING (a brand, a pull request, the
+// card's linework) rather than a role the user's theme has an opinion about.
+// Ratified with the card itself — `examples/double-preview.rs` is the picture
+// these values produce.
+
+/// The bracket's alternating pair — two quiet kanagawa inks, cool and warm,
+/// close enough in weight that neither reads as a state. The zebra lives in
+/// this linework: glass forbids painting every second background, so the
+/// alternation is carried by the `\u{256d}`/`\u{2570}` bracket instead.
+pub const BRACKET_A: Rgb = Rgb(0x72, 0x71, 0x69); // fujiGray
+pub const BRACKET_B: Rgb = Rgb(0x9C, 0xAB, 0xCA); // springViolet2
+
+/// The card's quiet metadata ink: branch, model, elapsed, and the `TERM` tag.
+pub const META_INK: Rgb = Rgb(0x72, 0x71, 0x69); // fujiGray
+/// The pull-request number.
+pub const PR_INK: Rgb = Rgb(0x98, 0xBB, 0x6C); // springGreen
+
+/// The provider brand cells. BRAND colours, so they are not themed at all —
+/// nf-cod-claude in Anthropic coral, nf-cod-openai in OpenAI green. A provider
+/// clave does not know renders nothing (`card::provider_mark`).
+pub const CLAUDE_GLYPH: char = '\u{ec82}';
+pub const CLAUDE_INK: Rgb = Rgb(0xD9, 0x77, 0x57);
+pub const OPENAI_GLYPH: char = '\u{ec81}';
+pub const OPENAI_INK: Rgb = Rgb(0x10, 0xA3, 0x7F);
+
+/// The card's rounded bracket, top and bottom — the glyph that binds a row's
+/// two lines into one card (round 7: the light arc, not the heavy one).
+pub const CARD_TOP: char = '\u{256d}';
+pub const CARD_BOT: char = '\u{2570}';
+
 // ── fades ───────────────────────────────────────────────────────────────────
 
 /// Unselected rows recede 25% toward the bar background (lock §6). Selection by

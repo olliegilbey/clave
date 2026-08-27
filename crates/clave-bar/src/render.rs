@@ -466,7 +466,7 @@ pub fn strip_sgr(s: &str) -> String {
 /// excluded rather than half-drawn (same rule as `cell_slice`), which can
 /// leave the row one cell short; padding unstyled keeps the row exactly `cols`
 /// without painting a colour into a cell the clip just took away.
-fn clip_to_cells(s: &str, cols: usize) -> String {
+pub(crate) fn clip_to_cells(s: &str, cols: usize) -> String {
     let mut out = String::with_capacity(s.len());
     let mut at = 0;
     let mut rest = s;
@@ -656,7 +656,10 @@ pub fn render_rows(
         .collect()
 }
 
-fn hue(ink: Option<u8>, theme: &Theme) -> Rgb {
+/// The repo/title ink for a palette index — `None` and out-of-range both fall
+/// back to the theme's untinted grey. Shared with `card.rs` so both row
+/// geometries resolve identity colour the same way.
+pub(crate) fn hue(ink: Option<u8>, theme: &Theme) -> Rgb {
     ink.and_then(|i| theme.palette.get(usize::from(i)))
         .map_or(theme.untinted, |c| *c)
 }
@@ -977,7 +980,7 @@ fn rjust(s: &str, w: usize) -> String {
 /// battery must not be wrong in. Above 9.95m the decimal is dropped rather than
 /// overflowing the cell (`10m`), and the whole figure saturates at `999m` — the
 /// same "at least this bad" direction the ramp's own clamp takes.
-fn token_text(tokens: u32) -> String {
+pub(crate) fn token_text(tokens: u32) -> String {
     // Widened before the arithmetic: `u32::MAX + 500` is not a `u32`, and the
     // rounding is the whole point of doing it in the wider type.
     let tokens = u64::from(tokens);
