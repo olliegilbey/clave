@@ -1,5 +1,17 @@
 # Sidebar visual design — locked
 
+> [!IMPORTANT]
+> **Superseded for the DEFAULT row, 2026-08-26.** The sidebar now renders
+> two-line **cards**, locked in
+> [2026-08-26-double-height-card-lock.md](2026-08-26-double-height-card-lock.md).
+> That file is authoritative for card geometry, the arc zebra, glass, the
+> blank-cell rule and the card-only cells (model, provider, PR, elapsed).
+>
+> This file remains authoritative for **everything else** — the palette, the
+> status mark table, the battery ramp and smart zone, the escape rule — and for
+> the single-line row in full, which is retained behind the flag and still
+> rendered by `clave rows single`.
+
 _Ratified 2026-07-25 by the maintainer, from rendered rows rather than from
 prose. Supersedes the geometry in `2026-07-22-S6-gutter-glyphs.md` and
 `2026-07-22-S8-sidebar-width.md`; both must be revised against this file before
