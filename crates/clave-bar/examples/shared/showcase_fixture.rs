@@ -143,24 +143,13 @@ pub const WEBAPP: u8 = 5;
 /// invents the format too would misrepresent the column in the one image most
 /// people will ever see. Several run past the 22-cell summary column and
 /// truncate, which is the honest common case.
+/// The rows sit in cluster order (#234): a repo's tabs travel together, and
+/// clusters rank by their summed frecency — clave's four tabs are the hottest
+/// cluster, then api-svc, webapp and infra, with the dormant block last. A
+/// fixture that interleaved repos would show an order the live block can no
+/// longer produce.
 pub fn showcase() -> Vec<Row> {
     let mut rows = vec![
-        detail(
-            agent(
-                RowStatus::NeedsYou,
-                Some((3, 52_000)),
-                Provenance::Branch,
-                "api-svc",
-                API_SVC,
-                Some(("AUTH-7", 3)),
-                "Rotate the signing keys",
-            ),
-            "opus",
-            "claude",
-            Some(184),
-            "key-rotation",
-            "4m",
-        ),
         detail(
             agent(
                 RowStatus::Working,
@@ -176,22 +165,6 @@ pub fn showcase() -> Vec<Row> {
             Some(232),
             "double-rows",
             "12m",
-        ),
-        detail(
-            agent(
-                RowStatus::Done,
-                Some((1, 18_000)),
-                Provenance::Main,
-                "webapp",
-                WEBAPP,
-                Some(("CART-99", 6)),
-                "Fix cart total rounding mismatch",
-            ),
-            "haiku",
-            "claude",
-            None,
-            "",
-            "1h",
         ),
         detail(
             terminal(
@@ -225,6 +198,54 @@ pub fn showcase() -> Vec<Row> {
         ),
         detail(
             agent(
+                RowStatus::Stale,
+                Some((10, 412_000)),
+                Provenance::Worktree,
+                "clave",
+                CLAVE,
+                Some(("KDL-GRD", 7)),
+                "Validate generated KDL artifacts",
+            ),
+            "fable",
+            "claude",
+            Some(219),
+            "kdl-guard",
+            "1d",
+        ),
+        detail(
+            agent(
+                RowStatus::NeedsYou,
+                Some((3, 52_000)),
+                Provenance::Branch,
+                "api-svc",
+                API_SVC,
+                Some(("AUTH-7", 3)),
+                "Rotate the signing keys",
+            ),
+            "fable",
+            "claude",
+            Some(184),
+            "key-rotation",
+            "4m",
+        ),
+        detail(
+            agent(
+                RowStatus::Done,
+                Some((1, 18_000)),
+                Provenance::Main,
+                "webapp",
+                WEBAPP,
+                Some(("CART-99", 6)),
+                "Fix cart total rounding mismatch",
+            ),
+            "haiku",
+            "claude",
+            None,
+            "",
+            "1h",
+        ),
+        detail(
+            agent(
                 RowStatus::Failed,
                 Some((5, 79_000)),
                 Provenance::Branch,
@@ -233,7 +254,7 @@ pub fn showcase() -> Vec<Row> {
                 Some(("DNS-TTL", 1)),
                 "Debug staging rollout DNS timeout",
             ),
-            "gpt-5",
+            "5.6sol",
             "openai",
             Some(77),
             "dns-timeout",
@@ -255,22 +276,6 @@ pub fn showcase() -> Vec<Row> {
         ),
         detail(
             agent(
-                RowStatus::Stale,
-                Some((10, 412_000)),
-                Provenance::Worktree,
-                "clave",
-                CLAVE,
-                Some(("KDL-GRD", 7)),
-                "Validate generated KDL artifacts",
-            ),
-            "sonnet",
-            "claude",
-            Some(219),
-            "kdl-guard",
-            "1d",
-        ),
-        detail(
-            agent(
                 RowStatus::Dormant,
                 Some((6, 93_000)),
                 Provenance::Main,
@@ -286,6 +291,6 @@ pub fn showcase() -> Vec<Row> {
             "2w",
         ),
     ];
-    rows[1].selected = true;
+    rows[0].selected = true;
     rows
 }

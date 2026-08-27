@@ -31,7 +31,7 @@ Prefer one line per agent? `clave rows single` gives you the classic dense list,
 <tr><td><b>text</b></td><td>Claude's own description of the session, not your prompt<br>on a terminal row, the last command it ran</td></tr>
 <tr><td><b>branch</b></td><td>the branch this checkout is on, beside the repo; expanded view only<br><i>blank</i>, an ordinary checkout</td></tr>
 <tr><td><b>PR</b></td><td><code>#232</code>, the pull request this branch is driving, looked up in the background<br><i>blank</i>, there isn't one</td></tr>
-<tr><td><b>agent</b></td><td><img alt="" src="docs/assets/glyphs/provider-claude.svg" width="18"> <img alt="" src="docs/assets/glyphs/provider-openai.svg" width="18"> who is running the conversation, in their own colour, and the model beside it (<code>opus</code>, <code>sonnet</code>)</td></tr>
+<tr><td><b>agent</b></td><td><img alt="" src="docs/assets/glyphs/provider-claude.svg" width="18"> <img alt="" src="docs/assets/glyphs/provider-openai.svg" width="18"> who is running the conversation, in their own colour, and the model beside it (<code>fable</code>, <code>sonnet</code>). Codex isn't supported yet: the icon is ready, the launch profile is on its way</td></tr>
 <tr><td><b>elapsed</b></td><td>how long since you last spoke to this agent (<code>4m</code>, <code>3h</code>, <code>2w</code>)</td></tr>
 </table>
 
