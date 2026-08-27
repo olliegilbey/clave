@@ -3542,8 +3542,9 @@ mod tests {
 
     // --- repo-grouped frecency (double layer, ratified 2026-08-26) ----------
 
-    /// A live agent with a repo and a bucket count for today — the smallest
-    /// row that participates in the double layer.
+    /// Every bump lands on day 100 — the section's pinned `today` — so a
+    /// row scores exactly `count × 1000` millipoints undecayed, keeping the
+    /// cluster sums asserted below hand-checkable at a glance.
     fn grouped(uuid: &str, tab_id: usize, root: &str, count: u32) -> Agent {
         let mut a = agent(uuid, Status::Idle, Some(tab_id));
         a.repo_root = root.into();
