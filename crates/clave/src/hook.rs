@@ -1066,7 +1066,7 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
     } else {
         None
     };
-    let snap = with_store_mut(&paths, |s| {
+    let (snap, pr_stale) = with_store_mut(&paths, |s| {
         if let Some(m) = &mint {
             // Re-checked under the flock: a racing hook may have minted first,
             // in which case mint_adopted lands on the preserve path anyway.
@@ -1127,10 +1127,25 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
         // mint always lands here too (row pane None → Some), so an adoption
         // pushes even when the event itself moved nothing.
         changed |= apply_hook_pane(s, &uuid, event, pane);
-        changed.then(|| snapshot_from(s))
+        // Read-only (#232): comparing two integers/strings against the row
+        // this same write just touched. NOT a network call — that discipline
+        // is the whole point (§6.5) — just the decision whether one is owed.
+        let pr_stale = s
+            .agents
+            .get(&uuid)
+            .is_some_and(|rec| crate::pr::pr_is_stale(rec, now_unix()));
+        (changed.then(|| snapshot_from(s)), pr_stale)
     })?;
     if let Some(snap) = snap {
         push_snapshot(&snap);
+    }
+    // Spawned OUTSIDE the flock — `with_store_mut` above has already
+    // returned, so `pr-sync` (its own locked RMW) can never deadlock against
+    // this hook's lock. `pr-sync` re-checks staleness itself, so a hook that
+    // fires again before `pr-sync` has answered spawns harmlessly again;
+    // the TTL is what keeps `gh` from being asked twice for the same answer.
+    if pr_stale {
+        crate::pr::spawn_pr_sync(&uuid);
     }
     Ok(())
 }

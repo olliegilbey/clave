@@ -12,7 +12,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
-use clave::{add, dev, hook, lsview, open, release, setup, spawn, store};
+use clave::{add, dev, hook, lsview, open, pr, release, setup, spawn, store};
 
 #[derive(Parser)]
 #[command(
@@ -103,6 +103,18 @@ enum Command {
     /// the done-unread flag clears durably (§6.5). Store-only, no pipe push.
     #[command(hide = true)]
     Focus {
+        /// The agent's session UUID (the store join key).
+        uuid: String,
+    },
+
+    /// Resolve (or re-resolve) a row's open-PR number via `gh` (#232).
+    ///
+    /// Hidden from `--help`: `clave hook` spawns this fully detached the
+    /// moment a row's cached PR answer goes stale (TTL or branch change) —
+    /// it is never run by hand. Runs its own locked store round trips; the
+    /// `gh` call itself sits outside the lock, hard-killed after 5s.
+    #[command(hide = true)]
+    PrSync {
         /// The agent's session UUID (the store join key).
         uuid: String,
     },
@@ -544,6 +556,13 @@ fn main() -> Result<()> {
             if let Some(snap) = store::apply_focus(&paths, &uuid, store::now_unix())? {
                 hook::push_snapshot(&snap);
             }
+            Ok(())
+        }
+        Some(Command::PrSync { uuid }) => {
+            // Detached from the hook (#232): nobody is watching this
+            // process's exit code, so it degrades silently end to end —
+            // same Global Constraint as `clave hook` itself.
+            pr::run_pr_sync(&uuid);
             Ok(())
         }
         Some(Command::Touch { tab_id }) => {
