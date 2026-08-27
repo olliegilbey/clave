@@ -939,6 +939,30 @@ impl BarModel {
         }
     }
 
+    /// The repo layer's grouping key for a LIVE row (double-layer frecency,
+    /// ratified 2026-08-26): the repo_root of the tab's agent, or — for a
+    /// terminal tab — of the fleet checkout its speaker pane sits in, the
+    /// same [`Self::checkout_of`] resolution that names its repo column
+    /// (#206). `repo_root` is the PARENT repo even for a worktree agent (the
+    /// worktree path lives in its own field), so worktree tabs cluster with
+    /// their repo. `None` — Recency mode, no repo, unresolved cwd — means
+    /// the row is a group of one.
+    fn live_group(&self, t: &TabMeta) -> Option<String> {
+        match self.order {
+            OrderMode::Recency => None,
+            OrderMode::Frecency { .. } => self
+                .agent_in_tab(t.tab_id)
+                .or_else(|| {
+                    self.speaker_pane(t.position)
+                        .and_then(|p| self.pane_facts.get(&p.pane_id))
+                        .and_then(|f| f.cwd.as_deref())
+                        .and_then(|cwd| self.checkout_of(cwd))
+                })
+                .map(|a| a.repo_root.clone())
+                .filter(|r| !r.is_empty()),
+        }
+    }
+
     /// Same rule read from the dormant side — one rule for both row classes,
     /// or closing a tab would change a row's rank (R2).
     fn dormant_key(&self, a: &Agent) -> (u64, u64) {
@@ -2174,6 +2198,14 @@ impl BarModel {
     /// else": the closed row leaves the live block for the head of the
     /// dormant one, and every survivor holds its relative order.
     ///
+    /// Double-layer frecency (ratified 2026-08-26) weakens that again, for
+    /// Frecency mode's live block only: rows cluster by repo and clusters
+    /// rank by summed member score, so a close shrinks its cluster's sum and
+    /// the surviving cluster may move AS A UNIT past another. Accepted
+    /// deliberately — the maintainer wants a repo's tabs adjacent more than
+    /// he wants closes inert. Within a cluster, and everywhere outside the
+    /// grouped live block, the invariant stands.
+    ///
     /// **The ordinal is untouched by any of this.** Both blocks sort on the
     /// same key by the same comparator, which is what keeps `live_ord` and
     /// `dormant_ord` the one ranking rule for both row classes — the identity
@@ -2209,7 +2241,7 @@ impl BarModel {
         // dormant rows, but it costs nothing and keeps the two keys readable
         // as the single scheme they are.
         let inks = ProvisionalInks::allocate(&self.agents);
-        let mut live: Vec<Ranked> = Vec::new();
+        let mut live: Vec<(Option<String>, Ranked)> = Vec::new();
         for t in &self.tabs {
             // Lock §7.1: the zellij tab name is used ONLY for a terminal tab.
             // An agent row's identity is its title chip and repo, both from the
@@ -2220,16 +2252,19 @@ impl BarModel {
                 None => self.terminal_content(t, &inks),
             };
             live.push((
-                self.live_key(t),
-                t.position,
+                self.live_group(t),
                 (
-                    RowKey::Tab(t.tab_id),
-                    Row {
-                        content,
-                        // A dormant selection steals the highlight from every tab.
-                        selected: selected_dormant.is_none() && t.active,
-                        dormant: false,
-                    },
+                    self.live_key(t),
+                    t.position,
+                    (
+                        RowKey::Tab(t.tab_id),
+                        Row {
+                            content,
+                            // A dormant selection steals the highlight from every tab.
+                            selected: selected_dormant.is_none() && t.active,
+                            dormant: false,
+                        },
+                    ),
                 ),
             ));
         }
@@ -2261,12 +2296,43 @@ impl BarModel {
                 ),
             ));
         }
-        // ONE comparator, applied twice. Sorting the blocks separately is the
-        // whole of segregation; giving either block its own rule would be the
-        // defect two reviewers caught on PR #135, arriving by a third route.
-        live.sort_by(rank_desc);
+        // ONE row comparator, applied twice — giving either block its own
+        // ROW rule would be the defect two reviewers caught on PR #135. The
+        // live block adds a layer ABOVE that rule (double-layer frecency,
+        // ratified 2026-08-26): rows cluster by repo, clusters rank by
+        // (Σ member score, best member key), members keep the row rule
+        // within. A group-of-one's primary is its own key restated, so
+        // ungrouped rows — Recency mode, no repo, every pre-grouping test —
+        // sort exactly as before. The group-identity tiebreak keeps two
+        // clusters that tie exactly (identical sum AND best) contiguous
+        // rather than interleaved; zero-sum clusters hold on the best
+        // member's ordinal fallback, so a fully-decayed fleet keeps its
+        // clusters instead of de-grouping at midnight. Dormant rows never
+        // group (maintainer's caveat): dormancy leaves the repo layer.
+        let mut clusters: BTreeMap<String, (u64, (u64, u64))> = BTreeMap::new();
+        for (repo, (key, _, _)) in &live {
+            if let Some(r) = repo {
+                let c = clusters.entry(r.clone()).or_default();
+                c.0 += key.0;
+                c.1 = c.1.max(*key);
+            }
+        }
+        let primary = |(repo, ranked): &(Option<String>, Ranked)| match repo {
+            Some(r) => clusters[r.as_str()],
+            None => (ranked.0.0, ranked.0),
+        };
+        live.sort_by(|a, b| {
+            primary(b)
+                .cmp(&primary(a))
+                .then_with(|| a.0.cmp(&b.0))
+                .then_with(|| rank_desc(&a.1, &b.1))
+        });
         dormant.sort_by(rank_desc);
-        live.into_iter().chain(dormant).map(|(_, _, r)| r).collect()
+        live.into_iter()
+            .map(|(_, r)| r)
+            .chain(dormant)
+            .map(|(_, _, r)| r)
+            .collect()
     }
 
     /// How many leading rows form the LIVE block (#112). [`Self::rows`] emits
@@ -3685,6 +3751,227 @@ mod tests {
                 RowKey::Tab(1),                       // block segregation: live always above
                 RowKey::Dormant("u-invested".into()), // 3000 millipoints
                 RowKey::Dormant("u-cold".into()),     // zero fallback, ordinal 999
+            ]
+        );
+    }
+
+    // --- repo-grouped frecency (double layer, ratified 2026-08-26) ----------
+
+    /// Every bump lands on day 100 — the section's pinned `today` — so a
+    /// row scores exactly `count × 1000` millipoints undecayed, keeping the
+    /// cluster sums asserted below hand-checkable at a glance.
+    fn grouped(uuid: &str, tab_id: usize, root: &str, count: u32) -> Agent {
+        let mut a = agent(uuid, Status::Idle, Some(tab_id));
+        a.repo_root = root.into();
+        a.buckets = [(100, count)].into();
+        a
+    }
+
+    /// The double layer itself: live rows cluster by repo, the CLUSTERS rank
+    /// by summed member score, rows within a cluster by their own. Raw scores
+    /// interleave the repos (10000, 8000, 7000, 1000); the sums (b: 15000 >
+    /// a: 11000) put every b row above every a row anyway.
+    #[test]
+    fn live_rows_cluster_by_repo_ranked_by_the_groups_sum() {
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![
+            tab(1, 0, "a1", false),
+            tab(2, 1, "b1", false),
+            tab(3, 2, "a2", false),
+            tab(4, 3, "b2", false),
+        ]);
+        let mut s = snap(
+            1,
+            vec![
+                grouped("u-a1", 1, "/r/a", 10),
+                grouped("u-b1", 2, "/r/b", 8),
+                grouped("u-a2", 3, "/r/a", 1),
+                grouped("u-b2", 4, "/r/b", 7),
+            ],
+        );
+        s.order = OrderMode::Frecency {
+            half_life_hours: 24,
+        };
+        s.today = 100;
+        m.apply_snapshot(s);
+        assert_eq!(
+            keys(&m),
+            vec![
+                RowKey::Tab(2), // b1 8000 — group b, Σ 15000
+                RowKey::Tab(4), // b2 7000
+                RowKey::Tab(1), // a1 10000 — group a, Σ 11000
+                RowKey::Tab(3), // a2 1000
+            ]
+        );
+    }
+
+    /// A row outside every repo is its own group of one: its own score IS the
+    /// sum it ranks by, so it slots between clusters exactly where flat
+    /// frecency would have put a whole repo.
+    #[test]
+    fn a_row_outside_any_repo_is_its_own_group() {
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![
+            tab(1, 0, "nr1", false),
+            tab(2, 1, "a1", false),
+            tab(3, 2, "a2", false),
+            tab(4, 3, "nr2", false),
+        ]);
+        let mut s = snap(
+            1,
+            vec![
+                grouped("u-nr1", 1, "", 10), // no repo: 10000 alone
+                grouped("u-a1", 2, "/r/a", 5),
+                grouped("u-a2", 3, "/r/a", 4), // group a: Σ 9000
+                grouped("u-nr2", 4, "", 6),    // no repo: 6000 alone
+            ],
+        );
+        s.order = OrderMode::Frecency {
+            half_life_hours: 24,
+        };
+        s.today = 100;
+        m.apply_snapshot(s);
+        assert_eq!(
+            keys(&m),
+            vec![
+                RowKey::Tab(1), // 10000 beats the a cluster's 9000
+                RowKey::Tab(2),
+                RowKey::Tab(3),
+                RowKey::Tab(4), // 6000 trails it
+            ]
+        );
+    }
+
+    /// The maintainer's caveat: dormancy leaves the grouping world entirely.
+    /// A dormant row ranks by its OWN score, flat — its repo's live sum
+    /// neither lifts it nor pins it, and dormant rows of one repo do not
+    /// cluster.
+    #[test]
+    fn dormant_rows_ignore_repo_grouping_and_rank_flat() {
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(1, 0, "live", true)]);
+        let mut d_corti = agent("d-corti", Status::Idle, None);
+        d_corti.repo_root = "/r/corti".into();
+        d_corti.buckets = [(100, 5)].into();
+        let mut d_clave = agent("d-clave", Status::Idle, None);
+        d_clave.repo_root = "/r/clave".into();
+        d_clave.buckets = [(100, 1)].into();
+        let mut s = snap(
+            1,
+            vec![grouped("u-live", 1, "/r/clave", 20), d_corti, d_clave],
+        );
+        s.order = OrderMode::Frecency {
+            half_life_hours: 24,
+        };
+        s.today = 100;
+        m.apply_snapshot(s);
+        assert_eq!(
+            keys(&m),
+            vec![
+                RowKey::Tab(1),                    // clave's 20000 stays live-side only
+                RowKey::Dormant("d-corti".into()), // 5000 flat
+                RowKey::Dormant("d-clave".into()), // 1000 — no ride on clave's sum
+            ]
+        );
+    }
+
+    /// A terminal tab whose speaker pane sits inside a fleet checkout joins
+    /// that repo's cluster — same `checkout_of` resolution as its repo column
+    /// (#206). Its 2000 lifts clave's sum to 11000 over corti's 8000; as a
+    /// singleton it would have trailed both (order unchanged from flat) and
+    /// the assertion would not distinguish, so the middle position is the
+    /// proof of membership.
+    #[test]
+    fn a_terminal_tab_joins_its_repos_cluster() {
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![
+            tab(10, 0, "Tab #1", true),
+            tab(11, 1, "clave", false),
+            tab(12, 2, "corti", false),
+        ]);
+        m.apply_panes(vec![pane(0, 5, false, true)]);
+        let mut s = snap(
+            1,
+            vec![
+                grouped("u-clave", 11, "/r/clave", 9),
+                grouped("u-corti", 12, "/r/corti", 8),
+            ],
+        );
+        s.order = OrderMode::Frecency {
+            half_life_hours: 24,
+        };
+        s.today = 100;
+        s.tab_buckets = [(10usize, [(100u32, 2u32)].into())].into();
+        m.apply_snapshot(s);
+        m.apply_pane_facts(vec![probe(5, Some("/r/clave/sub"), None)]);
+        assert_eq!(
+            keys(&m),
+            vec![
+                RowKey::Tab(11), // clave 9000, Σ 11000
+                RowKey::Tab(10), // the terminal's 2000 rides with it
+                RowKey::Tab(12), // corti 8000
+            ]
+        );
+    }
+
+    /// Recency mode is untouched by the repo layer: pure ordinal order, even
+    /// when grouping would have reordered (a's summed ordinals would front
+    /// both its tabs).
+    #[test]
+    fn recency_mode_ignores_repo_grouping() {
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![
+            tab(1, 0, "a1", false),
+            tab(2, 1, "b1", false),
+            tab(3, 2, "a2", false),
+        ]);
+        let mut a1 = agent("u-a1", Status::Idle, Some(1));
+        a1.repo_root = "/r/a".into();
+        let mut b1 = agent("u-b1", Status::Idle, Some(2));
+        b1.repo_root = "/r/b".into();
+        let mut a2 = agent("u-a2", Status::Idle, Some(3));
+        a2.repo_root = "/r/a".into();
+        let mut s = snap_full(1, vec![a1, b1, a2], &[(1, 30), (2, 20), (3, 10)]);
+        s.order = OrderMode::Recency;
+        m.apply_snapshot(s);
+        assert_eq!(
+            keys(&m),
+            vec![RowKey::Tab(1), RowKey::Tab(2), RowKey::Tab(3)]
+        );
+    }
+
+    /// A fully-decayed fleet must NOT spontaneously de-group at midnight:
+    /// every score hits zero after seven idle days, and if a zero sum meant
+    /// "flat", the live block would shuffle with no interaction at all. The
+    /// zero-sum cluster holds on its best member's ordinal fallback, so the
+    /// freshest repo fronts and its tabs stay together.
+    #[test]
+    fn zero_score_clusters_hold_on_the_ordinal_fallback() {
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![
+            tab(1, 0, "a1", false),
+            tab(2, 1, "b1", false),
+            tab(3, 2, "a2", false),
+        ]);
+        let mut a1 = agent("u-a1", Status::Idle, Some(1));
+        a1.repo_root = "/r/a".into();
+        let mut b1 = agent("u-b1", Status::Idle, Some(2));
+        b1.repo_root = "/r/b".into();
+        let mut a2 = agent("u-a2", Status::Idle, Some(3));
+        a2.repo_root = "/r/a".into();
+        // No buckets anywhere; ordinals a1 30 > b1 20 > a2 10.
+        let mut s = snap_full(1, vec![a1, b1, a2], &[(1, 30), (2, 20), (3, 10)]);
+        s.order = OrderMode::Frecency {
+            half_life_hours: 24,
+        };
+        s.today = 100;
+        m.apply_snapshot(s);
+        assert_eq!(
+            keys(&m),
+            vec![
+                RowKey::Tab(1), // a's best ordinal 30 fronts the cluster
+                RowKey::Tab(3), // a2 rides with its repo, past b1's 20
+                RowKey::Tab(2),
             ]
         );
     }
