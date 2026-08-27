@@ -1,642 +1,392 @@
-//! clave sidebar — DOUBLE-HEIGHT row candidates, rendered for screenshots.
+//! clave sidebar — the DOUBLE-HEIGHT card, rendered.
 //!
 //!     cargo run -p clave-bar --example double-preview
 //!
-//! NOT the locked design and NOT `render_rows` — this is the candidate
-//! explorer for the two-line row (session DOUBLE, 2026-08-26+), the same role
-//! the D17 width candidates played. It borrows the ratified colour and glyph
-//! machinery from `render.rs` so the candidates look like clave, but the
-//! geometry here is proposal, not authority. If a candidate is ratified, the
-//! layout moves into `render_rows` and this file becomes the preview of the
-//! new lock.
+//! The preview of the lock ratified 2026-08-26 — not its authority.
+//! `docs/superpowers/specs/2026-08-26-double-height-card-lock.md` is
+//! authoritative for every ruling, number and rationale; where this example and
+//! that document disagree, the document wins and this file is the bug. It plays
+//! the role `bar-preview.rs` plays for the single-line lock.
 //!
-//! Round 9: the 38-col card is ratified as the COLLAPSED profile, and this
-//! file now renders the EXPANDED candidate beside it for comparison — same
-//! card, +10 columns: a branch beside the repo on line 2 (blank on a
-//! default checkout, same "blank is the meaning" rule as the prov glyph)
-//! and a wider summary flex on line 1. Nothing else moves. Round 9b: repo
-//! and branch share one collective budget — the branch sits one space after
-//! the repo NAME (not its padded cell) and takes the leftover columns, with
-//! a guaranteed minimum; a long repo truncates before a branch does.
-//! RATIFIED 2026-08-26 ("that's the one"): both profiles are now final —
-//! this file is the visual spec for #232 in its entirety.
+//! Every card below comes from `clave_bar::render::render_rows` in
+//! `RowHeight::Double` — the same call the plugin renders with, reaching the
+//! same `card::render_card` inside it. During the design rounds this file
+//! carried its OWN copy of the geometry, which is exactly the drift the
+//! single-line preview was rewritten in Rust to end; the mock fleet stayed, the
+//! second renderer did not. Move a cell in `card.rs` and this preview moves with
+//! it, or the width assertion below fails.
 //!
-//! Round 6 state: the layout is settled — rounded-corner bracket ╭╰,
-//! two-line card, full glass (no painted backgrounds but the selection),
-//! token count top-right of line 1 in ramp ink:
-//!   line 1:  status ╭ chip-pill  title/summary     tokens
-//!   line 2:  prov   ╰ repo  #PR  icon  model      elapsed
-//! Ink placement is settled (round 6's O): brackets alternate two neutral
-//! inks per card, provenance carries the repo ink. The joiner is the light
-//! arc (round 7). Round 8 adds the space rules: a row with NO renamed title
-//! drops the pill and lets the summary claim its columns, and terminal tabs
-//! are pills too — dark bg where the title chips are coloured. Earlier
-//! rounds are retired; git history holds them.
+//! Two profiles, one card:
 //!
-//! Background: Ollie's terminal renders painted cell backgrounds OPAQUE
-//! (probe, 2026-08-28) — so translucency ("glass") exists only where NO
-//! background is painted. Per-cell opacity is not expressible in ANSI at all:
-//! a cell is either default-bg (glass) or a concrete RGB (opaque). The zebra
-//! variant paints every second card and leaves the others glass — the closest
-//! the protocol gets to "two opacities".
+//! ```text
+//!   line 1:  status ╭ chip-pill  summary            tokens
+//!   line 2:  prov   ╰ repo [branch]  #PR  provider  model   elapsed
+//! ```
 //!
-//! GLYPH RULE — every glyph is a `\u{...}` escape, never a literal (lock §5.4).
+//! COLLAPSED is 38 columns; EXPANDED is 48 and adds exactly two things — the
+//! branch beside the repo on line 2, and a wider line-1 summary flex. Repo and
+//! branch share one collective budget, so a long repo truncates before a branch
+//! does. Unselected cards paint NO background (glass); the selection is a full
+//! opaque bar; the zebra lives in the arc's alternating ink.
+//!
+//! GLYPH RULE — load-bearing (lock §5.4). Every glyph below is a `\u{...}`
+//! escape, never a literal character: during the design rounds literal glyphs
+//! were silently lost in transit twice.
 
 use clave_bar::render::{
-    BASE, CHIP_INK, CONSOLE, DEFAULT_INK, DORMANT_FADE, PALETTE, RESET, Rgb, RowStatus,
-    display_cells, strip_sgr,
+    Provenance, RESET, Rgb, Row, RowContent, RowHeight, RowStatus, TermStatus, Theme, Widths,
+    display_cells, render_rows, strip_sgr,
 };
-use clave_bar::theme::Theme;
 
-// Mirrors of render.rs internals a candidate needs but the lock keeps private.
-const SEL_BG: Rgb = Rgb(0x2D, 0x4F, 0x67); // waveBlue2 — the selected row
-const FADE: f64 = 0.25; // unselected recession (lock §6)
-const LCAP: char = '\u{e0b6}';
-const RCAP: char = '\u{e0b4}';
-const ELLIPSIS: char = '\u{2026}';
+/// The preview's own chrome — the profile captions. Not part of the design.
+const DIM: Rgb = Rgb(0x71, 0x7C, 0x7C);
 
-// The new cells.
-const CLAUDE_GLYPH: char = '\u{ec82}'; // nf-cod-claude
-const OPENAI_GLYPH: char = '\u{ec81}'; // nf-cod-openai
-const CLAUDE_INK: Rgb = Rgb(0xD9, 0x77, 0x57); // Anthropic coral
-const OPENAI_INK: Rgb = Rgb(0x10, 0xA3, 0x7F); // OpenAI green
-const META_INK: Rgb = Rgb(0x72, 0x71, 0x69); // fujiGray — model name, elapsed
-const PR_INK: Rgb = Rgb(0x98, 0xBB, 0x6C); // springGreen — PR number
-const BRANCH: char = '\u{f062c}'; // nf-md-source_branch
-const WORKTREE: char = '\u{168c2}'; // bamum tree (the invented worktree mark)
-
-const CHIP_W: usize = 7;
-// 9 plus a leading space (round 8d; was 6, then 12, then 10): the repo text
-// starts one cell in, vertically aligned with the pill LABEL on line 1
-// (both start at column 7). The repo cell still absorbs line 2's slack so
-// the PR number starts late and the model→elapsed gap stays closed.
-const REPO_W: usize = 9;
-const MODEL_W: usize = 6;
-// The expanded profile's branch MINIMUM (round 9b): repo and branch share
-// a collective REPO_W + 1 + BRANCH_W budget, branch taking whatever the
-// repo name leaves, never less than this. 0 = collapsed, no branch.
-const BRANCH_W: usize = 9;
-
-#[derive(Clone, Copy)]
-enum Provider {
-    Claude,
-    OpenAi,
-}
-
-impl Provider {
-    fn mark(self) -> (char, Rgb) {
-        match self {
-            Provider::Claude => (CLAUDE_GLYPH, CLAUDE_INK),
-            Provider::OpenAi => (OPENAI_GLYPH, OPENAI_INK),
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum Prov {
-    Main,
-    Branch,
-    Worktree,
-}
-
-impl Prov {
-    fn mark(self) -> Option<char> {
-        match self {
-            Prov::Main => None,
-            Prov::Branch => Some(BRANCH),
-            Prov::Worktree => Some(WORKTREE),
-        }
-    }
-}
-
-struct R {
+/// One mock agent card. Field-for-field the shape `RowContent::Agent` carries,
+/// with a `Default` so each row below states only what makes it interesting.
+struct A {
     status: RowStatus,
-    prov: Prov,
-    /// label + palette index; `None` bg means the TERM chip (dark on default).
-    chip: Option<(&'static str, Option<usize>)>,
+    prov: Provenance,
+    chip: Option<&'static str>,
+    chip_ink: Option<u8>,
     repo: &'static str,
-    repo_ink: usize,
-    /// The checkout's branch — expanded profile only; "" on a default
-    /// checkout (blank is the meaning, like the prov glyph).
+    repo_ink: Option<u8>,
     branch: &'static str,
     pr: Option<u32>,
-    provider: Option<Provider>,
-    model: &'static str,
-    /// `None` renders the TERM tag in the token cell (current design language).
-    tokens: Option<&'static str>,
+    provider: Option<&'static str>,
+    model: Option<&'static str>,
+    /// The ramp level AND the count it was bucketed from, together, the way a
+    /// real snapshot carries them (#105) — the ink is the level's band and the
+    /// text the exact magnitude, so a fixture cannot show a card no live row
+    /// could produce.
+    battery: Option<(u8, u32)>,
     elapsed: &'static str,
     summary: &'static str,
     selected: bool,
     dormant: bool,
 }
 
-/// Round 7: O is ratified-in-waiting — alternating neutral brackets, repo
-/// ink on provenance, full glass. The last hunt is the joiner GLYPH: every
-/// stackable top/bottom pair Unicode offers, rendered side by side.
-struct FV {
-    name: &'static str,
-    cols: usize,
-    top: char,
-    bot: char,
-    /// Branch cell width on line 2; 0 renders the collapsed card (no cell).
-    branch_w: usize,
-}
-
-/// The bracket's alternating pair — two quiet kanagawa inks, cool and warm,
-/// close enough in weight that neither reads as a state.
-const BRACKET_A: Rgb = Rgb(0x72, 0x71, 0x69); // fujiGray
-const BRACKET_B: Rgb = Rgb(0x9C, 0xAB, 0xCA); // springViolet2
-
-fn pad(s: &str, w: usize) -> String {
-    let cells = display_cells(s);
-    if cells > w {
-        let mut out = clave_bar::render::cell_slice(s, 0, w.saturating_sub(1));
-        out.push(ELLIPSIS);
-        out
-    } else {
-        format!("{s}{}", " ".repeat(w - cells))
-    }
-}
-
-fn rpad(s: &str, w: usize) -> String {
-    let cells = display_cells(s);
-    if cells >= w {
-        pad(s, w)
-    } else {
-        format!("{}{s}", " ".repeat(w - cells))
-    }
-}
-
-/// Token-count ink by the ramp's risk bands, approximated for the mock.
-fn tok_ink(t: &str) -> Rgb {
-    let k: u32 = t.trim_end_matches('k').parse().unwrap_or(0);
-    match k {
-        0..=79 => Rgb(0x98, 0xBB, 0x6C),    // springGreen
-        80..=129 => Rgb(0xE6, 0xC3, 0x84),  // carpYellow
-        130..=169 => Rgb(0xFF, 0xA0, 0x66), // surimiOrange
-        _ => Rgb(0xE4, 0x68, 0x76),         // waveRed
-    }
-}
-
-fn render_f_pair(r: &R, v: &FV, zebra_paint: bool) -> (String, String) {
-    // Glass rule: `None` paints NOTHING — the terminal's own (translucent)
-    // background shows through, with `49m` (default bg) re-asserted so the
-    // selection bar never bleeds into the glass after it. Selection stays a
-    // full opaque bar.
-    let row_bg: Option<Rgb> = if r.selected { Some(SEL_BG) } else { None };
-    let mix_to = row_bg.unwrap_or(BASE);
-    let ink = |c: Rgb| -> Rgb {
-        if r.dormant {
-            c.mix(mix_to, DORMANT_FADE)
-        } else if !r.selected {
-            c.mix(mix_to, FADE)
-        } else {
-            c
-        }
-    };
-    let paint = |bg: Option<Rgb>, c: Rgb, s: &str| match bg {
-        Some(b) => format!("{}{}{s}", b.bg(), c.fg(), s = s),
-        None => format!("\u{1b}[49m{}{s}", c.fg(), s = s),
-    };
-    let seg = |c: Rgb, s: &str| paint(row_bg, c, s);
-    // O's inking, now baked in: the bracket alternates between two neutrals
-    // (the zebra lives in the linework), and provenance carries the repo ink.
-    let bracket_ink = ink(if zebra_paint { BRACKET_B } else { BRACKET_A });
-    let prov_ink = ink(PALETTE[r.repo_ink].0);
-    let terminal = r.tokens.is_none();
-
-    // ── line 1: status ╭ chip-pill title [tokens?] ──
-    let (mark, mark_ink) = if terminal {
-        (CONSOLE, DEFAULT_INK)
-    } else {
-        r.status.mark(&Theme::default())
-    };
-    let mut l1 = String::new();
-    l1.push_str(&seg(ink(mark_ink), &format!(" {mark} ")));
-    l1.push_str(&seg(bracket_ink, &format!("{} ", v.top)));
-    match r.chip {
-        Some((label, Some(pal))) => {
-            let chip_bg = ink(PALETTE[pal].0);
-            l1.push_str(&seg(chip_bg, &LCAP.to_string()));
-            l1.push_str(&format!(
-                "{}{}{}{RESET}",
-                chip_bg.bg(),
-                ink(CHIP_INK).fg(),
-                pad(label, CHIP_W)
-            ));
-            l1.push_str(&seg(chip_bg, &RCAP.to_string()));
-        }
-        // The TERM pill: same pill shape as the title chips, dark bg instead
-        // of a palette colour (round 8, Ollie's mock).
-        Some((label, None)) => {
-            l1.push_str(&seg(ink(CHIP_INK), &LCAP.to_string()));
-            l1.push_str(&format!(
-                "{}{}{}{RESET}",
-                CHIP_INK.bg(),
-                ink(DEFAULT_INK).fg(),
-                pad(label, CHIP_W)
-            ));
-            l1.push_str(&seg(ink(CHIP_INK), &RCAP.to_string()));
-        }
-        // No renamed title: no pill at all — the summary claims its columns
-        // (round 8): the text starts at the bracket and runs the full flex.
-        None => {}
-    }
-    let flex = if r.chip.is_some() {
-        v.cols - 21
-    } else {
-        v.cols - 12
-    };
-    l1.push_str(&seg(
-        ink(DEFAULT_INK),
-        &format!(" {}", pad(r.summary, flex)),
-    ));
-    match r.tokens {
-        Some(t) => l1.push_str(&seg(ink(tok_ink(t)), &format!(" {}", rpad(t, 4)))),
-        None => l1.push_str(&seg(ink(META_INK), &format!(" {}", rpad("TERM", 4)))),
-    }
-    l1.push_str(&seg(DEFAULT_INK, " "));
-
-    // ── line 2: prov ╰ repo #PR [tokens?] icon model … elapsed [tokens?] ──
-    let mut l2 = String::new();
-    let prov = r.prov.mark().map(|g| g.to_string()).unwrap_or(" ".into());
-    l2.push_str(&seg(prov_ink, &format!(" {prov} ")));
-    l2.push_str(&seg(bracket_ink, &format!("{} ", v.bot)));
-    // Round 9, expanded only: repo and branch share ONE collective budget
-    // (round 9b) — the branch starts right after the repo name and claims
-    // every column the repo doesn't use, in meta ink so the repo's palette
-    // ink keeps carrying the identity. Branch names run longer than repo
-    // names, so the branch is guaranteed its `branch_w` minimum: a long
-    // repo truncates first. The PR column never moves.
-    if v.branch_w == 0 {
-        l2.push_str(&seg(
-            ink(PALETTE[r.repo_ink].0),
-            &format!(" {}", pad(r.repo, REPO_W)),
-        ));
-    } else {
-        let total = REPO_W + 1 + v.branch_w;
-        if r.branch.is_empty() {
-            l2.push_str(&seg(
-                ink(PALETTE[r.repo_ink].0),
-                &format!(" {}", pad(r.repo, total)),
-            ));
-        } else {
-            let repo_w = display_cells(r.repo).min(total - v.branch_w - 1);
-            l2.push_str(&seg(
-                ink(PALETTE[r.repo_ink].0),
-                &format!(" {}", pad(r.repo, repo_w)),
-            ));
-            l2.push_str(&seg(
-                ink(META_INK),
-                &format!(" {}", pad(r.branch, total - repo_w - 1)),
-            ));
-        }
-    }
-    let pr = r.pr.map(|n| format!("#{n}")).unwrap_or_default();
-    l2.push_str(&seg(ink(PR_INK), &format!(" {}", pad(&pr, 5))));
-    match r.provider {
-        // Two spaces before the icon (round 8c): the extra column between
-        // the PR number and the model name.
-        Some(p) => {
-            let (g, c) = p.mark();
-            l2.push_str(&seg(ink(c), &format!("  {g}")));
-        }
-        None => l2.push_str(&seg(DEFAULT_INK, "   ")),
-    }
-    l2.push_str(&seg(ink(META_INK), &format!(" {}", pad(r.model, MODEL_W))));
-    let fill = v
-        .cols
-        .saturating_sub(display_cells(&strip_sgr(&l2)) + 3 + 1);
-    l2.push_str(&seg(DEFAULT_INK, &" ".repeat(fill)));
-    l2.push_str(&seg(ink(META_INK), &rpad(r.elapsed, 3)));
-    l2.push_str(&seg(DEFAULT_INK, " "));
-
-    (format!("{l1}{RESET}"), format!("{l2}{RESET}"))
-}
-
-fn fleet() -> Vec<R> {
-    use RowStatus::*;
-    let a = |status,
-             prov,
-             chip,
-             pal,
-             repo,
-             repo_ink,
-             branch,
-             pr,
-             provider,
-             model,
-             tokens,
-             elapsed,
-             summary| {
-        R {
-            status,
-            prov,
-            chip: Some((chip, pal)),
-            repo,
-            repo_ink,
-            branch,
-            pr,
-            provider: Some(provider),
-            model,
-            tokens: Some(tokens),
-            elapsed,
-            summary,
-            selected: false,
-            dormant: false,
-        }
-    };
-    let mut rows = vec![
-        a(
-            NeedsYou,
-            Prov::Main,
-            "CORTI2",
-            Some(2),
-            "hermes",
-            2,
-            "",
-            None,
-            Provider::Claude,
-            "fable",
-            "105k",
-            "3m",
-            "Qdos IR35 assessment: the contract",
-        ),
-        a(
-            Working,
-            Prov::Main,
-            "HERMES",
-            Some(6),
-            "hermes",
-            2,
-            "",
-            None,
-            Provider::Claude,
-            "opus",
-            "78k",
-            "18m",
-            "Personal reflections and planning",
-        ),
-        a(
-            Working,
-            Prov::Main,
-            "XPS",
-            Some(1),
-            "hermes",
-            2,
-            "",
-            None,
-            Provider::Claude,
-            "fable",
-            "234k",
-            "1h",
-            "XPS dev server setup and deploy",
-        ),
-        a(
-            NeedsYou,
-            Prov::Main,
-            "REASSOC",
-            Some(3),
-            "clave",
-            0,
-            "",
-            None,
-            Provider::Claude,
-            "fable",
-            "86k",
-            "12m",
-            "Clave session reassociation pass",
-        ),
-        a(
-            Working,
-            Prov::Worktree,
-            "CLV-3",
-            Some(3),
-            "clave",
-            0,
-            "drive-launch",
-            Some(204),
-            Provider::Claude,
-            "sonnet",
-            "117k",
-            "45m",
-            "Drive launch",
-        ),
-        a(
-            Working,
-            Prov::Worktree,
-            "COLOUR",
-            Some(5),
-            "clave",
-            0,
-            "colour",
-            None,
-            Provider::Claude,
-            "fable",
-            "79k",
-            "2h",
-            "Zellij theme passthrough spike",
-        ),
-        R {
-            status: Idle,
-            prov: Prov::Main,
-            chip: Some(("Tab #12", None)),
-            repo: "clave",
-            repo_ink: 0,
-            branch: "",
-            pr: None,
-            provider: None,
-            model: "",
-            tokens: None,
-            elapsed: "7m",
-            summary: "zsh",
-            selected: false,
-            dormant: false,
-        },
-        a(
-            Working,
-            Prov::Worktree,
-            "CLV-M2",
-            Some(4),
-            "clave",
-            0,
-            "v022-prep",
-            Some(225),
-            Provider::Claude,
-            "fable",
-            "130k",
-            "5m",
-            "Goal is shipping v0.2.2 cleanly",
-        ),
-        a(
-            Done,
-            Prov::Main,
-            "DJ",
-            Some(4),
-            "hermes",
-            2,
-            "",
-            None,
-            Provider::OpenAi,
-            "gpt-5",
-            "78k",
-            "3h",
-            "DJ queue setup",
-        ),
-        // A row with no renamed title: the ai-summary fills the pill's
-        // columns too (round 8).
-        R {
-            status: Working,
-            prov: Prov::Main,
+impl Default for A {
+    fn default() -> A {
+        A {
+            status: RowStatus::Working,
+            prov: Provenance::Main,
             chip: None,
-            repo: "hermes",
-            repo_ink: 2,
+            chip_ink: None,
+            repo: "clave",
+            repo_ink: Some(0),
             branch: "",
             pr: None,
-            provider: Some(Provider::Claude),
-            model: "opus",
-            tokens: Some("34k"),
+            provider: Some("claude"),
+            model: Some("fable"),
+            battery: Some((5, 100_000)),
+            elapsed: "1m",
+            summary: "",
+            selected: false,
+            dormant: false,
+        }
+    }
+}
+
+impl A {
+    fn row(self) -> Row {
+        Row {
+            content: RowContent::Agent {
+                status: self.status,
+                battery: self.battery.map(|(level, _)| level),
+                tokens: self.battery.map(|(_, tokens)| tokens),
+                provenance: self.prov,
+                title: self.chip.map(String::from),
+                title_ink: self.chip_ink,
+                repo: self.repo.into(),
+                repo_ink: self.repo_ink,
+                summary: self.summary.into(),
+                model: self.model.map(String::from),
+                provider: self.provider.map(String::from),
+                pr: self.pr,
+                branch: self.branch.into(),
+                elapsed: Some(self.elapsed.into()),
+            },
+            selected: self.selected,
+            dormant: self.dormant,
+        }
+    }
+}
+
+/// One mock terminal card: the tab name is the chip, the focused pane's last
+/// foreground command is the summary, and provenance, branch and PR are
+/// borrowed from the checkout exactly as an agent card's are.
+struct T {
+    name: &'static str,
+    prov: Provenance,
+    repo: &'static str,
+    repo_ink: Option<u8>,
+    branch: &'static str,
+    command: &'static str,
+    pr: Option<u32>,
+    elapsed: &'static str,
+}
+
+impl T {
+    fn row(self) -> Row {
+        Row {
+            content: RowContent::Terminal {
+                name: self.name.into(),
+                status: TermStatus::Idle,
+                provenance: self.prov,
+                repo: Some(self.repo.into()),
+                repo_ink: self.repo_ink,
+                command: self.command.into(),
+                pr: self.pr,
+                branch: self.branch.into(),
+                elapsed: Some(self.elapsed.into()),
+            },
+            selected: false,
+            dormant: false,
+        }
+    }
+}
+
+/// The ratified fleet: the corners of the variant space in one frame — chip and
+/// chipless, agent and terminal, both providers, main / branch / worktree, repo
+/// names short, exactly at budget and overflowing, and the selected and dormant
+/// cards.
+fn fleet() -> Vec<Row> {
+    use Provenance::{Branch, Main, Worktree};
+    use RowStatus::{Done, Failed, NeedsYou};
+    vec![
+        A {
+            status: NeedsYou,
+            chip: Some("CORTI2"),
+            chip_ink: Some(2),
+            repo: "hermes",
+            repo_ink: Some(2),
+            battery: Some((6, 105_000)),
+            elapsed: "3m",
+            summary: "Qdos IR35 assessment: the contract",
+            ..A::default()
+        }
+        .row(),
+        A {
+            chip: Some("HERMES"),
+            chip_ink: Some(6),
+            repo: "hermes",
+            repo_ink: Some(2),
+            model: Some("opus"),
+            battery: Some((4, 78_000)),
+            elapsed: "18m",
+            summary: "Personal reflections and planning",
+            ..A::default()
+        }
+        .row(),
+        A {
+            chip: Some("XPS"),
+            chip_ink: Some(1),
+            repo: "hermes",
+            repo_ink: Some(2),
+            battery: Some((10, 234_000)),
+            elapsed: "1h",
+            summary: "XPS dev server setup and deploy",
+            ..A::default()
+        }
+        .row(),
+        A {
+            status: NeedsYou,
+            chip: Some("REASSOC"),
+            chip_ink: Some(3),
+            battery: Some((5, 86_000)),
+            elapsed: "12m",
+            summary: "Clave session reassociation pass",
+            ..A::default()
+        }
+        .row(),
+        A {
+            prov: Worktree,
+            chip: Some("CLV-3"),
+            chip_ink: Some(3),
+            branch: "drive-launch",
+            pr: Some(204),
+            model: Some("sonnet"),
+            battery: Some((7, 117_000)),
+            elapsed: "45m",
+            summary: "Drive launch",
+            ..A::default()
+        }
+        .row(),
+        A {
+            prov: Worktree,
+            chip: Some("COLOUR"),
+            chip_ink: Some(5),
+            branch: "colour",
+            battery: Some((4, 79_000)),
+            elapsed: "2h",
+            summary: "Zellij theme passthrough spike",
+            ..A::default()
+        }
+        .row(),
+        T {
+            name: "Tab #12",
+            prov: Main,
+            repo: "clave",
+            repo_ink: Some(0),
+            branch: "",
+            command: "zsh",
+            pr: None,
+            elapsed: "7m",
+        }
+        .row(),
+        A {
+            prov: Worktree,
+            chip: Some("CLV-M2"),
+            chip_ink: Some(4),
+            branch: "v022-prep",
+            pr: Some(225),
+            battery: Some((8, 130_000)),
+            elapsed: "5m",
+            summary: "Goal is shipping v0.2.2 cleanly",
+            selected: true,
+            ..A::default()
+        }
+        .row(),
+        A {
+            status: Done,
+            chip: Some("DJ"),
+            chip_ink: Some(4),
+            repo: "hermes",
+            repo_ink: Some(2),
+            provider: Some("openai"),
+            model: Some("gpt-5"),
+            battery: Some((4, 78_000)),
+            elapsed: "3h",
+            summary: "DJ queue setup",
+            ..A::default()
+        }
+        .row(),
+        // No renamed title: the summary fills the pill's columns too.
+        A {
+            repo: "hermes",
+            repo_ink: Some(2),
+            model: Some("opus"),
+            battery: Some((2, 34_000)),
             elapsed: "2h",
             summary: "Create close conversation summary flow",
-            selected: false,
-            dormant: false,
-        },
-        a(
-            Done,
-            Prov::Branch,
-            "GTMSS",
-            Some(0),
-            "nalu",
-            5,
-            "gtm-pass",
-            Some(31),
-            Provider::Claude,
-            "haiku",
-            "119k",
-            "1d",
-            "GTM Landscape - and first pass",
-        ),
-        // ── coverage rows (round 8e): the corners of the variant space ──
-        // Terminal on a BRANCH with a PR.
-        R {
-            status: Idle,
-            prov: Prov::Branch,
-            chip: Some(("Tab #3", None)),
+            ..A::default()
+        }
+        .row(),
+        A {
+            status: Done,
+            prov: Branch,
+            chip: Some("GTMSS"),
+            chip_ink: Some(0),
+            repo: "nalu",
+            repo_ink: Some(5),
+            branch: "gtm-pass",
+            pr: Some(31),
+            model: Some("haiku"),
+            battery: Some((7, 119_000)),
+            elapsed: "1d",
+            summary: "GTM Landscape - and first pass",
+            ..A::default()
+        }
+        .row(),
+        // Terminal on a branch with a PR.
+        T {
+            name: "Tab #3",
+            prov: Branch,
             repo: "clave",
-            repo_ink: 0,
+            repo_ink: Some(0),
             branch: "double-rows",
+            command: "gh pr checks --watch",
             pr: Some(232),
-            provider: None,
-            model: "",
-            tokens: None,
             elapsed: "3m",
-            summary: "gh pr checks --watch",
-            selected: false,
-            dormant: false,
-        },
-        // Terminal in a WORKTREE, repo name filling the 9-cell budget exactly.
-        R {
-            status: Idle,
-            prov: Prov::Worktree,
-            chip: Some(("Tab #7", None)),
+        }
+        .row(),
+        // Terminal in a worktree, repo name filling the 9-cell budget exactly.
+        T {
+            name: "Tab #7",
+            prov: Worktree,
             repo: "resumaker",
-            repo_ink: 7,
+            repo_ink: Some(7),
             branch: "resume-fix",
+            command: "just dev",
             pr: None,
-            provider: None,
-            model: "",
-            tokens: None,
             elapsed: "1h",
-            summary: "just dev",
-            selected: false,
-            dormant: false,
-        },
+        }
+        .row(),
         // Chipless + branch + PR + OpenAI, repo name OVERFLOWING to ellipsis.
-        R {
-            status: Working,
-            prov: Prov::Branch,
-            chip: None,
+        A {
+            prov: Branch,
             repo: "clave-website",
-            repo_ink: 6,
+            repo_ink: Some(6),
             branch: "hero-copy",
             pr: Some(12),
-            provider: Some(Provider::OpenAi),
-            model: "gpt-5",
-            tokens: Some("55k"),
+            provider: Some("openai"),
+            model: Some("gpt-5"),
+            battery: Some((3, 55_000)),
             elapsed: "30m",
             summary: "Landing page hero copy rewrite pass",
-            selected: false,
-            dormant: false,
-        },
+            ..A::default()
+        }
+        .row(),
         // FAILED agent in a worktree with a PR, long repo, high burn.
-        a(
-            Failed,
-            Prov::Worktree,
-            "MIGRATE",
-            Some(3),
-            "market-scanner",
-            1,
-            "pg17-migrate",
-            Some(88),
-            Provider::Claude,
-            "sonnet",
-            "201k",
-            "4h",
-            "Postgres 15 to 17 migration runbook",
-        ),
-    ];
-    rows[7].selected = true;
-    let mut dormant = a(
-        Dormant,
-        Prov::Main,
-        "FOOTER",
-        Some(0),
-        "resumaker",
-        7,
-        "",
-        None,
-        Provider::Claude,
-        "opus",
-        "73k",
-        "2w",
-        "ollie.gg company details footer",
-    );
-    dormant.dormant = true;
-    rows.push(dormant);
-    rows
+        A {
+            status: Failed,
+            prov: Worktree,
+            chip: Some("MIGRATE"),
+            chip_ink: Some(3),
+            repo: "market-scanner",
+            repo_ink: Some(1),
+            branch: "pg17-migrate",
+            pr: Some(88),
+            model: Some("sonnet"),
+            battery: Some((10, 201_000)),
+            elapsed: "4h",
+            summary: "Postgres 15 to 17 migration runbook",
+            ..A::default()
+        }
+        .row(),
+        A {
+            status: RowStatus::Dormant,
+            chip: Some("FOOTER"),
+            chip_ink: Some(0),
+            repo: "resumaker",
+            repo_ink: Some(7),
+            model: Some("opus"),
+            battery: Some((4, 73_000)),
+            elapsed: "2w",
+            summary: "ollie.gg company details footer",
+            dormant: true,
+            ..A::default()
+        }
+        .row(),
+    ]
 }
 
 fn main() {
-    let dim = Rgb(0x71, 0x7C, 0x7C);
-    let variants = [
-        FV {
-            name: "COLLAPSED — the ratified 38-col card",
-            cols: 38,
-            top: '\u{256d}',
-            bot: '\u{2570}',
-            branch_w: 0,
-        },
-        FV {
-            name: "EXPANDED — +10: branch beside repo, wider summary",
-            cols: 48,
-            top: '\u{256d}',
-            bot: '\u{2570}',
-            branch_w: BRANCH_W,
-        },
+    let profiles = [
+        ("COLLAPSED — the 38-column card", 38, Widths::COLLAPSED),
+        (
+            "EXPANDED — +10: branch beside repo, wider summary",
+            48,
+            Widths::EXPANDED,
+        ),
     ];
-    for v in &variants {
-        println!("\n{}{}{RESET}\n", dim.fg(), v.name);
-        for (i, r) in fleet().iter().enumerate() {
-            let (l1, l2) = render_f_pair(r, v, i % 2 == 1);
-            for l in [&l1, &l2] {
-                let w = display_cells(&strip_sgr(l));
-                assert_eq!(
-                    w, v.cols,
-                    "{}: row {i} rendered {w} cells, want {}",
-                    v.name, v.cols
-                );
-            }
-            println!("{l1}\n{l2}");
+    for (name, cols, widths) in profiles {
+        println!("\n{}{name}{RESET}\n", DIM.fg());
+        let rows = fleet();
+        // A pane tall enough for every card, so the preview shows the whole
+        // fleet rather than the viewport's slice of it.
+        let lines = render_rows(
+            &rows,
+            cols,
+            rows.len() * RowHeight::Double.lines_per_row(),
+            widths,
+            &Theme::default(),
+            RowHeight::Double,
+        );
+        for (i, line) in lines.iter().enumerate() {
+            let w = display_cells(&strip_sgr(line));
+            assert_eq!(w, cols, "{name}: line {i} rendered {w} cells, want {cols}");
+            println!("{line}");
         }
     }
     println!();
