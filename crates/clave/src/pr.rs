@@ -243,6 +243,19 @@ mod tests {
         assert_eq!(resolve_pr(&junk, "/r", "drive-launch"), None);
     }
 
+    /// Either half of "we don't know what to ask" is a hard no, and neither
+    /// reaches the runner: a detached checkout has no branch to head-match, and
+    /// an unknown repo root would leave `gh` guessing from whatever cwd it
+    /// inherited. The runner panics so the guard cannot pass by returning
+    /// `None` for the wrong reason.
+    #[test]
+    fn resolve_pr_asks_nothing_when_it_does_not_know_what_to_ask() {
+        let never = |_: &[&str]| -> Option<String> { panic!("gh must not run") };
+        assert_eq!(resolve_pr(&never, "", "drive-launch"), None);
+        assert_eq!(resolve_pr(&never, "/r", ""), None);
+        assert_eq!(resolve_pr(&never, "", ""), None);
+    }
+
     #[test]
     fn pr_staleness_is_ttl_or_branch_change() {
         let mut r = rec("u"); // store test fixture
@@ -250,11 +263,57 @@ mod tests {
         r.pr_checked = 1000;
         r.pr_branch = "drive-launch".into();
         assert!(!pr_is_stale(&r, 1000 + PR_TTL_SECS - 1));
+        // The boundary itself: an answer exactly `PR_TTL_SECS` old is still
+        // trusted — the TTL is how long it is good FOR, not the last instant
+        // it is good AT.
+        assert!(!pr_is_stale(&r, 1000 + PR_TTL_SECS));
         assert!(pr_is_stale(&r, 1000 + PR_TTL_SECS + 1));
         r.pr_branch = "old-branch".into(); // branch moved: cache is for the wrong question
         assert!(pr_is_stale(&r, 1001));
         let fresh = rec("u2"); // pr_checked = 0: never looked
         assert!(pr_is_stale(&fresh, 1));
+    }
+
+    /// `pr-sync` runs `gh` from the row's OWN checkout — the worktree when
+    /// `clave add --worktree` made one, the repo root otherwise. A lookup from
+    /// the wrong directory asks a different repo's question, or none at all,
+    /// and the miss it writes back is indistinguishable from "no PR".
+    #[test]
+    fn pr_sync_targets_the_rows_own_checkout() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = tmp_paths(d.path());
+        let mut plain = rec("plain");
+        plain.repo_root = "/repos/clave".into();
+        plain.branch = "drive-launch".into();
+        let mut wt = rec("wt");
+        wt.repo_root = "/repos/clave".into();
+        wt.worktree = Some("/repos/clave-wt/drive-launch".into());
+        wt.branch = "drive-launch".into();
+        store::with_store_mut(&paths, |s| {
+            s.agents.insert("plain".into(), plain);
+            s.agents.insert("wt".into(), wt);
+        })
+        .unwrap();
+
+        let target =
+            |uuid: &str| store::with_store_mut(&paths, |s| pr_sync_target(s, uuid, 1_000)).unwrap();
+        let triple =
+            |a: &str, b: &str, c: &str| Some((a.to_string(), b.to_string(), c.to_string()));
+        assert_eq!(
+            target("plain"),
+            triple("/repos/clave", "/repos/clave", "drive-launch"),
+            "an ordinary checkout asks from its repo root"
+        );
+        assert_eq!(
+            target("wt"),
+            triple(
+                "/repos/clave-wt/drive-launch",
+                "/repos/clave",
+                "drive-launch"
+            ),
+            "a worktree row asks from the worktree"
+        );
+        assert_eq!(target("gone"), None, "a vanished uuid is nothing to do");
     }
 
     /// The double-spawn race the design calls out: two hooks can both

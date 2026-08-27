@@ -2514,6 +2514,74 @@ mod tests {
         }
     }
 
+    /// The zebra alternates card by card, and it is anchored to the SCREEN:
+    /// the pane's top card always wears the first bracket ink, whatever the
+    /// viewport has scrolled past. `card.rs` pins what a parity flag does to
+    /// one card; this pins that `render_rows` hands out the flags in turn, and
+    /// that a scroll never inverts every stripe on the bar.
+    #[test]
+    fn the_zebra_alternates_down_the_screen_from_the_top_card() {
+        let theme = Theme::default();
+        // The ink is read POSITIONALLY — the SGR immediately before the arc —
+        // rather than by searching the line, because `BRACKET_A` and the card's
+        // metadata ink are the same grey and a `contains` would not tell the
+        // bracket from the model name.
+        let ink_before = |line: &str, arc: char| -> String {
+            let head = line.split(arc).next().expect("a card line carries its arc");
+            let at = head.rfind("\u{1b}[38;2;").expect("an ink before the arc");
+            head[at..].to_string()
+        };
+        let stripe = |rows: &[Row], height: usize| -> Vec<String> {
+            render_rows(
+                rows,
+                CARD_COLS,
+                height,
+                Widths::EXPANDED,
+                &theme,
+                RowHeight::Double,
+            )
+            .chunks(2)
+            .map(|card| {
+                let top = ink_before(&card[0], crate::theme::CARD_TOP);
+                assert_eq!(
+                    ink_before(&card[1], crate::theme::CARD_BOT),
+                    top,
+                    "both lines of one card share its bracket ink"
+                );
+                top
+            })
+            .collect()
+        };
+        // What the ink should be: the two neutrals in turn from the top card
+        // down, each receding like every other unselected cell.
+        let want = |sel: usize| -> Vec<String> {
+            (0..4)
+                .map(|i| {
+                    let base = if i % 2 == 0 {
+                        crate::theme::BRACKET_A
+                    } else {
+                        crate::theme::BRACKET_B
+                    };
+                    if i == sel {
+                        base
+                    } else {
+                        base.mix(theme.base, FADE)
+                    }
+                    .fg()
+                })
+                .collect()
+        };
+        // Selection at the top of the list: the pane rests unscrolled.
+        assert_eq!(stripe(&numbered(6, 0), 8), want(0), "the stripe alternates");
+        // Scrolled: the selection at the END of a long list puts model row 5 at
+        // the top of the pane, and THAT card still wears the first ink.
+        assert_eq!(
+            stripe(&numbered(9, 8), 8),
+            want(3),
+            "the stripe is anchored to the screen, not to the list"
+        );
+    }
+
     /// Every card line is exactly `cols` cells, at the card's own two targets
     /// and below its floor — the card clips both its lines itself, so this
     /// pins that `render_rows` neither needs nor breaks a second clip.

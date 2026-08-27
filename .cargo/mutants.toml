@@ -55,4 +55,23 @@ exclude_re = [
     # and killed directly. The seam itself is a live-run check: the
     # `clave: seeded frecency…` line on the next version refresh.
     "run_on_version_refresh",
+    # Fire-and-forget by contract (#232): spawns `clave pr-sync <uuid>` fully
+    # detached, with every stream nulled, and DROPS the child — its own doc
+    # says the caller never learns whether the spawn succeeded, because the
+    # hook must return before `gh` starts. There is no observable it could be
+    # asserted against; a test that could see the child would be testing a
+    # different function. What it forwards to is mutated and killed directly:
+    # `pr_is_stale` decides whether to call it, `run_pr_sync`'s target lookup
+    # decides what the child does.
+    "spawn_pr_sync",
+    # `pr-sync`'s process entry point, same argument as `run_on_version_refresh`
+    # above: resolves the AMBIENT store paths, takes the store lock, shells out
+    # to `gh`, and pushes a snapshot — all process-global, none observable from
+    # a unit test. Every decision inside it is reachable and mutated on its own
+    # (`pr_sync_target` for the re-check under the lock, `resolve_pr` for the
+    # parse and its degradations, `pr_is_stale` for the TTL), and the `seq += 1`
+    # it survives on is the same one-line idiom eleven other locked writers use,
+    # pinned by `rmw_roundtrips_and_bumps_seq` in store.rs. The seam itself is a
+    # live-run check: the PR cell filling within a TTL on a PR branch.
+    "run_pr_sync",
 ]
