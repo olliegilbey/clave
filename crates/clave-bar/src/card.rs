@@ -313,7 +313,10 @@ pub(crate) fn render_card(
         ));
     }
     if let Some(n) = c.pr {
-        l2.push_str(&seg(ink(PR_INK), &format!(" {}", pad(&format!("#{n}"), PR_W))));
+        l2.push_str(&seg(
+            ink(PR_INK),
+            &format!(" {}", pad(&format!("#{n}"), PR_W)),
+        ));
     }
     match c.provider {
         // Two spaces before the icon (round 8c): the extra column between the
@@ -939,8 +942,16 @@ mod tests {
     #[test]
     fn a_card_without_a_pr_flows_its_columns_into_repo_and_branch() {
         let f = fleet();
-        assert!(pin(&f[5], 38).1.contains(" clave colour "), "{}", pin(&f[5], 38).1);
-        assert!(pin(&f[5], 48).1.contains(" clave colour "), "{}", pin(&f[5], 48).1);
+        assert!(
+            pin(&f[5], 38).1.contains(" clave colour "),
+            "{}",
+            pin(&f[5], 38).1
+        );
+        assert!(
+            pin(&f[5], 48).1.contains(" clave colour "),
+            "{}",
+            pin(&f[5], 48).1
+        );
         // Same row with a PR: collapsed hides the branch again.
         let row = A {
             prov: Provenance::Worktree,
