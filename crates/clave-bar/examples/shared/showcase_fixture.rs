@@ -63,6 +63,7 @@ pub fn terminal(
             repo_ink: repo.map(|(_, i)| i),
             command: String::from(command),
             pr: None,
+            branch: String::new(),
             elapsed: None,
         },
         selected: false,

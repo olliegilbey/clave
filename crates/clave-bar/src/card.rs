@@ -145,6 +145,7 @@ fn cells<'a>(content: &'a RowContent, theme: &Theme) -> Cells<'a> {
             repo_ink,
             command,
             pr,
+            branch,
             elapsed,
         } => Cells {
             // The glyph is the row's KIND, the colour its state — the console
@@ -160,9 +161,7 @@ fn cells<'a>(content: &'a RowContent, theme: &Theme) -> Cells<'a> {
             // 2026-08-18) — so the ink-less repo falls back to the default ink
             // rather than the palette's absent-hue grey.
             repo_ink: repo_ink.map_or(theme.default_ink, |i| hue(Some(i), theme)),
-            // A terminal row has no branch of its own (`RowContent::Terminal`):
-            // its repo takes the whole collective budget.
-            branch: "",
+            branch,
             pr: *pr,
             provider: None,
             model: "",
@@ -454,6 +453,7 @@ mod tests {
         prov: Provenance,
         repo: &'static str,
         repo_ink: Option<u8>,
+        branch: &'static str,
         command: &'static str,
         pr: Option<u32>,
         elapsed: &'static str,
@@ -470,6 +470,7 @@ mod tests {
                     repo_ink: self.repo_ink,
                     command: self.command.into(),
                     pr: self.pr,
+                    branch: self.branch.into(),
                     elapsed: Some(self.elapsed.into()),
                 },
                 selected: false,
@@ -562,6 +563,7 @@ mod tests {
                 prov: Main,
                 repo: "clave",
                 repo_ink: Some(0),
+                branch: "",
                 command: "zsh",
                 pr: None,
                 elapsed: "7m",
@@ -631,6 +633,7 @@ mod tests {
                 prov: Branch,
                 repo: "clave",
                 repo_ink: Some(0),
+                branch: "double-rows",
                 command: "gh pr checks --watch",
                 pr: Some(232),
                 elapsed: "3m",
@@ -643,6 +646,7 @@ mod tests {
                 prov: Worktree,
                 repo: "resumaker",
                 repo_ink: Some(7),
+                branch: "resume-fix",
                 command: "just dev",
                 pr: None,
                 elapsed: "1h",
@@ -850,24 +854,29 @@ mod tests {
         }
     }
 
-    /// A terminal card has no branch of its own — its repo takes the whole
-    /// collective budget in the expanded profile. (The ratified preview's mock
-    /// gave its terminal rows a branch; `RowContent::Terminal` carries none,
-    /// so the cell renders as repo-only rather than inventing one.)
+    /// A terminal card's branch is borrowed the same way its `pr` is (#232):
+    /// the expanded profile shares the repo/branch budget exactly as an agent
+    /// card does. Row 12 (`resumaker`, `resume-fix`) is the boundary corner —
+    /// a 9-cell repo name PLUS a branch, which is `repo_w == 9` against the
+    /// collective budget (the ratified preview's Tab #7 shape).
     #[test]
-    fn a_terminal_card_gives_its_repo_the_whole_collective_budget() {
+    fn a_terminal_card_shares_its_borrowed_branch_across_the_collective_budget() {
         let f = fleet();
         assert_eq!(
             pin(&f[11], 48),
             (
                 " \u{f018d} \u{256d} \u{e0b6}Tab #3 \u{e0b4} gh pr checks --watch        TERM "
                     .to_string(),
-                " \u{f062c} \u{2570}  clave               #232               3m ".to_string(),
+                " \u{f062c} \u{2570}  clave double-rows   #232               3m ".to_string(),
             )
         );
         assert_eq!(
             pin(&f[12], 38).1,
             " \u{168c2} \u{2570}  resumaker                    1h "
+        );
+        assert_eq!(
+            pin(&f[12], 48).1,
+            " \u{168c2} \u{2570}  resumaker resume-f\u{2026}                    1h "
         );
     }
 

@@ -350,6 +350,13 @@ pub enum RowContent {
         /// borrowed from (#232) — never computed here. `None` when no agent's
         /// checkout claims this pane's cwd, or that row has no open PR.
         pr: Option<u32>,
+        /// Borrowed from the SAME prefix-matched store row `provenance` and
+        /// `pr` were borrowed from (#232) — never computed here. Blanked to
+        /// the empty string when that row's checkout is the repo's default
+        /// (the agent row's own predicate, shared rather than re-derived), or
+        /// when no agent's checkout claims this pane's cwd. Blank is the
+        /// meaning: no branch cell.
+        branch: String,
         /// Time since the USER last interacted with this TAB (the store's
         /// `tab_touched` wall-clock twin of the commitment ordinal) — same
         /// semantics as the agent row's `elapsed`, just a different source.
@@ -372,6 +379,7 @@ impl RowContent {
             repo_ink: None,
             command: String::new(),
             pr: None,
+            branch: String::new(),
             elapsed: None,
         }
     }
@@ -1466,6 +1474,7 @@ mod tests {
                 repo_ink,
                 command: String::from("cargo test"),
                 pr: None,
+                branch: String::new(),
                 elapsed: None,
             },
             selected: false,

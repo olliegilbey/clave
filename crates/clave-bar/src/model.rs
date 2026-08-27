@@ -1952,22 +1952,31 @@ impl BarModel {
         // and provenance verbatim — correct by construction, no git reading.
         // Unmatched cwds show their directory name untinted, provenance
         // blank: "where it lives" is useful even outside the fleet.
-        let (repo, repo_ink, provenance, pr) = match facts.and_then(|f| f.cwd.as_deref()) {
+        let (repo, repo_ink, provenance, pr, branch) = match facts.and_then(|f| f.cwd.as_deref()) {
             Some(cwd) => match self.checkout_of(cwd) {
                 Some(a) => (
                     Some(basename(&a.repo_root).to_string()),
                     inks.repo.get(&a.repo_root).copied(),
                     provenance_of(a),
                     a.pr_number,
+                    // Blanked on the exact predicate `provenance` above just
+                    // rendered blank via its `Main` case — shared, not
+                    // re-derived (#232), same as `agent_content`'s branch.
+                    if is_default_checkout(a) {
+                        String::new()
+                    } else {
+                        a.branch.clone()
+                    },
                 ),
                 None => (
                     Some(basename(cwd).to_string()),
                     None,
                     Provenance::Main,
                     None,
+                    String::new(),
                 ),
             },
-            None => (None, None, Provenance::Main, None),
+            None => (None, None, Provenance::Main, None, String::new()),
         };
         let command = facts
             .and_then(|f| f.last_cmd.clone())
@@ -1989,6 +1998,7 @@ impl BarModel {
             repo_ink,
             command,
             pr,
+            branch,
             elapsed,
         }
     }
@@ -3034,8 +3044,10 @@ mod tests {
     }
 
     /// The cwd through the fleet's checkouts: inside an agent's worktree the
-    /// terminal borrows that row's repo name, ink and provenance verbatim;
-    /// outside the fleet it shows its directory name, untinted, unmarked.
+    /// terminal borrows that row's repo name, ink, provenance and branch
+    /// verbatim (#232 for the branch: shared from the same matched row `pr`
+    /// is borrowed from); outside the fleet it shows its directory name,
+    /// untinted, unmarked, with no branch to borrow.
     #[test]
     fn a_terminal_cwd_borrows_a_matching_agents_repo_ink_and_provenance() {
         let mut m = BarModel::default();
@@ -3062,22 +3074,46 @@ mod tests {
                 repo,
                 repo_ink,
                 provenance,
+                branch,
                 ..
             } => {
                 assert_eq!(repo.as_deref(), Some("clave"));
                 assert_eq!(repo_ink, agent_ink);
                 assert_eq!(provenance, Provenance::Worktree);
+                assert_eq!(branch, "feat");
             }
             c => panic!("not a terminal row: {c:?}"),
         }
-        // Outside every checkout: directory name, no ink, no provenance. A
-        // sibling path sharing the checkout's PREFIX must not match — the
-        // boundary is a path component, not a byte prefix.
+        // Outside every checkout: directory name, no ink, no provenance, no
+        // branch. A sibling path sharing the checkout's PREFIX must not
+        // match — the boundary is a path component, not a byte prefix.
         m.apply_pane_facts(vec![probe(5, Some("/w/clave-wt-other"), None)]);
         assert!(matches!(
             terminal_row(&m),
-            RowContent::Terminal { repo: Some(r), repo_ink: None, provenance: Provenance::Main, .. }
-                if r == "clave-wt-other"
+            RowContent::Terminal { repo: Some(r), repo_ink: None, provenance: Provenance::Main, branch, .. }
+                if r == "clave-wt-other" && branch.is_empty()
+        ));
+    }
+
+    /// A terminal in a DEFAULT checkout borrows no branch — the same
+    /// predicate `agent_content` blanks its own branch cell on (#232),
+    /// shared rather than re-derived, applied here through
+    /// `terminal_content`'s borrow.
+    #[test]
+    fn a_terminal_in_a_default_checkout_borrows_no_branch() {
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "Tab #1", true), tab(11, 1, "agent", false)]);
+        m.apply_panes(vec![pane(0, 5, false, true), pane(1, 6, false, true)]);
+        let a = Agent {
+            repo_root: "/r/clave".into(),
+            branch: "main".into(),
+            ..agent_at("u1", Status::Idle, Some(11), 6)
+        };
+        m.apply_snapshot(snap(1, vec![a]));
+        m.apply_pane_facts(vec![probe(5, Some("/r/clave/crates"), None)]);
+        assert!(matches!(
+            terminal_row(&m),
+            RowContent::Terminal { branch, .. } if branch.is_empty()
         ));
     }
 
