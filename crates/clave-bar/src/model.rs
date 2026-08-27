@@ -1038,6 +1038,13 @@ impl BarModel {
         self.row_height = row_height;
     }
 
+    /// The geometry this bar draws — `main.rs` hands it to `render_rows` so
+    /// the renderer and [`Self::click`]'s `/2` read the same field, never two
+    /// separately-resolved copies of the mode (#148 discipline).
+    pub fn row_height(&self) -> RowHeight {
+        self.row_height
+    }
+
     /// The shell's wall clock, called once before every render (#232):
     /// `main.rs` supplies `wall_now()`, and the existing `TERM_POLL_SECS`
     /// cadence's re-render is what keeps the elapsed cell's minutes honest
@@ -2251,7 +2258,9 @@ impl BarModel {
 
     /// Mouse click on rendered line N of a pane `pane_height` lines tall
     /// (0-based, counted from the TOP OF THE SCREEN, not the top of the list —
-    /// see #148 below): jump to that row's tab.
+    /// see #148 below): jump to that row's tab. Both arguments are TERMINAL
+    /// LINES, as zellij reports them; a row is one or two of those depending
+    /// on the geometry (#232), and this function is where they convert.
     /// A click reaches exactly ONE instance (the visible bar), so the jump
     /// broadcasts a beacon for the other instances' executor election.
     /// Focus is not a commitment — clicks never reorder. A click on a
@@ -2266,17 +2275,35 @@ impl BarModel {
         // overflow had two symptoms (invisible rows, and clicks landing one or
         // two rows above the pointer) and a second copy of this arithmetic
         // would let them come apart again.
+        // #232: both arguments cross from TERMINAL LINES into ROWS here, at
+        // the boundary, and `viewport_top` stays row-unit for both callers.
+        // Converting one and not the other is exactly the #148 divergence —
+        // a click would land the right row against the wrong window.
+        // Integer division is also the odd-remainder rule: a click on a
+        // half-drawn last line (which the renderer never writes) folds onto
+        // the last whole card rather than off the end.
+        let lines_per_row = self.row_height.lines_per_row();
+        let raw_line = line;
+        let line = line / lines_per_row;
         let rows = self.rows();
         let top = viewport_top(
             rows.len(),
             rows.iter().position(|(_, r)| r.selected),
-            pane_height,
+            pane_height / lines_per_row,
         );
         // `rows.get` bounds-checks against the LIST, not the window: a `line`
         // at or past `pane_height` (reachable only in the one-frame-stale
         // `pane_height` window below) selects a row off screen harmlessly,
         // rather than panicking.
-        let Some((key, _)) = top.checked_add(line).and_then(|i| rows.get(i)).cloned() else {
+        let hit = top.checked_add(line).and_then(|i| rows.get(i)).cloned();
+        // UNCONDITIONAL (#232, the maintainer's ask): clicks are rare, and
+        // this one line is what debugs the next #148 — every term of the
+        // conversion, plus the row it resolved to, in the order they apply.
+        eprintln!(
+            "clave-bar click: raw_line={raw_line} lines_per_row={lines_per_row} row_line={line} top={top} -> key={:?}",
+            hit.as_ref().map(|(k, _)| k)
+        );
+        let Some((key, _)) = hit else {
             return Vec::new();
         };
         self.cursor_gen += 1; // a click is a landing like any other
@@ -3313,6 +3340,17 @@ mod tests {
     /// viewport (#148) rests at the top and a rendered line IS its model row —
     /// which is what every click assertion written before the viewport assumed.
     const TALL_PANE: usize = 64;
+
+    /// The legacy geometry, said out loud. Every click assertion below was
+    /// written when one rendered LINE was one model ROW, and #232 moved the
+    /// DEFAULT to the two-line card — so those tests pin `Single` explicitly
+    /// rather than riding a default that has shifted underneath them. The
+    /// card's own click map is
+    /// `a_click_on_either_line_of_a_card_selects_that_card`.
+    fn one_line_bar(mut m: BarModel) -> BarModel {
+        m.set_row_height(RowHeight::Single);
+        m
+    }
 
     /// One live tab (id 1, active) and `dormant` dormant rows, ordinals
     /// descending so the dormant block's display order is `u-00`, `u-01`, …
@@ -4620,7 +4658,7 @@ mod tests {
 
     #[test]
     fn nav_is_executor_gated_walks_display_rows_clicks_and_uuid_jumps() {
-        let mut m = BarModel::default();
+        let mut m = one_line_bar(BarModel::default());
         m.apply_tabs(vec![
             tab(10, 0, "a", true),
             tab(11, 1, "b", false),
@@ -6997,7 +7035,7 @@ mod tests {
         // FOCUSES that list, and Alt+j/Alt+k then walk it; clicking back to
         // the live list focuses the live list again. The walk itself never
         // moves between the blocks — only a pick does.
-        let mut m = fleet_two_live_three_dormant();
+        let mut m = one_line_bar(fleet_two_live_three_dormant());
         m.beacon(1);
         // Click the middle dormant row (line 3 = u-d1 at 800).
         m.click(3, TALL_PANE);
@@ -7120,7 +7158,7 @@ mod tests {
         // indexes the RENDERED list, so putting the live block on top is what
         // keeps the low numbers pointed at the live fleet — Alt+1-2 here, with
         // the dormant block starting at Alt+3.
-        let mut m = fleet_two_live_three_dormant();
+        let mut m = one_line_bar(fleet_two_live_three_dormant());
         m.beacon(1);
         assert!(
             m.nav("{\"row\":2}", Some(1))
@@ -7146,7 +7184,7 @@ mod tests {
         // and STOPS — no timer, no open, no tab switch. #112 changed only HOW
         // you land there: the dir walk is confined to the live block now, so
         // Alt+N is the keyboard route (the mouse is the other).
-        let mut m = live_plus_dormant();
+        let mut m = one_line_bar(live_plus_dormant());
         m.beacon(1);
         let fx = m.nav("{\"row\":2}", Some(1)); // Alt+2 → the dormant row
         assert!(fx.is_empty(), "a dormant landing is pure selection: {fx:?}");
@@ -7275,7 +7313,7 @@ mod tests {
         // spawn from the keyboard channel into the mouse channel. Both are
         // now the ONLY routes to a dormant row (#112 took the walk away), so
         // this pair covers the whole reachable surface.
-        let mut m = live_plus_dormant();
+        let mut m = one_line_bar(live_plus_dormant());
         assert!(
             m.click(DORMANT_LINE, TALL_PANE).is_empty(),
             "click selects, never opens"
@@ -7285,7 +7323,7 @@ mod tests {
             "clicked dormant row holds the selection"
         );
         // Alt+N (row payload) on a dormant row — new model, fresh state:
-        let mut m = live_plus_dormant();
+        let mut m = one_line_bar(live_plus_dormant());
         m.beacon(1);
         assert!(select_dormant(&mut m).is_empty(), "Alt+N selects too");
         assert!(selected(&m)[DORMANT_LINE]);
@@ -7306,7 +7344,7 @@ mod tests {
     fn a_click_lands_on_the_row_under_the_pointer_while_scrolled() {
         // 12 rows (one live, eleven dormant) in a five-line pane. Selecting the
         // last row slides the window to model rows 7..=11.
-        let mut m = overflowing_fleet(11);
+        let mut m = one_line_bar(overflowing_fleet(11));
         assert_eq!(keys(&m).len(), 12);
         m.nav("{\"row\":12}", Some(1));
         assert!(selected(&m)[11], "the fixture must be scrolled to the end");
@@ -7325,7 +7363,7 @@ mod tests {
         // And the bottom line of that same pane is the last row of the list.
         // A fresh model, because the click above MOVED the selection and the
         // view follows the selection — see the next test.
-        let mut m = overflowing_fleet(11);
+        let mut m = one_line_bar(overflowing_fleet(11));
         m.nav("{\"row\":12}", Some(1));
         m.click(4, 5);
         let mut expected = vec![false; 12];
@@ -7340,7 +7378,7 @@ mod tests {
     /// clicked row stays on screen, which is the invariant that matters.
     #[test]
     fn the_view_follows_a_click_the_way_it_follows_a_walk() {
-        let mut m = overflowing_fleet(11);
+        let mut m = one_line_bar(overflowing_fleet(11));
         m.nav("{\"row\":12}", Some(1)); // window 7..=11
         m.click(0, 5); // model row 7
         // The window is now 5..=9, so the row just clicked sits on line 2 —
@@ -7359,18 +7397,68 @@ mod tests {
     /// is row N. The offset is a consequence of overflow, never a constant.
     #[test]
     fn a_click_on_an_unscrolled_bar_still_lands_on_its_own_line() {
-        let mut m = overflowing_fleet(11);
+        let mut m = one_line_bar(overflowing_fleet(11));
         m.click(9, TALL_PANE);
         let mut expected = vec![false; 12];
         expected[9] = true;
         assert_eq!(selected(&m), expected);
     }
 
+    /// #232's click map. A card owns TWO screen lines, so both of them are the
+    /// same target — the pointer landing on a card's second line must not
+    /// select the card below it, which is the #148 failure shape one geometry
+    /// short. Both terms convert here (`line` AND `pane_height`), so a fleet
+    /// too tall for the pane scrolls in cards and the hit test counts in the
+    /// same cards.
+    #[test]
+    fn a_click_on_either_line_of_a_card_selects_that_card() {
+        // The shipping default: `BarModel::default()` is already `Double`.
+        // 12 rows (one live tab, eleven dormant) in an EIGHT-line pane — four
+        // cards, model rows 0..=3, because the selection rests at the top.
+        let live = vec![
+            Effect::SwitchTab { position: 0 },
+            Effect::AnnounceVisit { tab_id: 1 },
+        ];
+        for line in [0, 1] {
+            let mut m = overflowing_fleet(11);
+            assert_eq!(m.click(line, 8), live, "line {line} is the first card");
+        }
+        // The fourth card spans lines 6 and 7 — dormant row `u-02`, which a
+        // click SELECTS rather than opens (#100).
+        for line in [6, 7] {
+            let mut m = overflowing_fleet(11);
+            assert!(m.click(line, 8).is_empty(), "a dormant click opens nothing");
+            let mut expected = vec![false; 12];
+            expected[3] = true;
+            assert_eq!(selected(&m), expected, "line {line} is the fourth card");
+        }
+        // Scrolled, in cards: selecting the last row slides the card window to
+        // model rows 9..=11 in a six-line (three-card) pane, and line 0 of
+        // that pane is model row 9 — the whole #148 lesson, one geometry over.
+        let mut m = overflowing_fleet(11);
+        m.nav("{\"row\":12}", Some(1));
+        assert!(selected(&m)[11], "the fixture must be scrolled to the end");
+        m.click(1, 6);
+        let mut expected = vec![false; 12];
+        expected[9] = true;
+        assert_eq!(
+            selected(&m),
+            expected,
+            "the top visible card is model row 9"
+        );
+        // The legacy arm is untouched: one line, one row, same fixture.
+        let mut m = one_line_bar(overflowing_fleet(11));
+        assert!(m.click(3, 8).is_empty());
+        let mut expected = vec![false; 12];
+        expected[3] = true;
+        assert_eq!(selected(&m), expected, "Single still maps line 3 to row 3");
+    }
+
     #[test]
     fn click_on_a_live_tab_releases_the_dormant_selection() {
         // Selection follows every input path: picking a live row (mouse or
         // nav) resolves the highlight back to focus truth.
-        let mut m = live_plus_dormant();
+        let mut m = one_line_bar(live_plus_dormant());
         m.click(DORMANT_LINE, TALL_PANE); // select the dormant row
         assert_eq!(
             selected(&m),

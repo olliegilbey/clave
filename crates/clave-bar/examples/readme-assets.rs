@@ -25,7 +25,8 @@ use std::path::{Path, PathBuf};
 
 use clave_bar::render::{
     BASE, BATTERY, COLLAPSED_DESIGN_COLS, CONSOLE, DEFAULT_INK, DESIGN_COLS, DORMANT_FADE, PALETTE,
-    Provenance, Rgb, RowStatus, TermStatus, Theme, Widths, display_cells, render_rows, strip_sgr,
+    Provenance, Rgb, RowHeight, RowStatus, TermStatus, Theme, Widths, display_cells, render_rows,
+    strip_sgr,
 };
 
 #[path = "shared/showcase_fixture.rs"]
@@ -351,7 +352,16 @@ fn parse_row(line: &str) -> (Vec<Span>, Vec<(usize, usize, Rgb)>) {
 /// between the expanded and collapsed frames, exactly as in the plugin.
 fn hero_svg(fonts: &[Font], cols: usize, widths: Widths) -> String {
     let rows = showcase();
-    let lines = render_rows(&rows, cols, rows.len(), widths, &Theme::default());
+    // `RowHeight::Single` for now: task 11 flips the README assets to the card
+    // geometry, and a half-converted asset set would ship two designs.
+    let lines = render_rows(
+        &rows,
+        cols,
+        rows.len(),
+        widths,
+        &Theme::default(),
+        RowHeight::Single,
+    );
     for (line, row) in lines.iter().zip(&rows) {
         let width = display_cells(&strip_sgr(line));
         assert_eq!(width, cols, "row is {width} cells: {row:?}");

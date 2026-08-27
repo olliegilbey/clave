@@ -58,6 +58,16 @@ fn wall_now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Verbose per-frame logging, off unless `CLAVE_BAR_DEBUG` is set to something
+/// other than `0` in the zellij server's environment (#232). Read ONCE — a
+/// render fires on every event this plugin subscribes to, and an env lookup per
+/// frame is a syscall per frame for a line nobody usually wants. Clicks are
+/// rare enough to log unconditionally; frames are not.
+fn dbg_log() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("CLAVE_BAR_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0"))
+}
+
 #[derive(Default)]
 struct State {
     model: BarModel,
@@ -954,7 +964,36 @@ impl ZellijPlugin for State {
         // minutes honest between store pushes.
         self.model.tick(wall_now());
         let list: Vec<Row> = self.model.rows().into_iter().map(|(_, row)| row).collect();
-        let lines = render_rows(&list, cols, rows, self.model.widths_at(cols), &self.theme);
+        let row_height = self.model.row_height();
+        let lines = render_rows(
+            &list,
+            cols,
+            rows,
+            self.model.widths_at(cols),
+            &self.theme,
+            row_height,
+        );
+        // #232, the maintainer's resilience ask: one line per frame naming the
+        // geometry, the pane and the slice. Gated — a render fires on every
+        // event, and an ungated line here would drown the CLICK line (which is
+        // not gated) that the next #148 will actually be debugged from.
+        //
+        // `top` re-runs `viewport_top` rather than reimplementing it, through
+        // the same `lines_per_row()` divisor `render_rows` and `click` both
+        // use — no second copy of the follow rule, which is the one thing this
+        // log line must not become.
+        if dbg_log() {
+            eprintln!(
+                "clave-bar render: mode={row_height:?} cols={cols} height={rows} rows={} top={} shown={}",
+                list.len(),
+                clave_bar::render::viewport_top(
+                    list.len(),
+                    list.iter().position(|r| r.selected),
+                    rows / row_height.lines_per_row(),
+                ),
+                lines.len(),
+            );
+        }
         // Final review 2026-08-11: emit the frame WITHOUT a trailing newline.
         // Once the viewport (#148) slices to exactly `rows` lines, the pane is
         // full at steady state; a trailing newline after the bottom row would

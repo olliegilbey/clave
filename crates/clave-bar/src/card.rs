@@ -175,7 +175,10 @@ fn cells<'a>(content: &'a RowContent, theme: &Theme) -> Cells<'a> {
 /// `zebra_paint` is the card's parity in the viewport slice — the zebra lives
 /// in the linework (round 6's O), alternating the bracket between two neutral
 /// inks rather than painting every second background, which glass forbids.
-pub fn render_card(
+/// `pub(crate)` since #232 task 9 gave it its caller: `render_rows` is the
+/// bar's ONE entry point (LEDGER D5) and the card is a geometry inside it, not
+/// a second public renderer for a caller to reach past the dispatch and pick.
+pub(crate) fn render_card(
     row: &Row,
     cols: usize,
     any_selected: bool,

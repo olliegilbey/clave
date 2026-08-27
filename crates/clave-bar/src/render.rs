@@ -18,7 +18,14 @@
 //! missing font coverage; the failure mode is tofu in production from a diff
 //! that read clean.
 
+/// Re-exported so every caller of [`render_rows`] — the plugin, the dev
+/// crate's gate test, both preview examples — names the geometry through the
+/// renderer it is handing it to, rather than reaching past it into
+/// `clave-types` for a second import path to the same enum.
+pub use clave_types::RowHeight;
 use unicode_width::UnicodeWidthChar;
+
+use crate::card;
 
 // ── geometry ────────────────────────────────────────────────────────────────
 
@@ -633,35 +640,72 @@ pub fn viewport_top(len: usize, selected: Option<usize>, height: usize) -> usize
 /// per-row function cannot know that without a parameter that re-states what
 /// the slice already knows. It is also the unit a golden test should assert —
 /// the picture, not a fragment.
+///
+/// `row_height` (#232) is the whole of the dispatch. `height` is always a count
+/// of TERMINAL LINES — what zellij gives the pane — so the card arm divides it
+/// into a ROW budget before slicing, and [`viewport_top`] itself stays
+/// row-unit for both arms. That division is the one `BarModel::click` does to
+/// its own two arguments: one copy of the follow rule, two callers, which is
+/// the #148 discipline this file was rewritten around.
 pub fn render_rows(
     rows: &[Row],
     cols: usize,
     height: usize,
     widths: Widths,
     theme: &Theme,
+    row_height: RowHeight,
 ) -> Vec<String> {
     // The viewport (#148): the pane height is a hard budget, and a bar that
     // printed past it drew rows zellij clipped away — nav-reachable, invisible.
-    let top = viewport_top(rows.len(), rows.iter().position(|r| r.selected), height);
-    let rows = &rows[top..top.saturating_add(height).min(rows.len())];
+    // Rounded DOWN, which is the odd-remainder rule: a pane with room for two
+    // and a half cards draws two, and its last line is blank BY OMISSION.
+    // Half a card — a top arc with no bottom — is not a thing the design has.
+    let budget = height / row_height.lines_per_row();
+    let top = viewport_top(rows.len(), rows.iter().position(|r| r.selected), budget);
+    let rows = &rows[top..top.saturating_add(budget).min(rows.len())];
     // `viewport_top` guarantees the selected row (if any) is inside this
     // slice — pinned by the proptest — so the fade computed over the slice
     // is equivalent to computing it over the whole list.
     let any_selected = rows.iter().any(|r| r.selected);
-    rows.iter()
-        .map(|row| render_row(row, cols, widths, any_selected, theme))
-        // Below the floor the row was built wider than the pane on purpose;
-        // `clip_to_cells` is what stops the terminal WRAPPING that over-run
-        // into a second, blank line. Above the floor the row is already
-        // exactly `cols`, so this is a no-op the branch skips.
-        .map(|line| {
-            if cols < widths.min_intact_cols() {
-                clip_to_cells(&line, cols)
-            } else {
-                line
-            }
-        })
-        .collect()
+    match row_height {
+        RowHeight::Single => rows
+            .iter()
+            .map(|row| render_row(row, cols, widths, any_selected, theme))
+            // Below the floor the row was built wider than the pane on
+            // purpose; `clip_to_cells` is what stops the terminal WRAPPING
+            // that over-run into a second, blank line. Above the floor the row
+            // is already exactly `cols`, so this is a no-op the branch skips.
+            .map(|line| {
+                if cols < widths.min_intact_cols() {
+                    clip_to_cells(&line, cols)
+                } else {
+                    line
+                }
+            })
+            .collect(),
+        // No clip here, unlike the arm above: `render_card` builds at its own
+        // floor and clips BOTH lines to `cols` on the way out, so its two
+        // strings are already exactly `cols` cells at every width. A second
+        // clip would be dead code pretending to be a safeguard.
+        //
+        // `widths` is unused in this arm on purpose — the card reads its
+        // expanded threshold off `cols` alone (`card.rs`'s `COLLAPSED_COLS` /
+        // `EXPANDED_COLS`), so the profile the pane is actually painted at is
+        // the only input, and there is no second collapse flag to disagree
+        // with it.
+        RowHeight::Double => rows
+            .iter()
+            .enumerate()
+            .flat_map(|(i, row)| {
+                // The zebra is the card's parity in the SLICE, not in the
+                // list: the stripe is anchored to the SCREEN, so the pane's
+                // top card always wears the same bracket ink and a row
+                // arriving above the view cannot invert every stripe on it.
+                let (l1, l2) = card::render_card(row, cols, any_selected, i % 2 == 1, theme);
+                [l1, l2]
+            })
+            .collect(),
+    }
 }
 
 /// The repo/title ink for a palette index — `None` and out-of-range both fall
@@ -1039,7 +1083,14 @@ mod tests {
     /// regime every golden below was written against. Viewport behaviour is
     /// asserted by the `on_screen` tests, which pass a real pane height.
     fn render_all(rows: &[Row], cols: usize, widths: Widths) -> Vec<String> {
-        render_rows(rows, cols, rows.len(), widths, &Theme::default())
+        render_rows(
+            rows,
+            cols,
+            rows.len(),
+            widths,
+            &Theme::default(),
+            RowHeight::Single,
+        )
     }
 
     fn agent(status: RowStatus, provenance: Provenance, title: Option<&str>, summary: &str) -> Row {
@@ -2220,15 +2271,22 @@ mod tests {
     /// this way rather than the offset behind it — zero-padded names so `t01`
     /// is never a substring of `t12`.
     fn on_screen_at(rows: &[Row], height: usize, cols: usize, widths: Widths) -> Vec<usize> {
-        render_rows(rows, cols, height, widths, &Theme::default())
-            .iter()
-            .map(|line| {
-                let bare = strip_sgr(line);
-                (0..rows.len())
-                    .find(|i| bare.contains(&format!("t{i:02}")))
-                    .unwrap_or_else(|| panic!("no row name in rendered line {bare:?}"))
-            })
-            .collect()
+        render_rows(
+            rows,
+            cols,
+            height,
+            widths,
+            &Theme::default(),
+            RowHeight::Single,
+        )
+        .iter()
+        .map(|line| {
+            let bare = strip_sgr(line);
+            (0..rows.len())
+                .find(|i| bare.contains(&format!("t{i:02}")))
+                .unwrap_or_else(|| panic!("no row name in rendered line {bare:?}"))
+        })
+        .collect()
     }
 
     fn on_screen(rows: &[Row], height: usize) -> Vec<usize> {
@@ -2317,7 +2375,8 @@ mod tests {
                 DESIGN_COLS,
                 0,
                 Widths::EXPANDED,
-                &Theme::default()
+                &Theme::default(),
+                RowHeight::Single
             )
             .is_empty()
         );
@@ -2326,7 +2385,17 @@ mod tests {
         // Two lines afford ONE row of lookahead, not two — the pane's room for
         // it is what caps it.
         assert_eq!(on_screen(&numbered(10, 5), 2), vec![5, 6]);
-        assert!(render_rows(&[], DESIGN_COLS, 4, Widths::EXPANDED, &Theme::default()).is_empty());
+        assert!(
+            render_rows(
+                &[],
+                DESIGN_COLS,
+                4,
+                Widths::EXPANDED,
+                &Theme::default(),
+                RowHeight::Single
+            )
+            .is_empty()
+        );
     }
 
     /// Collapsed is a WIDTH profile (LEDGER D16): narrowing the bar must not
@@ -2390,6 +2459,146 @@ mod tests {
             vec![7, 8, 9, 10, 11],
             "the released clamp slid the view by other than LOOKAHEAD rows"
         );
+    }
+
+    // ── the card viewport (#232) ────────────────────────────────────────────
+
+    /// The card profile's expanded width — wide enough that the chip carrying
+    /// each row's `t00` name is never clipped, so the same read-the-picture-back
+    /// discipline the single-line viewport tests use works here too.
+    const CARD_COLS: usize = RowHeight::Double.target_cols(false);
+
+    /// [`on_screen_at`]'s card counterpart: the model indices the pane shows,
+    /// recovered from LINE 1 of each card (the name lives in the chip, which is
+    /// a line-1 cell). Asserts the pair-ness on the way through — a half card
+    /// reaching the screen is the failure this whole arm exists to prevent.
+    fn cards_on_screen(rows: &[Row], height: usize) -> Vec<usize> {
+        let lines = render_rows(
+            rows,
+            CARD_COLS,
+            height,
+            Widths::EXPANDED,
+            &Theme::default(),
+            RowHeight::Double,
+        );
+        assert_eq!(lines.len() % 2, 0, "a half card reached the screen");
+        lines
+            .chunks(2)
+            .map(|pair| {
+                let bare = strip_sgr(&pair[0]);
+                (0..rows.len())
+                    .find(|i| bare.contains(&format!("t{i:02}")))
+                    .unwrap_or_else(|| panic!("no row name in card line {bare:?}"))
+            })
+            .collect()
+    }
+
+    /// The pane height is a LINE budget; a card spends two of them. Half the
+    /// lines, rounded DOWN — an odd pane leaves its last line unwritten rather
+    /// than drawing a card's top with no bottom, and a one-line pane draws
+    /// nothing at all.
+    #[test]
+    fn double_mode_budgets_half_the_lines_and_blanks_the_odd_remainder() {
+        let rows = numbered(10, 0);
+        for height in [0usize, 1, 2, 3, 7, 8] {
+            let out = render_rows(
+                &rows,
+                CARD_COLS,
+                height,
+                Widths::EXPANDED,
+                &Theme::default(),
+                RowHeight::Double,
+            );
+            assert_eq!(out.len(), (height / 2) * 2, "height {height}");
+        }
+    }
+
+    /// Every card line is exactly `cols` cells, at the card's own two targets
+    /// and below its floor — the card clips both its lines itself, so this
+    /// pins that `render_rows` neither needs nor breaks a second clip.
+    #[test]
+    fn every_card_line_fills_the_width_exactly() {
+        let rows = numbered(4, 1);
+        for cols in [RowHeight::Double.target_cols(true), CARD_COLS, 20, 1] {
+            for line in render_rows(
+                &rows,
+                cols,
+                8,
+                Widths::EXPANDED,
+                &Theme::default(),
+                RowHeight::Double,
+            ) {
+                let width = display_cells(&strip_sgr(&line));
+                assert_eq!(width, cols, "card line is {width} cells at {cols}");
+            }
+        }
+    }
+
+    /// The #148 invariant in card units: whatever the fleet size, selection and
+    /// pane height, the selected card is on screen and the window is
+    /// contiguous. Exhaustive rather than a proptest — the interesting space
+    /// (which is the half-line arithmetic, not the row content) is small.
+    #[test]
+    fn the_selected_card_is_always_inside_the_double_viewport() {
+        for n in 1usize..12 {
+            for sel in 0..n {
+                for height in 0usize..=20 {
+                    let rows = numbered(n, sel);
+                    let seen = cards_on_screen(&rows, height);
+                    let budget = height / 2;
+                    assert_eq!(seen.len(), n.min(budget), "n {n} sel {sel} h {height}");
+                    for pair in seen.windows(2) {
+                        assert_eq!(pair[1], pair[0] + 1, "the window is not contiguous");
+                    }
+                    if budget == 0 {
+                        continue;
+                    }
+                    assert!(
+                        seen.contains(&sel),
+                        "selection {sel} off screen at height {height}: {seen:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The sentinel the flag needs: `RowHeight::Single` is the PRE-FLAG
+    /// renderer, byte for byte. Compared against `render_row` applied by hand
+    /// — the whole of the old function body — rather than against the goldens,
+    /// so it holds at widths no golden pins, and so a shared step added to the
+    /// dispatch fails here rather than silently repainting the legacy design.
+    #[test]
+    fn single_mode_output_is_byte_identical_to_before_the_flag() {
+        let rows = numbered(6, 2);
+        for (cols, widths) in [
+            (DESIGN_COLS, Widths::EXPANDED),
+            (COLLAPSED_DESIGN_COLS, Widths::COLLAPSED),
+            (20, Widths::COLLAPSED),
+        ] {
+            let want: Vec<String> = rows
+                .iter()
+                .map(|r| {
+                    let line = render_row(r, cols, widths, true, &Theme::default());
+                    if cols < widths.min_intact_cols() {
+                        clip_to_cells(&line, cols)
+                    } else {
+                        line
+                    }
+                })
+                .collect();
+            assert_eq!(
+                render_rows(
+                    &rows,
+                    cols,
+                    rows.len(),
+                    widths,
+                    &Theme::default(),
+                    RowHeight::Single
+                ),
+                want,
+                "single-line output forked at {cols}"
+            );
+        }
     }
 
     proptest! {
