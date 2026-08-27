@@ -106,7 +106,7 @@ pub const BAR_PERMISSIONS: [&str; 5] = [
 /// address a plugin the layout never loaded, launching a second bar
 /// (`keybind_and_layout_plugin_configurations_match`, kdl_guardrail.rs).
 pub fn config_kdl(binary: &str, wasm: &str, row_height: clave_types::RowHeight) -> String {
-    let row_height_value = row_height_config_value(row_height);
+    let row_height_value = row_height.as_config_value();
     let nav = |payload: &str| {
         // Trailing `;` after the child block is REQUIRED: zellij's KDL parser
         // rejects a `}`-closed node that isn't terminated before the enclosing
@@ -322,17 +322,6 @@ fn user_theme_slice() -> String {
         .unwrap_or_default()
 }
 
-/// The `row_height` plugin-config VALUE (#232) — one spelling, shared by
-/// every site that bakes the key, so `config_kdl`'s keybind pipes and
-/// `bar_pane_kdl`'s plugin pane can never spell the same mode two different
-/// ways.
-fn row_height_config_value(row_height: clave_types::RowHeight) -> &'static str {
-    match row_height {
-        clave_types::RowHeight::Single => "single",
-        clave_types::RowHeight::Double => "double",
-    }
-}
-
 /// One bar pane, at a FIXED column count (a bare `size=N` in zellij KDL).
 ///
 /// Fixed and no longer a percent: the percent mandate existed so the deleted
@@ -361,7 +350,7 @@ pub fn bar_pane_kdl(
     indent: &str,
     row_height: clave_types::RowHeight,
 ) -> String {
-    let row_height_value = row_height_config_value(row_height);
+    let row_height_value = row_height.as_config_value();
     format!(
         "{indent}pane size={cols} borderless=true {{\n\
          {indent}    plugin location=\"file:{wasm}\" {{\n\

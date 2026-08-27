@@ -459,6 +459,20 @@ impl RowHeight {
             _ => RowHeight::Double,
         }
     }
+
+    /// The inverse of [`from_config_value`] — the one spelling of each mode,
+    /// shared by every site that bakes or logs the `row_height` plugin-config
+    /// value (#232 final review, finding 2). Before this, `setup.rs`'s
+    /// `row_height_config_value` and `clave-bar/src/main.rs`'s load-time log
+    /// each carried their own `match` to the same two string literals — two
+    /// places that could drift out of sync with each other and with
+    /// `from_config_value`.
+    pub const fn as_config_value(self) -> &'static str {
+        match self {
+            RowHeight::Single => "single",
+            RowHeight::Double => "double",
+        }
+    }
 }
 
 // ── floating pane geometry ──────────────────────────────────────────────────
@@ -1044,6 +1058,16 @@ mod tests {
             RowHeight::from_config_value(Some("tall")),
             RowHeight::Double
         );
+    }
+
+    #[test]
+    fn row_height_config_value_round_trips() {
+        // The one spelling of each mode, both directions: whatever
+        // `as_config_value` writes, `from_config_value` reads back as the
+        // same variant (#232 final review, finding 2).
+        for rh in [RowHeight::Single, RowHeight::Double] {
+            assert_eq!(RowHeight::from_config_value(Some(rh.as_config_value())), rh);
+        }
     }
 
     #[test]

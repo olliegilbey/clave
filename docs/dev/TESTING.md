@@ -1098,6 +1098,17 @@ Four windows into what actually happened. Learn all four.
   **This file is shared by every Zellij session on the machine, and old entries
   linger.** Always filter by **today's date AND the build tag** — an unfiltered
   tail is a mix of every session's history and will mislead you.
+
+  **`CLAVE_BAR_DEBUG`** (set to any value other than empty or `0`, in the
+  zellij server's environment) turns on the bar's verbose per-frame line:
+  `clave-bar render: mode=<Single|Double> cols=<n> height=<n> rows=<n>
+  top=<n> shown=<n>` (`clave-bar/src/main.rs`'s `dbg_log()`, read once via a
+  `OnceLock` so a render — which fires on every event this plugin subscribes
+  to — costs no env lookup per frame). Off by default because that volume
+  would drown the one line that IS always on: `clave-bar click: raw_line=…
+  lines_per_row=… row_line=… top=… -> key=…` (`model.rs`'s `click()`), logged
+  unconditionally on every mouse click since clicks are rare enough to afford
+  it and are what the next `#148`-class bug gets debugged from.
 - **The evlog** — `clave.log`, JSON lines, one per host-side decision. There is
   one per state dir: `~/.local/state/clave/clave.log` for stable,
   `~/.local/state/clave-dev/state/clave.log` for the sandbox.

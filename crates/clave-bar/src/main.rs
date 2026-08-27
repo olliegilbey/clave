@@ -640,10 +640,7 @@ impl ZellijPlugin for State {
         let row_height = resolve_row_height(&config);
         eprintln!(
             "clave-bar: row_height: {} ({})",
-            match row_height {
-                clave_types::RowHeight::Single => "single",
-                clave_types::RowHeight::Double => "double",
-            },
+            row_height.as_config_value(),
             if config.contains_key(clave_types::ROW_HEIGHT_KEY) {
                 "from plugin config"
             } else {

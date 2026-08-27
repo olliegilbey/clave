@@ -1832,7 +1832,7 @@ mod tests {
     fn touch_stamps_the_tabs_wall_clock_and_the_snapshot_carries_it() {
         let mut s = Store::default();
         touch_in(&mut s, 4, 1_756_200_000);
-        assert!(s.tab_touched.get(&4).copied().unwrap_or(0) > 0);
+        assert_eq!(s.tab_touched.get(&4).copied(), Some(1_756_200_000));
         assert_eq!(snapshot_from(&s).tab_touched, s.tab_touched);
     }
 

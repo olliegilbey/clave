@@ -104,8 +104,10 @@ fn pr_sync_target(s: &store::Store, uuid: &str, now: u64) -> Option<(String, Str
 /// the minimum — this is the one surface here that needs a live `gh` to
 /// exercise, so it stays untested; everything it calls (`resolve_pr`,
 /// `pr_is_stale`) is covered above. A cancel channel (not a bare sleep +
-/// kill) keeps a fast, successful `gh` call from leaving a `kill -9` timer
-/// armed against a pid the OS may since have reused.
+/// kill) keeps `gh` finishing under 5s — success OR error — from leaving a
+/// `kill -9` timer armed against a pid the OS may since have reused: the
+/// cancel is sent right after `wait_with_output` returns, before either
+/// outcome is handled, so no exit path can skip it.
 fn gh_runner(cwd: String) -> impl Fn(&[&str]) -> Option<String> {
     move |args: &[&str]| {
         // Discovered path, never bare `gh` (same class as push_snapshot's
@@ -137,9 +139,14 @@ fn gh_runner(cwd: String) -> impl Fn(&[&str]) -> Option<String> {
                     .status();
             }
         });
-        let output = child.wait_with_output().ok()?;
+        // Send the cancel BEFORE handling the result, on every exit path: an
+        // early `?` on a wait error used to skip straight past the send,
+        // leaving the watchdog armed to `kill -9` a pid the OS is free to
+        // have already reused (finding 4, #232 final review).
+        let output = child.wait_with_output();
         let _ = cancel_tx.send(()); // this pid is free to be reused; stand down
         let _ = watchdog.join();
+        let output = output.ok()?;
         output
             .status
             .success()

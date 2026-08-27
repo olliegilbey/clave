@@ -151,10 +151,17 @@ pub const RED: Rgb = Rgb(0xE4, 0x68, 0x76);
 /// close enough in weight that neither reads as a state. The zebra lives in
 /// this linework: glass forbids painting every second background, so the
 /// alternation is carried by the `\u{256d}`/`\u{2570}` bracket instead.
+// `BRACKET_A` and `META_INK` below share this exact value (both fujiGray,
+// 0x727169) — a coincidence, not a shared identity. They play unrelated
+// roles (bracket linework vs. metadata text) and are declared as separate
+// constants on purpose; changing one to retune its role must not silently
+// repaint the other's.
 pub const BRACKET_A: Rgb = Rgb(0x72, 0x71, 0x69); // fujiGray
 pub const BRACKET_B: Rgb = Rgb(0x9C, 0xAB, 0xCA); // springViolet2
 
 /// The card's quiet metadata ink: branch, model, elapsed, and the `TERM` tag.
+/// Same RGB as [`BRACKET_A`] (both fujiGray) — coincidence, not aliasing; see
+/// the note there.
 pub const META_INK: Rgb = Rgb(0x72, 0x71, 0x69); // fujiGray
 /// The pull-request number.
 pub const PR_INK: Rgb = Rgb(0x98, 0xBB, 0x6C); // springGreen

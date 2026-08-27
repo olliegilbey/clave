@@ -626,7 +626,10 @@ fn main() -> Result<()> {
         Some(Command::Rows { mode }) => {
             let paths = store::store_paths()?;
             let Some(mode_str) = mode else {
-                println!("{:?}", store::read_store(&paths)?.row_height);
+                println!(
+                    "{}",
+                    store::read_store(&paths)?.row_height.as_config_value()
+                );
                 return Ok(());
             };
             let parsed = match mode_str.as_str() {
