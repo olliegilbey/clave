@@ -309,14 +309,10 @@ impl Theme {
     ///
     /// - `base`/`default_ink` ← `text_unselected` background/base — the theme's
     ///   ordinary text on its ordinary ground.
-    /// - `sel_bg` ← `list_selected.background` — the bar is a list and its
-    ///   selected row is the list's selected row — CLAMPED to the curated
-    ///   design's selection weight. zellij themes paint dark text on that
-    ///   background, so several (kanagawa's bright green above all) make it
-    ///   loud; the card keeps its light inks instead, so a selection brighter
-    ///   than waveBlue2-over-sumiInk3 is pulled toward `base` until it carries
-    ///   the same luminance weight the lock ratified. Quiet themes (catppuccin,
-    ///   tokyo-night, gruvbox all sit under the cap) pass through untouched.
+    /// - `sel_bg` ← `list_selected.background` when it is a quiet surface
+    ///   tint; when it is loud, a tint of `text_unselected.emphasis_1` at the
+    ///   curated selection weight instead — [`clamp_sel`] carries the full
+    ///   reasoning (drive finding, 2026-08-27: kanagawa's selection green).
     /// - `chip_ink` ← `base` darkened 30% toward black: "darker than the bar",
     ///   which is the relationship sumiInk0 has to sumiInk3 in the curated
     ///   design, preserved as a relationship rather than a colour.
@@ -337,7 +333,11 @@ impl Theme {
         let default_ink = rgb(s.text_unselected.base);
         Theme {
             base,
-            sel_bg: clamp_sel(base, rgb(s.list_selected.background)),
+            sel_bg: clamp_sel(
+                base,
+                rgb(s.list_selected.background),
+                rgb(s.text_unselected.emphasis_1),
+            ),
             default_ink,
             chip_ink: base.mix(Rgb(0, 0, 0), 0.3),
             untinted: default_ink.mix(base, 0.65),
@@ -348,16 +348,30 @@ impl Theme {
 
 /// The themed selection may not shout louder than the curated one. The cap is
 /// the curated pair's own luminance distance (waveBlue2 over sumiInk3, ~42) —
-/// self-calibrating, not a magic number — and an overshooting background keeps
-/// its hue, mixed toward `base` until it lands exactly on the cap. Signed via
-/// `abs`, so a light theme's darker-than-base selection clamps the same way.
-fn clamp_sel(base: Rgb, sel: Rgb) -> Rgb {
+/// self-calibrating, not a magic number. A quiet `list_selected.background`
+/// (catppuccin, tokyo-night, gruvbox, nord, dracula) passes through untouched.
+///
+/// A LOUD one is a colour zellij built for dark text (kanagawa's bright green,
+/// everforest's) — the theme gave the bar no usable selection surface, and
+/// quieting that green would still leave the selected row wearing a status hue
+/// (green means Done in the bar's fixed language). So the loud case tints from
+/// the theme's `text_unselected.emphasis_1` instead — blue or cyan in five of
+/// the seven popular shipped themes, and the theme's own signature hue in the
+/// green pair, where a green selection is honest — mixed toward `base` to land
+/// exactly on the cap. A degenerate emphasis (luma too close to the bar to ink
+/// anything, [`MIN_INK_LUMA_DIST`]) falls back to the loud colour, clamped.
+/// Distances are `abs`, so a light theme clamps the same way.
+fn clamp_sel(base: Rgb, sel: Rgb, emphasis: Rgb) -> Rgb {
     let cap = luma(SEL_BG) - luma(BASE);
     let dist = (luma(sel) - luma(base)).abs();
-    if dist > cap {
-        base.mix(sel, cap / dist)
+    if dist <= cap {
+        return sel;
+    }
+    let e_dist = (luma(emphasis) - luma(base)).abs();
+    if e_dist >= MIN_INK_LUMA_DIST {
+        base.mix(emphasis, cap / e_dist)
     } else {
-        sel
+        base.mix(sel, cap / dist)
     }
 }
 
@@ -629,9 +643,9 @@ mod tests {
         assert_eq!(t.base, Rgb(22, 22, 29), "bar bg = text_unselected bg");
         assert_eq!(t.default_ink, Rgb(220, 215, 186), "ink = text base");
         // zellij's kanagawa paints selections a BRIGHT green (118,148,106)
-        // meant for dark text; the clamp keeps the hue and pulls it to the
-        // curated selection weight (see `clamp_sel`).
-        assert_eq!(t.sel_bg, Rgb(57, 67, 57), "selection = clamped list bg");
+        // meant for dark text, so `clamp_sel` tints from emphasis_1 —
+        // springBlue — at the curated selection weight instead.
+        assert_eq!(t.sel_bg, Rgb(52, 67, 78), "selection = springBlue tint");
         assert_eq!(t.chip_ink, Rgb(15, 15, 20), "chip text = base toward black");
     }
 
@@ -690,23 +704,30 @@ mod tests {
         assert_eq!(Theme::from_styling(&s).palette, Theme::default().palette);
     }
 
-    /// The selection clamp's two sides, pinned. A quiet selection background
-    /// (tokyo-night's (56,62,90), the well-behaved majority) passes through
-    /// byte-identical; kanagawa's bright green lands at the curated weight
-    /// with its hue kept — and the clamped result sits within one luma unit
-    /// of the curated pair's own distance, which is the invariant the clamp
-    /// exists to hold.
+    /// The selection clamp's three regimes, pinned. A quiet selection
+    /// background (tokyo-night's (56,62,90), the well-behaved majority) passes
+    /// through byte-identical. A loud one (kanagawa's bright green) tints from
+    /// the emphasis hue — springBlue, giving the muted blue — and a loud one
+    /// whose emphasis is degenerate (black) clamps the loud hue itself. Both
+    /// loud results sit within one luma unit of the curated pair's own
+    /// distance, which is the invariant the clamp exists to hold.
     #[test]
     fn selection_clamp_passes_quiet_themes_and_tames_loud_ones() {
+        let blue = Rgb(127, 180, 202); // kanagawa emphasis_1 — springBlue
         let base = Rgb(26, 27, 38);
         let quiet = Rgb(56, 62, 90);
-        assert_eq!(clamp_sel(base, quiet), quiet);
+        assert_eq!(clamp_sel(base, quiet, blue), quiet);
 
         let k_base = Rgb(22, 22, 29);
         let loud = Rgb(118, 148, 106);
-        let clamped = clamp_sel(k_base, loud);
-        assert_eq!(clamped, Rgb(57, 67, 57));
         let cap = luma(SEL_BG) - luma(BASE);
+
+        let tinted = clamp_sel(k_base, loud, blue);
+        assert_eq!(tinted, Rgb(52, 67, 78));
+        assert!((luma(tinted) - luma(k_base) - cap).abs() < 1.0);
+
+        let clamped = clamp_sel(k_base, loud, Rgb(0, 0, 0));
+        assert_eq!(clamped, Rgb(57, 67, 57));
         assert!((luma(clamped) - luma(k_base) - cap).abs() < 1.0);
     }
 
