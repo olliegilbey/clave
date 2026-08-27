@@ -108,14 +108,20 @@ fn pr_sync_target(s: &store::Store, uuid: &str, now: u64) -> Option<(String, Str
 /// armed against a pid the OS may since have reused.
 fn gh_runner(cwd: String) -> impl Fn(&[&str]) -> Option<String> {
     move |args: &[&str]| {
-        let child = std::process::Command::new("gh")
-            .args(args)
-            .current_dir(&cwd)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .ok()?;
+        // Discovered path, never bare `gh` (same class as push_snapshot's
+        // zellij fix, hook.rs ~610-614): pr-sync runs detached from a hook
+        // that inherited Claude's env, whose PATH may lack homebrew. A miss
+        // here degrades silently — tool_path falls back to the bare name,
+        // which then simply fails to spawn and resolve_pr returns None.
+        let child =
+            std::process::Command::new(crate::discover::tool_path(crate::discover::ToolId::Gh))
+                .args(args)
+                .current_dir(&cwd)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .ok()?;
         let pid = child.id();
         let (cancel_tx, cancel_rx) = std::sync::mpsc::channel::<()>();
         let watchdog = std::thread::spawn(move || {
@@ -123,7 +129,10 @@ fn gh_runner(cwd: String) -> impl Fn(&[&str]) -> Option<String> {
                 .recv_timeout(std::time::Duration::from_secs(5))
                 .is_err()
             {
-                let _ = std::process::Command::new("kill")
+                // Absolute path, not PATH `kill`: same off-PATH hazard as
+                // `gh` above, and /bin/kill is universal on macOS/Linux so
+                // there is no discover() case to make for it.
+                let _ = std::process::Command::new("/bin/kill")
                     .args(["-9", &pid.to_string()])
                     .status();
             }
