@@ -2279,23 +2279,31 @@ impl BarModel {
         // the boundary, and `viewport_top` stays row-unit for both callers.
         // Converting one and not the other is exactly the #148 divergence —
         // a click would land the right row against the wrong window.
-        // Integer division is also the odd-remainder rule: a click on a
-        // half-drawn last line (which the renderer never writes) folds onto
-        // the last whole card rather than off the end.
+        // At an odd pane height the renderer leaves the last line blank
+        // (#232 again): `budget = pane_height / lines_per_row` is exactly the
+        // number of whole rows drawn, so a converted `line` at or past it is
+        // that blank remainder. It is ignored below rather than folded onto
+        // a card — a dropped click beats a click that silently jumps focus
+        // to the first row off screen.
         let lines_per_row = self.row_height.lines_per_row();
         let raw_line = line;
         let line = line / lines_per_row;
+        let budget = pane_height / lines_per_row;
         let rows = self.rows();
         let top = viewport_top(
             rows.len(),
             rows.iter().position(|(_, r)| r.selected),
-            pane_height / lines_per_row,
+            budget,
         );
-        // `rows.get` bounds-checks against the LIST, not the window: a `line`
-        // at or past `pane_height` (reachable only in the one-frame-stale
-        // `pane_height` window below) selects a row off screen harmlessly,
-        // rather than panicking.
-        let hit = top.checked_add(line).and_then(|i| rows.get(i)).cloned();
+        // `line < budget` bounds-checks against the WINDOW, not the list:
+        // `rows.get` below still guards the list separately (reachable only
+        // in the one-frame-stale `pane_height` window), so an out-of-window
+        // click is dropped here and an out-of-list one is dropped there.
+        let hit = if line < budget {
+            top.checked_add(line).and_then(|i| rows.get(i)).cloned()
+        } else {
+            None
+        };
         // UNCONDITIONAL (#232, the maintainer's ask): clicks are rare, and
         // this one line is what debugs the next #148 — every term of the
         // conversion, plus the row it resolved to, in the order they apply.
@@ -7432,6 +7440,35 @@ mod tests {
             expected[3] = true;
             assert_eq!(selected(&m), expected, "line {line} is the fourth card");
         }
+        // Height 7 is the odd-remainder case (#232): three cards fit on lines
+        // 0..=5 and line 6 is drawn by nobody. A click there must be dropped,
+        // not fold onto the first OFF-SCREEN row (card 3, `u-03`) — that would
+        // silently jump focus past the edge of the screen (the #148 shape).
+        for line in [0, 1] {
+            let mut m = overflowing_fleet(11);
+            assert_eq!(m.click(line, 7), live, "line {line} is the first card");
+        }
+        for (lines, row) in [([2, 3], 1), ([4, 5], 2)] {
+            for line in lines {
+                let mut m = overflowing_fleet(11);
+                assert!(m.click(line, 7).is_empty(), "a dormant click opens nothing");
+                let mut expected = vec![false; 12];
+                expected[row] = true;
+                assert_eq!(selected(&m), expected, "line {line} is card {row}");
+            }
+        }
+        let mut m = overflowing_fleet(11);
+        assert!(
+            m.click(6, 7).is_empty(),
+            "the blank remainder line selects nothing"
+        );
+        let mut expected = vec![false; 12];
+        expected[0] = true;
+        assert_eq!(
+            selected(&m),
+            expected,
+            "the blank remainder must not move the selection"
+        );
         // Scrolled, in cards: selecting the last row slides the card window to
         // model rows 9..=11 in a six-line (three-card) pane, and line 0 of
         // that pane is model row 9 — the whole #148 lesson, one geometry over.
