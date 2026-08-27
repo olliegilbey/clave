@@ -306,6 +306,27 @@ pub enum RowContent {
         repo: String,
         repo_ink: Option<u8>,
         summary: String,
+        /// The model handle the agent is running (e.g. "sonnet"), straight off
+        /// the wire. `None` renders blank — no reading yet, never a guess (#232).
+        model: Option<String>,
+        /// The provider running `model` (e.g. "claude"). Kept separate from
+        /// `model` for the same reason the wire type does (AGENTS.md: other
+        /// CLI-based agents are coming, and a future provider may reuse a
+        /// model name clave already knows under a different one).
+        provider: Option<String>,
+        /// The open PR number for this row's branch, host-resolved. `None`
+        /// means none is open (or none is known yet) — blank, never a dash.
+        pr: Option<u32>,
+        /// The current branch name, BLANKED to the empty string when the
+        /// checkout is the repo's default (#232) — the same predicate
+        /// `provenance` above renders blank via its `Main` case, shared
+        /// rather than re-derived (`is_default_checkout`).
+        branch: String,
+        /// Time since the USER last interacted with this agent
+        /// (`last_interacted`, bumped only on `UserPromptSubmit`) — never
+        /// agent activity, never focus. `None` renders blank: no measurement
+        /// invented for a tab that has never seen a prompt.
+        elapsed: Option<String>,
     },
     Terminal {
         /// The zellij tab name — the chip. Lock §7.1: this is the only row
@@ -325,6 +346,15 @@ pub enum RowContent {
         /// lingering as "most recently run" at the prompt. Empty until the
         /// first command.
         command: String,
+        /// Borrowed from the SAME prefix-matched store row `provenance` was
+        /// borrowed from (#232) — never computed here. `None` when no agent's
+        /// checkout claims this pane's cwd, or that row has no open PR.
+        pr: Option<u32>,
+        /// Time since the USER last interacted with this TAB (the store's
+        /// `tab_touched` wall-clock twin of the commitment ordinal) — same
+        /// semantics as the agent row's `elapsed`, just a different source.
+        /// `None` when the tab has no touch on record.
+        elapsed: Option<String>,
     },
 }
 
@@ -341,6 +371,8 @@ impl RowContent {
             repo: None,
             repo_ink: None,
             command: String::new(),
+            pr: None,
+            elapsed: None,
         }
     }
 }
@@ -1020,6 +1052,11 @@ mod tests {
                 repo: String::from("clave"),
                 repo_ink: Some(0),
                 summary: String::from(summary),
+                model: None,
+                provider: None,
+                pr: None,
+                branch: String::new(),
+                elapsed: None,
             },
             selected: false,
             // The helper mirrors the model's tier: a fixture asking for a
@@ -1060,6 +1097,11 @@ mod tests {
                     repo: String::from("dotfiles"),
                     repo_ink: None,
                     summary: String::new(),
+                    model: None,
+                    provider: None,
+                    pr: None,
+                    branch: String::new(),
+                    elapsed: None,
                 },
                 selected: false,
                 dormant: true,
@@ -1420,6 +1462,8 @@ mod tests {
                 repo: Some(String::from("clave")),
                 repo_ink,
                 command: String::from("cargo test"),
+                pr: None,
+                elapsed: None,
             },
             selected: false,
             dormant: false,

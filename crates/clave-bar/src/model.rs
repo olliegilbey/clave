@@ -129,19 +129,44 @@ const SHELLS: [&str; 9] = [
 fn provenance_of(a: &Agent) -> Provenance {
     if a.worktree.is_some() {
         Provenance::Worktree
-    } else if a.branch.is_empty() || a.branch == "-" {
-        Provenance::Main
-    } else if let Some(default) = a.default_branch.as_deref() {
-        if a.branch == default {
-            Provenance::Main
-        } else {
-            Provenance::Branch
-        }
-    } else if a.branch == "main" || a.branch == "master" {
+    } else if is_default_checkout(a) {
         Provenance::Main
     } else {
         Provenance::Branch
     }
+}
+
+/// True when `a.branch` reads as an ordinary checkout of the repo's default
+/// branch: empty (no repo), the host's git-failure sentinel `"-"`, or a name
+/// match against the resolved default (falling back to the bare main/master
+/// heuristic when the host couldn't resolve one). This is the exact name-only
+/// half of [`provenance_of`]'s `Main` case (the worktree branch is decided
+/// separately, above it) — shared rather than re-derived (#232) because the
+/// branch cell blanks on precisely this predicate too.
+fn is_default_checkout(a: &Agent) -> bool {
+    a.branch.is_empty()
+        || a.branch == "-"
+        || match a.default_branch.as_deref() {
+            Some(default) => a.branch == default,
+            None => a.branch == "main" || a.branch == "master",
+        }
+}
+
+/// m → h → d → w, each unit taking over at 1.0 of itself; sub-minute is "0m".
+/// `then == 0` is "never" (no interaction on record — the store never mints
+/// that value for a real one), which renders blank rather than "now": the bar
+/// never invents a measurement (#232).
+pub(crate) fn elapsed_label(now: u64, then: u64) -> Option<String> {
+    if then == 0 {
+        return None;
+    }
+    let s = now.saturating_sub(then);
+    Some(match s {
+        0..=3599 => format!("{}m", s / 60),
+        3600..=86_399 => format!("{}h", s / 3600),
+        86_400..=604_799 => format!("{}d", s / 86_400),
+        _ => format!("{}w", s / 604_800),
+    })
 }
 
 /// The summary-cell text for a foreground argv, or `None` when it is the
@@ -599,6 +624,13 @@ pub struct BarModel {
     order: OrderMode,
     today: u32,
     tab_buckets: BTreeMap<usize, BTreeMap<u32, u32>>,
+    /// tab_id → unix secs of the last USER interaction with a TERMINAL tab
+    /// (#232's wall-clock twin of `tab_order`'s commitment ordinal). Same
+    /// REPLACE doctrine as its neighbours above: the store is the one writer,
+    /// this copy exists only so `terminal_content`'s elapsed cell has
+    /// something to read — an agent row reads `Agent::last_interacted`
+    /// instead and never touches this map.
+    tab_touched: BTreeMap<usize, u64>,
     /// Tabs THIS instance has already birth-touched (`clave touch` spawned).
     /// Local and echo-independent on purpose: a guard that waited for the
     /// store echo re-fired per TabUpdate (C5 rd 4 spawn storm → server fd
@@ -746,6 +778,15 @@ pub struct BarModel {
     /// `RowHeight::default()` (`Double`) so existing tests that never call
     /// `set_row_height` keep testing the shipping default.
     row_height: RowHeight,
+    /// The shell's wall clock, set by [`Self::tick`] (#232). A field rather
+    /// than a parameter threaded through `rows`/`click`/`agent_content`/
+    /// `terminal_content`: those four signatures would otherwise all need a
+    /// `now` neither `click` nor most tests care about, for the sake of the
+    /// one leaf (`elapsed_label`) that does. The model still never READS a
+    /// clock itself — `main.rs` is the only caller of `tick`, once per
+    /// render, with `wall_now()` — so model.rs stays a pure state machine
+    /// driven entirely by values handed to it.
+    now: u64,
 }
 
 impl BarModel {
@@ -995,6 +1036,15 @@ impl BarModel {
     /// writer.
     pub fn set_row_height(&mut self, row_height: RowHeight) {
         self.row_height = row_height;
+    }
+
+    /// The shell's wall clock, called once before every render (#232):
+    /// `main.rs` supplies `wall_now()`, and the existing `TERM_POLL_SECS`
+    /// cadence's re-render is what keeps the elapsed cell's minutes honest
+    /// between pushes. See the `now` field doc for why this is a tick rather
+    /// than a parameter on `rows`.
+    pub fn tick(&mut self, now: u64) {
+        self.now = now;
     }
 
     /// Our own tab position, per the LAST PaneUpdate. Plugin and terminal pane
@@ -1398,6 +1448,7 @@ impl BarModel {
         self.order = snap.order;
         self.today = snap.today;
         self.tab_buckets = snap.tab_buckets;
+        self.tab_touched = snap.tab_touched;
         // Settle death claims: a witnessed-dead id the store no longer
         // references has had its prune land (or never needed one) — the claim
         // is spent. Settling at the ECHO, not at emit, is what keeps the
@@ -1901,21 +1952,35 @@ impl BarModel {
         // and provenance verbatim — correct by construction, no git reading.
         // Unmatched cwds show their directory name untinted, provenance
         // blank: "where it lives" is useful even outside the fleet.
-        let (repo, repo_ink, provenance) = match facts.and_then(|f| f.cwd.as_deref()) {
+        let (repo, repo_ink, provenance, pr) = match facts.and_then(|f| f.cwd.as_deref()) {
             Some(cwd) => match self.checkout_of(cwd) {
                 Some(a) => (
                     Some(basename(&a.repo_root).to_string()),
                     inks.repo.get(&a.repo_root).copied(),
                     provenance_of(a),
+                    a.pr_number,
                 ),
-                None => (Some(basename(cwd).to_string()), None, Provenance::Main),
+                None => (
+                    Some(basename(cwd).to_string()),
+                    None,
+                    Provenance::Main,
+                    None,
+                ),
             },
-            None => (None, None, Provenance::Main),
+            None => (None, None, Provenance::Main, None),
         };
         let command = facts
             .and_then(|f| f.last_cmd.clone())
             .or_else(|| speaker.and_then(|p| p.terminal_command.clone()))
             .unwrap_or_default();
+        // Elapsed reads the store's `tab_touched` wall-clock twin, not any
+        // agent field — a terminal tab has no agent record of its own. An
+        // absent entry defaults to 0, which `elapsed_label` already renders
+        // as "never interacted" (#232).
+        let elapsed = elapsed_label(
+            self.now,
+            self.tab_touched.get(&t.tab_id).copied().unwrap_or(0),
+        );
         RowContent::Terminal {
             name: t.name.clone(),
             status,
@@ -1923,6 +1988,8 @@ impl BarModel {
             repo,
             repo_ink,
             command,
+            pr,
+            elapsed,
         }
     }
 
@@ -2005,6 +2072,18 @@ impl BarModel {
             repo: basename(&a.repo_root).to_string(),
             repo_ink: inks.repo.get(&a.repo_root).copied(),
             summary: a.summary.clone(),
+            model: a.model.clone(),
+            provider: a.provider.clone(),
+            pr: a.pr_number,
+            // Blanked, not `a.branch.clone()`, on the exact predicate
+            // `provenance` above just rendered blank via its `Main` case —
+            // shared, not re-derived (#232).
+            branch: if is_default_checkout(a) {
+                String::new()
+            } else {
+                a.branch.clone()
+            },
+            elapsed: elapsed_label(self.now, a.last_interacted),
         }
     }
 
@@ -6225,6 +6304,57 @@ mod tests {
         };
         assert_eq!(provenance(0), Provenance::Main, "the host's non-repo value");
         assert_eq!(provenance(1), Provenance::Main, "a test builder's default");
+    }
+
+    #[test]
+    fn elapsed_label_is_coarse_and_never_invented() {
+        assert_eq!(elapsed_label(1000, 0), None); // then=0: never interacted
+        assert_eq!(elapsed_label(100, 100).as_deref(), Some("0m"));
+        assert_eq!(elapsed_label(100 + 59, 100).as_deref(), Some("0m"));
+        assert_eq!(elapsed_label(100 + 5 * 60, 100).as_deref(), Some("5m"));
+        assert_eq!(elapsed_label(100 + 2 * 3600, 100).as_deref(), Some("2h"));
+        assert_eq!(elapsed_label(100 + 3 * 86_400, 100).as_deref(), Some("3d"));
+        assert_eq!(elapsed_label(100 + 2 * 604_800, 100).as_deref(), Some("2w"));
+        assert_eq!(elapsed_label(50, 100).as_deref(), Some("0m")); // clock skew: clamp, don't panic
+    }
+
+    #[test]
+    fn agent_content_carries_the_card_fields() {
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "a", false), tab(11, 1, "b", false)]);
+        m.tick(1_100);
+        let mut on_branch = dressed("u-branch", "/r/one", "feature/x", None, Some(10));
+        on_branch.model = Some("sonnet".into());
+        on_branch.provider = Some("claude".into());
+        on_branch.pr_number = Some(232);
+        on_branch.last_interacted = 1_000;
+        let mut on_default = dressed("u-default", "/r/one", "main", None, Some(11));
+        on_default.default_branch = Some("main".into());
+        on_default.last_interacted = 0;
+        m.apply_snapshot(snap(1, vec![on_branch, on_default]));
+        let fields = |i: usize| match content_at(&m, i) {
+            RowContent::Agent {
+                model,
+                provider,
+                pr,
+                branch,
+                elapsed,
+                ..
+            } => (model, provider, pr, branch, elapsed),
+            RowContent::Terminal { .. } => panic!("row {i} is not an agent"),
+        };
+        let (model, provider, pr, branch, elapsed) = fields(0);
+        assert_eq!(model.as_deref(), Some("sonnet"));
+        assert_eq!(provider.as_deref(), Some("claude"));
+        assert_eq!(pr, Some(232));
+        assert_eq!(branch, "feature/x");
+        assert_eq!(elapsed.as_deref(), Some("1m")); // 100s since last_interacted
+        // The default checkout blanks its branch cell — the same predicate
+        // `provenance` renders blank via its `Main` case — and never having
+        // interacted (`last_interacted: 0`) renders no elapsed at all.
+        let (_, _, _, branch, elapsed) = fields(1);
+        assert_eq!(branch, "");
+        assert_eq!(elapsed, None);
     }
 
     #[test]

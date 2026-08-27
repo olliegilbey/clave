@@ -44,6 +44,20 @@ const _: () = assert!(TIMER_KIND_CUTOFF_SECS <= PEEK_SINK_SECS);
 const _: () = assert!(PEEK_SINK_SECS < TERM_POLL_CUTOFF_SECS);
 const _: () = assert!(TERM_POLL_CUTOFF_SECS <= TERM_POLL_SECS);
 
+/// The shell's wall clock (#232): UNIX-epoch seconds, read once per render
+/// and fed to `BarModel::tick` so `elapsed_label` has a `now` to subtract
+/// against. model.rs stays a pure state machine driven entirely by values
+/// handed to it, so the one syscall this feature needs lives here instead.
+/// 0-safe rather than panicking if the platform clock is ever unavailable
+/// (renders as "never interacted" instead of crashing the bar) — WASI is
+/// expected to give a real one; VERIFY in the sandbox drive (#232 task 11).
+fn wall_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 #[derive(Default)]
 struct State {
     model: BarModel,
@@ -935,6 +949,10 @@ impl ZellijPlugin for State {
         // because the mouse-click map needs the same height, and Mouse events
         // do not carry it.
         self.pane_height = rows;
+        // #232: the elapsed cell's `now`. The TERM_POLL_SECS-cadenced timer
+        // (and every other event this bar already re-renders on) keeps the
+        // minutes honest between store pushes.
+        self.model.tick(wall_now());
         let list: Vec<Row> = self.model.rows().into_iter().map(|(_, row)| row).collect();
         let lines = render_rows(&list, cols, rows, self.model.widths_at(cols), &self.theme);
         // Final review 2026-08-11: emit the frame WITHOUT a trailing newline.
