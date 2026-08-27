@@ -10,10 +10,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result};
 
 use crate::hook::push_snapshot;
-// Only `wasm_path` is consumed here (the layout needs the bar's wasm location);
-// `data_dir` from the same module is unused, so it is intentionally NOT
-// imported — an unused import would be a warning (see task-7 adaptation note).
-use crate::setup::wasm_path;
+use crate::setup::{data_dir, session_row_height, wasm_path};
 use crate::store::{
     AgentRecord, LabelSource, Store, now_unix, snapshot_from, store_paths, with_store_mut,
 };
@@ -196,8 +193,9 @@ pub fn sanitize_label(s: &str) -> String {
 /// `collapsed` is the mode the tab must be born in (LEDGER D36, task 7b′): a
 /// tab born expanded into a collapsed fleet flashes wide and then snaps. The
 /// width itself is not an input any more — the bar pane is a fixed column
-/// count taken from `target_cols_for`, which zellij applies exactly whatever
-/// the window is, so nothing here needs to know the display.
+/// count taken from `row_height.target_cols` (#232; formerly the single-mode
+/// `target_cols_for`), which zellij applies exactly whatever the window is,
+/// so nothing here needs to know the display.
 pub fn tab_node(
     binary: &str,
     wasm: &str,
@@ -205,6 +203,7 @@ pub fn tab_node(
     uuid: &str,
     cwd: &str,
     collapsed: bool,
+    row_height: clave_types::RowHeight,
 ) -> String {
     // split_direction="vertical" is REQUIRED for a LEFT bar: zellij stacks
     // sibling panes horizontally (rows) by default (Task 9 C1 finding; same
@@ -226,8 +225,9 @@ pub fn tab_node(
         pane = crate::setup::bar_pane_kdl(
             binary,
             wasm,
-            clave_types::target_cols_for(collapsed),
-            "            "
+            row_height.target_cols(collapsed),
+            "            ",
+            row_height
         ),
     )
 }
@@ -279,6 +279,7 @@ pub fn tab_layout(
     uuid: &str,
     cwd: &str,
     collapsed: bool,
+    row_height: clave_types::RowHeight,
 ) -> String {
     // #181: the new tab carries the same two swap geometries every other tab
     // has, so Alt+c works in a dwell-opened tab exactly as it does in a
@@ -287,8 +288,8 @@ pub fn tab_layout(
     // verbatim and the swap layouts sit alongside it.
     format!(
         "layout {{\n{swaps}{tab}}}\n",
-        swaps = crate::setup::swap_layouts_kdl(binary, wasm, collapsed),
-        tab = tab_node(binary, wasm, label, uuid, cwd, collapsed)
+        swaps = crate::setup::swap_layouts_kdl(binary, wasm, collapsed, row_height),
+        tab = tab_node(binary, wasm, label, uuid, cwd, collapsed, row_height)
     )
 }
 
@@ -600,6 +601,11 @@ pub(crate) fn mint_record(s: &mut Store, inputs: FreshRecordInputs) -> AgentReco
         // pointing at its live conversation (#99).
         live_session: None,
         buckets: seeded,
+        model: None,
+        provider: None,
+        pr_number: None,
+        pr_checked: 0,
+        pr_branch: String::new(),
     };
     // Note `merge_resume_record` PRESERVES an existing row's
     // `default_branch` along with everything else, so a row written before
@@ -1130,7 +1136,16 @@ pub fn run_add(worktree: bool) -> Result<()> {
     validate_cwd(&agent_cwd)?;
     let wasm = wasm_path()?.to_str().context("wasm path")?.to_string();
     let binary = crate::release::runtime_binary();
-    let layout = tab_layout(&binary, &wasm, &label, &uuid, &agent_cwd, collapsed);
+    // The SESSION's own mode, not the store's (finding 2, #232 review):
+    // `clave rows` only takes effect at the next launch, so a tab minted
+    // mid-session must match the plugin identity the running config.kdl's
+    // keybinds already address — reading `store.row_height` here would bake
+    // a tab whose bar registers under a configuration no keybind matches
+    // (a deaf bar; second-bar if every launch-era tab has since closed).
+    let row_height = session_row_height(&data_dir()?);
+    let layout = tab_layout(
+        &binary, &wasm, &label, &uuid, &agent_cwd, collapsed, row_height,
+    );
     let tmp = std::env::temp_dir().join(format!("clave-{uuid}.kdl"));
     std::fs::write(&tmp, layout)?;
     let status = Command::new(&zellij) // discovered above (Fix 2)
@@ -1226,6 +1241,11 @@ mod tests {
             context_level: None,
             live_session: None,
             buckets: BTreeMap::new(),
+            model: None,
+            provider: None,
+            pr_number: None,
+            pr_checked: 0,
+            pr_branch: String::new(),
         }
     }
 
@@ -1514,6 +1534,7 @@ mod tests {
             "u-1",
             "/x",
             false,
+            clave_types::RowHeight::Double,
         );
         // The bar pane, the baked spawn (idempotent resurrection, §6.3/S4),
         // and the cwd all present:
@@ -1526,7 +1547,15 @@ mod tests {
         // §2 binary split: the pane command is the passed binary. A stable
         // session bakes the versioned copy's absolute path instead of bare.
         assert!(kdl.contains("command=\"clave\""));
-        let abs = tab_layout("/data/clave/bin/clave-v0.1.0", "/w", "l", "u", "/x", false);
+        let abs = tab_layout(
+            "/data/clave/bin/clave-v0.1.0",
+            "/w",
+            "l",
+            "u",
+            "/x",
+            false,
+            clave_types::RowHeight::Double,
+        );
         assert!(abs.contains("command=\"/data/clave/bin/clave-v0.1.0\""));
         assert!(!abs.contains("command=\"clave\""));
     }
@@ -2007,6 +2036,7 @@ garbage that should be ignored
             &picked.uuid,
             &picked.cwd,
             false,
+            clave_types::RowHeight::Double,
         );
         assert!(kdl.contains("cwd=\"/repo/.claude/worktrees/wt\""));
         assert!(!kdl.contains("cwd=\"/repo\"")); // NOT the picker/root dir

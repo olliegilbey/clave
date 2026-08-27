@@ -115,7 +115,11 @@ pub struct Finding {
 fn tool_group(tool: ToolId) -> Group {
     match tool {
         ToolId::Zellij | ToolId::Claude | ToolId::Git => Group::RequiredTools,
-        ToolId::Fzf | ToolId::Zoxide => Group::AgentPicker,
+        // gh is not in the `diagnose()` catalogue below (pr-sync degrades
+        // silently by design, spec §Check catalogue scopes the doctor report
+        // to the 5 `Facts` fields) — this arm exists only so ToolId stays one
+        // exhaustive match, same optional bucket as the other pickers.
+        ToolId::Fzf | ToolId::Zoxide | ToolId::Gh => Group::AgentPicker,
     }
 }
 
@@ -132,10 +136,11 @@ pub fn missing_advice(tool: ToolId, mgr: Option<PkgManager>) -> Vec<String> {
         // URL-only: InstallFix ad-poisons copied one-liners and names Claude
         // Code users as a primary target — official docs, nothing else.
         ToolId::Claude => vec!["Install Claude Code: https://code.claude.com/docs".into()],
-        ToolId::Git | ToolId::Fzf | ToolId::Zoxide => {
+        ToolId::Git | ToolId::Fzf | ToolId::Zoxide | ToolId::Gh => {
             let (pkg, url) = match tool {
                 ToolId::Git => ("git", "https://git-scm.com/downloads"),
                 ToolId::Fzf => ("fzf", "https://github.com/junegunn/fzf#installation"),
+                ToolId::Gh => ("gh", "https://cli.github.com/"),
                 _ => (
                     "zoxide",
                     "https://github.com/ajeetdsouza/zoxide#installation",

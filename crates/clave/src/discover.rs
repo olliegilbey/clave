@@ -19,6 +19,7 @@ pub enum ToolId {
     Git,
     Fzf,
     Zoxide,
+    Gh,
 }
 
 impl ToolId {
@@ -29,6 +30,7 @@ impl ToolId {
             ToolId::Git => "git",
             ToolId::Fzf => "fzf",
             ToolId::Zoxide => "zoxide",
+            ToolId::Gh => "gh",
         }
     }
 
@@ -41,6 +43,7 @@ impl ToolId {
             ToolId::Git => "CLAVE_GIT_BIN",
             ToolId::Fzf => "CLAVE_FZF_BIN",
             ToolId::Zoxide => "CLAVE_ZOXIDE_BIN",
+            ToolId::Gh => "CLAVE_GH_BIN",
         }
     }
 }
@@ -124,7 +127,7 @@ pub fn candidate_dirs(tool: ToolId, home: &Path, nvm_versions: &[String]) -> Vec
             dirs.push(home.join(".bun/bin"));
         }
         ToolId::Fzf => dirs.push(home.join(".fzf/bin")), // fzf's git-install
-        ToolId::Zellij | ToolId::Git | ToolId::Zoxide => {}
+        ToolId::Zellij | ToolId::Git | ToolId::Zoxide | ToolId::Gh => {}
     }
     dirs
 }
@@ -251,6 +254,7 @@ mod tests {
         assert_eq!(ToolId::Fzf.override_var(), "CLAVE_FZF_BIN");
         assert_eq!(ToolId::Zoxide.override_var(), "CLAVE_ZOXIDE_BIN");
         assert_eq!(ToolId::Git.override_var(), "CLAVE_GIT_BIN");
+        assert_eq!(ToolId::Gh.override_var(), "CLAVE_GH_BIN");
     }
 
     #[test]
@@ -304,6 +308,10 @@ mod tests {
         assert!(!dirs.iter().any(|d| d.ends_with(".claude/local")));
         let dirs = candidate_dirs(ToolId::Zoxide, home, &[]);
         assert!(dirs.contains(&home.join(".cargo/bin")));
+        // gh has no tool-specific dirs — homebrew/system locations only.
+        let dirs = candidate_dirs(ToolId::Gh, home, &[]);
+        assert!(dirs.contains(&PathBuf::from("/opt/homebrew/bin")));
+        assert!(!dirs.iter().any(|d| d.ends_with(".claude/local")));
     }
 
     #[test]

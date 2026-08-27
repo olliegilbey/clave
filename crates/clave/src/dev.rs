@@ -809,6 +809,13 @@ fn agent_record(
         // Not seeded: the sandbox exercises the real birth-touch inheritance
         // path (touch_in/opener_buckets) rather than a scenario-typed value.
         buckets: Default::default(),
+        // #232: not yet wired into ScenarioAgent — out of scope here, the
+        // sandbox simply seeds "never looked up".
+        model: None,
+        provider: None,
+        pr_number: None,
+        pr_checked: 0,
+        pr_branch: String::new(),
     }
 }
 
@@ -1583,8 +1590,8 @@ mod tests {
         // the state the maintainer's fleet is in for the actual review.
         use clave_bar::model::{BarModel, TabMeta};
         use clave_bar::render::{
-            COLLAPSED_DESIGN_COLS, DESIGN_COLS, Provenance, RowContent, RowStatus, Theme, Widths,
-            display_cells, render_rows, strip_sgr,
+            COLLAPSED_DESIGN_COLS, DESIGN_COLS, Provenance, RowContent, RowHeight, RowStatus,
+            Theme, Widths, display_cells, render_rows, strip_sgr,
         };
 
         let sc = SCENARIOS.iter().find(|s| s.name == "ux-gate1").unwrap();
@@ -1651,17 +1658,45 @@ mod tests {
         // load-bearing (D17's 3-cell repo column, D18's suppressed ellipsis). A
         // repo field truncating below 3 cells, or a row missing the narrower
         // target, would have passed.
-        for (widths, cols) in [
-            (Widths::EXPANDED, DESIGN_COLS),
-            (Widths::COLLAPSED, COLLAPSED_DESIGN_COLS),
+        // Four geometries, not two (#232): the legacy single-line pair, and
+        // the card pair at ITS OWN two targets. The card is the shipping
+        // default, so leaving it out of the one test that drives the real
+        // store→model→renderer pipeline would leave the design the maintainer
+        // actually looks at unexercised against scenario data.
+        for (row_height, widths, cols) in [
+            (RowHeight::Single, Widths::EXPANDED, DESIGN_COLS),
+            (RowHeight::Single, Widths::COLLAPSED, COLLAPSED_DESIGN_COLS),
+            (
+                RowHeight::Double,
+                Widths::EXPANDED,
+                RowHeight::Double.target_cols(false),
+            ),
+            (
+                RowHeight::Double,
+                Widths::COLLAPSED,
+                RowHeight::Double.target_cols(true),
+            ),
         ] {
+            // One row is `lines_per_row` lines, so every zip below walks the
+            // rows REPEATED that many times — the single-line arm is the
+            // repeat-once case of the same expression, not a separate path.
+            let per_row = row_height.lines_per_row();
+            let rows_by_line = || rows.iter().flat_map(|r| std::iter::repeat_n(r, per_row));
             // Design-lock invariant, proven rather than asserted in prose:
             // every row is exactly the profile's target in display cells
             // (bar-preview.rs does the same measurement) — INCLUDING the
             // selected row, whose caps and full-width background are the
             // easiest thing to render one cell wide.
-            let lines = render_rows(&rows, cols, rows.len(), widths, &Theme::default());
-            for (line, row) in lines.iter().zip(&rows) {
+            let lines = render_rows(
+                &rows,
+                cols,
+                rows.len() * per_row,
+                widths,
+                &Theme::default(),
+                row_height,
+            );
+            assert_eq!(lines.len(), rows.len() * per_row, "line budget at {cols}");
+            for (line, row) in lines.iter().zip(rows_by_line()) {
                 let width = display_cells(&strip_sgr(line));
                 assert_eq!(width, cols, "row is {width} cells at {cols}: {row:?}");
             }
@@ -1669,8 +1704,10 @@ mod tests {
             // and every other row is faded 25% toward it (lock §6) — the two
             // halves of recession, checked against scenario data rather than a
             // fixture.
-            let (sel, rest): (Vec<_>, Vec<_>) =
-                lines.iter().zip(&rows).partition(|(_, r)| r.selected);
+            let (sel, rest): (Vec<_>, Vec<_>) = lines
+                .iter()
+                .zip(rows_by_line())
+                .partition(|(_, r)| r.selected);
             assert!(
                 sel[0].0.contains("48;2;45;79;103"),
                 "no selected background at {cols}"
@@ -1689,9 +1726,10 @@ mod tests {
             for (faded, plain) in lines.iter().zip(render_rows(
                 &unfaded,
                 cols,
-                unfaded.len(),
+                unfaded.len() * per_row,
                 widths,
                 &Theme::default(),
+                row_height,
             )) {
                 assert_ne!(*faded, plain, "recession did not change this row at {cols}");
             }

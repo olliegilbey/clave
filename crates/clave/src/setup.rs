@@ -50,6 +50,34 @@ pub fn launch_layout_path(dir: &std::path::Path) -> PathBuf {
     dir.join("launch.kdl")
 }
 
+/// Pull the `row_height "<value>"` string out of already-read KDL text —
+/// pure, so it's unit-testable without touching the filesystem. `None` when
+/// the key is absent (pre-#232 file, or the key text simply isn't there).
+fn parse_row_height(text: &str) -> Option<&str> {
+    let key = format!("{} \"", clave_types::ROW_HEIGHT_KEY);
+    let (_, rest) = text.split_once(&key)?;
+    rest.split('"').next()
+}
+
+/// The row-height mode the CURRENTLY RUNNING session was actually born
+/// with — read from the stable launch layout (`launch_layout_path`,
+/// rewritten by every `launch_session`), never the store.
+///
+/// Finding 2 (#232 review): `clave rows` only takes effect at the next
+/// launch, so between that write and the next relaunch the store and the
+/// live session's baked plugin-config disagree on purpose. `clave add`/`clave
+/// open` mint a new tab's bar identity from THIS session, not the store's
+/// current preference — reading the store there would bake a tab whose
+/// plugin `configuration` map matches no keybind in the running config.kdl
+/// (a deaf bar; second-bar sub-case if every launch-era tab has since
+/// closed). A missing file or key (pre-upgrade session that predates this
+/// mechanism) fails closed to `Double` via `from_config_value`, same as
+/// every other reader of this key.
+pub fn session_row_height(dir: &std::path::Path) -> clave_types::RowHeight {
+    let text = std::fs::read_to_string(launch_layout_path(dir)).unwrap_or_default();
+    clave_types::RowHeight::from_config_value(parse_row_height(&text))
+}
+
 /// §6.6's exact permission set. Keep THIS list, load()'s request_permission
 /// call, and the seeded cache in lockstep — a partial cache match raises the
 /// unanswerable prompt and withholds everything.
@@ -68,7 +96,17 @@ pub const BAR_PERMISSIONS: [&str; 5] = [
 /// = the dev binary) for the sandbox/dev install, the versioned copy's
 /// ABSOLUTE path for a release (§2 binary split — a stable session must never
 /// fall through to `~/.cargo/bin/clave`). The caller's environment decides.
-pub fn config_kdl(binary: &str, wasm: &str) -> String {
+///
+/// `row_height` (#232) MUST equal the value baked into the bar's OWN plugin
+/// pane (`bar_pane_kdl`'s config), the same way `binary` must: every
+/// `MessagePlugin` keybind here is a PIPE addressed at the bar by (location,
+/// configuration) — see the `nav` closure's doc below — and `configuration`
+/// is the WHOLE map, not just `clave_binary`. Adding `row_height` to the
+/// pane's own config without adding it here would make every keybind press
+/// address a plugin the layout never loaded, launching a second bar
+/// (`keybind_and_layout_plugin_configurations_match`, kdl_guardrail.rs).
+pub fn config_kdl(binary: &str, wasm: &str, row_height: clave_types::RowHeight) -> String {
+    let row_height_value = row_height.as_config_value();
     let nav = |payload: &str| {
         // Trailing `;` after the child block is REQUIRED: zellij's KDL parser
         // rejects a `}`-closed node that isn't terminated before the enclosing
@@ -81,8 +119,9 @@ pub fn config_kdl(binary: &str, wasm: &str) -> String {
         // configuration) hash-map lookup, and a miss LAUNCHES A SECOND BAR
         // (zellij-server plugins/wasm_bridge.rs:1676-1686, :1861-1894).
         format!(
-            "MessagePlugin \"file:{wasm}\" {{ name \"clave-nav\"; payload \"{payload}\"; {key} \"{binary}\"; }};",
-            key = clave_types::CLAVE_BINARY_KEY
+            "MessagePlugin \"file:{wasm}\" {{ name \"clave-nav\"; payload \"{payload}\"; {key} \"{binary}\"; {rh_key} \"{row_height_value}\"; }};",
+            key = clave_types::CLAVE_BINARY_KEY,
+            rh_key = clave_types::ROW_HEIGHT_KEY,
         )
     };
     let mut binds = String::new();
@@ -114,12 +153,14 @@ pub fn config_kdl(binary: &str, wasm: &str) -> String {
     // `{key}` config must match the loaded bar's or zellij boots a second
     // instance (FOOTGUNS on plugin identity).
     binds.push_str(&format!(
-        "        bind \"Alt f\" {{ MessagePlugin \"file:{wasm}\" {{ name \"clave-shell\"; {key} \"{binary}\"; }}; }}\n",
-        key = clave_types::CLAVE_BINARY_KEY
+        "        bind \"Alt f\" {{ MessagePlugin \"file:{wasm}\" {{ name \"clave-shell\"; {key} \"{binary}\"; {rh_key} \"{row_height_value}\"; }}; }}\n",
+        key = clave_types::CLAVE_BINARY_KEY,
+        rh_key = clave_types::ROW_HEIGHT_KEY,
     ));
     binds.push_str(&format!(
-        "        bind \"Alt c\" {{ MessagePlugin \"file:{wasm}\" {{ name \"clave-toggle\"; {key} \"{binary}\"; }}; }}\n",
-        key = clave_types::CLAVE_BINARY_KEY
+        "        bind \"Alt c\" {{ MessagePlugin \"file:{wasm}\" {{ name \"clave-toggle\"; {key} \"{binary}\"; {rh_key} \"{row_height_value}\"; }}; }}\n",
+        key = clave_types::CLAVE_BINARY_KEY,
+        rh_key = clave_types::ROW_HEIGHT_KEY,
     ));
     // Alt+t/Alt+w are the clave-owned tab pair. Alt+t exists because #28
     // unbound stock Ctrl+t (it swallowed Claude Code's todo view), and Ctrl+t
@@ -166,8 +207,9 @@ pub fn config_kdl(binary: &str, wasm: &str) -> String {
     // announces it — rounds 11–12: unbounded self-diagnosed announces
     // stormed; organic switches must be explicitly signalled).
     binds.push_str(&format!(
-        "        bind \"Alt o\" {{ ToggleTab; MessagePlugin \"file:{wasm}\" {{ name \"clave-organic\"; {key} \"{binary}\"; }}; }}\n",
-        key = clave_types::CLAVE_BINARY_KEY
+        "        bind \"Alt o\" {{ ToggleTab; MessagePlugin \"file:{wasm}\" {{ name \"clave-organic\"; {key} \"{binary}\"; {rh_key} \"{row_height_value}\"; }}; }}\n",
+        key = clave_types::CLAVE_BINARY_KEY,
+        rh_key = clave_types::ROW_HEIGHT_KEY,
     ));
     for n in 1..=9 {
         binds.push_str(&format!(
@@ -295,14 +337,29 @@ fn user_theme_slice() -> String {
 /// destinations match on (location, configuration) exactly — so this key must
 /// equal what `config_kdl` bakes into every `MessagePlugin` keybind or each
 /// keypress launches a second bar (#44).
-pub fn bar_pane_kdl(binary: &str, wasm: &str, cols: usize, indent: &str) -> String {
+///
+/// `row_height` bakes the SAME mode `cols` was sized from (#232) as a second
+/// plugin-config key beside `clave_binary` — the maintainer-ratified design:
+/// geometry and renderer read from one value at generation time, so they can
+/// never disagree at runtime the way a size chosen one place and a mode
+/// chosen another could drift.
+pub fn bar_pane_kdl(
+    binary: &str,
+    wasm: &str,
+    cols: usize,
+    indent: &str,
+    row_height: clave_types::RowHeight,
+) -> String {
+    let row_height_value = row_height.as_config_value();
     format!(
         "{indent}pane size={cols} borderless=true {{\n\
          {indent}    plugin location=\"file:{wasm}\" {{\n\
          {indent}        {key} \"{binary}\"\n\
+         {indent}        {rh_key} \"{row_height_value}\"\n\
          {indent}    }}\n\
          {indent}}}\n",
-        key = clave_types::CLAVE_BINARY_KEY
+        key = clave_types::CLAVE_BINARY_KEY,
+        rh_key = clave_types::ROW_HEIGHT_KEY,
     )
 }
 
@@ -344,16 +401,21 @@ pub fn bar_pane_kdl(binary: &str, wasm: &str, cols: usize, indent: &str) -> Stri
 /// constants and switches while they disagree. Declaration order — birth
 /// geometry FIRST — is still load-bearing: leaving the hidden birth position
 /// moves nothing visible.
-pub fn swap_layouts_kdl(binary: &str, wasm: &str, collapsed: bool) -> String {
+pub fn swap_layouts_kdl(
+    binary: &str,
+    wasm: &str,
+    collapsed: bool,
+    row_height: clave_types::RowHeight,
+) -> String {
     let mut out = String::new();
     for mode in [false, true] {
-        let cols = clave_types::target_cols_for(mode);
+        let cols = row_height.target_cols(mode);
         out.push_str(&format!(
             "    tab_template name=\"{name}\" split_direction=\"vertical\" {{\n\
              {pane}    \x20   children\n\
              \x20   }}\n",
             name = template_name(mode),
-            pane = bar_pane_kdl(binary, wasm, cols, "        "),
+            pane = bar_pane_kdl(binary, wasm, cols, "        ", row_height),
         ));
     }
     // The tab is born `collapsed`, and the first swap must land on the SAME
@@ -418,7 +480,7 @@ pub(crate) fn birth_size(kdl: &str, node: &str) -> String {
 /// The session layout: EVERY tab gets the bar via default_tab_template
 /// (§6.8). Task 9 checkpoint C6 validates the template survives real use;
 /// fallback = per-tab panes + a new-tab keybind with an explicit layout.
-pub fn layout_kdl(binary: &str, wasm: &str) -> String {
+pub fn layout_kdl(binary: &str, wasm: &str, row_height: clave_types::RowHeight) -> String {
     // split_direction="vertical" goes ON the template node, with `pane` and
     // `children` as DIRECT children (both Task 9 C1 findings):
     // 1. zellij stacks siblings horizontally (rows) by default — without
@@ -441,12 +503,13 @@ pub fn layout_kdl(binary: &str, wasm: &str) -> String {
          \x20   }}\n\
          \x20   tab name=\"clave\" focus=true\n\
          }}\n",
-        swaps = swap_layouts_kdl(binary, wasm, false),
+        swaps = swap_layouts_kdl(binary, wasm, false, row_height),
         pane = bar_pane_kdl(
             binary,
             wasm,
-            clave_types::target_cols_for(false),
-            "        "
+            row_height.target_cols(false),
+            "        ",
+            row_height
         ),
     )
 }
@@ -460,6 +523,7 @@ pub fn launch_layout_kdl(
     wasm: &str,
     most_recent: Option<&crate::store::AgentRecord>,
     collapsed: bool,
+    row_height: clave_types::RowHeight,
 ) -> String {
     let tab = match most_recent {
         // The label is re-sanitized for KDL safety: it can be hook-derived
@@ -488,12 +552,13 @@ pub fn launch_layout_kdl(
          \x20   default_tab_template split_direction=\"vertical\" {{\n\
          {pane}\x20       children\n\
          \x20   }}\n{tab}}}\n",
-        swaps = swap_layouts_kdl(binary, wasm, collapsed),
+        swaps = swap_layouts_kdl(binary, wasm, collapsed, row_height),
         pane = bar_pane_kdl(
             binary,
             wasm,
-            clave_types::target_cols_for(collapsed),
-            "        "
+            row_height.target_cols(collapsed),
+            "        ",
+            row_height
         ),
     )
 }
@@ -701,14 +766,21 @@ fn read_settings(path: &std::path::Path) -> Result<serde_json::Value> {
 /// unversioned wasm); release = (versioned CLI absolute path, versioned
 /// wasm). Everything version-shaped stays in the caller (§2).
 pub fn write_generated(dir: &std::path::Path, binary: &str, wasm: &str) -> Result<()> {
+    // Read fresh here rather than threaded through the signature: a missing
+    // store (fresh install) reads as its `Default` (Double), exactly the
+    // fresh-install behaviour everywhere else this field is read. Both
+    // config.kdl (the keybind pipes) and layout.kdl (the bar's own pane) MUST
+    // bake the SAME value (#232, `keybind_and_layout_plugin_configurations_match`)
+    // — one read, passed to both.
+    let row_height = crate::store::read_store(&crate::store::store_paths()?)?.row_height;
     // The theme slice rides the generated config (#145): appended top-level
     // nodes, which merge like any other config node — clave's own config
     // defines no theme, so there is nothing to collide with. Re-read on every
     // setup, so a theme change lands at the next clave launch.
-    let mut config = config_kdl(binary, wasm);
+    let mut config = config_kdl(binary, wasm, row_height);
     config.push_str(&user_theme_slice());
     std::fs::write(dir.join("config.kdl"), config)?;
-    std::fs::write(dir.join("layout.kdl"), layout_kdl(binary, wasm))?;
+    std::fs::write(dir.join("layout.kdl"), layout_kdl(binary, wasm, row_height))?;
 
     // Hooks: read-merge-write $CLAUDE_CONFIG_DIR/settings.json. The path may
     // be a symlink into a dotfiles repo — fs::read/write follow it, which is
@@ -1107,11 +1179,16 @@ pub fn launch_session() -> Result<()> {
     // `store.collapsed` is LOAD-BEARING here, not decoration (D36): the mode
     // persists across a launch, so a fleet left collapsed must be BORN at 30 or
     // it arrives at 54 and visibly shrinks — the jank D35 exists to remove.
+    // `store.row_height` is the same kind of load-bearing (#232): `clave rows`
+    // only ever writes the STORE, never a running bar, so this read is the one
+    // place the mode actually takes effect — sizes and the plugin-config line
+    // are baked from it together, right here, so they cannot disagree.
     let layout_text = launch_layout_kdl(
         &binary,
         wasm.to_str().context("wasm path")?,
         most_recent,
         store.collapsed,
+        store.row_height,
     );
     // STABLE path in the data dir, not a pid-suffixed temp file: the exec()
     // below never returns, so nothing here can clean up — a unique-per-launch
@@ -1261,16 +1338,24 @@ mod tests {
         // width machine compares against. Formatted from the constants, not
         // restated as literals — a restatement is exactly the skew the hoist
         // into clave-types removed.
+        // Pinned to the Single arm throughout (#232): `target_cols_for` IS
+        // `RowHeight::Single::target_cols` (the legacy constants), so this
+        // stays a test of the fixed-size invariant, decoupled from row-height
+        // mode — `the_launch_birth_size_follows_the_row_height_mode` below
+        // covers Double's budgets.
+        let row_height = clave_types::RowHeight::Single;
         for collapsed in [false, true] {
             let want = clave_types::target_cols_for(collapsed).to_string();
             // The one-shot layout has no template — its bar is in the tab node.
             let cases = [
                 (
-                    launch_layout_kdl("clave", "/w.wasm", None, collapsed),
+                    launch_layout_kdl("clave", "/w.wasm", None, collapsed, row_height),
                     "default_tab_template",
                 ),
                 (
-                    crate::add::tab_layout("clave", "/w.wasm", "l", "u", "/c", collapsed),
+                    crate::add::tab_layout(
+                        "clave", "/w.wasm", "l", "u", "/c", collapsed, row_height,
+                    ),
                     "tab name=",
                 ),
             ];
@@ -1288,7 +1373,7 @@ mod tests {
         }
         // The setup-time session layout has no collapse input; it is born
         // expanded, and carries no percent either.
-        let kdl = layout_kdl("clave", "/w.wasm");
+        let kdl = layout_kdl("clave", "/w.wasm", row_height);
         assert_eq!(
             birth_size(&kdl, "default_tab_template"),
             clave_types::BAR_TARGET_COLS.to_string(),
@@ -1313,6 +1398,52 @@ mod tests {
         );
     }
 
+    #[test]
+    fn session_row_height_reads_the_launch_layout_not_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        // Absent file (never launched, or a pre-#232 install): fails closed.
+        assert_eq!(
+            session_row_height(dir.path()),
+            clave_types::RowHeight::Double
+        );
+
+        // Present, single.
+        std::fs::write(
+            launch_layout_path(dir.path()),
+            "pane { plugin { row_height \"single\" } }",
+        )
+        .unwrap();
+        assert_eq!(
+            session_row_height(dir.path()),
+            clave_types::RowHeight::Single
+        );
+
+        // Present, double.
+        std::fs::write(
+            launch_layout_path(dir.path()),
+            "pane { plugin { row_height \"double\" } }",
+        )
+        .unwrap();
+        assert_eq!(
+            session_row_height(dir.path()),
+            clave_types::RowHeight::Double
+        );
+
+        // File present, key absent: fails closed too.
+        std::fs::write(launch_layout_path(dir.path()), "pane { plugin { } }").unwrap();
+        assert_eq!(
+            session_row_height(dir.path()),
+            clave_types::RowHeight::Double
+        );
+    }
+
+    #[test]
+    fn parse_row_height_is_the_pure_core_of_the_reader() {
+        assert_eq!(parse_row_height(r#"row_height "single""#), Some("single"));
+        assert_eq!(parse_row_height(r#"row_height "double""#), Some("double"));
+        assert_eq!(parse_row_height("no key in this text"), None);
+    }
+
     /// The birth size is a CONSTANT of the mode, independent of any width —
     /// the inverse of the D35 test this replaces, which supplied real terminal
     /// widths and pinned the percents they derived. There is no width
@@ -1325,9 +1456,13 @@ mod tests {
     /// substring assertion is satisfied by a geometry the tab is not born in.
     #[test]
     fn the_launch_birth_size_is_the_target_constant_for_both_modes() {
+        // Pinned to Single (#232): this test is about the COLLAPSE axis, not
+        // row height — `the_launch_birth_size_follows_the_row_height_mode`
+        // below covers Double's budgets and Single's legacy pair together.
         let born = |kdl: &str| birth_size(kdl, "default_tab_template");
-        let expanded = launch_layout_kdl("clave", "/w.wasm", None, false);
-        let collapsed = launch_layout_kdl("clave", "/w.wasm", None, true);
+        let row_height = clave_types::RowHeight::Single;
+        let expanded = launch_layout_kdl("clave", "/w.wasm", None, false, row_height);
+        let collapsed = launch_layout_kdl("clave", "/w.wasm", None, true, row_height);
         assert_eq!(
             born(&expanded),
             clave_types::BAR_TARGET_COLS.to_string(),
@@ -1338,6 +1473,67 @@ mod tests {
             clave_types::COLLAPSED_TARGET_COLS.to_string(),
             "{collapsed}"
         );
+    }
+
+    /// #232: the launch layout's pane sizes come from the STORE's row-height
+    /// mode, not the old single-mode-only `target_cols_for` — Double gets the
+    /// ratified card budgets, Single stays byte-identical to the legacy
+    /// constants so the flag's off position changes nothing observable.
+    #[test]
+    fn the_launch_birth_size_follows_the_row_height_mode() {
+        // Double (default): the card budgets.
+        let expanded = launch_layout_kdl(
+            "clave",
+            "/w.wasm",
+            None,
+            false,
+            clave_types::RowHeight::Double,
+        );
+        let collapsed = launch_layout_kdl(
+            "clave",
+            "/w.wasm",
+            None,
+            true,
+            clave_types::RowHeight::Double,
+        );
+        assert_eq!(birth_size(&expanded, "default_tab_template"), "48");
+        assert_eq!(birth_size(&collapsed, "default_tab_template"), "38");
+        // Single: byte-identical geometry to the legacy constants.
+        let legacy = launch_layout_kdl(
+            "clave",
+            "/w.wasm",
+            None,
+            false,
+            clave_types::RowHeight::Single,
+        );
+        assert_eq!(
+            birth_size(&legacy, "default_tab_template"),
+            clave_types::BAR_TARGET_COLS.to_string()
+        );
+    }
+
+    /// #232: the plugin-config line rides beside `clave_binary` in every
+    /// pane the layout writes, and matches the SAME mode the sizes came
+    /// from — the maintainer-ratified design that keeps geometry and
+    /// renderer from ever disagreeing.
+    #[test]
+    fn the_layout_bakes_the_row_height_key_matching_its_geometry() {
+        let kdl = launch_layout_kdl(
+            "clave",
+            "/w.wasm",
+            None,
+            false,
+            clave_types::RowHeight::Single,
+        );
+        assert!(kdl.contains(r#"row_height "single""#), "{kdl}");
+        let kdl = launch_layout_kdl(
+            "clave",
+            "/w.wasm",
+            None,
+            false,
+            clave_types::RowHeight::Double,
+        );
+        assert!(kdl.contains(r#"row_height "double""#), "{kdl}");
     }
 
     /// The swap layouts are DECLARED in the order the tab's birth mode demands:
@@ -1361,8 +1557,20 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        let expanded = launch_layout_kdl("clave", "/w.wasm", None, false);
-        let collapsed = launch_layout_kdl("clave", "/w.wasm", None, true);
+        let expanded = launch_layout_kdl(
+            "clave",
+            "/w.wasm",
+            None,
+            false,
+            clave_types::RowHeight::Double,
+        );
+        let collapsed = launch_layout_kdl(
+            "clave",
+            "/w.wasm",
+            None,
+            true,
+            clave_types::RowHeight::Double,
+        );
         assert_eq!(names(&expanded), ["clave_expanded", "clave_collapsed"]);
         assert_eq!(names(&collapsed), ["clave_collapsed", "clave_expanded"]);
     }
@@ -1371,7 +1579,13 @@ mod tests {
     fn launch_layout_is_bar_only_when_store_empty() {
         // §6.8 cold start, empty store: today's behavior — template + one
         // plain tab, no agent tabs.
-        let kdl = launch_layout_kdl("clave", "/w.wasm", None, false);
+        let kdl = launch_layout_kdl(
+            "clave",
+            "/w.wasm",
+            None,
+            false,
+            clave_types::RowHeight::Double,
+        );
         assert!(kdl.contains("default_tab_template"));
         assert!(kdl.contains("tab name=\"clave\" focus=true"));
         assert!(!kdl.contains("\"spawn\""));
@@ -1403,8 +1617,19 @@ mod tests {
             context_level: None,
             live_session: None,
             buckets: Default::default(),
+            model: None,
+            provider: None,
+            pr_number: None,
+            pr_checked: 0,
+            pr_branch: String::new(),
         };
-        let kdl = launch_layout_kdl("clave", "/w.wasm", Some(&r), false);
+        let kdl = launch_layout_kdl(
+            "clave",
+            "/w.wasm",
+            Some(&r),
+            false,
+            clave_types::RowHeight::Double,
+        );
         assert!(kdl.contains("default_tab_template")); // native new-tabs still barred
         assert!(kdl.contains("\"spawn\" \"u-recent\""));
         assert!(kdl.contains("cwd=\"/repo/.claude-worktrees/ab\""));
@@ -1458,6 +1683,11 @@ mod tests {
             context_level: None,
             live_session: None,
             buckets: Default::default(),
+            model: None,
+            provider: None,
+            pr_number: None,
+            pr_checked: 0,
+            pr_branch: String::new(),
         };
         // Most-recent row's cwd is GONE; the older row's cwd exists.
         let mut store = Store::default();
@@ -1539,7 +1769,7 @@ mod tests {
         // session would replay discovered `claude --session-id` commands
         // (create-collision) or mid-tool-call children (pty.rs ppid-priority
         // discovery, v0.44.3 source-verified).
-        let kdl = config_kdl("clave", "/w.wasm");
+        let kdl = config_kdl("clave", "/w.wasm", clave_types::RowHeight::Double);
         assert!(kdl.contains("session_serialization false"));
     }
 
@@ -1557,7 +1787,7 @@ mod tests {
         // mode after the merge-over-defaults. kdl 4.7.1 KdlDocument::get
         // (document.rs:80) returns the FIRST match only, so ALL keys must ride
         // that one node — two `unbind` nodes would silently drop the second.
-        let cfg = config_kdl("clave", "/w.wasm");
+        let cfg = config_kdl("clave", "/w.wasm", clave_types::RowHeight::Double);
         assert_eq!(
             cfg.matches("unbind").count(),
             1,
@@ -1573,7 +1803,11 @@ mod tests {
 
     #[test]
     fn generated_kdl_carries_the_wasm_path_and_alt_keys() {
-        let cfg = config_kdl("clave", "/data/clave-bar.wasm");
+        let cfg = config_kdl(
+            "clave",
+            "/data/clave-bar.wasm",
+            clave_types::RowHeight::Double,
+        );
         for key in [
             "Alt a",
             "Alt c",
@@ -1593,7 +1827,11 @@ mod tests {
         }
         assert!(cfg.contains("shared_among \"normal\" \"locked\"")); // invariant #6
         assert!(cfg.contains("clave-nav") && cfg.contains("clave-toggle"));
-        let lay = layout_kdl("clave", "/data/clave-bar.wasm");
+        let lay = layout_kdl(
+            "clave",
+            "/data/clave-bar.wasm",
+            clave_types::RowHeight::Double,
+        );
         assert!(lay.contains("default_tab_template"));
         assert!(lay.contains("file:/data/clave-bar.wasm"));
         // Regression (Task 9 C1): without the vertical wrapper the bar is a
@@ -1607,12 +1845,15 @@ mod tests {
         // sandbox keeps bare `clave` (PATH = the dev binary). The generation
         // fns are pure over the binary — the caller's environment decides.
         let abs = "/home/o/.local/share/clave/bin/clave-v0.1.0";
-        let cfg = config_kdl(abs, "/w.wasm");
+        let cfg = config_kdl(abs, "/w.wasm", clave_types::RowHeight::Double);
         // The keybind `Run` invokes the passed binary, not bare `clave`.
         assert!(cfg.contains(&format!("Run \"{abs}\" \"add\"")));
         assert!(!cfg.contains("Run \"clave\" \"add\""));
         // Sandbox generation keeps bare `clave`.
-        assert!(config_kdl("clave", "/w.wasm").contains("Run \"clave\" \"add\""));
+        assert!(
+            config_kdl("clave", "/w.wasm", clave_types::RowHeight::Double)
+                .contains("Run \"clave\" \"add\"")
+        );
         // The launch layout's eager-tab spawn bakes the same binary as its
         // pane command (resurrection re-execs the SAME clave).
         let r = crate::store::AgentRecord {
@@ -1637,8 +1878,19 @@ mod tests {
             context_level: None,
             live_session: None,
             buckets: Default::default(),
+            model: None,
+            provider: None,
+            pr_number: None,
+            pr_checked: 0,
+            pr_branch: String::new(),
         };
-        let lay = launch_layout_kdl(abs, "/w.wasm", Some(&r), false);
+        let lay = launch_layout_kdl(
+            abs,
+            "/w.wasm",
+            Some(&r),
+            false,
+            clave_types::RowHeight::Double,
+        );
         assert!(lay.contains(&format!("command=\"{abs}\"")));
         assert!(!lay.contains("command=\"clave\""));
     }
@@ -1945,13 +2197,24 @@ mod tests {
             context_level: None,
             live_session: None,
             buckets: Default::default(),
+            model: None,
+            provider: None,
+            pr_number: None,
+            pr_checked: 0,
+            pr_branch: String::new(),
         };
-        let cfg = config_kdl(binary, wasm);
-        let lay = layout_kdl(binary, wasm);
+        let cfg = config_kdl(binary, wasm, clave_types::RowHeight::Double);
+        let lay = layout_kdl(binary, wasm, clave_types::RowHeight::Double);
         // The launch layout is composed at launch time and takes the eager
         // agent row — synthesize one so the eager-tab's baked `command=`
         // (the version-bearing binary reference) is present to check too.
-        let launch = launch_layout_kdl(binary, wasm, Some(&r), false);
+        let launch = launch_layout_kdl(
+            binary,
+            wasm,
+            Some(&r),
+            false,
+            clave_types::RowHeight::Double,
+        );
 
         // Check PER ARTIFACT, not over the union (Codex, PR #52): flattening
         // first would let an artifact that lost its versioned reference

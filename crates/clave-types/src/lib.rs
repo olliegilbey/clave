@@ -226,6 +226,26 @@ pub struct Agent {
     /// pruned past 7 days. `default` keeps pre-field payloads parseable.
     #[serde(default)]
     pub buckets: std::collections::BTreeMap<u32, u32>,
+    /// The model handle this agent is running (e.g. "sonnet", "opus",
+    /// "fable") — the double-height card's second row (#232). `None` = no
+    /// reading yet, renders blank — the bar never invents a model name.
+    /// `default` keeps pre-field payloads parseable.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// The provider running `model` above (e.g. "claude"). Kept separate
+    /// from `model` rather than folded into one string: AGENTS.md commits
+    /// clave to other CLI-based agents down the line, and a future provider
+    /// may reuse a model NAME clave already knows under a different one.
+    /// `None` = no reading yet. `default` keeps pre-field payloads parseable.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// The open PR number for this row's branch, host-resolved (#232).
+    /// `None` = no open PR found, or not looked up yet — the bar renders the
+    /// same blank chip either way; the lookup's cache bookkeeping
+    /// (`AgentRecord::pr_checked`/`pr_branch`) stays host-side and never
+    /// rides the wire. `default` keeps pre-field payloads parseable.
+    #[serde(default)]
+    pub pr_number: Option<u32>,
 }
 
 /// The full-replace snapshot `clave` pushes to `clave-bar` on every change
@@ -274,6 +294,14 @@ pub struct AgentSnapshot {
     /// parseable.
     #[serde(default)]
     pub tab_buckets: std::collections::BTreeMap<usize, std::collections::BTreeMap<u32, u32>>,
+    /// tab_id → unix seconds of the last USER interaction with that tab —
+    /// the wall-clock twin of `tab_order` above, which is ordinal-only and
+    /// cannot say "how long ago" (#232's double-height card wants an age).
+    /// Stamped in `touch_in` and in `apply_hook_event`'s commit path, so
+    /// agent tabs and terminal tabs share one truth; pruned everywhere
+    /// `tab_order` is pruned. `default` keeps pre-field payloads parseable.
+    #[serde(default)]
+    pub tab_touched: std::collections::BTreeMap<usize, u64>,
 }
 
 /// The `clave-register` payload a pane's `clave spawn` pipes to the plugin so it
@@ -378,6 +406,72 @@ pub fn target_cols_for(collapsed: bool) -> usize {
         COLLAPSED_TARGET_COLS
     } else {
         BAR_TARGET_COLS
+    }
+}
+
+/// Which row geometry the bar renders — the #232 flag. `Double` is the
+/// two-line card (the default); `Single` is the legacy one-line row,
+/// retained intact behind this flag. Chosen per LAUNCH: the launch layout
+/// bakes both the pane sizes and the plugin-config key from it, so the
+/// geometry zellij gives the pane and the geometry the bar draws can never
+/// disagree mid-session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RowHeight {
+    Single,
+    #[default]
+    Double,
+}
+
+/// The zellij plugin-config key carrying the mode into the bar (same
+/// mechanism as [`CLAVE_BINARY_KEY`], #44).
+pub const ROW_HEIGHT_KEY: &str = "row_height";
+
+impl RowHeight {
+    /// The width the seek machinery asks for in this mode — the card
+    /// budgets ratified in #232, or the legacy pair for `Single`. `const` so
+    /// the bar's test-mod width-target pins (`EXP_W`/`COL_W`) can compute
+    /// off it at compile time instead of duplicating the numbers.
+    pub const fn target_cols(self, collapsed: bool) -> usize {
+        match (self, collapsed) {
+            (RowHeight::Double, false) => 48,
+            (RowHeight::Double, true) => 38,
+            (RowHeight::Single, false) => BAR_TARGET_COLS,
+            (RowHeight::Single, true) => COLLAPSED_TARGET_COLS,
+        }
+    }
+
+    /// Terminal lines one row occupies — the `/2` the viewport and click
+    /// conversions share (#148 discipline: derived once, here).
+    pub fn lines_per_row(self) -> usize {
+        match self {
+            RowHeight::Single => 1,
+            RowHeight::Double => 2,
+        }
+    }
+
+    /// Parse the plugin-config value, failing CLOSED to the default: a
+    /// typo'd or absent key must render the default design, never a
+    /// surprise legacy mode.
+    pub fn from_config_value(v: Option<&str>) -> RowHeight {
+        match v {
+            Some("single") => RowHeight::Single,
+            _ => RowHeight::Double,
+        }
+    }
+
+    /// The inverse of [`from_config_value`] — the one spelling of each mode,
+    /// shared by every site that bakes or logs the `row_height` plugin-config
+    /// value (#232 final review, finding 2). Before this, `setup.rs`'s
+    /// `row_height_config_value` and `clave-bar/src/main.rs`'s load-time log
+    /// each carried their own `match` to the same two string literals — two
+    /// places that could drift out of sync with each other and with
+    /// `from_config_value`.
+    pub const fn as_config_value(self) -> &'static str {
+        match self {
+            RowHeight::Single => "single",
+            RowHeight::Double => "double",
+        }
     }
 }
 
@@ -570,6 +664,9 @@ mod tests {
             context_tokens: None,
             context_level: None,
             buckets: Default::default(),
+            model: None,
+            provider: None,
+            pr_number: None,
         };
         assert!(!serde_json::to_string(&a).unwrap().contains("archived"));
     }
@@ -583,6 +680,7 @@ mod tests {
             order: OrderMode::default(),
             today: 0,
             tab_buckets: Default::default(),
+            tab_touched: Default::default(),
             agents: vec![Agent {
                 uuid: "u1".into(),
                 cwd: "/Users/x/code/clave".into(),
@@ -603,6 +701,9 @@ mod tests {
                 context_tokens: None,
                 context_level: None,
                 buckets: Default::default(),
+                model: None,
+                provider: None,
+                pr_number: None,
             }],
         };
         let json = serde_json::to_string(&snap).unwrap();
@@ -636,6 +737,9 @@ mod tests {
             context_tokens: None,
             context_level: None,
             buckets: Default::default(),
+            model: None,
+            provider: None,
+            pr_number: None,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert_eq!(back.tab_id, Some(4));
@@ -671,6 +775,9 @@ mod tests {
             context_tokens: None,
             context_level: None,
             buckets: Default::default(),
+            model: None,
+            provider: None,
+            pr_number: None,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert!(back.stale);
@@ -708,6 +815,9 @@ mod tests {
             context_tokens: None,
             context_level: None,
             buckets: Default::default(),
+            model: None,
+            provider: None,
+            pr_number: None,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert_eq!(back.title.as_deref(), Some("CLA-MAIN"));
@@ -759,6 +869,9 @@ mod tests {
             context_tokens: None,
             context_level: None,
             buckets: Default::default(),
+            model: None,
+            provider: None,
+            pr_number: None,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert_eq!(back.default_branch.as_deref(), Some("trunk"));
@@ -786,6 +899,7 @@ mod tests {
             order: OrderMode::default(),
             today: 0,
             tab_buckets: Default::default(),
+            tab_touched: Default::default(),
         };
         let json = serde_json::to_string(&snap).unwrap();
         let back: AgentSnapshot = serde_json::from_str(&json).unwrap();
@@ -837,6 +951,9 @@ mod tests {
             context_tokens: None,
             context_level: None,
             buckets: Default::default(),
+            model: None,
+            provider: None,
+            pr_number: None,
         };
         let mut v: serde_json::Value = serde_json::to_value(&a).unwrap();
         v.as_object_mut().unwrap().remove("commit_ord");
@@ -858,6 +975,7 @@ mod tests {
             order: OrderMode::default(),
             today: 0,
             tab_buckets: Default::default(),
+            tab_touched: Default::default(),
         };
         let back: AgentSnapshot =
             serde_json::from_str(&serde_json::to_string(&snap).unwrap()).unwrap();
@@ -906,5 +1024,59 @@ mod tests {
             let json = serde_json::to_string(&m).unwrap();
             assert_eq!(serde_json::from_str::<OrderMode>(&json).unwrap(), m);
         }
+    }
+
+    #[test]
+    fn row_height_defaults_to_double_and_maps_its_targets() {
+        assert_eq!(RowHeight::default(), RowHeight::Double);
+        // Double: the ratified card budgets (#232). Single: the legacy pair,
+        // which MUST keep reading the existing constants so the old design
+        // cannot drift from the flag's legacy arm.
+        assert_eq!(RowHeight::Double.target_cols(false), 48);
+        assert_eq!(RowHeight::Double.target_cols(true), 38);
+        assert_eq!(RowHeight::Single.target_cols(false), BAR_TARGET_COLS);
+        assert_eq!(RowHeight::Single.target_cols(true), COLLAPSED_TARGET_COLS);
+        assert_eq!(RowHeight::Double.lines_per_row(), 2);
+        assert_eq!(RowHeight::Single.lines_per_row(), 1);
+    }
+
+    #[test]
+    fn row_height_parses_its_config_value_failing_closed_to_double() {
+        assert_eq!(
+            RowHeight::from_config_value(Some("single")),
+            RowHeight::Single
+        );
+        assert_eq!(
+            RowHeight::from_config_value(Some("double")),
+            RowHeight::Double
+        );
+        // Absent, empty, or junk → the default. A typo must not strand a user
+        // in a mode they didn't ask for.
+        assert_eq!(RowHeight::from_config_value(None), RowHeight::Double);
+        assert_eq!(RowHeight::from_config_value(Some("")), RowHeight::Double);
+        assert_eq!(
+            RowHeight::from_config_value(Some("tall")),
+            RowHeight::Double
+        );
+    }
+
+    #[test]
+    fn row_height_config_value_round_trips() {
+        // The one spelling of each mode, both directions: whatever
+        // `as_config_value` writes, `from_config_value` reads back as the
+        // same variant (#232 final review, finding 2).
+        for rh in [RowHeight::Single, RowHeight::Double] {
+            assert_eq!(RowHeight::from_config_value(Some(rh.as_config_value())), rh);
+        }
+    }
+
+    #[test]
+    fn row_height_serde_is_lowercase_and_defaultable() {
+        assert_eq!(
+            serde_json::to_string(&RowHeight::Single).unwrap(),
+            "\"single\""
+        );
+        let d: RowHeight = serde_json::from_str("\"double\"").unwrap();
+        assert_eq!(d, RowHeight::Double);
     }
 }
