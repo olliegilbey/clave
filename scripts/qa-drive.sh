@@ -485,7 +485,17 @@ measure "plugin panes visible to list-panes (bar panes are NOT listed — geomet
 # catch). The claude process's argv is read from pane_command; when no pane
 # in the tab names claude that is UNKNOWN, not a mismatch (deepest-child
 # trap, FOOTGUNS), so it demotes to a measure instead of failing.
+#
+# GATED on the scenario actually seeding a rotated row (2026-08-27 drive):
+# only qa-fleet mints one, and every other scenario's seeded rows carry
+# live_session=null by design (dev.rs #182) — hard-failing there measured
+# the scenario, not the build. No rotation seeded → the whole identity
+# block demotes to a measure, matching the usage text's qa-fleet-only note.
+ROTATED_SEEDED="$(jq -r '[.store.agents[] | select(.live_session != null)] | length' <<<"$STATUS_JSON" 2>/dev/null)"
 EAGER_LS="$(jq -r --arg u "$EAGER_UUID" '.store.agents[$u].live_session // empty' <<<"$STATUS_JSON" 2>/dev/null)"
+if [[ "${ROTATED_SEEDED:-0}" -eq 0 ]]; then
+  measure "eager row live_session" "scenario seeds no rotated row — resume-identity checks demoted to measure (qa-fleet owns them)"
+else
 check_nonempty "eager row live_session (rotated transcript seeded)" "$EAGER_LS"
 EAGER_CMD="$(jq -r --argjson t "${EAGER_TID:-null}" '[.[] | select(.tab_id == $t and ((.pane_command // "") | test("claude")))] | .[0].pane_command // empty' <<<"$PANES_JSON" 2>/dev/null)"
 if [[ -n "$EAGER_CMD" ]]; then
@@ -507,6 +517,7 @@ else
   else
     measure "eager resume identity" "unresolvable — no pane_command in tab $EAGER_TID names claude and no process resumes either uuid (deepest-child, unknown not mismatched)"
   fi
+fi
 fi
 
 # Store <-> layout join, unresolvables MARKED, never filtered (TESTING.md,
