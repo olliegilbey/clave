@@ -239,6 +239,13 @@ pub struct Agent {
     /// `None` = no reading yet. `default` keeps pre-field payloads parseable.
     #[serde(default)]
     pub provider: Option<String>,
+    /// The effort level the agent is running at, stored as the card's
+    /// two-letter tag (`lo` `md` `hi` `xh` `mx` `au`) and read off the same
+    /// transcript lines as `model`. `None` = no reading yet, renders blank —
+    /// the bar never invents a level. `default` keeps pre-field payloads
+    /// parseable.
+    #[serde(default)]
+    pub effort: Option<String>,
     /// The open PR number for this row's branch, host-resolved (#232).
     /// `None` = no open PR found, or not looked up yet — the bar renders the
     /// same blank chip either way; the lookup's cache bookkeeping
@@ -666,6 +673,7 @@ mod tests {
             buckets: Default::default(),
             model: None,
             provider: None,
+            effort: None,
             pr_number: None,
         };
         assert!(!serde_json::to_string(&a).unwrap().contains("archived"));
@@ -703,6 +711,7 @@ mod tests {
                 buckets: Default::default(),
                 model: None,
                 provider: None,
+                effort: None,
                 pr_number: None,
             }],
         };
@@ -739,6 +748,7 @@ mod tests {
             buckets: Default::default(),
             model: None,
             provider: None,
+            effort: None,
             pr_number: None,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
@@ -777,6 +787,7 @@ mod tests {
             buckets: Default::default(),
             model: None,
             provider: None,
+            effort: None,
             pr_number: None,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
@@ -817,6 +828,7 @@ mod tests {
             buckets: Default::default(),
             model: None,
             provider: None,
+            effort: None,
             pr_number: None,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
@@ -871,6 +883,7 @@ mod tests {
             buckets: Default::default(),
             model: None,
             provider: None,
+            effort: None,
             pr_number: None,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
@@ -953,6 +966,7 @@ mod tests {
             buckets: Default::default(),
             model: None,
             provider: None,
+            effort: None,
             pr_number: None,
         };
         let mut v: serde_json::Value = serde_json::to_value(&a).unwrap();

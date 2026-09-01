@@ -54,6 +54,7 @@ struct A {
     pr: Option<u32>,
     provider: Option<&'static str>,
     model: Option<&'static str>,
+    effort: Option<&'static str>,
     /// The ramp level AND the count it was bucketed from, together, the way a
     /// real snapshot carries them (#105) — the ink is the level's band and the
     /// text the exact magnitude, so a fixture cannot show a card no live row
@@ -78,6 +79,7 @@ impl Default for A {
             pr: None,
             provider: Some("claude"),
             model: Some("fable"),
+            effort: Some("hi"),
             battery: Some((5, 100_000)),
             elapsed: "1m",
             summary: "",
@@ -102,6 +104,7 @@ impl A {
                 summary: self.summary.into(),
                 model: self.model.map(String::from),
                 provider: self.provider.map(String::from),
+                effort: self.effort.map(String::from),
                 pr: self.pr,
                 branch: self.branch.into(),
                 elapsed: Some(self.elapsed.into()),
@@ -237,6 +240,7 @@ fn fleet() -> Vec<Row> {
         A {
             prov: Worktree,
             chip: Some("CLV-M2"),
+            effort: Some("xh"),
             chip_ink: Some(4),
             branch: "v022-prep",
             pr: Some(225),
@@ -255,6 +259,7 @@ fn fleet() -> Vec<Row> {
             repo_ink: Some(2),
             provider: Some("openai"),
             model: Some("gpt-5"),
+            effort: None,
             battery: Some((4, 78_000)),
             elapsed: "3h",
             summary: "DJ queue setup",
@@ -321,6 +326,7 @@ fn fleet() -> Vec<Row> {
             pr: Some(12),
             provider: Some("openai"),
             model: Some("gpt-5"),
+            effort: None,
             battery: Some((3, 55_000)),
             elapsed: "30m",
             summary: "Landing page hero copy rewrite pass",

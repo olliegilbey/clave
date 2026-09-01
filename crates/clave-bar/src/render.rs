@@ -322,6 +322,9 @@ pub enum RowContent {
         /// CLI-based agents are coming, and a future provider may reuse a
         /// model name clave already knows under a different one).
         provider: Option<String>,
+        /// The effort level the agent runs at, as the two-letter tag the host
+        /// stored (`xh`). `None` renders blank — no reading yet, never a guess.
+        effort: Option<String>,
         /// The open PR number for this row's branch, host-resolved. `None`
         /// means none is open (or none is known yet) — blank, never a dash.
         pr: Option<u32>,
@@ -1117,6 +1120,7 @@ mod tests {
                 summary: String::from(summary),
                 model: None,
                 provider: None,
+                effort: None,
                 pr: None,
                 branch: String::new(),
                 elapsed: None,
@@ -1162,6 +1166,7 @@ mod tests {
                     summary: String::new(),
                     model: None,
                     provider: None,
+                    effort: None,
                     pr: None,
                     branch: String::new(),
                     elapsed: None,

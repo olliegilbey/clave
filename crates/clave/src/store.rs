@@ -177,6 +177,10 @@ pub struct AgentRecord {
     /// pre-field store files loading.
     #[serde(default)]
     pub provider: Option<String>,
+    /// Wire twin of `clave_types::Agent::effort`, which carries the
+    /// rationale. `default` keeps pre-field store files loading.
+    #[serde(default)]
+    pub effort: Option<String>,
     /// Wire twin of `clave_types::Agent::pr_number` (#232) — the cached
     /// answer the bar renders. `default` keeps pre-field store files
     /// loading.
@@ -432,6 +436,7 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
                 // bookkeeping the bar has no use for.
                 model: r.model.clone(),
                 provider: r.provider.clone(),
+                effort: r.effort.clone(),
                 pr_number: r.pr_number,
             })
             .collect(),
@@ -935,6 +940,7 @@ mod tests {
             buckets: BTreeMap::new(),
             model: None,
             provider: None,
+            effort: None,
             pr_number: None,
             pr_checked: 0,
             pr_branch: String::new(),
@@ -1842,6 +1848,7 @@ mod tests {
         let mut r = rec("u1");
         r.model = Some("fable".into());
         r.provider = Some("claude".into());
+        r.effort = Some("xh".into());
         r.pr_number = Some(232);
         r.pr_checked = 1_756_200_000;
         r.pr_branch = "double-rows".into();
@@ -1850,6 +1857,7 @@ mod tests {
         let a = &snap.agents[0];
         assert_eq!(a.model.as_deref(), Some("fable"));
         assert_eq!(a.provider.as_deref(), Some("claude"));
+        assert_eq!(a.effort.as_deref(), Some("xh"));
         assert_eq!(a.pr_number, Some(232));
     }
 
@@ -1863,6 +1871,7 @@ mod tests {
         .unwrap();
         assert_eq!(a.model, None);
         assert_eq!(a.provider, None);
+        assert_eq!(a.effort, None);
         assert_eq!(a.pr_number, None);
     }
 

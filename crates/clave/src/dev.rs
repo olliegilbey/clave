@@ -813,6 +813,7 @@ fn agent_record(
         // sandbox simply seeds "never looked up".
         model: None,
         provider: None,
+        effort: None,
         pr_number: None,
         pr_checked: 0,
         pr_branch: String::new(),
