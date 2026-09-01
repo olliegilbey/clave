@@ -146,12 +146,13 @@ fn scan_projects_for(claude_dir: &Path, session: &str) -> Option<std::path::Path
 }
 
 /// The fleet-wide one-shot: seed every row with EMPTY buckets, and seed
-/// model/provider independently from the transcript tail. Earned buckets are
-/// never touched, so re-running is free — which is what lets `launch_session`
-/// fire it on every version refresh without bookkeeping. Model/provider are
-/// seeded only if the row's model is None (i.e., backfill is a seeder, never
-/// an updater). A row counts as seeded if either buckets or model/provider
-/// were written. Returns the number of rows seeded.
+/// model/provider and effort independently from the transcript tail. Earned
+/// buckets are never touched, so re-running is free — which is what lets
+/// `launch_session` fire it on every version refresh without bookkeeping.
+/// Model/provider are seeded only if the row's model is None, and effort only
+/// if its effort is None (i.e., backfill is a seeder, never an updater). A row
+/// counts as seeded if any of buckets, model/provider or effort were written.
+/// Returns the number of rows seeded.
 pub fn backfill_store(s: &mut Store, claude_dir: &Path, today: u32) -> usize {
     let mut seeded = 0;
     for rec in s.agents.values_mut() {
@@ -183,6 +184,16 @@ pub fn backfill_store(s: &mut Store, claude_dir: &Path, today: u32) -> usize {
         {
             rec.model = Some(model);
             rec.provider = Some("claude".to_string());
+            changed = true;
+        }
+
+        // Effort seeds on its own guard, not the model's: a store written
+        // before the field existed has a model and no effort, and the
+        // transcript answers it.
+        if rec.effort.is_none()
+            && let Some(effort) = crate::hook::effort_from_tail(&text)
+        {
+            rec.effort = Some(crate::hook::short_effort(&effort));
             changed = true;
         }
 
@@ -304,6 +315,7 @@ mod tests {
             buckets: BTreeMap::new(),
             model: None,
             provider: None,
+            effort: None,
             pr_number: None,
             pr_checked: 0,
             pr_branch: String::new(),
@@ -409,6 +421,50 @@ mod tests {
         assert_eq!(backfill_store(&mut s, dir.path(), 20685), 1);
         assert_eq!(s.agents["u-model"].model, Some("opus".to_string()));
         assert_eq!(s.agents["u-model"].provider, Some("claude".to_string()));
+    }
+
+    #[test]
+    fn backfill_seeds_effort_from_the_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Store::default();
+        s.agents.insert("u-effort".into(), rec("u-effort", "/x"));
+        write_transcript(
+            dir.path(),
+            "/x",
+            "u-effort",
+            &[
+                line("2026-08-20", r#""hey""#, ""),
+                r#"{"type":"assistant","effort":"xhigh","timestamp":"2026-08-20T10:00:01.000Z","message":{"model":"claude-opus-5","usage":{"input_tokens":10}}}"#.into(),
+            ]
+            .join("\n"),
+        );
+        assert_eq!(backfill_store(&mut s, dir.path(), 20685), 1);
+        assert_eq!(s.agents["u-effort"].effort, Some("xh".to_string()));
+    }
+
+    #[test]
+    fn backfill_seeds_effort_on_a_row_whose_model_was_already_seeded() {
+        // The upgrade path: a store written before the field existed has a
+        // model and no effort. Effort seeds on its own guard, not the model's.
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Store::default();
+        let mut r = rec("u-upgrade", "/x");
+        r.model = Some("opus".into());
+        r.provider = Some("claude".into());
+        s.agents.insert("u-upgrade".into(), r);
+        write_transcript(
+            dir.path(),
+            "/x",
+            "u-upgrade",
+            &[
+                line("2026-08-20", r#""hey""#, ""),
+                r#"{"type":"assistant","effort":"low","timestamp":"2026-08-20T10:00:01.000Z","message":{"model":"claude-opus-5","usage":{"input_tokens":10}}}"#.into(),
+            ]
+            .join("\n"),
+        );
+        assert_eq!(backfill_store(&mut s, dir.path(), 20685), 1);
+        assert_eq!(s.agents["u-upgrade"].effort, Some("lo".to_string()));
+        assert_eq!(s.agents["u-upgrade"].model, Some("opus".to_string()));
     }
 
     #[test]

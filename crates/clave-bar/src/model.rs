@@ -2139,6 +2139,7 @@ impl BarModel {
             summary: a.summary.clone(),
             model: a.model.clone(),
             provider: a.provider.clone(),
+            effort: a.effort.clone(),
             pr: a.pr_number,
             // Blanked, not `a.branch.clone()`, on the exact predicate
             // `provenance` above just rendered blank via its `Main` case —
@@ -2948,6 +2949,7 @@ mod tests {
             context_level: None,
             model: None,
             provider: None,
+            effort: None,
             pr_number: None,
         }
     }
@@ -2988,6 +2990,7 @@ mod tests {
             context_level: None,
             model: None,
             provider: None,
+            effort: None,
             pr_number: None,
         }
     }
@@ -6851,6 +6854,7 @@ mod tests {
         let mut on_branch = dressed("u-branch", "/r/one", "feature/x", None, Some(10));
         on_branch.model = Some("sonnet".into());
         on_branch.provider = Some("claude".into());
+        on_branch.effort = Some("xh".into());
         on_branch.pr_number = Some(232);
         on_branch.last_interacted = 1_000;
         let mut on_default = dressed("u-default", "/r/one", "main", None, Some(11));
@@ -6861,23 +6865,25 @@ mod tests {
             RowContent::Agent {
                 model,
                 provider,
+                effort,
                 pr,
                 branch,
                 elapsed,
                 ..
-            } => (model, provider, pr, branch, elapsed),
+            } => (model, provider, effort, pr, branch, elapsed),
             RowContent::Terminal { .. } => panic!("row {i} is not an agent"),
         };
-        let (model, provider, pr, branch, elapsed) = fields(0);
+        let (model, provider, effort, pr, branch, elapsed) = fields(0);
         assert_eq!(model.as_deref(), Some("sonnet"));
         assert_eq!(provider.as_deref(), Some("claude"));
+        assert_eq!(effort.as_deref(), Some("xh"));
         assert_eq!(pr, Some(232));
         assert_eq!(branch, "feature/x");
         assert_eq!(elapsed.as_deref(), Some("1m")); // 100s since last_interacted
         // The default checkout blanks its branch cell — the same predicate
         // `provenance` renders blank via its `Main` case — and never having
         // interacted (`last_interacted: 0`) renders no elapsed at all.
-        let (_, _, _, branch, elapsed) = fields(1);
+        let (_, _, _, _, branch, elapsed) = fields(1);
         assert_eq!(branch, "");
         assert_eq!(elapsed, None);
     }

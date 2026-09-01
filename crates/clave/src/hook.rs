@@ -409,6 +409,29 @@ pub fn model_from_tail(tail: &str) -> Option<String> {
     })
 }
 
+/// The newest assistant line's top-level `effort` — the raw level word
+/// (`xhigh`), written beside `message.model` on every assistant line.
+pub fn effort_from_tail(tail: &str) -> Option<String> {
+    last_tail_field(tail, "assistant", "effort")
+}
+
+/// Display form of an effort level: the two-letter tag the card's cell holds
+/// (`lo` `md` `hi` `xh` `mx` `au`). Anything unrecognised keeps its first two
+/// letters rather than vanishing — the transcript said something, and two
+/// cells is exactly how much of it there is room for.
+pub fn short_effort(raw: &str) -> String {
+    match raw {
+        "low" => "lo",
+        "medium" => "md",
+        "high" => "hi",
+        "xhigh" => "xh",
+        "max" => "mx",
+        "auto" => "au",
+        other => return other.chars().take(2).collect(),
+    }
+    .to_string()
+}
+
 /// Display form of a model id: for Claude ids, the FAMILY word (`fable`,
 /// `opus`, `sonnet`, `haiku`) — the segment after the vendor prefix that
 /// isn't a version number; anything else passes through untouched (open
@@ -783,6 +806,17 @@ pub fn apply_hook_event(
             rec.provider = Some("claude".to_string());
             changed = true;
         }
+    }
+    // The card's effort cell: the top-level `effort` on the same assistant
+    // lines the model comes from, stored short (`xh`) the way the model is.
+    // A tail without one HOLDS the previous reading — an older Claude Code
+    // never wrote the field, and blanking a real reading would be a lie.
+    if let Some(short) = jsonl_tail
+        .and_then(effort_from_tail)
+        .map(|e| short_effort(&e))
+    {
+        changed |= rec.effort.as_deref() != Some(short.as_str());
+        rec.effort = Some(short);
     }
     // Bucketed HERE, in the row's own agent's process, for two reasons: this is
     // where `SMART_ZONE_ENV` means the right thing, and stamping it makes a
@@ -1391,6 +1425,7 @@ mod tests {
             buckets: BTreeMap::new(),
             model: None,
             provider: None,
+            effort: None,
             pr_number: None,
             pr_checked: 0,
             pr_branch: String::new(),
@@ -3031,5 +3066,72 @@ mod tests {
         apply_hook_event(&mut s, "minted", "Stop", &p, Some(tail), 100, true);
         assert_eq!(s.agents["minted"].model.as_deref(), Some("fable"));
         assert_eq!(s.agents["minted"].provider.as_deref(), Some("claude"));
+    }
+
+    // ── the card's effort cell ──────────────────────────────────────────────
+
+    #[test]
+    fn effort_from_tail_reads_the_newest_assistant_lines_top_level_effort() {
+        let tail = [
+            r#"{"type":"assistant","effort":"high","message":{"model":"claude-opus-5"}}"#,
+            r#"{"type":"user","effort":"low"}"#,
+            r#"{"type":"assistant","effort":"xhigh","message":{"model":"claude-fable-5"}}"#,
+            r#"{"type":"user"}"#,
+        ]
+        .join("\n");
+        assert_eq!(effort_from_tail(&tail).as_deref(), Some("xhigh"));
+        assert_eq!(
+            effort_from_tail(r#"{"type":"assistant","message":{}}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn short_effort_maps_the_six_levels_to_two_letters() {
+        for (raw, short) in [
+            ("low", "lo"),
+            ("medium", "md"),
+            ("high", "hi"),
+            ("xhigh", "xh"),
+            ("max", "mx"),
+            ("auto", "au"),
+        ] {
+            assert_eq!(short_effort(raw), short, "{raw}");
+        }
+        // An unrecognised level keeps its first two letters rather than
+        // vanishing: the transcript said something, and the cell holds
+        // exactly that much of it.
+        assert_eq!(short_effort("adaptive"), "ad");
+        assert_eq!(short_effort("x"), "x");
+    }
+
+    #[test]
+    fn a_stop_event_stamps_effort() {
+        let mut s = Store::default();
+        s.agents.insert("minted".into(), rec("minted"));
+        let tail = r#"{"type":"assistant","effort":"xhigh","message":{"model":"claude-fable-5","usage":{"input_tokens":1000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#;
+        let p = HookPayload {
+            session_id: Some("minted".into()),
+            ..Default::default()
+        };
+        apply_hook_event(&mut s, "minted", "Stop", &p, Some(tail), 100, true);
+        assert_eq!(s.agents["minted"].effort.as_deref(), Some("xh"));
+    }
+
+    #[test]
+    fn a_tail_without_an_effort_holds_the_previous_reading() {
+        // Fail-closed like the model and token readings: an older Claude
+        // Code that never wrote the field must not blank a real reading.
+        let mut s = Store::default();
+        let mut r = rec("minted");
+        r.effort = Some("hi".into());
+        s.agents.insert("minted".into(), r);
+        let tail = r#"{"type":"assistant","message":{"model":"claude-fable-5","usage":{"input_tokens":1000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#;
+        let p = HookPayload {
+            session_id: Some("minted".into()),
+            ..Default::default()
+        };
+        apply_hook_event(&mut s, "minted", "Stop", &p, Some(tail), 100, true);
+        assert_eq!(s.agents["minted"].effort.as_deref(), Some("hi"));
     }
 }

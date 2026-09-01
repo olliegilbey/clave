@@ -224,6 +224,7 @@ mod tests {
             buckets: BTreeMap::new(),
             model: None,
             provider: None,
+            effort: None,
             pr_number: None,
             pr_checked: 0,
             pr_branch: String::new(),

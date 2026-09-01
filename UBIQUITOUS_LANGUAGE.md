@@ -101,7 +101,7 @@ rendered in.** The shape is the **row height**, and there are two:
 
 | Term | Means |
 |---|---|
-| **card** | A row's **two-line** rendering, the default since #232. Line 1 is status, chip and token count; line 2 is identity — provenance, repo, branch, PR, provider, model and elapsed. The two lines are one unit: one click target, one viewport slot, one zebra parity. Locked in `docs/superpowers/specs/2026-08-26-double-height-card-lock.md`. |
+| **card** | A row's **two-line** rendering, the default since #232. Line 1 is status, chip and token count; line 2 is identity — provenance, repo, branch, PR, provider, model, effort and elapsed. The two lines are one unit: one click target, one viewport slot, one zebra parity. Locked in `docs/superpowers/specs/2026-08-26-double-height-card-lock.md`. |
 | **single-line row** | The original one-line rendering, retained behind `clave rows single` and locked in `docs/superpowers/specs/2026-07-25-sidebar-visual-design-lock.md`. Its geometry is §3.2 below. |
 
 Both come in the same two **width states**, expanded and collapsed; height and

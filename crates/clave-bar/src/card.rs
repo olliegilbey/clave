@@ -9,7 +9,7 @@
 //!
 //! ```text
 //!   line 1:  status ╭ chip-pill  summary            tokens
-//!   line 2:  prov   ╰ repo [branch]  #PR  provider  model   elapsed
+//!   line 2:  prov   ╰ repo [branch]  #PR  provider model ef  elapsed
 //! ```
 //!
 //! Glass discipline (lock §6, and Ollie's terminal probe): a painted cell
@@ -35,6 +35,11 @@ const CHIP_W: usize = 7;
 const REPO_W: usize = 9;
 /// The model handle.
 const MODEL_W: usize = 6;
+/// The effort tag (`xh`), beside the model. Its column came from the second
+/// of round 8c's two spaces before the provider glyph (2026-09-01): line 2
+/// had exactly three free cells between model and elapsed, and a tag with a
+/// gap on each side needs four.
+const EFFORT_W: usize = 2;
 /// The branch's guaranteed MINIMUM in the expanded profile: repo and branch
 /// share one `REPO_W + 1 + BRANCH_MIN` budget and the branch takes what the
 /// repo name leaves, never less than this — branch names run longer than repo
@@ -90,6 +95,8 @@ struct Cells<'a> {
     pr: Option<u32>,
     provider: Option<(char, Rgb)>,
     model: &'a str,
+    /// The two-letter effort tag; empty when the host has no reading.
+    effort: &'a str,
     elapsed: &'a str,
 }
 
@@ -107,6 +114,7 @@ fn cells<'a>(content: &'a RowContent, theme: &Theme) -> Cells<'a> {
             summary,
             model,
             provider,
+            effort,
             pr,
             branch,
             elapsed,
@@ -134,6 +142,7 @@ fn cells<'a>(content: &'a RowContent, theme: &Theme) -> Cells<'a> {
                 pr: *pr,
                 provider: provider.as_deref().and_then(provider_mark),
                 model: model.as_deref().unwrap_or(""),
+                effort: effort.as_deref().unwrap_or(""),
                 elapsed: elapsed.as_deref().unwrap_or(""),
             }
         }
@@ -165,6 +174,7 @@ fn cells<'a>(content: &'a RowContent, theme: &Theme) -> Cells<'a> {
             pr: *pr,
             provider: None,
             model: "",
+            effort: "",
             elapsed: elapsed.as_deref().unwrap_or(""),
         },
     }
@@ -286,7 +296,7 @@ pub(crate) fn render_card(
     }
     l1.push_str(&seg(theme.default_ink, " "));
 
-    // ── line 2: prov ╰ repo [branch] #PR provider model … elapsed ──
+    // ── line 2: prov ╰ repo [branch] #PR provider model effort … elapsed ──
     let mut l2 = String::new();
     let prov = c.prov.map_or_else(|| " ".to_string(), String::from);
     l2.push_str(&seg(ink(c.repo_ink), &format!(" {prov} ")));
@@ -319,12 +329,17 @@ pub(crate) fn render_card(
         ));
     }
     match c.provider {
-        // Two spaces before the icon (round 8c): the extra column between the
-        // PR number and the model name.
-        Some((glyph, brand)) => l2.push_str(&seg(ink(brand), &format!("  {glyph}"))),
-        None => l2.push_str(&seg(theme.default_ink, "   ")),
+        // One space before the icon: round 8c gave it two, and the effort
+        // cell took the second (see `EFFORT_W`). The PR cell's own trailing
+        // pad keeps two visual spaces there for any PR under five digits.
+        Some((glyph, brand)) => l2.push_str(&seg(ink(brand), &format!(" {glyph}"))),
+        None => l2.push_str(&seg(theme.default_ink, "  ")),
     }
     l2.push_str(&seg(ink(META_INK), &format!(" {}", pad(c.model, MODEL_W))));
+    l2.push_str(&seg(
+        ink(META_INK),
+        &format!(" {}", pad(c.effort, EFFORT_W)),
+    ));
     let fill = build.saturating_sub(display_cells(&strip_sgr(&l2)) + ELAPSED_W + 1);
     l2.push_str(&seg(theme.default_ink, &" ".repeat(fill)));
     l2.push_str(&seg(ink(META_INK), &rpad(c.elapsed, ELAPSED_W)));
@@ -401,6 +416,7 @@ mod tests {
         pr: Option<u32>,
         provider: Option<&'static str>,
         model: Option<&'static str>,
+        effort: Option<&'static str>,
         tokens: Option<u32>,
         battery: Option<u8>,
         elapsed: &'static str,
@@ -422,6 +438,7 @@ mod tests {
                 pr: None,
                 provider: Some("claude"),
                 model: Some("fable"),
+                effort: Some("hi"),
                 tokens: Some(100_000),
                 battery: Some(5),
                 elapsed: "1m",
@@ -447,6 +464,7 @@ mod tests {
                     summary: self.summary.into(),
                     model: self.model.map(String::from),
                     provider: self.provider.map(String::from),
+                    effort: self.effort.map(String::from),
                     pr: self.pr,
                     branch: self.branch.into(),
                     elapsed: Some(self.elapsed.into()),
@@ -581,6 +599,7 @@ mod tests {
             A {
                 prov: Worktree,
                 chip: Some("CLV-M2"),
+                effort: Some("xh"),
                 chip_ink: Some(4),
                 branch: "v022-prep",
                 pr: Some(225),
@@ -600,6 +619,7 @@ mod tests {
                 repo_ink: Some(2),
                 provider: Some("openai"),
                 model: Some("gpt-5"),
+                effort: None,
                 tokens: Some(78_000),
                 battery: Some(4),
                 elapsed: "3h",
@@ -670,6 +690,7 @@ mod tests {
                 pr: Some(12),
                 provider: Some("openai"),
                 model: Some("gpt-5"),
+                effort: None,
                 tokens: Some(55_000),
                 battery: Some(3),
                 elapsed: "30m",
@@ -717,6 +738,7 @@ mod tests {
                 chip_ink: Some(1),
                 provider: Some("grok"),
                 model: None,
+                effort: None,
                 tokens: None,
                 battery: None,
                 elapsed: "",
@@ -731,6 +753,7 @@ mod tests {
                 chip: Some("OPENING"),
                 chip_ink: Some(2),
                 provider: None,
+                effort: None,
                 summary: "Just launched",
                 dormant: true,
                 ..A::default()
@@ -787,7 +810,7 @@ mod tests {
             (
                 " \u{25cf} \u{256d} \u{e0b6}CLV-M2 \u{e0b4} Goal is shipping\u{2026} 130k "
                     .to_string(),
-                " \u{168c2} \u{2570}  clave     #225   \u{ec82} fable     5m ".to_string(),
+                " \u{168c2} \u{2570}  clave     #225  \u{ec82} fable  xh  5m ".to_string(),
             )
         );
         assert_eq!(
@@ -795,7 +818,7 @@ mod tests {
             (
                 " \u{25cf} \u{256d} \u{e0b6}CLV-M2 \u{e0b4} Goal is shipping v0.2.2 cl\u{2026} 130k "
                     .to_string(),
-                " \u{168c2} \u{2570}  clave v022-prep     #225   \u{ec82} fable     5m ".to_string(),
+                " \u{168c2} \u{2570}  clave v022-prep     #225  \u{ec82} fable  xh  5m ".to_string(),
             )
         );
     }
@@ -810,9 +833,9 @@ mod tests {
             (
                 4,
                 " \u{25cf} \u{256d} \u{e0b6}CLV-3  \u{e0b4} Drive launch      117k ",
-                " \u{168c2} \u{2570}  clave     #204   \u{ec82} sonnet   45m ",
+                " \u{168c2} \u{2570}  clave     #204  \u{ec82} sonnet hi 45m ",
                 " \u{25cf} \u{256d} \u{e0b6}CLV-3  \u{e0b4} Drive launch                117k ",
-                " \u{168c2} \u{2570}  clave drive-launch  #204   \u{ec82} sonnet   45m ",
+                " \u{168c2} \u{2570}  clave drive-launch  #204  \u{ec82} sonnet hi 45m ",
             ),
             (
                 6,
@@ -824,37 +847,37 @@ mod tests {
             (
                 9,
                 " \u{25cf} \u{256d}  Create close conversation\u{2026}  34k ",
-                "   \u{2570}  hermes           \u{ec82} opus      2h ",
+                "   \u{2570}  hermes          \u{ec82} opus   hi  2h ",
                 " \u{25cf} \u{256d}  Create close conversation summary f\u{2026}  34k ",
-                "   \u{2570}  hermes                     \u{ec82} opus      2h ",
+                "   \u{2570}  hermes                    \u{ec82} opus   hi  2h ",
             ),
             (
                 10,
                 " \u{25cf} \u{256d} \u{e0b6}GTMSS  \u{e0b4} GTM Landscape - \u{2026} 119k ",
-                " \u{f062c} \u{2570}  nalu      #31    \u{ec82} haiku     1d ",
+                " \u{f062c} \u{2570}  nalu      #31   \u{ec82} haiku  hi  1d ",
                 " \u{25cf} \u{256d} \u{e0b6}GTMSS  \u{e0b4} GTM Landscape - and first \u{2026} 119k ",
-                " \u{f062c} \u{2570}  nalu gtm-pass       #31    \u{ec82} haiku     1d ",
+                " \u{f062c} \u{2570}  nalu gtm-pass       #31   \u{ec82} haiku  hi  1d ",
             ),
             (
                 13,
                 " \u{25cf} \u{256d}  Landing page hero copy re\u{2026}  55k ",
-                " \u{f062c} \u{2570}  clave-we\u{2026} #12    \u{ec81} gpt-5    30m ",
+                " \u{f062c} \u{2570}  clave-we\u{2026} #12   \u{ec81} gpt-5     30m ",
                 " \u{25cf} \u{256d}  Landing page hero copy rewrite pass   55k ",
-                " \u{f062c} \u{2570}  clave-we\u{2026} hero-copy #12    \u{ec81} gpt-5    30m ",
+                " \u{f062c} \u{2570}  clave-we\u{2026} hero-copy #12   \u{ec81} gpt-5     30m ",
             ),
             (
                 14,
                 " \u{2716} \u{256d} \u{e0b6}MIGRATE\u{e0b4} Postgres 15 to 1\u{2026} 201k ",
-                " \u{168c2} \u{2570}  market-s\u{2026} #88    \u{ec82} sonnet    4h ",
+                " \u{168c2} \u{2570}  market-s\u{2026} #88   \u{ec82} sonnet hi  4h ",
                 " \u{2716} \u{256d} \u{e0b6}MIGRATE\u{e0b4} Postgres 15 to 17 migratio\u{2026} 201k ",
-                " \u{168c2} \u{2570}  market-s\u{2026} pg17-mig\u{2026} #88    \u{ec82} sonnet    4h ",
+                " \u{168c2} \u{2570}  market-s\u{2026} pg17-mig\u{2026} #88   \u{ec82} sonnet hi  4h ",
             ),
             (
                 15,
                 " \u{25cb} \u{256d} \u{e0b6}FOOTER \u{e0b4} ollie.gg company\u{2026}  73k ",
-                "   \u{2570}  resumaker        \u{ec82} opus      2w ",
+                "   \u{2570}  resumaker       \u{ec82} opus   hi  2w ",
                 " \u{25cb} \u{256d} \u{e0b6}FOOTER \u{e0b4} ollie.gg company details f\u{2026}  73k ",
-                "   \u{2570}  resumaker                  \u{ec82} opus      2w ",
+                "   \u{2570}  resumaker                 \u{ec82} opus   hi  2w ",
             ),
         ];
         for (i, c1, c2, e1, e2) in want {

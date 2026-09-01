@@ -34,6 +34,7 @@ pub fn agent(
             summary: String::from(summary),
             model: None,
             provider: None,
+            effort: None,
             pr: None,
             branch: String::new(),
             elapsed: None,
@@ -71,14 +72,17 @@ pub fn terminal(
     }
 }
 
-/// The card-only cells (#232): model, provider, PR, branch and elapsed. The
-/// single-line row ignores every one of them and the two-line card draws them
-/// all, so one fixture feeds both renderers and the README's card frames are
-/// full rather than half-blank. A terminal row borrows the checkout's PR,
-/// branch and elapsed, and has no model or provider of its own.
+/// The card-only cells (#232): model, effort, provider, PR, branch and
+/// elapsed. The single-line row ignores every one of them and the two-line
+/// card draws them all, so one fixture feeds both renderers and the README's
+/// card frames are full rather than half-blank. A terminal row borrows the
+/// checkout's PR, branch and elapsed, and has no model, effort or provider of
+/// its own. An empty `effort` is no reading — the cell a provider that never
+/// reports one renders blank.
 pub fn detail(
     mut row: Row,
     model: &str,
+    effort: &str,
     provider: &str,
     pr: Option<u32>,
     branch: &str,
@@ -87,6 +91,7 @@ pub fn detail(
     match &mut row.content {
         RowContent::Agent {
             model: m,
+            effort: f,
             provider: p,
             pr: n,
             branch: b,
@@ -94,6 +99,7 @@ pub fn detail(
             ..
         } => {
             *m = Some(String::from(model));
+            *f = (!effort.is_empty()).then(|| String::from(effort));
             *p = Some(String::from(provider));
             *n = pr;
             *b = String::from(branch);
@@ -161,6 +167,7 @@ pub fn showcase() -> Vec<Row> {
                 "Wire the status column into render_rows",
             ),
             "sonnet",
+            "hi",
             "claude",
             Some(232),
             "double-rows",
@@ -174,6 +181,7 @@ pub fn showcase() -> Vec<Row> {
                 Some(("clave", CLAVE)),
                 "just gates",
             ),
+            "",
             "",
             "",
             Some(232),
@@ -191,6 +199,7 @@ pub fn showcase() -> Vec<Row> {
                 "Review the spawn identity gate",
             ),
             "opus",
+            "xh",
             "claude",
             None,
             "",
@@ -207,6 +216,7 @@ pub fn showcase() -> Vec<Row> {
                 "Validate generated KDL artifacts",
             ),
             "fable",
+            "hi",
             "claude",
             Some(219),
             "kdl-guard",
@@ -223,6 +233,7 @@ pub fn showcase() -> Vec<Row> {
                 "Rotate the signing keys",
             ),
             "fable",
+            "mx",
             "claude",
             Some(184),
             "key-rotation",
@@ -239,6 +250,7 @@ pub fn showcase() -> Vec<Row> {
                 "Fix cart total rounding mismatch",
             ),
             "haiku",
+            "lo",
             "claude",
             None,
             "",
@@ -255,6 +267,7 @@ pub fn showcase() -> Vec<Row> {
                 "Debug staging rollout DNS timeout",
             ),
             "5.6sol",
+            "",
             "openai",
             Some(77),
             "dns-timeout",
@@ -268,6 +281,7 @@ pub fn showcase() -> Vec<Row> {
                 Some(("infra", INFRA)),
                 "kubectl logs -f api-7d9",
             ),
+            "",
             "",
             "",
             None,
@@ -285,6 +299,7 @@ pub fn showcase() -> Vec<Row> {
                 "Tidy the shell startup files",
             ),
             "haiku",
+            "md",
             "claude",
             None,
             "",
