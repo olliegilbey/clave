@@ -716,6 +716,68 @@ pub fn push_snapshot(snap: &AgentSnapshot) {
         .spawn();
 }
 
+/// Remember which conversation this row is actually living in (#99). The
+/// payload's id is the live one BY DEFINITION — Claude is reporting its own
+/// session. Held as `None` when it equals `uuid`, so the field can go BACK
+/// to agreeing rather than keep pointing at a superseded conversation.
+///
+/// GATED ON THE ENV, unlike everything else in the two callers, and the
+/// asymmetry is the point. `resolve_row` admits a payload whose `session_id`
+/// NAMES A ROW without consulting the env — correctly, that is the ordinary
+/// path — but the minted transcript this bug leaves orphaned is listed in
+/// `claude --resume`'s own picker, so a Claude started by hand OUTSIDE clave
+/// can fire hooks carrying exactly that id. Ungated, its `session_id == uuid`
+/// would read as "the two agree again" and WIPE a live pointer that is still
+/// true, silently re-arming #99 for the next release. Every other field the
+/// callers write describes the event and is corrected by the next one; this
+/// pointer is read once, much later, by a process with nothing else to go on.
+///
+/// Fails closed: no `CLAVE_AGENT_UUID`, or one naming another row, and the
+/// pointer simply holds. Worst case is the pre-#99 target, never a wrong one.
+///
+/// A rotation IS a `/clear`: Claude mints a new id AND starts a new
+/// transcript (FOOTGUNS, "ROTATES its session id on `/clear`"). The new
+/// conversation genuinely holds nothing, so the battery returns to full on
+/// this event rather than waiting for a usage line to exist — and the meter's
+/// stamp (#245) goes with it, because the new conversation has not been
+/// metered. That is the design statement in code: **the battery measures the
+/// conversation the row is IN, never the row's history**, so a near-zero
+/// reading straight after a `/clear` is CORRECT and is not to be "fixed".
+///
+/// `--resume` does NOT rotate (measured, same FOOTGUNS entry), so resuming a
+/// conversation correctly keeps its reading.
+///
+/// Shared by the hook and the statusLine paths, which is why it lives here
+/// rather than inline: a `/clear` reaches whichever of the two speaks first.
+pub(crate) fn note_live_session(
+    rec: &mut AgentRecord,
+    uuid: &str,
+    live: Option<&str>,
+    own_claude: bool,
+) {
+    let Some(live) = live.filter(|_| own_claude) else {
+        return;
+    };
+    if live != rec.live_session.as_deref().unwrap_or(uuid) {
+        rec.context_tokens = Some(0);
+        rec.metered_at = 0;
+    }
+    rec.live_session = (live != uuid).then(|| live.to_string());
+}
+
+/// Bucket the row's count into its level and stamp it; returns whether the
+/// level moved. Bucketed HERE, in the row's own agent's process, for two
+/// reasons: this is where `SMART_ZONE_ENV` means the right thing, and
+/// stamping it makes a dormant row free forever after — `snapshot_from` only
+/// copies. The fleet's dormant list may eventually hold every conversation
+/// the user has ever had.
+pub(crate) fn restamp_level(rec: &mut AgentRecord, zone: u32) -> bool {
+    let level = rec.context_tokens.map(|t| battery_level(t, zone));
+    let moved = rec.context_level != level;
+    rec.context_level = level;
+    moved
+}
+
 /// The one store mutation a hook event performs, factored out of run_hook's
 /// lock closure so it unit-tests against a plain `Store`. Returns whether
 /// anything changed; bumps `seq` itself (exactly once) when it did.
@@ -743,62 +805,32 @@ pub fn apply_hook_event(
         changed |= rec.status != next;
         rec.status = next;
     }
-    // Remember which conversation this row is actually living in (#99). The
-    // payload's id is the live one BY DEFINITION — Claude is reporting its own
-    // session. Held as `None` when it equals `uuid`, so the field can go BACK
-    // to agreeing rather than keep pointing at a superseded conversation.
-    //
-    // GATED ON THE ENV, unlike everything else here, and the asymmetry is the
-    // point. `resolve_row` admits a payload whose `session_id` NAMES A ROW
-    // without consulting the env — correctly, that is the ordinary path — but
-    // the minted transcript this bug leaves orphaned is listed in `claude
-    // --resume`'s own picker, so a Claude started by hand OUTSIDE clave can
-    // fire hooks carrying exactly that id. Ungated, its `session_id == uuid`
-    // would read as "the two agree again" and WIPE a live pointer that is still
-    // true, silently re-arming #99 for the next release. Every other field here
-    // describes the event and is corrected by the next one; this pointer is
-    // read once, much later, by a process with nothing else to go on.
-    //
-    // Fails closed: no `CLAVE_AGENT_UUID`, or one naming another row, and the
-    // pointer simply holds. Worst case is the pre-#99 target, never a wrong
-    // one.
-    //
-    // Not part of `changed`, on purpose. `with_store_mut` persists the record
-    // either way; `changed` gates only the SNAPSHOT PUSH, and the bar renders
-    // nothing from this field — bumping `seq` for it would push a pipe message
-    // that changes no pixel.
-    //
-    // S7 (#62) rides this same signal, and ORDER MATTERS — it compares against
-    // `rec.live_session` before the assignment below overwrites it.
-    //
-    // A rotation IS a `/clear`: Claude mints a new id AND starts a new
-    // transcript (FOOTGUNS, "ROTATES its session id on `/clear`"). The new
-    // conversation genuinely holds nothing, so the battery returns to full on
-    // this event rather than waiting for a usage line to exist. That is the
-    // design statement in code: **the battery measures the conversation the row
-    // is IN, never the row's history**, so a near-zero reading straight after a
-    // `/clear` is CORRECT and is not to be "fixed".
-    //
-    // `--resume` does NOT rotate (measured, same FOOTGUNS entry), so resuming a
-    // conversation correctly keeps its reading.
+    // Which conversation the row is living in (#99), and the rotation reset
+    // that rides it — see `note_live_session`. Not part of `changed`, on
+    // purpose: `with_store_mut` persists the record either way; `changed`
+    // gates only the SNAPSHOT PUSH, and the bar renders nothing from the
+    // pointer — bumping `seq` for it would push a pipe message that changes
+    // no pixel. S7 (#62) rides the same signal, and ORDER MATTERS: the
+    // battery reset counts as a change against the count taken BEFORE it.
     let tokens_before = rec.context_tokens;
-    if let Some(live) = payload.session_id.as_deref().filter(|_| own_claude) {
-        if live != rec.live_session.as_deref().unwrap_or(uuid) {
-            rec.context_tokens = Some(0);
-        }
-        rec.live_session = (live != uuid).then(|| live.to_string());
-    }
+    note_live_session(rec, uuid, payload.session_id.as_deref(), own_claude);
+    // #245: the three cells below have a fresher source when the statusLine
+    // is wired — the meter reads the API response this Stop's tail has not
+    // yet had flushed to it. While the meter is speaking the tail keeps quiet
+    // on them; `title` and `summary` still read the whole tail
+    // (`refresh_label`, below), those stay on the transcript by design.
+    let tail = jsonl_tail.filter(|_| !crate::statusline::hook_yields(rec, now));
     // A tail reaches us only on Stop / UserPromptSubmit (`run_hook`'s event
     // gate). No tail, or a tail carrying no usage line, HOLDS the previous
     // reading — §5.4 fail-closed. Never invent a measurement.
-    if let Some(tokens) = jsonl_tail.and_then(tokens_from_tail) {
+    if let Some(tokens) = tail.and_then(tokens_from_tail) {
         rec.context_tokens = Some(tokens);
     }
     // #232: the card's model cell. Same source and cadence as the token
     // reading — the tail the hook already took. Provider is "claude" by
     // construction here: this tail IS a Claude Code transcript. Other
     // providers arrive with their own hook path, not a guess.
-    if let Some(raw) = jsonl_tail.and_then(model_from_tail) {
+    if let Some(raw) = tail.and_then(model_from_tail) {
         let short = short_model(&raw);
         changed |= rec.model.as_deref() != Some(short.as_str());
         rec.model = Some(short);
@@ -811,25 +843,17 @@ pub fn apply_hook_event(
     // lines the model comes from, stored short (`xh`) the way the model is.
     // A tail without one HOLDS the previous reading — an older Claude Code
     // never wrote the field, and blanking a real reading would be a lie.
-    if let Some(short) = jsonl_tail
-        .and_then(effort_from_tail)
-        .map(|e| short_effort(&e))
-    {
+    if let Some(short) = tail.and_then(effort_from_tail).map(|e| short_effort(&e)) {
         changed |= rec.effort.as_deref() != Some(short.as_str());
         rec.effort = Some(short);
     }
-    // Bucketed HERE, in the row's own agent's process, for two reasons: this is
-    // where `SMART_ZONE_ENV` means the right thing, and stamping it makes a
-    // dormant row free forever after — `snapshot_from` only copies. The fleet's
-    // dormant list may eventually hold every conversation the user has ever had.
-    let level = rec.context_tokens.map(|t| battery_level(t, smart_zone()));
+    let level_moved = restamp_level(rec, smart_zone());
     // BOTH fields gate the push, not just the level. The glyph only moves once
     // per tenth of the zone, but #105 renders the raw count as text — gating on
     // the level alone would leave that text stale for up to a tenth of the zone
     // (15k tokens at the default), which is a bug shipped early rather than a
     // bug avoided. (CodeRabbit and the spec review agreed here, #147.)
-    changed |= rec.context_level != level || rec.context_tokens != tokens_before;
-    rec.context_level = level;
+    changed |= level_moved || rec.context_tokens != tokens_before;
     // §6.6 / S1 / #39: a PROMPT is the ONLY event that reorders. Stop,
     // StopFailure, Notification, PermissionRequest and SessionEnd change the
     // STATUS and nothing else — "claude finishing should not move it up"
@@ -1422,6 +1446,7 @@ mod tests {
             context_tokens: None,
             context_level: None,
             live_session: None,
+            metered_at: 0,
             buckets: BTreeMap::new(),
             model: None,
             provider: None,
@@ -3133,5 +3158,135 @@ mod tests {
         };
         apply_hook_event(&mut s, "minted", "Stop", &p, Some(tail), 100, true);
         assert_eq!(s.agents["minted"].effort.as_deref(), Some("hi"));
+    }
+
+    // ---- #245: the tail readers yield to the meter ---------------------------
+
+    /// A Stop tail one response behind, written over a fresher statusLine
+    /// reading: the bug #245 exists to remove.
+    fn stale_tail() -> String {
+        [
+            r#"{"type":"assistant","effort":"low","message":{"model":"claude-opus-5","usage":{"input_tokens":11,"cache_creation_input_tokens":800,"cache_read_input_tokens":19000,"output_tokens":5}}}"#,
+            r#"{"type":"user"}"#,
+        ]
+        .join("\n")
+    }
+
+    fn metered_rec(uuid: &str, at: u64) -> AgentRecord {
+        let mut r = rec(uuid);
+        r.context_tokens = Some(20_508);
+        r.context_level = Some(1);
+        r.model = Some("fable".into());
+        r.provider = Some("claude".into());
+        r.effort = Some("hi".into());
+        r.metered_at = at;
+        r
+    }
+
+    #[test]
+    fn the_hook_yields_tokens_model_and_effort_while_the_meter_is_speaking() {
+        let mut s = Store::default();
+        s.agents
+            .insert("minted".into(), metered_rec("minted", 1000));
+        let ev = HookPayload {
+            session_id: Some("minted".into()),
+            ..Default::default()
+        };
+        // The return is not asserted: the label path may still move on a Stop
+        // tail (summary, title), and that is right — only these three yield.
+        apply_hook_event(
+            &mut s,
+            "minted",
+            "Stop",
+            &ev,
+            Some(&stale_tail()),
+            1005,
+            true,
+        );
+        let row = &s.agents["minted"];
+        assert_eq!(row.context_tokens, Some(20_508));
+        assert_eq!(row.model.as_deref(), Some("fable"));
+        assert_eq!(row.effort.as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn the_hook_speaks_again_once_the_meter_has_gone_quiet() {
+        let mut s = Store::default();
+        s.agents
+            .insert("minted".into(), metered_rec("minted", 1000));
+        let ev = HookPayload {
+            session_id: Some("minted".into()),
+            ..Default::default()
+        };
+        let quiet = 1000 + crate::statusline::HOOK_YIELD_SECS;
+        assert!(apply_hook_event(
+            &mut s,
+            "minted",
+            "Stop",
+            &ev,
+            Some(&stale_tail()),
+            quiet,
+            true
+        ));
+        let row = &s.agents["minted"];
+        assert_eq!(row.context_tokens, Some(19_811));
+        assert_eq!(row.model.as_deref(), Some("opus"));
+        assert_eq!(row.effort.as_deref(), Some("lo"));
+    }
+
+    #[test]
+    fn a_rotation_resets_the_meter_so_the_hook_speaks_in_the_new_conversation() {
+        let mut s = Store::default();
+        s.agents
+            .insert("minted".into(), metered_rec("minted", 1000));
+        let ev = HookPayload {
+            session_id: Some("cleared".into()),
+            ..Default::default()
+        };
+        apply_hook_event(&mut s, "minted", "Notification", &ev, None, 1001, true);
+        assert_eq!(s.agents["minted"].metered_at, 0);
+        assert!(apply_hook_event(
+            &mut s,
+            "minted",
+            "Stop",
+            &ev,
+            Some(&stale_tail()),
+            1002,
+            true
+        ));
+        assert_eq!(s.agents["minted"].context_tokens, Some(19_811));
+    }
+
+    /// A count that moves WITHIN a level still pushes: #105 renders the raw
+    /// figure as text, so gating on the glyph alone would leave it stale for
+    /// up to a tenth of the zone (the #147 ruling). A `just mutants` survivor
+    /// (2026-09-01) showed nothing pinned the `||` here.
+    #[test]
+    fn a_count_that_moves_inside_its_level_still_pushes() {
+        let usage = |n: u32| {
+            format!(
+                r#"{{"type":"assistant","message":{{"model":"claude-opus-5","usage":{{"input_tokens":{n},"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}}}}"#
+            )
+        };
+        let mut s = Store::default();
+        s.agents.insert("minted".into(), rec("minted"));
+        let ev = HookPayload {
+            session_id: Some("minted".into()),
+            ..Default::default()
+        };
+        // First tail absorbs whatever else a Stop tail moves (model, label).
+        apply_hook_event(&mut s, "minted", "Stop", &ev, Some(&usage(40_000)), 1, true);
+        assert_eq!(s.agents["minted"].context_level, Some(2));
+        assert!(apply_hook_event(
+            &mut s,
+            "minted",
+            "Stop",
+            &ev,
+            Some(&usage(41_000)),
+            2,
+            true
+        ));
+        assert_eq!(s.agents["minted"].context_level, Some(2));
+        assert_eq!(s.agents["minted"].context_tokens, Some(41_000));
     }
 }

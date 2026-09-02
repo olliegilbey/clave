@@ -60,8 +60,9 @@ clave   # from a terminal OUTSIDE zellij; clave makes its own session
 
 First launch sets the machine up: Zellij config and keybinds, clave's status
 hooks in `~/.claude/settings.json` (additive, your own hooks are left alone),
-and the plugin permission cache. That's what lets an agent report its own
-state. `clave doctor` explains anything that didn't land.
+a wrap around your Claude status line command so the battery reads live (your
+command still runs, unchanged), and the plugin permission cache. That's what
+lets an agent report its own state. `clave doctor` explains anything that didn't land.
 
 Then `Alt+a`, pick a directory, choose `new`. That's your first agent.
 

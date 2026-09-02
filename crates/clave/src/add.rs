@@ -600,6 +600,7 @@ pub(crate) fn mint_record(s: &mut Store, inputs: FreshRecordInputs) -> AgentReco
         // `..row.clone()`, which is what keeps a re-added rotated agent
         // pointing at its live conversation (#99).
         live_session: None,
+        metered_at: 0,
         buckets: seeded,
         model: None,
         provider: None,
@@ -1241,6 +1242,7 @@ mod tests {
             context_tokens: None,
             context_level: None,
             live_session: None,
+            metered_at: 0,
             buckets: BTreeMap::new(),
             model: None,
             provider: None,

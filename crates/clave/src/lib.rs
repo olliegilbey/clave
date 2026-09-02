@@ -20,4 +20,5 @@ pub mod release;
 pub mod sandbox;
 pub mod setup;
 pub mod spawn;
+pub mod statusline;
 pub mod store;

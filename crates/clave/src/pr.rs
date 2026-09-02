@@ -221,6 +221,7 @@ mod tests {
             context_tokens: None,
             context_level: None,
             live_session: None,
+            metered_at: 0,
             buckets: BTreeMap::new(),
             model: None,
             provider: None,

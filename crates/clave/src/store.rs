@@ -162,6 +162,16 @@ pub struct AgentRecord {
     /// refuses a value shaped like a flag, before it reaches argv.
     #[serde(default)]
     pub live_session: Option<String>,
+    /// Wall clock of the last statusLine TOKEN reading this row's current
+    /// conversation delivered (#245); `0` = none yet. Two jobs: the hook's
+    /// tail readers YIELD while it is recent (`statusline::hook_yields`), so
+    /// a Stop — which reads the transcript one response behind — never
+    /// overwrites the meter's fresher figure; and the meter's own throttle
+    /// paces its pushes against it. Reset with the battery on a rotation,
+    /// because like the battery it describes the conversation the row is
+    /// IN. `default` keeps pre-field payloads parseable.
+    #[serde(default)]
+    pub metered_at: u64,
     /// Commitment day-buckets (unix day → count) — the frecency numerator.
     /// Store twin of `clave_types::Agent::buckets`, which carries the
     /// rationale. Written on UserPromptSubmit; seeded at row creation from
@@ -937,6 +947,7 @@ mod tests {
             context_tokens: None,
             context_level: None,
             live_session: None,
+            metered_at: 0,
             buckets: BTreeMap::new(),
             model: None,
             provider: None,
