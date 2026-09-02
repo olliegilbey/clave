@@ -97,10 +97,15 @@ pub enum OrderMode {
     Frecency { half_life_hours: u32 },
 }
 
+/// The default frecency dial, in hours. `OrderMode::default()` carries it,
+/// and the Alt+a dir picker falls back to it when a fleet runs in `Recency`
+/// mode, which has no dial of its own (2026-09-02).
+pub const DEFAULT_HALF_LIFE_HOURS: u32 = 24;
+
 impl Default for OrderMode {
     fn default() -> Self {
         OrderMode::Frecency {
-            half_life_hours: 24,
+            half_life_hours: DEFAULT_HALF_LIFE_HOURS,
         }
     }
 }
@@ -121,6 +126,40 @@ impl Default for OrderMode {
 /// row carrying only such keys as empty and re-derives it from the
 /// transcript (the jsonl is the source of truth; the store is a cache).
 pub const BUCKET_RETAIN_HOURS: u32 = 7 * 24;
+
+/// Frecency score in millipoints: Σ count × 0.5^(age_hours / half_life_hours),
+/// ×1000, floored. THE score: the bar ranks rows and repo clusters by it,
+/// the host ranks the Alt+a dir picker by it (2026-09-02) — one function,
+/// so the two surfaces can never disagree. Millipoints keep comparators
+/// integral; identical bucket maps produce identical sums (BTreeMap order
+/// is deterministic), which is what makes the bar's newborn-adjacency tie
+/// exact. Future-dated buckets (clock skew) clamp to age 0.
+/// half_life_hours == 0 is clamped to 1 (zero half-life is possible via CLI
+/// or wire).
+///
+/// Buckets outside [`BUCKET_RETAIN_HOURS`] score ZERO at every dial
+/// (maintainer ruling, 2026-08-19): the store prunes them lazily — only on
+/// a row's next bump — so a long-dormant row can still carry stale hours,
+/// and without this cut a huge dial (999h) would resurrect them. "Fully
+/// decayed at 7 days" is the semantic; skipping the `powf` is the bonus.
+pub fn frecency_millis(
+    buckets: &std::collections::BTreeMap<u32, u32>,
+    now_hour: u32,
+    half_life_hours: u32,
+) -> u64 {
+    let hl = half_life_hours.max(1) as f64;
+    let sum: f64 = buckets
+        .iter()
+        // Same window arithmetic as the store's `bump_bucket` prune (strict:
+        // hour + RETAIN > now_hour keeps now_hour-167..=now_hour, 168 hours).
+        .filter(|&(&hour, _)| hour + BUCKET_RETAIN_HOURS > now_hour)
+        .map(|(&hour, &count)| {
+            let age_hours = now_hour.saturating_sub(hour) as f64;
+            count as f64 * 0.5_f64.powf(age_hours / hl)
+        })
+        .sum();
+    (sum * 1000.0) as u64
+}
 
 /// One agent row as the plugin renders it. Mirrors the store record's
 /// display-relevant fields (spec §5); the plugin never sees the store, only
@@ -1101,5 +1140,64 @@ mod tests {
         );
         let d: RowHeight = serde_json::from_str("\"double\"").unwrap();
         assert_eq!(d, RowHeight::Double);
+    }
+
+    /// The decay curve itself: this hour full weight, each half-life halves
+    /// (24h by default), future-dated buckets clamp to age 0, empty map is 0.
+    /// (Moved here from the bar with the function, 2026-09-02.)
+    #[test]
+    fn frecency_millis_decays_by_half_lives() {
+        use std::collections::BTreeMap;
+        let b: BTreeMap<u32, u32> = [(1000, 4), (976, 4), (832, 4)].into();
+        // now_hour=1000, hl=24h: 4*1000 + 4*500; hour 832 is exactly 168h
+        // old — outside the retention window, so it scores ZERO, mirroring
+        // the store prune that would have dropped it on the row's next bump.
+        assert_eq!(frecency_millis(&b, 1000, 24), 6000);
+        assert_eq!(frecency_millis(&BTreeMap::new(), 1000, 24), 0);
+        let future: BTreeMap<u32, u32> = [(1005, 2)].into();
+        assert_eq!(frecency_millis(&future, 1000, 24), 2000); // clamp, not panic
+        // An hour is the unit: one prompt an hour ago at the 24h dial is
+        // 0.5^(1/24) = 0.9715..., and twelve hours ago 0.7071...
+        assert_eq!(frecency_millis(&[(999, 1)].into(), 1000, 24), 971);
+        assert_eq!(frecency_millis(&[(988, 1)].into(), 1000, 24), 707);
+        // A zero dial is reachable from the CLI and the wire; it must behave
+        // as a 1-hour half-life, not as a division by zero.
+        let b0: BTreeMap<u32, u32> = [(1000, 4), (999, 4)].into();
+        assert_eq!(frecency_millis(&b0, 1000, 0), frecency_millis(&b0, 1000, 1));
+        assert_eq!(frecency_millis(&b0, 1000, 0), 6000);
+    }
+
+    /// One shared half-life scales every score by the same factor as the
+    /// hour advances, so a stale `now_hour` between pushes can never
+    /// reorder rows — only a landing commitment or the window edge can.
+    #[test]
+    fn a_stale_now_hour_preserves_the_order() {
+        use std::collections::BTreeMap;
+        let a: BTreeMap<u32, u32> = [(1000, 2), (990, 3)].into();
+        let b: BTreeMap<u32, u32> = [(998, 2), (960, 6)].into();
+        for now in [1000, 1001, 1010, 1100] {
+            assert!(
+                frecency_millis(&a, now, 24) > frecency_millis(&b, now, 24),
+                "order flipped at now_hour={now}"
+            );
+        }
+    }
+
+    /// Maintainer ruling (2026-08-19): "fully decayed at 7 days" is a
+    /// semantic, at EVERY dial. The store prunes lazily — only on a row's
+    /// next bump — so a long-dormant row still carries stale hours, and
+    /// without the scoring cut a 999h dial would resurrect them.
+    #[test]
+    fn a_bucket_past_retention_scores_zero_at_every_dial() {
+        use std::collections::BTreeMap;
+        let stale: BTreeMap<u32, u32> = [(832, 1000)].into(); // exactly 168h old
+        assert_eq!(frecency_millis(&stale, 1000, 999), 0);
+        assert_eq!(frecency_millis(&stale, 1000, 1), 0);
+        let edge: BTreeMap<u32, u32> = [(833, 4)].into(); // now_hour-167: last hour in
+        assert!(frecency_millis(&edge, 1000, 999) > 0);
+        // A day-era key (pre-v0.4.0 store, unix DAY ~20k) read against a
+        // real unix hour (~496k) is the same case: zero, at every dial.
+        let day_era: BTreeMap<u32, u32> = [(20685, 50)].into();
+        assert_eq!(frecency_millis(&day_era, 20685 * 24 + 10, 999), 0);
     }
 }

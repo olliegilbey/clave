@@ -470,22 +470,98 @@ pub fn resume_candidates(
     list.into_iter().map(|(_, c)| c).collect()
 }
 
-/// #139: the Alt+a dir picker's candidate list — zoxide's ranked entries
-/// (order preserved, current dir first) unioned with every worktree of every
-/// repo the store already tracks. A worktree never `cd`'d into does not exist
-/// for zoxide, yet it is a first-class fleet location; visiting it first is an
-/// unreasonable precondition. Dedup by exact path keeps zoxide's ranking for
-/// dirs it knows; a zoxide-known LINKED worktree still gains the `(wt)` mark.
-/// Returns `(path, mark_wt)`.
-pub fn dir_candidates(zoxide: Vec<String>, worktrees: Vec<(String, bool)>) -> Vec<(String, bool)> {
-    let mut out: Vec<(String, bool)> = zoxide.into_iter().map(|d| (d, false)).collect();
-    for (path, linked) in worktrees {
-        match out.iter_mut().find(|(d, _)| *d == path) {
-            Some((_, mark)) => *mark |= linked,
-            None => out.push((path, linked)),
+/// The Alt+a dir picker's candidate list, ranked — best first, and fzf
+/// renders bottom-up, so "first" is the line beside the prompt (design
+/// 2026-09-02, docs/superpowers/specs/2026-09-02-dir-picker-ranking.md).
+///
+/// Every candidate belongs to one CLUSTER: a store repo's root plus its
+/// worktrees, or a zoxide-only dir alone. A cluster weighs the summed
+/// frecency of every store row keyed by its root — the number the bar's
+/// repo layer ranks a cluster by, from the same `frecency_millis` — and
+/// remembers the best zoxide position among its members. Clusters sort by
+/// weight descending, then zoxide rank, then root path: weighted store
+/// repos beside the prompt, then everything zoxide remembers in zoxide's
+/// order (a store repo whose week has fully decayed falls in here by its
+/// own zoxide rank), then store dirs neither source has ever weighted.
+/// Within a cluster the root leads and worktrees follow by their own rows'
+/// weight; a linked worktree keeps its `(wt)` mark wherever it came from.
+///
+/// `cwd` is pinned first and appears once — the adjacent-only `Vec::dedup`
+/// that used to double it is gone. Dedup is by exact path string, as it
+/// always was: zoxide records `$PWD`, which for a checkout is the canonical
+/// path the store holds. Returns `(path, mark_wt)`.
+pub fn ranked_dir_candidates(
+    cwd: &str,
+    zoxide: &[String],
+    store: &StoreDirs,
+) -> Vec<(String, bool)> {
+    use std::cmp::Reverse;
+    use std::collections::{BTreeMap, HashMap, HashSet};
+
+    // zoxide's opinion of a dir: its first position in the list.
+    let mut zrank: HashMap<&str, usize> = HashMap::new();
+    for (i, d) in zoxide.iter().enumerate() {
+        zrank.entry(d.as_str()).or_insert(i);
+    }
+
+    // Store clusters by root: members are (path, wt, own millis) with the
+    // root always first; the cluster's weight is its rows' sum.
+    type Members = Vec<(String, bool, u64)>;
+    let lead = |root: &str| -> (Members, u64) { (vec![(root.to_string(), false, 0)], 0) };
+    let mut clusters: BTreeMap<&str, (Members, u64)> = BTreeMap::new();
+    for root in &store.roots {
+        clusters.entry(root.as_str()).or_insert_with(|| lead(root));
+    }
+    for (root, path, linked) in &store.worktrees {
+        let (members, _) = clusters.entry(root.as_str()).or_insert_with(|| lead(root));
+        match members.iter_mut().find(|(p, _, _)| p == path) {
+            Some((_, wt, _)) => *wt |= linked,
+            None => members.push((path.clone(), *linked, 0)),
         }
     }
-    out
+    for (root, row_cwd, millis) in &store.rows {
+        let Some((members, weight)) = clusters.get_mut(root.as_str()) else {
+            continue; // a root that no longer exists: weighs nothing, lists nothing
+        };
+        *weight += millis;
+        if let Some((_, _, own)) = members.iter_mut().find(|(p, _, _)| p == row_cwd) {
+            *own += millis;
+        }
+    }
+
+    // Rank clusters; cwd is pinned first and everything else appears once.
+    let mut cwd_wt = false;
+    let mut placed: HashSet<String> = HashSet::from([cwd.to_string()]);
+    type Key<'a> = (Reverse<u64>, usize, &'a str); // weight desc, zoxide rank, root
+    let mut ranked: Vec<(Key, Vec<(String, bool)>)> = Vec::new();
+    for (root, (mut members, weight)) in clusters {
+        let zmin = members
+            .iter()
+            .filter_map(|(p, _, _)| zrank.get(p.as_str()))
+            .min()
+            .copied()
+            .unwrap_or(usize::MAX);
+        members[1..].sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+        let mut lines = Vec::new();
+        for (path, wt, _) in members {
+            if path == cwd {
+                cwd_wt |= wt;
+            } else if placed.insert(path.clone()) {
+                lines.push((path, wt));
+            }
+        }
+        ranked.push(((Reverse(weight), zmin, root), lines));
+    }
+    for (i, d) in zoxide.iter().enumerate() {
+        if placed.insert(d.clone()) {
+            ranked.push(((Reverse(0), i, d.as_str()), vec![(d.clone(), false)]));
+        }
+    }
+    ranked.sort_by(|a, b| a.0.cmp(&b.0));
+
+    std::iter::once((cwd.to_string(), cwd_wt))
+        .chain(ranked.into_iter().flat_map(|(_, lines)| lines))
+        .collect()
 }
 
 /// One dir-picker fzf line: the path, tab-suffixed with the `(wt)` marker for
@@ -801,26 +877,55 @@ fn strip_origin_prefix(out: &str) -> Option<String> {
     (!b.is_empty()).then(|| b.to_string())
 }
 
-/// #139 (io half of `dir_candidates`): every worktree of every distinct
-/// `repo_root` the store tracks, canonicalized (S0b), vanished paths skipped,
+/// What the store contributes to the picker (#139, and the frecency ranking
+/// of 2026-09-02). `roots` and `worktrees` are candidate dirs; `rows` only
+/// weigh. Plain data, so `ranked_dir_candidates` is unit-testable without
+/// git, zoxide or a store on disk.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct StoreDirs {
+    /// Every distinct `repo_root` a store row is keyed by, that still exists.
+    pub roots: Vec<String>,
+    /// `(repo_root, canonical worktree path, linked)` for every worktree of
+    /// every root — the main tree included, unmarked.
+    pub worktrees: Vec<(String, String, bool)>,
+    /// `(repo_root, cwd, frecency millipoints)` per row, live or dormant.
+    pub rows: Vec<(String, String, u64)>,
+}
+
+/// The io half of the picker's store input. Roots that still exist (a
+/// vanished checkout is nothing to open, and `git -C` there would only
+/// fail); each root's worktrees canonicalized (S0b), vanished paths skipped,
 /// linked-vs-main decided per repo the same way the resume scan decides it
-/// (first porcelain entry is the main tree — see `main_worktree_path`).
-/// A repo_root that is gone or not a repo yields nothing (`cmd_stdout` fails
-/// → empty porcelain). BTreeSet roots keep the output deterministic.
-fn store_worktree_dirs(git: &Path, store: &Store) -> Vec<(String, bool)> {
-    let roots: std::collections::BTreeSet<&str> = store
+/// (first porcelain entry is the main tree — see `main_worktree_path`); and
+/// every row weighed with the fleet's own dial — `Recency` mode has none, so
+/// it takes the default. BTreeSet roots keep the output deterministic.
+fn store_dirs(git: &Path, store: &Store, now_hour: u32) -> StoreDirs {
+    let half_life = match store.order {
+        clave_types::OrderMode::Frecency { half_life_hours } => half_life_hours,
+        clave_types::OrderMode::Recency => clave_types::DEFAULT_HALF_LIFE_HOURS,
+    };
+    let rows = store
+        .agents
+        .values()
+        .map(|r| {
+            let millis = clave_types::frecency_millis(&r.buckets, now_hour, half_life);
+            (r.repo_root.clone(), r.cwd.clone(), millis)
+        })
+        .collect();
+    let roots: BTreeSet<&str> = store
         .agents
         .values()
         .map(|r| r.repo_root.as_str())
+        .filter(|r| Path::new(r).is_dir())
         .collect();
-    let mut seen: std::collections::BTreeSet<String> = Default::default();
-    let mut out = Vec::new();
-    for root in roots {
+    let mut seen: BTreeSet<String> = Default::default();
+    let mut worktrees = Vec::new();
+    for root in &roots {
         let porcelain =
             cmd_stdout(git, &["-C", root, "worktree", "list", "--porcelain"]).unwrap_or_default();
-        let worktrees = parse_worktrees(&porcelain);
-        let main = main_worktree_path(&worktrees).and_then(|p| std::fs::canonicalize(p).ok());
-        for w in &worktrees {
+        let list = parse_worktrees(&porcelain);
+        let main = main_worktree_path(&list).and_then(|p| std::fs::canonicalize(p).ok());
+        for w in &list {
             let Ok(canon) = std::fs::canonicalize(&w.path) else {
                 continue; // vanished worktree — nothing to open there
             };
@@ -829,11 +934,15 @@ fn store_worktree_dirs(git: &Path, store: &Store) -> Vec<(String, bool)> {
                 continue;
             };
             if seen.insert(path.to_string()) {
-                out.push((path.to_string(), linked));
+                worktrees.push((root.to_string(), path.to_string(), linked));
             }
         }
     }
-    out
+    StoreDirs {
+        roots: roots.into_iter().map(String::from).collect(),
+        worktrees,
+        rows,
+    }
 }
 
 pub fn run_add(worktree: bool) -> Result<()> {
@@ -858,30 +967,31 @@ pub fn run_add(worktree: bool) -> Result<()> {
         anyhow::bail!("missing dependencies for `clave add`");
     }
 
-    // 1) Pick a directory: fzf over zoxide's ranked list, current dir first
-    //    (§6.3 — fzf+zoxide are verified present on the target machine),
-    //    UNIONED with every store-known repo's worktrees (#139): a worktree
-    //    zoxide has never seen is still a first-class fleet location. The
-    //    store read here is lock-free and only feeds the candidate list; the
-    //    authoritative read happens in step 3 as before.
+    // 1) Pick a directory: fzf over the fleet's own ranking (design
+    //    2026-09-02, docs/superpowers/specs/2026-09-02-dir-picker-ranking.md):
+    //    cwd first, then store repos by summed frecency — the number the
+    //    bar's repo clusters rank by — each with its worktrees beside it
+    //    (#139), then zoxide's memory in zoxide's order for everything clave
+    //    has not driven this week. fzf renders bottom-up, so "first" is the
+    //    line beside the prompt. The store read here is lock-free and only
+    //    feeds the candidate list; the authoritative read happens in step 3.
     // Route every git/zellij invocation through discovery (review 2026-07-22,
     // Fix 2): doctor promises off-PATH tools are used by absolute path, so
     // add must not fall back to bare `git`/`zellij` — an off-PATH git (SSH,
     // ~/.local/bin) would break repo detection preflight already passed.
     let git = tool_path(crate::discover::ToolId::Git);
     let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
-    let mut zx: Vec<String> = vec![cwd.clone()];
-    zx.extend(
+    let zoxide: Vec<String> =
         cmd_stdout(tool_path(crate::discover::ToolId::Zoxide), &["query", "-l"])?
             .lines()
-            .map(String::from),
-    );
-    zx.dedup();
-    let wt_dirs = store_paths()
+            .map(String::from)
+            .collect();
+    let now_hour = crate::store::unix_hour(crate::store::now_unix());
+    let store_view = store_paths()
         .and_then(|p| crate::store::read_store(&p))
-        .map(|s| store_worktree_dirs(&git, &s))
+        .map(|s| store_dirs(&git, &s, now_hour))
         .unwrap_or_default();
-    let lines: Vec<String> = dir_candidates(zx, wt_dirs)
+    let lines: Vec<String> = ranked_dir_candidates(&cwd, &zoxide, &store_view)
         .iter()
         .map(|(d, wt)| dir_line(d, *wt))
         .collect();
@@ -1670,38 +1780,122 @@ mod tests {
         assert!(!c[2].live);
     }
 
-    /// #139: the dir picker must reach worktrees zoxide has never seen —
-    /// store-known repos' worktrees union in AFTER zoxide's ranked list
-    /// (ranking preserved), deduped by exact path, marked when linked.
+    fn paths(c: &[(String, bool)]) -> Vec<&str> {
+        c.iter().map(|(p, _)| p.as_str()).collect()
+    }
+
+    /// Design 2026-09-02: weighted store repos lead in summed-frecency order;
+    /// zoxide's memory follows in zoxide's order, and a store repo whose week
+    /// has fully decayed takes its zoxide position there; store roots neither
+    /// source ever weighted trail, by path. cwd first, once — even when zoxide
+    /// lists it too (the adjacent-only `Vec::dedup` used to double it).
     #[test]
-    fn dir_candidates_unions_worktrees_after_zoxide_and_dedups() {
-        let zoxide = vec![
-            "/here".to_string(),                         // current dir, always first
-            "/repo".to_string(),                         // zoxide knows the main checkout
-            "/repo/.claude/worktrees/known".to_string(), // and ONE worktree
-        ];
-        let worktrees = vec![
-            ("/repo".to_string(), false), // main checkout: never marked
-            ("/repo/.claude/worktrees/known".to_string(), true),
-            ("/repo/.claude/worktrees/unseen".to_string(), true),
-        ];
-        let c = dir_candidates(zoxide, worktrees);
+    fn ranked_dir_candidates_leads_with_weighted_repos_then_zoxides_memory() {
+        let zoxide: Vec<String> = [
+            "/dotfiles",
+            "/code",
+            "/clave",
+            "/here",
+            "/olympus",
+            "/stale",
+        ]
+        .map(String::from)
+        .into();
+        let store = StoreDirs {
+            roots: ["/olympus", "/clave", "/code", "/never-b", "/never-a"]
+                .map(String::from)
+                .into(),
+            worktrees: vec![],
+            rows: vec![
+                ("/clave".into(), "/clave".into(), 100_000),
+                ("/olympus".into(), "/olympus".into(), 200_000),
+                ("/olympus".into(), "/olympus".into(), 62_000), // two rows, one cluster: they sum
+                ("/code".into(), "/code".into(), 0),            // decayed: zoxide's rank decides
+                ("/gone".into(), "/gone".into(), 9_999), // no root → weighs nothing, lists nothing
+            ],
+        };
+        let c = ranked_dir_candidates("/here", &zoxide, &store);
+        assert_eq!(
+            paths(&c),
+            [
+                "/here",
+                "/olympus",
+                "/clave",
+                "/dotfiles",
+                "/code",
+                "/stale",
+                "/never-a",
+                "/never-b"
+            ]
+        );
+        assert!(c.iter().all(|(_, wt)| !wt));
+        // No store at all → cwd, then zoxide verbatim, cwd's repeat gone.
+        let bare: Vec<String> = ["/x", "/here", "/y"].map(String::from).into();
+        assert_eq!(
+            paths(&ranked_dir_candidates(
+                "/here",
+                &bare,
+                &StoreDirs::default()
+            )),
+            ["/here", "/x", "/y"]
+        );
+    }
+
+    /// #139 + design 2026-09-02: a repo's worktrees travel with it. The root
+    /// leads whatever its own weight; worktrees follow by their own rows'
+    /// weight, unweighted ones last; a zoxide-known worktree collapses into
+    /// the cluster (no second line) and keeps its `(wt)` mark; a path listed
+    /// twice is one line, and a mark once given is never lost.
+    #[test]
+    fn ranked_dir_candidates_keeps_a_repos_worktrees_beside_its_root() {
+        let zoxide: Vec<String> = ["/repo/.claude/worktrees/hot", "/other", "/repo"]
+            .map(String::from)
+            .into();
+        let store = StoreDirs {
+            roots: vec!["/repo".into()],
+            worktrees: vec![
+                ("/repo".into(), "/repo".into(), false),
+                ("/repo".into(), "/repo/.claude/worktrees/hot".into(), true),
+                ("/repo".into(), "/repo/.claude/worktrees/cold".into(), false),
+                ("/repo".into(), "/repo/.claude/worktrees/cold".into(), true), // seen twice: one line, mark kept
+                ("/repo".into(), "/repo/.claude/worktrees/warm".into(), true),
+            ],
+            rows: vec![
+                ("/repo".into(), "/repo/.claude/worktrees/hot".into(), 5_000),
+                ("/repo".into(), "/repo/.claude/worktrees/warm".into(), 1_000),
+                ("/repo".into(), "/repo".into(), 100),
+            ],
+        };
+        let c = ranked_dir_candidates("/elsewhere", &zoxide, &store);
         assert_eq!(
             c,
             vec![
-                ("/here".to_string(), false),
+                ("/elsewhere".to_string(), false),
                 ("/repo".to_string(), false),
-                // zoxide's copy survives (its rank), but gains the mark:
-                ("/repo/.claude/worktrees/known".to_string(), true),
-                // the one zoxide never saw appends:
-                ("/repo/.claude/worktrees/unseen".to_string(), true),
+                ("/repo/.claude/worktrees/hot".to_string(), true),
+                ("/repo/.claude/worktrees/warm".to_string(), true),
+                ("/repo/.claude/worktrees/cold".to_string(), true),
+                ("/other".to_string(), false),
             ]
         );
-        // No store repos → exactly the zoxide list, unmarked.
-        assert_eq!(
-            dir_candidates(vec!["/a".into()], vec![]),
-            vec![("/a".to_string(), false)]
-        );
+    }
+
+    /// cwd is pinned first and appears once; when it is a cluster member the
+    /// rest of its cluster still travels together at the cluster's rank; a
+    /// cwd inside a linked worktree carries the mark.
+    #[test]
+    fn ranked_dir_candidates_lists_cwd_first_and_once() {
+        let zoxide: Vec<String> = ["/a", "/repo", "/b", "/repo"].map(String::from).into();
+        let store = StoreDirs {
+            roots: vec!["/repo".into()],
+            worktrees: vec![("/repo".into(), "/repo/wt".into(), true)],
+            rows: vec![("/repo".into(), "/repo".into(), 10)],
+        };
+        let c = ranked_dir_candidates("/repo", &zoxide, &store);
+        assert_eq!(paths(&c), ["/repo", "/repo/wt", "/a", "/b"]);
+        let c = ranked_dir_candidates("/repo/wt", &zoxide, &store);
+        assert_eq!(paths(&c), ["/repo/wt", "/repo", "/a", "/b"]);
+        assert_eq!(c[0], ("/repo/wt".to_string(), true));
     }
 
     #[test]
@@ -1770,9 +1964,16 @@ mod tests {
         let mut store = Store::default();
         let mut row = rec("u");
         row.repo_root = repo_s.into();
+        row.buckets = [(100, 3)].into();
+        store.order = clave_types::OrderMode::Recency;
         store.agents.insert("u".into(), row);
 
-        let dirs = store_worktree_dirs(&git, &store);
+        let sd = store_dirs(&git, &store, 100);
+        assert_eq!(sd.roots, vec![repo_s.to_string()]);
+        // 3 commitments this hour; Recency mode has no dial, so the default 24h
+        // one applies: 3 × 1000 millipoints.
+        assert_eq!(sd.rows, vec![(repo_s.to_string(), "/x".to_string(), 3000)]);
+        let dirs = sd.worktrees;
         let main_c = std::fs::canonicalize(&repo)
             .unwrap()
             .to_string_lossy()
@@ -1782,11 +1983,11 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         assert!(
-            dirs.contains(&(main_c, false)),
+            dirs.contains(&(repo_s.to_string(), main_c, false)),
             "main tree unmarked: {dirs:?}"
         );
         assert!(
-            dirs.contains(&(wt_c, true)),
+            dirs.contains(&(repo_s.to_string(), wt_c, true)),
             "linked worktree marked: {dirs:?}"
         );
         assert_eq!(dirs.len(), 2);
