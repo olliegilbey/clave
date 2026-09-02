@@ -3320,6 +3320,60 @@ mod tests {
         assert_eq!(s.agents["minted"].context_tokens, Some(19_811));
     }
 
+    /// A model or effort change with nothing else moving still pushes: the
+    /// bar renders both cells. Two `just mutants` survivors (2026-09-02)
+    /// showed the `|=` at each site unpinned once the blocks became helpers.
+    #[test]
+    fn a_model_change_alone_pushes() {
+        let mut s = Store::default();
+        let mut r = rec("minted");
+        r.status = Status::Done;
+        r.model = Some("fable".into());
+        r.provider = Some("claude".into());
+        s.agents.insert("minted".into(), r);
+        let ev = HookPayload {
+            session_id: Some("minted".into()),
+            ..Default::default()
+        };
+        let tail = r#"{"type":"assistant","message":{"model":"claude-opus-5"}}"#;
+        assert!(apply_hook_event(
+            &mut s,
+            "minted",
+            "Stop",
+            &ev,
+            Some(tail),
+            1,
+            true
+        ));
+        assert_eq!(s.agents["minted"].model.as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn an_effort_change_alone_pushes() {
+        let mut s = Store::default();
+        let mut r = rec("minted");
+        r.status = Status::Done;
+        r.model = Some("opus".into());
+        r.provider = Some("claude".into());
+        r.effort = Some("md".into());
+        s.agents.insert("minted".into(), r);
+        let ev = HookPayload {
+            session_id: Some("minted".into()),
+            ..Default::default()
+        };
+        let tail = r#"{"type":"assistant","effort":"high","message":{"model":"claude-opus-5"}}"#;
+        assert!(apply_hook_event(
+            &mut s,
+            "minted",
+            "Stop",
+            &ev,
+            Some(tail),
+            1,
+            true
+        ));
+        assert_eq!(s.agents["minted"].effort.as_deref(), Some("hi"));
+    }
+
     /// A count that moves WITHIN a level still pushes: #105 renders the raw
     /// figure as text, so gating on the glyph alone would leave it stale for
     /// up to a tenth of the zone (the #147 ruling). A `just mutants` survivor
