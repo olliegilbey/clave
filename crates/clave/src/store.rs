@@ -162,10 +162,10 @@ pub struct AgentRecord {
     /// refuses a value shaped like a flag, before it reaches argv.
     #[serde(default)]
     pub live_session: Option<String>,
-    /// Commitment day-buckets (unix day → count) — the frecency numerator.
+    /// Commitment hour-buckets (unix hour → count) — the frecency numerator.
     /// Store twin of `clave_types::Agent::buckets`, which carries the
     /// rationale. Written on UserPromptSubmit; seeded at row creation from
-    /// the opener; pruned past [`BUCKET_RETAIN_DAYS`] on every bump.
+    /// the opener; pruned past [`BUCKET_RETAIN_HOURS`] on every bump.
     #[serde(default)]
     pub buckets: BTreeMap<u32, u32>,
     /// Wire twin of `clave_types::Agent::model`, which carries the
@@ -231,7 +231,7 @@ pub struct Store {
     /// every push. `default` (expanded) keeps pre-field store files loading.
     #[serde(default)]
     pub collapsed: bool,
-    /// tab_id → commitment day-buckets: the tab-keyed twin of the record's
+    /// tab_id → commitment hour-buckets: the tab-keyed twin of the record's
     /// `buckets`, exactly as `tab_order` twins `commit_ord` — it covers
     /// terminal tabs and the pre-bind window, and the bar max-merges the
     /// two (R2: same rank live or dormant). Session-scoped like
@@ -282,21 +282,21 @@ impl Store {
 
 /// The shared window: the bar's scoring cuts to zero outside it too, so the
 /// two sides cannot drift (clave-types is the single source).
-pub use clave_types::BUCKET_RETAIN_DAYS;
+pub use clave_types::BUCKET_RETAIN_HOURS;
 
-/// Unix seconds → unix day. The one place the day arithmetic lives.
-pub fn unix_day(unix_secs: u64) -> u32 {
-    (unix_secs / 86_400) as u32
+/// Unix seconds → unix hour. The one place the bucket arithmetic lives.
+pub fn unix_hour(unix_secs: u64) -> u32 {
+    (unix_secs / 3_600) as u32
 }
 
-/// +1 commitment today, and prune everything out of retention. Both maps
+/// +1 commitment this hour, and prune everything out of retention. Both maps
 /// (record and tab twin) go through here, so retention cannot skew.
-pub(crate) fn bump_bucket(map: &mut BTreeMap<u32, u32>, today: u32) {
-    *map.entry(today).or_insert(0) += 1;
-    // Strict `>`, not `>=`: a day exactly BUCKET_RETAIN_DAYS back (today's
-    // 8th day counting inclusively) is out of the rolling window — the test
-    // pins today=100 pruning day=93 (100-93=7).
-    map.retain(|day, _| *day + BUCKET_RETAIN_DAYS > today);
+pub(crate) fn bump_bucket(map: &mut BTreeMap<u32, u32>, now_hour: u32) {
+    *map.entry(now_hour).or_insert(0) += 1;
+    // Strict `>`, not `>=`: an hour exactly BUCKET_RETAIN_HOURS back is out
+    // of the rolling window — the test pins now_hour=1000 pruning hour=832
+    // (1000-832=168). Day-era keys (pre-v0.4.0) fall out here too.
+    map.retain(|hour, _| *hour + BUCKET_RETAIN_HOURS > now_hour);
 }
 
 /// The newborn-inheritance source (spec: newborn initialisation): the
@@ -395,7 +395,7 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
         collapsed: store.collapsed,
         tab_buckets: store.tab_buckets.clone(),
         order: store.order,
-        today: unix_day(now_unix()),
+        now_hour: unix_hour(now_unix()),
         tab_touched: store.tab_touched.clone(),
         agents: store
             .agents
@@ -690,7 +690,7 @@ pub(crate) fn prune_in(s: &mut Store, stale_ids: &[usize]) -> bool {
     let before = s.tab_order.len();
     s.tab_order.retain(|id, _| !stale_ids.contains(id));
     changed |= s.tab_order.len() != before;
-    // tab_buckets is tab_order's frecency twin: a dead tab's day-buckets
+    // tab_buckets is tab_order's frecency twin: a dead tab's hour-buckets
     // must not keep contributing once its ordinal entry is gone.
     for id in stale_ids {
         s.tab_buckets.remove(id);
@@ -1331,7 +1331,7 @@ mod tests {
             dead.tab_id = Some(11); // its tab just closed
             s.agents.insert("u-dead".into(), dead);
             // tab_buckets is tab_order's frecency twin (2026-08-19 spec):
-            // it must be pruned in lockstep or a dead tab's day-buckets
+            // it must be pruned in lockstep or a dead tab's hour-buckets
             // would keep contributing to frecency forever.
             s.tab_buckets.insert(10, [(100, 1)].into());
             s.tab_buckets.insert(11, [(100, 1)].into());
@@ -1973,11 +1973,21 @@ mod tests {
     }
 
     #[test]
-    fn bump_bucket_increments_today_and_prunes_past_retention() {
-        let mut m: BTreeMap<u32, u32> = [(100, 3), (93, 9)].into();
-        bump_bucket(&mut m, 100);
-        assert_eq!(m.get(&100), Some(&4));
-        assert!(!m.contains_key(&93)); // 100 - 7 = 93 is out of retention
+    fn bump_bucket_increments_this_hour_and_prunes_past_retention() {
+        let mut m: BTreeMap<u32, u32> = [(1000, 3), (833, 2), (832, 9)].into();
+        bump_bucket(&mut m, 1000);
+        assert_eq!(m.get(&1000), Some(&4));
+        assert_eq!(m.get(&833), Some(&2)); // 167h old: the window's last hour
+        assert!(!m.contains_key(&832)); // 1000 - 168 = 832 is out of retention
+    }
+
+    #[test]
+    fn unix_hour_is_whole_hours_since_the_epoch() {
+        assert_eq!(unix_hour(0), 0);
+        assert_eq!(unix_hour(3_599), 0);
+        assert_eq!(unix_hour(3_600), 1);
+        // 2026-08-20T14:03:11Z — the backfill parser's pinned fixture.
+        assert_eq!(unix_hour(1_787_234_591), 20685 * 24 + 14);
     }
 
     #[test]
@@ -2092,7 +2102,7 @@ mod tests {
         assert_eq!(snap.agents[0].buckets, [(100u32, 5u32)].into());
         assert_eq!(snap.tab_buckets.get(&3), Some(&[(100u32, 1u32)].into()));
         assert_eq!(snap.order, clave_types::OrderMode::default());
-        assert_eq!(snap.today, unix_day(now_unix()));
+        assert_eq!(snap.now_hour, unix_hour(now_unix()));
     }
 
     /// The ordinal invariants, quantified rather than exemplified (S1 §5.3).

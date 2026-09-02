@@ -1182,7 +1182,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
             ],
             &uuid,
             None,
-            crate::store::unix_day(now_unix()),
+            crate::store::unix_hour(now_unix()),
         )
     });
     let snap = with_store_mut(&paths, |s| {
