@@ -21,7 +21,10 @@
 //!   one. Time-bounded rather than for-the-conversation so a meter that goes
 //!   quiet (a settings edit, a schema change) degrades back to today's
 //!   behaviour instead of freezing the row. A rotation (`/clear`) resets the
-//!   stamp with the battery: the new conversation has not been metered.
+//!   stamp with the battery: the new conversation has not been metered. A
+//!   Stop resets it too, after its own tail has yielded: the turn is over,
+//!   so the meter's next reading lands regardless of its interval and a
+//!   prompt's tail, post-turn and complete, may speak until it arrives.
 //! - **The meter paces itself.** The statusLine runs on every assistant
 //!   message (6 runs, 4 distinct counts in one 15-second sandbox turn), and
 //!   every applied reading is a store rewrite under the flock plus a pipe
@@ -143,9 +146,9 @@ pub const APPLY_INTERVAL_SECS: u64 = 10;
 pub const HOOK_YIELD_SECS: u64 = 600;
 
 /// The hook's side of the bargain: while the meter has spoken recently the
-/// hook's tail readers keep quiet on tokens, model and effort. `0` is "never
-/// metered in this conversation" — the reset a rotation performs. A clock
-/// stepped backwards reads as recent, never as an underflow.
+/// hook's tail readers keep quiet on tokens, model and effort. `0` is "not
+/// metered since the last rotation or Stop" — the resets those two perform.
+/// A clock stepped backwards reads as recent, never as an underflow.
 pub fn hook_yields(rec: &AgentRecord, now: u64) -> bool {
     rec.metered_at != 0 && now.saturating_sub(rec.metered_at) < HOOK_YIELD_SECS
 }
@@ -573,6 +576,19 @@ mod tests {
         assert_eq!(row.context_tokens, Some(3_000));
         assert_eq!(row.context_level, Some(0));
         assert_eq!(row.metered_at, 1001);
+    }
+
+    #[test]
+    fn a_stop_cleared_stamp_lets_the_next_reading_land_inside_the_interval() {
+        // The hook's Stop cleared the stamp (same conversation, a count
+        // already held): the turn's final reading must not wait out the
+        // interval that the turn's earlier readings paid.
+        let mut s = metered_store();
+        s.agents.get_mut("minted").unwrap().metered_at = 0;
+        let r = reading("minted", Some(19_200), "claude-fable-5-1", "medium");
+        assert!(apply_statusline(&mut s, "minted", &r, 1001, true, ZONE));
+        assert_eq!(s.agents["minted"].context_tokens, Some(19_200));
+        assert_eq!(s.agents["minted"].metered_at, 1001);
     }
 
     #[test]

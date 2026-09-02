@@ -820,6 +820,15 @@ pub fn apply_hook_event(
     // on them; `title` and `summary` still read the whole tail
     // (`refresh_label`, below), those stay on the transcript by design.
     let tail = jsonl_tail.filter(|_| !crate::statusline::hook_yields(rec, now));
+    // Stop hands the floor back — AFTER the yield decision above, so this
+    // Stop's own stale tail never lands. A cleared stamp lets the meter's
+    // next reading land regardless of its interval (the turn's last count is
+    // otherwise held until the next turn), and until it arrives a prompt's
+    // tail, post-turn and complete, may speak. Not part of `changed`: the
+    // stamp is persisted either way and renders nothing.
+    if event == "Stop" {
+        rec.metered_at = 0;
+    }
     // A tail reaches us only on Stop / UserPromptSubmit (`run_hook`'s event
     // gate). No tail, or a tail carrying no usage line, HOLDS the previous
     // reading — §5.4 fail-closed. Never invent a measurement.
@@ -3254,6 +3263,44 @@ mod tests {
             1002,
             true
         ));
+        assert_eq!(s.agents["minted"].context_tokens, Some(19_811));
+    }
+
+    /// Stop hands the floor back. Its OWN tail still yields — the reset comes
+    /// after the tail decision, so the stale-by-one figure #245 exists to
+    /// remove never lands — but the stamp is cleared: the meter's next
+    /// reading lands regardless of the interval, and until it arrives a
+    /// prompt's tail, which is post-turn and complete, may speak.
+    #[test]
+    fn a_stop_yields_its_own_tail_then_hands_the_floor_back() {
+        let mut s = Store::default();
+        s.agents
+            .insert("minted".into(), metered_rec("minted", 1000));
+        let ev = HookPayload {
+            session_id: Some("minted".into()),
+            ..Default::default()
+        };
+        apply_hook_event(
+            &mut s,
+            "minted",
+            "Stop",
+            &ev,
+            Some(&stale_tail()),
+            1005,
+            true,
+        );
+        let row = &s.agents["minted"];
+        assert_eq!(row.context_tokens, Some(20_508));
+        assert_eq!(row.metered_at, 0);
+        apply_hook_event(
+            &mut s,
+            "minted",
+            "UserPromptSubmit",
+            &ev,
+            Some(&stale_tail()),
+            1006,
+            true,
+        );
         assert_eq!(s.agents["minted"].context_tokens, Some(19_811));
     }
 
