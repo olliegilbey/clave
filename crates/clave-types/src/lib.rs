@@ -91,9 +91,9 @@ impl Status {
 pub enum OrderMode {
     /// The shipped S1 ordering: commitment ordinal descending.
     Recency,
-    /// Decayed-commitment score: Σ count × 0.5^(age_days × 24 / half_life).
+    /// Decayed-commitment score: Σ count × 0.5^(age_hours / half_life).
     /// half-life → 0 behaves like Recency; → ∞ like a 7-day rolling
-    /// investment count ([`BUCKET_RETAIN_DAYS`] caps both sides).
+    /// investment count ([`BUCKET_RETAIN_HOURS`] caps both sides).
     Frecency { half_life_hours: u32 },
 }
 
@@ -105,13 +105,22 @@ impl Default for OrderMode {
     }
 }
 
-/// The day-bucket window, shared by both sides of the wire (maintainer
+/// The hour-bucket window, shared by both sides of the wire (maintainer
 /// ruling, 2026-08-19 post-drive): the store prunes a row's buckets past
 /// this on every bump, and the bar scores an out-of-window bucket as ZERO
 /// at every dial — "fully decayed at 7 days" is a semantic, not a numeric
 /// accident of the half-life, and it caps per-frame scoring work however
 /// stale a long-dormant row's stored buckets are.
-pub const BUCKET_RETAIN_DAYS: u32 = 7;
+///
+/// Buckets were keyed by unix DAY until v0.4.0 (2026-09-02): a day's
+/// resolution made every prompt of the same UTC day weigh the same and
+/// halved yesterday's whole history at midnight, so the count alone decided
+/// the order within a day. Hour keys give the curve its shape back. A
+/// day-era key read as an hour lands in 1972, far outside this window, so
+/// it scores zero, prunes on the row's next bump, and `backfill` treats a
+/// row carrying only such keys as empty and re-derives it from the
+/// transcript (the jsonl is the source of truth; the store is a cache).
+pub const BUCKET_RETAIN_HOURS: u32 = 7 * 24;
 
 /// One agent row as the plugin renders it. Mirrors the store record's
 /// display-relevant fields (spec §5); the plugin never sees the store, only
@@ -220,8 +229,8 @@ pub struct Agent {
     /// project. `default` keeps pre-field payloads parseable.
     #[serde(default)]
     pub context_level: Option<u8>,
-    /// Commitment day-buckets: unix day → count of user commitments that
-    /// day. The frecency numerator; written by the hook on UserPromptSubmit,
+    /// Commitment hour-buckets: unix hour → count of user commitments that
+    /// hour. The frecency numerator; written by the hook on UserPromptSubmit,
     /// seeded at birth from the opener (spec: newborn initialisation),
     /// pruned past 7 days. `default` keeps pre-field payloads parseable.
     #[serde(default)]
@@ -288,13 +297,13 @@ pub struct AgentSnapshot {
     /// payloads parseable.
     #[serde(default)]
     pub order: OrderMode,
-    /// Unix DAY at projection time, stamped by the host — the bar never
-    /// reads a clock (wasm). Frecency ages every bucket against this.
+    /// Unix HOUR at projection time, stamped by the host so both sides
+    /// share one bucket arithmetic. Frecency ages every bucket against this.
     /// `default` (0) carries no buckets (pre-frecency payload has none),
     /// so all scores are 0 → the ordinal fallback carries.
     #[serde(default)]
-    pub today: u32,
-    /// tab_id → commitment day-buckets: the tab-keyed twin of
+    pub now_hour: u32,
+    /// tab_id → commitment hour-buckets: the tab-keyed twin of
     /// `Agent::buckets`, exactly as `tab_order` twins `commit_ord` —
     /// covers terminal tabs and the pre-bind window; session-scoped and
     /// pruned with `tab_order`. `default` keeps pre-field payloads
@@ -686,7 +695,7 @@ mod tests {
             tab_order: Default::default(),
             collapsed: false,
             order: OrderMode::default(),
-            today: 0,
+            now_hour: 0,
             tab_buckets: Default::default(),
             tab_touched: Default::default(),
             agents: vec![Agent {
@@ -910,7 +919,7 @@ mod tests {
             tab_order: std::collections::BTreeMap::from([(4usize, 12u64)]),
             collapsed: false,
             order: OrderMode::default(),
-            today: 0,
+            now_hour: 0,
             tab_buckets: Default::default(),
             tab_touched: Default::default(),
         };
@@ -987,7 +996,7 @@ mod tests {
             tab_order: Default::default(),
             collapsed: true,
             order: OrderMode::default(),
-            today: 0,
+            now_hour: 0,
             tab_buckets: Default::default(),
             tab_touched: Default::default(),
         };
@@ -1025,7 +1034,7 @@ mod tests {
         let old = r#"{"seq":1,"agents":[]}"#;
         let snap: AgentSnapshot = serde_json::from_str(old).unwrap();
         assert_eq!(snap.order, OrderMode::default());
-        assert_eq!(snap.today, 0);
+        assert_eq!(snap.now_hour, 0);
         assert!(snap.tab_buckets.is_empty());
     }
 

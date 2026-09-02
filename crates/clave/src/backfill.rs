@@ -14,13 +14,13 @@ use std::path::Path;
 
 use crate::store::Store;
 
-/// The unix day of an ISO-8601 `timestamp` line field ("2026-08-20T…").
-/// Days-from-civil (Howard Hinnant's algorithm), dependency-free — the
-/// workspace deliberately carries no date crate. Only the date prefix is
-/// read: bucket granularity is a DAY, so the time-of-day is noise here.
-/// (UTC dates, matching the transcript's `Z` timestamps; `now_unix()/86400`
-/// on the scoring side is the same UTC day arithmetic.)
-pub fn unix_day_from_iso(ts: &str) -> Option<u32> {
+/// Unix hour from an ISO-8601 `Z` timestamp, dependency-free — the
+/// workspace deliberately carries no date crate. Days-from-civil is Howard
+/// Hinnant's algorithm; the hour is the `HH` after the `T`. A bare date
+/// (no time part) reads as its midnight hour. UTC throughout, matching the
+/// transcript's `Z` timestamps; `now_unix()/3600` on the scoring side is
+/// the same arithmetic.
+pub fn unix_hour_from_iso(ts: &str) -> Option<u32> {
     let b = ts.as_bytes();
     if b.len() < 10 || b[4] != b'-' || b[7] != b'-' {
         return None;
@@ -31,6 +31,17 @@ pub fn unix_day_from_iso(ts: &str) -> Option<u32> {
     if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
         return None;
     }
+    let h: i64 = match b.get(10) {
+        None => 0,
+        Some(b'T') | Some(b' ') => {
+            let h = ts.get(11..13)?.parse().ok()?;
+            if !(0..=23).contains(&h) {
+                return None;
+            }
+            h
+        }
+        Some(_) => return None,
+    };
     let y = if m <= 2 { y - 1 } else { y };
     let era = y.div_euclid(400);
     let yoe = y - era * 400;
@@ -38,7 +49,7 @@ pub fn unix_day_from_iso(ts: &str) -> Option<u32> {
     let doy = (153 * mp + 2) / 5 + d - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     let days = era * 146097 + doe - 719468; // 719468 = days_from_civil(1970,1,1)
-    u32::try_from(days).ok()
+    u32::try_from(days * 24 + h).ok()
 }
 
 /// One transcript line is a COMMITMENT iff it is what UserPromptSubmit fires
@@ -66,12 +77,13 @@ fn is_commitment(v: &serde_json::Value) -> bool {
     }
 }
 
-/// Derive a row's day buckets from its transcript: genuine user turns per
-/// unix day, windowed to the same trailing-7-days arithmetic as the store's
-/// `bump_bucket` prune and the bar's scoring cutoff (strict: `day + RETAIN >
-/// today`). Unparseable lines are skipped — a transcript is external input
-/// and a hostile line must cost nothing (§6.5 zero-risk stance).
-pub fn buckets_from_transcript(text: &str, today: u32) -> BTreeMap<u32, u32> {
+/// Derive a row's hour buckets from its transcript: genuine user turns per
+/// unix hour, windowed to the same trailing-168-hours arithmetic as the
+/// store's `bump_bucket` prune and the bar's scoring cutoff (strict:
+/// `hour + RETAIN > now_hour`). Unparseable lines are skipped — a
+/// transcript is external input and a hostile line must cost nothing (§6.5
+/// zero-risk stance).
+pub fn buckets_from_transcript(text: &str, now_hour: u32) -> BTreeMap<u32, u32> {
     let mut out = BTreeMap::new();
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -80,18 +92,30 @@ pub fn buckets_from_transcript(text: &str, today: u32) -> BTreeMap<u32, u32> {
         if !is_commitment(&v) {
             continue;
         }
-        let Some(day) = v
+        let Some(hour) = v
             .get("timestamp")
             .and_then(|t| t.as_str())
-            .and_then(unix_day_from_iso)
+            .and_then(unix_hour_from_iso)
         else {
             continue;
         };
-        if day + clave_types::BUCKET_RETAIN_DAYS > today && day <= today {
-            *out.entry(day).or_insert(0) += 1;
+        if hour + clave_types::BUCKET_RETAIN_HOURS > now_hour && hour <= now_hour {
+            *out.entry(hour).or_insert(0) += 1;
         }
     }
     out
+}
+
+/// A bucket map is "earned" only while some bucket still sits inside the
+/// retention window — a map of fully-decayed keys scores zero everywhere
+/// and is, for seeding purposes, empty. This is also the day→hour
+/// migration (v0.4.0): a day-era key read as an hour is decades stale, so a
+/// pre-upgrade row re-derives from its transcript on the next refresh
+/// instead of sitting on weight the bar can no longer see.
+fn carries_weight(buckets: &BTreeMap<u32, u32>, now_hour: u32) -> bool {
+    buckets
+        .keys()
+        .any(|&hour| hour + clave_types::BUCKET_RETAIN_HOURS > now_hour)
 }
 
 /// Read-and-derive for one row, probing the places the transcript can live
@@ -110,10 +134,10 @@ pub fn derive_for_row(
     cwds: &[&str],
     uuid: &str,
     live_session: Option<&str>,
-    today: u32,
+    now_hour: u32,
 ) -> Option<BTreeMap<u32, u32>> {
     let text = read_transcript_text(claude_dir, cwds, uuid, live_session)?;
-    let derived = buckets_from_transcript(&text, today);
+    let derived = buckets_from_transcript(&text, now_hour);
     (!derived.is_empty()).then_some(derived)
 }
 
@@ -153,10 +177,10 @@ fn scan_projects_for(claude_dir: &Path, session: &str) -> Option<std::path::Path
 /// if its effort is None (i.e., backfill is a seeder, never an updater). A row
 /// counts as seeded if any of buckets, model/provider or effort were written.
 /// Returns the number of rows seeded.
-pub fn backfill_store(s: &mut Store, claude_dir: &Path, today: u32) -> usize {
+pub fn backfill_store(s: &mut Store, claude_dir: &Path, now_hour: u32) -> usize {
     let mut seeded = 0;
     for rec in s.agents.values_mut() {
-        if !rec.buckets.is_empty() {
+        if carries_weight(&rec.buckets, now_hour) {
             continue;
         }
         let Some(text) = read_transcript_text(
@@ -170,7 +194,7 @@ pub fn backfill_store(s: &mut Store, claude_dir: &Path, today: u32) -> usize {
         let mut changed = false;
 
         // Seed buckets only if derived buckets are non-empty.
-        let derived = buckets_from_transcript(&text, today);
+        let derived = buckets_from_transcript(&text, now_hour);
         if !derived.is_empty() {
             rec.buckets = derived;
             changed = true;
@@ -215,8 +239,8 @@ pub fn run_on_version_refresh() {
     let res = (|| -> anyhow::Result<usize> {
         let paths = crate::store::store_paths()?;
         let claude_dir = crate::env::claude_config_dir()?;
-        let today = crate::store::unix_day(crate::store::now_unix());
-        crate::store::with_store_mut(&paths, |s| backfill_store(s, &claude_dir, today))
+        let now_hour = crate::store::unix_hour(crate::store::now_unix());
+        crate::store::with_store_mut(&paths, |s| backfill_store(s, &claude_dir, now_hour))
     })();
     match res {
         Ok(0) => {}
@@ -233,37 +257,62 @@ mod tests {
     use super::*;
     use crate::store::AgentRecord;
 
+    /// 2026-08-20 = day 20685 (1787184000 / 86400), cross-checked against
+    /// `date +%s` the day the day-keyed parser landed; hours are day × 24 +
+    /// HH. Epoch hour 0 and a leap day pin the civil conversion's edges.
     #[test]
-    fn unix_day_matches_the_stores_epoch_arithmetic() {
-        // 2026-08-20 = 20685 (1755648000 / 86400) — cross-checked against
-        // `date +%s` the day this landed. Epoch day 0 and a leap day pin the
-        // civil conversion's edges.
-        assert_eq!(unix_day_from_iso("2026-08-20T14:03:11.000Z"), Some(20685));
-        assert_eq!(unix_day_from_iso("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(unix_day_from_iso("2024-02-29T23:59:59Z"), Some(19782));
-        assert_eq!(unix_day_from_iso("garbage"), None);
-        assert_eq!(unix_day_from_iso("2026-13-01T00:00:00Z"), None);
-        assert_eq!(unix_day_from_iso(""), None);
-        // A bare date (exactly 10 bytes, no time part) is a valid prefix.
-        assert_eq!(unix_day_from_iso("2026-08-20"), Some(20685));
-        // EITHER separator being wrong refuses — this one parses cleanly as
-        // numbers, so the guard is the only thing standing.
-        assert_eq!(unix_day_from_iso("2026-08:20T00:00:00Z"), None);
-        assert_eq!(unix_day_from_iso("2026:08-20T00:00:00Z"), None);
+    fn unix_hour_matches_the_stores_epoch_arithmetic() {
+        assert_eq!(
+            unix_hour_from_iso("2026-08-20T14:03:11.000Z"),
+            Some(20685 * 24 + 14)
+        );
+        assert_eq!(unix_hour_from_iso("2026-08-20T00:00:00Z"), Some(20685 * 24));
+        assert_eq!(
+            unix_hour_from_iso("2026-08-20T23:59:59Z"),
+            Some(20685 * 24 + 23)
+        );
+        assert_eq!(unix_hour_from_iso("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(
+            unix_hour_from_iso("2024-02-29T23:59:59Z"),
+            Some(19782 * 24 + 23)
+        );
+        assert_eq!(unix_hour_from_iso("garbage"), None);
+        assert_eq!(unix_hour_from_iso("2026-13-01T00:00:00Z"), None);
+        assert_eq!(unix_hour_from_iso("2026-08-20T24:00:00Z"), None);
+        assert_eq!(unix_hour_from_iso("2026-08-20T1"), None);
+        assert_eq!(unix_hour_from_iso(""), None);
+        // A bare date (exactly 10 bytes, no time part) reads as midnight.
+        assert_eq!(unix_hour_from_iso("2026-08-20"), Some(20685 * 24));
+        // Any separator being wrong refuses — these parse cleanly as
+        // numbers, so the guards are the only thing standing.
+        assert_eq!(unix_hour_from_iso("2026-08:20T00:00:00Z"), None);
+        assert_eq!(unix_hour_from_iso("2026:08-20T00:00:00Z"), None);
+        assert_eq!(unix_hour_from_iso("2026-08-20X00:00:00Z"), None);
     }
 
-    fn line(day_iso: &str, content: &str, extra: &str) -> String {
+    /// 2026-08-20T10Z — the hour every `line` below stamps unless the
+    /// caller gives a `YYYY-MM-DDTHH:MM` timestamp of its own.
+    const NOON_ISH: u32 = 20685 * 24 + 10;
+
+    fn line(iso: &str, content: &str, extra: &str) -> String {
+        let ts = if iso.len() == 10 {
+            format!("{iso}T10:00:00.000Z")
+        } else {
+            format!("{iso}:00.000Z")
+        };
         format!(
-            r#"{{"type":"user","timestamp":"{day_iso}T10:00:00.000Z","message":{{"role":"user","content":{content}}}{extra}}}"#
+            r#"{{"type":"user","timestamp":"{ts}","message":{{"role":"user","content":{content}}}{extra}}}"#
         )
     }
 
     #[test]
     fn only_genuine_user_turns_in_window_are_counted() {
-        // today = 20685 (2026-08-20); window keeps 20679..=20685.
+        // now_hour = 2026-08-20T10Z; the window keeps the 168 hours back to
+        // 2026-08-13T11Z inclusive.
         let t = [
             line("2026-08-20", r#""a real prompt""#, ""), // counts
-            // On a day OF THEIR OWN, so a mutant flipping the array branch
+            line("2026-08-20T09:30", r#""an hour earlier""#, ""), // counts, its own hour
+            // On an hour OF THEIR OWN, so a mutant flipping the array branch
             // (counting tool results, dropping attachments) shifts the map
             // instead of trading one for the other invisibly.
             line("2026-08-18", r#"[{"type":"text","text":"pasted"}]"#, ""), // counts (attachment array)
@@ -274,19 +323,31 @@ mod tests {
             ), // tool result: NOT a commitment
             line("2026-08-20", r#""command output""#, r#","isMeta":true"#), // meta
             line("2026-08-20", r#""subagent turn""#, r#","isSidechain":true"#), // sidechain
-            line("2026-08-14", r#""today-6, the window's oldest day""#, ""), // counts
-            line("2026-08-13", r#""exactly 7 days old""#, ""),              // outside strict window
+            line(
+                "2026-08-13T11:59",
+                r#""167h old: the window's oldest hour""#,
+                "",
+            ), // counts
+            line("2026-08-13T10:59", r#""exactly 168h old""#, ""),          // outside strict window
             line("2026-08-19", r#""yesterday""#, ""),                       // counts
-            line("2026-08-21", r#""future-dated""#, ""),                    // clock skew: dropped
+            line("2026-08-20T10:59", r#""same hour, later minute""#, ""),   // counts, same bucket
+            line("2026-08-20T11:00", r#""future-dated""#, ""),              // clock skew: dropped
             r#"{"type":"assistant","timestamp":"2026-08-20T10:00:00Z"}"#.into(),
             r#"{"type":"user","message":{"content":"no timestamp"}}"#.into(),
             "not json at all".into(),
         ]
         .join("\n");
-        let b = buckets_from_transcript(&t, 20685);
+        let b = buckets_from_transcript(&t, NOON_ISH);
         assert_eq!(
             b,
-            [(20685u32, 1u32), (20684, 1), (20683, 1), (20679, 1)].into()
+            [
+                (NOON_ISH, 2u32),
+                (NOON_ISH - 1, 1),
+                (NOON_ISH - 24, 1),
+                (NOON_ISH - 48, 1),
+                (NOON_ISH - 167, 1),
+            ]
+            .into()
         );
     }
 
@@ -333,11 +394,11 @@ mod tests {
     #[test]
     fn backfill_seeds_empty_rows_and_never_touches_earned_buckets() {
         let dir = tempfile::tempdir().unwrap();
-        let today = 20685;
+        let now_hour = NOON_ISH;
         let mut s = Store::default();
         s.agents.insert("u-cold".into(), rec("u-cold", "/x"));
         let mut earned = rec("u-earned", "/x");
-        earned.buckets = [(20685, 9)].into();
+        earned.buckets = [(NOON_ISH, 9)].into();
         s.agents.insert("u-earned".into(), earned);
         s.agents
             .insert("u-no-jsonl".into(), rec("u-no-jsonl", "/x"));
@@ -358,13 +419,78 @@ mod tests {
             .join("\n"),
         );
 
-        assert_eq!(backfill_store(&mut s, dir.path(), today), 1);
-        assert_eq!(s.agents["u-cold"].buckets, [(20685u32, 1u32)].into());
+        assert_eq!(backfill_store(&mut s, dir.path(), now_hour), 1);
+        assert_eq!(s.agents["u-cold"].buckets, [(NOON_ISH, 1u32)].into());
         // Earned state survives even though its transcript disagrees.
-        assert_eq!(s.agents["u-earned"].buckets, [(20685u32, 9u32)].into());
+        assert_eq!(s.agents["u-earned"].buckets, [(NOON_ISH, 9u32)].into());
         assert!(s.agents["u-no-jsonl"].buckets.is_empty());
         // Idempotent: the seeded row now has buckets, so a second pass is free.
-        assert_eq!(backfill_store(&mut s, dir.path(), today), 0);
+        assert_eq!(backfill_store(&mut s, dir.path(), now_hour), 0);
+    }
+
+    /// The v0.4.0 day→hour migration: a store written before hour keys
+    /// carries unix DAYS (~20k), which read as hours are decades stale —
+    /// zero weight to the bar. Such a row is treated as unseeded and
+    /// re-derived from its transcript; a row whose keys merely all aged out
+    /// of the window is the same case, and a row with one in-window key
+    /// keeps its earned map untouched.
+    #[test]
+    fn day_era_and_fully_decayed_buckets_are_reseeded_from_the_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Store::default();
+        let mut day_era = rec("u-day", "/x");
+        day_era.buckets = [(20685, 7), (20684, 2)].into();
+        s.agents.insert("u-day".into(), day_era);
+        let mut decayed = rec("u-decayed", "/x");
+        decayed.buckets = [(NOON_ISH - 168, 5)].into();
+        s.agents.insert("u-decayed".into(), decayed);
+        let mut edge = rec("u-edge", "/x");
+        edge.buckets = [(NOON_ISH - 400, 5), (NOON_ISH - 167, 1)].into();
+        s.agents.insert("u-edge".into(), edge);
+        for u in ["u-day", "u-decayed", "u-edge"] {
+            write_transcript(dir.path(), "/x", u, &line("2026-08-20", r#""hey""#, ""));
+        }
+
+        assert_eq!(backfill_store(&mut s, dir.path(), NOON_ISH), 2);
+        assert_eq!(s.agents["u-day"].buckets, [(NOON_ISH, 1u32)].into());
+        assert_eq!(s.agents["u-decayed"].buckets, [(NOON_ISH, 1u32)].into());
+        assert_eq!(
+            s.agents["u-edge"].buckets,
+            [(NOON_ISH - 400, 5u32), (NOON_ISH - 167, 1)].into(),
+            "one in-window bucket is earned weight: never re-derived"
+        );
+    }
+
+    /// `derive_for_row` is the resume path's seeder (`own_buckets`): a
+    /// transcript with in-window turns derives a map, one without derives
+    /// None (not an empty map — the caller falls back to the opener's copy
+    /// on None), and a missing transcript is None too.
+    #[test]
+    fn derive_for_row_reads_the_transcript_or_yields_none() {
+        let dir = tempfile::tempdir().unwrap();
+        write_transcript(
+            dir.path(),
+            "/x",
+            "u-warm",
+            &[
+                line("2026-08-20", r#""p1""#, ""),
+                line("2026-08-19", r#""p2""#, ""),
+            ]
+            .join("\n"),
+        );
+        write_transcript(
+            dir.path(),
+            "/x",
+            "u-stale",
+            &line("2026-08-01", r#""long ago""#, ""),
+        );
+        let derive = |uuid: &str| derive_for_row(dir.path(), &["/x"], uuid, None, NOON_ISH);
+        assert_eq!(
+            derive("u-warm"),
+            Some([(NOON_ISH, 1u32), (NOON_ISH - 24, 1)].into())
+        );
+        assert_eq!(derive("u-stale"), None);
+        assert_eq!(derive("u-missing"), None);
     }
 
     #[test]
@@ -382,8 +508,8 @@ mod tests {
             "u-live",
             &line("2026-08-20", r#""after rotation""#, ""),
         );
-        assert_eq!(backfill_store(&mut s, dir.path(), 20685), 1);
-        assert_eq!(s.agents["u-minted"].buckets, [(20685u32, 1u32)].into());
+        assert_eq!(backfill_store(&mut s, dir.path(), NOON_ISH), 1);
+        assert_eq!(s.agents["u-minted"].buckets, [(NOON_ISH, 1u32)].into());
     }
 
     /// A worktree session's transcript lives under the WORKTREE's munged
@@ -400,8 +526,8 @@ mod tests {
             "u-wt",
             &line("2026-08-20", r#""from the worktree""#, ""),
         );
-        assert_eq!(backfill_store(&mut s, dir.path(), 20685), 1);
-        assert_eq!(s.agents["u-wt"].buckets, [(20685u32, 1u32)].into());
+        assert_eq!(backfill_store(&mut s, dir.path(), NOON_ISH), 1);
+        assert_eq!(s.agents["u-wt"].buckets, [(NOON_ISH, 1u32)].into());
     }
 
     #[test]
@@ -419,7 +545,7 @@ mod tests {
             ]
             .join("\n"),
         );
-        assert_eq!(backfill_store(&mut s, dir.path(), 20685), 1);
+        assert_eq!(backfill_store(&mut s, dir.path(), NOON_ISH), 1);
         assert_eq!(s.agents["u-model"].model, Some("opus".to_string()));
         assert_eq!(s.agents["u-model"].provider, Some("claude".to_string()));
     }
@@ -439,7 +565,7 @@ mod tests {
             ]
             .join("\n"),
         );
-        assert_eq!(backfill_store(&mut s, dir.path(), 20685), 1);
+        assert_eq!(backfill_store(&mut s, dir.path(), NOON_ISH), 1);
         assert_eq!(s.agents["u-effort"].effort, Some("xh".to_string()));
     }
 
@@ -463,7 +589,7 @@ mod tests {
             ]
             .join("\n"),
         );
-        assert_eq!(backfill_store(&mut s, dir.path(), 20685), 1);
+        assert_eq!(backfill_store(&mut s, dir.path(), NOON_ISH), 1);
         assert_eq!(s.agents["u-upgrade"].effort, Some("lo".to_string()));
         assert_eq!(s.agents["u-upgrade"].model, Some("opus".to_string()));
     }
@@ -479,7 +605,7 @@ mod tests {
             "u-nomodel",
             &line("2026-08-20", r#""hey""#, ""),
         );
-        assert_eq!(backfill_store(&mut s, dir.path(), 20685), 1);
+        assert_eq!(backfill_store(&mut s, dir.path(), NOON_ISH), 1);
         assert_eq!(s.agents["u-nomodel"].model, None);
         assert_eq!(s.agents["u-nomodel"].provider, None);
     }
@@ -504,7 +630,7 @@ mod tests {
             ]
             .join("\n"),
         );
-        assert_eq!(backfill_store(&mut s, dir.path(), 20685), 1);
+        assert_eq!(backfill_store(&mut s, dir.path(), NOON_ISH), 1);
         // Buckets stay empty — all commitments are outside the window.
         assert!(s.agents["u-dormant"].buckets.is_empty());
         // But model/provider are seeded from the tail's assistant line.
@@ -526,7 +652,7 @@ mod tests {
             "u-old",
             &line("2026-08-01", r#""long ago""#, ""),
         );
-        assert_eq!(backfill_store(&mut s, dir.path(), 20685), 0);
+        assert_eq!(backfill_store(&mut s, dir.path(), NOON_ISH), 0);
         assert!(s.agents["u-old"].buckets.is_empty());
     }
 }

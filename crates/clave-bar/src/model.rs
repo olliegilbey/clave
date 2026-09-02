@@ -408,28 +408,28 @@ fn rank_desc(a: &Ranked, b: &Ranked) -> std::cmp::Ordering {
     b.0.cmp(&a.0).then(a.1.cmp(&b.1))
 }
 
-/// Frecency score in millipoints: Σ count × 0.5^(age_days × 24 / half_life_hours),
+/// Frecency score in millipoints: Σ count × 0.5^(age_hours / half_life_hours),
 /// ×1000, floored. Millipoints keep the comparator integral; identical bucket
 /// maps produce identical sums (BTreeMap order is deterministic), which is
 /// what makes the newborn-adjacency tie exact. Future-dated buckets (clock
 /// skew) clamp to age 0. half_life_hours == 0 is clamped to 1 (zero half-life
 /// is possible via CLI or wire).
 ///
-/// Buckets outside [`clave_types::BUCKET_RETAIN_DAYS`] score ZERO at every
+/// Buckets outside [`clave_types::BUCKET_RETAIN_HOURS`] score ZERO at every
 /// dial (maintainer ruling, 2026-08-19): the store prunes them lazily — only
 /// on a row's next bump — so a long-dormant row can still carry stale days,
 /// and without this cut a huge dial (999h) would resurrect them. "Fully
 /// decayed at 7 days" is the semantic; skipping the `powf` is the bonus.
-fn frecency_millis(buckets: &BTreeMap<u32, u32>, today: u32, half_life_hours: u32) -> u64 {
+fn frecency_millis(buckets: &BTreeMap<u32, u32>, now_hour: u32, half_life_hours: u32) -> u64 {
     let hl = half_life_hours.max(1) as f64;
     let sum: f64 = buckets
         .iter()
         // Same window arithmetic as the store's `bump_bucket` prune (strict:
-        // day + RETAIN > today keeps today-6..=today, seven days inclusive).
-        .filter(|&(&day, _)| day + clave_types::BUCKET_RETAIN_DAYS > today)
-        .map(|(&day, &count)| {
-            let age_days = today.saturating_sub(day) as f64;
-            count as f64 * 0.5_f64.powf(age_days * 24.0 / hl)
+        // hour + RETAIN > now_hour keeps now_hour-167..=now_hour, 168 hours).
+        .filter(|&(&hour, _)| hour + clave_types::BUCKET_RETAIN_HOURS > now_hour)
+        .map(|(&hour, &count)| {
+            let age_hours = now_hour.saturating_sub(hour) as f64;
+            count as f64 * 0.5_f64.powf(age_hours / hl)
         })
         .sum();
     (sum * 1000.0) as u64
@@ -617,12 +617,15 @@ pub struct BarModel {
     /// live (C5 round 5) and walking oscillated. Focus is deliberately NOT
     /// a commitment (the list holds still while you look around).
     tab_order: BTreeMap<usize, u64>,
-    /// Ordering mode + dial, `today`, and the tab-keyed bucket twin — all
+    /// Ordering mode + dial, `now_hour`, and the tab-keyed bucket twin — all
     /// REPLACED wholesale from every snapshot, never merged (the tab_order
-    /// doctrine, C5 round 5). `today` is the HOST's unix day, stamped into
-    /// every snapshot: the bar never reads a wall clock.
+    /// doctrine, C5 round 5). `now_hour` is the HOST's unix hour, stamped
+    /// into every snapshot so both sides share one bucket arithmetic. Going
+    /// stale between pushes cannot reorder anything: one shared half-life
+    /// scales every score by the same factor, so only a landing commitment
+    /// or a bucket ageing out of the window moves a row.
     order: OrderMode,
-    today: u32,
+    now_hour: u32,
     tab_buckets: BTreeMap<usize, BTreeMap<u32, u32>>,
     /// tab_id → unix secs of the last USER interaction with a TERMINAL tab
     /// (#232's wall-clock twin of `tab_order`'s commitment ordinal). Same
@@ -925,9 +928,9 @@ impl BarModel {
                 let tab = self
                     .tab_buckets
                     .get(&t.tab_id)
-                    .map_or(0, |b| frecency_millis(b, self.today, half_life_hours));
+                    .map_or(0, |b| frecency_millis(b, self.now_hour, half_life_hours));
                 let agent = self.agent_in_tab(t.tab_id).map_or(0, |a| {
-                    frecency_millis(&a.buckets, self.today, half_life_hours)
+                    frecency_millis(&a.buckets, self.now_hour, half_life_hours)
                 });
                 let millis = tab.max(agent);
                 if millis > 0 {
@@ -969,11 +972,11 @@ impl BarModel {
         match self.order {
             OrderMode::Recency => (self.dormant_ord(a), 0),
             OrderMode::Frecency { half_life_hours } => {
-                let own = frecency_millis(&a.buckets, self.today, half_life_hours);
+                let own = frecency_millis(&a.buckets, self.now_hour, half_life_hours);
                 let carried = a
                     .tab_id
                     .and_then(|id| self.tab_buckets.get(&id))
-                    .map_or(0, |b| frecency_millis(b, self.today, half_life_hours));
+                    .map_or(0, |b| frecency_millis(b, self.now_hour, half_life_hours));
                 let millis = own.max(carried);
                 if millis > 0 {
                     (millis, 0)
@@ -1477,7 +1480,7 @@ impl BarModel {
         // Same doctrine for the ordering mode, the host's day, and the
         // tab-keyed bucket twin: the store is the one writer, REPLACE.
         self.order = snap.order;
-        self.today = snap.today;
+        self.now_hour = snap.now_hour;
         self.tab_buckets = snap.tab_buckets;
         self.tab_touched = snap.tab_touched;
         // Settle death claims: a witnessed-dead id the store no longer
@@ -2998,7 +3001,7 @@ mod tests {
     fn snap(seq: u64, agents: Vec<Agent>) -> AgentSnapshot {
         AgentSnapshot {
             order: OrderMode::default(),
-            today: 0,
+            now_hour: 0,
             tab_buckets: Default::default(),
             tab_touched: Default::default(),
             collapsed: false,
@@ -3013,7 +3016,7 @@ mod tests {
     fn snap_t(seq: u64, ords: &[(usize, u64)]) -> AgentSnapshot {
         AgentSnapshot {
             order: OrderMode::default(),
-            today: 0,
+            now_hour: 0,
             tab_buckets: Default::default(),
             tab_touched: Default::default(),
             collapsed: false,
@@ -3426,7 +3429,7 @@ mod tests {
         a.commit_ord = 999;
         m.apply_snapshot(AgentSnapshot {
             order: OrderMode::default(),
-            today: 0,
+            now_hour: 0,
             tab_buckets: Default::default(),
             tab_touched: Default::default(),
             collapsed: false,
@@ -3469,7 +3472,7 @@ mod tests {
             .collect();
         m.apply_snapshot(AgentSnapshot {
             order: OrderMode::default(),
-            today: 0,
+            now_hour: 0,
             tab_buckets: Default::default(),
             tab_touched: Default::default(),
             collapsed: false,
@@ -3546,23 +3549,42 @@ mod tests {
 
     // --- frecency ordering (spec 2026-08-19) --------------------------------
 
-    /// The decay curve itself: today full weight, each day halves (24h
-    /// half-life), future-dated buckets clamp to age 0, empty map is 0.
+    /// The decay curve itself: this hour full weight, each half-life halves
+    /// (24h by default), future-dated buckets clamp to age 0, empty map is 0.
     #[test]
     fn frecency_millis_decays_by_half_lives() {
-        let b: BTreeMap<u32, u32> = [(100, 4), (99, 4), (93, 4)].into();
-        // today=100, hl=24h: 4*1000 + 4*500; day 93 is exactly 7 days old —
-        // outside the retention window, so it scores ZERO, mirroring the
-        // store prune that would have dropped it on the row's next bump.
-        assert_eq!(frecency_millis(&b, 100, 24), 6000);
-        assert_eq!(frecency_millis(&BTreeMap::new(), 100, 24), 0);
-        let future: BTreeMap<u32, u32> = [(105, 2)].into();
-        assert_eq!(frecency_millis(&future, 100, 24), 2000); // clamp, not panic
+        let b: BTreeMap<u32, u32> = [(1000, 4), (976, 4), (832, 4)].into();
+        // now_hour=1000, hl=24h: 4*1000 + 4*500; hour 832 is exactly 168h
+        // old — outside the retention window, so it scores ZERO, mirroring
+        // the store prune that would have dropped it on the row's next bump.
+        assert_eq!(frecency_millis(&b, 1000, 24), 6000);
+        assert_eq!(frecency_millis(&BTreeMap::new(), 1000, 24), 0);
+        let future: BTreeMap<u32, u32> = [(1005, 2)].into();
+        assert_eq!(frecency_millis(&future, 1000, 24), 2000); // clamp, not panic
+        // An hour is the unit: one prompt an hour ago at the 24h dial is
+        // 0.5^(1/24) = 0.9715..., and twelve hours ago 0.7071...
+        assert_eq!(frecency_millis(&[(999, 1)].into(), 1000, 24), 971);
+        assert_eq!(frecency_millis(&[(988, 1)].into(), 1000, 24), 707);
         // A zero dial is reachable from the CLI and the wire; it must behave
         // as a 1-hour half-life, not as a division by zero.
-        let b0: BTreeMap<u32, u32> = [(100, 4), (99, 4)].into();
-        assert_eq!(frecency_millis(&b0, 100, 0), frecency_millis(&b0, 100, 1));
-        assert!(frecency_millis(&b0, 100, 0) >= 4000);
+        let b0: BTreeMap<u32, u32> = [(1000, 4), (999, 4)].into();
+        assert_eq!(frecency_millis(&b0, 1000, 0), frecency_millis(&b0, 1000, 1));
+        assert_eq!(frecency_millis(&b0, 1000, 0), 6000);
+    }
+
+    /// One shared half-life scales every score by the same factor as the
+    /// hour advances, so a stale `now_hour` between pushes can never
+    /// reorder rows — only a landing commitment or the window edge can.
+    #[test]
+    fn a_stale_now_hour_preserves_the_order() {
+        let a: BTreeMap<u32, u32> = [(1000, 2), (990, 3)].into();
+        let b: BTreeMap<u32, u32> = [(998, 2), (960, 6)].into();
+        for now in [1000, 1001, 1010, 1100] {
+            assert!(
+                frecency_millis(&a, now, 24) > frecency_millis(&b, now, 24),
+                "order flipped at now_hour={now}"
+            );
+        }
     }
 
     /// Accelerated time: a hand-computed week of daily driving, two live
@@ -3571,11 +3593,14 @@ mod tests {
     /// daily use overtakes a stale burst by day 3; the burst exits the 7-day
     /// window and survives only on the ordinal floor; by day 10 everything
     /// has decayed and the ordinal fallback quietly flips the order back.
-    /// Days 7 and 10 re-rank on IDENTICAL buckets — only `snapshot.today`
-    /// moves, which is exactly what an idle fleet's midnight rollover does
-    /// (today is host-computed per push; the bar never reads a clock).
+    /// Days 7 and 10 re-rank on IDENTICAL buckets — only `snapshot.now_hour`
+    /// moves, which is exactly what an idle fleet's rollover does (now_hour
+    /// is host-computed per push). Hours are keyed from a day-0 origin of
+    /// 1000 so every fixture sits well inside `u32`.
     #[test]
     fn a_week_of_daily_driving_reranks_only_by_decay_and_the_window() {
+        const D: u32 = 24;
+        const T0: u32 = 1000;
         let mut m = BarModel::default();
         m.apply_tabs(vec![tab(1, 0, "burst", false), tab(2, 1, "steady", false)]);
         let mut burst = agent("u-burst", Status::Idle, Some(1));
@@ -3584,45 +3609,45 @@ mod tests {
         // ago (tab 1 ord 9 > tab 2 ord 5).
         let ords: &[(usize, u64)] = &[(1, 9), (2, 5)];
 
-        // Day 100: five prompts into burst, one into steady. 5000 > 1000.
-        burst.buckets = [(100, 5)].into();
-        steady.buckets = [(100, 1)].into();
+        // Day 0: five prompts into burst, one into steady. 5000 > 1000.
+        burst.buckets = [(T0, 5)].into();
+        steady.buckets = [(T0, 1)].into();
         let mut snap = snap_full(1, vec![burst.clone(), steady.clone()], ords);
-        snap.today = 100;
+        snap.now_hour = T0;
         m.apply_snapshot(snap);
         assert_eq!(keys(&m), vec![RowKey::Tab(1), RowKey::Tab(2)]);
 
-        // Day 103: steady prompted once each day, burst went silent.
+        // Day 3: steady prompted once each day, burst went silent.
         // burst 5*0.5^3 = 625; steady 125+250+500+1000 = 1875.
-        steady.buckets = [(100, 1), (101, 1), (102, 1), (103, 1)].into();
+        steady.buckets = [(T0, 1), (T0 + D, 1), (T0 + 2 * D, 1), (T0 + 3 * D, 1)].into();
         let mut snap = snap_full(2, vec![burst.clone(), steady.clone()], ords);
-        snap.today = 103;
+        snap.now_hour = T0 + 3 * D;
         m.apply_snapshot(snap);
-        assert_eq!(frecency_millis(&burst.buckets, 103, 24), 625);
-        assert_eq!(frecency_millis(&steady.buckets, 103, 24), 1875);
+        assert_eq!(frecency_millis(&burst.buckets, T0 + 3 * D, 24), 625);
+        assert_eq!(frecency_millis(&steady.buckets, T0 + 3 * D, 24), 1875);
         assert_eq!(keys(&m), vec![RowKey::Tab(2), RowKey::Tab(1)]);
 
-        // Day 107, nobody prompted since: burst's day-100 bucket is now 7
-        // days old — out of the window, score ZERO, alive on the ordinal
-        // floor only. steady still carries 15.625+31.25+62.5, floored = 109.
+        // Day 7, nobody prompted since: burst's day-0 bucket is now 168h
+        // old — out of the window, score ZERO, alive on the ordinal floor
+        // only. steady still carries 15.625+31.25+62.5, floored = 109.
         let mut snap = snap_full(3, vec![burst.clone(), steady.clone()], ords);
-        snap.today = 107;
+        snap.now_hour = T0 + 7 * D;
         m.apply_snapshot(snap);
-        assert_eq!(frecency_millis(&burst.buckets, 107, 24), 0);
-        assert_eq!(frecency_millis(&steady.buckets, 107, 24), 109);
+        assert_eq!(frecency_millis(&burst.buckets, T0 + 7 * D, 24), 0);
+        assert_eq!(frecency_millis(&steady.buckets, T0 + 7 * D, 24), 109);
         assert_eq!(keys(&m), vec![RowKey::Tab(2), RowKey::Tab(1)]);
 
-        // Day 110, same buckets again: steady's history has left the window
+        // Day 10, same buckets again: steady's history has left the window
         // too. Both zero → ordinal fallback, and the order flips back to
         // burst (ord 9 > 5) with no interaction having happened at all.
         let mut snap = snap_full(4, vec![burst.clone(), steady.clone()], ords);
-        snap.today = 110;
+        snap.now_hour = T0 + 10 * D;
         m.apply_snapshot(snap);
-        assert_eq!(frecency_millis(&steady.buckets, 110, 24), 0);
+        assert_eq!(frecency_millis(&steady.buckets, T0 + 10 * D, 24), 0);
         assert_eq!(keys(&m), vec![RowKey::Tab(1), RowKey::Tab(2)]);
     }
 
-    /// Two live agent tabs: `u-big` invested 10 commitments today but committed
+    /// Two live agent tabs: `u-big` invested 10 commitments this hour but committed
     /// FIRST (ordinal 5, position 1); `u-latest` one commitment, the most
     /// recent (ordinal 9, position 0). The two modes must disagree about them.
     fn invested_vs_one_off(order: OrderMode) -> BarModel {
@@ -3634,7 +3659,7 @@ mod tests {
         big.buckets = [(100, 10)].into();
         let mut s = snap_full(1, vec![latest, big], &[(1, 9), (2, 5)]);
         s.order = order;
-        s.today = 100;
+        s.now_hour = 100;
         m.apply_snapshot(s);
         m
     }
@@ -3645,11 +3670,15 @@ mod tests {
     /// without the scoring cut a 999h dial would resurrect them.
     #[test]
     fn a_bucket_past_retention_scores_zero_at_every_dial() {
-        let stale: BTreeMap<u32, u32> = [(93, 1000)].into(); // exactly 7 days old
-        assert_eq!(frecency_millis(&stale, 100, 999), 0);
-        assert_eq!(frecency_millis(&stale, 100, 1), 0);
-        let edge: BTreeMap<u32, u32> = [(94, 4)].into(); // today-6: last day in
-        assert!(frecency_millis(&edge, 100, 999) > 0);
+        let stale: BTreeMap<u32, u32> = [(832, 1000)].into(); // exactly 168h old
+        assert_eq!(frecency_millis(&stale, 1000, 999), 0);
+        assert_eq!(frecency_millis(&stale, 1000, 1), 0);
+        let edge: BTreeMap<u32, u32> = [(833, 4)].into(); // now_hour-167: last hour in
+        assert!(frecency_millis(&edge, 1000, 999) > 0);
+        // A day-era key (pre-v0.4.0 store, unix DAY ~20k) read against a
+        // real unix hour (~496k) is the same case: zero, at every dial.
+        let day_era: BTreeMap<u32, u32> = [(20685, 50)].into();
+        assert_eq!(frecency_millis(&day_era, 20685 * 24 + 10, 999), 0);
     }
 
     /// Frecency mode: more decayed weight ranks higher, regardless of who
@@ -3689,7 +3718,7 @@ mod tests {
         s.order = OrderMode::Frecency {
             half_life_hours: 24,
         };
-        s.today = 100;
+        s.now_hour = 100;
         s.tab_buckets = [
             (9usize, [(100u32, 9u32)].into()),
             (5, [(100, 6)].into()), // the newborn's inherited exact copy
@@ -3724,7 +3753,7 @@ mod tests {
         s.order = OrderMode::Frecency {
             half_life_hours: 24,
         };
-        s.today = 100;
+        s.now_hour = 100;
         m.apply_snapshot(s);
         assert_eq!(
             keys(&m),
@@ -3746,7 +3775,7 @@ mod tests {
         let mut cold = agent("u-cold", Status::Idle, None);
         cold.commit_ord = 999;
         let mut s = snap(1, vec![invested, cold]); // order: the Frecency default
-        s.today = 100;
+        s.now_hour = 100;
         m.apply_snapshot(s);
         assert_eq!(
             keys(&m),
@@ -3760,7 +3789,7 @@ mod tests {
 
     // --- repo-grouped frecency (double layer, ratified 2026-08-26) ----------
 
-    /// Every bump lands on day 100 — the section's pinned `today` — so a
+    /// Every bump lands on hour 100 — the section's pinned `now_hour` — so a
     /// row scores exactly `count × 1000` millipoints undecayed, keeping the
     /// cluster sums asserted below hand-checkable at a glance.
     fn grouped(uuid: &str, tab_id: usize, root: &str, count: u32) -> Agent {
@@ -3795,7 +3824,7 @@ mod tests {
         s.order = OrderMode::Frecency {
             half_life_hours: 24,
         };
-        s.today = 100;
+        s.now_hour = 100;
         m.apply_snapshot(s);
         assert_eq!(
             keys(&m),
@@ -3832,7 +3861,7 @@ mod tests {
         s.order = OrderMode::Frecency {
             half_life_hours: 24,
         };
-        s.today = 100;
+        s.now_hour = 100;
         m.apply_snapshot(s);
         assert_eq!(
             keys(&m),
@@ -3866,7 +3895,7 @@ mod tests {
         s.order = OrderMode::Frecency {
             half_life_hours: 24,
         };
-        s.today = 100;
+        s.now_hour = 100;
         m.apply_snapshot(s);
         assert_eq!(
             keys(&m),
@@ -3903,7 +3932,7 @@ mod tests {
         s.order = OrderMode::Frecency {
             half_life_hours: 24,
         };
-        s.today = 100;
+        s.now_hour = 100;
         s.tab_buckets = [(10usize, [(100u32, 2u32)].into())].into();
         m.apply_snapshot(s);
         m.apply_pane_facts(vec![probe(5, Some("/r/clave/sub"), None)]);
@@ -3967,7 +3996,7 @@ mod tests {
         s.order = OrderMode::Frecency {
             half_life_hours: 24,
         };
-        s.today = 100;
+        s.now_hour = 100;
         m.apply_snapshot(s);
         assert_eq!(
             keys(&m),
@@ -3986,17 +4015,17 @@ mod tests {
         let mut m = BarModel::default();
         let mut s1 = snap(1, vec![]);
         s1.order = OrderMode::Recency;
-        s1.today = 100;
+        s1.now_hour = 100;
         s1.tab_buckets = [(3usize, [(100u32, 1u32)].into())].into();
         m.apply_snapshot(s1);
         assert_eq!(m.order, OrderMode::Recency);
-        assert_eq!(m.today, 100);
+        assert_eq!(m.now_hour, 100);
         assert_eq!(m.tab_buckets.get(&3).and_then(|b| b.get(&100)), Some(&1));
         let mut s2 = snap(2, vec![]);
         s2.order = OrderMode::Frecency {
             half_life_hours: 24,
         };
-        s2.today = 101;
+        s2.now_hour = 101;
         m.apply_snapshot(s2);
         assert_eq!(
             m.order,
@@ -4004,7 +4033,7 @@ mod tests {
                 half_life_hours: 24
             }
         );
-        assert_eq!(m.today, 101);
+        assert_eq!(m.now_hour, 101);
         assert!(m.tab_buckets.is_empty()); // replaced wholesale, not merged
     }
 
@@ -4205,7 +4234,7 @@ mod tests {
     fn snap_full(seq: u64, agents: Vec<Agent>, ords: &[(usize, u64)]) -> AgentSnapshot {
         AgentSnapshot {
             order: OrderMode::default(),
-            today: 0,
+            now_hour: 0,
             tab_buckets: Default::default(),
             tab_touched: Default::default(),
             collapsed: false,
@@ -7108,7 +7137,7 @@ mod tests {
         a.last_interacted = 500;
         m.apply_snapshot(AgentSnapshot {
             order: OrderMode::default(),
-            today: 0,
+            now_hour: 0,
             tab_buckets: Default::default(),
             tab_touched: Default::default(),
             collapsed: false,
@@ -7162,7 +7191,7 @@ mod tests {
         new.last_interacted = 100;
         m.apply_snapshot(AgentSnapshot {
             order: OrderMode::default(),
-            today: 0,
+            now_hour: 0,
             tab_buckets: Default::default(),
             tab_touched: Default::default(),
             collapsed: false,
@@ -7391,7 +7420,7 @@ mod tests {
         m.apply_tabs(vec![tab(7, 0, "agent-tab", true)]);
         m.apply_snapshot(AgentSnapshot {
             order: OrderMode::default(),
-            today: 0,
+            now_hour: 0,
             tab_buckets: Default::default(),
             tab_touched: Default::default(),
             collapsed: false,
@@ -7407,7 +7436,7 @@ mod tests {
         m.apply_panes(vec![pane(0, 42, false, true)]);
         m.apply_snapshot(AgentSnapshot {
             order: OrderMode::default(),
-            today: 0,
+            now_hour: 0,
             tab_buckets: Default::default(),
             tab_touched: Default::default(),
             collapsed: false,
@@ -7432,7 +7461,7 @@ mod tests {
         }
         m.apply_snapshot(AgentSnapshot {
             order: OrderMode::default(),
-            today: 0,
+            now_hour: 0,
             tab_buckets: Default::default(),
             tab_touched: Default::default(),
             collapsed: false,
@@ -7535,7 +7564,7 @@ mod tests {
         m.apply_tabs(vec![tab(1, 0, "live", false), tab(2, 1, "u-d", true)]);
         m.apply_snapshot(AgentSnapshot {
             order: OrderMode::default(),
-            today: 0,
+            now_hour: 0,
             tab_buckets: Default::default(),
             tab_touched: Default::default(),
             collapsed: false,
@@ -7585,7 +7614,7 @@ mod tests {
         }
         m.apply_snapshot(AgentSnapshot {
             order: OrderMode::default(),
-            today: 0,
+            now_hour: 0,
             tab_buckets: Default::default(),
             tab_touched: Default::default(),
             collapsed: false,
@@ -7975,7 +8004,7 @@ mod tests {
         a.commit_ord = 999;
         m.apply_snapshot(AgentSnapshot {
             order: OrderMode::default(),
-            today: 0,
+            now_hour: 0,
             tab_buckets: Default::default(),
             tab_touched: Default::default(),
             // Issue #5: snapshots now carry the store's collapse mode; after
@@ -8004,7 +8033,7 @@ mod tests {
         m.opening.insert("u1".into());
         m.apply_snapshot(AgentSnapshot {
             order: OrderMode::default(),
-            today: 0,
+            now_hour: 0,
             tab_buckets: Default::default(),
             tab_touched: Default::default(),
             collapsed: false,
@@ -8018,7 +8047,7 @@ mod tests {
         let mut m = BarModel::default();
         m.apply_snapshot(AgentSnapshot {
             order: OrderMode::default(),
-            today: 0,
+            now_hour: 0,
             tab_buckets: Default::default(),
             tab_touched: Default::default(),
             collapsed: false,
@@ -8069,7 +8098,7 @@ mod tests {
         m.apply_tabs(vec![tab(1, 0, "live", false), tab(2, 1, "u-d", true)]);
         m.apply_snapshot(AgentSnapshot {
             order: OrderMode::default(),
-            today: 0,
+            now_hour: 0,
             tab_buckets: Default::default(),
             tab_touched: Default::default(),
             collapsed: false,
@@ -8106,7 +8135,7 @@ mod tests {
         a.commit_ord = 999;
         m.apply_snapshot(AgentSnapshot {
             order: OrderMode::default(),
-            today: 0,
+            now_hour: 0,
             tab_buckets: Default::default(),
             tab_touched: Default::default(),
             collapsed: false,
@@ -8178,7 +8207,7 @@ mod tests {
         a.stale = true;
         m.apply_snapshot(AgentSnapshot {
             order: OrderMode::default(),
-            today: 0,
+            now_hour: 0,
             tab_buckets: Default::default(),
             tab_touched: Default::default(),
             collapsed: false,
@@ -8283,7 +8312,7 @@ mod tests {
     fn collapse_snap(seq: u64, collapsed: bool) -> AgentSnapshot {
         AgentSnapshot {
             order: OrderMode::default(),
-            today: 0,
+            now_hour: 0,
             tab_buckets: Default::default(),
             tab_touched: Default::default(),
             collapsed,
@@ -8426,7 +8455,7 @@ mod tests {
                                         .enumerate()
                                         .map(|(i, &id)| (id, timeline[i]))
                                         .collect();
-                                    m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 1, agents: vec![], tab_order: tl, order: OrderMode::default(), today: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
+                                    m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 1, agents: vec![], tab_order: tl, order: OrderMode::default(), now_hour: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
                                     m
                                 };
                                 let baseline: Vec<RowKey> =
@@ -8455,7 +8484,7 @@ mod tests {
                                 {
                                     m.apply_snapshot(AgentSnapshot {
                 order: OrderMode::default(),
-                today: 0,
+                now_hour: 0,
                 tab_buckets: Default::default(),
         tab_touched: Default::default(),
                                         collapsed: false,
@@ -8528,7 +8557,7 @@ mod tests {
                                     .enumerate()
                                     .map(|(i, &id)| (id, tl_vals[i]))
                                     .collect();
-                                m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 1, agents, tab_order: timeline.clone(), order: OrderMode::default(), today: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
+                                m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 1, agents, tab_order: timeline.clone(), order: OrderMode::default(), now_hour: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
 
                                 // Determinism: identical inputs → identical rows.
                                 prop_assert_eq!(m.rows(), m.rows());
@@ -8580,7 +8609,7 @@ mod tests {
                                 m.apply_tabs(vec![tab(0, 0, "a", true), tab(1, 1, "b", false)]);
                                 m.apply_snapshot(AgentSnapshot {
                 order: OrderMode::default(),
-                today: 0,
+                now_hour: 0,
                 tab_buckets: Default::default(),
         tab_touched: Default::default(),
                                     collapsed: false,
@@ -8592,7 +8621,7 @@ mod tests {
                                 let timeline0 = m.tab_order.clone();
                                 m.apply_snapshot(AgentSnapshot {
                 order: OrderMode::default(),
-                today: 0,
+                now_hour: 0,
                 tab_buckets: Default::default(),
         tab_touched: Default::default(),
                                     collapsed: false,
@@ -8614,10 +8643,10 @@ mod tests {
                                 tl1 in prop::collection::btree_map(0usize..8, 0u64..500, 0..5),
                             ) {
                                 let mut m = BarModel::default();
-                                m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 1, agents: vec![], tab_order: tl0, order: OrderMode::default(), today: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
+                                m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 1, agents: vec![], tab_order: tl0, order: OrderMode::default(), now_hour: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
                                 m.apply_snapshot(AgentSnapshot {
                 order: OrderMode::default(),
-                today: 0,
+                now_hour: 0,
                 tab_buckets: Default::default(),
         tab_touched: Default::default(),
                                     collapsed: false,
@@ -8664,7 +8693,7 @@ mod tests {
                                     ids.iter().enumerate().map(|(i, &id)| (id, tl_vals[i])).collect();
                                 m.apply_snapshot(AgentSnapshot {
                 order: OrderMode::default(),
-                today: 0,
+                now_hour: 0,
                 tab_buckets: Default::default(),
         tab_touched: Default::default(),
                                     collapsed: false,
@@ -8771,7 +8800,7 @@ mod tests {
                                 );
                                 m.apply_snapshot(AgentSnapshot {
                 order: OrderMode::default(),
-                today: 0,
+                now_hour: 0,
                 tab_buckets: Default::default(),
         tab_touched: Default::default(),
                                     collapsed: false,
@@ -8825,7 +8854,7 @@ mod tests {
                                         .collect();
                                     let mut tl = timeline.clone();
                                     tl.remove(&victim_id);
-                                    m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 2, agents, tab_order: tl, order: OrderMode::default(), today: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
+                                    m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 2, agents, tab_order: tl, order: OrderMode::default(), now_hour: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
                                 }
 
                                 let closed = RowKey::Dormant(format!("u{victim_id}"));
@@ -8903,7 +8932,7 @@ mod tests {
                                             seq += 1;
                                             m.apply_snapshot(AgentSnapshot {
                 order: OrderMode::default(),
-                today: 0,
+                now_hour: 0,
                 tab_buckets: Default::default(),
         tab_touched: Default::default(),
                                                 collapsed: *flag,
@@ -8939,7 +8968,7 @@ mod tests {
                                         // not even the pending ledger.
                                         m.apply_snapshot(AgentSnapshot {
                 order: OrderMode::default(),
-                today: 0,
+                now_hour: 0,
                 tab_buckets: Default::default(),
         tab_touched: Default::default(),
                                             collapsed: !expected,
@@ -8991,7 +9020,7 @@ mod tests {
                                 }
                                 m.apply_snapshot(AgentSnapshot {
                 order: OrderMode::default(),
-                today: 0,
+                now_hour: 0,
                 tab_buckets: Default::default(),
         tab_touched: Default::default(),
                                     collapsed: false,
@@ -9215,7 +9244,7 @@ mod tests {
                         self.u1_holds = !self.u1_holds; // the eviction flip
                         self.m.apply_snapshot(AgentSnapshot {
                             order: OrderMode::default(),
-                            today: 0,
+                            now_hour: 0,
                             tab_buckets: Default::default(),
                             tab_touched: Default::default(),
                             collapsed: false,
