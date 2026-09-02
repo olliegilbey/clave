@@ -36,7 +36,12 @@
 //! Never invent: a `0` total (session start) or a `null` `current_usage`
 //! (documented for the window after `/compact`) is not a token reading, and
 //! the row HOLDS what it had. Model and effort in the same payload are still
-//! true and still land.
+//! true and still land. Measured 2026-09-02: the run that fires when
+//! `/compact` finishes carries `total_input_tokens: 0` with a `current_usage`
+//! of all zeros rather than the documented `null`; the total guard holds it
+//! either way, and the post-compact figure lands on the next turn's first
+//! reading (the transcript's `postTokens` is the hook's fallback for that
+//! window, `hook::tokens_from_tail`).
 
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
@@ -416,6 +421,15 @@ mod tests {
         // Session start: no API response yet. Model and effort are still true.
         let r = Reading::parse(&payload("s", "0", "null", "claude-opus-5", "high"));
         assert_eq!(r, reading("s", None, "claude-opus-5", "high"));
+    }
+
+    #[test]
+    fn the_compact_finish_run_is_not_a_token_reading() {
+        // Measured 2026-09-02: `/compact` finishing fires a run with a zero
+        // total and a usage object of all zeros, not the documented null.
+        let usage = r#"{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}"#;
+        let r = Reading::parse(&payload("s", "0", usage, "claude-fable-5-1", "medium"));
+        assert_eq!(r, reading("s", None, "claude-fable-5-1", "medium"));
     }
 
     #[test]
