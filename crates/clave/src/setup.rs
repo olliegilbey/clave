@@ -584,14 +584,8 @@ pub fn session_exists(list_output: &str, name: &str) -> bool {
 /// versioned binary name but is not ours, and must never be absorbed or
 /// rewritten by merge_hooks.
 pub fn is_clave_hook_command(cmd: &str, event: &str) -> bool {
-    let Some(bin) = cmd.strip_suffix(&format!(" hook {event}")) else {
-        return false;
-    };
-    matches!(
-        std::path::Path::new(bin).file_name().and_then(|n| n.to_str()),
-        Some(name) if name == "clave"
-            || name.strip_prefix("clave-v").is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit()))
-    )
+    cmd.strip_suffix(&format!(" hook {event}"))
+        .is_some_and(is_clave_bin)
 }
 
 /// The §6.5 state machine's input events — hook registration AND doctor's
@@ -606,6 +600,124 @@ pub const HOOK_EVENTS: [&str; 5] = [
     // Maps to no status transition — its job is the pane register + mint.
     "SessionStart",
 ];
+
+/// Is `bin` one of ours — bare `clave` or a versioned copy `clave-vN…`? The
+/// `clave-v` check requires a DIGIT immediately after the prefix (not just
+/// `starts_with`): a foreign tool named `clave-vault` or `clave-verify`
+/// shares the textual prefix with our versioned binary name but is not ours,
+/// and must never be absorbed or rewritten. Shared by the hook and statusLine
+/// matchers so the rule lives once.
+fn is_clave_bin(bin: &str) -> bool {
+    matches!(
+        std::path::Path::new(bin).file_name().and_then(|n| n.to_str()),
+        Some(name) if name == "clave"
+            || name.strip_prefix("clave-v").is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit()))
+    )
+}
+
+/// The single-quoted form `sh -c` reads back verbatim: the only character
+/// that needs care inside single quotes is the single quote itself.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+fn shell_unquote(q: &str) -> Option<String> {
+    let inner = q.strip_prefix('\'')?.strip_suffix('\'')?;
+    Some(inner.replace(r"'\''", "'"))
+}
+
+/// If `cmd` is clave's statusLine wrap (any version's path), the command it
+/// wraps — `""` when clave stands alone. `None` for anything else, including
+/// a user's own script, which `merge_statusline` must wrap and never absorb.
+/// A hand-written unquoted wrap (`clave statusline -- bash s.sh`) reads back
+/// as its raw tail, so it re-wraps correctly rather than being lost.
+pub fn unwrap_statusline(cmd: &str) -> Option<String> {
+    let (bin, rest) = cmd.split_once(" statusline")?;
+    if !is_clave_bin(bin) {
+        return None;
+    }
+    match rest {
+        "" => Some(String::new()),
+        r => r
+            .strip_prefix(" -- ")
+            .map(|q| shell_unquote(q).unwrap_or_else(|| q.to_string())),
+    }
+}
+
+/// Whether `binary` may be written into the statusLine slot at all. The one
+/// leak (CONTRIBUTING, #43/#44): a dev setup bakes bare `clave`, and the
+/// REAL settings.json is the one every Claude session reads — the maintainer's
+/// live Claude sessions would resolve that name to the stable launcher, whose
+/// version may not know `statusline` yet, and a failing status line command
+/// blanks the line in every Claude session. Hooks tolerate bare `clave` because
+/// every version has `hook`; this slot needs the version-pinned absolute
+/// path a release cut bakes, and a dev setup leaves it alone.
+pub fn statusline_wrap_allowed(binary: &str) -> bool {
+    std::path::Path::new(binary).is_absolute()
+}
+
+/// Wrap `statusLine.command` so clave meters the payload on its way to the
+/// user's own script (#245). The statusLine is ONE slot, so this is a wrap
+/// rather than the hooks' additive merge, but the same two promises hold:
+/// replace-on-version-change (the wrap is recognised by `unwrap_statusline`,
+/// its inner command carried over, and the clave path rewritten to
+/// `clave_bin`) and idempotency (a same-version re-run changes nothing and
+/// never double-wraps). An empty slot gets clave alone. A slot of a type
+/// clave does not understand is left exactly as found. Returns whether
+/// anything changed.
+pub fn merge_statusline(settings: &mut serde_json::Value, clave_bin: &str) -> bool {
+    let slot = settings
+        .as_object_mut()
+        .expect("settings.json root must be an object")
+        .entry("statusLine")
+        .or_insert_with(|| serde_json::json!({}));
+    if !slot.is_object()
+        || slot
+            .get("type")
+            .and_then(|t| t.as_str())
+            .is_some_and(|t| t != "command")
+    {
+        return false;
+    }
+    let current = slot.get("command").and_then(|c| c.as_str()).unwrap_or("");
+    let original = unwrap_statusline(current).unwrap_or_else(|| current.to_string());
+    let want = if original.trim().is_empty() {
+        format!("{clave_bin} statusline")
+    } else {
+        format!("{clave_bin} statusline -- {}", shell_quote(&original))
+    };
+    if current == want {
+        return false;
+    }
+    slot["type"] = serde_json::json!("command");
+    slot["command"] = serde_json::json!(want);
+    true
+}
+
+/// What [`merge_claude_settings`] moved, so the caller writes the file once
+/// and prints two truthful lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettingsMerge {
+    pub hooks: bool,
+    pub statusline: bool,
+}
+
+impl SettingsMerge {
+    /// Whether settings.json needs writing back at all.
+    pub fn changed(self) -> bool {
+        self.hooks || self.statusline
+    }
+}
+
+/// Both settings.json merges in one pass over one parsed value: the hooks
+/// (additive, every binary) and the statusLine slot (wrapped, release
+/// binaries only — see [`statusline_wrap_allowed`]).
+pub fn merge_claude_settings(settings: &mut serde_json::Value, binary: &str) -> SettingsMerge {
+    SettingsMerge {
+        hooks: merge_hooks(settings, binary),
+        statusline: statusline_wrap_allowed(binary) && merge_statusline(settings, binary),
+    }
+}
 
 /// Merge clave's hook registrations into a settings.json value, keyed on
 /// `clave_bin` (the command path to bake — bare `clave` for dev, the
@@ -793,12 +905,30 @@ pub fn write_generated(dir: &std::path::Path, binary: &str, wasm: &str) -> Resul
         std::fs::create_dir_all(parent)?; // fresh box: ~/.claude may not exist yet
     }
     let mut settings = read_settings(&settings_path)?;
-    if merge_hooks(&mut settings, binary) {
+    // The statusLine slot (#245) rides the same read-merge-write: one more
+    // key, wrapped rather than appended — see `merge_statusline`.
+    let merged = merge_claude_settings(&mut settings, binary);
+    if merged.changed() {
         std::fs::write(&settings_path, serde_json::to_vec_pretty(&settings)?)?;
-        println!("hooks merged into {}", settings_path.display());
-    } else {
-        println!("hooks already registered");
     }
+    println!(
+        "{}",
+        if merged.hooks {
+            format!("hooks merged into {}", settings_path.display())
+        } else {
+            "hooks already registered".to_string()
+        }
+    );
+    println!(
+        "{}",
+        if merged.statusline {
+            format!("statusLine wrapped in {}", settings_path.display())
+        } else if statusline_wrap_allowed(binary) {
+            "statusLine already wrapped".to_string()
+        } else {
+            "statusLine left alone: a dev build bakes bare `clave`, which live sessions resolve to the stable launcher".to_string()
+        }
+    );
 
     // Permissions pre-seed (§7): merge, preserving other plugins.
     let cache = permissions_cache_path()?;
@@ -1616,6 +1746,7 @@ mod tests {
             context_tokens: None,
             context_level: None,
             live_session: None,
+            metered_at: 0,
             buckets: Default::default(),
             model: None,
             provider: None,
@@ -1683,6 +1814,7 @@ mod tests {
             context_tokens: None,
             context_level: None,
             live_session: None,
+            metered_at: 0,
             buckets: Default::default(),
             model: None,
             provider: None,
@@ -1879,6 +2011,7 @@ mod tests {
             context_tokens: None,
             context_level: None,
             live_session: None,
+            metered_at: 0,
             buckets: Default::default(),
             model: None,
             provider: None,
@@ -2199,6 +2332,7 @@ mod tests {
             context_tokens: None,
             context_level: None,
             live_session: None,
+            metered_at: 0,
             buckets: Default::default(),
             model: None,
             provider: None,
@@ -2253,5 +2387,138 @@ mod tests {
         }
         // Vacuity guard: the loop above only proves agreement if it ran.
         assert!(agreed.is_some(), "no versioned reference found at all");
+    }
+
+    // ---- #245: the statusLine slot ----------------------------------------------
+
+    #[test]
+    fn an_empty_statusline_slot_gets_clave_alone() {
+        let mut v = serde_json::json!({});
+        assert!(merge_statusline(&mut v, "clave"));
+        assert_eq!(v["statusLine"]["type"], "command");
+        assert_eq!(v["statusLine"]["command"], "clave statusline");
+    }
+
+    #[test]
+    fn a_users_statusline_command_is_wrapped_as_one_quoted_argument() {
+        let mut v = serde_json::json!({
+            "statusLine": { "type": "command", "command": "bash ~/.claude/statusline-starship.sh", "padding": 2 }
+        });
+        assert!(merge_statusline(&mut v, "clave"));
+        assert_eq!(
+            v["statusLine"]["command"],
+            "clave statusline -- 'bash ~/.claude/statusline-starship.sh'"
+        );
+        assert_eq!(v["statusLine"]["padding"], 2); // untouched
+        // Idempotent: a second run changes nothing and never double-wraps.
+        assert!(!merge_statusline(&mut v, "clave"));
+        assert_eq!(
+            v["statusLine"]["command"],
+            "clave statusline -- 'bash ~/.claude/statusline-starship.sh'"
+        );
+    }
+
+    #[test]
+    fn a_version_bump_rewrites_the_path_and_keeps_the_wrapped_command() {
+        let mut v = serde_json::json!({
+            "statusLine": { "type": "command", "command": "/h/.local/share/clave/bin/clave-v0.3.0 statusline -- 'bash s.sh'" }
+        });
+        let new = "/h/.local/share/clave/bin/clave-v0.4.0";
+        assert!(merge_statusline(&mut v, new));
+        assert_eq!(
+            v["statusLine"]["command"],
+            format!("{new} statusline -- 'bash s.sh'")
+        );
+        assert!(!merge_statusline(&mut v, new));
+    }
+
+    #[test]
+    fn a_single_quote_inside_the_original_survives_the_round_trip() {
+        let original = r#"jq -r '"[\(.model.display_name)]"'"#;
+        let mut v = serde_json::json!({ "statusLine": { "type": "command", "command": original } });
+        assert!(merge_statusline(&mut v, "clave"));
+        let wrapped = v["statusLine"]["command"].as_str().unwrap();
+        assert_eq!(unwrap_statusline(wrapped).as_deref(), Some(original));
+        assert!(!merge_statusline(&mut v, "clave"));
+    }
+
+    #[test]
+    fn a_statusline_of_a_type_clave_does_not_know_is_left_alone() {
+        let before = serde_json::json!({ "statusLine": { "type": "other", "command": "x" } });
+        let mut v = before.clone();
+        assert!(!merge_statusline(&mut v, "clave"));
+        assert_eq!(v, before);
+    }
+
+    #[test]
+    fn unwrap_statusline_matches_our_paths_not_foreign() {
+        assert_eq!(unwrap_statusline("clave statusline").as_deref(), Some(""));
+        assert_eq!(
+            unwrap_statusline("/h/bin/clave-v0.3.0 statusline -- 'bash s.sh'").as_deref(),
+            Some("bash s.sh")
+        );
+        // A hand-written, unquoted wrap still reads back as the command.
+        assert_eq!(
+            unwrap_statusline("clave statusline -- bash s.sh").as_deref(),
+            Some("bash s.sh")
+        );
+        assert_eq!(unwrap_statusline("bash ~/.claude/statusline.sh"), None);
+        assert_eq!(unwrap_statusline("clave-vault statusline"), None);
+        assert_eq!(unwrap_statusline("clave hook Stop"), None);
+    }
+
+    /// The one leak (CONTRIBUTING, #43/#44): a dev setup bakes bare `clave`,
+    /// which the maintainer's LIVE sessions resolve to the stable launcher —
+    /// and a stable clave without this subcommand would blank his status
+    /// line in every Claude session. Only an absolute, version-pinned binary may
+    /// take the slot; hooks are safe with bare `clave` because every version
+    /// has `hook`.
+    #[test]
+    fn only_a_version_pinned_binary_may_wrap_the_statusline() {
+        assert!(statusline_wrap_allowed(
+            "/h/.local/share/clave/bin/clave-v0.4.0"
+        ));
+        assert!(!statusline_wrap_allowed("clave"));
+        assert!(!statusline_wrap_allowed("clave-dev"));
+    }
+
+    /// The write gate is EITHER merge, and a dev binary never takes the
+    /// slot. A `just mutants` survivor (2026-09-01) lived in the IO shell
+    /// until the decision moved here.
+    #[test]
+    fn settings_are_written_when_either_merge_moved_and_dev_never_wraps() {
+        let bin = "/h/.local/share/clave/bin/clave-v0.4.0";
+        let mut v = serde_json::json!({});
+        assert!(merge_hooks(&mut v, bin));
+        // Hooks already current: only the slot moves, and that alone writes.
+        let m = merge_claude_settings(&mut v, bin);
+        assert_eq!(
+            m,
+            SettingsMerge {
+                hooks: false,
+                statusline: true
+            }
+        );
+        assert!(m.changed());
+        let m = merge_claude_settings(&mut v, bin);
+        assert_eq!(
+            m,
+            SettingsMerge {
+                hooks: false,
+                statusline: false
+            }
+        );
+        assert!(!m.changed());
+        // A dev binary merges hooks and leaves the slot untouched.
+        let mut dev = serde_json::json!({});
+        let m = merge_claude_settings(&mut dev, "clave");
+        assert_eq!(
+            m,
+            SettingsMerge {
+                hooks: true,
+                statusline: false
+            }
+        );
+        assert!(dev.get("statusLine").is_none());
     }
 }

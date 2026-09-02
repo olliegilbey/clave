@@ -12,7 +12,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
-use clave::{add, dev, hook, lsview, open, pr, release, setup, spawn, store};
+use clave::{add, dev, hook, lsview, open, pr, release, setup, spawn, statusline, store};
 
 #[derive(Parser)]
 #[command(
@@ -68,6 +68,19 @@ enum Command {
     Hook {
         /// Hook event name, e.g. Stop, Notification, UserPromptSubmit.
         event: String,
+    },
+
+    /// Ingest Claude Code's statusLine JSON (stdin), then hand the same bytes
+    /// to the status line command clave wrapped, exiting with its status.
+    ///
+    /// `clave setup` rewrites `statusLine.command` in settings.json as
+    /// `clave statusline -- '<original>'`; the original runs via `sh -c`, so
+    /// pipes and quotes inside it keep their meaning. No original: clave is
+    /// the whole status line and prints nothing.
+    Statusline {
+        /// The wrapped command, one shell string (joined with spaces if split).
+        #[arg(last = true)]
+        command: Vec<String>,
     },
 
     /// List agents and their current status.
@@ -464,6 +477,20 @@ fn main() -> Result<()> {
             }
             Ok(()) // ALWAYS success
         }
+        Some(Command::Statusline { command }) => {
+            // Same citizenship as `hook`: read stdin, do our best, and let the
+            // WRAPPED command's status be the exit status — a clave bug must
+            // never blank the user's status line.
+            let mut input = String::new();
+            let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input);
+            let env_uuid = std::env::var(clave_types::AGENT_UUID_ENV).ok();
+            std::process::exit(statusline::run_statusline(
+                store::store_paths(),
+                env_uuid.as_deref(),
+                &input,
+                &command,
+            ));
+        }
         Some(Command::Ls { json }) => {
             let paths = store::store_paths()?;
             let s = store::read_store(&paths)?;
@@ -859,5 +886,24 @@ mod tests {
         // clap's value_parser rejects anything else before it ever reaches
         // the handler — the two valid values are named in ITS own error.
         assert!(Cli::try_parse_from(["clave", "rows", "tall"]).is_err());
+    }
+
+    /// #245: the settings.json wrap is `clave statusline -- '<original>'`, one
+    /// shell-quoted argument after the double dash. Bare `clave statusline`
+    /// (an empty slot at setup time) must parse too.
+    #[test]
+    fn statusline_cli_takes_the_wrapped_command_after_a_double_dash() {
+        let cli =
+            Cli::try_parse_from(["clave", "statusline", "--", "bash ~/.claude/statusline.sh"])
+                .expect("must parse");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Statusline { command }) if command == ["bash ~/.claude/statusline.sh"]
+        ));
+        let cli = Cli::try_parse_from(["clave", "statusline"]).expect("must parse");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Statusline { command }) if command.is_empty()
+        ));
     }
 }

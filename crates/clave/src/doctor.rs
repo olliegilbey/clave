@@ -70,6 +70,10 @@ pub struct Facts {
     pub has_embedded_wasm: bool,
     /// (event, clave-entry count) per HOOK_EVENTS — exactly 1 is healthy.
     pub hook_counts: Vec<(String, usize)>,
+    /// Whether `statusLine.command` is clave's wrap (#245). Without it the
+    /// battery, model and effort read from the transcript tail, one response
+    /// behind; a `false` degrades, never breaks.
+    pub statusline_wired: bool,
     pub perms_seeded: bool,
     pub bin_dir_exists: bool,
     /// Semver strings parsed from <data>/bin/clave-v* names.
@@ -359,6 +363,24 @@ pub fn diagnose(f: &Facts) -> Vec<Finding> {
             vec![],
         ));
     }
+    // #245: a missing wrap degrades rather than breaks — the tail readers
+    // still feed the card, one response behind — so this is a Warn.
+    out.push(if f.statusline_wired {
+        setup(
+            Severity::Ok,
+            "Claude statusLine wrapped (battery reads live)".into(),
+            vec![],
+        )
+    } else {
+        setup(
+            Severity::Warn,
+            "Claude statusLine not wrapped".into(),
+            vec![
+                "Run `clave setup` — until then the battery, model and effort read".into(),
+                "from the transcript tail, one response behind.".into(),
+            ],
+        )
+    });
     out.push(if f.perms_seeded {
         setup(Severity::Ok, "Zellij plugin permissions pre-seeded".into(), vec![])
     } else {
@@ -609,6 +631,17 @@ pub fn preflight(required: &[ToolId], context: &str) -> anyhow::Result<()> {
     }
 }
 
+/// Whether the statusLine slot carries clave's wrap — `unwrap_statusline`,
+/// the SAME matcher `merge_statusline` writes with (doctor never guesses a
+/// second form).
+pub fn statusline_wired(settings: &serde_json::Value) -> bool {
+    settings
+        .get("statusLine")
+        .and_then(|s| s.get("command"))
+        .and_then(|c| c.as_str())
+        .is_some_and(|c| crate::setup::unwrap_statusline(c).is_some())
+}
+
 /// Count clave hook entries per event — reuses is_clave_hook_command, the
 /// SAME matcher merge_hooks writes with (doctor never guesses a second form).
 pub fn hook_entry_counts(settings: &serde_json::Value) -> Vec<(String, usize)> {
@@ -719,6 +752,7 @@ pub fn gather() -> anyhow::Result<Facts> {
         wasm_path,
         has_embedded_wasm: crate::release::embedded_wasm().is_some(),
         hook_counts: hook_entry_counts(&settings),
+        statusline_wired: statusline_wired(&settings),
         bin_dir_exists: bin_dir.is_dir(),
         launcher_exists: bin_dir.join(crate::release::LAUNCHER_NAME).is_file(),
         installed_releases,
@@ -910,6 +944,7 @@ mod tests {
                 .iter()
                 .map(|e| (e.to_string(), 1))
                 .collect(),
+            statusline_wired: true,
             perms_seeded: true,
             bin_dir_exists: false,
             launcher_exists: false,
@@ -1256,5 +1291,29 @@ clave can't start — missing required tools:
 ";
         assert_eq!(s, expected);
         assert!(!s.contains("permissions")); // Warn not included
+    }
+
+    #[test]
+    fn an_unwired_statusline_warns_and_a_wired_one_ticks() {
+        let mut facts = base_facts();
+        let f = diagnose(&facts);
+        let wired = f.iter().find(|x| x.label.contains("statusLine")).unwrap();
+        assert_eq!(wired.severity, Severity::Ok);
+        facts.statusline_wired = false;
+        let f = diagnose(&facts);
+        let unwired = f.iter().find(|x| x.label.contains("statusLine")).unwrap();
+        assert_eq!(unwired.severity, Severity::Warn);
+        assert!(unwired.advice.iter().any(|l| l.contains("clave setup")));
+    }
+
+    #[test]
+    fn statusline_wired_reads_the_slot_with_setups_own_matcher() {
+        assert!(!statusline_wired(&serde_json::json!({})));
+        let mut settings = serde_json::json!({
+            "statusLine": { "type": "command", "command": "bash ~/.claude/statusline.sh" }
+        });
+        assert!(!statusline_wired(&settings));
+        crate::setup::merge_statusline(&mut settings, "clave");
+        assert!(statusline_wired(&settings));
     }
 }
