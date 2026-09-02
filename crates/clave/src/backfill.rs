@@ -460,6 +460,38 @@ mod tests {
         );
     }
 
+    /// `derive_for_row` is the resume path's seeder (`own_buckets`): a
+    /// transcript with in-window turns derives a map, one without derives
+    /// None (not an empty map — the caller falls back to the opener's copy
+    /// on None), and a missing transcript is None too.
+    #[test]
+    fn derive_for_row_reads_the_transcript_or_yields_none() {
+        let dir = tempfile::tempdir().unwrap();
+        write_transcript(
+            dir.path(),
+            "/x",
+            "u-warm",
+            &[
+                line("2026-08-20", r#""p1""#, ""),
+                line("2026-08-19", r#""p2""#, ""),
+            ]
+            .join("\n"),
+        );
+        write_transcript(
+            dir.path(),
+            "/x",
+            "u-stale",
+            &line("2026-08-01", r#""long ago""#, ""),
+        );
+        let derive = |uuid: &str| derive_for_row(dir.path(), &["/x"], uuid, None, NOON_ISH);
+        assert_eq!(
+            derive("u-warm"),
+            Some([(NOON_ISH, 1u32), (NOON_ISH - 24, 1)].into())
+        );
+        assert_eq!(derive("u-stale"), None);
+        assert_eq!(derive("u-missing"), None);
+    }
+
     #[test]
     fn a_rotated_row_reads_its_live_conversations_transcript() {
         let dir = tempfile::tempdir().unwrap();
