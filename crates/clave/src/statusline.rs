@@ -51,12 +51,11 @@ use clave_types::AgentSnapshot;
 use serde::Deserialize;
 
 use crate::hook::{
-    battery_level, note_live_session, push_snapshot, resolve_row, restamp_level, short_effort,
-    short_model, smart_zone,
+    battery_level, note_live_session, push_snapshot, resolve_row, restamp_level, smart_zone,
+    take_effort, take_model,
 };
 use crate::store::{
-    AgentRecord, Store, StorePaths, now_unix, read_store, snapshot_from, store_paths,
-    with_store_mut,
+    AgentRecord, Store, StorePaths, now_unix, read_store, snapshot_from, with_store_mut,
 };
 
 /// The subset of Claude Code's statusLine JSON clave reads. Everything else
@@ -194,17 +193,11 @@ pub fn apply_statusline(
     let tokens_before = rec.context_tokens;
     note_live_session(rec, uuid, reading.session_id.as_deref(), own_claude);
     let mut changed = false;
-    if let Some(short) = reading.model.as_deref().map(short_model) {
-        changed |= rec.model.as_deref() != Some(short.as_str());
-        rec.model = Some(short);
-        if rec.provider.as_deref() != Some("claude") {
-            rec.provider = Some("claude".to_string());
-            changed = true;
-        }
+    if let Some(raw) = reading.model.as_deref() {
+        changed |= take_model(rec, raw);
     }
-    if let Some(short) = reading.effort.as_deref().map(short_effort) {
-        changed |= rec.effort.as_deref() != Some(short.as_str());
-        rec.effort = Some(short);
+    if let Some(raw) = reading.effort.as_deref() {
+        changed |= take_effort(rec, raw);
     }
     if let Some(tokens) = reading
         .tokens
@@ -249,18 +242,11 @@ fn wait_code(mut child: Child) -> i32 {
     child.wait().ok().and_then(|s| s.code()).unwrap_or(1)
 }
 
-/// Feed `payload` to `command` and return its exit status. The IO shell
-/// splits this into spawn and wait around the store work; the tests use it
-/// whole.
-pub fn passthrough(payload: &str, command: &str) -> i32 {
-    spawn_passthrough(payload, command).map_or(1, wait_code)
-}
-
 /// The IO shell's decision, with the paths injected so it tests against a
 /// throwaway store. Parse, admit through `resolve_row` (the hook's own gate:
 /// a `session_id` naming a row, or the pane's `CLAVE_AGENT_UUID`), then
 /// PROBE on a lock-free copy and take the flock only when the probe says a
-/// pixel moves. A session outside the fleet, or a reading that changes
+/// pixel moves. An agent session outside the fleet, or a reading that changes
 /// nothing, never reaches the lock — the §6.5 property, and this path's
 /// throttle in practice: most runs of a busy turn end right here.
 pub fn meter(
@@ -289,19 +275,16 @@ pub fn meter(
 /// The whole statusLine flow: hand the bytes on first, meter second, exit
 /// with the wrapped command's status. Errors go to stderr only — the hook's
 /// zero-risk citizenship, and here the user's status line is the thing a
-/// clave bug must never blank.
-pub fn run_statusline(stdin_json: &str, wrapped: &[String]) -> i32 {
+/// clave bug must never blank. `paths` and `env_uuid` are the process's
+/// store and pane, injected so the relay tests against a throwaway store.
+pub fn run_statusline(
+    paths: Result<StorePaths>,
+    env_uuid: Option<&str>,
+    stdin_json: &str,
+    wrapped: &[String],
+) -> i32 {
     let child = (!wrapped.is_empty()).then(|| spawn_passthrough(stdin_json, &wrapped.join(" ")));
-    let env_uuid = std::env::var(clave_types::AGENT_UUID_ENV).ok();
-    match store_paths().and_then(|paths| {
-        meter(
-            &paths,
-            stdin_json,
-            env_uuid.as_deref(),
-            now_unix(),
-            smart_zone(),
-        )
-    }) {
+    match paths.and_then(|paths| meter(&paths, stdin_json, env_uuid, now_unix(), smart_zone())) {
         Ok(Some(snap)) => push_snapshot(&snap),
         Ok(None) => {}
         Err(e) => eprintln!("clave statusline: {e:#}"),
@@ -323,6 +306,11 @@ mod tests {
     use clave_types::DEFAULT_SMART_ZONE_TOKENS as ZONE;
     use clave_types::Status;
     use std::collections::BTreeMap;
+
+    /// Run the wrapped command alone: the relay the tests below pin.
+    fn passthrough(payload: &str, command: &str) -> i32 {
+        spawn_passthrough(payload, command).map_or(1, wait_code)
+    }
 
     /// The first payload captured live from the sandbox (Claude Code 2.1.257,
     /// 2026-09-01), trimmed to the keys clave reads plus a few it must ignore.
@@ -677,6 +665,24 @@ mod tests {
 
     // ---- the IO shell's decision ------------------------------------------------
 
+    /// The whole shell exits with the wrapped command's status whatever the
+    /// store did: no wrapped command is 0, a store that cannot be reached is
+    /// still the wrapped status (a `just mutants` survivor, 2026-09-02).
+    #[test]
+    fn the_shell_exits_with_the_wrapped_status_whatever_the_store_did() {
+        let d = tempfile::tempdir().unwrap();
+        let wrapped = |code: &str| vec!["exit".to_string(), code.to_string()];
+        assert_eq!(
+            run_statusline(Ok(tmp_paths(d.path())), None, "{}", &wrapped("3")),
+            3
+        );
+        assert_eq!(run_statusline(Ok(tmp_paths(d.path())), None, "{}", &[]), 0);
+        assert_eq!(
+            run_statusline(Err(anyhow::anyhow!("no store")), None, "{}", &wrapped("5")),
+            5
+        );
+    }
+
     fn tmp_paths(dir: &std::path::Path) -> crate::store::StorePaths {
         crate::store::StorePaths {
             dir: dir.to_path_buf(),
@@ -688,7 +694,7 @@ mod tests {
     const CAPTURED_UUID: &str = "00000000-0000-4000-8000-c85c00000001";
 
     #[test]
-    fn a_session_outside_the_fleet_never_touches_the_store() {
+    fn an_agent_session_outside_the_fleet_never_touches_the_store() {
         let d = tempfile::tempdir().unwrap();
         let paths = tmp_paths(d.path());
         assert!(meter(&paths, CAPTURED, None, 1000, ZONE).unwrap().is_none());

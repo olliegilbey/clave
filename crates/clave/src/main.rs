@@ -483,7 +483,13 @@ fn main() -> Result<()> {
             // never blank the user's status line.
             let mut input = String::new();
             let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input);
-            std::process::exit(statusline::run_statusline(&input, &command));
+            let env_uuid = std::env::var(clave_types::AGENT_UUID_ENV).ok();
+            std::process::exit(statusline::run_statusline(
+                store::store_paths(),
+                env_uuid.as_deref(),
+                &input,
+                &command,
+            ));
         }
         Some(Command::Ls { json }) => {
             let paths = store::store_paths()?;

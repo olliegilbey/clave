@@ -778,6 +778,29 @@ pub(crate) fn restamp_level(rec: &mut AgentRecord, zone: u32) -> bool {
     moved
 }
 
+/// A row takes a model reading in the raw form both sources carry
+/// (`claude-fable-5-1`), stored short. Returns whether a rendered cell moved.
+/// Provider is "claude" by construction: both readers are Claude Code's own
+/// channels; other providers arrive with their own path, not a guess.
+pub fn take_model(rec: &mut AgentRecord, raw: &str) -> bool {
+    let short = short_model(raw);
+    let mut changed = rec.model.as_deref() != Some(short.as_str());
+    rec.model = Some(short);
+    if rec.provider.as_deref() != Some("claude") {
+        rec.provider = Some("claude".to_string());
+        changed = true;
+    }
+    changed
+}
+
+/// The effort twin of `take_model` (`medium` → `md`).
+pub fn take_effort(rec: &mut AgentRecord, raw: &str) -> bool {
+    let short = short_effort(raw);
+    let changed = rec.effort.as_deref() != Some(short.as_str());
+    rec.effort = Some(short);
+    changed
+}
+
 /// The one store mutation a hook event performs, factored out of run_hook's
 /// lock closure so it unit-tests against a plain `Store`. Returns whether
 /// anything changed; bumps `seq` itself (exactly once) when it did.
@@ -840,21 +863,14 @@ pub fn apply_hook_event(
     // construction here: this tail IS a Claude Code transcript. Other
     // providers arrive with their own hook path, not a guess.
     if let Some(raw) = tail.and_then(model_from_tail) {
-        let short = short_model(&raw);
-        changed |= rec.model.as_deref() != Some(short.as_str());
-        rec.model = Some(short);
-        if rec.provider.as_deref() != Some("claude") {
-            rec.provider = Some("claude".to_string());
-            changed = true;
-        }
+        changed |= take_model(rec, &raw);
     }
     // The card's effort cell: the top-level `effort` on the same assistant
     // lines the model comes from, stored short (`xh`) the way the model is.
     // A tail without one HOLDS the previous reading — an older Claude Code
     // never wrote the field, and blanking a real reading would be a lie.
-    if let Some(short) = tail.and_then(effort_from_tail).map(|e| short_effort(&e)) {
-        changed |= rec.effort.as_deref() != Some(short.as_str());
-        rec.effort = Some(short);
+    if let Some(raw) = tail.and_then(effort_from_tail) {
+        changed |= take_effort(rec, &raw);
     }
     let level_moved = restamp_level(rec, smart_zone());
     // BOTH fields gate the push, not just the level. The glyph only moves once

@@ -646,10 +646,10 @@ pub fn unwrap_statusline(cmd: &str) -> Option<String> {
 
 /// Whether `binary` may be written into the statusLine slot at all. The one
 /// leak (CONTRIBUTING, #43/#44): a dev setup bakes bare `clave`, and the
-/// REAL settings.json is the one every session reads — the maintainer's
-/// live sessions would resolve that name to the stable launcher, whose
+/// REAL settings.json is the one every Claude session reads — the maintainer's
+/// live Claude sessions would resolve that name to the stable launcher, whose
 /// version may not know `statusline` yet, and a failing status line command
-/// blanks the line in every session. Hooks tolerate bare `clave` because
+/// blanks the line in every Claude session. Hooks tolerate bare `clave` because
 /// every version has `hook`; this slot needs the version-pinned absolute
 /// path a release cut bakes, and a dev setup leaves it alone.
 pub fn statusline_wrap_allowed(binary: &str) -> bool {
@@ -2470,7 +2470,7 @@ mod tests {
     /// The one leak (CONTRIBUTING, #43/#44): a dev setup bakes bare `clave`,
     /// which the maintainer's LIVE sessions resolve to the stable launcher —
     /// and a stable clave without this subcommand would blank his status
-    /// line in every session. Only an absolute, version-pinned binary may
+    /// line in every Claude session. Only an absolute, version-pinned binary may
     /// take the slot; hooks are safe with bare `clave` because every version
     /// has `hook`.
     #[test]
