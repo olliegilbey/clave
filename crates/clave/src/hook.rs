@@ -852,14 +852,14 @@ pub fn apply_hook_event(
     // the §6.6 row order share one counter (see Store::mint_ord).
     let ord = s.mint_ord();
     if commitment {
-        let today = crate::store::unix_day(now);
+        let now_hour = crate::store::unix_hour(now);
         if let Some(tab_id) = commit_tab {
             s.tab_order.insert(tab_id, ord);
             // #232: the wall-clock twin of the ordinal above, stamped at the
             // same site so agent tabs and terminal tabs (`touch_in`) share
             // one truth for "how long ago".
             s.tab_touched.insert(tab_id, now);
-            crate::store::bump_bucket(s.tab_buckets.entry(tab_id).or_default(), today);
+            crate::store::bump_bucket(s.tab_buckets.entry(tab_id).or_default(), now_hour);
         }
         if let Some(rec) = s.agents.get_mut(uuid) {
             // Set on the AGENT too, not only the tab: an unbound agent (RC-B,
@@ -867,7 +867,7 @@ pub fn apply_hook_event(
             // commitment, so the dormant row it becomes on close sorts right
             // even if the prune never lands.
             rec.commit_ord = ord;
-            crate::store::bump_bucket(&mut rec.buckets, today);
+            crate::store::bump_bucket(&mut rec.buckets, now_hour);
         }
     }
     true
@@ -1124,7 +1124,7 @@ fn adoption_inputs(raw_cwd: &str, claude_dir: &Path, session: &str) -> Option<Ad
         &[cwd.as_str(), repo_root.as_str()],
         session,
         None,
-        crate::store::unix_day(now_unix()),
+        crate::store::unix_hour(now_unix()),
     );
     Some(AdoptionInputs {
         cwd,
@@ -1906,7 +1906,7 @@ mod tests {
 
     #[test]
     fn a_prompt_buckets_one_commitment_on_record_and_bound_tab() {
-        // A prompt is one commitment: +1 in the record's day bucket AND the
+        // A prompt is one commitment: +1 in the record's hour bucket AND the
         // bound tab's twin — the same doubled bookkeeping as commit_ord/tab_order.
         let mut s = crate::store::Store::default();
         let mut r = rec("u1");
@@ -1928,9 +1928,12 @@ mod tests {
             1700,
             true
         ));
-        let today = crate::store::unix_day(1700);
-        assert_eq!(s.agents["u1"].buckets.get(&today), Some(&1));
-        assert_eq!(s.tab_buckets.get(&4).and_then(|m| m.get(&today)), Some(&1));
+        let now_hour = crate::store::unix_hour(1700);
+        assert_eq!(s.agents["u1"].buckets.get(&now_hour), Some(&1));
+        assert_eq!(
+            s.tab_buckets.get(&4).and_then(|m| m.get(&now_hour)),
+            Some(&1)
+        );
     }
 
     #[test]
