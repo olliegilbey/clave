@@ -1,5 +1,10 @@
 # Alt+a dir picker ranking — design (proposal)
 
+> **Landed on top of #247 (hour buckets).** Where this ratified text says
+> `today`, `unix_day` or `BUCKET_RETAIN_DAYS`, the code reads `now_hour`,
+> `unix_hour` and `BUCKET_RETAIN_HOURS`. Same window (7 days, now 168 hours),
+> same dial, same score; only the bucket key's unit changed.
+
 Status: **ratified 2026-09-02** — Ollie took the recommended default on every
 decision below, and asked for the frecency score to be reused as-is (DRY). Built in the `dir-picker-ranking` branch.
 
