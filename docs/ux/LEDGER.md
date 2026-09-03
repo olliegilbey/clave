@@ -525,11 +525,19 @@ Grilled and ratified with Ollie. The bar's colour language splits in two, and
 Consequences, all accepted at the grill:
 
 - Repo inks HARVEST: `multiplayer_user_colors` first (the format's only
-  "distinguishable identity hues" concept), emphasis slots as top-up; dedupe,
-  skip hues within 48/255 luminance of the bar background or equal to the
-  default ink; pad to eight by cycling. Deterministic per theme, so a repo
-  keeps its colour across restarts. Palette length is FIXED at eight (D7's
-  `Option<u8>` indices persist in the store).
+  "distinguishable identity hues" concept), emphasis slots as top-up; skip
+  hues within 48/255 luminance of the bar background or equal to the default
+  ink. Picks are farthest-first (2026-09-03, the v0.4.0 cut): the first
+  legible hue seeds, each next slot takes the hue most distant from every
+  pick, and a hue nearer to a pick than the curated palette's own closest
+  pair (sakuraPink beside waveRed, 45 in RGB) is a twin and never enters —
+  under zellij's kanagawa that drops one of its two blues and one of its two
+  oranges. A short harvest pads from the curated palette under the same rule;
+  only a harvest still short after that cycles its tail. Before this the pad
+  cycled directly, and with nine repos on kanagawa's seven hues three repos
+  wore oniViolet. Deterministic per theme, so a repo keeps its colour across
+  restarts. Palette length is FIXED at eight (D7's `Option<u8>` indices
+  persist in the store).
 - Stock `DEFAULT_STYLES` ⇒ curated kanagawa (`Theme::default()`, byte-identical
   to the pre-#145 constants — every golden pins it). An unthemed user keeps
   today's exact bar; a deliberate `theme "default"` gets kanagawa too, accepted.

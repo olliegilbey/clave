@@ -112,8 +112,8 @@ pub const PALETTE: [(Rgb, &str); PALETTE_LEN] = [
 
 /// The repo-ink table's FIXED length, under any theme. The persisted ink
 /// indices (`model.rs` allocation, store-backed) and every `i % len` wrap are
-/// written against it; a theme that yields fewer distinct hues pads by cycling
-/// rather than shrinking the table.
+/// written against it; a theme that yields fewer distinct hues pads from the
+/// curated palette rather than shrinking the table.
 pub const PALETTE_LEN: usize = 8;
 
 // ── fixed semantic hues (never themed) ──────────────────────────────────────
@@ -296,6 +296,30 @@ impl Default for Theme {
 /// hue the curated palette considers legible.
 const MIN_INK_LUMA_DIST: f64 = 48.0;
 
+/// Squared RGB distance — the harvest's "how different" measure. Integer and
+/// exact, so the farthest-first ordering is bit-identical on every host and
+/// in the wasm.
+fn dist2(a: Rgb, b: Rgb) -> u32 {
+    let d = |x: u8, y: u8| {
+        let d = i32::from(x) - i32::from(y);
+        (d * d) as u32
+    };
+    d(a.0, b.0) + d(a.1, b.1) + d(a.2, b.2)
+}
+
+/// The closest pair in the curated palette (sakuraPink beside waveRed, 45
+/// apart) — the design's own answer to "how close can two repo inks sit and
+/// still read as two". A harvested hue nearer than this to any pick is a twin,
+/// not an identity. Self-calibrating, like the selection cap in `clamp_sel`.
+fn curated_spread() -> u32 {
+    PALETTE
+        .iter()
+        .enumerate()
+        .flat_map(|(i, a)| PALETTE[i + 1..].iter().map(move |b| dist2(a.0, b.0)))
+        .min()
+        .unwrap_or(0)
+}
+
 /// Rec. 709 relative luminance, in channel units (0–255).
 fn luma(c: Rgb) -> f64 {
     0.2126 * f64::from(c.0) + 0.7152 * f64::from(c.1) + 0.0722 * f64::from(c.2)
@@ -377,15 +401,25 @@ fn clamp_sel(base: Rgb, sel: Rgb, emphasis: Rgb) -> Rgb {
 
 /// Eight repo inks from a theme that never heard of repo inks.
 ///
-/// `multiplayer_user_colors` leads because it is the one place zellij's format
-/// means what the repo palette means — "N mutually distinguishable identity
-/// hues" — then the emphasis slots top up, in a fixed order so the same theme
+/// The pool is every candidate slot below, in a fixed order so the same theme
 /// always yields the same palette (a repo keeps its colour across restarts,
-/// lock §4). Candidates are dropped when they duplicate an earlier pick, sit
-/// closer than [`MIN_INK_LUMA_DIST`] to the bar background, or equal the
-/// default ink (a repo painted exactly like the summary text reads untinted).
-/// Short harvests pad by cycling; an empty one (every slot degenerate) falls
-/// back to the curated palette rather than painting eight holes.
+/// lock §4): `multiplayer_user_colors` leads because it is the one place
+/// zellij's format means what the repo palette means — "N mutually
+/// distinguishable identity hues" — then the emphasis slots. A candidate is
+/// legible when it is not the default ink (a repo painted exactly like the
+/// summary text reads untinted) and clears [`MIN_INK_LUMA_DIST`] from the bar
+/// background.
+///
+/// Picks are farthest-first ([`spread_into`]): the first legible hue seeds,
+/// then each slot takes the pool hue most distant from every pick so far, so
+/// the low slots — the ones a small fleet actually uses — are the starkest
+/// pairs the theme has. A hue nearer than [`curated_spread`] to a pick is a
+/// twin, not an identity, and never enters (kanagawa's two blues, its two
+/// oranges). When the theme runs dry the curated palette pads the rest under
+/// the same rule, so a short theme no longer paints one hue twice. An empty
+/// harvest (every slot degenerate) is the curated palette verbatim; a harvest
+/// still short after the pad (a theme whose hues sit between curated pairs)
+/// cycles its tail, the honest last resort.
 fn harvest(s: &Styling, base: Rgb, default_ink: Rgb) -> [Rgb; PALETTE_LEN] {
     let m = &s.multiplayer_user_colors;
     let candidates = [
@@ -415,24 +449,45 @@ fn harvest(s: &Styling, base: Rgb, default_ink: Rgb) -> [Rgb; PALETTE_LEN] {
         s.exit_code_success.base,
         s.exit_code_error.base,
     ];
-    let mut picked: Vec<Rgb> = Vec::with_capacity(PALETTE_LEN);
-    for c in candidates {
-        let c = rgb(c);
-        if picked.contains(&c)
-            || c == default_ink
-            || (luma(c) - luma(base)).abs() < MIN_INK_LUMA_DIST
-        {
-            continue;
-        }
-        picked.push(c);
-        if picked.len() == PALETTE_LEN {
-            break;
-        }
-    }
-    if picked.is_empty() {
+    let legible: Vec<Rgb> = candidates
+        .into_iter()
+        .map(rgb)
+        .filter(|&c| c != default_ink && (luma(c) - luma(base)).abs() >= MIN_INK_LUMA_DIST)
+        .collect();
+    if legible.is_empty() {
         return Theme::default().palette;
     }
+    let spread = curated_spread();
+    let mut picked: Vec<Rgb> = Vec::with_capacity(PALETTE_LEN);
+    spread_into(&mut picked, &legible, spread);
+    let curated: Vec<Rgb> = PALETTE.iter().map(|p| p.0).collect();
+    spread_into(&mut picked, &curated, spread);
     core::array::from_fn(|i| picked[i % picked.len()])
+}
+
+/// Farthest-first selection: append pool hues to `picked`, each time the one
+/// whose nearest pick is farthest away, until the palette is full or the best
+/// hue left is nearer than `spread` to a pick (everything after it is nearer
+/// still). An empty `picked` takes the pool's first hue. Ties keep pool order,
+/// so the pick is deterministic on every host and in the wasm.
+fn spread_into(picked: &mut Vec<Rgb>, pool: &[Rgb], spread: u32) {
+    while picked.len() < PALETTE_LEN {
+        let mut best: Option<(u32, Rgb)> = None;
+        for &c in pool {
+            let nearest = picked
+                .iter()
+                .map(|&p| dist2(c, p))
+                .min()
+                .unwrap_or(u32::MAX);
+            if best.is_none_or(|(d, _)| nearest > d) {
+                best = Some((nearest, c));
+            }
+        }
+        match best {
+            Some((d, c)) if d >= spread => picked.push(c),
+            _ => return,
+        }
+    }
 }
 
 /// `PaletteColor` → truecolor. Indexed values go through the xterm 256 table
@@ -649,26 +704,129 @@ mod tests {
         assert_eq!(t.chip_ink, Rgb(15, 15, 20), "chip text = base toward black");
     }
 
-    /// The harvest order and every filter, pinned over the real kanagawa
-    /// slots: multiplayer's five live hues lead, the zeros (black — luma too
-    /// close to the bar) are skipped, then the emphasis top-up adds
-    /// surimiOrange and autumnGreen while dropping duplicates and the
-    /// fujiWhite that equals the default ink. Seven distinct hues, so the
-    /// eighth wraps to the first.
+    /// The harvest, pinned over the real kanagawa slots. The legible theme
+    /// hues (multiplayer's five live hues, then the emphasis top-up; black
+    /// slots and the fujiWhite that equals the default ink are out) are taken
+    /// farthest-first: oniViolet leads as the theme's first identity hue, then
+    /// whichever remaining hue is most distant from everything picked. Two
+    /// theme hues never make it — crystalBlue sits 28 from springBlue and
+    /// surimiOrange 43 from roninYellow, both inside the curated spread — so
+    /// the curated palette pads the last three slots under the same rule.
+    /// Eight distinct hues, nothing wraps.
     #[test]
-    fn kanagawa_harvest_yields_seven_distinct_hues_and_wraps() {
+    fn kanagawa_harvest_takes_the_farthest_hues_first_and_pads_from_the_curated_palette() {
         let t = Theme::from_styling(&zellij_kanagawa());
         let expect = [
-            Rgb(149, 127, 184), // player_1 — oniViolet
-            Rgb(126, 156, 216), // player_2 — crystalBlue
-            Rgb(255, 158, 59),  // player_4 — roninYellow (player_3 is black: skipped)
-            Rgb(127, 180, 202), // player_5 — springBlue
-            Rgb(195, 64, 67),   // player_7 — autumnRed
-            Rgb(255, 160, 102), // text emphasis_0 — surimiOrange
-            Rgb(118, 148, 106), // text emphasis_2 — autumnGreen
-            Rgb(149, 127, 184), // wrap: 7 distinct hues pad by cycling
+            Rgb(149, 127, 184),    // player_1 — oniViolet, the seed
+            Rgb(255, 158, 59),     // player_4 — roninYellow, 167 from violet
+            Rgb(195, 64, 67),      // player_7 — autumnRed, 112 from the nearest pick
+            Rgb(118, 148, 106),    // text emphasis_2 — autumnGreen, 87
+            Rgb(127, 180, 202),    // player_5 — springBlue, 60
+            Rgb(0xE6, 0xC3, 0x84), // pad: carpYellow, 86
+            Rgb(0xE4, 0x68, 0x76), // pad: waveRed, 73
+            Rgb(0x98, 0xBB, 0x6C), // pad: springGreen, 52
         ];
         assert_eq!(t.palette, expect);
+    }
+
+    /// Every pair in a harvested palette clears the curated palette's own
+    /// closest pair (sakuraPink beside waveRed) — the bar's definition of
+    /// "distinct enough". This is the property the exact pin above serves.
+    #[test]
+    fn harvested_hues_are_pairwise_at_least_the_curated_spread_apart() {
+        let p = Theme::from_styling(&zellij_kanagawa()).palette;
+        let spread = curated_spread();
+        for (i, a) in p.iter().enumerate() {
+            for b in &p[i + 1..] {
+                assert!(
+                    dist2(*a, *b) >= spread,
+                    "{} and {} sit {} apart, under the curated spread {}",
+                    a.hex(),
+                    b.hex(),
+                    dist2(*a, *b),
+                    spread
+                );
+            }
+        }
+    }
+
+    /// A theme whose one legible hue sits between sakuraPink and waveRed
+    /// kills both pads (each is nearer than the spread), so seven hues survive
+    /// and the eighth slot cycles back to the first — the honest last resort,
+    /// and the only way a harvested palette still repeats a hue.
+    #[test]
+    fn a_harvest_short_even_after_the_pad_cycles_its_tail() {
+        let black = PaletteColor::EightBit(0);
+        let one = StyleDeclaration {
+            base: black,
+            background: black,
+            emphasis_0: PaletteColor::Rgb((219, 115, 135)),
+            emphasis_1: black,
+            emphasis_2: black,
+            emphasis_3: black,
+        };
+        let s = Styling {
+            text_unselected: one,
+            ..all_black()
+        };
+        let p = Theme::from_styling(&s).palette;
+        assert_eq!(p[0], Rgb(219, 115, 135));
+        assert_eq!(p[7], p[0], "the tail cycles");
+        let distinct: std::collections::BTreeSet<(u8, u8, u8)> =
+            p.iter().map(|c| (c.0, c.1, c.2)).collect();
+        assert_eq!(distinct.len(), 7);
+        assert!(
+            !p.contains(&PALETTE[3].0),
+            "waveRed is a twin of the theme hue"
+        );
+        assert!(
+            !p.contains(&PALETTE[7].0),
+            "sakuraPink is a twin of the theme hue"
+        );
+    }
+
+    /// The luma gate is a DISTANCE from the bar background, not a brightness
+    /// floor: on a mid-grey bar a slightly lighter grey is a hole, however
+    /// bright it is in absolute terms. Nothing legible ⇒ the curated fallback.
+    #[test]
+    fn the_luma_gate_measures_distance_from_the_bar_not_brightness() {
+        let grey = PaletteColor::Rgb((80, 80, 80));
+        let near = StyleDeclaration {
+            base: grey,
+            background: grey,
+            emphasis_0: PaletteColor::Rgb((100, 100, 100)),
+            emphasis_1: grey,
+            emphasis_2: grey,
+            emphasis_3: grey,
+        };
+        let s = Styling {
+            text_unselected: near,
+            ..all_of(grey)
+        };
+        assert_eq!(Theme::from_styling(&s).palette, Theme::default().palette);
+    }
+
+    /// The selection stops at a full palette even when the pool has more
+    /// well-separated hues to give, seeds on the pool's first hue, and takes
+    /// the farthest hue next.
+    #[test]
+    fn spread_into_seeds_first_takes_farthest_next_and_stops_when_full() {
+        let pool = [
+            Rgb(0, 0, 0),
+            Rgb(255, 0, 0),
+            Rgb(0, 255, 0),
+            Rgb(0, 0, 255),
+            Rgb(255, 255, 0),
+            Rgb(255, 0, 255),
+            Rgb(0, 255, 255),
+            Rgb(255, 255, 255),
+            Rgb(128, 128, 128),
+        ];
+        let mut picked = Vec::new();
+        spread_into(&mut picked, &pool, curated_spread());
+        assert_eq!(picked.len(), PALETTE_LEN);
+        assert_eq!(picked[0], Rgb(0, 0, 0));
+        assert_eq!(picked[1], Rgb(255, 255, 255));
     }
 
     /// A theme whose every candidate is degenerate (all slots black on a black
@@ -676,32 +834,55 @@ mod tests {
     /// fallback of last resort.
     #[test]
     fn an_all_degenerate_harvest_falls_back_to_the_curated_palette() {
-        let black = StyleDeclaration {
-            base: PaletteColor::EightBit(0),
-            background: PaletteColor::EightBit(0),
-            emphasis_0: PaletteColor::EightBit(0),
-            emphasis_1: PaletteColor::EightBit(0),
-            emphasis_2: PaletteColor::EightBit(0),
-            emphasis_3: PaletteColor::EightBit(0),
+        assert_eq!(
+            Theme::from_styling(&all_black()).palette,
+            Theme::default().palette
+        );
+    }
+
+    /// Every slot black on a black background: nothing legible anywhere.
+    fn all_black() -> Styling {
+        all_of(PaletteColor::EightBit(0))
+    }
+
+    /// Every slot, multiplayer included, painted one colour.
+    fn all_of(c: PaletteColor) -> Styling {
+        let flat = StyleDeclaration {
+            base: c,
+            background: c,
+            emphasis_0: c,
+            emphasis_1: c,
+            emphasis_2: c,
+            emphasis_3: c,
         };
-        let s = Styling {
-            text_unselected: black,
-            text_selected: black,
-            ribbon_selected: black,
-            ribbon_unselected: black,
-            table_title: black,
-            table_cell_selected: black,
-            table_cell_unselected: black,
-            list_selected: black,
-            list_unselected: black,
+        Styling {
+            text_unselected: flat,
+            text_selected: flat,
+            ribbon_selected: flat,
+            ribbon_unselected: flat,
+            table_title: flat,
+            table_cell_selected: flat,
+            table_cell_unselected: flat,
+            list_selected: flat,
+            list_unselected: flat,
             frame_unselected: None,
-            frame_selected: black,
-            frame_highlight: black,
-            exit_code_success: black,
-            exit_code_error: black,
-            multiplayer_user_colors: MultiplayerColors::default(),
-        };
-        assert_eq!(Theme::from_styling(&s).palette, Theme::default().palette);
+            frame_selected: flat,
+            frame_highlight: flat,
+            exit_code_success: flat,
+            exit_code_error: flat,
+            multiplayer_user_colors: MultiplayerColors {
+                player_1: c,
+                player_2: c,
+                player_3: c,
+                player_4: c,
+                player_5: c,
+                player_6: c,
+                player_7: c,
+                player_8: c,
+                player_9: c,
+                player_10: c,
+            },
+        }
     }
 
     /// The selection clamp's three regimes, pinned. A quiet selection
