@@ -498,14 +498,19 @@ pub fn ranked_dir_candidates(
     use std::cmp::Reverse;
     use std::collections::{BTreeMap, HashMap, HashSet};
 
-    // zoxide's opinion of a dir: its first position in the list.
+    // zoxide's order is the memory for everything the store has not driven
+    // this week (spec § UX principles 3), so a dir's rank is its first
+    // position there; `or_insert` keeps it stable should the list repeat a path.
     let mut zrank: HashMap<&str, usize> = HashMap::new();
     for (i, d) in zoxide.iter().enumerate() {
         zrank.entry(d.as_str()).or_insert(i);
     }
 
-    // Store clusters by root: members are (path, wt, own millis) with the
-    // root always first; the cluster's weight is its rows' sum.
+    // A repo's dirs travel together (spec § UX principles 4, #234 applied to
+    // the picker): the root is member 0 so it leads its cluster whatever its
+    // own weight, and the cluster ranks by its rows' summed millis, the
+    // number the bar's repo layer ranks clusters by. Members are
+    // (path, wt, own millis).
     type Members = Vec<(String, bool, u64)>;
     let lead = |root: &str| -> (Members, u64) { (vec![(root.to_string(), false, 0)], 0) };
     let mut clusters: BTreeMap<&str, (Members, u64)> = BTreeMap::new();
@@ -529,7 +534,9 @@ pub fn ranked_dir_candidates(
         }
     }
 
-    // Rank clusters; cwd is pinned first and everything else appears once.
+    // cwd first, once (spec § UX principles 5): "another agent here" is the
+    // default action, so cwd is pre-placed and its duplicate in any cluster
+    // or in zoxide's list is dropped.
     let mut cwd_wt = false;
     let mut placed: HashSet<String> = HashSet::from([cwd.to_string()]);
     type Key<'a> = (Reverse<u64>, usize, &'a str); // weight desc, zoxide rank, root

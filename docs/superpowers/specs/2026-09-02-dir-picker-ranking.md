@@ -43,10 +43,13 @@ removes ADJACENT duplicates, so zoxide's own copy survives further up.
    the cursor starts, where the next screen's `new`/`resume` choice sits,
    and where Claude's own input line lives. The eye never has to travel to
    the top of the pane. `--layout=reverse` is rejected, for every picker.
-2. **One score, two surfaces.** The picker ranks a repo by the same number
-   the sidebar's repo layer ranks its cluster by: Σ over the repo's rows of
-   `frecency_millis(buckets, today, half_life)`. If the bar shows olympus
-   above clave, the picker does too. No second frecency, no new dial.
+2. **One score, two surfaces.** The picker ranks a repo by Σ over the
+   repo's rows of `frecency_millis(buckets, now_hour, half_life)`, the same
+   per-row score the sidebar's repo layer sums for its clusters. No second
+   frecency, no new dial. The two orders can still differ: the bar's live
+   block sums live rows only, while the picker also weighs dormant rows (a
+   repo driven this week and closed still ranks), so a repo with dormant
+   weight may sit higher here than in the bar.
 3. **Nothing known is hidden, nothing remembered is dropped.** A dir zoxide
    knows and clave has never opened still appears, in zoxide's order, above
    the store-ranked block (further from the prompt). Store knowledge
@@ -97,20 +100,21 @@ so a store root and its zoxide twin collapse to one line. A symlinked
 zoxide entry stays its own line — today's behaviour, unchanged.
 
 `half_life` is the store's dial when `Store.order` is `Frecency`; a fleet in
-`Recency` mode uses the default 24h. `today` is `unix_day(now_unix())`,
+`Recency` mode uses the default 24h. `now_hour` is `unix_hour(now_unix())`,
 the store's own arithmetic.
 
 ### Data flow in `run_add`, step 1
 
-```
+```text
 cwd
-zoxide query -l                       (ordered, as today)
-store (lock-free read, as today)      → rows: (repo_root, cwd, buckets)
-store_worktree_dirs                   (as today)
-today, half_life
+zoxide query -l                       (ordered, as before)
+store (lock-free read, as before)
+store_dirs(git, store, now_hour)      → StoreDirs { roots,
+                                          worktrees: (root, path, linked),
+                                          rows: (repo_root, cwd, frecency_millis) }
         │
         ▼
-ranked_dir_candidates(...) -> Vec<(String /*path*/, bool /*wt*/)>
+ranked_dir_candidates(cwd, zoxide, &StoreDirs) -> Vec<(String /*path*/, bool /*wt*/)>
         │
         ▼
 dir_line / fzf_pick / picked_dir      (untouched)
