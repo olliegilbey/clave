@@ -840,12 +840,18 @@ mod tests {
         );
     }
 
-    /// Every slot black on a black background: nothing legible anywhere.
+    /// The all-degenerate theme: black on a black bar in every slot, so no
+    /// candidate clears [`MIN_INK_LUMA_DIST`] and the harvest reaches its
+    /// fallback of last resort (LEDGER.md, repo inks HARVEST: an empty harvest
+    /// is the curated palette, never eight holes).
     fn all_black() -> Styling {
         all_of(PaletteColor::EightBit(0))
     }
 
-    /// Every slot, multiplayer included, painted one colour.
+    /// One flat colour in every slot, multiplayer included, so every candidate
+    /// equals the bar base and fails the luma gate by construction. A test that
+    /// then overrides ONE slot has isolated that slot's fate: it is the only
+    /// candidate that can enter the harvest at all.
     fn all_of(c: PaletteColor) -> Styling {
         let flat = StyleDeclaration {
             base: c,
