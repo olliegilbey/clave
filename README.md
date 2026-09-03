@@ -48,7 +48,7 @@ Pairs well with [rot-reducer](https://github.com/olliegilbey/rot-reducer), a plu
 ## Try it
 
 You need [`zellij`](https://zellij.dev) (0.44.3 is what's tested), `claude`,
-`git`, plus `fzf` and `zoxide` for the directory picker, and a
+`git`, plus `fzf` and `zoxide` for the directory picker (your fleet ranks it, zoxide fills in the rest), and a
 [Nerd Font](https://www.nerdfonts.com/) in your terminal, version 3.5 or newer
 so the provider icons have glyphs. macOS and Linux.
 
