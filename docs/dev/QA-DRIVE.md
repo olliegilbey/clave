@@ -10,8 +10,10 @@ owns everything they structurally cannot reach._
 
 One script, `scripts/qa-drive.sh <scenario>`, driven **by an agent** against
 the per-worktree sandbox (`clave dev instance`), every zellij touch through
-`scripts/ct.sh` (fail-closed — Z14). The human launches and kills; the agent
-stages, drives, joins, and reports; two eyeball checkpoints go to the human.
+`scripts/ct.sh` (fail-closed — Z14). The human launches; the agent stages,
+drives, joins, and reports; two eyeball checkpoints go to the human; once
+both are in, the agent may kill the sandbox it asked for (TESTING.md's
+lifecycle exemption) or print the pair and leave it to the human.
 This is the drive loop (TESTING.md) made executable — its nine steps are the
 skeleton, phases below are the flesh.
 
@@ -51,7 +53,7 @@ loudly and stops the run; later phases assume earlier truth.
 | 4 | Ring walk | pick into the dormant block, walk both directions, wrap; Alt+Enter one commit | single executor (one focus change per press, never two); walk stays in-block; commit opens exactly one tab | P1 (#162), P2, P16, K8 — becomes single-ring on #179 |
 | 5 | Collapse burst | 12× toggle with pauses, then 5× rapid, then 1 more | store writes per press ≤ 2; every paced press lands its store flip within a bounded wait; the rapid burst settles at parity (per-instance snapshots are not observable from outside — the store flag plus the phase-5 eyeball stand in for them); bar still answers press 18 | B6–B9, B10/B11, P5 |
 | 6 | Quiescence | idle 60s | evlog and store `seq` flat; zellij log flat after the mark for sandbox-attributable lines only (the shared log is never globally flat with a live maintainer fleet — see Delivery accounting) | P17, B19/B20, drive step 6 |
-| 7 | Teardown | nothing | prints the kill pair for the human | drive step 9 |
+| 7 | Teardown | nothing | prints the kill pair (the agent may run it once both eyeballs are in) | drive step 9 |
 
 **Eyeball checkpoints** (human, one message each): after phase 2 — one bar
 per tab, woken rows show agent chips not terminal glyphs; after phase 5 —

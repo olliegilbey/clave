@@ -1830,7 +1830,7 @@ The two eyeball checkpoints (human, one message each — QA-DRIVE):
   1. one bar per tab; woken rows show agent chips, not terminal glyphs
   2. every tab a strip (or every tab wide) — no width outliers
 
-Teardown, when done (human, non-zellij terminal):
+Teardown, when done (human, or the agent that asked for this sandbox once both eyeballs are in):
   zellij kill-session ${SESSION}
   zellij delete-session --force ${SESSION}
 EOF
