@@ -94,7 +94,8 @@ Two invariants:
 ## The rule that matters most
 
 **Never install over a running clave session, and never kill or launch a session
-on someone else's behalf.**
+on someone else's behalf.** (The one exemption — an agent killing its own
+completed drive sandbox — is in TESTING.md's sandbox drive loop.)
 
 A live session only ever loads the versioned files baked into the config it
 generated at launch, so a normal release lands atomically at the *next* launch

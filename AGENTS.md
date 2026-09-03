@@ -36,9 +36,13 @@ a `vX.Y.Z` tag plus `just release` is the promotion event.
 the Claude you are is running _inside_ a live clave session, so a bare `zellij`
 command targets his working fleet. Against `clave-test` you may run `zellij
 action` freely (`ZELLIJ_SESSION_NAME=clave-test …` — stage it with `just
-sandbox`); against his session you run nothing, not even a read. **Launching or
-killing any session is his**, as is `just release` and anything writing
-`~/.local/share/clave/`. Print those; let him run them. The loop is
+sandbox`); against his session you run nothing, not even a read. **Launching
+any session is his**, as is `just release` and anything writing
+`~/.local/share/clave/`. Print those; let him run them. Killing is his too,
+with one exemption: a sandbox you asked him to launch in this conversation,
+once its drive and both eyeball checkpoints are done — kill it by its explicit
+name (`clave dev instance --field session`), never a sandbox another agent
+staged (each has its own name and root). The loop is
 [docs/dev/TESTING.md](docs/dev/TESTING.md) § the sandbox drive loop.
 
 Something behaving strangely? Grep FOOTGUNS.md before you start debugging.

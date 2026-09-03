@@ -17,8 +17,8 @@ map and the sanctioned-command list are binding here and are not repeated.
 
 | Who | Does |
 |---|---|
-| **agent** | Part A, the QA-drive gate (once the maintainer has launched its sandbox session), and Part D. Reads logs, the store, `clave dev status`. During the gate, runs **sandbox-scoped** zellij actions through `scripts/ct.sh` only; **prints** launch and kill commands, and every other zellij command; never launches or kills a session. Never runs `just release`. |
-| **maintainer** | The tag, `just release`, launching the QA drive's sandbox session, every keypress in Part C, killing a session, and the go/no-go. **The tag is pushed only after the go** — Part B. |
+| **agent** | Part A, the QA-drive gate (once the maintainer has launched its sandbox session), and Part D. Reads logs, the store, `clave dev status`. During the gate, runs **sandbox-scoped** zellij actions through `scripts/ct.sh` only; **prints** the launch command and every other zellij command; never launches a session; may kill the gate's sandbox once the drive and both eyeballs are done (TESTING.md's lifecycle exemption). Never runs `just release`. |
+| **maintainer** | The tag, `just release`, launching the QA drive's sandbox session, every keypress in Part C, killing any session the exemption does not cover, and the go/no-go. **The tag is pushed only after the go** — Part B. |
 
 ---
 

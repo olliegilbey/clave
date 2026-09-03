@@ -743,10 +743,14 @@ There is a hard division of labor, and it is not negotiable:
   `clave-test`, an agent may run `zellij action` freely — open tabs, close tabs,
   list panes, dump layout. Against the maintainer's session it may run nothing
   at all, not even a read: `list-panes` there is his to run and paste back.
-  Session **lifecycle** — launching or killing even `clave-test` — stays his
-  either way. clave's own `dev` subcommands follow this by construction: `dev
-  reset` prints the kill-session command rather than executing it, and the
-  module never launches or kills a Zellij session itself.
+  Session **lifecycle** stays his either way, with one exemption (ratified
+  2026-09-03, after the v0.4.0 gate): the agent may kill a sandbox it asked
+  him to launch in the same conversation, once the drive on it and both
+  eyeball checkpoints are done — by explicit name, after `clave dev status`
+  reports it live, and never a sandbox another agent staged (per-worktree
+  instances have their own names and roots). Launching is never the agent's.
+  clave's own `dev` subcommands never launch or kill by construction: `dev
+  reset` prints the kill-session command rather than executing it.
 
 The asymmetry is the point. A sandbox is disposable and a mistake there costs a
 `dev reset`; the same mistake against the daily fleet costs the maintainer his
