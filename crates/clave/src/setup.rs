@@ -1112,8 +1112,9 @@ pub fn run_setup() -> Result<()> {
     // machine that cuts a release skipped the backfill on the v0.2.1 cut
     // (found live, Part C, 2026-08-21). Every setup path wants it anyway:
     // upgrade-refresh (via this call), a fresh install (no-op: no rows), and
-    // the sanctioned idempotent `clave setup` — which makes it reachable on
-    // demand. Seed-only + best-effort, so re-running is free and a failure
+    // the sanctioned idempotent `clave setup`. The cut seeds at its own tail
+    // now (`release::run_release`), since it never reaches this function at
+    // all. Seed-only + best-effort, so re-running is free and a failure
     // cannot break setup.
     crate::backfill::run_on_version_refresh();
     Ok(())
