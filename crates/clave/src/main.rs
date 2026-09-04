@@ -224,6 +224,12 @@ enum Command {
         json: bool,
     },
 
+    /// Re-derive frecency buckets from the Claude transcripts for every
+    /// store row that carries no live weight — the recovery path for a store
+    /// an older cut left un-migrated. Seed-only and idempotent: a row that
+    /// already has current buckets is untouched.
+    Backfill,
+
     /// Open a known store row's tab (plugin-internal, §6.3 C8): the bar fires
     /// this when a dormant row's focus settles or on an explicit pick.
     #[command(hide = true)]
@@ -687,6 +693,7 @@ fn main() -> Result<()> {
         }
         Some(Command::Setup) => setup::run_setup(),
         Some(Command::Doctor { json }) => clave::doctor::run_doctor(json),
+        Some(Command::Backfill) => clave::backfill::run_backfill(),
         Some(Command::Open { uuid, collapsed }) => open::run_open(&uuid, collapsed),
         Some(Command::Dev { action }) => match action {
             DevAction::Scenario { name } => dev::run_scenario(&name),
@@ -705,6 +712,15 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The recovery verb for a store the cut left un-migrated (v0.4.0
+    /// day→hour buckets): `clave backfill` must reach the same seed the
+    /// setup tail runs, with no args and no subcommand of its own.
+    #[test]
+    fn backfill_is_a_bare_verb() {
+        let cli = Cli::try_parse_from(["clave", "backfill"]).expect("must parse");
+        assert!(matches!(cli.command, Some(Command::Backfill)));
+    }
 
     /// Issue #5 (CodeRabbit CLI, PR #13): the plugin shells
     /// `clave collapse true|false` — pin that the positional literally

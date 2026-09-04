@@ -229,33 +229,99 @@ pub fn backfill_store(s: &mut Store, claude_dir: &Path, now_hour: u32) -> usize 
 }
 
 /// Fired at the tail of every `setup::run_setup` (first run, upgrade
-/// refresh, and the idempotent `clave setup` — the maintainer flow's only
-/// reachable path, since `clave release` pre-installs the wasm and the
-/// launch refresh therefore never fires on the cutting machine).
+/// refresh, and the idempotent `clave setup`), at the tail of
+/// `release::run_release`, and on demand as `clave backfill`. The release
+/// call site is not redundant: a cut never runs `run_setup` — it calls
+/// `write_generated` and the settings merge directly — so before it existed
+/// the machine that CUT a release was the one machine that never migrated
+/// its own store (found live on the v0.4.0 cut, 2026-09-04).
 /// Best-effort by design: a failed backfill must never block a launch (the
 /// same zero-risk stance as the evlog). Quiet when there was nothing to do —
 /// most refreshes find a fully-earned store.
 pub fn run_on_version_refresh() {
-    let res = (|| -> anyhow::Result<usize> {
-        let paths = crate::store::store_paths()?;
-        let claude_dir = crate::env::claude_config_dir()?;
-        let now_hour = crate::store::unix_hour(crate::store::now_unix());
-        crate::store::with_store_mut(&paths, |s| backfill_store(s, &claude_dir, now_hour))
-    })();
-    match res {
-        Ok(0) => {}
-        Ok(n) => {
-            println!("clave: seeded frecency for {n} row(s) from transcripts");
-            crate::evlog::log_event("backfill", &format!("{n} rows seeded from transcripts"));
-        }
+    match backfill_now() {
+        Ok(n) => announce(n),
         Err(e) => eprintln!("clave backfill: {e:#}"),
     }
+}
+
+/// The seed itself: every row that carries no live weight re-derives from its
+/// transcript. The count is rows CHANGED, so a healthy store returns 0.
+pub fn backfill_now() -> anyhow::Result<usize> {
+    let paths = crate::store::store_paths()?;
+    let claude_dir = crate::env::claude_config_dir()?;
+    let now_hour = crate::store::unix_hour(crate::store::now_unix());
+    crate::store::with_store_mut(&paths, |s| backfill_store(s, &claude_dir, now_hour))
+}
+
+/// The line a seed of `n` rows reports, or nothing at all. Silent on zero:
+/// most refreshes find a fully-earned store, and a launch must not narrate a
+/// no-op. Split out from the printing so the boundary is testable — the
+/// operator reads this line to decide whether a re-cut migrated the store.
+fn seeded_line(n: usize) -> Option<String> {
+    (n > 0).then(|| format!("clave: seeded frecency for {n} row(s) from transcripts"))
+}
+
+/// One outcome line, shared so the verb and the tails say the same thing.
+fn announce(n: usize) {
+    if let Some(line) = seeded_line(n) {
+        println!("{line}");
+        crate::evlog::log_event("backfill", &format!("{n} rows seeded from transcripts"));
+    }
+}
+
+/// `clave backfill` — the hand-run recovery path for a store an older cut
+/// left un-migrated. Unlike the setup and release tails this one is NOT
+/// best-effort: a human running the repair verb must see a failure in the
+/// exit code, and a zero result must say so rather than print nothing at
+/// all (CodeRabbit CLI, 2026-09-04).
+pub fn run_backfill() -> anyhow::Result<()> {
+    let n = backfill_now()?;
+    println!("{}", verb_line(n));
+    // Unconditional, unlike the tails: an operator running the repair by hand
+    // wants the log to show the attempt, including the one that found nothing.
+    crate::evlog::log_event("backfill", &format!("{n} rows seeded on request"));
+    Ok(())
+}
+
+/// What the hand-run verb says. Silence is an acceptable answer on a launch;
+/// to an operator who just ran the repair it is indistinguishable from a
+/// broken verb, so zero gets its own sentence.
+fn verb_line(n: usize) -> String {
+    seeded_line(n).unwrap_or_else(|| {
+        "clave: every store row already carries frecency; nothing to seed".to_string()
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::store::AgentRecord;
+
+    /// The repair verb must answer even when it changed nothing — a silent
+    /// exit 0 reads as a broken verb to the operator running it by hand.
+    #[test]
+    fn the_verb_says_something_on_an_empty_seed() {
+        assert!(verb_line(0).contains("nothing to seed"));
+        assert_eq!(verb_line(3), seeded_line(3).unwrap());
+    }
+
+    /// The operator's only signal that a cut migrated the store. A zero seed
+    /// must print NOTHING on the launch path (a healthy refresh is silent),
+    /// and a non-zero seed must name the count — the re-cut check is
+    /// literally "did this line appear, and was N above zero".
+    #[test]
+    fn the_seed_line_is_silent_on_zero_and_names_the_count() {
+        assert_eq!(seeded_line(0), None);
+        assert_eq!(
+            seeded_line(1).as_deref(),
+            Some("clave: seeded frecency for 1 row(s) from transcripts")
+        );
+        assert_eq!(
+            seeded_line(79).as_deref(),
+            Some("clave: seeded frecency for 79 row(s) from transcripts")
+        );
+    }
 
     /// 2026-08-20 = day 20685 (1787184000 / 86400), cross-checked against
     /// `date +%s` the day the day-keyed parser landed; hours are day × 24 +

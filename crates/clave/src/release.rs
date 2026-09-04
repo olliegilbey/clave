@@ -397,6 +397,16 @@ pub fn run_release(wasm_src: &Path, cli_src: &Path) -> Result<()> {
         installed.display(),
         launcher.display()
     );
+    // The cut owns the store migration too. `clave release` never calls
+    // `run_setup`, so setup's backfill tail does not fire on the cutting
+    // machine — the v0.4.0 cut installed cleanly and left the maintainer's
+    // own fleet on day-era bucket keys, which the hour-era bar reads as
+    // decades stale (found live, 2026-09-04). LAST, after the launcher
+    // install and its coherence check, so a cut that failed to land never
+    // migrates a store. Best-effort inside: a failed backfill prints and
+    // never fails the cut.
+    crate::backfill::run_on_version_refresh();
+
     println!(
         "released v{version}:\n  {}\n  {}\n{}",
         wasm_dst.display(),
@@ -411,6 +421,38 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    /// A cut must migrate the store it just upgraded. `clave release` never
+    /// calls `run_setup`, so the backfill wired into setup's tail does not
+    /// fire on the cutting machine — the maintainer's own fleet came back
+    /// cold from the v0.4.0 cut with day-era bucket keys (found live,
+    /// 2026-09-04). Nothing about `run_release` is unit-testable end to end
+    /// (it gates on a clean tree and a HEAD tag), so this is a source
+    /// tripwire: the call must exist, and must sit AFTER the launcher
+    /// install, so a cut that failed to install never migrates.
+    #[test]
+    fn the_release_tail_seeds_frecency_after_the_launcher_lands() {
+        let src = include_str!("release.rs");
+        // Truncate at the test module: this file's own tests mention both
+        // names, so an untruncated scan would pass on itself.
+        let body = src
+            .split_once("pub fn run_release(")
+            .expect("run_release must exist")
+            .1
+            .split_once("#[cfg(test)]")
+            .expect("the test module must follow")
+            .0;
+        let install = body
+            .find("install_launcher(&bin_dir")
+            .expect("the cut must install the launcher");
+        let backfill = body
+            .find("backfill::run_on_version_refresh()")
+            .expect("the cut must seed frecency from the transcripts");
+        assert!(
+            install < backfill,
+            "the backfill must run after the launcher install, not before"
+        );
+    }
 
     #[test]
     fn versioned_names_embed_the_version() {
