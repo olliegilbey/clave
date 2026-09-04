@@ -1,6 +1,8 @@
 # clave 🥁
 
-## Terminal sidebar for agent orchestration
+**C**ommand **L**ine **A**gent **V**iew **E**ngine
+
+## The tool for **C**onducting **L**ots of **A**gents, **V**ery **E**ffectively
 
 **Coordinate your many agents with ease from a terminal sidebar - giving you glanceable information and quick navigation - where you are right at home already.**
 
