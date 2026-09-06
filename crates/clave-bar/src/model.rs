@@ -7968,9 +7968,19 @@ mod tests {
         m.opening.insert("u1".into());
         assert_eq!(status_at(&m, ROW), Some(RowStatus::Opening), "in flight");
 
+        // The spin-up window: snapshots keep arriving before `clave bind`
+        // writes anything, and the mark must ride them out — clearing here
+        // would mean the ↻ never showed at all.
+        m.apply_snapshot(snap(2, vec![agent("u1", Status::Working, None)]));
+        assert_eq!(
+            status_at(&m, ROW),
+            Some(RowStatus::Opening),
+            "an unbound row is still spinning up"
+        );
+
         // The open lands: `clave bind` writes the tab into the store, and the
         // snapshot reaches every instance — including this blind one.
-        m.apply_snapshot(snap(2, vec![agent("u1", Status::Working, Some(10))]));
+        m.apply_snapshot(snap(3, vec![agent("u1", Status::Working, Some(10))]));
         assert!(
             m.opening.is_empty(),
             "the store's bind resolves the open even where the tab is unseen"
