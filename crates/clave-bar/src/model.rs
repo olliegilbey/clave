@@ -1368,7 +1368,8 @@ impl BarModel {
     /// the row went live (open succeeded), or the snapshot flagged it stale
     /// (open failed). Called after every input that changes the join picture.
     ///
-    /// **The store's `tab_id` leads, and it has to.** `is_dormant` is an
+    /// **The store's `tab_id` leads, and it has to** (§6.6 Design B — the
+    /// snapshot bind is the join every instance shares). `is_dormant` is an
     /// instance-local question, and the instance that fires an open is exactly
     /// the one that goes blind: firing moves focus to the new tab, and zellij
     /// delivers `TabUpdate` only to the ACTIVE tab's instance. So the firing
@@ -1377,6 +1378,15 @@ impl BarModel {
     /// The store's binding is the cross-instance truth every instance receives
     /// in the snapshot, and it cannot precede the tab — `clave open` creates
     /// the tab, then the bar's `clave bind` writes the id.
+    ///
+    /// Honest residual: a row still carrying a SUPERSEDED `tab_id` (its tab
+    /// died and the `clave prune-tabs` repair below has not landed yet) clears
+    /// its mark on the first snapshot, so the ↻ never renders for that open.
+    /// Cosmetic, in an already-degraded state, self-healing on the next
+    /// TabUpdate, and `clave open`'s liveness no-op remains the second
+    /// double-fire guard. Tracking the binding observed at fire time would
+    /// close it, at the cost of turning `opening` into a map — take that step
+    /// only if the window is ever observed to bite.
     fn prune_opening(&mut self) {
         let resolved: Vec<String> = self
             .opening
