@@ -1373,20 +1373,37 @@ impl BarModel {
     /// instance-local question, and the instance that fires an open is exactly
     /// the one that goes blind: firing moves focus to the new tab, and zellij
     /// delivers `TabUpdate` only to the ACTIVE tab's instance. So the firing
-    /// bar never sees the tab appear and would wear ↻ for the tab's whole
-    /// life, outranking the row's real status (see `agent_content`'s tier).
-    /// The store's binding is the cross-instance truth every instance receives
-    /// in the snapshot, and it cannot precede the tab — `clave open` creates
-    /// the tab, then the bar's `clave bind` writes the id.
+    /// bar never sees the tab appear, and if that tab then DIES before the bar
+    /// ever observes it live, `is_dormant` stays true forever and the mark is
+    /// immortal — outranking the row's real status (see `agent_content`'s
+    /// tier) for the rest of the bar's life, refocusing included. The store's
+    /// binding is the cross-instance truth every instance receives in the
+    /// snapshot, and it cannot precede the tab: `clave open` creates the tab,
+    /// then the bar's `clave bind` writes the id (`store.rs`, the only writer
+    /// of a non-null `tab_id`).
     ///
-    /// Honest residual: a row still carrying a SUPERSEDED `tab_id` (its tab
-    /// died and the `clave prune-tabs` repair below has not landed yet) clears
-    /// its mark on the first snapshot, so the ↻ never renders for that open.
-    /// Cosmetic, in an already-degraded state, self-healing on the next
-    /// TabUpdate, and `clave open`'s liveness no-op remains the second
-    /// double-fire guard. Tracking the binding observed at fire time would
-    /// close it, at the cost of turning `opening` into a map — take that step
-    /// only if the window is ever observed to bite.
+    /// **Two honest residuals**, both recorded from review rather than fixed;
+    /// each needs a state that is already degraded, and both leave `clave
+    /// open`'s liveness no-op standing as the second double-fire guard.
+    ///
+    /// 1. A row carrying a SUPERSEDED `tab_id` — its tab died and the
+    ///    `clave prune-tabs` repair below has not landed — clears its mark on
+    ///    the first snapshot, so no ↻ renders for that open. Cosmetic, and it
+    ///    self-heals on the next TabUpdate. Same shape when nothing ever
+    ///    witnessed the tab die: the clear means "the store says bound", not
+    ///    "this open landed".
+    /// 2. A bar STALLED below the bind's `seq` for that tab's whole life can
+    ///    consume the bind snapshot after firing a fresh open, clearing the
+    ///    mark mid-flight; a second commit inside the spin-up window would then
+    ///    pass both guards, since `open_is_live` reads the store's CURRENT
+    ///    (still unbound) row. Any consumed snapshot at or past the close
+    ///    discards the stale one by the §5 seq gate, so the window closes
+    ///    itself the moment the bar is not stalled.
+    ///
+    /// Recording the binding seen at fire time does NOT close (2) — a stalled
+    /// bar records the same `None` the store had. Closing it properly means
+    /// resolving the mark on the open's own completion rather than on any
+    /// store field; take that step only if the window is observed to bite.
     fn prune_opening(&mut self) {
         let resolved: Vec<String> = self
             .opening
@@ -7995,10 +8012,13 @@ mod tests {
             m.opening.is_empty(),
             "the store's bind resolves the open even where the tab is unseen"
         );
-        assert_ne!(
+        // Dormant, not Working: tab 10 is still absent from THIS instance's
+        // frame, so the row reads exactly as it does in every other blind bar.
+        // That is the point — the ↻ no longer masks it.
+        assert_eq!(
             status_at(&m, ROW),
-            Some(RowStatus::Opening),
-            "the row shows its real state, not an immortal ↻"
+            Some(RowStatus::Dormant),
+            "the row reads as it does everywhere else, not an immortal ↻"
         );
     }
 
