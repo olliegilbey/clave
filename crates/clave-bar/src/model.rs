@@ -729,9 +729,11 @@ pub struct BarModel {
     /// contradicting snapshot wins (wrong-but-consistent beats a storm).
     collapse_reasserted: bool,
     /// uuids with a `clave open` in flight (§6.6): set on fire, shown ↻.
-    /// Cleared when the row stops being dormant (tab appeared) or a stale=true
-    /// snapshot lands (open failed → ✗, retryable). First double-fire guard;
-    /// `clave open`'s liveness no-op is the second.
+    /// Cleared when the store binds the row to a tab, when the row stops being
+    /// dormant here, or when a stale=true snapshot lands (open failed → ✗,
+    /// retryable). The store's bind leads because the firing instance is the
+    /// one that cannot see the tab appear — see `prune_opening`. First
+    /// double-fire guard; `clave open`'s liveness no-op is the second.
     opening: BTreeSet<String>,
     /// §6.6 C8 virtual selection cursor: Some(uuid) while nav sits on a
     /// dormant row (there is no tab to focus). Nav steps continue from it;
@@ -1362,9 +1364,46 @@ impl BarModel {
         !tab_live && !pane_live
     }
 
-    /// Drop in-flight marks that resolved: the row went live (open succeeded)
-    /// or the snapshot flagged it stale (open failed). Called after every
-    /// input that changes the join picture.
+    /// Drop in-flight marks that resolved: the store bound the row to a tab or
+    /// the row went live (open succeeded), or the snapshot flagged it stale
+    /// (open failed). Called after every input that changes the join picture.
+    ///
+    /// **The store's `tab_id` leads, and it has to** (§6.6 Design B — the
+    /// snapshot bind is the join every instance shares). `is_dormant` is an
+    /// instance-local question, and the instance that fires an open is exactly
+    /// the one that goes blind: firing moves focus to the new tab, and zellij
+    /// delivers `TabUpdate` only to the ACTIVE tab's instance. So the firing
+    /// bar never sees the tab appear, and if that tab then DIES before the bar
+    /// ever observes it live, `is_dormant` stays true forever and the mark is
+    /// immortal — outranking the row's real status (see `agent_content`'s
+    /// tier) for the rest of the bar's life, refocusing included. The store's
+    /// binding is the cross-instance truth every instance receives in the
+    /// snapshot, and it cannot precede the tab: `clave open` creates the tab,
+    /// then the bar's `clave bind` writes the id (`store.rs`, the only writer
+    /// of a non-null `tab_id`).
+    ///
+    /// **Two honest residuals**, both recorded from review rather than fixed;
+    /// each needs a state that is already degraded, and both leave `clave
+    /// open`'s liveness no-op standing as the second double-fire guard.
+    ///
+    /// 1. A row carrying a SUPERSEDED `tab_id` — its tab died and the
+    ///    `clave prune-tabs` repair below has not landed — clears its mark on
+    ///    the first snapshot, so no ↻ renders for that open. Cosmetic, and it
+    ///    self-heals on the next TabUpdate. Same shape when nothing ever
+    ///    witnessed the tab die: the clear means "the store says bound", not
+    ///    "this open landed".
+    /// 2. A bar STALLED below the bind's `seq` for that tab's whole life can
+    ///    consume the bind snapshot after firing a fresh open, clearing the
+    ///    mark mid-flight; a second commit inside the spin-up window would then
+    ///    pass both guards, since `open_is_live` reads the store's CURRENT
+    ///    (still unbound) row. Any consumed snapshot at or past the close
+    ///    discards the stale one by the §5 seq gate, so the window closes
+    ///    itself the moment the bar is not stalled.
+    ///
+    /// Recording the binding seen at fire time does NOT close (2) — a stalled
+    /// bar records the same `None` the store had. Closing it properly means
+    /// resolving the mark on the open's own completion rather than on any
+    /// store field; take that step only if the window is observed to bite.
     fn prune_opening(&mut self) {
         let resolved: Vec<String> = self
             .opening
@@ -1373,7 +1412,7 @@ impl BarModel {
                 self.agents
                     .iter()
                     .find(|a| &&a.uuid == u)
-                    .is_none_or(|a| !self.is_dormant(a) || a.stale)
+                    .is_none_or(|a| a.tab_id.is_some() || !self.is_dormant(a) || a.stale)
             })
             .cloned()
             .collect();
@@ -7937,6 +7976,53 @@ mod tests {
         let fx = select_dormant(&mut m);
         // The peek is the landing's ONLY effect — the dwell died with #100.
         assert_eq!(fx, vec![Effect::ArmPeek]);
+    }
+
+    #[test]
+    fn the_stores_bind_clears_the_mark_in_an_instance_blind_to_that_tab() {
+        // The immortal ↻. Zellij delivers TabUpdate only to the ACTIVE tab's
+        // instance (C3 live finding, 2026-07-06 — the same delivery rule §6.5's
+        // unread clear is built on), and firing an open moves focus AWAY from
+        // the firing bar. So the one instance that set the mark is the one that
+        // never sees the tab appear, and `is_dormant` — an instance-local
+        // question — can never answer it. The store's `tab_id` is the
+        // cross-instance truth that the open landed (§6.6 Design B: the
+        // snapshot bind is the join every instance shares), and every instance
+        // gets it in the snapshot.
+        let mut m = BarModel::default();
+        // This instance knows only its OWN tab; tab 10 is invisible to it.
+        // Its unbound tab renders first, so the agent row sits on line 1.
+        const ROW: usize = 1;
+        m.apply_tabs(vec![tab(7, 0, "mine", true)]);
+        m.apply_snapshot(snap(1, vec![agent("u1", Status::Working, None)]));
+        m.opening.insert("u1".into());
+        assert_eq!(status_at(&m, ROW), Some(RowStatus::Opening), "in flight");
+
+        // The spin-up window: snapshots keep arriving before `clave bind`
+        // writes anything, and the mark must ride them out — clearing here
+        // would mean the ↻ never showed at all.
+        m.apply_snapshot(snap(2, vec![agent("u1", Status::Working, None)]));
+        assert_eq!(
+            status_at(&m, ROW),
+            Some(RowStatus::Opening),
+            "an unbound row is still spinning up"
+        );
+
+        // The open lands: `clave bind` writes the tab into the store, and the
+        // snapshot reaches every instance — including this blind one.
+        m.apply_snapshot(snap(3, vec![agent("u1", Status::Working, Some(10))]));
+        assert!(
+            m.opening.is_empty(),
+            "the store's bind resolves the open even where the tab is unseen"
+        );
+        // Dormant, not Working: tab 10 is still absent from THIS instance's
+        // frame, so the row reads exactly as it does in every other blind bar.
+        // That is the point — the ↻ no longer masks it.
+        assert_eq!(
+            status_at(&m, ROW),
+            Some(RowStatus::Dormant),
+            "the row reads as it does everywhere else, not an immortal ↻"
+        );
     }
 
     #[test]
