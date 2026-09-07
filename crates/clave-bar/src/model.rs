@@ -7980,12 +7980,15 @@ mod tests {
 
     #[test]
     fn the_stores_bind_clears_the_mark_in_an_instance_blind_to_that_tab() {
-        // The immortal ↻: zellij delivers TabUpdate only to the ACTIVE tab's
-        // instance, and firing an open moves focus AWAY from the firing bar.
-        // So the one instance that set the mark is the one that never sees the
-        // tab appear, and `is_dormant` — an instance-local question — can never
-        // answer it. The store's `tab_id` is the cross-instance truth that the
-        // open landed, and every instance gets it in the snapshot.
+        // The immortal ↻. Zellij delivers TabUpdate only to the ACTIVE tab's
+        // instance (C3 live finding, 2026-07-06 — the same delivery rule §6.5's
+        // unread clear is built on), and firing an open moves focus AWAY from
+        // the firing bar. So the one instance that set the mark is the one that
+        // never sees the tab appear, and `is_dormant` — an instance-local
+        // question — can never answer it. The store's `tab_id` is the
+        // cross-instance truth that the open landed (§6.6 Design B: the
+        // snapshot bind is the join every instance shares), and every instance
+        // gets it in the snapshot.
         let mut m = BarModel::default();
         // This instance knows only its OWN tab; tab 10 is invisible to it.
         // Its unbound tab renders first, so the agent row sits on line 1.
