@@ -40,7 +40,10 @@ fn try_log(dir: &std::path::Path, cmd: &str, detail: &str) -> anyhow::Result<()>
     // the Display impl produces. Two clave processes logging in the same
     // instant — `clave open` and the spawn it runs — then shredded each other
     // into `{{""tsts""::…`, and the QA drive's open-counter read zero opens
-    // that had plainly run (drive run, 2026-09-07, phase 3 churn C).
+    // that had plainly run (drive run, 2026-09-07, phase 3 churn C). The trap
+    // and its blast radius are FOOTGUNS.md, "`writeln!` on a `std::fs::File`
+    // is NOT one write" — five records in the maintainer's own live log were
+    // already shredded this way before the drive surfaced it.
     let mut line = line.to_string();
     line.push('\n');
     let mut f = std::fs::OpenOptions::new()
@@ -95,6 +98,10 @@ mod tests {
         }
         let body = std::fs::read_to_string(dir.join("clave.log")).unwrap();
         assert_eq!(body.lines().count(), 8 * 40, "no line was lost");
+        assert!(
+            body.ends_with('\n'),
+            "the newline rides INSIDE the one write, so the file always ends on a complete line"
+        );
         for (n, line) in body.lines().enumerate() {
             let v: serde_json::Value = serde_json::from_str(line)
                 .unwrap_or_else(|e| panic!("line {n} is not JSON ({e}): {line}"));
