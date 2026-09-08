@@ -34,11 +34,23 @@ fn try_log(dir: &std::path::Path, cmd: &str, detail: &str) -> anyhow::Result<()>
         "cmd": cmd,
         "detail": detail,
     });
+    // ONE buffer, ONE write. O_APPEND makes a single `write` atomic against
+    // other appenders; it does nothing for a SEQUENCE of them, and
+    // `writeln!(f, "{line}")` on an unbuffered File emits a syscall per token
+    // the Display impl produces. Two clave processes logging in the same
+    // instant — `clave open` and the spawn it runs — then shredded each other
+    // into `{{""tsts""::…`, and the QA drive's open-counter read zero opens
+    // that had plainly run (drive run, 2026-09-07, phase 3 churn C). The trap
+    // and its blast radius are FOOTGUNS.md, "`writeln!` on a `std::fs::File`
+    // is NOT one write" — five records in the maintainer's own live log were
+    // already shredded this way before the drive surfaced it.
+    let mut line = line.to_string();
+    line.push('\n');
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(dir.join("clave.log"))?;
-    writeln!(f, "{line}")?;
+    f.write_all(line.as_bytes())?;
     Ok(())
 }
 
@@ -58,6 +70,43 @@ mod tests {
         assert_eq!(v["cmd"], "open");
         assert_eq!(v["detail"], "d");
         assert!(v["ts"].is_u64());
+    }
+
+    #[test]
+    fn concurrent_writers_never_interleave_a_line() {
+        // The drive's phase-3 witness went red on a mangled line: `clave open`
+        // and the spawn it runs both append at the same instant, and the log
+        // came back as `{{""tsts""::…` — two records shredded into each other,
+        // so `grep '"cmd":"open"'` counted zero opens that had plainly run.
+        // O_APPEND makes ONE write atomic; it does not make a sequence of them
+        // atomic, and a `writeln!` of a Display type emits a syscall per token.
+        // Every line must parse, and every line must be one of ours.
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().to_path_buf();
+        let writers: Vec<_> = (0..8)
+            .map(|w| {
+                let dir = dir.clone();
+                std::thread::spawn(move || {
+                    for i in 0..40 {
+                        log_event_in(&dir, "open", &format!("writer {w} line {i}"));
+                    }
+                })
+            })
+            .collect();
+        for w in writers {
+            w.join().unwrap();
+        }
+        let body = std::fs::read_to_string(dir.join("clave.log")).unwrap();
+        assert_eq!(body.lines().count(), 8 * 40, "no line was lost");
+        assert!(
+            body.ends_with('\n'),
+            "the newline rides INSIDE the one write, so the file always ends on a complete line"
+        );
+        for (n, line) in body.lines().enumerate() {
+            let v: serde_json::Value = serde_json::from_str(line)
+                .unwrap_or_else(|e| panic!("line {n} is not JSON ({e}): {line}"));
+            assert_eq!(v["cmd"], "open", "line {n} carries a shredded cmd");
+        }
     }
 
     #[test]
