@@ -3468,6 +3468,15 @@ mod tests {
         m
     }
 
+    /// The two-line card, said out loud for the same reason — it was the
+    /// default when its click map was written and is not any more. The
+    /// four-line card's own map is
+    /// `a_click_on_any_of_a_cards_four_lines_selects_that_card`.
+    fn two_line_bar(mut m: BarModel) -> BarModel {
+        m.set_row_height(RowHeight::Double);
+        m
+    }
+
     /// One live tab (id 1, active) and `dormant` dormant rows, ordinals
     /// descending so the dormant block's display order is `u-00`, `u-01`, …
     /// A fleet built to OVERFLOW: the viewport tests below give it a pane that
@@ -6100,12 +6109,12 @@ mod tests {
 
     /// The two widths the layouts declare, verbatim (fixed column counts since
     /// the 2026-08-17 rebuild — the machine compares painted width against
-    /// these constants and nothing else). Pinned to the `Double` arm (#232's
-    /// shipping default, and every `BarModel::default()` model's mode below)
-    /// — a test that needs to pin `Single` builds its own model via
-    /// `model_with_row_height(RowHeight::Single)` instead of this pair.
-    const EXP_W: usize = RowHeight::Double.target_cols(false);
-    const COL_W: usize = RowHeight::Double.target_cols(true);
+    /// these constants and nothing else). Pinned to the `Card` arm, which is
+    /// the shipping default and therefore every `BarModel::default()` model's
+    /// mode below — a test that needs another mode builds its own model via
+    /// `model_with_row_height(...)` instead of this pair.
+    const EXP_W: usize = RowHeight::Card.target_cols(false);
+    const COL_W: usize = RowHeight::Card.target_cols(true);
 
     /// Test-only constructor for a model whose row-height mode is not the
     /// default (#232) — mirrors production's `set_row_height`, called from
@@ -7855,7 +7864,6 @@ mod tests {
     /// same cards.
     #[test]
     fn a_click_on_either_line_of_a_card_selects_that_card() {
-        // The shipping default: `BarModel::default()` is already `Double`.
         // 12 rows (one live tab, eleven dormant) in an EIGHT-line pane — four
         // cards, model rows 0..=3, because the selection rests at the top.
         let live = vec![
@@ -7863,13 +7871,13 @@ mod tests {
             Effect::AnnounceVisit { tab_id: 1 },
         ];
         for line in [0, 1] {
-            let mut m = overflowing_fleet(11);
+            let mut m = two_line_bar(overflowing_fleet(11));
             assert_eq!(m.click(line, 8), live, "line {line} is the first card");
         }
         // The fourth card spans lines 6 and 7 — dormant row `u-02`, which a
         // click SELECTS rather than opens (#100).
         for line in [6, 7] {
-            let mut m = overflowing_fleet(11);
+            let mut m = two_line_bar(overflowing_fleet(11));
             assert!(m.click(line, 8).is_empty(), "a dormant click opens nothing");
             let mut expected = vec![false; 12];
             expected[3] = true;
@@ -7880,19 +7888,19 @@ mod tests {
         // not fold onto the first OFF-SCREEN row (card 3, `u-03`) — that would
         // silently jump focus past the edge of the screen (the #148 shape).
         for line in [0, 1] {
-            let mut m = overflowing_fleet(11);
+            let mut m = two_line_bar(overflowing_fleet(11));
             assert_eq!(m.click(line, 7), live, "line {line} is the first card");
         }
         for (lines, row) in [([2, 3], 1), ([4, 5], 2)] {
             for line in lines {
-                let mut m = overflowing_fleet(11);
+                let mut m = two_line_bar(overflowing_fleet(11));
                 assert!(m.click(line, 7).is_empty(), "a dormant click opens nothing");
                 let mut expected = vec![false; 12];
                 expected[row] = true;
                 assert_eq!(selected(&m), expected, "line {line} is card {row}");
             }
         }
-        let mut m = overflowing_fleet(11);
+        let mut m = two_line_bar(overflowing_fleet(11));
         assert!(
             m.click(6, 7).is_empty(),
             "the blank remainder line selects nothing"
@@ -7907,7 +7915,7 @@ mod tests {
         // Scrolled, in cards: selecting the last row slides the card window to
         // model rows 9..=11 in a six-line (three-card) pane, and line 0 of
         // that pane is model row 9 — the whole #148 lesson, one geometry over.
-        let mut m = overflowing_fleet(11);
+        let mut m = two_line_bar(overflowing_fleet(11));
         m.nav("{\"row\":12}", Some(1));
         assert!(selected(&m)[11], "the fixture must be scrolled to the end");
         m.click(1, 6);
@@ -7924,6 +7932,76 @@ mod tests {
         let mut expected = vec![false; 12];
         expected[3] = true;
         assert_eq!(selected(&m), expected, "Single still maps line 3 to row 3");
+    }
+
+    /// The four-line card's click map — the same rule one geometry further
+    /// out. All four of a card's screen lines are one target, including the
+    /// blank separator, which is the card's own line and not a gap between
+    /// cards. The remainder case matters more here than it did at two lines:
+    /// a pane can now be three lines short of a whole card, and every one of
+    /// them must be dropped rather than folded onto the first row off screen.
+    #[test]
+    fn a_click_on_any_of_a_cards_four_lines_selects_that_card() {
+        let live = vec![
+            Effect::SwitchTab { position: 0 },
+            Effect::AnnounceVisit { tab_id: 1 },
+        ];
+        // 12 rows in a SIXTEEN-line pane — four cards, model rows 0..=3.
+        for line in [0, 1, 2, 3] {
+            let mut m = overflowing_fleet(11);
+            assert_eq!(m.click(line, 16), live, "line {line} is the first card");
+        }
+        // The fourth card spans lines 12..=15 — dormant row `u-02`, selected
+        // rather than opened (#100).
+        for line in [12, 13, 14, 15] {
+            let mut m = overflowing_fleet(11);
+            assert!(
+                m.click(line, 16).is_empty(),
+                "a dormant click opens nothing"
+            );
+            let mut expected = vec![false; 12];
+            expected[3] = true;
+            assert_eq!(selected(&m), expected, "line {line} is the fourth card");
+        }
+        // Height 15: three whole cards on lines 0..=11, and lines 12, 13, 14
+        // are drawn by nobody. Each must be dropped, not folded onto card 3.
+        for (lines, row) in [([4, 5, 6, 7], 1), ([8, 9, 10, 11], 2)] {
+            for line in lines {
+                let mut m = overflowing_fleet(11);
+                assert!(m.click(line, 15).is_empty());
+                let mut expected = vec![false; 12];
+                expected[row] = true;
+                assert_eq!(selected(&m), expected, "line {line} is card {row}");
+            }
+        }
+        for line in [12, 13, 14] {
+            let mut m = overflowing_fleet(11);
+            assert!(
+                m.click(line, 15).is_empty(),
+                "remainder line {line} selects nothing"
+            );
+            let mut expected = vec![false; 12];
+            expected[0] = true;
+            assert_eq!(
+                selected(&m),
+                expected,
+                "remainder line {line} must not move the selection"
+            );
+        }
+        // Scrolled, in cards: the last row selected slides the window to model
+        // rows 9..=11 in a twelve-line (three-card) pane, so line 0 of that
+        // pane is model row 9.
+        let mut m = overflowing_fleet(11);
+        m.nav("{\"row\":12}", Some(1));
+        assert!(selected(&m)[11], "the fixture must be scrolled to the end");
+        m.click(2, 12);
+        let mut expected = vec![false; 12];
+        expected[9] = true;
+        assert_eq!(
+            selected(&m),
+            expected,
+            "the top visible card is model row 9"
+        );
     }
 
     #[test]

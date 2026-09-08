@@ -1182,8 +1182,8 @@ mod tests {
         let p = tmp_paths(d.path());
         assert_eq!(
             read_store(&p).unwrap().row_height,
-            clave_types::RowHeight::Double,
-            "fresh install defaults to double"
+            clave_types::RowHeight::Card,
+            "fresh install defaults to the four-line card"
         );
         let seq0 = read_store(&p).unwrap().seq;
         set_row_height(&p, clave_types::RowHeight::Single).unwrap();

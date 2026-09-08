@@ -464,18 +464,20 @@ pub fn target_cols_for(collapsed: bool) -> usize {
     }
 }
 
-/// Which row geometry the bar renders — the #232 flag. `Double` is the
-/// two-line card (the default); `Single` is the legacy one-line row,
-/// retained intact behind this flag. Chosen per LAUNCH: the launch layout
-/// bakes both the pane sizes and the plugin-config key from it, so the
-/// geometry zellij gives the pane and the geometry the bar draws can never
-/// disagree mid-session.
+/// Which row geometry the bar renders — the #232 flag. `Card` is the
+/// four-line card ratified by the 2026-09-08 lock and **the default a fresh
+/// install draws**; `Double` is the two-line card it revises, and `Single`
+/// the legacy one-line row, both retained intact behind this flag. Chosen
+/// per LAUNCH: the launch layout bakes both the pane sizes and the
+/// plugin-config key from it, so the geometry zellij gives the pane and the
+/// geometry the bar draws can never disagree mid-session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RowHeight {
     Single,
-    #[default]
     Double,
+    #[default]
+    Card,
 }
 
 /// The zellij plugin-config key carrying the mode into the bar (same
@@ -489,6 +491,8 @@ impl RowHeight {
     /// off it at compile time instead of duplicating the numbers.
     pub const fn target_cols(self, collapsed: bool) -> usize {
         match (self, collapsed) {
+            (RowHeight::Card, false) => 48,
+            (RowHeight::Card, true) => 16,
             (RowHeight::Double, false) => 48,
             (RowHeight::Double, true) => 38,
             (RowHeight::Single, false) => BAR_TARGET_COLS,
@@ -502,6 +506,7 @@ impl RowHeight {
         match self {
             RowHeight::Single => 1,
             RowHeight::Double => 2,
+            RowHeight::Card => 4,
         }
     }
 
@@ -511,7 +516,8 @@ impl RowHeight {
     pub fn from_config_value(v: Option<&str>) -> RowHeight {
         match v {
             Some("single") => RowHeight::Single,
-            _ => RowHeight::Double,
+            Some("double") => RowHeight::Double,
+            _ => RowHeight::Card,
         }
     }
 
@@ -526,6 +532,7 @@ impl RowHeight {
         match self {
             RowHeight::Single => "single",
             RowHeight::Double => "double",
+            RowHeight::Card => "card",
         }
     }
 }
@@ -1088,9 +1095,20 @@ mod tests {
         }
     }
 
+    /// The four-line card (2026-09-08 lock §1): three lines of content plus
+    /// the shadow rule that closes it, 48 columns expanded and 16 collapsed.
+    /// Collapsed drops from `Double`'s 38 because a card still showing the
+    /// model, the branch and two clocks is not collapsed, it is narrow.
     #[test]
-    fn row_height_defaults_to_double_and_maps_its_targets() {
-        assert_eq!(RowHeight::default(), RowHeight::Double);
+    fn row_height_card_is_four_lines_at_forty_eight_and_sixteen() {
+        assert_eq!(RowHeight::Card.lines_per_row(), 4);
+        assert_eq!(RowHeight::Card.target_cols(false), 48);
+        assert_eq!(RowHeight::Card.target_cols(true), 16);
+    }
+
+    #[test]
+    fn row_height_defaults_to_card_and_maps_its_targets() {
+        assert_eq!(RowHeight::default(), RowHeight::Card);
         // Double: the ratified card budgets (#232). Single: the legacy pair,
         // which MUST keep reading the existing constants so the old design
         // cannot drift from the flag's legacy arm.
@@ -1103,7 +1121,7 @@ mod tests {
     }
 
     #[test]
-    fn row_height_parses_its_config_value_failing_closed_to_double() {
+    fn row_height_parses_its_config_value_failing_closed_to_card() {
         assert_eq!(
             RowHeight::from_config_value(Some("single")),
             RowHeight::Single
@@ -1112,14 +1130,14 @@ mod tests {
             RowHeight::from_config_value(Some("double")),
             RowHeight::Double
         );
+        assert_eq!(RowHeight::from_config_value(Some("card")), RowHeight::Card);
         // Absent, empty, or junk → the default. A typo must not strand a user
-        // in a mode they didn't ask for.
-        assert_eq!(RowHeight::from_config_value(None), RowHeight::Double);
-        assert_eq!(RowHeight::from_config_value(Some("")), RowHeight::Double);
-        assert_eq!(
-            RowHeight::from_config_value(Some("tall")),
-            RowHeight::Double
-        );
+        // in a mode they didn't ask for. Both named modes are spelled out
+        // above the fallthrough now, so the arm cannot quietly capture one of
+        // them the way it did when `Double` was both the default and unnamed.
+        assert_eq!(RowHeight::from_config_value(None), RowHeight::Card);
+        assert_eq!(RowHeight::from_config_value(Some("")), RowHeight::Card);
+        assert_eq!(RowHeight::from_config_value(Some("tall")), RowHeight::Card);
     }
 
     #[test]
@@ -1127,7 +1145,7 @@ mod tests {
         // The one spelling of each mode, both directions: whatever
         // `as_config_value` writes, `from_config_value` reads back as the
         // same variant (#232 final review, finding 2).
-        for rh in [RowHeight::Single, RowHeight::Double] {
+        for rh in [RowHeight::Single, RowHeight::Double, RowHeight::Card] {
             assert_eq!(RowHeight::from_config_value(Some(rh.as_config_value())), rh);
         }
     }

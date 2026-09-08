@@ -709,6 +709,22 @@ pub fn render_rows(
                 [l1, l2]
             })
             .collect(),
+        // SCAFFOLD, not the design. The four-line card's geometry is ratified
+        // (the 2026-09-08 lock) but still lives only in the triple-preview
+        // example; porting it into `card.rs` is the next step. Until then this
+        // arm holds the ONE contract the rest of the bar divides by — four
+        // lines per row, each exactly `cols` — by drawing the two-line card
+        // and padding beneath it. The padding is unpainted, which is the glass
+        // rule: a blank line asserts no background, so it recedes with the
+        // card above it.
+        RowHeight::Card => rows
+            .iter()
+            .enumerate()
+            .flat_map(|(i, row)| {
+                let (l1, l2) = card::render_card(row, cols, any_selected, i % 2 == 1, theme);
+                [l1, l2, " ".repeat(cols), " ".repeat(cols)]
+            })
+            .collect(),
     }
 }
 
@@ -2473,6 +2489,38 @@ mod tests {
     /// each row's `t00` name is never clipped, so the same read-the-picture-back
     /// discipline the single-line viewport tests use works here too.
     const CARD_COLS: usize = RowHeight::Double.target_cols(false);
+
+    /// The four-line card's contract at the dispatch seam (2026-09-08 lock
+    /// §1): one row is four terminal lines, and every one of them is exactly
+    /// as wide as the pane. The line COUNT is what the viewport and the click
+    /// hit-test both divide by, so it is pinned here independently of what the
+    /// four lines eventually say.
+    #[test]
+    fn card_mode_emits_four_lines_per_row_each_exactly_cols() {
+        let rows = numbered(3, 0);
+        for cols in [
+            RowHeight::Card.target_cols(false),
+            RowHeight::Card.target_cols(true),
+        ] {
+            let lines = render_rows(
+                &rows,
+                cols,
+                12,
+                Widths::EXPANDED,
+                &Theme::default(),
+                RowHeight::Card,
+            );
+            assert_eq!(lines.len(), 12, "3 cards at {cols} cols is 12 lines");
+            for (i, line) in lines.iter().enumerate() {
+                assert_eq!(
+                    display_cells(&strip_sgr(line)),
+                    cols,
+                    "line {i} at {cols} cols: {:?}",
+                    strip_sgr(line)
+                );
+            }
+        }
+    }
 
     /// [`on_screen_at`]'s card counterpart: the model indices the pane shows,
     /// recovered from LINE 1 of each card (the name lives in the chip, which is

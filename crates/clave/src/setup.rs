@@ -1554,11 +1554,9 @@ mod tests {
     #[test]
     fn session_row_height_reads_the_launch_layout_not_the_store() {
         let dir = tempfile::tempdir().unwrap();
-        // Absent file (never launched, or a pre-#232 install): fails closed.
-        assert_eq!(
-            session_row_height(dir.path()),
-            clave_types::RowHeight::Double
-        );
+        // Absent file (never launched, or a pre-#232 install): fails closed
+        // to the default, which is the four-line card.
+        assert_eq!(session_row_height(dir.path()), clave_types::RowHeight::Card);
 
         // Present, single.
         std::fs::write(
@@ -1582,18 +1580,24 @@ mod tests {
             clave_types::RowHeight::Double
         );
 
+        // Present, card.
+        std::fs::write(
+            launch_layout_path(dir.path()),
+            "pane { plugin { row_height \"card\" } }",
+        )
+        .unwrap();
+        assert_eq!(session_row_height(dir.path()), clave_types::RowHeight::Card);
+
         // File present, key absent: fails closed too.
         std::fs::write(launch_layout_path(dir.path()), "pane { plugin { } }").unwrap();
-        assert_eq!(
-            session_row_height(dir.path()),
-            clave_types::RowHeight::Double
-        );
+        assert_eq!(session_row_height(dir.path()), clave_types::RowHeight::Card);
     }
 
     #[test]
     fn parse_row_height_is_the_pure_core_of_the_reader() {
         assert_eq!(parse_row_height(r#"row_height "single""#), Some("single"));
         assert_eq!(parse_row_height(r#"row_height "double""#), Some("double"));
+        assert_eq!(parse_row_height(r#"row_height "card""#), Some("card"));
         assert_eq!(parse_row_height("no key in this text"), None);
     }
 
@@ -1629,12 +1633,26 @@ mod tests {
     }
 
     /// #232: the launch layout's pane sizes come from the STORE's row-height
-    /// mode, not the old single-mode-only `target_cols_for` — Double gets the
-    /// ratified card budgets, Single stays byte-identical to the legacy
-    /// constants so the flag's off position changes nothing observable.
+    /// mode, not the old single-mode-only `target_cols_for` — each card mode
+    /// gets its own ratified budgets, and Single stays byte-identical to the
+    /// legacy constants so the flag's off position changes nothing
+    /// observable. The four-line card's collapsed 16 is the one number here
+    /// a user sees change on upgrade, so it is pinned first.
     #[test]
     fn the_launch_birth_size_follows_the_row_height_mode() {
-        // Double (default): the card budgets.
+        // Card (the default): 48 expanded, 16 collapsed.
+        let card_exp = launch_layout_kdl(
+            "clave",
+            "/w.wasm",
+            None,
+            false,
+            clave_types::RowHeight::Card,
+        );
+        let card_col =
+            launch_layout_kdl("clave", "/w.wasm", None, true, clave_types::RowHeight::Card);
+        assert_eq!(birth_size(&card_exp, "default_tab_template"), "48");
+        assert_eq!(birth_size(&card_col, "default_tab_template"), "16");
+        // Double: the two-line card budgets.
         let expanded = launch_layout_kdl(
             "clave",
             "/w.wasm",
