@@ -692,6 +692,7 @@ pub(crate) fn mint_record(s: &mut Store, inputs: FreshRecordInputs) -> AgentReco
         pr_checked: 0,
         pr_branch: String::new(),
         wants: None,
+        subagents: false,
     };
     // Note `merge_resume_record` PRESERVES an existing row's
     // `default_branch` along with everything else, so a row written before
@@ -1369,6 +1370,7 @@ mod tests {
             pr_checked: 0,
             pr_branch: String::new(),
             wants: None,
+            subagents: false,
         }
     }
 

@@ -39,6 +39,7 @@ pub fn agent(
             branch: String::new(),
             elapsed: None,
             wants: None,
+            subagents: false,
         },
         selected: false,
         dormant: matches!(status, RowStatus::Dormant | RowStatus::DormantSelected),
@@ -56,6 +57,15 @@ pub fn blocked_on(mut row: Row, ask: &str) -> Row {
             "only a flagged row wants anything"
         );
         *wants = Some(String::from(ask));
+    }
+    row
+}
+
+/// Mark the row as having agents still running under it. A boolean, not a
+/// count: the mark says "this row has fanned out" and nothing more.
+pub fn fanned_out(mut row: Row) -> Row {
+    if let RowContent::Agent { subagents, .. } = &mut row.content {
+        *subagents = true;
     }
     row
 }
@@ -221,7 +231,7 @@ pub fn showcase() -> Vec<Row> {
             "",
             "25m",
         ),
-        detail(
+        fanned_out(detail(
             agent(
                 RowStatus::Stale,
                 Some((10, 412_000)),
@@ -237,7 +247,7 @@ pub fn showcase() -> Vec<Row> {
             Some(219),
             "kdl-guard",
             "1d",
-        ),
+        )),
         blocked_on(
             detail(
                 agent(

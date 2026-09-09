@@ -221,6 +221,16 @@ pub struct AgentRecord {
     /// store files loading.
     #[serde(default)]
     pub wants: Option<String>,
+    /// Whether this row has any agent still running under it — the card's
+    /// subagent mark (lock 4.6). Wire twin of `clave_types::Agent::subagents`.
+    ///
+    /// A BOOLEAN, not a count, and read from the transcript's closing
+    /// `turn_duration` record by `hook::subagents_from_tail`, which carries
+    /// the cadence caveat. Held when a tail carries no such record, so a
+    /// missed read never blanks a true mark. `default` keeps pre-field store
+    /// files loading.
+    #[serde(default)]
+    pub subagents: bool,
 }
 
 /// The whole store file. `seq` is the monotonic snapshot counter of the §5
@@ -462,6 +472,7 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
                 effort: r.effort.clone(),
                 pr_number: r.pr_number,
                 wants: r.wants.clone(),
+                subagents: r.subagents,
             })
             .collect(),
     }
@@ -970,6 +981,7 @@ mod tests {
             pr_checked: 0,
             pr_branch: String::new(),
             wants: None,
+            subagents: false,
         }
     }
 

@@ -188,9 +188,9 @@ struct Cells<'a> {
     /// still. Derived from the status the card already draws — no new wire
     /// field, and no way for the spinner and the mark's colour to disagree.
     thinking: bool,
-    /// Whether this row has any subagent in flight. NO SOURCE YET: it comes
-    /// from the transcript's pending-background-agent count, and renders blank
-    /// until that is wired.
+    /// Whether this row has any subagent in flight, off the transcript's
+    /// pending-background-agent count (lock 4.6). A terminal row never has
+    /// one.
     subs: bool,
     /// How long the turn in flight has been going. NO SOURCE YET: the store
     /// will hold when the turn BEGAN and the bar subtracts from the wall clock
@@ -224,6 +224,7 @@ fn cells<'a>(content: &'a RowContent, theme: &Theme) -> Cells<'a> {
             branch,
             elapsed,
             wants,
+            subagents,
         } => {
             // CLAMPED like `render_row`'s: the wire crosses a version boundary
             // and a newer host's longer ramp must read "at least this bad"
@@ -251,7 +252,7 @@ fn cells<'a>(content: &'a RowContent, theme: &Theme) -> Cells<'a> {
                 effort: effort.as_deref().unwrap_or(""),
                 elapsed: elapsed.as_deref().unwrap_or(""),
                 thinking: status.thinking(),
-                subs: false,
+                subs: *subagents,
                 turn: "",
                 wants: wants.as_deref().unwrap_or(""),
             }
@@ -779,6 +780,7 @@ mod tests {
         elapsed: &'static str,
         summary: &'static str,
         wants: Option<&'static str>,
+        subs: bool,
         selected: bool,
         dormant: bool,
     }
@@ -802,6 +804,7 @@ mod tests {
                 elapsed: "1m",
                 summary: "",
                 wants: None,
+                subs: false,
                 selected: false,
                 dormant: false,
             }
@@ -828,6 +831,7 @@ mod tests {
                     branch: self.branch.into(),
                     elapsed: Some(self.elapsed.into()),
                     wants: self.wants.map(String::from),
+                    subagents: self.subs,
                 },
                 selected: self.selected,
                 dormant: self.dormant,
@@ -937,6 +941,9 @@ mod tests {
                 battery: Some(7),
                 elapsed: "45m",
                 summary: "Drive launch",
+                // The one fleet row that has fanned out, so the golden pins
+                // both states of the third structural mark.
+                subs: true,
                 ..A::default()
             }
             .row(),
@@ -1234,12 +1241,12 @@ mod tests {
                 [
                     " \u{b7} \u{2502} \u{e0b6}CLV-3  \u{e0b4} Drive launch                     ",
                     " \u{f1bb} \u{2502} clave drive-launch       #204  \u{ec82} sonnet hi ",
-                    "   \u{2502} 117k  45m                                  ",
+                    " \u{f171a} \u{2502} 117k  45m                                  ",
                 ],
                 [
                     " \u{b7} \u{2502} \u{e0b6}CLV-3  \u{e0b4}  ",
                     " \u{f1bb} \u{2502} clave      ",
-                    "   \u{2502} 117k   45m ",
+                    " \u{f171a} \u{2502} 117k   45m ",
                 ],
             ),
             (

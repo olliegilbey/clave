@@ -69,6 +69,8 @@ struct A {
     /// writes it nowhere else, so a fixture that filled it on a working row
     /// would preview a card the product cannot produce.
     wants: Option<&'static str>,
+    /// Whether anything is still running under this row.
+    subs: bool,
     selected: bool,
     dormant: bool,
 }
@@ -91,6 +93,7 @@ impl Default for A {
             elapsed: "1m",
             summary: "",
             wants: None,
+            subs: false,
             selected: false,
             dormant: false,
         }
@@ -117,6 +120,7 @@ impl A {
                 branch: self.branch.into(),
                 elapsed: Some(self.elapsed.into()),
                 wants: self.wants.map(String::from),
+                subagents: self.subs,
             },
             selected: self.selected,
             dormant: self.dormant,
@@ -198,6 +202,7 @@ fn fleet() -> Vec<Row> {
         }
         .row(),
         A {
+            subs: true,
             chip: Some("OLYMPUS"),
             chip_ink: Some(1),
             repo: "olympus",

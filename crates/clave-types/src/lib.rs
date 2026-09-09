@@ -311,6 +311,13 @@ pub struct Agent {
     /// standing. `default` keeps pre-field payloads parseable.
     #[serde(default)]
     pub wants: Option<String>,
+    /// Whether this row has any agent still running under it — the card's
+    /// subagent mark (four-line lock 4.6). A boolean, not a count: "this row
+    /// has fanned out" is the whole signal, and a digit beside the mark was
+    /// noise. `false` renders a blank cell. `default` keeps pre-field payloads
+    /// parseable.
+    #[serde(default)]
+    pub subagents: bool,
 }
 
 /// The full-replace snapshot `clave` pushes to `clave-bar` on every change
@@ -741,6 +748,7 @@ mod tests {
             effort: None,
             pr_number: None,
             wants: None,
+            subagents: false,
         };
         assert!(!serde_json::to_string(&a).unwrap().contains("archived"));
     }
@@ -780,6 +788,7 @@ mod tests {
                 effort: None,
                 pr_number: None,
                 wants: None,
+                subagents: false,
             }],
         };
         let json = serde_json::to_string(&snap).unwrap();
@@ -818,6 +827,7 @@ mod tests {
             effort: None,
             pr_number: None,
             wants: None,
+            subagents: false,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert_eq!(back.tab_id, Some(4));
@@ -858,6 +868,7 @@ mod tests {
             effort: None,
             pr_number: None,
             wants: None,
+            subagents: false,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert!(back.stale);
@@ -900,6 +911,7 @@ mod tests {
             effort: None,
             pr_number: None,
             wants: None,
+            subagents: false,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert_eq!(back.title.as_deref(), Some("CLA-MAIN"));
@@ -956,6 +968,7 @@ mod tests {
             effort: None,
             pr_number: None,
             wants: None,
+            subagents: false,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert_eq!(back.default_branch.as_deref(), Some("trunk"));
@@ -1040,6 +1053,7 @@ mod tests {
             effort: None,
             pr_number: None,
             wants: None,
+            subagents: false,
         };
         let mut v: serde_json::Value = serde_json::to_value(&a).unwrap();
         v.as_object_mut().unwrap().remove("commit_ord");

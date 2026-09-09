@@ -285,6 +285,35 @@ pub fn summary_from_tail(tail: &str) -> Option<String> {
     last_tail_field(tail, "summary", "summary")
 }
 
+/// Whether this row has fanned out — the card's subagent mark (lock §4.6),
+/// read off the LAST `{"type":"system","subtype":"turn_duration",…}` line in
+/// `tail`. A BOOLEAN, not a count: "this row has agents under it" is the whole
+/// signal and a digit beside the mark was noise.
+///
+/// `None` is "no reading", and it is not the same as `Some(false)`. The field
+/// arrived in a recent Claude Code, and a 64 KiB tail that reaches back past
+/// the last turn boundary carries no closing record at all — both of those
+/// must HOLD what the store already knows. Only a record that IS present and
+/// says zero can clear the mark.
+///
+/// **This reading is a turn behind, by construction.** `turn_duration` is
+/// written when a turn CLOSES, so what it reports is "when this turn ended, N
+/// background agents were still pending". That is the cadence clave already
+/// reads a tail on (Stop / UserPromptSubmit), and pending-at-close is the
+/// useful half of the signal anyway: an agent still running when its parent
+/// stopped is exactly the one worth a mark. Subagents launched and finished
+/// inside one turn are never seen, and that is correct — they were never
+/// something to go and look at.
+pub fn subagents_from_tail(tail: &str) -> Option<bool> {
+    tail.lines().rev().find_map(|l| {
+        let v: serde_json::Value = serde_json::from_str(l).ok()?;
+        if v.get("type")?.as_str()? != "system" || v.get("subtype")?.as_str()? != "turn_duration" {
+            return None;
+        }
+        Some(v.get("pendingBackgroundAgentCount")?.as_u64()? > 0)
+    })
+}
+
 /// The anchor a permission notification's tool name follows. Claude Code's
 /// wording, matched as a substring for the same reason `status_for_event`
 /// matches its notifications that way: the CLI owns the sentence and has
@@ -925,6 +954,12 @@ pub fn apply_hook_event(
     if let Some(raw) = tail.and_then(effort_from_tail) {
         changed |= take_effort(rec, &raw);
     }
+    // The card's subagent mark. Same tail, same fail-closed rule: `None` is
+    // "no reading" and HOLDS, only a closing record saying zero clears it.
+    if let Some(subs) = tail.and_then(subagents_from_tail) {
+        changed |= rec.subagents != subs;
+        rec.subagents = subs;
+    }
     let level_moved = restamp_level(rec, smart_zone());
     // BOTH fields gate the push, not just the level. The glyph only moves once
     // per tenth of the zone, but #105 renders the raw count as text — gating on
@@ -1533,6 +1568,7 @@ mod tests {
             pr_checked: 0,
             pr_branch: String::new(),
             wants: None,
+            subagents: false,
         }
     }
 
@@ -2127,6 +2163,77 @@ mod tests {
         );
         // Unknown events are a no-op — the global hook must never guess.
         assert_eq!(status_for_event("PreToolUse", None, Status::Idle), None);
+    }
+
+    #[test]
+    fn a_tail_without_a_closing_record_holds_the_subagent_mark() {
+        // §5.4 fail-closed, the same rule the token reading follows: a tail
+        // that says nothing must never blank a reading that said something.
+        let mut s = Store::default();
+        s.agents.insert("u1".into(), rec("u1"));
+        let p = HookPayload {
+            session_id: Some("u1".into()),
+            ..HookPayload::default()
+        };
+        let turn = |n: u32| {
+            format!(
+                r#"{{"type":"system","subtype":"turn_duration","pendingBackgroundAgentCount":{n}}}"#
+            )
+        };
+
+        apply_hook_event(&mut s, "u1", "Stop", &p, Some(&turn(2)), 1000, true);
+        assert!(s.agents["u1"].subagents);
+
+        // A tail with no closing record in it at all.
+        let quiet = r#"{"type":"assistant","message":{"model":"claude-opus-5"}}"#;
+        apply_hook_event(&mut s, "u1", "Stop", &p, Some(quiet), 1001, true);
+        assert!(
+            s.agents["u1"].subagents,
+            "a silent tail must hold the mark, not clear it"
+        );
+
+        // Only a record that IS present and says zero clears it.
+        apply_hook_event(&mut s, "u1", "Stop", &p, Some(&turn(0)), 1002, true);
+        assert!(!s.agents["u1"].subagents);
+    }
+
+    #[test]
+    fn the_turns_closing_record_says_whether_anything_is_still_running_under_it() {
+        let turn = |n: u32| {
+            format!(
+                r#"{{"type":"system","subtype":"turn_duration","durationMs":35640,"messageCount":40,"pendingBackgroundAgentCount":{n},"sessionId":"s"}}"#
+            )
+        };
+        assert_eq!(subagents_from_tail(&turn(1)), Some(true));
+        assert_eq!(subagents_from_tail(&turn(3)), Some(true));
+        assert_eq!(subagents_from_tail(&turn(0)), Some(false));
+
+        // Newest wins: the reading is the LAST turn's, not any earlier one.
+        let two = format!("{}\n{}", turn(2), turn(0));
+        assert_eq!(subagents_from_tail(&two), Some(false));
+        let two = format!("{}\n{}", turn(0), turn(2));
+        assert_eq!(subagents_from_tail(&two), Some(true));
+
+        // No reading is not a reading of zero. An older Claude Code never
+        // wrote the field, and a tail that reaches back past the last turn
+        // boundary carries no closing record at all — both must HOLD what the
+        // store already knows rather than assert an empty fleet.
+        assert_eq!(subagents_from_tail(""), None);
+        assert_eq!(
+            subagents_from_tail(r#"{"type":"system","subtype":"turn_duration","messageCount":40}"#),
+            None
+        );
+        assert_eq!(
+            subagents_from_tail(r#"{"type":"system","subtype":"away_summary","content":"x"}"#),
+            None
+        );
+        // The count also rides `type:"assistant"` lines in no transcript we
+        // have measured, and reading it off one would be a guess: the subtype
+        // is the discriminator, exactly as it is for every other system record.
+        assert_eq!(
+            subagents_from_tail(r#"{"type":"assistant","pendingBackgroundAgentCount":4}"#),
+            None
+        );
     }
 
     #[test]

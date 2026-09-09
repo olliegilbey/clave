@@ -110,6 +110,7 @@ impl A {
                 elapsed: Some(self.elapsed.into()),
                 // The two-line card has no `wants` cell.
                 wants: None,
+                subagents: false,
             },
             selected: self.selected,
             dormant: self.dormant,

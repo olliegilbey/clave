@@ -2168,6 +2168,7 @@ impl BarModel {
             // Straight off the wire (lock §4.7). The host has already decided
             // whether this row is blocked; the bar only draws the words.
             wants: a.wants.clone(),
+            subagents: a.subagents,
         }
     }
 
@@ -2970,6 +2971,7 @@ mod tests {
             effort: None,
             pr_number: None,
             wants: None,
+            subagents: false,
         }
     }
 
@@ -3012,6 +3014,7 @@ mod tests {
             effort: None,
             pr_number: None,
             wants: None,
+            subagents: false,
         }
     }
 

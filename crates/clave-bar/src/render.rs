@@ -369,6 +369,10 @@ pub enum RowContent {
         /// has already flagged, so the bar never decides whether an ask is
         /// still live.
         wants: Option<String>,
+        /// Whether this row has any agent still running under it — the
+        /// four-line card's subagent mark. A boolean, not a count: "this row
+        /// has fanned out" is the whole signal.
+        subagents: bool,
     },
     Terminal {
         /// The zellij tab name — the chip. Lock §7.1: this is the only row
@@ -1170,6 +1174,7 @@ mod tests {
                 branch: String::new(),
                 elapsed: None,
                 wants: None,
+                subagents: false,
             },
             selected: false,
             // The helper mirrors the model's tier: a fixture asking for a
@@ -1217,6 +1222,7 @@ mod tests {
                     branch: String::new(),
                     elapsed: None,
                     wants: None,
+                    subagents: false,
                 },
                 selected: false,
                 dormant: true,
