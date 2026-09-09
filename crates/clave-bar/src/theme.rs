@@ -118,6 +118,34 @@ pub const PALETTE_LEN: usize = 8;
 
 // ── fixed semantic hues (never themed) ──────────────────────────────────────
 
+/// Provenance's own inks on the four-line card, FIXED and semantic rather than
+/// borrowed from the repo: the rail carries the repo's identity there, so the
+/// glyph is free to say what KIND of checkout this is, and to say it the same
+/// way on every card. Main draws nothing, as ever. Fixed under every theme for
+/// the same reason the status inks are — a green that meant "worktree" only
+/// under kanagawa would be a legend the reader has to relearn per theme.
+pub const WORKTREE_INK: Rgb = Rgb(0x98, 0xBB, 0x6C); // springGreen
+pub const BRANCH_INK: Rgb = Rgb(0x95, 0x7F, 0xB8); // oniViolet
+
+/// The turn clock's ink while a turn is RUNNING (kanagawa crystalBlue). It is
+/// the card's only live number, and the blue is the signal. When no turn is in
+/// flight the cell renders BLANK rather than dimming: blank is already the
+/// card's word for "no reading", and a blank clock beside a lit one is the
+/// cheapest possible "this agent is thinking".
+pub const TURN_INK: Rgb = Rgb(0x7E, 0x9C, 0xD8);
+
+/// The subagent mark and its ink — a quiet blue-grey, because it says "this
+/// row has depth", not "this row is hot". A BOOLEAN on the card, not a count:
+/// "this row has fanned out" is the whole signal and a digit beside it was
+/// noise.
+///
+/// `md-robot_happy_outline`, verified present in the installed Nerd Font by
+/// reading its character map rather than a cheat sheet. The codicon set has no
+/// `cod-robot` at all, and `fa-robot` is not at the codepoint published for it;
+/// both candidates would have shipped as tofu.
+pub const SUBS_INK: Rgb = Rgb(0x9C, 0xAB, 0xCA);
+pub const SUBS_MARK: char = '\u{f171a}';
+
 /// The status-mark inks (LEDGER D10's table). Fixed under every theme (#145):
 /// the COLOUR is the state, and a red that meant "failed" only under kanagawa
 /// would be a legend the reader has to relearn per theme.

@@ -37,9 +37,9 @@
 
 use crate::render::{Row, RowContent, cell_slice, clip_to_cells, display_cells, hue, strip_sgr};
 use crate::theme::{
-    BATTERY, BRACKET_A, BRACKET_B, CARD_BOT, CARD_TOP, CLAUDE_GLYPH, CLAUDE_INK, CONSOLE,
-    DORMANT_FADE, ELLIPSIS, FADE, LCAP, META_INK, NEEDS_YOU_INK, OPENAI_GLYPH, OPENAI_INK, PR_INK,
-    RCAP, RESET, RULE, Rgb, TERM_MARK, Theme,
+    BATTERY, BRACKET_A, BRACKET_B, BRANCH_INK, CARD_BOT, CARD_TOP, CLAUDE_GLYPH, CLAUDE_INK,
+    CONSOLE, DORMANT_FADE, ELLIPSIS, FADE, LCAP, META_INK, NEEDS_YOU_INK, OPENAI_GLYPH, OPENAI_INK,
+    PR_INK, RCAP, RESET, RULE, Rgb, SUBS_INK, SUBS_MARK, TERM_MARK, TURN_INK, Theme, WORKTREE_INK,
 };
 
 // ── the budgets (the example's fixed cells) ─────────────────────────────────
@@ -101,29 +101,6 @@ const TURN_W: usize = 3;
 /// The tail line 2 pays for provider, model and effort in the expanded
 /// profile, and hands entirely to the repo in the collapsed one.
 const META_TAIL_W: usize = 12;
-
-/// Provenance's own inks, FIXED and semantic rather than borrowed from the
-/// repo: the rail carries the repo's identity on the four-line card, so the
-/// glyph is free to say what KIND of checkout this is, the same way on every
-/// card. Main draws nothing, as ever.
-const WORKTREE_INK: Rgb = Rgb(0x98, 0xBB, 0x6C); // springGreen
-const BRANCH_INK: Rgb = Rgb(0x95, 0x7F, 0xB8); // oniViolet
-
-/// The turn clock's ink while a turn is RUNNING (kanagawa crystalBlue). When
-/// no turn is in flight the cell renders BLANK rather than dimming: blank is
-/// already the card's word for "no reading", and a blank clock beside a lit
-/// one is the cheapest possible "this agent is thinking".
-const TURN_INK: Rgb = Rgb(0x7E, 0x9C, 0xD8);
-
-/// The subagent mark's ink — the quiet blue-grey of a structural mark, since
-/// it says "this row has depth", not "this row is hot".
-const SUBS_INK: Rgb = Rgb(0x9C, 0xAB, 0xCA);
-
-/// The subagent mark, `md-robot_happy_outline`. Verified present in the
-/// installed Nerd Font by reading its character map: the codicon set has no
-/// `cod-robot` at all, and `fa-robot` is not at the codepoint the cheat sheets
-/// publish for it. Both would have shipped as tofu.
-const SUBS_MARK: char = '\u{f171a}';
 
 /// Line 4's hairline and its ink — a rule so dark it reads as a shadow under
 /// the card rather than as a border between two. Chosen by eye from a swatch

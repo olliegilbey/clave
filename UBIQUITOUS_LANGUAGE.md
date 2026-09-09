@@ -98,15 +98,16 @@ column target, was deleted at #181; the term survives only in the ledger.)
 - **terminal tab** — a zellij tab with no agent session bound to it.
 
 **Row is the data-side word — a row is what gets rendered, never the shape it is
-rendered in.** The shape is the **row height**, and there are two:
+rendered in.** The shape is the **row height**, and there are three:
 
 | Term | Means |
 |---|---|
-| **card** | A row's **two-line** rendering, the default since #232. Line 1 is status, chip and token count; line 2 is identity — provenance, repo, branch, PR, provider, model, effort and elapsed. The two lines are one unit: one click target, one viewport slot, one zebra parity. Locked in `docs/superpowers/specs/2026-08-26-double-height-card-lock.md`. |
+| **card** | A row's **four-line** rendering, the default since the four-line lock. Line 1 is status, chip and summary; line 2 is identity — provenance, repo, branch, PR, provider, model and effort; line 3 is state — subagents, tokens, elapsed, what it wants and how long this turn has run; line 4 is a hairline that closes the card. The four lines are one unit: one click target, one viewport slot. The separator does the job zebra parity used to. Locked in `docs/superpowers/specs/2026-09-08-triple-height-card-lock.md`. |
+| **double card** | The earlier **two-line** card, retained behind `clave rows double`. Line 1 is status, chip, summary and token count; line 2 is identity. Locked in `docs/superpowers/specs/2026-08-26-double-height-card-lock.md`. |
 | **single-line row** | The original one-line rendering, retained behind `clave rows single` and locked in `docs/superpowers/specs/2026-07-25-sidebar-visual-design-lock.md`. Its geometry is §3.2 below. |
 
-Both come in the same two **width states**, expanded and collapsed; height and
-width are independent choices.
+All three come in the same two **width states**, expanded and collapsed; height
+and width are independent choices.
 
 **Live and dormant rows both take their text from the STORE record** — title,
 repo and summary as separate fields. A live row does *not* render the zellij tab

@@ -11,16 +11,21 @@
 //! - `docs/assets/sidebar.svg` — the hero frame: the shared showcase fixture
 //!   rendered through `render_rows` (the plugin's own renderer), its ANSI
 //!   parsed into positioned, coloured glyph outlines. It renders in
-//!   `RowHeight::Double` at the card's own two width targets, because that is
-//!   what a fresh install draws (#232).
+//!   `RowHeight::Card` at the card's own two width targets, because that is
+//!   what a fresh install draws.
+//!
+//! The hero renders at animation frame 0, so the status spinner on a working
+//! row is its first frame rather than a mid-cycle one. A still image cannot
+//! show motion, and picking a heavier frame would only misrepresent the card's
+//! resting state.
 //!
 //! Colours come from `clave_bar::render` (`RowStatus::mark`, `BATTERY`,
 //! `PALETTE`, `BASE`, …), never copied, so the assets cannot drift from the
-//! shipped palette. Fonts are the ones the design was ratified against:
-//! JetBrainsMono Nerd Font Mono, plus Noto Sans Bamum for the worktree mark
-//! (macOS ships it in the system Supplemental fonts). Override discovery with
-//! `CLAVE_ASSET_FONT` / `CLAVE_ASSET_FONT_BAMUM` / `CLAVE_ASSET_FONT_SYMBOLS` /
-//! `CLAVE_ASSET_FONT_EXTRA` (extra = fallback for symbols the mono font lacks).
+//! shipped palette. One font carries the design now — JetBrainsMono Nerd Font
+//! Mono — with system faces behind it for the handful of symbols outside the
+//! Nerd Font patch ranges. Override discovery with `CLAVE_ASSET_FONT` /
+//! `CLAVE_ASSET_FONT_SYMBOLS` / `CLAVE_ASSET_FONT_EXTRA` (extra = one more
+//! fallback for symbols the mono font lacks).
 //!
 //! **Nerd Fonts 3.5 or newer is required** for the provider marks: `cod-claude`
 //! U+EC82 and `cod-openai` U+EC81 landed in 3.5, and a 3.4 patched font's
@@ -34,9 +39,9 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use clave_bar::render::{
-    BASE, BATTERY, CLAUDE_GLYPH, CLAUDE_INK, CONSOLE, DEFAULT_INK, DORMANT_FADE, OPENAI_GLYPH,
-    OPENAI_INK, PALETTE, Provenance, Rgb, RowHeight, RowStatus, TermStatus, Theme, Widths,
-    display_cells, render_rows, strip_sgr,
+    BASE, BATTERY, BRANCH_INK, CLAUDE_GLYPH, CLAUDE_INK, CONSOLE, DEFAULT_INK, DORMANT_FADE,
+    OPENAI_GLYPH, OPENAI_INK, PALETTE, Provenance, Rgb, RowHeight, RowStatus, SUBS_INK, SUBS_MARK,
+    TermStatus, Theme, WORKTREE_INK, Widths, display_cells, render_rows, strip_sgr,
 };
 
 #[path = "shared/showcase_fixture.rs"]
@@ -89,15 +94,12 @@ fn load_fonts() -> Vec<Font> {
         ],
     )
     .expect("JetBrainsMono Nerd Font Mono not found; set CLAVE_ASSET_FONT");
-    let bamum = find_font(
-        "CLAVE_ASSET_FONT_BAMUM",
-        &[
-            "/System/Library/Fonts/Supplemental/NotoSansBamum-Regular.ttf",
-            "/usr/share/fonts/truetype/noto/NotoSansBamum-Regular.ttf",
-        ],
-    )
-    .expect("Noto Sans Bamum not found; set CLAVE_ASSET_FONT_BAMUM");
-    let mut fonts = vec![mono, bamum];
+    // Noto Sans Bamum was a hard requirement here until 2026-09-08, solely to
+    // carry a worktree mark that no icon set has. That mark is now `fa-tree`,
+    // which JetBrainsMono carries — and the reason to change it was exactly
+    // this dependency's cost on screen: a fallback face brings its own
+    // metrics, so the glyph rendered off-centre in its cell.
+    let mut fonts = vec![mono];
     // Nerd Fonts' Symbols-Only face, for glyphs newer than the patched mono
     // font installed here. The provider marks are the live case: they landed in
     // Nerd Fonts 3.5 and a 3.4 JetBrainsMono stops at U+EC1E. Optional and
@@ -271,15 +273,23 @@ fn write_icons(fonts: &[Font], dir: &Path) {
             &icon_svg(fonts, CONSOLE, t.ink(&Theme::default())),
         );
     }
-    // Provenance marks ride the default ink, like the bar renders them.
-    let ink = DEFAULT_INK;
-    for (name, p) in [
-        ("mark-branch", Provenance::Branch),
-        ("mark-worktree", Provenance::Worktree),
+    // Provenance marks wear the four-line card's own semantic inks — green for
+    // a worktree, violet for a branch. They used to ride the default ink
+    // because the glyph borrowed the repo's colour; the card's rail carries
+    // that identity now, so the mark says what KIND of checkout this is.
+    for (name, p, ink) in [
+        ("mark-branch", Provenance::Branch, BRANCH_INK),
+        ("mark-worktree", Provenance::Worktree, WORKTREE_INK),
     ] {
         let ch = p.mark().expect("marked provenance has a glyph");
         write_file(&dir.join(format!("{name}.svg")), &icon_svg(fonts, ch, ink));
     }
+    // The subagent mark: the four-line card's third structural mark, stacked
+    // under status and provenance.
+    write_file(
+        &dir.join("mark-subagents.svg"),
+        &icon_svg(fonts, SUBS_MARK, SUBS_INK),
+    );
     // The provider marks (#232), each in its own brand ink — fixed colours, so
     // they never repaint with a theme.
     for (name, ch, brand) in [
@@ -399,14 +409,14 @@ fn hero_svg(fonts: &[Font], cols: usize, widths: Widths) -> String {
     let rows = showcase();
     // The default height: what a fresh install draws. `height` is a count of
     // TERMINAL LINES, so a frame showing the whole fleet asks for two per card.
-    let height = rows.len() * RowHeight::Double.lines_per_row();
+    let height = rows.len() * RowHeight::Card.lines_per_row();
     let lines = render_rows(
         &rows,
         cols,
         height,
         widths,
         &Theme::default(),
-        RowHeight::Double,
+        RowHeight::Card,
         0,
     );
     assert_eq!(lines.len(), height, "the frame drops cards");
@@ -500,18 +510,10 @@ fn main() {
     write_icons(&fonts, &glyphs);
     write_file(
         &root.join("docs/assets/sidebar-expanded.svg"),
-        &hero_svg(
-            &fonts,
-            RowHeight::Double.target_cols(false),
-            Widths::EXPANDED,
-        ),
+        &hero_svg(&fonts, RowHeight::Card.target_cols(false), Widths::EXPANDED),
     );
     write_file(
         &root.join("docs/assets/sidebar-collapsed.svg"),
-        &hero_svg(
-            &fonts,
-            RowHeight::Double.target_cols(true),
-            Widths::COLLAPSED,
-        ),
+        &hero_svg(&fonts, RowHeight::Card.target_cols(true), Widths::COLLAPSED),
     );
 }
