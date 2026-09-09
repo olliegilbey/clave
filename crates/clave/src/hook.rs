@@ -2228,6 +2228,45 @@ mod tests {
     }
 
     #[test]
+    fn the_subagent_mark_moving_is_itself_a_store_write() {
+        // `changed` is what mints an ord and pushes the fleet. A mark that
+        // flipped without reporting it would be correct in memory and stale on
+        // every bar until some unrelated event happened to push — and the
+        // reverse, a push on every quiet Stop, is traffic for nothing.
+        let mut s = Store::default();
+        s.agents.insert("u1".into(), rec("u1"));
+        let p = HookPayload {
+            session_id: Some("u1".into()),
+            ..HookPayload::default()
+        };
+        let turn = |n: u32| {
+            format!(
+                r#"{{"type":"system","subtype":"turn_duration","pendingBackgroundAgentCount":{n}}}"#
+            )
+        };
+
+        // Settle every other field first, so the mark is the only thing left
+        // that could move.
+        apply_hook_event(&mut s, "u1", "Stop", &p, Some(&turn(0)), 1000, true);
+        assert!(
+            !apply_hook_event(&mut s, "u1", "Stop", &p, Some(&turn(0)), 1001, true),
+            "a fleet where nothing moved must not mint an ord"
+        );
+        assert!(
+            apply_hook_event(&mut s, "u1", "Stop", &p, Some(&turn(2)), 1002, true),
+            "the mark lighting up is a change the bar has to be told about"
+        );
+        assert!(
+            !apply_hook_event(&mut s, "u1", "Stop", &p, Some(&turn(2)), 1003, true),
+            "and staying lit is not"
+        );
+        assert!(
+            apply_hook_event(&mut s, "u1", "Stop", &p, Some(&turn(0)), 1004, true),
+            "going out is a change too"
+        );
+    }
+
+    #[test]
     fn the_turns_closing_record_says_whether_anything_is_still_running_under_it() {
         let turn = |n: u32| {
             format!(

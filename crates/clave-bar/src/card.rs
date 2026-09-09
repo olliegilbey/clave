@@ -888,7 +888,13 @@ mod tests {
                 // line 3's right-hand arithmetic, which the width invariant
                 // alone cannot: `clip_to_cells` would silently eat a
                 // miscounted cell that had nothing in it.
-                wants: Some("Bash (cargo mutants --in-diff)"),
+                //
+                // Long enough to OVERFLOW the cell, deliberately. An ask that
+                // fits leaves trailing spaces, and a mis-sized cell full of
+                // spaces clips to the same line — which is how eight `wants_w`
+                // mutants survived twice. Overflowing puts the ellipsis at a
+                // column, and a column is a thing a golden can see.
+                wants: Some("Bash (cargo mutants --in-diff main)"),
                 ..A::default()
             }
             .row(),
@@ -1227,7 +1233,7 @@ mod tests {
                 [
                     " \u{25cf} \u{2502} \u{e0b6}CORTI2 \u{e0b4} Qdos IR35 assessment: the contr\u{2026} ",
                     "   \u{2502} hermes                         \u{ec82} fable  hi ",
-                    "   \u{2502} 105k    3m Bash (cargo mutants --in-diff)  ",
+                    "   \u{2502} 105k    3m Bash (cargo mutants --in-diff \u{2026} ",
                 ],
                 [
                     " \u{25cf} \u{2502} \u{e0b6}CORTI2 \u{e0b4}  ",
