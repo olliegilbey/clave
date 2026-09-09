@@ -880,6 +880,13 @@ mod tests {
                 battery: Some(6),
                 elapsed: "3m",
                 summary: "Qdos IR35 assessment: the contract",
+                // The only fleet row with an ask. `wants` is written for
+                // flagged rows and nothing else, so this row is also the only
+                // one that COULD carry it — and pinning it is what holds
+                // line 3's right-hand arithmetic, which the width invariant
+                // alone cannot: `clip_to_cells` would silently eat a
+                // miscounted cell that had nothing in it.
+                wants: Some("Bash (cargo mutants --in-diff)"),
                 ..A::default()
             }
             .row(),
@@ -1203,7 +1210,25 @@ mod tests {
     #[test]
     fn the_four_line_card_pins_both_profiles() {
         let f = fleet();
-        let want: [(usize, [&str; 3], [&str; 3]); 7] = [
+        let want: [(usize, [&str; 3], [&str; 3]); 8] = [
+            (
+                // The one flagged row, and so the only one carrying an ask.
+                // Its line 3 is what pins the right-hand arithmetic: the
+                // ellipsis lands where `wants_w` says it does, and a
+                // miscount that `clip_to_cells` would swallow on a blank
+                // cell moves it here.
+                0,
+                [
+                    " \u{25cf} \u{2502} \u{e0b6}CORTI2 \u{e0b4} Qdos IR35 assessment: the contr\u{2026} ",
+                    "   \u{2502} hermes                         \u{ec82} fable  hi ",
+                    "   \u{2502} 105k   3m Bash (cargo mutants --in-di\u{2026}     ",
+                ],
+                [
+                    " \u{25cf} \u{2502} \u{e0b6}CORTI2 \u{e0b4}  ",
+                    "   \u{2502} hermes     ",
+                    "   \u{2502} 105k    3m ",
+                ],
+            ),
             (
                 4,
                 [
@@ -1458,6 +1483,19 @@ mod tests {
                 "frame {t} moved something other than the status mark"
             );
         }
+        // The ping-pong is a REFLECTION, not just a closed loop: the walk back
+        // must retrace the frames it walked out on. Counting distinct frames
+        // cannot see that — a cycle that returned by some other route would
+        // still visit all six — so the symmetry is asserted directly.
+        for k in 1..THINK_FRAMES.len() {
+            assert_eq!(
+                think_frame(THINK_CYCLE - k),
+                think_frame(k),
+                "frame {} is not the reflection of frame {k}",
+                THINK_CYCLE - k
+            );
+        }
+
         // The row blocked on you holds still across the whole cycle.
         let still = at(&asking, 0);
         for t in 0..THINK_CYCLE {
@@ -1465,6 +1503,68 @@ mod tests {
                 at(&asking, t),
                 still,
                 "a NeedsYou row animated at frame {t}"
+            );
+        }
+    }
+
+    #[test]
+    fn provenance_wears_a_fixed_semantic_ink_not_the_rows() {
+        // Lock §4.2: worktree green, branch violet, and an ordinary checkout
+        // no mark at all. The inks are the reason a third glyph could join
+        // that column at all, and a golden over stripped text cannot see them
+        // — so this reads the SGR the goldens throw away.
+        let line2 = |prov: Provenance| {
+            render_card(
+                &A {
+                    prov,
+                    branch: "topic",
+                    ..A::default()
+                }
+                .row(),
+                CARD_EXPANDED_COLS,
+                false,
+                0,
+                &Theme::default(),
+            )[1]
+            .clone()
+        };
+        let worktree = line2(Provenance::Worktree);
+        let branch = line2(Provenance::Branch);
+        assert!(
+            worktree.contains(&WORKTREE_INK.fg()),
+            "the worktree mark must be springGreen: {worktree:?}"
+        );
+        assert!(
+            branch.contains(&BRANCH_INK.fg()),
+            "the branch mark must be oniViolet: {branch:?}"
+        );
+        assert!(
+            !worktree.contains(&BRANCH_INK.fg()) && !branch.contains(&WORKTREE_INK.fg()),
+            "the two inks must not both be painted"
+        );
+        // An ordinary checkout has no mark, so it claims neither ink.
+        let main = line2(Provenance::Main);
+        assert!(!main.contains(&WORKTREE_INK.fg()) && !main.contains(&BRANCH_INK.fg()));
+    }
+
+    #[test]
+    fn a_summary_cell_too_narrow_to_say_anything_says_nothing() {
+        // Lock §2: a cell with room for an ellipsis and nothing else says less
+        // than a blank one. The threshold is four cells, so the card is swept
+        // across the widths where it is crossed rather than pinned at one.
+        let row = A {
+            chip: Some("CHIPPED"),
+            summary: "a summary long enough to be cut",
+            ..A::default()
+        }
+        .row();
+        for cols in CARD_COLLAPSED_COLS..CARD_EXPANDED_COLS {
+            let l1 = strip_sgr(&render_card(&row, cols, false, 0, &Theme::default())[0]);
+            assert_eq!(display_cells(&l1), cols, "width at {cols}");
+            let shown = l1.split('\u{e0b4}').nth(1).unwrap_or("").trim();
+            assert!(
+                shown.is_empty() || shown.chars().filter(|c| *c != ELLIPSIS).count() >= 3,
+                "at {cols} the summary cell said only {shown:?}"
             );
         }
     }
