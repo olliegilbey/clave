@@ -61,6 +61,13 @@ Three defects, none of which a golden could see:
 3. **`<synthetic>` was taken as a model.** One such line among ten real answers
    left the card reading `<synt…`. `model_from_tail` scans past it.
 
+And one defect the drive did not find, because I introduced it after: the
+clock's resolution went in at the row projection, which feeds all three
+geometries, but only the four-line card arms a repaint timer. `double` would
+have frozen mid-count on a seconds reading. Both sites now ask one predicate,
+`RowHeight::animates`. No test caught it — the question that did was "what did
+this change do to the modes I was not looking at".
+
 Confirmed working live: four lines per row against a real pane; the click hit
 test at `lines_per_row=4` (`raw_line=5 → row_line=1`); the collapse toggle
 48 ↔ 16; the six-frame spinner; 60s idle quiescence at zero store writes.
@@ -80,6 +87,26 @@ if I wanted those glyphs to show."*
   dimming when it stops. Eyeball only; the goldens cannot see ink.
 - **post-turn quiescence** — the animation timer's disarm was never measured
   after a Working row went idle.
+
+## The mutation run
+
+**109 mutants over the diff, 102 caught, 7 unviable, 0 missed.** Run in two
+halves — `card.rs`+`main.rs`, then `model.rs`+`hook.rs`+`clave-types` — because
+`just mutants` on the whole diff was killed twice by the OS for low memory with
+three worktrees and two sandboxes live. `-j 1` and a split diff got through.
+The only survivor anywhere is `clave/src/main.rs`'s `fn main`, which is not a
+seam and predates this branch.
+
+Two families it found, both worth the run:
+
+- **`wants_w` survived a SECOND time.** Giving `ask` four more columns made the
+  golden's ask FIT, so a mis-sized cell was trailing spaces either way and
+  `clip_to_cells` ate the difference — the exact FOOTGUNS trap, twice, in the
+  same function. The fixture's ask now overflows on purpose: an ellipsis has a
+  column, and a column is a thing a golden can see. All 10 now caught.
+- **The subagent mark flipped without reporting `changed`**, so the row would
+  have been right in memory and stale on every bar until an unrelated event
+  pushed. Both mutants die on the new test.
 
 ## Open — one thing to watch, not a bug
 
