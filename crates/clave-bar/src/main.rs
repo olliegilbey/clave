@@ -35,11 +35,25 @@ const TIMER_KIND_CUTOFF_SECS: f64 = 0.5;
 const TERM_POLL_CUTOFF_SECS: f64 = 2.0;
 const TERM_POLL_SECS: f64 = 3.0;
 
-// The Timer classifier reads elapsed seconds alone, so the three durations
-// must hold their bands or one kind silently eats another's expiry — nothing
-// would fail except a live session. Same shape as the collapsed<expanded
-// width guard.
+/// The four-line card's status spinner: five frames a second, near Claude
+/// Code's own. Not one second — at a second a card stutters rather than
+/// breathes.
+///
+/// It shares the FAST band with the width cooldown rather than getting a band
+/// of its own, and that is deliberate: the classifier has three bands and no
+/// room for a fourth below 0.15s. The two cross-classify harmlessly in both
+/// directions — the width leg is inert unless an ask is in flight, and an
+/// animation tick arriving on a width expiry advances the spinner one frame
+/// early, which is a frame. Anything FASTER than this would need the
+/// classifier replaced with properly tagged timers first; do not simply lower
+/// the number.
+const ANIM_FRAME_SECS: f64 = 0.2;
+
+// The Timer classifier reads elapsed seconds alone, so the durations must hold
+// their bands or one kind silently eats another's expiry — nothing would fail
+// except a live session. Same shape as the collapsed<expanded width guard.
 const _: () = assert!(WIDTH_COOLDOWN_SECS < TIMER_KIND_CUTOFF_SECS);
+const _: () = assert!(ANIM_FRAME_SECS < TIMER_KIND_CUTOFF_SECS);
 const _: () = assert!(TIMER_KIND_CUTOFF_SECS <= PEEK_SINK_SECS);
 const _: () = assert!(PEEK_SINK_SECS < TERM_POLL_CUTOFF_SECS);
 const _: () = assert!(TERM_POLL_CUTOFF_SECS <= TERM_POLL_SECS);
@@ -88,6 +102,16 @@ struct State {
     /// A term-facts poll timer is in flight (#206) — one at a time, re-armed
     /// on expiry only while `term_poll_wanted()` holds.
     term_poll_armed: bool,
+    /// The four-line card's status-spinner tick, handed to `render_rows`. A
+    /// plain counter rather than a clock reading: the cycle is a ping-pong
+    /// over ten frames, so what it needs is a monotonic index, and the render
+    /// path stays a pure function of values passed to it.
+    anim_frame: usize,
+    /// An animation frame timer is in flight — one at a time, re-armed on
+    /// expiry only while some row is mid-turn. An idle fleet arms NOTHING,
+    /// which is what the drive loop's quiescence assertion requires and what
+    /// keeps a bar with no working agent from waking five times a second.
+    anim_armed: bool,
     /// The user's zellij theme, mapped onto the bar's colour roles (#145).
     /// Arrives via `ModeUpdate` (`ModeInfo.style.colors`); `Default` — the
     /// curated kanagawa — stands until the first one lands, which also keeps
@@ -157,6 +181,31 @@ impl State {
         if !self.term_poll_armed && self.model.term_poll_wanted() {
             self.term_poll_armed = true;
             set_timeout(TERM_POLL_SECS);
+        }
+    }
+
+    /// One animation timer at a time, and only while the geometry that draws a
+    /// spinner is on screen AND some row is actually mid-turn. Both gates
+    /// matter: the two legacy row modes have no spinner to drive, and an idle
+    /// fleet must arm nothing at all.
+    ///
+    /// Visibility-gated like the term poll, and for the same reason — a hidden
+    /// instance re-arming a 0.2s timer forever is the worst version of this
+    /// feature, and nobody would see the animation it was paying for.
+    fn arm_anim(&mut self, rows: &[Row]) {
+        if self.anim_armed || !self.model.own_tab_focused() {
+            return;
+        }
+        if self.model.row_height().lines_per_row() != 4 {
+            return;
+        }
+        let thinking = rows.iter().any(|r| match &r.content {
+            clave_bar::render::RowContent::Agent { status, .. } => status.thinking(),
+            clave_bar::render::RowContent::Terminal { .. } => false,
+        });
+        if thinking {
+            self.anim_armed = true;
+            set_timeout(ANIM_FRAME_SECS);
         }
     }
 
@@ -966,6 +1015,18 @@ impl ZellijPlugin for State {
                 let fx = self.model.width_cooldown_elapsed();
                 let width_moved = !fx.is_empty();
                 self.run_effects(fx);
+                // The animation leg shares the fast band with the width
+                // cooldown (see ANIM_FRAME_SECS). Disarming here and letting
+                // `render` re-arm is what stops the spinner the moment the
+                // last turn ends: the next frame is only ever armed by a paint
+                // that found a row still working.
+                let anim_moved = if elapsed < TIMER_KIND_CUTOFF_SECS && self.anim_armed {
+                    self.anim_armed = false;
+                    self.anim_frame = self.anim_frame.wrapping_add(1);
+                    true
+                } else {
+                    false
+                };
                 // The term-poll leg (#206): re-probe, re-arm while wanted,
                 // and never touch the peek count — that is the whole reason
                 // it classifies ABOVE the peek band.
@@ -973,7 +1034,7 @@ impl ZellijPlugin for State {
                     self.term_poll_armed = false;
                     let changed = self.probe_term_facts();
                     self.arm_term_poll();
-                    return width_moved || changed;
+                    return width_moved || changed || anim_moved;
                 }
                 // The peek leg is the one that must NOT run on a width
                 // expiry: it counts armed peeks, and a foreign decrement
@@ -987,7 +1048,7 @@ impl ZellijPlugin for State {
                 } else {
                     false
                 };
-                width_moved || peek_sunk
+                width_moved || peek_sunk || anim_moved
             }
             Event::Mouse(Mouse::LeftClick(line, _col)) => {
                 // §6.6: rows are mouse-clickable. line is the rendered row.
@@ -1060,6 +1121,11 @@ impl ZellijPlugin for State {
         self.model.tick(wall_now());
         let list: Vec<Row> = self.model.rows().into_iter().map(|(_, row)| row).collect();
         let row_height = self.model.row_height();
+        // The spinner's next frame is armed HERE, by the paint that found a
+        // row still working — so the animation starts with the first working
+        // row and stops with the last, without any other code having to know
+        // the fleet's state.
+        self.arm_anim(&list);
         let lines = render_rows(
             &list,
             cols,
@@ -1067,6 +1133,7 @@ impl ZellijPlugin for State {
             self.model.widths_at(cols),
             &self.theme,
             row_height,
+            self.anim_frame,
         );
         // #232, the maintainer's resilience ask: one line per frame naming the
         // geometry, the pane and the slice. Gated — a render fires on every

@@ -407,6 +407,7 @@ fn hero_svg(fonts: &[Font], cols: usize, widths: Widths) -> String {
         widths,
         &Theme::default(),
         RowHeight::Double,
+        0,
     );
     assert_eq!(lines.len(), height, "the frame drops cards");
     for (i, line) in lines.iter().enumerate() {

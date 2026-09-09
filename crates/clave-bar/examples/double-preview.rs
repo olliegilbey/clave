@@ -10,7 +10,7 @@
 //!
 //! Every card below comes from `clave_bar::render::render_rows` in
 //! `RowHeight::Double` — the same call the plugin renders with, reaching the
-//! same `card::render_card` inside it. During the design rounds this file
+//! same `card::render_double_card` inside it. During the design rounds this file
 //! carried its OWN copy of the geometry, which is exactly the drift the
 //! single-line preview was rewritten in Rust to end; the mock fleet stayed, the
 //! second renderer did not. Move a cell in `card.rs` and this preview moves with
@@ -388,6 +388,7 @@ fn main() {
             widths,
             &Theme::default(),
             RowHeight::Double,
+            0,
         );
         for (i, line) in lines.iter().enumerate() {
             let w = display_cells(&strip_sgr(line));

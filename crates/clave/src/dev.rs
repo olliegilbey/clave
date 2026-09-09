@@ -1696,6 +1696,7 @@ mod tests {
                 widths,
                 &Theme::default(),
                 row_height,
+                0,
             );
             assert_eq!(lines.len(), rows.len() * per_row, "line budget at {cols}");
             for (line, row) in lines.iter().zip(rows_by_line()) {
@@ -1732,6 +1733,7 @@ mod tests {
                 widths,
                 &Theme::default(),
                 row_height,
+                0,
             )) {
                 assert_ne!(*faded, plain, "recession did not change this row at {cols}");
             }
