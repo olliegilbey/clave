@@ -474,8 +474,15 @@ impl State {
         // delivery, and the `clave-toggle` arm below used to treat it as a
         // press — so one scripted Alt+c arrived twice and flipped the bar back
         // to where it started, while the keybind (which is not a CLI pipe)
-        // fired once. The drop line stays: those log lines are how pipe
-        // delivery is counted in the field (QA pipe-delivery P8).
+        // fired once. The drop line stays, but NOT as a delivery count — it
+        // used to be justified by a "QA pipe-delivery P8" that has never
+        // existed in the drive (which runs P0-P7), and the drive's own
+        // `count_eof_twins` says the tally is user-global and unattributable,
+        // so it is recorded for forensics and asserted nowhere. Since #141 the
+        // beacon is not a CLI pipe at all and `clave-status` from the hooks is
+        // the only clave-* CLI pipe left, so what this line is actually good
+        // for is seeing the hook push arrive. Beacon fan-out has its own
+        // attributable line in the `clave-visited` arm below.
         if clave_bar::pipe::is_cli_blank_twin(
             matches!(message.source, PipeSource::Cli(_)),
             message.payload.as_deref(),
@@ -552,6 +559,22 @@ impl State {
                     // sinks ~1s after the last nav (timer per peek; the
                     // Event::Timer arm below sinks only when the count of
                     // pending timers drains to zero).
+                    // The fan-out oracle (#141). Until this line, the evidence
+                    // that a beacon reached every instance was the blank twin
+                    // zellij appended to the old CLI announce — one per
+                    // instance, so ten per announce in a real fleet. That was
+                    // an artifact, not a record: it carried no payload, it
+                    // existed only because the channel was a CLI pipe, and the
+                    // log it lands in is shared by every session on the
+                    // machine, so it could be counted and never attributed.
+                    // This is the same volume and better evidence — the log's
+                    // own column carries the instance, and the text carries the
+                    // tab the beacon names. It answers the discriminator
+                    // FOOTGUNS spells out for a dead-looking nav: beacon lines
+                    // present and no landing means the executor election
+                    // refused, not that the channel starved. That distinction
+                    // read the wrong way for a day in #162.
+                    eprintln!("clave-bar: beacon {tab_id}");
                     if self.model.visited(tab_id) {
                         self.pending_peeks += 1;
                         set_timeout(PEEK_SINK_SECS); // user-tuned: 1.0 felt a touch long
