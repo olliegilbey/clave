@@ -90,10 +90,15 @@ const CHROME: usize = 5;
 /// edge, not the first letter inside it.
 const INDENT: usize = CHROME;
 
-/// The gap between the token count and the time beside it. TWO cells, not one:
-/// at one they read as a single figure, the same failure that keeps the two
-/// clocks apart.
-const TOKEN_GAP: usize = 2;
+/// The gap between the token count and the time beside it. Two cells is the
+/// floor — at one they read as a single figure, the same failure that keeps
+/// the two clocks apart. THREE is what it is, because the collapsed profile
+/// gets the last word: there the time is flushed to the right edge, which at
+/// 16 columns lands it three cells past the token field. Ruled from rendered
+/// output 2026-09-09 — the cell was one column left of its collapsed self, and
+/// the crop rule says collapsed is a strict left-crop of expanded, so any cell
+/// surviving the crop must not MOVE across it.
+const TOKEN_GAP: usize = 3;
 
 /// The turn clock — the card's only live number.
 const TURN_W: usize = 3;
@@ -1240,7 +1245,7 @@ mod tests {
                 [
                     " \u{25cf} \u{2502} \u{e0b6}CORTI2 \u{e0b4} Qdos IR35 assessment: the contr\u{2026} ",
                     "   \u{2502} hermes                         \u{ec82} fable  hi ",
-                    "   \u{2502} 105k   3m Bash (cargo mutants --in-di\u{2026}     ",
+                    "   \u{2502} 105k    3m Bash (cargo mutants --in-d\u{2026}     ",
                 ],
                 [
                     " \u{25cf} \u{2502} \u{e0b6}CORTI2 \u{e0b4}  ",
@@ -1253,7 +1258,7 @@ mod tests {
                 [
                     " \u{b7} \u{2502} \u{e0b6}CLV-3  \u{e0b4} Drive launch                     ",
                     " \u{f1bb} \u{2502} clave drive-launch       #204  \u{ec82} sonnet hi ",
-                    " \u{f171a} \u{2502} 117k  45m                                  ",
+                    " \u{f171a} \u{2502} 117k   45m                                 ",
                 ],
                 [
                     " \u{b7} \u{2502} \u{e0b6}CLV-3  \u{e0b4}  ",
@@ -1266,7 +1271,7 @@ mod tests {
                 [
                     " \u{f018d} \u{2502} \u{e0b6}Tab #12\u{e0b4} zsh                              ",
                     "   \u{2502} clave                                      ",
-                    "   \u{2502} TERM   7m                                  ",
+                    "   \u{2502} TERM    7m                                 ",
                 ],
                 [
                     " \u{f018d} \u{2502} \u{e0b6}Tab #12\u{e0b4}  ",
@@ -1279,7 +1284,7 @@ mod tests {
                 [
                     " \u{b7} \u{2502} Create close conversation summary flow     ",
                     "   \u{2502} hermes                         \u{ec82} opus   hi ",
-                    "   \u{2502} 34k    2h                                  ",
+                    "   \u{2502} 34k     2h                                 ",
                 ],
                 [
                     " \u{b7} \u{2502} Create cl\u{2026} ",
@@ -1292,7 +1297,7 @@ mod tests {
                 [
                     " \u{b7} \u{2502} Landing page hero copy rewrite pass        ",
                     " \u{f062c} \u{2502} clave-we\u{2026} hero-copy      #12   \u{ec81} gpt-5     ",
-                    "   \u{2502} 55k   30m                                  ",
+                    "   \u{2502} 55k    30m                                 ",
                 ],
                 [
                     " \u{b7} \u{2502} Landing p\u{2026} ",
@@ -1305,7 +1310,7 @@ mod tests {
                 [
                     " \u{2716} \u{2502} \u{e0b6}MIGRATE\u{e0b4} Postgres 15 to 17 migration run\u{2026} ",
                     " \u{f1bb} \u{2502} market-s\u{2026} pg17-migrate   #88   \u{ec82} sonnet hi ",
-                    "   \u{2502} 201k   4h                                  ",
+                    "   \u{2502} 201k    4h                                 ",
                 ],
                 [
                     " \u{2716} \u{2502} \u{e0b6}MIGRATE\u{e0b4}  ",
@@ -1331,7 +1336,7 @@ mod tests {
                 [
                     " \u{21bb} \u{2502} \u{e0b6}OPENING\u{e0b4} Just launched                    ",
                     "   \u{2502} clave                            fable     ",
-                    "   \u{2502} 100k   1m                                  ",
+                    "   \u{2502} 100k    1m                                 ",
                 ],
                 [
                     " \u{21bb} \u{2502} \u{e0b6}OPENING\u{e0b4}  ",
@@ -1457,6 +1462,26 @@ mod tests {
                 assert!(
                     !tail.trim().is_empty(),
                     "row {i}: the collapsed card's elapsed clock is not flush right ({narrow_l3:?})"
+                );
+
+                // And the expanded card puts it in the SAME columns. This is
+                // the crop rule applied to the one cell that has a position at
+                // both widths: collapsed is a left-crop of expanded, so a cell
+                // surviving the crop must not shift under it. The column comes
+                // from the COLLAPSED geometry — flush right, one margin in —
+                // so this cannot agree with the expanded arithmetic by
+                // sharing a constant with it. It caught a one-column drift the
+                // goldens could not see (ruled by eye 2026-09-09).
+                let at = |s: &str| -> String {
+                    s.chars()
+                        .skip(CARD_COLLAPSED_COLS - 1 - ELAPSED_W)
+                        .take(ELAPSED_W)
+                        .collect()
+                };
+                assert_eq!(
+                    at(&strip_sgr(&wide[2])),
+                    at(&narrow_l3),
+                    "row {i}: the elapsed clock moved across the crop"
                 );
             }
         }

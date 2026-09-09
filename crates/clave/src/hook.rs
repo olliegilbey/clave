@@ -290,11 +290,18 @@ pub fn summary_from_tail(tail: &str) -> Option<String> {
 /// `tail`. A BOOLEAN, not a count: "this row has agents under it" is the whole
 /// signal and a digit beside the mark was noise.
 ///
-/// `None` is "no reading", and it is not the same as `Some(false)`. The field
-/// arrived in a recent Claude Code, and a 64 KiB tail that reaches back past
-/// the last turn boundary carries no closing record at all — both of those
-/// must HOLD what the store already knows. Only a record that IS present and
-/// says zero can clear the mark.
+/// `None` is "no reading", and it is not the same as `Some(false)`: a 64 KiB
+/// tail that reaches back past the last turn boundary carries no closing
+/// record at all, and that must HOLD what the store already knows.
+///
+/// **A closing record that carries no count is a ZERO, not a silence.** Every
+/// `turn_duration` line in the sandbox drive (2026-09-09, a session that ran
+/// no background agents) omitted `pendingBackgroundAgentCount` entirely rather
+/// than writing `0`. Whether that is omit-when-zero or a field this Claude
+/// Code does not emit at all, the safe reading is the same one: absence inside
+/// a record that IS present clears the mark. Holding there would let a row
+/// earn the mark once and never lose it, which is the one failure a boolean
+/// cannot recover from.
 ///
 /// **This reading is a turn behind, by construction.** `turn_duration` is
 /// written when a turn CLOSES, so what it reports is "when this turn ended, N
@@ -310,7 +317,12 @@ pub fn subagents_from_tail(tail: &str) -> Option<bool> {
         if v.get("type")?.as_str()? != "system" || v.get("subtype")?.as_str()? != "turn_duration" {
             return None;
         }
-        Some(v.get("pendingBackgroundAgentCount")?.as_u64()? > 0)
+        Some(
+            v.get("pendingBackgroundAgentCount")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+                > 0,
+        )
     })
 }
 
@@ -483,7 +495,14 @@ pub fn model_from_tail(tail: &str) -> Option<String> {
             return None;
         }
         let s = v.get("message")?.get("model")?.as_str()?.trim();
-        (!s.is_empty()).then(|| s.to_string())
+        // `<synthetic>` is Claude Code's marker on an assistant line IT wrote
+        // — an interrupt notice, an API error stub — not a model that
+        // answered. Seen live in the sandbox drive (2026-09-09), where one
+        // such line among ten real ones left the card reading `<synt…` until
+        // the next real answer overwrote it. Scanning PAST keeps the last
+        // model that actually spoke, which is the honest cell. The angle
+        // brackets are the discriminator: no model id has ever carried one.
+        (!s.is_empty() && !s.starts_with('<')).then(|| s.to_string())
     })
 }
 
@@ -955,7 +974,8 @@ pub fn apply_hook_event(
         changed |= take_effort(rec, &raw);
     }
     // The card's subagent mark. Same tail, same fail-closed rule: `None` is
-    // "no reading" and HOLDS, only a closing record saying zero clears it.
+    // "no reading" and HOLDS. A closing record clears it — including one that
+    // names no count, which is the shape the drive actually saw.
     if let Some(subs) = tail.and_then(subagents_from_tail) {
         changed |= rec.subagents != subs;
         rec.subagents = subs;
@@ -2192,9 +2212,19 @@ mod tests {
             "a silent tail must hold the mark, not clear it"
         );
 
-        // Only a record that IS present and says zero clears it.
+        // Only a record that IS present clears it.
         apply_hook_event(&mut s, "u1", "Stop", &p, Some(&turn(0)), 1002, true);
         assert!(!s.agents["u1"].subagents);
+
+        // And the live shape of that record names no count at all.
+        apply_hook_event(&mut s, "u1", "Stop", &p, Some(&turn(2)), 1003, true);
+        assert!(s.agents["u1"].subagents);
+        let closed = r#"{"type":"system","subtype":"turn_duration","durationMs":3200}"#;
+        apply_hook_event(&mut s, "u1", "Stop", &p, Some(closed), 1004, true);
+        assert!(
+            !s.agents["u1"].subagents,
+            "a closing record with no count is a turn that ended with nothing pending"
+        );
     }
 
     #[test]
@@ -2214,14 +2244,18 @@ mod tests {
         let two = format!("{}\n{}", turn(0), turn(2));
         assert_eq!(subagents_from_tail(&two), Some(true));
 
-        // No reading is not a reading of zero. An older Claude Code never
-        // wrote the field, and a tail that reaches back past the last turn
-        // boundary carries no closing record at all — both must HOLD what the
-        // store already knows rather than assert an empty fleet.
+        // No reading is not a reading of zero: a tail that reaches back past
+        // the last turn boundary carries no closing record at all, and must
+        // HOLD what the store knows rather than assert an empty fleet.
         assert_eq!(subagents_from_tail(""), None);
+
+        // But a closing record that IS present and names no count is a zero.
+        // This is the COMMON shape, not an edge one — every `turn_duration`
+        // line in the sandbox drive looked like this. Reading it as "no
+        // reading" is what would let the mark stick to a row forever.
         assert_eq!(
             subagents_from_tail(r#"{"type":"system","subtype":"turn_duration","messageCount":40}"#),
-            None
+            Some(false)
         );
         assert_eq!(
             subagents_from_tail(r#"{"type":"system","subtype":"away_summary","content":"x"}"#),
@@ -3321,6 +3355,25 @@ mod tests {
         // last_tail_field.
         let dirty = format!("not-json\n{tail}");
         assert_eq!(model_from_tail(&dirty).as_deref(), Some("claude-fable-5"));
+
+        // A synthetic line is one Claude Code wrote itself, not a model that
+        // answered. It must be scanned PAST — not taken as the newest reading,
+        // and not treated as "no reading" either, which would leave the card
+        // holding something even staler than the real answer below it.
+        let synthetic = format!(
+            "{tail}{}\n",
+            r#"{"type":"assistant","message":{"model":"<synthetic>"}}"#
+        );
+        assert_eq!(
+            model_from_tail(&synthetic).as_deref(),
+            Some("claude-fable-5")
+        );
+        // With nothing real anywhere, it is genuinely no reading, and the
+        // fail-closed rule holds whatever the store already knew.
+        assert_eq!(
+            model_from_tail(r#"{"type":"assistant","message":{"model":"<synthetic>"}}"#),
+            None
+        );
     }
 
     #[test]
