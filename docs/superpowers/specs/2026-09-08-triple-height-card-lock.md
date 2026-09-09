@@ -145,14 +145,36 @@ what you do is the reading that survives collapse.
 
 ### 4.4 The turn clock is the only live number on the card
 
-Blue (`#7E9CD8` kanagawa crystalBlue) while a turn is in flight, and **blank**
-when none is — not dimmed. Blank is already the card's word for "no reading",
-and a blank clock beside a lit one is the cheapest possible "this agent is
-thinking".
+**AMENDED 2026-09-09, ruled from the drive.** The clock is blue (`#7E9CD8`
+kanagawa crystalBlue) while a turn is in flight. It is not a *separate cell*
+from `elapsed`, and it does not go blank when the turn ends — it **dims**, and
+the same number changes meaning.
 
-**It costs no store traffic.** The store holds *when the turn began*; the bar
-subtracts from its own wall clock, which it already reads once per render for
-the elapsed label. The fleet is never re-pushed to animate a counter.
+The original wording assumed two numbers. There is only one instant to measure.
+The store bumps `last_interacted` on `UserPromptSubmit` and nothing else, and
+`UserPromptSubmit` is the only event that sets `Working` — so "when the turn
+began" and "when you last interacted" are the same moment, always. A separate
+turn cell would have printed `elapsed`'s number two columns away, which is the
+one thing §4.3 kept them apart to prevent.
+
+What the two readings genuinely differ in is **resolution and meaning**:
+
+| | while `Working` | once the turn is over |
+|---|---|---|
+| ink | crystalBlue `#7E9CD8` | dimmed meta |
+| grain | seconds under a minute (`3s`, `59s`) | minutes and up (`5m`, `2h`) |
+| means | how long this turn has run | how stale this row is |
+
+The drive is what settled it: the card read `0m` for the whole of a turn Claude
+Code's own footer was calling `3s`. Staleness in seconds would be noise; a turn
+in minutes says nothing at all.
+
+**It costs no store traffic and no new timer.** The bar already repaints every
+0.2s while any row is thinking, and arms nothing when none is (`arm_anim`), so
+the seconds tick for free at one end and an idle fleet pays nothing at the
+other. The fleet is never re-pushed to animate a counter.
+
+Dropping the separate cell returns **four columns** to `ask` (§4.7).
 
 ### 4.5 The status mark animates while working
 

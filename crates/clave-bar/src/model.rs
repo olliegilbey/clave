@@ -156,6 +156,26 @@ fn is_default_checkout(a: &Agent) -> bool {
 /// `then == 0` is "never" (no interaction on record — the store never mints
 /// that value for a real one), which renders blank rather than "now": the bar
 /// never invents a measurement (#232).
+/// The same instant `elapsed_label` measures, at the resolution a turn in
+/// flight needs: SECONDS under the first minute, and the staleness ladder
+/// above it. Ruled from the drive (2026-09-09) — the card sat on `0m` for the
+/// whole of a turn Claude Code's own footer was counting in seconds, which is
+/// the one stretch where the number is worth watching rather than glancing at.
+///
+/// Three characters wide at the widest (`59s`), so it costs the cell nothing.
+/// The bar already repaints every 0.2s while any row is thinking and arms
+/// nothing at all when none is, so this reading is free at both ends: no new
+/// timer to drive it, and no idle fleet paying for a clock nobody is watching.
+pub(crate) fn turn_label(now: u64, then: u64) -> Option<String> {
+    if then == 0 {
+        return None;
+    }
+    match now.saturating_sub(then) {
+        s if s < 60 => Some(format!("{s}s")),
+        _ => elapsed_label(now, then),
+    }
+}
+
 pub(crate) fn elapsed_label(now: u64, then: u64) -> Option<String> {
     if then == 0 {
         return None;
@@ -2164,7 +2184,18 @@ impl BarModel {
             } else {
                 a.branch.clone()
             },
-            elapsed: elapsed_label(self.now, a.last_interacted),
+            // One instant, two resolutions (lock §4.4). Mid-turn the number is
+            // a turn clock and wants SECONDS — the drive caught the card
+            // saying `0m` through a turn Claude Code called 3s. Once the turn
+            // is over the same number means staleness, where minutes and hours
+            // are the honest grain and seconds would be noise that repaints
+            // forever. `status`, not `a.status`: a row the local override has
+            // already quieted is not thinking, whatever the store still says.
+            elapsed: if status.thinking() {
+                turn_label(self.now, a.last_interacted)
+            } else {
+                elapsed_label(self.now, a.last_interacted)
+            },
             // Straight off the wire (lock §4.7). The host has already decided
             // whether this row is blocked; the bar only draws the words.
             wants: a.wants.clone(),
@@ -6847,6 +6878,27 @@ mod tests {
         assert_eq!(elapsed_label(100 + 3 * 86_400, 100).as_deref(), Some("3d"));
         assert_eq!(elapsed_label(100 + 2 * 604_800, 100).as_deref(), Some("2w"));
         assert_eq!(elapsed_label(50, 100).as_deref(), Some("0m")); // clock skew: clamp, don't panic
+    }
+
+    #[test]
+    fn the_turn_clock_counts_seconds_where_staleness_would_say_nothing() {
+        // The whole reason the reading exists: `elapsed_label` spends the
+        // entire first minute saying `0m`, and that minute is exactly when a
+        // turn is worth watching. Measured against a real turn in the sandbox
+        // drive, where the card read `0m` and Claude Code's footer read 3s.
+        assert_eq!(turn_label(103, 100).as_deref(), Some("3s"));
+        assert_eq!(elapsed_label(103, 100).as_deref(), Some("0m"));
+        assert_eq!(turn_label(100, 100).as_deref(), Some("0s"));
+        assert_eq!(turn_label(159, 100).as_deref(), Some("59s"));
+        // Three characters at its widest, which is what lets it share the
+        // staleness cell rather than needing one of its own.
+        assert_eq!(turn_label(159, 100).map(|s| s.len()), Some(3));
+        // Past the minute the two readings converge — a long turn is stale in
+        // the same units, and one ladder is easier to read than two.
+        assert_eq!(turn_label(160, 100).as_deref(), Some("1m"));
+        assert_eq!(turn_label(100 + 2 * 3600, 100).as_deref(), Some("2h"));
+        // And it invents nothing where there is nothing, same as elapsed.
+        assert_eq!(turn_label(1000, 0), None);
     }
 
     #[test]

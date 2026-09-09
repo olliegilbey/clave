@@ -12,7 +12,7 @@
 //! ```text
 //!   line 1:  status  │ chip-pill  summary
 //!   line 2:  prov    │ repo [branch]  #PR   provider model effort
-//!   line 3:  subs    │ tokens  elapsed  wants               turn
+//!   line 3:  subs    │ tokens  clock  wants
 //!   line 4:  the shadow rule — a hairline that closes the card
 //! ```
 //!
@@ -99,9 +99,6 @@ const INDENT: usize = CHROME;
 /// the crop rule says collapsed is a strict left-crop of expanded, so any cell
 /// surviving the crop must not MOVE across it.
 const TOKEN_GAP: usize = 3;
-
-/// The turn clock — the card's only live number.
-const TURN_W: usize = 3;
 
 /// The tail line 2 pays for provider, model and effort in the expanded
 /// profile, and hands entirely to the repo in the collapsed one.
@@ -197,23 +194,6 @@ struct Cells<'a> {
     /// pending-background-agent count (lock 4.6). A terminal row never has
     /// one.
     subs: bool,
-    /// How long the turn in flight has been going. **STILL BLANK, and it is
-    /// blocked on a ruling rather than on work** (lock 4.4).
-    ///
-    /// The lock says the store holds when the turn began and the bar
-    /// subtracts. It already does: `last_interacted` is bumped on
-    /// `UserPromptSubmit` and on nothing else, and `UserPromptSubmit` is the
-    /// only event that sets `Working` — so "when the turn began" and "when you
-    /// last interacted" are the same instant, always. A turn clock read from
-    /// it would print the same number `elapsed` prints, two cells apart on the
-    /// same line, which is the one thing 4.3 kept them apart to avoid.
-    ///
-    /// So this cell needs a decision, not a field: retarget `elapsed` to
-    /// `last_visited` (time since you LOOKED, a genuinely different reading),
-    /// give the turn clock a different source (silence since the agent's last
-    /// output — a real live number, but no longer free), or drop it and let
-    /// the animated mark carry "thinking" alone. Until then, blank.
-    turn: &'a str,
     /// What this row is blocked on, in its own words (lock §4.7). Tier 1 is
     /// wired: the tool name off the permission notification clave's hook
     /// already receives. Blank is the common case and the point — an idle
@@ -270,7 +250,6 @@ fn cells<'a>(content: &'a RowContent, theme: &Theme) -> Cells<'a> {
                 elapsed: elapsed.as_deref().unwrap_or(""),
                 thinking: status.thinking(),
                 subs: *subagents,
-                turn: "",
                 wants: wants.as_deref().unwrap_or(""),
             }
         }
@@ -309,7 +288,6 @@ fn cells<'a>(content: &'a RowContent, theme: &Theme) -> Cells<'a> {
             // the sense the spinner means.
             thinking: false,
             subs: false,
-            turn: "",
             wants: "",
         },
     }
@@ -494,10 +472,9 @@ pub(crate) fn render_double_card(
 /// working ignores it, so a still fleet renders identically at every frame and
 /// the goldens below can pin frame 0 without freezing the animation out.
 ///
-/// Three cells have no source on the wire yet — the subagent mark, the turn
-/// clock and `wants` — and each renders BLANK until one is wired. Blank is the
-/// meaning on this card, so that is a correct card rather than a placeholder,
-/// and the three can land independently.
+/// Every cell now has a source. Where one has no reading the cell renders
+/// BLANK rather than an invented value — blank is the meaning on this card,
+/// and a quiet fleet is supposed to look quiet.
 ///
 /// `pub(crate)` for the same reason as its two-line sibling: `render_rows` is
 /// the bar's one entry point, and a card is a geometry inside it rather than a
@@ -670,40 +647,44 @@ pub(crate) fn render_card(
     };
     l3.push_str(&seg(ink(token_text.1), &pad(&token_text.0, TOKEN_W)));
     if expanded {
-        // Three measurements and one message. `wants` claims every cell the
-        // numbers do not.
-        let wants_w =
-            build.saturating_sub(INDENT + TOKEN_W + TOKEN_GAP + ELAPSED_W + 1 + 1 + TURN_W + 1);
-        // The clocks stay APART: adjacent, `20h 20m` reads as one duration —
-        // twenty hours and twenty minutes — rather than two numbers, and no
-        // amount of colour saves it, only distance. Elapsed takes the LEFT
-        // slot and therefore the crop, because the animated mark already says
-        // "thinking" while past an hour without interaction the prompt cache
-        // is gone and the next turn costs more. The one that changes what you
-        // do is the one that survives collapse.
+        // Two measurements and one message. `wants` claims every cell the
+        // numbers do not — including the four the turn clock used to hold.
+        let wants_w = build.saturating_sub(INDENT + TOKEN_W + TOKEN_GAP + ELAPSED_W + 1 + 1);
+        // ONE clock, rendered two ways (lock §4.4, ruled from the drive
+        // 2026-09-09). There was never a second number to print: the store
+        // bumps `last_interacted` on `UserPromptSubmit` and nothing else, and
+        // `UserPromptSubmit` is the only event that sets `Working` — so "when
+        // the turn began" and "when you last interacted" are the same instant,
+        // always, and a turn cell would have printed elapsed's number two
+        // cells away. What the two readings differ in is RESOLUTION and what
+        // they mean, not the instant they measure from, so the cell carries
+        // both: crystalBlue and counting seconds while the turn is in flight,
+        // dimmed and coarse once it is over and the number means staleness.
+        // The drive is what made this obvious — the card said `0m` through a
+        // turn Claude Code's own footer was calling 3s.
+        let clock_ink = if c.thinking { TURN_INK } else { META_INK };
         l3.push_str(&seg(
-            ink(META_INK),
+            ink(clock_ink),
             &format!("{}{}", " ".repeat(TOKEN_GAP), rpad(c.elapsed, ELAPSED_W)),
         ));
         l3.push_str(&seg(
             ink(NEEDS_YOU_INK),
             &format!(" {}", pad(c.wants, wants_w)),
         ));
-        l3.push_str(&seg(ink(TURN_INK), &format!(" {}", rpad(c.turn, TURN_W))));
         l3.push_str(&seg(theme.default_ink, " "));
     } else {
         // The crop rule: collapsed is a LEFT-CROP of expanded, never a
         // re-arrangement, so a cell's column IS its priority. Line 3's crop
-        // reaches the token count and the time since you last touched the row
-        // — how hot, and how stale — and stops. The time LOCKS to the right
-        // edge, one cell in: the same edge the turn clock holds in the
-        // expanded card, so whichever clock is rightmost sits in the same
-        // column and the eye finds a duration in one place in both profiles.
-        // The fill is whatever is left rather than a fixed cell, so the line
-        // lands on `build` without a second constant to keep in step.
+        // reaches the token count and the clock — how hot, and how long — and
+        // stops. The clock LOCKS to the right edge, one cell in, and that is
+        // the RULED position: the expanded card's `TOKEN_GAP` is chosen to put
+        // it in the same columns, not the other way round. The fill is
+        // whatever is left rather than a fixed cell, so the line lands on
+        // `build` without a second constant to keep in step.
         let fill = build.saturating_sub(display_cells(&strip_sgr(&l3)) + ELAPSED_W + 1);
         l3.push_str(&seg(theme.default_ink, &" ".repeat(fill)));
-        l3.push_str(&seg(ink(META_INK), &rpad(c.elapsed, ELAPSED_W)));
+        let clock_ink = if c.thinking { TURN_INK } else { META_INK };
+        l3.push_str(&seg(ink(clock_ink), &rpad(c.elapsed, ELAPSED_W)));
         l3.push_str(&seg(theme.default_ink, " "));
     }
 
@@ -1227,10 +1208,11 @@ mod tests {
     /// (line 3 goes fully blank, which is the design and not a hole), and the
     /// `Opening` row that escapes the dormant fade.
     ///
-    /// The subagent mark, `wants` and the turn clock render BLANK throughout,
-    /// because nothing writes them to the wire yet. These goldens therefore
-    /// pin what ships today; wiring each source is a change that MOVES them,
-    /// which is exactly what a golden is for.
+    /// One row carries an `ask` and one the subagent mark. That is deliberate
+    /// and not decoration: `clip_to_cells` guarantees every line's width at the
+    /// exit, so a golden whose flex cells are all BLANK cannot see arithmetic
+    /// that only moves where the right edge falls — the mutation run found
+    /// eight survivors living in exactly that gap (FOOTGUNS).
     #[test]
     fn the_four_line_card_pins_both_profiles() {
         let f = fleet();
@@ -1245,7 +1227,7 @@ mod tests {
                 [
                     " \u{25cf} \u{2502} \u{e0b6}CORTI2 \u{e0b4} Qdos IR35 assessment: the contr\u{2026} ",
                     "   \u{2502} hermes                         \u{ec82} fable  hi ",
-                    "   \u{2502} 105k    3m Bash (cargo mutants --in-d\u{2026}     ",
+                    "   \u{2502} 105k    3m Bash (cargo mutants --in-diff)  ",
                 ],
                 [
                     " \u{25cf} \u{2502} \u{e0b6}CORTI2 \u{e0b4}  ",
@@ -1444,8 +1426,9 @@ mod tests {
             let pill: String = strip_sgr(&wide[0]).chars().skip(CHROME).take(9).collect();
             let cropped: String = strip_sgr(&narrow[0]).chars().skip(CHROME).take(9).collect();
             assert_eq!(pill, cropped, "row {i} clipped its pill");
-            // Line 3's rightmost cell is a duration, one margin in, at both
-            // widths — the turn clock expanded, the elapsed clock collapsed.
+            // Line 3 keeps a right margin at both widths. The clock is the
+            // rightmost thing in the collapsed profile; expanded, `wants` may
+            // run past it, but the margin holds either way.
             for card in [&wide, &narrow] {
                 let l3 = strip_sgr(&card[2]);
                 assert!(
@@ -1628,6 +1611,61 @@ mod tests {
             roomy.contains("\u{2026} pg17"),
             "and it is separated from the repo by a space: {roomy:?}"
         );
+    }
+
+    /// Lock §4.4: there is ONE clock and it is rendered two ways. While the
+    /// turn is in flight it is crystalBlue and counting; the moment it is over
+    /// the same cell dims and the number means staleness instead. The text
+    /// alone cannot carry that — `3m` reads identically either way — so this
+    /// reads the SGR, and it checks BOTH profiles because the clock is the one
+    /// cell that survives the crop.
+    #[test]
+    fn the_clock_is_lit_while_the_turn_runs_and_dim_once_it_is_over() {
+        let line3 = |status: RowStatus, cols: usize| {
+            render_card(
+                &A {
+                    status,
+                    elapsed: "42s",
+                    ..A::default()
+                }
+                .row(),
+                cols,
+                false,
+                0,
+                &Theme::default(),
+            )[2]
+            .clone()
+        };
+        // The ink the clock's OWN run wears, not merely one the line contains
+        // somewhere: the rail is crystalBlue too, so a `contains` check passes
+        // on every row ever rendered and proves nothing.
+        let clock_ink = |line: &str| -> String {
+            let at = line.find("42s").expect("the clock's text");
+            let start = line[..at].rfind("\u{1b}[38;2;").expect("an ink before it");
+            let run = &line[start..];
+            run[..=run.find('m').expect("a terminated SGR")].to_string()
+        };
+        for cols in [CARD_EXPANDED_COLS, CARD_COLLAPSED_COLS] {
+            let running = line3(RowStatus::Working, cols);
+            let over = line3(RowStatus::Idle, cols);
+            assert_eq!(
+                clock_ink(&running),
+                TURN_INK.fg(),
+                "at {cols} cols a running turn's clock must be crystalBlue: {running:?}"
+            );
+            assert_eq!(
+                clock_ink(&over),
+                META_INK.fg(),
+                "at {cols} cols a finished turn's clock must dim to meta: {over:?}"
+            );
+            // And only the INK moved — a row that lit up must not also have
+            // shifted the number it lit.
+            assert_eq!(
+                strip_sgr(&running),
+                strip_sgr(&over),
+                "at {cols} cols the clock's ink changed its column"
+            );
+        }
     }
 
     #[test]
