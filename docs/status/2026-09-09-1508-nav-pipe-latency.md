@@ -6,7 +6,7 @@ along the way, not so it re-opens the task.
 
 ## What shipped
 
-Branch `worktree-nav-pipe-latency`, four commits, PR open against `main`.
+Branch `worktree-nav-pipe-latency`, PR open against `main`.
 
 The beacon announce — the message one sidebar sends to converge the other nine
 after a nav or a click — no longer shells out `zellij pipe`. It goes through
@@ -21,9 +21,14 @@ repo before.
 - **From source.** With neither `plugin_url` nor `destination_plugin_id` set,
   the server takes the `(None, None)` arm and calls `pipe_to_all_plugins` over
   `all_plugin_ids()` — the whole plugin asset map, no tab or focus filter
-  anywhere in the path (`zellij-server-0.44.3` `plugins/mod.rs:1126`,
+  anywhere in the path (`zellij-server-0.44.3`, the `MessageFromPlugin`
+  handler's `(None, None)` arm at `plugins/mod.rs:1128-1138`, then
   `plugin_map.rs:211`). That is the same function a payload-only `zellij pipe`
   reaches, which is what makes this a channel swap and not a semantic one.
+  An independent reviewer re-read the whole server path and confirmed it,
+  adding two facts worth keeping: pipe delivery is NOT subscription-gated
+  (`wasm_bridge.rs` binds `_subscriptions` and never reads it), and a denied
+  permission is LOGGED, not silent (`zellij_exports.rs`).
   Note `zellij-server` is NOT vendored locally — only `zellij-tile` and
   `zellij-utils` are, because those are the plugin's own dependencies. Fetch it
   to read it: `curl -sL
@@ -88,7 +93,14 @@ announce made zellij append a blank message per instance (#45), and the field
 counted those as fan-out evidence. They were an artifact: no payload, present
 only because the channel was a subprocess, in a log shared by every session on
 the machine — countable, never attributable. The beacon line is the same volume
-with the instance in the log's own column and the tab in the text.
+with the tab in the text and the instance id in the log's own column.
+
+Be precise about what that buys, because an earlier draft overclaimed it. The
+line is attributable to a PLUGIN ID, not to a session. Plugin ids are
+per-server and the log still carries no session identity, so two live clave
+sessions interleave beacon lines under colliding ids. Counting instances is
+only sound with one session running; `scripts/nav-bench.sh` now detects that
+and warns.
 
 Also killed while in this code: the `QA pipe-delivery P8` comment that
 justified keeping the blank-twin drop line. The drive runs P0-P7 and has never
@@ -105,6 +117,15 @@ comment.
   mutants to filter". The diff is a channel swap inside an effect arm, a const
   list and log lines, so nothing in it has a mutable return value. Say this
   plainly rather than calling it a pass.
+- **CodeRabbit CLI** — 3 minor, all accepted (bench slice truncation, unvalidated
+  gesture count, unlabelled before-figures).
+- **Independent adversarial reviewer** — 10 findings, all accepted and fixed.
+  The load-bearing delivery claim survived it. The one that mattered most is
+  in the permission section below; the rest were the bench script's stdin
+  guard and swallowed stderr, two false statements in comments, the
+  session-attribution overclaim, and two holes in the new lockstep test (a
+  second `request_permission` call would have been invisible to it, and it
+  compared in order where zellij's own check is containment — both closed).
 
 **The one thing that is NOT verified, and it is the acceptance test.** The
 maintainer mashing `Alt+Up`/`Alt+Down` in his OWN ten-tab fleet and it keeping
@@ -127,9 +148,23 @@ a normal release path is fine — but **an existing session must be relaunched
 after the cut**, and that is the same rule as any keybind change.
 
 A new test reads the bar's `request_permission` block out of the source and
-asserts it equals `BAR_PERMISSIONS`, because the two lists live in different
-crates and the bar's is wasm-only, so no shared const can reach it. That guard
-did not exist before; the doc comment had asked for it in prose for months.
+asserts it matches `BAR_PERMISSIONS` as a SET, because the two lists live in
+different crates and the bar's is wasm-only, so no shared const can reach it.
+That guard did not exist before; the doc comment had asked for it in prose for
+months.
+
+**And `permissions_seeded` — what `clave doctor` reports — was blind to exactly
+this failure.** It checked only that the wasm key existed in the cache, not
+which permissions sat under it, so a cache holding a PREVIOUS release's shorter
+set read as green while every pipe to that bar was dead. The reachable path is
+the dev loop, not a release: `just dev-install` overwrites the sandbox wasm IN
+PLACE so the cache key does not change, and `dev launch` skips `run_setup`
+because a dev build has no embedded wasm to refresh against. A release is
+immune for the opposite reason — the versioned filename changes, so the merge
+seeds a fresh key with the current set. Found by the adversarial reviewer;
+`permissions_seeded` now checks the set inside our own node, with a test for
+the stale-shorter-grant case and for a neighbouring plugin's grant not
+satisfying ours.
 
 ## Reference
 

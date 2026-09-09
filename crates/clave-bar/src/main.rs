@@ -227,7 +227,8 @@ impl State {
                     // a payload-only `zellij pipe` reaches —
                     // `pipe_to_all_plugins` over `all_plugin_ids()`, which is
                     // the whole plugin asset map with NO tab or focus filter
-                    // (zellij-server-0.44.3 `plugins/mod.rs:1126-1136`,
+                    // (zellij-server-0.44.3, the `MessageFromPlugin` handler's
+                    // `(None, None)` arm at `plugins/mod.rs:1128-1138`,
                     // `plugin_map.rs:211`). That is the load-bearing fact: the
                     // beacon exists to converge instances whose tab is NOT
                     // focused, and unlike `TabUpdate` this channel does reach
@@ -479,10 +480,11 @@ impl State {
         // existed in the drive (which runs P0-P7), and the drive's own
         // `count_eof_twins` says the tally is user-global and unattributable,
         // so it is recorded for forensics and asserted nowhere. Since #141 the
-        // beacon is not a CLI pipe at all and `clave-status` from the hooks is
-        // the only clave-* CLI pipe left, so what this line is actually good
-        // for is seeing the hook push arrive. Beacon fan-out has its own
-        // attributable line in the `clave-visited` arm below.
+        // beacon is not a CLI pipe at all, so what this line now witnesses is
+        // the pipes the HOST binary still pushes: `clave-status` from the
+        // hooks, `clave-register` from `spawn.rs`, and `clave-nav` from the
+        // `add.rs` live pick. Beacon fan-out has its own line in the
+        // `clave-visited` arm below.
         if clave_bar::pipe::is_cli_blank_twin(
             matches!(message.source, PipeSource::Cli(_)),
             message.payload.as_deref(),
@@ -559,17 +561,26 @@ impl State {
                     // sinks ~1s after the last nav (timer per peek; the
                     // Event::Timer arm below sinks only when the count of
                     // pending timers drains to zero).
+                    //
                     // The fan-out oracle (#141). Until this line, the evidence
                     // that a beacon reached every instance was the blank twin
                     // zellij appended to the old CLI announce — one per
                     // instance, so ten per announce in a real fleet. That was
-                    // an artifact, not a record: it carried no payload, it
-                    // existed only because the channel was a CLI pipe, and the
-                    // log it lands in is shared by every session on the
-                    // machine, so it could be counted and never attributed.
-                    // This is the same volume and better evidence — the log's
-                    // own column carries the instance, and the text carries the
-                    // tab the beacon names. It answers the discriminator
+                    // an artifact, not a record: it carried no payload and
+                    // existed only because the channel was a CLI pipe. This
+                    // line carries the tab the beacon names and the log's own
+                    // column carries the instance id, so a delivery can be
+                    // read rather than merely tallied.
+                    //
+                    // It does NOT solve the log's session problem, and an
+                    // earlier draft of this comment overclaimed that it did.
+                    // The zellij log is shared by every session on the machine
+                    // and plugin ids are per-server, so ids from two live
+                    // sessions collide and nothing in this line says which
+                    // session it came from. Counting instances across a window
+                    // is only sound when one clave session is running —
+                    // `scripts/nav-bench.sh` checks that and says so. It
+                    // answers the discriminator
                     // FOOTGUNS spells out for a dead-looking nav: beacon lines
                     // present and no landing means the executor election
                     // refused, not that the channel starved. That distinction
@@ -638,6 +649,16 @@ impl State {
                 // the code path and never measured, which is why the announce
                 // channel could not be shown to be the cost. Executor-only
                 // keeps it at one line per gesture, not one per instance.
+                //
+                // It fires BEFORE `nav`, so it records the press ARRIVING at
+                // the elected instance, not the selection moving — a press
+                // that cannot move (a walk into the end of the ring) still
+                // logs. That is deliberate: the measurement wants the arrival
+                // timestamp, and a press whose only effect is repainting the
+                // highlight is still a gesture the user is waiting on. What a
+                // MISSING line means is therefore exact — no instance elected
+                // itself, which is the #162 election refusal — and nothing
+                // else can suppress it.
                 if is_executor {
                     eprintln!("clave-bar: nav landed {payload}");
                 }

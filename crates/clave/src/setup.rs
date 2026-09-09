@@ -841,10 +841,31 @@ pub fn merge_permissions_kdl(existing: &str, wasm_abs: &str) -> String {
     out
 }
 
-/// Is our grant present in the permission-cache text? Same key form
-/// merge_permissions_kdl writes — doctor never guesses a second format.
+/// Is our grant present in the permission-cache text, WITH every permission
+/// the bar asks for? Same key form merge_permissions_kdl writes — doctor never
+/// guesses a second format.
+///
+/// The set check is load-bearing, not thoroughness (#141). Checking only that
+/// the key exists made doctor report a green "permissions pre-seeded" over a
+/// cache holding a PREVIOUS release's shorter set, which is the exact state
+/// that kills the bar: zellij's grant check is containment, so one missing name
+/// puts the instance in the host's pending-permission set — and that set is the
+/// one thing `pipe_messages` filters out, so EVERY pipe to that bar is
+/// dropped, `clave-status` included, behind a prompt that a narrow bar pane
+/// cannot answer. The reachable path is the dev loop rather than a release:
+/// `just dev-install` overwrites the sandbox wasm IN PLACE, so the cache key
+/// does not change, and `dev launch` skips `run_setup` because a dev build has
+/// no embedded wasm to refresh against. A release is immune for the opposite
+/// reason — the versioned wasm filename changes, so the merge seeds a fresh
+/// key with the current set.
 pub fn permissions_seeded(existing: &str, wasm_abs: &str) -> bool {
-    existing.contains(&format!("\"file:{wasm_abs}\""))
+    let Some(node) = existing.split_once(&format!("\"file:{wasm_abs}\"")) else {
+        return false;
+    };
+    // The node's own body only — up to its closing brace. Scanning the rest of
+    // the file would let ANOTHER plugin's grant satisfy ours.
+    let body = node.1.split_once('}').map(|(b, _)| b).unwrap_or(node.1);
+    BAR_PERMISSIONS.iter().all(|p| body.contains(p))
 }
 
 /// Claude's `settings.json` as a JSON value — an empty object when the file
@@ -1902,6 +1923,13 @@ mod tests {
     #[test]
     fn the_bars_permission_ask_matches_the_seeded_grant() {
         let bar = include_str!("../../clave-bar/src/main.rs");
+        // Exactly ONE call, because this test reads the first and a second one
+        // anywhere later in the file would drift invisibly.
+        assert_eq!(
+            bar.matches("request_permission(&[").count(),
+            1,
+            "clave-bar must make exactly one request_permission call for this guard to see the whole ask"
+        );
         let block = bar
             .split_once("request_permission(&[")
             .expect("the bar must request permissions")
@@ -1909,7 +1937,7 @@ mod tests {
             .split_once("]);")
             .expect("the request must close")
             .0;
-        let asked: Vec<&str> = block
+        let mut asked: Vec<&str> = block
             .lines()
             .filter_map(|l| l.split_once("PermissionType::"))
             .map(|(_, rest)| {
@@ -1920,9 +1948,14 @@ mod tests {
                     .unwrap_or_default()
             })
             .collect();
+        // SORTED, because zellij's own grant check is containment and does not
+        // care about order — comparing in order would fail a harmless reorder
+        // of either list and cry drift where there is none.
+        asked.sort_unstable();
+        let mut seeded = BAR_PERMISSIONS.to_vec();
+        seeded.sort_unstable();
         assert_eq!(
-            asked,
-            BAR_PERMISSIONS.to_vec(),
+            asked, seeded,
             "clave-bar's request_permission list and BAR_PERMISSIONS have drifted"
         );
     }
@@ -1933,6 +1966,41 @@ mod tests {
         assert!(permissions_seeded(&seeded, "/data/clave-bar.wasm"));
         assert!(!permissions_seeded("", "/data/clave-bar.wasm"));
         assert!(!permissions_seeded(&seeded, "/other/clave-bar.wasm"));
+    }
+
+    /// A cache holding a PREVIOUS release's shorter set under the right key is
+    /// the state that kills the bar — zellij's grant check is containment, so
+    /// the instance lands in the host's pending set and every pipe to it is
+    /// dropped behind an unanswerable prompt. Doctor used to call that green.
+    /// Reachable via `just dev-install` (overwrites the sandbox wasm in place,
+    /// so the key does not change) followed by a `dev launch` that skips
+    /// `run_setup`.
+    #[test]
+    fn a_stale_shorter_grant_under_the_right_key_is_not_seeded() {
+        let wasm = "/data/clave-bar.wasm";
+        let stale = format!(
+            "\"file:{wasm}\" {{\n{}}}\n",
+            BAR_PERMISSIONS
+                .iter()
+                .rev()
+                .skip(1) // every permission but the most recently added
+                .map(|p| format!("    {p}\n"))
+                .collect::<String>()
+        );
+        assert!(
+            !permissions_seeded(&stale, wasm),
+            "a short grant under the right key must not read as seeded"
+        );
+        // And another plugin's full grant must not satisfy ours: the check
+        // reads OUR node's body, not the whole file.
+        let neighbour = format!(
+            "\"file:{wasm}\" {{\n}}\n\"file:/other.wasm\" {{\n{}}}\n",
+            BAR_PERMISSIONS
+                .iter()
+                .map(|p| format!("    {p}\n"))
+                .collect::<String>()
+        );
+        assert!(!permissions_seeded(&neighbour, wasm));
     }
 
     #[test]

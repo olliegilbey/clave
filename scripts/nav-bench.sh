@@ -48,32 +48,73 @@ case "$N" in
 esac
 [ "$N" -gt 0 ] || { echo "gestures must be > 0, got: $N" >&2; exit 2; }
 
+# One clave session, or the instance count below is fiction. Plugin ids are
+# per-server and this log carries no session identity, so with two sessions
+# live their beacon lines interleave under colliding ids and the maintainer's
+# own key presses land in the gap median. Warn rather than refuse: a run whose
+# only purpose is the landing spacing is still readable, and the operator may
+# know the other session is idle.
+SESSIONS=$(zellij list-sessions --short 2>/dev/null | grep -c . || echo 0)
+if [ "$SESSIONS" -gt 1 ]; then
+  cat >&2 <<WARN
+  WARNING: $SESSIONS zellij sessions are live. The zellij log is user-global and
+  these lines carry no session identity, so 'instances reached' and the gap
+  figures below MIX sessions. Treat this run as indicative only.
+WARN
+fi
+
 MARK=$(wc -l < "$LOG")
 
 for i in $(seq 1 "$N"); do
-  # Alternate, so the burst walks the ring instead of pressing into its end
-  # — a nav that cannot move is a no-op and logs no landing.
+  # Alternate, so the burst walks the ring instead of pressing into its end.
+  # (The landing line fires on ARRIVAL at the elected instance, so a press
+  # that cannot move still logs — the alternation is about not parking the
+  # selection against the ring's end, not about the log.)
   if (( i % 2 == 0 )); then DIR=next; else DIR=prev; fi
-  "$CT" pipe --name clave-nav -- "{\"dir\":\"$DIR\"}" >/dev/null 2>&1 \
-    || echo "  gesture $i refused (rc=$?)"
+  # `</dev/null` is NOT optional, and matches frecency-walk.sh. `ct.sh` wraps
+  # every call in `timeout 15`; a `zellij pipe` client killed mid-flight with
+  # an inherited terminal stdin leaves the server holding a half-open stream,
+  # and every later pipe queues behind it — a CUMULATIVE, unrecoverable wedge
+  # of the session's whole CLI-pipe lane (FOOTGUNS). Thirty invocations a run.
+  #
+  # stdout is suppressed; STDERR IS NOT. ct.sh's refusal text is the only
+  # thing it ever prints, and swallowing it is called out by name in FOOTGUNS:
+  # with it hidden, a dead sandbox yields N bare "refused" lines and then a
+  # confident `landings logged: 0`, which this script's own output glosses as
+  # an election refusal — asserting the one diagnosis it exists to make
+  # trustworthy, and asserting it wrongly.
+  "$CT" pipe --name clave-nav -- "{\"dir\":\"$DIR\"}" >/dev/null </dev/null \
+    || echo "  gesture $i refused (rc=$?) — see the refusal above" >&2
 done
 
 # Wait for the log to SETTLE, rather than sleeping a fixed second. The last
 # gestures' lines land after their pipes return, and cutting the slice early
 # loses them — which shows up as a landing shortfall, i.e. as an election
-# refusal, the one reading this script exists to make trustworthy. Stop when
-# the slice has held the same length twice in a row; cap it so a session that
-# is genuinely busy cannot hang the bench.
+# refusal, the one reading this script exists to make trustworthy.
 #
 # Settle on OUR OWN lines, not the file length: this log is user-global, so a
 # live fleet in another session writes to it continuously and a file-length
-# check would never settle.
+# check would never converge.
+#
+# The primary exit is "all N landings are in", which is exact. The quiet-run
+# fallback exists only for the genuinely short case, and it wants FOUR steady
+# polls, not two: the measured p90 gap is ~0.14s and the max is unbounded, so
+# two 0.25s polls can straddle one slow gesture and stop early — recreating
+# the very truncation this loop was added to prevent.
 SETTLE_POLLS=40
+STEADY_NEEDED=4
 prev=-1
+steady=0
 for _ in $(seq 1 "$SETTLE_POLLS"); do
   sleep 0.25
-  now=$(tail -n "+$((MARK + 1))" "$LOG" | grep -c -E "nav landed|clave-bar: beacon ")
-  [ "$now" = "$prev" ] && break
+  now=$(tail -n "+$((MARK + 1))" "$LOG" | grep -c "nav landed" || true)
+  [ "$now" -ge "$N" ] && break
+  if [ "$now" = "$prev" ]; then
+    steady=$((steady + 1))
+    [ "$steady" -ge "$STEADY_NEEDED" ] && break
+  else
+    steady=0
+  fi
   prev=$now
 done
 tail -n "+$((MARK + 1))" "$LOG" > "$OUT"
@@ -97,13 +138,16 @@ def at(needle):
 
 landed, beacons = at("nav landed"), at("clave-bar: beacon ")
 gaps = sorted((b[0] - a[0]).total_seconds() for a, b in zip(landed, landed[1:]))
+# Nearest-rank, so "p90" on a short run is the next rank up — at n=29 it is
+# really the 93rd percentile. Fine for a delta between builds; do not quote it
+# as a percentile in isolation.
 pct = lambda p: gaps[min(len(gaps) - 1, int(p * len(gaps)))] if gaps else float("nan")
 instances = len({i for _, i in beacons})
 
 print(f"--- nav-bench {label} ---")
 print(f"gestures sent        : {n}")
 print(f"landings logged      : {len(landed)}   (a shortfall is an election refusal, not a lost pipe)")
-print(f"instances reached    : {instances}     (distinct bars that logged a beacon)")
+print(f"instances reached    : {instances}     (distinct plugin ids, NOT session-filtered — see the warning above if any)")
 print(f"beacon deliveries    : {len(beacons)}")
 if landed:
     print(f"first -> last landing: {(landed[-1][0] - landed[0][0]).total_seconds():.2f}s")
