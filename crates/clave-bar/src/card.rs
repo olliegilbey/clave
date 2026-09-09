@@ -192,10 +192,22 @@ struct Cells<'a> {
     /// pending-background-agent count (lock 4.6). A terminal row never has
     /// one.
     subs: bool,
-    /// How long the turn in flight has been going. NO SOURCE YET: the store
-    /// will hold when the turn BEGAN and the bar subtracts from the wall clock
-    /// it already reads once per render, so animating this costs no store
-    /// traffic across the fleet. Blank when no turn is in flight.
+    /// How long the turn in flight has been going. **STILL BLANK, and it is
+    /// blocked on a ruling rather than on work** (lock 4.4).
+    ///
+    /// The lock says the store holds when the turn began and the bar
+    /// subtracts. It already does: `last_interacted` is bumped on
+    /// `UserPromptSubmit` and on nothing else, and `UserPromptSubmit` is the
+    /// only event that sets `Working` — so "when the turn began" and "when you
+    /// last interacted" are the same instant, always. A turn clock read from
+    /// it would print the same number `elapsed` prints, two cells apart on the
+    /// same line, which is the one thing 4.3 kept them apart to avoid.
+    ///
+    /// So this cell needs a decision, not a field: retarget `elapsed` to
+    /// `last_visited` (time since you LOOKED, a genuinely different reading),
+    /// give the turn clock a different source (silence since the agent's last
+    /// output — a real live number, but no longer free), or drop it and let
+    /// the animated mark carry "thinking" alone. Until then, blank.
     turn: &'a str,
     /// What this row is blocked on, in its own words (lock §4.7). Tier 1 is
     /// wired: the tool name off the permission notification clave's hook
