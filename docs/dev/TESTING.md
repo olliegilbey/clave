@@ -1125,10 +1125,10 @@ Four windows into what actually happened. Learn all four.
   the channel.** `scripts/nav-bench.sh` consumes both — it bursts N gestures at
   this worktree's sandbox and reports the median gap between landings plus how
   many distinct sidebars the beacon reached. Two things make its number honest:
-  fan-out is the variable (75 ms per gesture at one instance vs 160 ms at ten,
-  same build), and its scripted stimulus is itself a `zellij pipe` that a real
-  keypress never pays — so use the DELTA between two builds, not the absolute
-  figure. The beacon line costs ~16 ms per gesture at ten sidebars, which is
+  fan-out is the variable (on the PRE-`#141` build, 75 ms per gesture at one
+  instance vs 160 ms at ten; the current build measures ~135 ms at ten), and
+  its scripted stimulus is itself a `zellij pipe` that a real keypress never
+  pays — so use the DELTA between two builds, not the absolute figure. The beacon line costs ~16 ms per gesture at ten sidebars, which is
   recorded and re-decidable in `#257`.
 - **The evlog** — `clave.log`, JSON lines, one per host-side decision. There is
   one per state dir: `~/.local/state/clave/clave.log` for stable,

@@ -15,11 +15,12 @@
 #
 # Two things to hold while reading the number.
 #
-# FAN-OUT IS THE VARIABLE. A one-tab sandbox measured 75 ms/gesture and a
-# ten-instance one 160 ms on the same build — the announce costs what it costs
-# per recipient, which is why the sandbox always felt faster than a real fleet
-# and why a single-tab run proves nothing. Open tabs until the instance count
-# matches the fleet you care about.
+# FAN-OUT IS THE VARIABLE. On the PRE-#141 build (the CLI-pipe announce), a
+# one-tab sandbox measured 75 ms/gesture and a ten-instance one 160 ms — the
+# announce costs what it costs per recipient, which is why the sandbox always
+# felt faster than a real fleet and why a single-tab run proves nothing. Open
+# tabs until the instance count matches the fleet you care about. For scale on
+# the CURRENT build, ten instances measure ~135 ms.
 #
 # THE STIMULUS IS NOT FREE. There is no way to press a keybind from a script,
 # so this pokes the bar with `zellij pipe` — itself a CLI pipe with the same
@@ -40,6 +41,13 @@ LOG="${TMPDIR:-/tmp}/zellij-$(id -u)/zellij-log/zellij.log"
 OUT="${TMPDIR:-/tmp}/nav-bench-$LABEL.log"
 
 [ -r "$LOG" ] || { echo "no zellij log at $LOG" >&2; exit 1; }
+# A non-numeric or zero N would make `seq` emit nothing and the run would
+# report a clean zero-gesture bench — a silent no-op that reads like a result.
+case "$N" in
+  ''|*[!0-9]*) echo "gestures must be a positive integer, got: $N" >&2; exit 2 ;;
+esac
+[ "$N" -gt 0 ] || { echo "gestures must be > 0, got: $N" >&2; exit 2; }
+
 MARK=$(wc -l < "$LOG")
 
 for i in $(seq 1 "$N"); do
@@ -50,7 +58,24 @@ for i in $(seq 1 "$N"); do
     || echo "  gesture $i refused (rc=$?)"
 done
 
-sleep 1
+# Wait for the log to SETTLE, rather than sleeping a fixed second. The last
+# gestures' lines land after their pipes return, and cutting the slice early
+# loses them — which shows up as a landing shortfall, i.e. as an election
+# refusal, the one reading this script exists to make trustworthy. Stop when
+# the slice has held the same length twice in a row; cap it so a session that
+# is genuinely busy cannot hang the bench.
+#
+# Settle on OUR OWN lines, not the file length: this log is user-global, so a
+# live fleet in another session writes to it continuously and a file-length
+# check would never settle.
+SETTLE_POLLS=40
+prev=-1
+for _ in $(seq 1 "$SETTLE_POLLS"); do
+  sleep 0.25
+  now=$(tail -n "+$((MARK + 1))" "$LOG" | grep -c -E "nav landed|clave-bar: beacon ")
+  [ "$now" = "$prev" ] && break
+  prev=$now
+done
 tail -n "+$((MARK + 1))" "$LOG" > "$OUT"
 
 python3 - "$LABEL" "$N" "$OUT" <<'PY'
