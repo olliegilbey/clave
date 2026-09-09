@@ -572,6 +572,17 @@ impl State {
                 // keypress, a jump to the wrong tab is not.
                 let executor = self.model.nav_executor();
                 let is_executor = executor.is_some();
+                // The latency oracle (#141). One timestamped line per nav
+                // landing, from the ONE instance that acts — the zellij log
+                // stamps it to the millisecond, so the spacing between these
+                // lines is how fast nav keeps up with a key-mash. Before this
+                // line existed the per-landing router stall was inferred from
+                // the code path and never measured, which is why the announce
+                // channel could not be shown to be the cost. Executor-only
+                // keeps it at one line per gesture, not one per instance.
+                if is_executor {
+                    eprintln!("clave-bar: nav landed {payload}");
+                }
                 let fx = self.model.nav(payload, executor);
                 let acted = !fx.is_empty();
                 self.run_effects(fx);
