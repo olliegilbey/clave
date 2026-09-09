@@ -81,12 +81,13 @@ pub fn session_row_height(dir: &std::path::Path) -> clave_types::RowHeight {
 /// §6.6's exact permission set. Keep THIS list, load()'s request_permission
 /// call, and the seeded cache in lockstep — a partial cache match raises the
 /// unanswerable prompt and withholds everything.
-pub const BAR_PERMISSIONS: [&str; 5] = [
+pub const BAR_PERMISSIONS: [&str; 6] = [
     "ReadCliPipes",
     "ChangeApplicationState",
     "ReadApplicationState",
     "RunCommands",
     "OpenTerminalsOrPlugins",
+    "MessageAndLaunchOtherPlugins",
 ];
 
 /// The clave session config: Alt keybinds in shared_among normal+locked
@@ -1888,6 +1889,42 @@ mod tests {
         // Idempotent: re-merging replaces our blocks, not duplicates them.
         let again = merge_permissions_kdl(&merged, "/data/clave-bar.wasm");
         assert_eq!(again.matches("file:/data/clave-bar.wasm").count(), 1);
+    }
+
+    /// The seed and the bar's own ask must be the SAME set. zellij grants
+    /// all-or-nothing per plugin, so a bar asking for one permission the
+    /// cache does not hold raises the prompt that cannot be answered in a
+    /// bar pane — every pipe hangs, and nothing in the build says why. The
+    /// two lists live in different crates (and the bar's is wasm-only, so no
+    /// shared const reaches it), which is exactly the drift this catches.
+    /// Adding `MessageAndLaunchOtherPlugins` for the #141 beacon channel is
+    /// what made the gap concrete.
+    #[test]
+    fn the_bars_permission_ask_matches_the_seeded_grant() {
+        let bar = include_str!("../../clave-bar/src/main.rs");
+        let block = bar
+            .split_once("request_permission(&[")
+            .expect("the bar must request permissions")
+            .1
+            .split_once("]);")
+            .expect("the request must close")
+            .0;
+        let asked: Vec<&str> = block
+            .lines()
+            .filter_map(|l| l.split_once("PermissionType::"))
+            .map(|(_, rest)| {
+                // The identifier only — the rest of the line is a trailing
+                // `,` and an explanatory comment.
+                rest.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .next()
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert_eq!(
+            asked,
+            BAR_PERMISSIONS.to_vec(),
+            "clave-bar's request_permission list and BAR_PERMISSIONS have drifted"
+        );
     }
 
     #[test]

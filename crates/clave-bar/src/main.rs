@@ -217,16 +217,29 @@ impl State {
                 // election. An un-elected emitter anywhere else, or an arm that
                 // drops what these two return, would bypass it completely.
                 Effect::AnnounceVisit { tab_id } | Effect::ReanchorVisit { tab_id } => {
-                    run_command(
-                        &[
-                            "zellij",
-                            "pipe",
-                            "--name",
-                            "clave-visited",
-                            "--",
-                            &tab_id.to_string(),
-                        ],
-                        BTreeMap::new(),
+                    // IN-PLUGIN channel, not a `zellij pipe` subprocess (#141).
+                    // The old form spawned a process per landing whose 1s CLI
+                    // timeout blocks the server router (FOOTGUNS.md:110), so
+                    // every nav paid a stall to move one integer. This is the
+                    // same delivery set by construction: with NEITHER
+                    // `plugin_url` NOR `destination_plugin_id` set, the server
+                    // takes the `(None, None)` arm and calls the very function
+                    // a payload-only `zellij pipe` reaches —
+                    // `pipe_to_all_plugins` over `all_plugin_ids()`, which is
+                    // the whole plugin asset map with NO tab or focus filter
+                    // (zellij-server-0.44.3 `plugins/mod.rs:1126-1136`,
+                    // `plugin_map.rs:211`). That is the load-bearing fact: the
+                    // beacon exists to converge instances whose tab is NOT
+                    // focused, and unlike `TabUpdate` this channel does reach
+                    // them. Naming our own URL instead would route through
+                    // `get_or_load_plugins`, which matches on plugin CONFIG as
+                    // well as location and can LAUNCH a plugin when none
+                    // matches — a narrower set for no gain here.
+                    //
+                    // Receivers see `PipeSource::Plugin`, so there is no CLI
+                    // blank twin to drop and no `unblock_cli_pipe_input` owed.
+                    pipe_message_to_plugin(
+                        MessageToPlugin::new("clave-visited").with_payload(tab_id.to_string()),
                     );
                 }
                 Effect::RenameTab { tab_id, name } if presumed => {
@@ -668,17 +681,25 @@ impl ZellijPlugin for State {
         // not the gate. Nothing before hydration may move the pane, and
         // `load()` is the only point that precedes every render.
         self.model.await_hydration();
-        // §6.6 permission set — EXACTLY these four; grants are all-or-nothing
+        // §6.6 permission set — EXACTLY this list; grants are all-or-nothing
         // per plugin and the prompt is unanswerable in the bar pane, so
         // `clave setup` pre-seeds permissions.kdl with THIS set (both key
         // forms). Changing this list without changing the seed hangs every
-        // pipe (this re-bit S2 — see the ledger).
+        // pipe (this re-bit S2 — see the ledger). `BAR_PERMISSIONS` in
+        // `clave/src/setup.rs` is that seed, and a test there reads THIS
+        // block to keep the two from drifting.
         request_permission(&[
             PermissionType::ReadCliPipes,           // receive the clave-* pipes
             PermissionType::ChangeApplicationState, // focus_pane / rename_tab / hide_self
             PermissionType::ReadApplicationState,   // TabUpdate + PaneUpdate truth
             PermissionType::RunCommands,            // hydrate (clave snapshot) + clave focus
             PermissionType::OpenTerminalsOrPlugins, // Alt+f scratch-shell spawn (#207)
+            // The beacon's in-plugin channel (#141). zellij gates
+            // `pipe_message_to_plugin` on this one because the same call can
+            // LAUNCH a plugin; clave never does, but the check is on the
+            // command, not the arguments. Withhold it and every announce is
+            // silently refused server-side.
+            PermissionType::MessageAndLaunchOtherPlugins,
         ]);
         subscribe(&[
             EventType::TabUpdate,
