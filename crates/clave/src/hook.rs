@@ -285,6 +285,55 @@ pub fn summary_from_tail(tail: &str) -> Option<String> {
     last_tail_field(tail, "summary", "summary")
 }
 
+/// The anchor a permission notification's tool name follows. Claude Code's
+/// wording, matched as a substring for the same reason `status_for_event`
+/// matches its notifications that way: the CLI owns the sentence and has
+/// reworded it before, and a substring survives a prefix change.
+const PERMISSION_ANCHOR: &str = "permission to use ";
+
+/// What a blocked agent is asking for, from the `Notification` message clave
+/// already receives (lock §4.7 tier 1). `Claude needs your permission to use
+/// Bash` yields `Bash`.
+///
+/// The MESSAGE is the source and that is the whole point of the tier: the tool
+/// name is also on a `PreToolUse` payload, but clave registers five hook events
+/// and that is not one of them — reading it there would mean a hook firing on
+/// every tool call of every tracked session, to learn something the
+/// notification hands over for free. `None` for every other message, including
+/// the idle nag: the card's word for "nothing measured" is blank.
+pub fn wants_from_message(message: &str) -> Option<String> {
+    let rest = message.split(PERMISSION_ANCHOR).nth(1)?.trim();
+    (!rest.is_empty()).then(|| clamp_field(rest, WANTS_MAX_CHARS))
+}
+
+/// Cap for [`wants_from_message`]. Wider than the 28 columns the cell holds at
+/// 48 (lock §4.7), because the RENDERER does the final clamping — the store's
+/// job is only to keep an unbounded notification out of the snapshot.
+const WANTS_MAX_CHARS: usize = 64;
+
+/// Write, hold or clear `rec.wants` against the status the caller just set.
+///
+/// Three cases, and the middle one is the reason this is a function rather
+/// than an assignment. A flagged row whose message NAMES a tool takes it. A
+/// flagged row whose message does not — the CLI's ~60s idle nag, which fires
+/// while the same permission prompt still stands — HOLDS what it already had,
+/// because a message carrying no news must not erase one that did. An unflagged
+/// row wants nothing, whatever it wanted a moment ago.
+///
+/// Returns whether the value moved, so a push happens only when a pixel would.
+pub fn take_wants(rec: &mut AgentRecord, message: Option<&str>) -> bool {
+    let next = if rec.status == Status::NeedsYou {
+        message
+            .and_then(wants_from_message)
+            .or_else(|| rec.wants.clone())
+    } else {
+        None
+    };
+    let moved = rec.wants != next;
+    rec.wants = next;
+    moved
+}
+
 /// First unsigned integer following `"<key>":` in `s`. Deliberately literal:
 /// the leading quote is what keeps `"input_tokens":` from also matching
 /// `"cache_read_input_tokens":` and `"ephemeral_1h_input_tokens":`, which sit in
@@ -828,6 +877,10 @@ pub fn apply_hook_event(
         changed |= rec.status != next;
         rec.status = next;
     }
+    // The card's `wants` cell (lock §4.7). AFTER the transition, never before:
+    // the gate reads the status this event just produced, so the ask and the
+    // flag it explains can never disagree by one event.
+    changed |= take_wants(rec, payload.message.as_deref());
     // Which conversation the row is living in (#99), and the rotation reset
     // that rides it — see `note_live_session`. Not part of `changed`, on
     // purpose: `with_store_mut` persists the record either way; `changed`
@@ -1479,6 +1532,7 @@ mod tests {
             pr_number: None,
             pr_checked: 0,
             pr_branch: String::new(),
+            wants: None,
         }
     }
 
@@ -2073,6 +2127,77 @@ mod tests {
         );
         // Unknown events are a no-op — the global hook must never guess.
         assert_eq!(status_for_event("PreToolUse", None, Status::Idle), None);
+    }
+
+    #[test]
+    fn wants_lives_exactly_as_long_as_the_block_it_names() {
+        // Lock §4.7: structure gates, the words only fill in. `wants` is
+        // written for a row the status machine flagged, and dies with the flag
+        // — never held past the block, never invented without one.
+        let mut s = Store::default();
+        s.agents.insert("u1".into(), rec("u1"));
+        let msg = |m: &str| HookPayload {
+            session_id: Some("u1".into()),
+            message: Some(m.into()),
+            ..HookPayload::default()
+        };
+        let bare = HookPayload {
+            session_id: Some("u1".into()),
+            ..HookPayload::default()
+        };
+
+        apply_hook_event(&mut s, "u1", "UserPromptSubmit", &bare, None, 1000, true);
+        assert_eq!(s.agents["u1"].wants, None, "a working row wants nothing");
+
+        let perm = msg("Claude needs your permission to use Bash");
+        apply_hook_event(&mut s, "u1", "Notification", &perm, None, 1001, true);
+        assert_eq!(s.agents["u1"].wants.as_deref(), Some("Bash"));
+
+        // The ~60s idle nag arrives while the SAME block stands. It names no
+        // tool, and blanking here would drop a true reading for a message that
+        // carries no news.
+        let nag = msg("Claude is waiting for your input");
+        apply_hook_event(&mut s, "u1", "Notification", &nag, None, 1002, true);
+        assert_eq!(
+            s.agents["u1"].wants.as_deref(),
+            Some("Bash"),
+            "a nag mid-block holds the ask it cannot restate"
+        );
+
+        // You answered: the row is working again, so nothing is wanted.
+        apply_hook_event(&mut s, "u1", "UserPromptSubmit", &bare, None, 1003, true);
+        assert_eq!(
+            s.agents["u1"].wants, None,
+            "leaving needs-you clears the ask"
+        );
+
+        // The nag ALONE can flag a working row (§6.5), and that row is blocked
+        // on something clave cannot name. Blank, not a guess.
+        apply_hook_event(&mut s, "u1", "Notification", &nag, None, 1004, true);
+        assert_eq!(s.agents["u1"].status, Status::NeedsYou);
+        assert_eq!(s.agents["u1"].wants, None);
+    }
+
+    #[test]
+    fn a_permission_notification_names_the_tool_it_is_blocked_on() {
+        assert_eq!(
+            wants_from_message("Claude needs your permission to use Bash").as_deref(),
+            Some("Bash")
+        );
+        // The parenthetical the CLI sometimes appends is the useful half of
+        // the ask, so it rides along rather than being trimmed to the bare
+        // tool name.
+        assert_eq!(
+            wants_from_message("Claude needs your permission to use Bash (git push)").as_deref(),
+            Some("Bash (git push)")
+        );
+        // Every other notification the hook already sees yields nothing: the
+        // idle nag names no tool, and inventing one would be a measurement
+        // the card never took.
+        assert_eq!(wants_from_message("Claude is waiting for your input"), None);
+        assert_eq!(wants_from_message("compacting…"), None);
+        // A trailing anchor with nothing after it is not a tool name.
+        assert_eq!(wants_from_message("… permission to use "), None);
     }
 
     #[test]

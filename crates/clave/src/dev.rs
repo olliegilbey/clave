@@ -818,6 +818,7 @@ fn agent_record(
         pr_number: None,
         pr_checked: 0,
         pr_branch: String::new(),
+        wants: None,
     }
 }
 

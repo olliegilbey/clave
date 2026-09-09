@@ -82,6 +82,7 @@ mod tests {
             pr_number: None,
             pr_checked: 0,
             pr_branch: String::new(),
+            wants: None,
         }
     }
 

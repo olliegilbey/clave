@@ -65,6 +65,10 @@ struct A {
     battery: Option<(u8, u32)>,
     elapsed: &'static str,
     summary: &'static str,
+    /// What the row is blocked on. Set only on a `NeedsYou` row — the host
+    /// writes it nowhere else, so a fixture that filled it on a working row
+    /// would preview a card the product cannot produce.
+    wants: Option<&'static str>,
     selected: bool,
     dormant: bool,
 }
@@ -86,6 +90,7 @@ impl Default for A {
             battery: Some((5, 100_000)),
             elapsed: "1m",
             summary: "",
+            wants: None,
             selected: false,
             dormant: false,
         }
@@ -111,6 +116,7 @@ impl A {
                 pr: self.pr,
                 branch: self.branch.into(),
                 elapsed: Some(self.elapsed.into()),
+                wants: self.wants.map(String::from),
             },
             selected: self.selected,
             dormant: self.dormant,
@@ -172,10 +178,13 @@ fn fleet() -> Vec<Row> {
             battery: Some((4, 71_000)),
             elapsed: "27m",
             summary: "Clave AI assessment",
+            // Tier 1: the tool name off the permission notification.
+            wants: Some("Bash (cargo mutants)"),
             ..A::default()
         }
         .row(),
-        // Blocked on a prose question — the case `wants` exists for.
+        // Blocked on a prose question — the tier the scribe still owes, so
+        // the cell stays blank and the dot carries the row on its own.
         A {
             status: NeedsYou,
             chip: Some("BEACON"),

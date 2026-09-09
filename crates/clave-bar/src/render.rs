@@ -363,6 +363,12 @@ pub enum RowContent {
         /// agent activity, never focus. `None` renders blank: no measurement
         /// invented for a tab that has never seen a prompt.
         elapsed: Option<String>,
+        /// What this row is blocked on, in the words its own notification
+        /// used — the four-line card's `wants` cell. `None` renders blank,
+        /// and blank is the common case: the host sets this only for a row it
+        /// has already flagged, so the bar never decides whether an ask is
+        /// still live.
+        wants: Option<String>,
     },
     Terminal {
         /// The zellij tab name — the chip. Lock §7.1: this is the only row
@@ -1163,6 +1169,7 @@ mod tests {
                 pr: None,
                 branch: String::new(),
                 elapsed: None,
+                wants: None,
             },
             selected: false,
             // The helper mirrors the model's tier: a fixture asking for a
@@ -1209,6 +1216,7 @@ mod tests {
                     pr: None,
                     branch: String::new(),
                     elapsed: None,
+                    wants: None,
                 },
                 selected: false,
                 dormant: true,

@@ -208,6 +208,19 @@ pub struct AgentRecord {
     /// `pr_checked == 0`. `default` keeps pre-field store files loading.
     #[serde(default)]
     pub pr_branch: String,
+    /// What this row is blocked on, in the words its own notification used —
+    /// the card's `wants` cell (lock §4.7). Wire twin of
+    /// `clave_types::Agent::wants`.
+    ///
+    /// Written and cleared by `hook::take_wants`, which gates it on
+    /// `Status::NeedsYou`: the STRUCTURE decides whether a row is waiting, and
+    /// the words only say what for. That gate is why this field can never lie
+    /// — an ask outliving its block would be worse than no ask at all, and the
+    /// only way for it to survive is for the row to still be flagged.
+    /// `None` renders blank, which is most rows. `default` keeps pre-field
+    /// store files loading.
+    #[serde(default)]
+    pub wants: Option<String>,
 }
 
 /// The whole store file. `seq` is the monotonic snapshot counter of the §5
@@ -448,6 +461,7 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
                 provider: r.provider.clone(),
                 effort: r.effort.clone(),
                 pr_number: r.pr_number,
+                wants: r.wants.clone(),
             })
             .collect(),
     }
@@ -955,6 +969,7 @@ mod tests {
             pr_number: None,
             pr_checked: 0,
             pr_branch: String::new(),
+            wants: None,
         }
     }
 

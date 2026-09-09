@@ -197,11 +197,11 @@ struct Cells<'a> {
     /// it already reads once per render, so animating this costs no store
     /// traffic across the fleet. Blank when no turn is in flight.
     turn: &'a str,
-    /// What this row is blocked on, in its own words. NO SOURCE YET: the
-    /// cheapest tier is free — clave's hook already receives the tool name
-    /// from a pending permission prompt and throws it away. Blank is the
-    /// common case and the point: an idle fleet has a quiet right-hand column
-    /// and the one row that wants you grows text.
+    /// What this row is blocked on, in its own words (lock §4.7). Tier 1 is
+    /// wired: the tool name off the permission notification clave's hook
+    /// already receives. Blank is the common case and the point — an idle
+    /// fleet has a quiet right-hand column, and the one row that wants you
+    /// grows text.
     wants: &'a str,
 }
 
@@ -223,6 +223,7 @@ fn cells<'a>(content: &'a RowContent, theme: &Theme) -> Cells<'a> {
             pr,
             branch,
             elapsed,
+            wants,
         } => {
             // CLAMPED like `render_row`'s: the wire crosses a version boundary
             // and a newer host's longer ramp must read "at least this bad"
@@ -252,7 +253,7 @@ fn cells<'a>(content: &'a RowContent, theme: &Theme) -> Cells<'a> {
                 thinking: status.thinking(),
                 subs: false,
                 turn: "",
-                wants: "",
+                wants: wants.as_deref().unwrap_or(""),
             }
         }
         RowContent::Terminal {
@@ -777,6 +778,7 @@ mod tests {
         battery: Option<u8>,
         elapsed: &'static str,
         summary: &'static str,
+        wants: Option<&'static str>,
         selected: bool,
         dormant: bool,
     }
@@ -799,6 +801,7 @@ mod tests {
                 battery: Some(5),
                 elapsed: "1m",
                 summary: "",
+                wants: None,
                 selected: false,
                 dormant: false,
             }
@@ -824,6 +827,7 @@ mod tests {
                     pr: self.pr,
                     branch: self.branch.into(),
                     elapsed: Some(self.elapsed.into()),
+                    wants: self.wants.map(String::from),
                 },
                 selected: self.selected,
                 dormant: self.dormant,
@@ -1463,6 +1467,57 @@ mod tests {
                 "a NeedsYou row animated at frame {t}"
             );
         }
+    }
+
+    #[test]
+    fn the_wants_cell_carries_the_ask_and_survives_the_crop_only_as_far_as_it_fits() {
+        // Lock §4.7: `wants` claims every cell the numbers on line 3 leave, so
+        // the expanded card shows the ask and the collapsed one — 16 columns,
+        // all of them spoken for by the token count and the clock — shows none
+        // of it. Blank stays blank: a row that is not blocked grows no text.
+        let blocked = A {
+            status: RowStatus::NeedsYou,
+            wants: Some("Bash (git push --force)"),
+            ..A::default()
+        }
+        .row();
+        let quiet = A {
+            status: RowStatus::NeedsYou,
+            ..A::default()
+        }
+        .row();
+        let line3 = |row: &Row, cols: usize| {
+            strip_sgr(&render_card(row, cols, false, 0, &Theme::default())[2])
+        };
+
+        let wide = line3(&blocked, CARD_EXPANDED_COLS);
+        assert!(
+            wide.contains("Bash (git push --for"),
+            "the expanded card must show the ask: {wide:?}"
+        );
+        assert_eq!(display_cells(&wide), CARD_EXPANDED_COLS);
+
+        let narrow = line3(&blocked, CARD_COLLAPSED_COLS);
+        assert!(
+            !narrow.contains("Bash"),
+            "16 columns have no room for an ask: {narrow:?}"
+        );
+        assert_eq!(display_cells(&narrow), CARD_COLLAPSED_COLS);
+
+        // The unblocked row's line 3 is the same shape with the cell empty —
+        // the ask grows into space that was already there, it does not reflow
+        // the numbers beside it.
+        let empty = line3(&quiet, CARD_EXPANDED_COLS);
+        assert_eq!(display_cells(&empty), CARD_EXPANDED_COLS);
+        let shared = empty
+            .chars()
+            .zip(wide.chars())
+            .take_while(|(a, b)| a == b)
+            .count();
+        assert!(
+            empty.chars().skip(shared).all(char::is_whitespace),
+            "the ask must grow into space that was already blank: {empty:?}"
+        );
     }
 
     // ── the two-line card ───────────────────────────────────────────────────

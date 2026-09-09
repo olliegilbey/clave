@@ -2165,6 +2165,9 @@ impl BarModel {
                 a.branch.clone()
             },
             elapsed: elapsed_label(self.now, a.last_interacted),
+            // Straight off the wire (lock §4.7). The host has already decided
+            // whether this row is blocked; the bar only draws the words.
+            wants: a.wants.clone(),
         }
     }
 
@@ -2966,6 +2969,7 @@ mod tests {
             provider: None,
             effort: None,
             pr_number: None,
+            wants: None,
         }
     }
 
@@ -3007,6 +3011,7 @@ mod tests {
             provider: None,
             effort: None,
             pr_number: None,
+            wants: None,
         }
     }
 

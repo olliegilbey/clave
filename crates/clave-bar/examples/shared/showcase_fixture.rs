@@ -38,10 +38,26 @@ pub fn agent(
             pr: None,
             branch: String::new(),
             elapsed: None,
+            wants: None,
         },
         selected: false,
         dormant: matches!(status, RowStatus::Dormant | RowStatus::DormantSelected),
     }
+}
+
+/// Fill the `wants` cell. Only ever applied to a `NeedsYou` row, because that
+/// is the rule the host enforces (lock 4.7): structure decides whether a row
+/// is waiting, and the words only say what for. A fixture that filled this on
+/// a working row would show a card the product cannot produce.
+pub fn blocked_on(mut row: Row, ask: &str) -> Row {
+    if let RowContent::Agent { status, wants, .. } = &mut row.content {
+        assert!(
+            matches!(status, RowStatus::NeedsYou),
+            "only a flagged row wants anything"
+        );
+        *wants = Some(String::from(ask));
+    }
+    row
 }
 
 /// A terminal row with its pane facts filled in (#206): the tab name is the
@@ -222,22 +238,25 @@ pub fn showcase() -> Vec<Row> {
             "kdl-guard",
             "1d",
         ),
-        detail(
-            agent(
-                RowStatus::NeedsYou,
-                Some((3, 52_000)),
-                Provenance::Branch,
-                "api-svc",
-                API_SVC,
-                Some(("AUTH-7", 3)),
-                "Rotate the signing keys",
+        blocked_on(
+            detail(
+                agent(
+                    RowStatus::NeedsYou,
+                    Some((3, 52_000)),
+                    Provenance::Branch,
+                    "api-svc",
+                    API_SVC,
+                    Some(("AUTH-7", 3)),
+                    "Rotate the signing keys",
+                ),
+                "fable",
+                "mx",
+                "claude",
+                Some(184),
+                "key-rotation",
+                "4m",
             ),
-            "fable",
-            "mx",
-            "claude",
-            Some(184),
-            "key-rotation",
-            "4m",
+            "Bash (cargo publish)",
         ),
         detail(
             agent(

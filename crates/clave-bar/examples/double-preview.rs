@@ -108,6 +108,8 @@ impl A {
                 pr: self.pr,
                 branch: self.branch.into(),
                 elapsed: Some(self.elapsed.into()),
+                // The two-line card has no `wants` cell.
+                wants: None,
             },
             selected: self.selected,
             dormant: self.dormant,

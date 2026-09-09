@@ -1795,6 +1795,7 @@ mod tests {
             pr_number: None,
             pr_checked: 0,
             pr_branch: String::new(),
+            wants: None,
         };
         let kdl = launch_layout_kdl(
             "clave",
@@ -1863,6 +1864,7 @@ mod tests {
             pr_number: None,
             pr_checked: 0,
             pr_branch: String::new(),
+            wants: None,
         };
         // Most-recent row's cwd is GONE; the older row's cwd exists.
         let mut store = Store::default();
@@ -2143,6 +2145,7 @@ mod tests {
             pr_number: None,
             pr_checked: 0,
             pr_branch: String::new(),
+            wants: None,
         };
         let lay = launch_layout_kdl(
             abs,
@@ -2464,6 +2467,7 @@ mod tests {
             pr_number: None,
             pr_checked: 0,
             pr_branch: String::new(),
+            wants: None,
         };
         let cfg = config_kdl(binary, wasm, clave_types::RowHeight::Double);
         let lay = layout_kdl(binary, wasm, clave_types::RowHeight::Double);
