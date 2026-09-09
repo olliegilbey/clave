@@ -83,13 +83,23 @@ What the drive has to answer, none of it visible in a golden:
 
 ## What the mutation run bought
 
-`cargo mutants --in-diff main`: 26 missed of 82 on the first pass. The largest
-family was line 3's `wants_w`, and the cause is now a FOOTGUNS entry —
-`clip_to_cells` guarantees the width at the exit, so a golden whose flex cells
-are BLANK cannot see arithmetic that only moves where the right edge falls.
-Filling the golden's ask killed eight. Three more tests closed the ping-pong's
-reflection, the provenance inks (a stripped golden cannot see SGR) and the
-too-narrow-to-speak threshold.
+`cargo mutants --in-diff main`, twice: **26 missed of 82**, then **5 of 97**,
+then **0 of the four in card.rs**. The only survivor left is
+`clave/src/main.rs`'s `fn main`, which is not a seam.
+
+The largest family was line 3's `wants_w`, and the cause is now a FOOTGUNS
+entry — `clip_to_cells` guarantees the width at the exit, so a golden whose
+flex cells are BLANK cannot see arithmetic that only moves where the right edge
+falls. Filling the golden's ask killed eight. What the rest bought, each a real
+gap rather than a test-shaped one:
+
+- the ping-pong is a REFLECTION, not just a closed loop over six frames
+- the provenance inks live in SGR a stripped golden throws away
+- an OPENING row must not be faded while the store still calls it dormant —
+  the moment between the click and the first hook event
+- the branch reserves one column of AIR beside the repo; off by that one it
+  reads as a single long name. Boundary pinned at 24 columns.
+- the too-narrow-to-speak threshold is four cells, and four cells still speak
 
 ## Deferred
 

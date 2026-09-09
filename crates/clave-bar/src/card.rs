@@ -1527,6 +1527,85 @@ mod tests {
     }
 
     #[test]
+    fn an_opening_row_is_never_faded_even_while_the_store_still_calls_it_dormant() {
+        // A row stays flagged dormant until its agent answers, so the moment
+        // between the click and the first hook event is exactly when the card
+        // is BOTH dormant and opening. Fading it there dims the one row the
+        // user just acted on. The exemption is a `!matches!` inside the fade
+        // ladder, and nothing but this can see it.
+        let opening = |dormant: bool| {
+            render_card(
+                &Row {
+                    content: A {
+                        status: RowStatus::Opening,
+                        ..A::default()
+                    }
+                    .row()
+                    .content,
+                    selected: false,
+                    dormant,
+                },
+                CARD_EXPANDED_COLS,
+                true,
+                0,
+                &Theme::default(),
+            )
+        };
+        assert_eq!(
+            opening(true),
+            opening(false),
+            "an opening row must render identically whether or not it is still flagged dormant"
+        );
+        // And the exemption is narrow: an ordinary dormant row IS faded, so
+        // the assertion above is not passing because nothing fades at all.
+        let ordinary = |dormant: bool| {
+            render_card(
+                &Row {
+                    content: A::default().row().content,
+                    selected: false,
+                    dormant,
+                },
+                CARD_EXPANDED_COLS,
+                true,
+                0,
+                &Theme::default(),
+            )
+        };
+        assert_ne!(ordinary(true), ordinary(false));
+    }
+
+    #[test]
+    fn the_branch_needs_its_whole_minimum_and_one_column_of_air() {
+        // `branch_fits` reserves the repo, ONE separating space and
+        // `BRANCH_MIN`. Off by that single column the branch appears with no
+        // gap before it, which reads as one long name. The boundary is the
+        // only place the space is visible, so it is pinned there: at 24
+        // columns a nine-cell repo leaves exactly `BRANCH_MIN` and no air.
+        let row = A {
+            repo: "market-scanner",
+            branch: "pg17-migrate",
+            ..A::default()
+        }
+        .row();
+        let at = |cols: usize| strip_sgr(&render_card(&row, cols, false, 0, &Theme::default())[1]);
+        let tight = at(24);
+        assert!(
+            !tight.contains("pg17"),
+            "the branch must not take the column that separates it from the repo: {tight:?}"
+        );
+        // One column more and it earns its place, air included.
+        let roomy = at(25);
+        assert!(
+            roomy.contains("pg17"),
+            "one column further out the branch fits: {roomy:?}"
+        );
+        assert!(
+            roomy.contains("\u{2026} pg17"),
+            "and it is separated from the repo by a space: {roomy:?}"
+        );
+    }
+
+    #[test]
     fn provenance_wears_a_fixed_semantic_ink_not_the_rows() {
         // Lock §4.2: worktree green, branch violet, and an ordinary checkout
         // no mark at all. The inks are the reason a third glyph could join
@@ -1577,15 +1656,26 @@ mod tests {
             ..A::default()
         }
         .row();
-        for cols in CARD_COLLAPSED_COLS..CARD_EXPANDED_COLS {
+        let said = |cols: usize| {
             let l1 = strip_sgr(&render_card(&row, cols, false, 0, &Theme::default())[0]);
             assert_eq!(display_cells(&l1), cols, "width at {cols}");
-            let shown = l1.split('\u{e0b4}').nth(1).unwrap_or("").trim();
+            l1.split('\u{e0b4}').nth(1).unwrap_or("").trim().to_string()
+        };
+        for cols in CARD_COLLAPSED_COLS..CARD_EXPANDED_COLS {
+            let shown = said(cols);
             assert!(
                 shown.is_empty() || shown.chars().filter(|c| *c != ELLIPSIS).count() >= 3,
                 "at {cols} the summary cell said only {shown:?}"
             );
         }
+        // The threshold is FOUR, and it is a floor rather than a fence: four
+        // cells buy three characters and an ellipsis, which is the narrowest
+        // cell that still says something. A test that only swept could not
+        // tell that from a threshold of five, so the boundary is named. The
+        // chip claims eleven columns and the chrome five, so four cells left
+        // over is exactly twenty.
+        assert_eq!(said(20).chars().count(), 4, "four cells must still speak");
+        assert!(said(19).is_empty(), "three cells must stay quiet");
     }
 
     #[test]
