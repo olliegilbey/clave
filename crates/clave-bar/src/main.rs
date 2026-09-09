@@ -574,6 +574,28 @@ impl State {
                     // present and no landing means the executor election
                     // refused, not that the channel starved. That distinction
                     // read the wrong way for a day in #162.
+                    //
+                    // IT IS NOT FREE, and the number is here so a later perf
+                    // pass does not have to re-measure it: ten sidebars means
+                    // ten host log writes per gesture, which cost ~16ms of the
+                    // ~41ms the channel swap won back (160ms → 119ms without
+                    // this line, 135ms with it; `scripts/nav-bench.sh`, 30
+                    // gestures, ten instances). Kept deliberately — log volume
+                    // is unchanged from the blank twin this replaces, and the
+                    // #162 ambiguity is worth more than the milliseconds.
+                    // Gating it behind `dbg_log()` was considered and declined
+                    // (#257), on this file's OWN precedent: per-FRAME lines are
+                    // gated because a frame fires on every subscribed event,
+                    // and rare-but-diagnostic lines are not — `click()` logs
+                    // unconditionally because it is what the next #148-class
+                    // bug gets debugged from. A beacon is a gesture, not a
+                    // frame, and it is what the next #162-class bug gets
+                    // debugged from. The gate would also be the wrong shape
+                    // here: `CLAVE_BAR_DEBUG` is read once from the SERVER's
+                    // environment, so turning it on means relaunching the
+                    // fleet — which destroys the intermittent state you wanted
+                    // to observe. If this ever must be switchable, the shape is
+                    // a runtime pipe, not an env read.
                     eprintln!("clave-bar: beacon {tab_id}");
                     if self.model.visited(tab_id) {
                         self.pending_peeks += 1;
