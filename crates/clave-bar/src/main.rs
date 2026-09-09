@@ -196,7 +196,9 @@ impl State {
         if self.anim_armed || !self.model.own_tab_focused() {
             return;
         }
-        if self.model.row_height().lines_per_row() != 4 {
+        // The same predicate the clock's resolution reads, so the seconds and
+        // the timer that ticks them can never disagree (`RowHeight::animates`).
+        if !self.model.row_height().animates() {
             return;
         }
         let thinking = rows.iter().any(|r| match &r.content {

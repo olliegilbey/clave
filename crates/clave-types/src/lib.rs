@@ -527,6 +527,20 @@ impl RowHeight {
         }
     }
 
+    /// Whether this geometry repaints on a sub-second timer — the four-line
+    /// card's spinner is the only thing that arms one (`arm_anim`).
+    ///
+    /// **Two callers, and they MUST agree.** The bar's animation timer asks
+    /// this before arming, and the row projection asks it before rendering a
+    /// clock in SECONDS. A seconds-resolution number in a geometry that only
+    /// repaints on store pushes would freeze mid-count and read as broken,
+    /// where the coarse `0m` it replaced sat still and read as correct. One
+    /// predicate rather than two `lines_per_row() == 4` tests is what keeps
+    /// the reading and the cadence that drives it from drifting apart.
+    pub fn animates(self) -> bool {
+        self.lines_per_row() == 4
+    }
+
     /// Parse the plugin-config value, failing CLOSED to the default: a
     /// typo'd or absent key must render the default design, never a
     /// surprise legacy mode.

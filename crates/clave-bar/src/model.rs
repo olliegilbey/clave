@@ -2191,7 +2191,13 @@ impl BarModel {
             // are the honest grain and seconds would be noise that repaints
             // forever. `status`, not `a.status`: a row the local override has
             // already quieted is not thinking, whatever the store still says.
-            elapsed: if status.thinking() {
+            //
+            // Gated on `animates()` because seconds are only honest where
+            // something repaints them. The two legacy geometries arm no timer,
+            // so a seconds count there would freeze at whatever the last store
+            // push saw — worse than the coarse reading it replaced, which at
+            // least sits still on purpose.
+            elapsed: if self.row_height().animates() && status.thinking() {
                 turn_label(self.now, a.last_interacted)
             } else {
                 elapsed_label(self.now, a.last_interacted)
@@ -6899,6 +6905,34 @@ mod tests {
         assert_eq!(turn_label(100 + 2 * 3600, 100).as_deref(), Some("2h"));
         // And it invents nothing where there is nothing, same as elapsed.
         assert_eq!(turn_label(1000, 0), None);
+    }
+
+    #[test]
+    fn only_a_geometry_that_repaints_gets_a_seconds_clock() {
+        // Seconds are only honest where something ticks them. The four-line
+        // card arms a 0.2s timer for its spinner and the two legacy geometries
+        // arm nothing, so a seconds count there would freeze at whatever the
+        // last store push happened to see — worse than the coarse reading it
+        // replaced, because a stale `0m` at least looks like it means to sit
+        // still. One predicate drives both the resolution and the timer
+        // (`RowHeight::animates`); this is what stops them drifting apart.
+        let clock = |h: RowHeight| {
+            let mut m = BarModel::default();
+            m.set_row_height(h);
+            m.apply_tabs(vec![tab(10, 0, "a", false)]);
+            m.tick(1_003);
+            let mut a = dressed("u1", "/r/one", "main", None, Some(10));
+            a.status = Status::Working;
+            a.last_interacted = 1_000;
+            m.apply_snapshot(snap(1, vec![a]));
+            match content_at(&m, 0) {
+                RowContent::Agent { elapsed, .. } => elapsed,
+                other => panic!("expected an agent row, got {other:?}"),
+            }
+        };
+        assert_eq!(clock(RowHeight::Card).as_deref(), Some("3s"));
+        assert_eq!(clock(RowHeight::Double).as_deref(), Some("0m"));
+        assert_eq!(clock(RowHeight::Single).as_deref(), Some("0m"));
     }
 
     #[test]
