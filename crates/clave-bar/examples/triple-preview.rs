@@ -18,7 +18,7 @@
 //! ```text
 //!   line 1:  status  │ chip-pill  summary
 //!   line 2:  prov    │ repo [branch]  #PR   provider model effort
-//!   line 3:  subs    │ tokens  elapsed  wants               turn
+//!   line 3:  subs    │ tokens  clock  ask
 //!   line 4:  the shadow rule — a hairline that closes the card
 //! ```
 //!
@@ -212,7 +212,7 @@ fn fleet() -> Vec<Row> {
             model: Some("fable"),
             effort: Some("xh"),
             battery: Some((4, 80_000)),
-            elapsed: "1m",
+            elapsed: "42s",
             summary: "Validate and fix codebase",
             ..A::default()
         }
