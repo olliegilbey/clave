@@ -2239,9 +2239,25 @@ impl BarModel {
             } else {
                 elapsed_label(self.now, a.last_interacted)
             },
-            // Straight off the wire (lock §4.7). The host has already decided
-            // whether this row is blocked; the bar only draws the words.
-            wants: a.wants.clone(),
+            // Gated on the PROJECTED status, not the wire's — the same
+            // `status`/`a.status` distinction the clock above makes, and for
+            // the same reason (amended 2026-09-10; lock §4.7 had it straight
+            // off the wire).
+            //
+            // The host keeps `wants` exactly coextensive with `NeedsYou`
+            // (`take_wants` clears it on every other status), so the wire is
+            // already coherent for a LIVE row and this changes nothing there.
+            // What it fixes is the four model states that OUTRANK the store's
+            // status: stale, opening, dormant and dormant-selected. A dormant
+            // row has no process to be blocked; a stale row's checkout is
+            // gone; an opening row is starting a NEW session and the words
+            // belong to the old one. Each of them rendered "waiting on Bash"
+            // beside a glyph that says otherwise — the card contradicting
+            // itself in the one cell whose whole job is to say what to do
+            // next.
+            wants: (status == RowStatus::NeedsYou)
+                .then(|| a.wants.clone())
+                .flatten(),
             subagents: a.subagents,
         }
     }
@@ -7195,6 +7211,64 @@ mod tests {
         assert_eq!(status_at(&m, 0), Some(RowStatus::Done));
         m.apply_tabs(vec![tab(10, 0, "t", true)]); // focus marks it read
         assert_eq!(status_at(&m, 0), Some(RowStatus::Idle));
+    }
+
+    /// **The card must not contradict itself.** `wants` is the cell that says
+    /// what to do next, and it rode straight off the wire — so every model
+    /// state that OUTRANKS the store's status left the words behind. A dormant
+    /// row has no process to be blocked. A stale row's checkout is gone. An
+    /// opening row is starting a NEW session, and the words describe the old
+    /// one. All three drew "waiting on Bash" beside a glyph saying otherwise.
+    ///
+    /// Note what this does NOT change: a live `NeedsYou` row keeps its words,
+    /// because the host already keeps `wants` coextensive with `NeedsYou`
+    /// (`take_wants`). The wire was never incoherent; the projection was.
+    #[test]
+    fn a_row_that_is_not_asking_shows_no_words_however_the_wire_reads() {
+        // Every fixture below carries the same live-looking wire value, so a
+        // blank cell can only come from the projection.
+        let asking = |tab: Option<usize>| {
+            let mut a = agent("u1", Status::NeedsYou, tab);
+            a.wants = Some("Bash (git push --force)".into());
+            a
+        };
+        let wants_of = |m: &BarModel| match content_at(m, 0) {
+            RowContent::Agent { wants, .. } => wants,
+            other => panic!("expected an agent row, got {other:?}"),
+        };
+
+        // The live row it was written for — unchanged, and asserted first so a
+        // gate that simply blanked everything cannot pass this test.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "t", false)]);
+        m.apply_snapshot(snap(1, vec![asking(Some(10))]));
+        assert_eq!(status_at(&m, 0), Some(RowStatus::NeedsYou));
+        assert_eq!(
+            wants_of(&m).as_deref(),
+            Some("Bash (git push --force)"),
+            "a row that IS asking must still say what for"
+        );
+
+        // Dormant: no process, nothing to be blocked on.
+        let mut m = BarModel::default();
+        m.apply_snapshot(snap(1, vec![asking(None)]));
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Dormant));
+        assert_eq!(wants_of(&m), None, "a dormant row is asking nobody");
+
+        // Opening: the words belong to the session being replaced.
+        m.opening.insert("u1".into());
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Opening));
+        assert_eq!(wants_of(&m), None, "an opening row's ask is the old one's");
+        m.opening.clear();
+
+        // Stale, live and bound — the case the dormant path cannot reach.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "t", false)]);
+        let mut a = asking(Some(10));
+        a.stale = true;
+        m.apply_snapshot(snap(1, vec![a]));
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Stale));
+        assert_eq!(wants_of(&m), None, "a stale row's checkout is gone");
     }
 
     #[test]

@@ -250,6 +250,24 @@ decided by the free structural signal that already drives the status mark — a
 fact. `wants` is written only for rows that signal already flagged, so a scribe
 outage degrades to today's dot rather than to silence.
 
+**Amended 2026-09-10: the gate is the PROJECTED status, not the wire's.** This
+section said the bar draws the words straight off the wire, on the reasoning
+that the host has already decided. The host has — `take_wants` keeps `wants`
+exactly coextensive with `NeedsYou` — but the BAR has four states that outrank
+the store's status entirely: stale, opening, dormant and dormant-selected. Each
+of them left the words behind, so a dormant row with no process, a stale row
+whose checkout is gone, and an opening row starting a fresh session all drew
+"waiting on Bash" beside a glyph saying otherwise. The card contradicted itself
+in the one cell whose whole job is to say what to do next. The words now render
+only where the projection says `NeedsYou`, the same `status`-not-`a.status`
+distinction §4.4's clock already makes.
+
+**Its twin, the same day.** §4.6's subagent mark HOLDS on a silent tail, which
+is right — an older Claude Code never wrote the field — but nothing ended the
+hold. A `SessionEnd` now clears it (`take_subagents`): a session that has
+exited can have nothing pending under it, and a held mark would sit on a
+dormant row claiming depth the user cannot go and look at.
+
 Its sources, cheapest first:
 
 1. **The tool name from a pending permission prompt.** Free and structural:
