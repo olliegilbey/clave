@@ -143,6 +143,39 @@ fi
 unset ZELLIJ ZELLIJ_PANE_ID
 export ZELLIJ_SESSION_NAME="$SESSION"
 
+# 3b. THE SECOND DOOR (2026-09-10). Everything above guards `zellij action`.
+#     `clave hook` needs the identical guard for a reason that is invisible
+#     until it bites: the hook writes the store (safe — CLAVE_STATE_DIR selects
+#     it) and then PUSHES the resulting snapshot with `zellij pipe`, and that
+#     push carries no `--session` either (`bounded_pipe_command`, hook.rs). So a
+#     drive that carefully sets CLAVE_STATE_DIR and nothing else writes the
+#     right store and fires the notification at the MAINTAINER'S FLEET.
+#
+#     That happened while driving the four-line card: a 3-row sandbox snapshot
+#     was aimed at a live 20-row session, and only `apply_snapshot`'s
+#     `snap.seq <= self.seq` discard stopped it landing. That guard is an
+#     accident of which store had the higher seq, not protection.
+#
+#     The failure is SILENT in the direction that matters — the sandbox bar
+#     keeps rendering its stale snapshot, so the feature under test looks
+#     broken and the drive chases the wrong bug. Two rounds went that way.
+#
+#     Usage:  scripts/ct.sh --hook UserPromptSubmit '{"session_id":"…"}'
+if [[ "${1:-}" == "--hook" ]]; then
+  shift
+  [[ $# -ge 1 ]] || { echo "usage: ct.sh --hook <Event> [payload-json]" >&2; exit 2; }
+  hook_event="$1"; shift
+  # Same discipline as SESSION above: ask the binary that owns the sandbox,
+  # never reconstruct the paths here, or the wrapper and the CLI can disagree
+  # about which root a drive is writing.
+  hook_state="$("$CLAVE_BIN" dev instance --field state)"
+  hook_data="$("$CLAVE_BIN" dev instance --field data)"
+  exec env CLAVE_SESSION="$SESSION" \
+    CLAVE_STATE_DIR="$hook_state" \
+    CLAVE_DATA_DIR="$hook_data" \
+    "$CLAVE_BIN" hook "$hook_event" <<<"${1:-{\}}"
+fi
+
 # 4. Bound it (CodeRabbit, PR #152). Every check above races with the session
 #    dying, and `zellij action` against a dead or wedged session BLOCKS
 #    INDEFINITELY AND NEVER ERRORS (FOOTGUNS) — which is the single worst thing
