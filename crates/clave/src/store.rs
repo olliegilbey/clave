@@ -288,11 +288,50 @@ pub struct Store {
     /// (unlike `collapsed`/`order`): geometry is launch-baked into fixed pane
     /// sizes and a plugin-config line, and a LIVE bar can neither resize its
     /// own pane nor swap its own plugin config, so there is nothing for a
-    /// running instance to react to. `default` (Double, matching
-    /// `RowHeight`'s own default) keeps pre-field store files loading and is
-    /// exactly the fresh-install behaviour: nothing set → double.
-    #[serde(default)]
+    /// running instance to react to. `default` keeps pre-field store files
+    /// loading and is exactly the fresh-install behaviour.
+    ///
+    /// `deserialize_with` for the OTHER direction, which `default` does not
+    /// cover: `default` answers a MISSING field, and the field being present
+    /// with an unfamiliar value is a different question with a much worse
+    /// answer. See [`lenient_row_height`].
+    #[serde(default, deserialize_with = "lenient_row_height")]
     pub row_height: clave_types::RowHeight,
+}
+
+/// An unrecognised row height is the FUTURE, not corruption — a newer clave
+/// wrote a mode this binary has no name for.
+///
+/// serde fails the whole struct on an unknown enum variant, so one such value
+/// takes the ENTIRE store down: every `clave hook` invocation then dies on the
+/// read. And it dies in the worst possible way — the hook exits 0 by Global
+/// Constraint and says so only on stderr, so nothing surfaces, and the fleet
+/// simply stops updating. No status, no tokens, no binding, no error.
+///
+/// Measured 2026-09-10: a v0.4.0 hook against a store this branch had written
+/// `card` into printed `unknown variant \`card\`, expected \`single\` or
+/// \`double\`` and gave up, and every hook for that session did the same. That
+/// is one version's skew from the other — a rollback, a partial upgrade, or
+/// clave's own stable-vs-worktree split, which is how it was found.
+///
+/// Reuses `from_config_value` rather than minting a second table of the
+/// spellings: it is already the one place that maps a string to a mode and is
+/// already lenient, so the two cannot drift.
+///
+/// Geometry is the right field to guess on — being wrong costs a row height
+/// until the next launch, never a fact. A field where a wrong guess would cost
+/// a FACT must fail loudly instead; do not copy this upward without asking
+/// what a wrong answer costs there.
+fn lenient_row_height<'de, D>(d: D) -> std::result::Result<clave_types::RowHeight, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    // Through `Value`, not `String`: a future clave could write a shape as
+    // well as a spelling, and this must survive that too rather than trading
+    // one strict-parse failure for another.
+    let raw = serde_json::Value::deserialize(d)?;
+    Ok(clave_types::RowHeight::from_config_value(raw.as_str()))
 }
 
 impl Store {
@@ -983,6 +1022,47 @@ mod tests {
             wants: None,
             subagents: false,
         }
+    }
+
+    #[test]
+    fn a_row_height_from_the_future_loads_the_store_instead_of_killing_it() {
+        // The failure this prevents is total and silent. serde fails the whole
+        // struct on an unknown enum variant, so one unfamiliar `row_height`
+        // makes the ENTIRE store unreadable — and `clave hook` exits 0 by
+        // Global Constraint, reporting only on stderr, so the fleet just stops
+        // updating with nothing to see. Measured 2026-09-10: a v0.4.0 hook
+        // against a `card` store printed `unknown variant \`card\`` and gave up
+        // on every event.
+        //
+        // Both directions matter. A value from the future degrades to the
+        // default; the two this binary knows still round-trip, or the leniency
+        // would be hiding a real read.
+        let store = |v: &str| -> Store {
+            serde_json::from_str(&format!(r#"{{"seq":3,"agents":{{}},"row_height":{v}}}"#))
+                .expect("an unfamiliar row height must not fail the whole store")
+        };
+        assert_eq!(
+            store(r#""single""#).row_height,
+            clave_types::RowHeight::Single
+        );
+        assert_eq!(
+            store(r#""double""#).row_height,
+            clave_types::RowHeight::Double
+        );
+        assert_eq!(store(r#""card""#).row_height, clave_types::RowHeight::Card);
+        // The future: a spelling, and a SHAPE. Neither may take the store with
+        // it, and the rest of the store must still arrive intact.
+        let ahead = store(r#""quadruple""#);
+        assert_eq!(ahead.row_height, clave_types::RowHeight::default());
+        assert_eq!(ahead.seq, 3, "the rest of the store must survive the guess");
+        assert_eq!(store("null").row_height, clave_types::RowHeight::default());
+        assert_eq!(
+            store("{\"lines\":6}").row_height,
+            clave_types::RowHeight::default()
+        );
+        // A missing field is the OTHER question, and `default` still answers it.
+        let bare: Store = serde_json::from_str(r#"{"seq":1,"agents":{}}"#).unwrap();
+        assert_eq!(bare.row_height, clave_types::RowHeight::default());
     }
 
     #[test]
