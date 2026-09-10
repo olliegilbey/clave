@@ -58,9 +58,16 @@ pub const BATTERY_LEVELS: u8 = 11;
 
 /// Per-agent status. This is a *latest-wins state machine* (spec §6.5), not a
 /// priority-max: a later event can downgrade an earlier one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
+    /// `#[default]` exists for the store's lenient read, not for a fresh row —
+    /// every mint sets a status explicitly. It is the answer to "this store was
+    /// written by a newer clave and names a status I do not know", and `Idle`
+    /// is the right guess there because it is the one state that claims
+    /// nothing: dim, unread, no session. Any other default would invent a fact
+    /// about an agent this binary cannot see.
+    #[default]
     Idle,
     Working,
     NeedsYou,

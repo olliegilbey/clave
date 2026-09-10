@@ -132,7 +132,7 @@ const THINK_FRAMES: [char; 6] = [
 
 /// Ping-pong: the six frames out and the four inner ones back, so the cycle
 /// turns over without a jump.
-const THINK_CYCLE: usize = 10;
+pub(crate) const THINK_CYCLE: usize = 10;
 
 /// The spinner's glyph at animation frame `t`. `pub(crate)` so the shell can
 /// decide whether any row is animating without a second copy of the cycle.

@@ -362,6 +362,39 @@ measure "loaded-tail matched line (verbatim)" "$TAIL_MATCH"
 check "build tag on loaded tail (any of last 5)" "$([[ -n "$TAIL_MATCH" ]] && echo present || echo absent)" "present"
 printf '[%s %s] NOTE same-HEAD re-runs cannot distinguish a stale load here — eyeball the tail timestamps\n' "$CURRENT_PHASE" "$(ts)"
 
+# The clave that HOOKS will resolve must be able to read this sandbox's store.
+#
+# Added 2026-09-10 after a round lost to its absence. Hooks are registered in
+# the shared ~/.claude/settings.json as bare `clave` — they must be, since that
+# file is the maintainer's real one and a versioned path there is "the one
+# leak" (#43/#44). But the sandbox's PATH shim does NOT reach the hook process
+# Claude Code spawns: the pane's env survives (CLAVE_SESSION, CLAVE_STATE_DIR,
+# ZELLIJ_PANE_ID are all correct, and `command -v clave` in the pane resolves
+# to the shim), while its PATH does not. So bare `clave` lands on the RELEASE
+# launcher, and the release binary is handed the SANDBOX store.
+#
+# That pairing is silent and total. An older clave hits an enum variant it has
+# no name for, serde fails the whole struct, and every hook dies on the read —
+# exiting 0 by Global Constraint with the message only on stderr. The fleet
+# stops updating entirely and it presents as "the feature under test is
+# broken": `card` did exactly this, and cost a round diagnosed as an adoption
+# bug when adoption was fine.
+#
+# `ls` is the cheapest command that reads the store and nothing else. Stderr,
+# not exit code — `clave` reports a store read failure there and still exits 0.
+HOOK_CLAVE="$(command -v clave 2>/dev/null || true)"
+measure "clave a hook would resolve" "${HOOK_CLAVE:-<none on PATH>}"
+if [[ -n "$HOOK_CLAVE" ]]; then
+  measure "its version" "$("$HOOK_CLAVE" --version 2>&1 || true)"
+  STORE_READ="$(CLAVE_STATE_DIR="$STATE_DIR" CLAVE_DATA_DIR="$DATA_DIR" \
+    "$HOOK_CLAVE" ls 2>&1 >/dev/null || true)"
+  check "hook-resolved clave reads this sandbox store" "${STORE_READ:-clean}" "clean"
+  printf '[%s %s] NOTE a failure here means EVERY hook in this sandbox no-ops silently — the drive below will read as broken features\n' \
+    "$CURRENT_PHASE" "$(ts)"
+else
+  check "clave resolvable on PATH (hooks need it)" "absent" "present"
+fi
+
 # config.kdl <-> layout.kdl identity pair (the #44 self-check `just sandbox`
 # already runs at stage time — re-asserted here because config coherence can
 # rot between staging and this run, e.g. a `clave setup` run by hand).

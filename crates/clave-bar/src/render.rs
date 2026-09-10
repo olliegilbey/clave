@@ -2563,6 +2563,81 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_animation_frame_reaches_the_card_it_is_meant_to_spin() {
+        // The whole spinner runs on `frame` travelling from the shell's timer
+        // through `render_rows` into `render_card`, and NOTHING tested the
+        // journey: `card.rs` calls `render_card` directly with a frame it
+        // chooses, every `render_rows` test passes 0, and `main.rs`'s
+        // `arm_anim` lives in the wasm shell, which has no test module at all.
+        // Replacing `frame` with a literal `0` at the call site survived the
+        // entire suite — the spinner would be frozen on screen with a green PR.
+        //
+        // Two frames of the same fleet, compared. Frame 0 and frame 1 are
+        // adjacent in the ping-pong cycle and must differ; a full cycle later
+        // must come back to where it started, which is what makes this an
+        // assertion about the CYCLE rather than about "something changed".
+        let rows = vec![agent(RowStatus::Working, Provenance::Main, Some("T"), "s")];
+        let at = |frame: usize| {
+            render_rows(
+                &rows,
+                RowHeight::Card.target_cols(false),
+                4,
+                Widths::EXPANDED,
+                &Theme::default(),
+                RowHeight::Card,
+                frame,
+            )
+        };
+        assert_ne!(
+            at(0)[0],
+            at(1)[0],
+            "the frame never reached the card — the spinner is frozen"
+        );
+        assert_eq!(
+            at(0)[0],
+            at(crate::card::THINK_CYCLE)[0],
+            "a full cycle must land back on frame 0"
+        );
+        // Only line 1 carries the mark, so a frame that leaked into any other
+        // line would be a different bug wearing the same green.
+        for line in 1..4 {
+            assert_eq!(
+                at(0)[line],
+                at(1)[line],
+                "line {line} moved with the animation frame and must not"
+            );
+        }
+    }
+
+    #[test]
+    fn a_row_that_is_not_working_ignores_the_animation_frame_entirely() {
+        // The other half: the frame must reach a card, and must change nothing
+        // on a card with no turn in flight. Without this, "the frame arrives"
+        // could be satisfied by a renderer that spins every row — which is the
+        // exact complaint the maintainer raised against a live sandbox ("the
+        // flower is animated even though the agent isn't doing anything").
+        for status in [RowStatus::Idle, RowStatus::Done, RowStatus::NeedsYou] {
+            let rows = vec![agent(status, Provenance::Main, Some("T"), "s")];
+            let at = |frame: usize| {
+                render_rows(
+                    &rows,
+                    RowHeight::Card.target_cols(false),
+                    4,
+                    Widths::EXPANDED,
+                    &Theme::default(),
+                    RowHeight::Card,
+                    frame,
+                )
+            };
+            assert_eq!(
+                at(0),
+                at(3),
+                "{status:?} has no turn running and must not animate"
+            );
+        }
+    }
+
     /// [`on_screen_at`]'s card counterpart: the model indices the pane shows,
     /// recovered from LINE 1 of each card (the name lives in the chip, which is
     /// a line-1 cell). Asserts the pair-ness on the way through — a half card
