@@ -761,6 +761,25 @@ mod tests {
     /// straight off that file's output; 16 and 17 add the two corners the mock
     /// had no field for (an unknown provider, and the `Opening` row that
     /// escapes the dormant fade).
+    /// The ink a specific CELL wears: the last SGR colour opened before its
+    /// own text. `line.contains(&INK.fg())` is NOT this and must not be used
+    /// for it (FOOTGUNS) — the line already contains the sequence if any other
+    /// cell on it does, and the card's inks are not distinct byte-strings.
+    /// `WORKTREE_INK` and `PR_INK` are both springGreen; `TURN_INK` is the
+    /// rail's crystalBlue. A `contains` check against any of those passes on
+    /// every row ever rendered, which is a tautology wearing a colour test's
+    /// name.
+    fn ink_before(line: &str, needle: &str) -> String {
+        let at = line
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} is not on this line: {line:?}"));
+        let start = line[..at]
+            .rfind("\u{1b}[38;2;")
+            .unwrap_or_else(|| panic!("no ink opened before {needle:?}: {line:?}"));
+        let run = &line[start..];
+        run[..=run.find('m').expect("a terminated SGR")].to_string()
+    }
+
     struct A {
         status: RowStatus,
         prov: Provenance,
@@ -1518,6 +1537,100 @@ mod tests {
         }
     }
 
+    /// **Order IS the animation** (lock §4.5). The mark grows from a dot
+    /// through progressively heavier stars and back; any other sequence over
+    /// the same six glyphs gives six things flickering rather than one shape
+    /// breathing, and every property the spinner test asserts — the cycle
+    /// closes, all six are visited, the walk back reflects the walk out —
+    /// survives shuffling `THINK_FRAMES` completely.
+    ///
+    /// So the ratified sequence is pinned as a literal, taken from the spec
+    /// rather than recomputed from the array it is checking. Ten frames: six
+    /// out, the four inner ones back.
+    #[test]
+    fn the_spinner_walks_the_ratified_sequence_and_no_other() {
+        const RATIFIED: [char; THINK_CYCLE] = [
+            '\u{00b7}', // interpunct — the quietest possible mark
+            '\u{2722}', // four teardrop-spoked asterisk
+            '\u{2733}', // eight-spoked asterisk
+            '\u{2736}', // six pointed black star
+            '\u{273b}', // teardrop-spoked asterisk
+            '\u{273d}', // heavy teardrop-spoked asterisk — the peak
+            '\u{273b}', // and back down the same way it came
+            '\u{2736}', '\u{2733}', '\u{2722}',
+        ];
+        let walked: Vec<char> = (0..THINK_CYCLE).map(think_frame).collect();
+        assert_eq!(
+            walked, RATIFIED,
+            "the spinner is not breathing, it is flickering"
+        );
+        // The glyphs must reach the CARD in that order too — `think_frame` is
+        // reachable from the shell, so a card that picked its own would keep
+        // this green.
+        let working = A {
+            status: RowStatus::Working,
+            ..A::default()
+        }
+        .row();
+        for (t, want) in RATIFIED.iter().enumerate() {
+            let line = strip_sgr(
+                &render_card(&working, CARD_EXPANDED_COLS, false, t, &Theme::default())[0],
+            );
+            assert!(
+                line.contains(*want),
+                "frame {t} should draw {want:?}: {line:?}"
+            );
+        }
+    }
+
+    /// The subagent mark's ink, which nothing asserted — the glyph could have
+    /// arrived in any colour and every golden (stripped text) and every width
+    /// test would have stayed green.
+    ///
+    /// `SUBS_INK` is a quiet blue-grey on purpose (lock §4.6): the mark says
+    /// "this row has depth", not "this row is hot", so it must not borrow a
+    /// lifecycle hue. Read off the mark's own run, never `contains` — line 3's
+    /// rail and its token band are both painted too.
+    #[test]
+    fn the_subagent_mark_is_quiet_blue_grey_and_absent_when_there_is_none() {
+        let line3 = |subs: bool, cols: usize| {
+            render_card(
+                &A {
+                    subs,
+                    ..A::default()
+                }
+                .row(),
+                cols,
+                false,
+                0,
+                &Theme::default(),
+            )[2]
+            .clone()
+        };
+        // Both widths: the mark is a gutter cell, so it survives the crop —
+        // which is exactly why its ink has to be right at 16 columns too.
+        for cols in [CARD_EXPANDED_COLS, CARD_COLLAPSED_COLS] {
+            let marked = line3(true, cols);
+            assert_eq!(
+                ink_before(&marked, &SUBS_MARK.to_string()),
+                SUBS_INK.fg(),
+                "at {cols} cols the subagent mark must be its own quiet ink: {marked:?}"
+            );
+            // Absent is BLANK, not a fallback glyph, and the cell it left
+            // behind is the same width — the crop rule depends on it.
+            let bare = line3(false, cols);
+            assert!(!strip_sgr(&bare).contains(SUBS_MARK));
+            assert_eq!(display_cells(&strip_sgr(&bare)), cols);
+            // The gutter is ` X `, so everything from the third character on
+            // must be identical — the mark is one cell and claims no more.
+            assert_eq!(
+                strip_sgr(&marked).chars().skip(2).collect::<String>(),
+                strip_sgr(&bare).chars().skip(2).collect::<String>(),
+                "at {cols} cols the mark moved something other than its own cell"
+            );
+        }
+    }
+
     /// The spinner: a working row's status mark BREATHES, and nothing else on
     /// the card moves with it. A row blocked on you holds still, which is what
     /// makes a stopped spinner mean "Claude is asking".
@@ -1684,15 +1797,7 @@ mod tests {
             )[2]
             .clone()
         };
-        // The ink the clock's OWN run wears, not merely one the line contains
-        // somewhere: the rail is crystalBlue too, so a `contains` check passes
-        // on every row ever rendered and proves nothing.
-        let clock_ink = |line: &str| -> String {
-            let at = line.find("42s").expect("the clock's text");
-            let start = line[..at].rfind("\u{1b}[38;2;").expect("an ink before it");
-            let run = &line[start..];
-            run[..=run.find('m').expect("a terminated SGR")].to_string()
-        };
+        let clock_ink = |line: &str| ink_before(line, "42s");
         for cols in [CARD_EXPANDED_COLS, CARD_COLLAPSED_COLS] {
             let running = line3(RowStatus::Working, cols);
             let over = line3(RowStatus::Idle, cols);
@@ -1727,6 +1832,9 @@ mod tests {
                 &A {
                     prov,
                     branch: "topic",
+                    // The trap this test exists to avoid needs a PR present:
+                    // `PR_INK` and `WORKTREE_INK` are the same bytes.
+                    pr: Some(232),
                     ..A::default()
                 }
                 .row(),
@@ -1737,23 +1845,49 @@ mod tests {
             )[1]
             .clone()
         };
+        // Read the MARK's own ink, never `line.contains` (FOOTGUNS): line 2
+        // also carries the PR cell, and `PR_INK` is byte-identical to
+        // `WORKTREE_INK` — both springGreen. Every card below therefore has a
+        // PR open, so a `contains` check would pass on all three, including
+        // the `Main` row written to reject it.
+        let mark_ink = |line: &str, mark: char| ink_before(line, &mark.to_string());
         let worktree = line2(Provenance::Worktree);
         let branch = line2(Provenance::Branch);
-        assert!(
-            worktree.contains(&WORKTREE_INK.fg()),
+        assert_eq!(
+            mark_ink(&worktree, crate::render::WORKTREE_MARK),
+            WORKTREE_INK.fg(),
             "the worktree mark must be springGreen: {worktree:?}"
         );
-        assert!(
-            branch.contains(&BRANCH_INK.fg()),
+        assert_eq!(
+            mark_ink(&branch, crate::render::BRANCH_MARK),
+            BRANCH_INK.fg(),
             "the branch mark must be oniViolet: {branch:?}"
         );
-        assert!(
-            !worktree.contains(&BRANCH_INK.fg()) && !branch.contains(&WORKTREE_INK.fg()),
-            "the two inks must not both be painted"
-        );
-        // An ordinary checkout has no mark, so it claims neither ink.
+        // Neither card wears the other's glyph at all — the ink follows the
+        // mark, so the marks must not be interchangeable either.
+        assert!(!strip_sgr(&worktree).contains(crate::render::BRANCH_MARK));
+        assert!(!strip_sgr(&branch).contains(crate::render::WORKTREE_MARK));
+        // An ordinary checkout has no mark: the gutter cell is blank, and its
+        // ink is the theme's, not a semantic one.
         let main = line2(Provenance::Main);
-        assert!(!main.contains(&WORKTREE_INK.fg()) && !main.contains(&BRANCH_INK.fg()));
+        assert!(!strip_sgr(&main).contains(crate::render::WORKTREE_MARK));
+        assert!(!strip_sgr(&main).contains(crate::render::BRANCH_MARK));
+        // The gutter is the line's FIRST cell, so its ink is the line's first
+        // SGR — the one place `ink_before` cannot reach, because the cell it
+        // paints is a space with nothing before it.
+        let opening_ink = |line: &str| {
+            let run = &line[line.find("\u{1b}[38;2;").expect("an opening ink")..];
+            run[..=run.find('m').expect("a terminated SGR")].to_string()
+        };
+        assert_eq!(
+            opening_ink(&main),
+            Theme::default().default_ink.fg(),
+            "a main-checkout row must not open a semantic ink it has no mark for"
+        );
+        // And the two that DO have a mark open on their own ink, which is the
+        // same statement read from the other end.
+        assert_eq!(opening_ink(&worktree), WORKTREE_INK.fg());
+        assert_eq!(opening_ink(&branch), BRANCH_INK.fg());
     }
 
     #[test]
@@ -2091,6 +2225,69 @@ mod tests {
         assert!(a1.contains(&BRACKET_A.fg()) && a2.contains(&BRACKET_A.fg()));
         assert!(b1.contains(&BRACKET_B.fg()) && b2.contains(&BRACKET_B.fg()));
         assert_eq!(strip_sgr(&a1), strip_sgr(&b1), "the zebra costs no cells");
+    }
+
+    /// The four-line card's version of the sweep below, which only ever
+    /// covered `render_double_card`. The card added three cells that carry
+    /// agent-authored text the double card never had — `wants`, `model` and
+    /// `effort` — plus a title chip, and it has a CROP rule the two-line card
+    /// does not: collapsed is a strict left-crop of expanded, so a wide glyph
+    /// straddling the crop boundary is a width bug on the one line that must
+    /// hold its column count exactly.
+    ///
+    /// `wants` is the one that matters most. It is quoted from a Claude Code
+    /// notification, so its content is whatever tool invocation the model
+    /// chose to name — a shell command with CJK in it, or an emoji, arrives
+    /// here verbatim.
+    #[test]
+    fn hostile_text_cannot_break_a_four_line_card() {
+        const CJK: &str = "\u{65e5}\u{672c}\u{8a9e}\u{3067}\u{3059}";
+        const CONTROL: &str = "one\ntwo\rthree\u{1b}[31m";
+        const EMOJI: &str = "\u{1f600}\u{1f600}\u{1f600}";
+        // A leading wide glyph is the case that straddles the crop boundary
+        // when the card narrows to 16 columns — a cell wide enough to be cut
+        // in half rather than dropped whole.
+        for hostile in [CJK, CONTROL, EMOJI, "\u{1f600}x", "\u{200b}\u{200b}zero"] {
+            for cols in [CARD_COLLAPSED_COLS, 24, 33, CARD_EXPANDED_COLS, 80] {
+                let row = A {
+                    status: RowStatus::NeedsYou,
+                    chip: Some(hostile),
+                    repo: hostile,
+                    branch: hostile,
+                    summary: hostile,
+                    wants: Some(hostile),
+                    model: Some(hostile),
+                    effort: Some(hostile),
+                    prov: Provenance::Worktree,
+                    pr: Some(1234),
+                    subs: true,
+                    ..A::default()
+                }
+                .row();
+                let card = render_card(&row, cols, false, 0, &Theme::default());
+                assert_eq!(card.len(), 4, "{hostile:?} at {cols} lost a line");
+                for (i, line) in card.iter().enumerate() {
+                    let bare = strip_sgr(line);
+                    assert_eq!(
+                        display_cells(&bare),
+                        cols,
+                        "{hostile:?} line {i} at {cols} cols: {bare:?}"
+                    );
+                    // A newline would tear the card apart in the pane.
+                    assert!(!bare.contains('\n'), "{hostile:?} line {i} kept a newline");
+                    // And the injected SGR must not survive INTO the raw line,
+                    // where the card's own escapes live — checked on `line`,
+                    // not on `bare`, because `strip_sgr` would erase the very
+                    // thing being looked for and pass either way. The card
+                    // paints only 38;2 / 48;2 / 49 / 0, so a `[31m` on the
+                    // wire could only be the agent's.
+                    assert!(
+                        !line.contains("\u{1b}[31m"),
+                        "{hostile:?} line {i} let agent text repaint the bar: {line:?}"
+                    );
+                }
+            }
+        }
     }
 
     /// Agent-authored text reaches these cells raw. A control character

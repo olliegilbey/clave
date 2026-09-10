@@ -404,14 +404,20 @@ impl State {
                 // The timer ends the ask's deafness: the swap's queued
                 // repaints echo the PRE-swap width, and judging them is the
                 // paint-speed toggle loop the 2026-08-17 QA drive filmed.
-                Effect::SwapWidth => {
-                    next_swap_layout();
-                    set_timeout(WIDTH_COOLDOWN_SECS);
-                }
-                // The same timer WITHOUT the swap: this ask is owed another
-                // expiry because a spinner tick was in flight when it was
-                // made and may have eaten the first one (`swap_owed`).
-                Effect::RearmWidthCooldown => {
+                //
+                // ONE arm for both, and one `set_timeout` inside it. The two
+                // differ only in whether they swap: `RearmWidthCooldown` is an
+                // ask owed a second expiry because a spinner tick was in
+                // flight when it was made (`swap_owed`), and swapping again
+                // for it would step the tab past the geometry it already
+                // asked for. Written as two arms, the timer is a line either
+                // could lose — and `main.rs` does not link on the host
+                // (Cargo.toml), so nothing here is reachable by a test. An
+                // arm that cannot be tested should not be duplicated.
+                e @ (Effect::SwapWidth | Effect::RearmWidthCooldown) => {
+                    if matches!(e, Effect::SwapWidth) {
+                        next_swap_layout();
+                    }
                     set_timeout(WIDTH_COOLDOWN_SECS);
                 }
                 // §6.6 C8 dormant nav (ungated — click reaches exactly one
