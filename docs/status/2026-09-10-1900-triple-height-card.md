@@ -114,11 +114,19 @@ swap made conditional — there is no second timer call to lose.
 
 ## Sandbox
 
-`clave-test-triple-card` is still up and still deliberately dirty: two extra
-tabs (`nav-b`, `nav-c`) and two agents pruned by a direct `agents.json` edit.
-Both drives and both eyeball checkpoints were done at the last handoff, so it
-can be killed by its explicit name (`clave dev instance --field session`)
-whenever the maintainer is finished with it. Nothing this round drove it.
+`clave-test-triple-card` is **gone.** Both drives and both eyeball checkpoints
+were done at the last handoff and nothing this round drove it; the maintainer
+asked for the teardown and there was nothing left to tear down.
+
+Worth recording, because it read as alive right up to the kill: its SOCKET file
+is still at `…/T/zellij-501/contract_version_1/clave-test-triple-card`, with no
+`zellij --server` process holding it, and both `kill-session` and
+`delete-session --force` answer `Session: "…" not found`. That is a stale socket
+outliving its server — `ct.sh`'s check #2 exists for exactly this, and it is why
+TESTING.md puts `;` and not `&&` between the teardown pair. The file was left in
+place: a future preflight passes check #1 on it and then refuses at check #2
+with an accurate "stale socket from a dead sandbox", which is the right
+failure.
 
 ## Open — eyeball only, neither a blocker
 
