@@ -205,17 +205,6 @@ pub enum RowStatus {
 }
 
 impl RowStatus {
-    /// The COLOUR is the state; the shape varies only where the state is not a
-    /// conversation at all (lock §5). `Failed` is U+2716 HEAVY multiplication
-    /// x and `Stale` is U+2717 BALLOT x — different glyphs for different
-    /// things, and easy to transpose (FOOTGUNS). `DormantSelected` is U+23CE
-    /// RETURN SYMBOL in the Opening tint — the ⏎ affordance IS the first
-    /// frame of the launch lifecycle it invites (⏎ → ↻ → status, #100).
-    ///
-    /// Takes the theme for its two NON-semantic inks only: `Idle`'s untinted
-    /// grey and `Dormant`'s default ink follow the user's theme, while the
-    /// lifecycle hues stay the fixed consts — red means failed under every
-    /// theme (#145).
     /// Whether this row's status mark BREATHES — the four-line card's spinner.
     /// Only a turn actually in flight does. A row blocked on you does not: the
     /// spinner stopping is what makes "Claude is asking" legible at a glance,
@@ -228,6 +217,20 @@ impl RowStatus {
         matches!(self, RowStatus::Working)
     }
 
+    /// The COLOUR is the state; the shape varies only where the state is not a
+    /// conversation at all (lock §5). `Failed` is U+2716 HEAVY multiplication
+    /// x and `Stale` is U+2717 BALLOT x — different glyphs for different
+    /// things, and easy to transpose (FOOTGUNS). `DormantSelected` is U+23CE
+    /// RETURN SYMBOL in the Opening tint — the ⏎ affordance IS the first
+    /// frame of the launch lifecycle it invites (⏎ → ↻ → status, #100).
+    ///
+    /// Takes the theme for its two NON-semantic inks only: `Idle`'s untinted
+    /// grey and `Dormant`'s default ink follow the user's theme, while the
+    /// lifecycle hues stay the fixed consts — red means failed under every
+    /// theme (#145).
+    ///
+    /// The four-line card overrides the glyph (not the ink) while
+    /// [`Self::thinking`] holds — see `card.rs`'s spinner.
     pub fn mark(self, theme: &Theme) -> (char, Rgb) {
         match self {
             RowStatus::NeedsYou => ('\u{25cf}', NEEDS_YOU_INK),

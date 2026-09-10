@@ -127,11 +127,15 @@ pub const PALETTE_LEN: usize = 8;
 pub const WORKTREE_INK: Rgb = Rgb(0x98, 0xBB, 0x6C); // springGreen
 pub const BRANCH_INK: Rgb = Rgb(0x95, 0x7F, 0xB8); // oniViolet
 
-/// The turn clock's ink while a turn is RUNNING (kanagawa crystalBlue). It is
-/// the card's only live number, and the blue is the signal. When no turn is in
-/// flight the cell renders BLANK rather than dimming: blank is already the
-/// card's word for "no reading", and a blank clock beside a lit one is the
-/// cheapest possible "this agent is thinking".
+/// The clock's ink while a turn is RUNNING (kanagawa crystalBlue). It is the
+/// card's only live number, and the blue is the signal.
+///
+/// Once the turn is over the cell DIMS to `META_INK` rather than blanking —
+/// the design that shipped, and the reverse of what this comment used to
+/// promise. Blanking was right while the clock was a cell of its own; the
+/// lock's §4.4 amendment made it one cell at two resolutions, and the same
+/// number then means staleness, which is worth keeping on screen. So the
+/// contrast that reads as "thinking" is lit-vs-dim, not filled-vs-blank.
 pub const TURN_INK: Rgb = Rgb(0x7E, 0x9C, 0xD8);
 
 /// The subagent mark and its ink — a quiet blue-grey, because it says "this

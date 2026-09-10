@@ -152,11 +152,7 @@ fn is_default_checkout(a: &Agent) -> bool {
         }
 }
 
-/// m → h → d → w, each unit taking over at 1.0 of itself; sub-minute is "0m".
-/// `then == 0` is "never" (no interaction on record — the store never mints
-/// that value for a real one), which renders blank rather than "now": the bar
-/// never invents a measurement (#232).
-/// The same instant `elapsed_label` measures, at the resolution a turn in
+/// The same instant [`elapsed_label`] measures, at the resolution a turn in
 /// flight needs: SECONDS under the first minute, and the staleness ladder
 /// above it. Ruled from the drive (2026-09-09) — the card sat on `0m` for the
 /// whole of a turn Claude Code's own footer was counting in seconds, which is
@@ -176,6 +172,14 @@ pub(crate) fn turn_label(now: u64, then: u64) -> Option<String> {
     }
 }
 
+/// m → h → d → w, each unit taking over at 1.0 of itself; sub-minute is "0m".
+/// `then == 0` is "never" (no interaction on record — the store never mints
+/// that value for a real one), which renders blank rather than "now": the bar
+/// never invents a measurement (#232).
+///
+/// This is the STALENESS reading. While a turn is in flight the same instant
+/// is read by [`turn_label`] instead, at seconds — one number, two
+/// resolutions (lock §4.4).
 pub(crate) fn elapsed_label(now: u64, then: u64) -> Option<String> {
     if then == 0 {
         return None;

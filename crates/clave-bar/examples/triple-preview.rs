@@ -22,11 +22,10 @@
 //!   line 4:  the shadow rule — a hairline that closes the card
 //! ```
 //!
-//! **Three cells render BLANK here and will until their sources are wired** —
-//! the subagent mark, `wants` and the turn clock. That is the card being
-//! correct rather than the preview being stale: blank is the meaning on this
-//! design, so each source can land independently. The ratified design rounds
-//! showed them filled; this renders what the wire can actually answer today.
+//! All three of the cells this preview once rendered blank — the subagent
+//! mark, `wants` and the clock — are wired, and the fleet below fills them.
+//! Blank is still the meaning wherever a row has no reading; it is now the
+//! card saying so, rather than the source not existing yet.
 //!
 //! COLLAPSED is 16 columns and a strict LEFT-CROP of the 48-column expanded
 //! card — never a re-arrangement, so a cell's column is its priority. What

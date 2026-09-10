@@ -15,11 +15,13 @@ are defined in [UBIQUITOUS_LANGUAGE.md](../../../UBIQUITOUS_LANGUAGE.md). Three
 terms are new here and defined in §7: **rail**, **shadow rule**, **crop rule**.
 
 **Source-of-truth hierarchy.** _This document is authoritative_ for every
-ruling, number and rationale. `crates/clave-bar/examples/triple-preview.rs` is
-the illustration, and **today it is also the only implementation** — the
-geometry has not yet been ported into `card.rs`, so unlike `double-preview.rs`
-it carries its own copy and can drift. Where the two disagree, this file wins
-and the example is the bug. §8 lists what porting costs.
+ruling, number and rationale — with the standing exception recorded in §4.4,
+which the drive overturned and this file was amended to match.
+`crates/clave-bar/examples/triple-preview.rs` is the illustration and nothing
+more: the geometry now lives in `card.rs` and the example renders THROUGH
+`render_rows`, so the two can no longer disagree by drifting. Where this file
+and the code disagree, read it as a spec amendment owed, not a bug filed — the
+card shipped and was driven, and §9 records what settled each ruling.
 
 ---
 
@@ -28,7 +30,7 @@ and the example is the bug. §8 lists what porting costs.
 ```text
   line 1:  status  │ chip-pill  summary
   line 2:  prov    │ repo [branch]  #PR   provider model effort
-  line 3:  subs    │ tokens  elapsed  wants                turn
+  line 3:  subs    │ tokens  clock  wants
   line 4:  the shadow rule — a hairline that closes the card
 ```
 
@@ -130,7 +132,13 @@ in its cell** — tolerable beside one other glyph, not once a third joins the
 column. `fa-tree` `\u{f1bb}` is a metaphor rather than a depiction and is in the
 font. See §6.
 
-### 4.3 The two clocks stay apart, and elapsed is the one that matters
+### 4.3 ~~The two clocks stay apart~~ — REVERSED, see §4.4
+
+> **Amended 2026-09-09.** There are not two clocks. §4.4 records why, and the
+> rest of this section is kept because the reasoning below is still the reason
+> two clocks would have been wrong — it just turned out they could not exist.
+> The layout that shipped is one clock in the LEFT slot beside the token count,
+> with `wants` running from it to the right edge.
 
 Adjacent, `20h 20m` reads as one duration — twenty hours and twenty minutes —
 rather than as two numbers. Different inks do not save it; only distance does.
@@ -194,9 +202,14 @@ flickering rather than one shape breathing.
 **A row blocked on you does not animate.** The spinner stops when Claude asks.
 
 Frame interval **0.2s**, and that number is not free. The bar identifies which
-timer fired by elapsed seconds, with bands at 0.15s, 1.0s and 3.0s guarded by a
-compile-time assert chain in `crates/clave-bar/src/main.rs`. 0.2s sits in a gap;
-anything faster requires replacing the classifier with tagged timers first.
+timer fired by elapsed seconds alone, guarded by a compile-time assert chain in
+`crates/clave-bar/src/main.rs`.
+
+**Corrected 2026-09-10:** 0.2s does NOT sit in a gap. The classifier has three
+bands and the fastest one already holds the width cooldown at 0.15s, so the
+spinner SHARES that band rather than getting one of its own — the two cannot be
+told apart by elapsed. Anything faster still requires tagged timers first, and
+so, it turns out, does making the sharing correct.
 
 ### 4.6 The subagent mark is a boolean
 
@@ -210,7 +223,9 @@ signal; the digit beside it was noise.
 ### 4.7 `wants` — the flexing cell, and the reason for the change
 
 What this agent is blocked on, in its own words, in `NEEDS_YOU_INK`. It claims
-every cell the numbers on line 3 do not: **28 at 48 columns**. Blank means
+every cell the numbers on line 3 do not: **31 at 48 columns** (28 until the
+clock merger of §4.4 returned three columns and the wider token gap took one
+back). Blank means
 nothing is needed, so an idle fleet has a quiet right-hand column and the one
 row that wants you grows text.
 
@@ -258,20 +273,22 @@ figure is a different question, asked less often, and it would cost columns the
 | subs    | 3 (` X `)   | the subagent mark, boolean (§4.6)      | `#9CABCA`              |
 | rail    | 2 (`│ `)    | the spine                              | the repo's ink         |
 | tokens  | **4**       | thousands of tokens (`211k`, `1.1m`)   | the battery ramp band  |
-| gap     | **2**       | —                                      | —                      |
-| elapsed | **3**, right-aligned | time since you last interacted | meta ink               |
+| gap     | **3**       | —                                      | —                      |
+| clock   | **3**, right-aligned | ONE cell, two resolutions (§4.4) | crystalBlue while `Working`, else meta ink |
 | wants   | 1 + flex    | §4.7 — expanded only                   | needs-you ink          |
-| turn    | 1 + **3**, right-aligned | the live turn clock — expanded only | crystalBlue, or blank |
 | margin  | 1           | —                                      | —                      |
 
-**The token gap is two cells, not one.** At one, `211k 20m` reads as a single
-figure — the same failure that keeps the two clocks apart.
+**The token gap is three cells, not one.** At one, `211k 20m` reads as a single
+figure — the same failure that kept the two clocks apart. Two was the ruling
+until the card was driven; three is what actually puts the expanded clock in the
+columns the COLLAPSED card holds it in, and the collapsed position is the ruled
+one (§5.3). The number is load-bearing, not taste.
 
-**Collapsed locks elapsed to the right edge**, one cell in, computed from what
-the line has already spent rather than from a second margin constant. That is
-the same column the turn clock holds in the expanded card, so whichever clock is
-rightmost sits in the same place and the eye finds a duration in one spot in
-both profiles.
+**Collapsed locks the clock to the right edge**, one cell in, computed from what
+the line has already spent rather than from a second margin constant. With one
+clock this is no longer about which of two is rightmost: it is the crop rule
+applied to a cell that survives, so the same columns hold the duration in both
+profiles and the eye finds it in one place.
 
 ### 5.2 Line 4 — the shadow rule
 
@@ -294,8 +311,9 @@ about what survives 16 columns.
 
 What survives: the status mark, the chip, the repo, the token count, the time
 since you last touched the row. What does not: the summary (with a pill), the
-branch, the PR, the provider, the model, the effort tag, the turn clock, and the
-`wants` message.
+branch, the PR, the provider, the model, the effort tag, and the `wants`
+message. The clock survives — it is the same cell as "the time since you last
+touched the row" above, at whichever resolution applies (§4.4).
 
 This rule settles orderings that were otherwise a matter of taste, and it is why
 the most useful reading on every line sits at the far left.
@@ -346,37 +364,43 @@ rather than a signed-off screenshot. All three entries are in
   and rejected by eye. The pill is a solid block of colour, so the edge the
   column reads against is its outer edge, not the first letter inside it.
 - **A leading space on the chipless summary** — §2. It staggered the card.
-- **The turn clock winning the crop** — §4.3, reversed at round 8.
+- **The turn clock winning the crop** — §4.3, reversed at round 8, then made
+  moot: §4.4's merger left one clock, and it survives the crop.
 - **The PR on line 3** — §4.9.
 - **The two clocks adjacent** — §4.3.
 - **Collapsed at 38 columns** — §1. Not collapsed, just narrow.
-- **Dimming the turn clock when no turn is running** — §4.4. Blank is the
-  card's existing word for "no reading".
+- ~~**Dimming the turn clock when no turn is running**~~ — **this is what
+  shipped.** Forbidden while the clock was a cell of its own, where blank was
+  the card's word for "no reading". §4.4's merger changed the question: the cell
+  always holds a real number, so the choice was never blank-vs-dim but
+  lit-vs-dim, and dim is right.
 
-## 9. What the port still costs
+## 9. What the port cost — closed 2026-09-10
 
-The geometry above is ratified; `card.rs` does not implement it yet. Porting it
-means, in order:
+All four steps are done and all three blank cells are wired. Kept as the record
+of what each step actually settled, since three of the five amendments above
+came out of doing them rather than out of planning them.
 
-1. A `RowHeight` variant carrying `lines_per_row() == 4` and
-   `target_cols(collapsed)` of 16 / 48. Every width in the codebase flows
-   through this enum, and it is **launch-baked into the Zellij KDL artifacts** —
-   changing profile means regenerating them.
-2. `card::render_card` returning four lines instead of two, with goldens pinning
-   both profiles cell for cell.
-3. Rewriting `triple-preview.rs` to render through `render_rows`, the way
-   `double-preview.rs` does, so the illustration can no longer drift.
-4. Fixing the worktree glyph on the shipped double-height card too (§4.2) — it
-   renders off-centre there today, independent of this lock.
+1. **`RowHeight::Card`** — `lines_per_row() == 4`, `target_cols` of 48 / 16,
+   launch-baked into the KDL as predicted. It grew a fifth caller nobody
+   planned: `RowHeight::animates()`, because §4.4's seconds are only honest
+   where something repaints them, and the two legacy geometries arm no timer.
+2. **`card::render_card` returning four lines**, goldens pinning both profiles.
+   The goldens caught less than expected — `clip_to_cells` guarantees the width,
+   so a mis-sized cell is invisible unless the fixture OVERFLOWS. Two rounds of
+   surviving mutants were the same lesson twice (FOOTGUNS).
+3. **`triple-preview.rs` renders through `render_rows`**, so it can no longer
+   drift.
+4. **The double-height worktree glyph** — fixed.
 
-Three cells have **no data behind them yet** and must render blank until their
-source is wired:
+The three cells, and what wiring each one taught:
 
-| Cell     | Needs                                                                |
+| Cell     | Wired from                                                           |
 | -------- | -------------------------------------------------------------------- |
-| turn     | the turn-start timestamp in the store; the bar subtracts (§4.4)      |
-| subs     | the subagent boolean, from `pendingBackgroundAgentCount` in the transcript |
-| `wants`  | tier 1 is free — stop discarding the permission tool name in `hook.rs`. Tier 2 is the scribe. |
+| clock    | **no new field.** `last_interacted` already was the turn start, because `UserPromptSubmit` both moves it and is the only event that sets `Working`. The store timestamp §4.4 asked for was never needed. |
+| subs     | `pendingBackgroundAgentCount`, from the turn's own closing record. A closing record that names NO count is a zero, not a silence — held the mark lit forever until fixed. And it must read the raw tail, not the statusLine-suppressed one: the meter has no subagent reading to yield to, and gated on it the mark never lands in a released install. |
+| `wants`  | tier 1 — the permission tool name `hook.rs` was discarding. Tier 2, the scribe, is still deferred. |
 
-Blank is the meaning, so each can land independently and the card is correct at
-every stage.
+Blank stayed the meaning throughout, so each landed independently and the card
+was correct at every stage — which is the one prediction in this section that
+held exactly.

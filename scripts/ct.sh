@@ -170,6 +170,24 @@ if [[ "${1:-}" == "--hook" ]]; then
   # about which root a drive is writing.
   hook_state="$("$CLAVE_BIN" dev instance --field state)"
   hook_data="$("$CLAVE_BIN" dev instance --field data)"
+  # EMPTY IS NOT UNSET HERE, and that asymmetry is the hazard: `env.rs`'s
+  # `dir_from` treats an empty value as absent and falls back to the
+  # maintainer's REAL store and data dir. So an empty answer above would not
+  # fail — it would silently aim a sandbox drive at his live fleet's store,
+  # which is the one outcome this whole wrapper exists to make unexpressible.
+  # Same discipline as the `-z` check on SESSION: refuse rather than guess.
+  if [[ -z "$hook_state" || -z "$hook_data" ]]; then
+    cat >&2 <<EOF
+REFUSING: this checkout's sandbox roots came back empty.
+  state='${hook_state}'
+  data='${hook_data}'
+
+An empty CLAVE_STATE_DIR is not "no override" — it reads as UNSET, and the
+hook would then write the maintainer's real store. There is deliberately no
+fallback.
+EOF
+    exit 1
+  fi
   exec env CLAVE_SESSION="$SESSION" \
     CLAVE_STATE_DIR="$hook_state" \
     CLAVE_DATA_DIR="$hook_data" \

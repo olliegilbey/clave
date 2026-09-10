@@ -630,7 +630,7 @@ pub(crate) fn render_card(
     }
     l2.push_str(&seg(theme.default_ink, " "));
 
-    // ── line 3: subs │ tokens elapsed wants … turn ──
+    // ── line 3: subs │ tokens  clock  wants ──
     let mut l3 = String::new();
     // The third structural mark, stacked under status and provenance. A
     // BOOLEAN, not a count: "this row has fanned out" is the whole signal, and
