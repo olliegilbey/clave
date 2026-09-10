@@ -326,6 +326,28 @@ pub fn subagents_from_tail(tail: &str) -> Option<bool> {
     })
 }
 
+/// Write, hold or clear `rec.subagents` against the event that just arrived.
+///
+/// The twin of [`take_wants`], and it exists for the same reason: a reading
+/// that HOLDS needs something that can end it. `None` is "this tail said
+/// nothing about subagents" and must hold — an older Claude Code never wrote
+/// the field, and blanking a real mark on silence would be a lie. But a
+/// `SessionEnd` is not silence. The session is over, so nothing can still be
+/// pending under it, and a held mark would sit on a dormant row claiming depth
+/// it no longer has — a row the user cannot go and look at, wearing the glyph
+/// that says go and look.
+///
+/// Returns whether the value moved, so a push happens only when a pixel would.
+pub fn take_subagents(rec: &mut AgentRecord, event: &str, reading: Option<bool>) -> bool {
+    let next = match event {
+        "SessionEnd" => false,
+        _ => reading.unwrap_or(rec.subagents),
+    };
+    let moved = rec.subagents != next;
+    rec.subagents = next;
+    moved
+}
+
 /// The anchor a permission notification's tool name follows. Claude Code's
 /// wording, matched as a substring for the same reason `status_for_event`
 /// matches its notifications that way: the CLI owns the sentence and has
@@ -343,7 +365,11 @@ const PERMISSION_ANCHOR: &str = "permission to use ";
 /// notification hands over for free. `None` for every other message, including
 /// the idle nag: the card's word for "nothing measured" is blank.
 pub fn wants_from_message(message: &str) -> Option<String> {
-    let rest = message.split(PERMISSION_ANCHOR).nth(1)?.trim();
+    // `split_once`, not `split(..).nth(1)`: the two differ the moment the
+    // anchor appears twice, where `nth(1)` hands back the MIDDLE segment and
+    // silently drops everything past the second occurrence. What the cell
+    // wants is the whole tail after the first anchor.
+    let rest = message.split_once(PERMISSION_ANCHOR)?.1.trim();
     (!rest.is_empty()).then(|| clamp_field(rest, WANTS_MAX_CHARS))
 }
 
@@ -722,6 +748,7 @@ fn refresh_row_fields(
 /// The lifetime bound a status-push child carries (#233). The hook process
 /// exits right after spawning, so the bound must live INSIDE the spawned
 /// process tree — nothing outside it survives long enough to reap.
+#[derive(Debug)]
 enum PipeBound {
     /// `timeout`/`gtimeout` found: `<path> <secs> zellij pipe …`.
     Coreutils(std::path::PathBuf),
@@ -761,12 +788,37 @@ fn discover_pipe_bound() -> PipeBound {
 /// Pure builder for the push child (#233): wraps the `zellij pipe`
 /// invocation in the discovered process-level bound. The payload and pipe
 /// name pass through untouched; only the outer wrapper varies by rung.
-fn bounded_pipe_command(zellij: &Path, payload: &str, bound: &PipeBound, secs: u32) -> Command {
-    let pipe_args = ["pipe", "--name", "clave-status", "--", payload];
+///
+/// `session` NAMES THE TARGET, and it is not belt-and-braces (2026-09-10).
+/// With no `--session`, zellij's `ActiveSession::One` arm serves the ONLY
+/// live session whatever `ZELLIJ_SESSION_NAME` says — the same resolution
+/// hole `scripts/ct.sh` exists to close for `zellij action`. This push
+/// inherits the pane's env and so had looked safe; it is not, and the drive
+/// caught it: a three-row sandbox snapshot fired at the maintainer's live
+/// twenty-row fleet, stopped only by `apply_snapshot`'s seq discard, which is
+/// an accident of which store had counted higher. Two rounds went chasing the
+/// sandbox bar's stale render before the aim was the suspect.
+///
+/// `None` keeps today's shape exactly — a hook fired outside zellij has no
+/// session to name, and there is nothing to guess.
+fn bounded_pipe_command(
+    zellij: &Path,
+    payload: &str,
+    bound: &PipeBound,
+    secs: u32,
+    session: Option<&str>,
+) -> Command {
+    // BEFORE the subcommand: `--session` is a flag on the `zellij` binary
+    // itself, not on `pipe` (zellij-utils-0.44.3 src/cli.rs:52-54).
+    let mut zellij_args: Vec<&str> = Vec::new();
+    if let Some(name) = session {
+        zellij_args.extend(["--session", name]);
+    }
+    zellij_args.extend(["pipe", "--name", "clave-status", "--", payload]);
     match bound {
         PipeBound::Coreutils(wrapper) => {
             let mut cmd = Command::new(wrapper);
-            cmd.arg(secs.to_string()).arg(zellij).args(pipe_args);
+            cmd.arg(secs.to_string()).arg(zellij).args(zellij_args);
             cmd
         }
         PipeBound::PerlAlarm(perl) => {
@@ -777,15 +829,36 @@ fn bounded_pipe_command(zellij: &Path, payload: &str, bound: &PipeBound, secs: u
             ])
             .arg(secs.to_string())
             .arg(zellij)
-            .args(pipe_args);
+            .args(zellij_args);
             cmd
         }
         PipeBound::Unbounded => {
             let mut cmd = Command::new(zellij);
-            cmd.args(pipe_args);
+            cmd.args(zellij_args);
             cmd
         }
     }
+}
+
+/// The rule for reading a session name out of an env value, split from the
+/// read itself so it can be tested (the read cannot be — see `.cargo/
+/// mutants.toml`, and `smart_zone`'s note on why env-mutating tests are
+/// forbidden here).
+///
+/// EMPTY IS NOT UNSET, and the asymmetry is the whole content of the
+/// function. An exported-but-empty `ZELLIJ_SESSION_NAME` is not a session
+/// name; passed to `--session` it would turn a push that today lands
+/// correctly into one that dies at argument validation on every event. The
+/// same trap `ct.sh` guards on the sandbox roots, from the other direction.
+fn session_from_env(raw: Option<String>) -> Option<String> {
+    raw.filter(|s| !s.is_empty())
+}
+
+/// The session this hook is running inside, as its own pane's env reports it.
+/// IO shell over [`session_from_env`]; the discipline is `discover_pipe_bound`
+/// over `pipe_bound_ladder`, one function up.
+fn own_session() -> Option<String> {
+    session_from_env(std::env::var("ZELLIJ_SESSION_NAME").ok())
 }
 
 /// Seconds a push child may live (#233). A healthy pipe completes in
@@ -795,8 +868,9 @@ const PUSH_BOUND_SECS: u32 = 15;
 
 /// Fire-and-forget snapshot push (§5). Spawn WITHOUT waiting: `zellij pipe`
 /// can dawdle (S1) and a global hook must never block Claude on it. The
-/// child inherits ZELLIJ env vars from the pane, targeting the right session;
-/// stdio is nulled so nothing leaks into the hook protocol on stdout.
+/// child is AIMED at this pane's own session by name rather than left to
+/// zellij's fallback resolution (see `bounded_pipe_command`); stdio is nulled
+/// so nothing leaks into the hook protocol on stdout.
 pub fn push_snapshot(snap: &AgentSnapshot) {
     let Ok(payload) = serde_json::to_string(snap) else {
         return;
@@ -806,11 +880,17 @@ pub fn push_snapshot(snap: &AgentSnapshot) {
     // status push a silent no-op. Fire-and-forget stays: failure here must
     // never become a hook failure (§6.5 zero-risk citizen).
     let zellij = crate::discover::tool_path(crate::discover::ToolId::Zellij);
-    let _ = bounded_pipe_command(&zellij, &payload, &discover_pipe_bound(), PUSH_BOUND_SECS)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+    let _ = bounded_pipe_command(
+        &zellij,
+        &payload,
+        &discover_pipe_bound(),
+        PUSH_BOUND_SECS,
+        own_session().as_deref(),
+    )
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .spawn();
 }
 
 /// Remember which conversation this row is actually living in (#99). The
@@ -984,10 +1064,7 @@ pub fn apply_hook_event(
     // spoken seconds earlier — and lands one prompt late, which is after the
     // moment it exists for. No drive can see that: the sandbox never wraps the
     // statusLine (`statusline_wrap_allowed`), so the yield is always off there.
-    if let Some(subs) = jsonl_tail.and_then(subagents_from_tail) {
-        changed |= rec.subagents != subs;
-        rec.subagents = subs;
-    }
+    changed |= take_subagents(rec, event, jsonl_tail.and_then(subagents_from_tail));
     let level_moved = restamp_level(rec, smart_zone());
     // BOTH fields gate the push, not just the level. The glyph only moves once
     // per tenth of the zone, but #105 renders the raw count as text — gating on
@@ -1445,6 +1522,7 @@ mod tests {
             "p",
             &PipeBound::PerlAlarm(PathBuf::from("/usr/bin/perl")),
             15,
+            None,
         );
         assert_eq!(cmd.get_program(), "/usr/bin/perl");
         assert_eq!(
@@ -1483,7 +1561,7 @@ mod tests {
             "dev/CI machines must discover a rung (perl at minimum)"
         );
 
-        let mut child = bounded_pipe_command(&fake, "p", &bound, 1)
+        let mut child = bounded_pipe_command(&fake, "p", &bound, 1, None)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1528,11 +1606,92 @@ mod tests {
         ));
     }
 
+    /// **The push must AIM.** Without `--session`, zellij's one-live-session
+    /// arm serves whichever session exists, ignoring `ZELLIJ_SESSION_NAME`
+    /// entirely — so a hook carefully pointed at a sandbox store still fired
+    /// its snapshot at the maintainer's live fleet. It happened on the
+    /// four-line card's drive, and only `apply_snapshot`'s seq discard stopped
+    /// a three-row snapshot landing on a twenty-row session.
+    ///
+    /// Asserted at every rung, because the flag sits on the `zellij` binary
+    /// rather than on `pipe` and the two wrapper rungs each build that argv
+    /// separately — a fix applied to one of three is the same bug with better
+    /// odds.
+    #[test]
+    fn every_rung_aims_the_push_at_the_session_it_names() {
+        let rungs = [
+            PipeBound::Unbounded,
+            PipeBound::Coreutils(PathBuf::from("/usr/bin/timeout")),
+            PipeBound::PerlAlarm(PathBuf::from("/usr/bin/perl")),
+        ];
+        for bound in &rungs {
+            let cmd = bounded_pipe_command(
+                Path::new("/opt/zellij"),
+                "p",
+                bound,
+                15,
+                Some("clave-test-triple-card"),
+            );
+            let args = args_of(&cmd);
+            let at = args
+                .iter()
+                .position(|a| a == "--session")
+                .unwrap_or_else(|| panic!("{bound:?} sent an unaimed push: {args:?}"));
+            assert_eq!(args[at + 1], "clave-test-triple-card");
+            // BEFORE the subcommand. `zellij pipe --session x` is not the same
+            // command — `pipe` has no such flag, and the push would die at
+            // argument parsing on every event.
+            let pipe = args
+                .iter()
+                .position(|a| a == "pipe")
+                .expect("the pipe verb");
+            assert!(
+                at + 1 < pipe,
+                "{bound:?} put --session after the subcommand: {args:?}"
+            );
+        }
+    }
+
+    /// Empty is not unset. An exported-but-empty `ZELLIJ_SESSION_NAME` names
+    /// nothing, and handing it to `--session` would trade a push that lands
+    /// for one that dies at argument validation on every hook event — a
+    /// working feature turned off by a variable someone cleared.
+    #[test]
+    fn an_empty_session_variable_names_no_session() {
+        assert_eq!(session_from_env(None), None);
+        assert_eq!(session_from_env(Some(String::new())), None);
+        assert_eq!(
+            session_from_env(Some("clave-test".into())).as_deref(),
+            Some("clave-test")
+        );
+    }
+
+    /// `None` leaves the argv exactly as it was. A hook fired outside zellij
+    /// has no session to name, and inventing one would turn a push that today
+    /// does nothing into a push that errors — worse, and for no gain.
+    #[test]
+    fn a_hook_outside_zellij_sends_the_same_unaimed_push_it_always_did() {
+        let cmd = bounded_pipe_command(
+            Path::new("/opt/zellij"),
+            "p",
+            &PipeBound::Unbounded,
+            15,
+            None,
+        );
+        assert_eq!(args_of(&cmd), ["pipe", "--name", "clave-status", "--", "p"]);
+    }
+
     /// A machine with no wrapper at all keeps TODAY's behavior — a status
     /// push is never sacrificed to the bound (#233 story 5).
     #[test]
     fn no_rung_degrades_to_the_bare_unbounded_pipe() {
-        let cmd = bounded_pipe_command(Path::new("/opt/zellij"), "p", &PipeBound::Unbounded, 15);
+        let cmd = bounded_pipe_command(
+            Path::new("/opt/zellij"),
+            "p",
+            &PipeBound::Unbounded,
+            15,
+            None,
+        );
         assert_eq!(cmd.get_program(), "/opt/zellij");
         assert_eq!(args_of(&cmd), ["pipe", "--name", "clave-status", "--", "p"]);
     }
@@ -1547,6 +1706,7 @@ mod tests {
             r#"{"agents":[]}"#,
             &PipeBound::Coreutils(PathBuf::from("/usr/bin/timeout")),
             15,
+            None,
         );
         assert_eq!(cmd.get_program(), "/usr/bin/timeout");
         assert_eq!(
@@ -2271,6 +2431,65 @@ mod tests {
         assert!(
             apply_hook_event(&mut s, "u1", "Stop", &p, Some(&turn(0)), 1004, true),
             "going out is a change too"
+        );
+    }
+
+    /// A held reading needs something that can END it. `subagents` holds on a
+    /// silent tail — correctly; an older Claude Code never wrote the field and
+    /// blanking a real mark on silence would be a lie — but `SessionEnd` is
+    /// not silence. Nothing can still be pending under a session that is over,
+    /// so a held mark would sit on a dormant row claiming depth the user
+    /// cannot go and look at, wearing the glyph that says go and look.
+    ///
+    /// `wants` already had this rule (`take_wants` clears on any status that
+    /// is not `NeedsYou`); the mark stacked directly under it did not.
+    #[test]
+    fn a_session_that_ended_carries_no_subagents_however_the_tail_reads() {
+        let mut r = rec("u1");
+        r.subagents = true;
+        // A silent tail on an ordinary event holds the mark — the whole reason
+        // the clear has to be explicit.
+        assert!(!take_subagents(&mut r, "Stop", None));
+        assert!(r.subagents, "silence must not blank a real reading");
+        // The same silence at SessionEnd clears it, and reports the move so
+        // the snapshot goes out.
+        assert!(take_subagents(&mut r, "SessionEnd", None));
+        assert!(!r.subagents);
+        // Even a tail still CLAIMING pending agents cannot resurrect it: the
+        // reading is a turn behind by construction, and the turn it describes
+        // belongs to a session that has since exited.
+        assert!(!take_subagents(&mut r, "SessionEnd", Some(true)));
+        assert!(!r.subagents, "a dead session cannot have live subagents");
+        // And a clear that changes nothing is not a push.
+        assert!(!take_subagents(&mut r, "SessionEnd", None));
+    }
+
+    /// The ordinary path, unchanged: a reading wins over what was there, in
+    /// both directions, and only a real move is reported.
+    #[test]
+    fn a_subagent_reading_wins_over_the_held_one_in_both_directions() {
+        let mut r = rec("u1");
+        assert!(take_subagents(&mut r, "Stop", Some(true)));
+        assert!(r.subagents);
+        assert!(!take_subagents(&mut r, "Stop", Some(true)), "no move");
+        assert!(take_subagents(&mut r, "Stop", Some(false)));
+        assert!(!r.subagents);
+    }
+
+    /// `split_once`, not `split(anchor).nth(1)`. The two agree until the
+    /// anchor appears twice, where `nth(1)` returns the MIDDLE segment and
+    /// drops everything past the second occurrence — so a tool invocation that
+    /// happens to quote the CLI's own sentence loses its tail. Agent-adjacent
+    /// text reaches this function; it should not be able to choose which half
+    /// of itself the card shows.
+    #[test]
+    fn a_repeated_anchor_yields_everything_after_the_first_one() {
+        assert_eq!(
+            wants_from_message(
+                "Claude needs your permission to use Bash (grep 'permission to use ' log)"
+            )
+            .as_deref(),
+            Some("Bash (grep 'permission to use ' log)")
         );
     }
 

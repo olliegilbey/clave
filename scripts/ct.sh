@@ -144,12 +144,12 @@ unset ZELLIJ ZELLIJ_PANE_ID
 export ZELLIJ_SESSION_NAME="$SESSION"
 
 # 3b. THE SECOND DOOR (2026-09-10). Everything above guards `zellij action`.
-#     `clave hook` needs the identical guard for a reason that is invisible
-#     until it bites: the hook writes the store (safe — CLAVE_STATE_DIR selects
+#     `clave hook` needs the identical guard for a reason that was invisible
+#     until it bit: the hook writes the store (safe — CLAVE_STATE_DIR selects
 #     it) and then PUSHES the resulting snapshot with `zellij pipe`, and that
-#     push carries no `--session` either (`bounded_pipe_command`, hook.rs). So a
-#     drive that carefully sets CLAVE_STATE_DIR and nothing else writes the
-#     right store and fires the notification at the MAINTAINER'S FLEET.
+#     push carried no `--session`. So a drive that carefully set
+#     CLAVE_STATE_DIR and nothing else wrote the right store and fired the
+#     notification at the MAINTAINER'S FLEET.
 #
 #     That happened while driving the four-line card: a 3-row sandbox snapshot
 #     was aimed at a live 20-row session, and only `apply_snapshot`'s
@@ -159,6 +159,15 @@ export ZELLIJ_SESSION_NAME="$SESSION"
 #     The failure is SILENT in the direction that matters — the sandbox bar
 #     keeps rendering its stale snapshot, so the feature under test looks
 #     broken and the drive chases the wrong bug. Two rounds went that way.
+#
+#     THE PUSH ITSELF IS FIXED: `bounded_pipe_command` now passes
+#     `--session "$ZELLIJ_SESSION_NAME"` when the hook's env names one
+#     (hook.rs, `own_session`). This block stays, and not merely as belt to
+#     that brace — it is what SETS `CLAVE_SESSION` and the two sandbox roots,
+#     and an agent shell inherits the maintainer's `ZELLIJ_SESSION_NAME`, so
+#     the export at step 3 above is what the fixed push then reads. Invoking
+#     `clave hook` outside this wrapper still aims at his fleet, correctly and
+#     precisely.
 #
 #     Usage:  scripts/ct.sh --hook UserPromptSubmit '{"session_id":"…"}'
 if [[ "${1:-}" == "--hook" ]]; then
