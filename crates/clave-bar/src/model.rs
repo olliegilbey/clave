@@ -2255,9 +2255,11 @@ impl BarModel {
             // beside a glyph that says otherwise — the card contradicting
             // itself in the one cell whose whole job is to say what to do
             // next.
-            wants: (status == RowStatus::NeedsYou)
-                .then(|| a.wants.clone())
-                .flatten(),
+            wants: if status == RowStatus::NeedsYou {
+                a.wants.clone()
+            } else {
+                None
+            },
             subagents: a.subagents,
         }
     }
