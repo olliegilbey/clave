@@ -92,9 +92,18 @@ Clean over everything this round touched:
 | `agent_content` | 5 caught, 1 unviable |
 | `think_frame`, `render_card` | 54 caught, 3 unviable |
 
-`own_session` joined `.cargo/mutants.toml`'s exclusions with its reasoning — it
-reads process env, which the config already forbids testing against. The rule it
-applies is split into `session_from_env` and mutated there.
+And over the whole branch diff: **150 mutants, 135 caught, 13 unviable, 2
+missed.** Both misses are seams, not gaps. `clave/src/main.rs`'s `fn main`
+predates this branch and was already recorded as a non-seam at the last
+handoff. `push_snapshot` is fire-and-forget by contract — it spawns a child with
+every stream nulled and drops it, so replacing the body with `()` is
+indistinguishable from success to any host test; it joins `.cargo/mutants.toml`
+with the same reasoning `spawn_pr_sync` carries, and every decision it makes is
+mutated one layer down.
+
+`own_session` joined the exclusions too — it reads process env, which the config
+already forbids testing against. The rule it applies is split into
+`session_from_env` and mutated there.
 
 ## Not reachable by a test, deliberately
 
