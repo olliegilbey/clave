@@ -1411,6 +1411,48 @@ mod tests {
     /// the elapsed clock is flush to the right margin in both profiles, so
     /// whichever clock is rightmost sits in the same column and the eye finds
     /// a duration in one place.
+    /// Sixteen columns is a tight budget, so pin what actually competes for it
+    /// at the widest each cell can be. The maintainer's worry was a collapsed
+    /// line reading `123k #1234 30m` — three cells where there is room for two.
+    /// It cannot happen: the PR lives on line 2 and the crop drops it there,
+    /// so line 3 collapsed is the token count and the clock and nothing else.
+    #[test]
+    fn the_collapsed_card_fits_its_widest_cells() {
+        let row = A {
+            // 9.9m is the widest the token formatter can produce below the
+            // point it drops the tenth (`render::token_text`), so this is the
+            // worst case for that cell, not a big-looking number.
+            tokens: Some(9_949_999),
+            pr: Some(1234),
+            branch: "feat/some-long-branch-name",
+            repo: "a-long-repository-name",
+            elapsed: "59s",
+            ..A::default()
+        }
+        .row();
+        let narrow = render_card(&row, CARD_COLLAPSED_COLS, false, 0, &Theme::default());
+        let l2 = strip_sgr(&narrow[1]);
+        let l3 = strip_sgr(&narrow[2]);
+        assert!(
+            !l2.contains("1234") && !l3.contains("1234"),
+            "the PR must not survive the crop: {l2:?} / {l3:?}"
+        );
+        assert!(
+            l3.contains("9.9m") && l3.contains("59s"),
+            "both of line 3's cells must survive at their widest: {l3:?}"
+        );
+        // And the row still holds its width — the guarantee that makes the
+        // above a statement about CONTENT rather than about overflow.
+        for (i, line) in narrow.iter().enumerate() {
+            assert_eq!(
+                display_cells(&strip_sgr(line)),
+                CARD_COLLAPSED_COLS,
+                "line {} left the collapsed width",
+                i + 1
+            );
+        }
+    }
+
     #[test]
     fn the_collapsed_card_crops_cells_without_moving_them() {
         let f = fleet();
