@@ -6511,6 +6511,41 @@ mod tests {
         assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
     }
 
+    /// The walk budget is per INTENT, and the intent guard is the only thing
+    /// that re-arms it — nothing else writes `walk_spent`. The companion test
+    /// above flips the mode onto a width that is ALREADY the new target, so
+    /// the landing clears the budget and the guard never has to: a mutant that
+    /// ignored the recorded intent entirely survived the whole suite.
+    ///
+    /// What it survived is a bar that cannot be un-stuck. Exhaust three asks
+    /// on an intent zellij will not serve, change your mind, and the new
+    /// intent inherits the old one's spent budget — so the toggle emits
+    /// nothing and the width stays where the failed walk left it, through
+    /// every further press.
+    #[test]
+    fn a_walk_that_never_landed_still_hands_the_next_intent_a_full_budget() {
+        // Neither target, so no paint below can end an episode by landing —
+        // the budget can only be re-armed by the intent changing.
+        const NEITHER: usize = EXP_W - 1;
+        let mut m = focused_bar();
+        m.toggle(); // wants collapsed
+        assert_eq!(m.width_effects(Some(NEITHER)), vec![Effect::SwapWidth]);
+        for _ in 1..WALK_ASK_CAP {
+            assert_eq!(m.width_cooldown_elapsed(), vec![Effect::SwapWidth]);
+        }
+        assert_eq!(
+            m.width_cooldown_elapsed(),
+            Vec::<Effect>::new(),
+            "the budget should be spent"
+        );
+        m.toggle(); // wants expanded — a new intent, from the same width
+        assert_eq!(
+            m.width_effects(Some(NEITHER)),
+            vec![Effect::SwapWidth],
+            "the new intent inherited the failed walk's budget and cannot ask"
+        );
+    }
+
     /// A toggle pressed while an ask is in flight is not lost and not
     /// double-served: the paint stays unjudged until the expiry, which
     /// serves the NEW intent.
