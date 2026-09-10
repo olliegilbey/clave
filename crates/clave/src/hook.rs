@@ -973,10 +973,18 @@ pub fn apply_hook_event(
     if let Some(raw) = tail.and_then(effort_from_tail) {
         changed |= take_effort(rec, &raw);
     }
-    // The card's subagent mark. Same tail, same fail-closed rule: `None` is
-    // "no reading" and HOLDS. A closing record clears it — including one that
-    // names no count, which is the shape the drive actually saw.
-    if let Some(subs) = tail.and_then(subagents_from_tail) {
+    // The card's subagent mark. Same fail-closed rule: `None` is "no reading"
+    // and HOLDS. A closing record clears it — including one that names no
+    // count, which is the shape the drive actually saw.
+    //
+    // `jsonl_tail`, NOT the metered `tail` above. The yield exists because the
+    // statusLine has a FRESHER source for those three cells; it carries no
+    // subagent reading, so there is nothing here to yield to. Gated on it, this
+    // mark reads nothing on any Stop in a released install — the meter has
+    // spoken seconds earlier — and lands one prompt late, which is after the
+    // moment it exists for. No drive can see that: the sandbox never wraps the
+    // statusLine (`statusline_wrap_allowed`), so the yield is always off there.
+    if let Some(subs) = jsonl_tail.and_then(subagents_from_tail) {
         changed |= rec.subagents != subs;
         rec.subagents = subs;
     }
@@ -2263,6 +2271,102 @@ mod tests {
         assert!(
             apply_hook_event(&mut s, "u1", "Stop", &p, Some(&turn(0)), 1004, true),
             "going out is a change too"
+        );
+    }
+
+    /// A tail carrying all four readings a Stop can take: the token usage, the
+    /// model, the effort, and the turn's closing subagent count.
+    fn four_signal_tail() -> String {
+        [
+            r#"{"type":"assistant","effort":"high","message":{"model":"claude-opus-5","usage":{"input_tokens":1200,"cache_read_input_tokens":800}}}"#,
+            r#"{"type":"system","subtype":"turn_duration","pendingBackgroundAgentCount":2}"#,
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn the_subagent_mark_is_read_even_while_the_meter_is_speaking() {
+        // #245's yield exists because the statusLine meter reads the API
+        // response before the transcript has it — so while the meter speaks,
+        // the hook's tail readers keep quiet. Its scope is stated in
+        // `statusline::hook_yields`: tokens, model and effort. The meter takes
+        // NO subagent reading, so there is nothing here to yield to, and a mark
+        // gated on that yield is a mark that never lands in the field.
+        //
+        // Why no sandbox drive can catch this: `statusline_wrap_allowed`
+        // (setup.rs) requires an absolute binary path, so only a release cut
+        // wraps the slot. The sandbox shares the real ~/.claude by ruling
+        // (dev.rs, 2026-07-18 — isolating it dragged claude's auth along), so a
+        // dev setup must leave that file alone. Every drive therefore runs with
+        // the meter silent, `hook_yields` false, and this bug invisible.
+        let mut s = Store::default();
+        let mut r = rec("u1");
+        r.metered_at = 900;
+        s.agents.insert("u1".into(), r);
+        let p = HookPayload {
+            session_id: Some("u1".into()),
+            ..HookPayload::default()
+        };
+
+        assert!(
+            crate::statusline::hook_yields(&s.agents["u1"], 1000),
+            "the fixture must have the meter actually speaking, or this proves nothing"
+        );
+        apply_hook_event(
+            &mut s,
+            "u1",
+            "Stop",
+            &p,
+            Some(&four_signal_tail()),
+            1000,
+            true,
+        );
+        assert!(
+            s.agents["u1"].subagents,
+            "the turn's own closing record is the only source for this cell — a \
+             metered row must still read it"
+        );
+    }
+
+    #[test]
+    fn the_meters_yield_covers_three_cells_and_no_others() {
+        // The class guard, not the instance. The bug above was one new tail
+        // reader picking up the suppressed local instead of the raw one, and
+        // nothing about that call site looks wrong. This runs the SAME event
+        // against a metered row and a quiet one and demands the two records come
+        // out identical once the three documented cells are set aside — so a
+        // fourth cell added under the wrong local fails here, whatever it is.
+        let p = HookPayload {
+            session_id: Some("u1".into()),
+            ..HookPayload::default()
+        };
+        let tail = four_signal_tail();
+        let run = |metered_at: u64| {
+            let mut s = Store::default();
+            let mut r = rec("u1");
+            r.metered_at = metered_at;
+            s.agents.insert("u1".into(), r);
+            apply_hook_event(&mut s, "u1", "Stop", &p, Some(&tail), 1000, true);
+            s.agents["u1"].clone()
+        };
+
+        let mut quiet = run(0);
+        let mut metered = run(900);
+        for r in [&mut quiet, &mut metered] {
+            // The yield's whole scope. Three CELLS, five fields: the level is
+            // derived from the count and the provider is set alongside the
+            // model, and the meter writes both of those too — so they ride with
+            // their cell rather than being a fourth thing the yield covers.
+            r.context_tokens = None;
+            r.context_level = None;
+            r.model = None;
+            r.provider = None;
+            r.effort = None;
+        }
+        assert_eq!(
+            quiet, metered,
+            "the meter may only silence tokens, model and effort — every other \
+             cell has no fresher source to yield to"
         );
     }
 

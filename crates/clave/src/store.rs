@@ -985,6 +985,82 @@ mod tests {
         }
     }
 
+    #[test]
+    fn every_field_the_wire_shares_with_the_record_is_carried_verbatim() {
+        // The class guard for the projection. `snapshot_from` is a long
+        // hand-written field list, and the failure mode when a line is missing
+        // is the worst kind: the host computes the value, the store holds it,
+        // the bar's own tests prove it renders — and the cell is blank in
+        // production because nothing joins the two. It cost the `wants` and
+        // `subagents` cells exactly that, and neither `cargo test` nor `cargo
+        // mutants` could see it (mutants does not generate struct-literal field
+        // mutations).
+        //
+        // So this asserts the rule instead of the fields: every key the wire
+        // `Agent` shares a NAME with the record must hold the record's value,
+        // verbatim. A new cell added to both types and forgotten in the middle
+        // fails here without anyone remembering to extend a list. Store-only
+        // fields (`pr_checked`, `pr_branch`, `label_source`) are absent from
+        // the wire and simply do not match a key, so they cost nothing.
+        //
+        // Every value below is deliberately NON-default: a field copied as
+        // `Default::default()` is only distinguishable from a real copy if the
+        // source differs from the default.
+        let mut r = rec("u-wire");
+        r.cwd = "/repo/wt".into();
+        r.repo_root = "/repo".into();
+        r.branch = "feature/x".into();
+        r.label = "wt · feature/x".into();
+        r.status = Status::NeedsYou;
+        r.last_interacted = 1_700_000_000;
+        r.commit_ord = 7;
+        r.last_visited = 1_699_999_000;
+        r.worktree = Some("wt".into());
+        r.tab_id = Some(3);
+        r.pane_id = Some(9);
+        r.stale = true;
+        r.title = Some("a title".into());
+        r.summary = "a summary".into();
+        r.default_branch = Some("main".into());
+        r.context_tokens = Some(105_000);
+        r.context_level = Some(4);
+        r.buckets = BTreeMap::from([(1_u32, 2_u32)]);
+        r.model = Some("opus".into());
+        r.provider = Some("claude".into());
+        r.effort = Some("xh".into());
+        r.pr_number = Some(1234);
+        r.wants = Some("Bash (git push --force)".into());
+        r.subagents = true;
+
+        let mut s = Store::default();
+        s.agents.insert(r.uuid.clone(), r.clone());
+        let snap = snapshot_from(&s);
+        let wire = serde_json::to_value(&snap.agents[0]).expect("the wire agent serializes");
+        let record = serde_json::to_value(&r).expect("the record serializes");
+
+        let wire = wire.as_object().expect("an object");
+        let record = record.as_object().expect("an object");
+        let mut shared = 0;
+        for (key, on_the_wire) in wire {
+            let Some(in_the_record) = record.get(key) else {
+                continue; // wire-only, if there ever is one
+            };
+            shared += 1;
+            assert_eq!(
+                in_the_record, on_the_wire,
+                "`{key}` did not survive `snapshot_from` — the host computed it \
+                 and the bar will render it blank"
+            );
+        }
+        // Guards the guard: if the two types ever stop sharing names the loop
+        // above would pass by matching nothing at all.
+        assert!(
+            shared >= 24,
+            "only {shared} shared fields found — the projection guard is not \
+             looking at the record it thinks it is"
+        );
+    }
+
     /// #149: only unprotected rows past the cutoff go; a protected row NEVER
     /// prunes however old; a DEAD session's bind protects nothing (#150
     /// review: binds outlive their session until the next launch clears
