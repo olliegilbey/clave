@@ -40,13 +40,15 @@ const TERM_POLL_SECS: f64 = 3.0;
 /// breathes.
 ///
 /// It shares the FAST band with the width cooldown rather than getting a band
-/// of its own, and that is deliberate: the classifier has three bands and no
-/// room for a fourth below 0.15s. The two cross-classify harmlessly in both
-/// directions — the width leg is inert unless an ask is in flight, and an
-/// animation tick arriving on a width expiry advances the spinner one frame
-/// early, which is a frame. Anything FASTER than this would need the
-/// classifier replaced with properly tagged timers first; do not simply lower
-/// the number.
+/// of its own: the classifier has three bands and no room for a fourth below
+/// 0.15s. The two cross-classify, and NOT harmlessly in both directions —
+/// a width expiry read as a frame costs one spare repaint, but a FRAME read as
+/// a width expiry ended the switch deafness early and spent a walk ask on a
+/// pre-swap echo, which rests the bar at the wrong width (fixed 2026-09-10;
+/// `BarModel::swap_owed` counts expiries instead of trusting one).
+///
+/// Anything FASTER than this would need the classifier replaced with properly
+/// tagged timers first; do not simply lower the number.
 const ANIM_FRAME_SECS: f64 = 0.2;
 
 // The Timer classifier reads elapsed seconds alone, so the durations must hold
@@ -54,6 +56,15 @@ const ANIM_FRAME_SECS: f64 = 0.2;
 // except a live session. Same shape as the collapsed<expanded width guard.
 const _: () = assert!(WIDTH_COOLDOWN_SECS < TIMER_KIND_CUTOFF_SECS);
 const _: () = assert!(ANIM_FRAME_SECS < TIMER_KIND_CUTOFF_SECS);
+// The one ORDERING inside the shared fast band, and `swap_owed`'s two-expiry
+// rule depends on it. An ask armed at t=0 with a frame due at f in (0, FRAME):
+// if f < COOLDOWN the frame is spent first and the cooldown's own expiry at
+// COOLDOWN is the second; if f > COOLDOWN the cooldown is spent first and the
+// frame at f > COOLDOWN is the second. Either way the deafness covers a full
+// COOLDOWN — but only while a frame cannot be SHORTER than one, which is what
+// this asserts. Lower ANIM_FRAME_SECS under WIDTH_COOLDOWN_SECS and two
+// expiries could both land inside 0.15s, restoring the bug the count fixed.
+const _: () = assert!(WIDTH_COOLDOWN_SECS <= ANIM_FRAME_SECS);
 const _: () = assert!(TIMER_KIND_CUTOFF_SECS <= PEEK_SINK_SECS);
 const _: () = assert!(PEEK_SINK_SECS < TERM_POLL_CUTOFF_SECS);
 const _: () = assert!(TERM_POLL_CUTOFF_SECS <= TERM_POLL_SECS);
@@ -207,6 +218,7 @@ impl State {
         });
         if thinking {
             self.anim_armed = true;
+            self.model.set_animating(true);
             set_timeout(ANIM_FRAME_SECS);
         }
     }
@@ -394,6 +406,12 @@ impl State {
                 // paint-speed toggle loop the 2026-08-17 QA drive filmed.
                 Effect::SwapWidth => {
                     next_swap_layout();
+                    set_timeout(WIDTH_COOLDOWN_SECS);
+                }
+                // The same timer WITHOUT the swap: this ask is owed another
+                // expiry because a spinner tick was in flight when it was
+                // made and may have eaten the first one (`swap_owed`).
+                Effect::RearmWidthCooldown => {
                     set_timeout(WIDTH_COOLDOWN_SECS);
                 }
                 // §6.6 C8 dormant nav (ungated — click reaches exactly one
@@ -1006,14 +1024,22 @@ impl ZellijPlugin for State {
             }
             Event::CwdChanged(..) | Event::CommandChanged(..) => false,
             Event::Timer(elapsed) => {
-                // TWO timer kinds share this event again (the dwell era's
+                // FOUR timer kinds share this event (the dwell era's
                 // classify_timer scheme, revived for the width cooldown):
-                // Timer echoes the ELAPSED seconds, and the two durations
-                // sit either side of the cutoff. The width leg runs on
-                // EVERY expiry — `width_cooldown_elapsed` is inert unless
-                // an ask is in flight, so a peek expiry (or a delayed
-                // width timer classified long) ending the deafness a few
-                // ms early is harmless, and no expiry can strand it.
+                // Timer echoes the ELAPSED seconds, and the bands sort them.
+                // The width leg runs on EVERY expiry — `width_cooldown_elapsed`
+                // is inert unless an ask is in flight, so a peek expiry ending
+                // the deafness a few ms early is harmless, and no expiry can
+                // strand it.
+                //
+                // The ANIMATION frame is the one kind that cannot be sorted
+                // out this way: it shares the fast band with the width
+                // cooldown and no elapsed reading separates 0.15 from 0.2 once
+                // the host has rounded them. So the width machine does not try
+                // — it counts expiries instead (`swap_owed`), asking for two
+                // when a spinner was armed at the moment of the ask. Whichever
+                // timer this expiry really was, the second is a full frame
+                // behind it, so the deafness always covers its cooldown.
                 let fx = self.model.width_cooldown_elapsed();
                 let width_moved = !fx.is_empty();
                 self.run_effects(fx);
@@ -1024,6 +1050,7 @@ impl ZellijPlugin for State {
                 // that found a row still working.
                 let anim_moved = if elapsed < TIMER_KIND_CUTOFF_SECS && self.anim_armed {
                     self.anim_armed = false;
+                    self.model.set_animating(false);
                     self.anim_frame = self.anim_frame.wrapping_add(1);
                     true
                 } else {

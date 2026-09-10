@@ -208,8 +208,24 @@ timer fired by elapsed seconds alone, guarded by a compile-time assert chain in
 **Corrected 2026-09-10:** 0.2s does NOT sit in a gap. The classifier has three
 bands and the fastest one already holds the width cooldown at 0.15s, so the
 spinner SHARES that band rather than getting one of its own — the two cannot be
-told apart by elapsed. Anything faster still requires tagged timers first, and
-so, it turns out, does making the sharing correct.
+told apart by elapsed.
+
+**Resolved the same day, without tagged timers.** The sharing is harmless in one
+direction and not the other. A width expiry mistaken for a frame costs a spare
+repaint. A FRAME mistaken for a width expiry ends the switch deafness early —
+its remaining time is uniform in [0, 0.2) against a 0.15s cooldown, so it wins
+most toggles made while a row is mid-turn — and the judgement then lands on a
+pre-swap echo and spends one of the walk's three asks on it. That is a bar
+resting at the wrong width, and it needs no rare timing to happen.
+
+The fix is to stop trusting any single expiry: `swap_owed` is a COUNT, set to
+two when the shell's spinner timer was armed at the instant of the ask and one
+when it was not. Whichever timer the first expiry really belonged to, the second
+is a full frame behind it, so the deafness always covers its cooldown. The model
+asks for that second tick itself (`Effect::RearmWidthCooldown`) rather than
+waiting on a frame — the spinner stops the moment the last turn ends, and an ask
+that outlived it must not strand. Tagged timers remain the prerequisite for
+anything FASTER than 0.15s.
 
 ### 4.6 The subagent mark is a boolean
 
