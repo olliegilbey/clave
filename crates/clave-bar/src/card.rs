@@ -130,15 +130,22 @@ const THINK_FRAMES: [char; 6] = [
     '\u{273d}', // heavy teardrop-spoked asterisk
 ];
 
-/// Ping-pong: the six frames out and the four inner ones back, so the cycle
-/// turns over without a jump.
-pub(crate) const THINK_CYCLE: usize = 10;
+/// Ping-pong: the frames out and the inner ones back, so the cycle turns over
+/// without a jump. DERIVED from the frame list rather than written down — the
+/// two ends are visited once and every inner frame twice — because a cycle
+/// length left behind by an edit to [`THINK_FRAMES`] would silently drop a
+/// glyph off the walk back, or index past the end of it.
+pub(crate) const THINK_CYCLE: usize = 2 * THINK_FRAMES.len() - 2;
 
 /// The spinner's glyph at animation frame `t`. `pub(crate)` so the shell can
 /// decide whether any row is animating without a second copy of the cycle.
 pub(crate) fn think_frame(t: usize) -> char {
     let i = t % THINK_CYCLE;
-    THINK_FRAMES[if i < 6 { i } else { THINK_CYCLE - i }]
+    THINK_FRAMES[if i < THINK_FRAMES.len() {
+        i
+    } else {
+        THINK_CYCLE - i
+    }]
 }
 
 /// The provider's brand cell. An unrecognised provider renders NOTHING — same
