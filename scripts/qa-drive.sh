@@ -380,19 +380,42 @@ printf '[%s %s] NOTE same-HEAD re-runs cannot distinguish a stale load here — 
 # broken": `card` did exactly this, and cost a round diagnosed as an adoption
 # bug when adoption was fine.
 #
+# WHICH `clave`, though. This drive runs in its own terminal and the hook
+# process does not inherit this shell's PATH, so the binary resolved HERE can
+# differ from the one a hook lands on — and vouching for the wrong one is
+# exactly the silent pass this check exists to prevent (#259 review). Claude's
+# environment cannot be read from outside it, so the check does not pretend
+# to: it tests EVERY clave a hook could plausibly land on — this shell's, and
+# a clean login shell's, which is the PATH a process that inherited nothing
+# from here would see. Both must read this sandbox's store. **These are
+# approximations of the hook environment, not the hook environment**; a green
+# here means no candidate is broken, not that the hook's own binary is one of
+# them.
+#
 # `ls` is the cheapest command that reads the store and nothing else. Stderr,
 # not exit code — `clave` reports a store read failure there and still exits 0.
-HOOK_CLAVE="$(command -v clave 2>/dev/null || true)"
-measure "clave a hook would resolve" "${HOOK_CLAVE:-<none on PATH>}"
-if [[ -n "$HOOK_CLAVE" ]]; then
-  measure "its version" "$("$HOOK_CLAVE" --version 2>&1 || true)"
-  STORE_READ="$(CLAVE_STATE_DIR="$STATE_DIR" CLAVE_DATA_DIR="$DATA_DIR" \
-    "$HOOK_CLAVE" ls 2>&1 >/dev/null || true)"
-  check "hook-resolved clave reads this sandbox store" "${STORE_READ:-clean}" "clean"
+DRIVE_CLAVE="$(command -v clave 2>/dev/null || true)"
+LOGIN_CLAVE="$(env -i HOME="$HOME" bash -lc 'command -v clave' 2>/dev/null || true)"
+measure "clave on this drive shell's PATH" "${DRIVE_CLAVE:-<none on PATH>}"
+measure "clave on a clean login PATH" "${LOGIN_CLAVE:-<none on PATH>}"
+HOOK_CLAVES=()
+for CAND in "$DRIVE_CLAVE" "$LOGIN_CLAVE"; do
+  [[ -n "$CAND" ]] || continue
+  # The `+()` guard is what keeps an empty array safe under `set -u`.
+  [[ " ${HOOK_CLAVES[*]+${HOOK_CLAVES[*]}} " == *" $CAND "* ]] && continue
+  HOOK_CLAVES+=("$CAND")
+done
+if [[ ${#HOOK_CLAVES[@]} -eq 0 ]]; then
+  check "clave resolvable on PATH (hooks need it)" "absent" "present"
+else
+  for CAND in "${HOOK_CLAVES[@]}"; do
+    measure "version of $CAND" "$("$CAND" --version 2>&1 || true)"
+    STORE_READ="$(CLAVE_STATE_DIR="$STATE_DIR" CLAVE_DATA_DIR="$DATA_DIR" \
+      "$CAND" ls 2>&1 >/dev/null || true)"
+    check "$CAND reads this sandbox store" "${STORE_READ:-clean}" "clean"
+  done
   printf '[%s %s] NOTE a failure here means EVERY hook in this sandbox no-ops silently — the drive below will read as broken features\n' \
     "$CURRENT_PHASE" "$(ts)"
-else
-  check "clave resolvable on PATH (hooks need it)" "absent" "present"
 fi
 
 # config.kdl <-> layout.kdl identity pair (the #44 self-check `just sandbox`
