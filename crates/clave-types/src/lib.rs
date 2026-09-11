@@ -56,6 +56,64 @@ pub const DEFAULT_SMART_ZONE_TOKENS: u32 = 150_000;
 /// must be exactly this long, and nothing else links the two numbers.
 pub const BATTERY_LEVELS: u8 = 11;
 
+/// A value this binary has no name for is the FUTURE, not corruption — a newer
+/// clave wrote it. Take the field's default and keep reading.
+///
+/// **Why this is not a nicety.** serde fails the WHOLE STRUCT on an unknown
+/// enum variant, so one unfamiliar value costs the entire payload, and both
+/// sides of the wire fail in the worst possible way. On the STORE side (the
+/// `clave` reader) every `clave hook` dies on the read, and the hook exits 0 by
+/// Global Constraint reporting only on stderr — the fleet simply stops updating
+/// with no status, no tokens, no pane binding, no adoption, no error, and
+/// presents as whichever feature is being tested at the time. On the WIRE side
+/// `clave-bar` drops the snapshot it cannot parse and keeps painting the last
+/// one it could, so the bar goes quietly inert against a live fleet.
+///
+/// Measured 2026-09-10: a v0.4.0 hook against a store carrying `row_height:
+/// "card"` printed ``unknown variant `card`, expected `single` or `double` ``
+/// and gave up on every event of the session. One version's skew from another
+/// — a rollback, a partial upgrade, or clave's own stable-vs-worktree split,
+/// which is how it was found.
+///
+/// **The limit, so nobody reads more into this than it does.** This fixes the
+/// READER, and every released reader is frozen. A store or a pipe written by a
+/// newer clave still kills an older one outright. So: adding a variant to a
+/// persisted or piped enum is a BREAKING change unless the leniency shipped a
+/// version first.
+///
+/// **What a wrong guess costs, per field, because that is the only question
+/// that matters here.** `row_height` costs a row geometry until the next launch
+/// (it is re-read at session create). `order` costs a sort until the next push.
+/// `label_source` degrades to `FirstPrompt`, which means "keep scanning" — the
+/// safe direction, since the wrong answer merely re-reads a tail. `status`
+/// degrades to `Idle`, the one state that claims nothing. None of them invents
+/// a fact. **A field where a wrong guess WOULD invent one must fail loudly
+/// instead — do not reach for this without asking that question first.**
+pub fn lenient<'de, D, T>(d: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    // `untagged` buffers the input and tries the arms in order, so an
+    // unfamiliar SHAPE is survived as well as an unfamiliar spelling — a
+    // variant that grows a field one day would otherwise just trade one
+    // strict-parse failure for another. `IgnoredAny` accepts anything, so the
+    // second arm cannot fail. Done with serde's own buffering rather than
+    // `serde_json::Value` deliberately: this crate carries serde and nothing
+    // else at runtime (invariant #9).
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOf<T> {
+        Known(T),
+        Unknown(serde::de::IgnoredAny),
+    }
+
+    Ok(match OneOf::deserialize(d)? {
+        OneOf::Known(known) => known,
+        OneOf::Unknown(_) => T::default(),
+    })
+}
+
 /// Per-agent status. This is a *latest-wins state machine* (spec §6.5), not a
 /// priority-max: a later event can downgrade an earlier one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -183,7 +241,10 @@ pub struct Agent {
     pub branch: String,
     /// `cwd · branch · summary` (spec §6.4).
     pub label: String,
-    /// Per-agent status (latest-wins state machine, spec §6.5).
+    /// Per-agent status (latest-wins state machine, spec §6.5). `lenient`
+    /// because a newer host can name a status this bar has never heard of,
+    /// and rejecting the variant would reject the whole SNAPSHOT.
+    #[serde(default, deserialize_with = "lenient")]
     pub status: Status,
     /// unix seconds; bumped on UserPromptSubmit. DISPLAY and cross-session
     /// policy only (`clave ls`, the picker, eager-launch selection) — it is
@@ -357,8 +418,9 @@ pub struct AgentSnapshot {
     pub collapsed: bool,
     /// Row-ordering mode + dial (2026-08-19 spec). Store state like
     /// `collapsed` above, same doctrine. `default` keeps pre-field
-    /// payloads parseable.
-    #[serde(default)]
+    /// payloads parseable; `lenient` keeps a mode this bar cannot spell
+    /// from costing the whole snapshot, and it rides every push.
+    #[serde(default, deserialize_with = "lenient")]
     pub order: OrderMode,
     /// Unix HOUR at projection time, stamped by the host so both sides
     /// share one bucket arithmetic. Frecency ages every bucket against this.
@@ -739,6 +801,72 @@ mod tests {
             assert_eq!(serde_json::to_string(&v).unwrap(), s);
             assert_eq!(serde_json::from_str::<Status>(s).unwrap(), v);
         }
+    }
+
+    /// A minimal wire row, with `status` spliced in as a raw JSON literal so a
+    /// test can post a value no `Status` variant spells.
+    fn wire_row(status: &str) -> String {
+        format!(
+            r#"{{"uuid":"u1","cwd":"/x","repo_root":"/x","branch":"main",
+                 "label":"x · main","status":{status},
+                 "last_interacted":1,"last_visited":0}}"#
+        )
+    }
+
+    #[test]
+    fn a_status_this_bar_cannot_read_costs_the_field_not_the_snapshot() {
+        // The store reader got `lenient` in #232; the WIRE did not, and the
+        // failure there is worse-behaved: serde fails the whole STRUCT on an
+        // unknown variant, so one row carrying a status from a newer host made
+        // `clave-bar` drop the entire snapshot and keep painting the last one
+        // it could parse. The bar goes inert against a live fleet with nothing
+        // on screen to say why.
+        let json = format!(r#"{{"seq":1,"agents":[{}]}}"#, wire_row(r#""paused""#));
+        let snap: AgentSnapshot = serde_json::from_str(&json).expect("the snapshot survives");
+        assert_eq!(snap.agents.len(), 1, "the row is kept, not dropped");
+        assert_eq!(
+            snap.agents[0].status,
+            Status::Idle,
+            "an unreadable status degrades to the one state that claims nothing"
+        );
+        assert_eq!(
+            snap.agents[0].label, "x · main",
+            "the rest of the row is intact"
+        );
+    }
+
+    #[test]
+    fn a_status_this_bar_does_know_still_arrives_as_itself() {
+        // The other half of `lenient`: the tolerant arm must be the SECOND one
+        // tried. If it ever wins first, every row on the wire reads `Idle` and
+        // the bar is uniformly wrong instead of occasionally lenient.
+        let json = format!(r#"{{"seq":1,"agents":[{}]}}"#, wire_row(r#""needs_you""#));
+        let snap: AgentSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(snap.agents[0].status, Status::NeedsYou);
+    }
+
+    #[test]
+    fn an_order_mode_from_the_future_keeps_the_dial_we_ship() {
+        // `order` is the snapshot's other enum, and it rides EVERY push — so a
+        // newer host's sort mode would have cost the fleet every update, not
+        // one row. A wrong guess here costs a sort until the next push.
+        let unknown: AgentSnapshot =
+            serde_json::from_str(r#"{"seq":1,"agents":[],"order":"alphabetical"}"#).unwrap();
+        assert_eq!(unknown.order, OrderMode::default());
+
+        // And a variant that GREW A SHAPE, which `#[serde(default)]` alone
+        // cannot survive either: the spelling is one we know, the payload is
+        // not. `untagged` buffers the input, so this falls back too.
+        let reshaped: AgentSnapshot =
+            serde_json::from_str(r#"{"seq":1,"agents":[],"order":{"frecency":{}}}"#).unwrap();
+        assert_eq!(reshaped.order, OrderMode::default());
+
+        // The dial a host we DO understand names still lands.
+        let known: AgentSnapshot = serde_json::from_str(
+            r#"{"seq":1,"agents":[],"order":{"frecency":{"half_life_hours":9}}}"#,
+        )
+        .unwrap();
+        assert_eq!(known.order, OrderMode::Frecency { half_life_hours: 9 });
     }
 
     #[test]

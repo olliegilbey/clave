@@ -18,7 +18,11 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use clave_types::{Agent, AgentSnapshot, Status};
+// `lenient` is the shared read-tolerance helper: a value this binary has no
+// name for is the FUTURE, not corruption. It lives in `clave-types` because
+// BOTH sides need it — the store reader here and the snapshot the bar parses
+// off the pipe — and its doc carries the limits on reaching for it.
+use clave_types::{Agent, AgentSnapshot, Status, lenient};
 use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 
@@ -300,52 +304,9 @@ pub struct Store {
     /// `deserialize_with` for the OTHER direction, which `default` does not
     /// cover: `default` answers a MISSING field, and the field being present
     /// with an unfamiliar value is a different question with a much worse
-    /// answer. See [`lenient_row_height`].
+    /// answer. See [`clave_types::lenient`].
     #[serde(default, deserialize_with = "lenient")]
     pub row_height: clave_types::RowHeight,
-}
-
-/// A value this binary has no name for is the FUTURE, not corruption — a newer
-/// clave wrote it. Take the default and keep reading.
-///
-/// **Why this is not a nicety.** serde fails the WHOLE STRUCT on an unknown
-/// enum variant, so one unfamiliar value makes the entire store unreadable, and
-/// every `clave hook` then dies on the read. It dies in the worst possible way:
-/// the hook exits 0 by Global Constraint and reports only on stderr, so nothing
-/// surfaces anywhere a human looks. The fleet simply stops updating — no
-/// status, no tokens, no pane binding, no adoption, no error — and presents as
-/// whichever feature is being tested at the time.
-///
-/// Measured 2026-09-10: a v0.4.0 hook against a store carrying `row_height:
-/// "card"` printed ``unknown variant `card`, expected `single` or `double` ``
-/// and gave up on every event of the session. One version's skew from another
-/// — a rollback, a partial upgrade, or clave's own stable-vs-worktree split,
-/// which is how it was found.
-///
-/// **The limit, so nobody reads more into this than it does.** This fixes the
-/// READER, and every released reader is frozen. A store written by a newer
-/// clave still kills an older one outright. So: adding a variant to a persisted
-/// enum is a BREAKING store change unless the leniency shipped a version first.
-///
-/// **What a wrong guess costs, per field, because that is the only question
-/// that matters here.** `row_height` costs a row geometry until the next launch
-/// (it is re-read at session create). `order` costs a sort until the next push.
-/// `label_source` degrades to `FirstPrompt`, which means "keep scanning" — the
-/// safe direction, since the wrong answer merely re-reads a tail. `status`
-/// degrades to `Idle`, the one state that claims nothing. None of them invents
-/// a fact. **A field where a wrong guess WOULD invent one must fail loudly
-/// instead — do not reach for this without asking that question first.**
-fn lenient<'de, D, T>(d: D) -> std::result::Result<T, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: serde::de::DeserializeOwned + Default,
-{
-    use serde::Deserialize;
-    // Through `Value` first, so an unfamiliar SHAPE is survived as well as an
-    // unfamiliar spelling — otherwise this would just trade one strict-parse
-    // failure for another the day a variant grows a field.
-    let raw = serde_json::Value::deserialize(d)?;
-    Ok(T::deserialize(raw).unwrap_or_default())
 }
 
 impl Store {
