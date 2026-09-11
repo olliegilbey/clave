@@ -2935,7 +2935,7 @@ impl BarModel {
     /// walk lapped the whole cycle, and the walk's own paint wake re-armed
     /// the next burst — an infinite expand/collapse loop at paint speed.
     /// So an ask buys deafness: paints are recorded (`last_painted`) but not
-    /// judged until the cooldown timer fires and
+    /// judged until the fast tick that ends the deafness fires and
     /// [`Self::width_cooldown_elapsed`] judges the latest width exactly
     /// once. Every ask is thereby judged against the width the previous ask
     /// actually produced, never against its echoes. The first mismatching

@@ -915,6 +915,24 @@ Do not resurrect either judge-every-paint or movement-re-arms-budget:
 each alone is a loop, fast or slow. Validated live: 13 presses = 13
 single-ask moves, fast six-burst settles at the mode's width, machine at
 rest.
+(4) **Two ARMING SITES in one classifier band cannot hold a
+one-timer-at-a-time invariant**, and the cooldown is one of the two. The
+card's spinner (0.2s) and this cooldown (0.15s) each armed their own fast
+timer, and the leg that disarms the spinner cannot know whose expiry it
+just consumed — `Event::Timer` carries elapsed seconds and nothing else.
+So a cooldown expiry disarmed a spinner whose frame was still pending, the
+next paint armed a SECOND frame, and two pending frames spend both of an
+ask's owed ticks inside one 0.15s deafness (0.05 + 0.10): judging a
+pre-swap echo again, with extra steps. Counting expiries (`swap_owed`,
+2026-09-10) does NOT fix this on its own — it was the fix that rested on
+the false invariant, and it shipped because `main.rs` does not link on the
+host and nothing could watch it. What works: ONE timer in the band
+(`FAST_TICK_SECS`, 0.2s) armed through one funnel (`arm_fast_tick`), with
+the count kept and now exact because there is provably one timer to count.
+Do not resurrect a second fast timer for any purpose — there is nowhere in
+the band to tell it apart — and if the shell's timer discipline changes,
+the source-text guards in `clave-bar/src/lib.rs` mod `shell_text` are what
+stand in for the unit tests it cannot have. (2026-09-11, #259 review)
 
 ## C9 — Hydration (S5)
 - With agents in the store, kill+relaunch the session (or reload the plugin):
