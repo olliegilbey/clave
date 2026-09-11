@@ -124,13 +124,14 @@ what _kind_ of checkout this is, and to say it the same way on every card.
 | branch     | `\u{f062c}` `md-source_branch`    | `#957FB8` kanagawa oniViolet   |
 | main       | nothing                           | —                          |
 
-**The worktree glyph changed.** The shipped card uses `\u{168c2}`, a Bamum
-letter, taken knowingly because no surveyed icon set contains a worktree glyph
-at all (already in FOOTGUNS.md). What had not been costed is that it arrives by
-fallback out of a proportional historic-script face and so renders **off-centre
-in its cell** — tolerable beside one other glyph, not once a third joins the
-column. `fa-tree` `\u{f1bb}` is a metaphor rather than a depiction and is in the
-font. See §6.
+**The worktree glyph changed, and the table above is what ships.** Until this
+lock the card drew `\u{168c2}`, a Bamum letter, taken knowingly because no
+surveyed icon set contains a worktree glyph at all (already in FOOTGUNS.md).
+What had not been costed is that it arrives by fallback out of a proportional
+historic-script face and so renders **off-centre in its cell** — tolerable
+beside one other glyph, not once a third joins the column. It was replaced by
+`fa-tree` `\u{f1bb}`, a metaphor rather than a depiction, which is in the font;
+`render::WORKTREE_MARK` carries it. See §6.
 
 ### 4.3 ~~The two clocks stay apart~~ — REVERSED, see §4.4
 
@@ -369,8 +370,10 @@ tofu:
 | `cod-robot` `\u{f544}` | there is no `cod-robot`; the codicon set's nearest is `cod-hubot` `\u{eb08}` |
 | `fa-robot` `\u{f0e9c}` | `fa-robot` is `\u{0ee0d}`                                                     |
 
-Enumerate the real `cmap` of the installed `FiraCodeNerdFontMono-Regular.ttf`
-before committing a glyph. And a fallback glyph brings its **own metrics**: it
+Enumerate the real `cmap` of the font you will actually render with before
+committing a glyph — both of them, since there are two: the terminal's own
+face, and `JetBrainsMonoNerdFontMono-Regular.ttf`, which is the default the
+asset workflow pins and traces outlines from (`examples/readme-assets.rs`). And a fallback glyph brings its **own metrics**: it
 holds its cell if the fallback face is monospace, but weight and baseline do
 not, and neither shows in a static render or a golden. That is what caught the
 old worktree glyph (§4.2), and it is why five of the six spinner frames — which
