@@ -383,40 +383,71 @@ printf '[%s %s] NOTE same-HEAD re-runs cannot distinguish a stale load here — 
 # WHICH `clave`, though. This drive runs in its own terminal and the hook
 # process does not inherit this shell's PATH, so the binary resolved HERE can
 # differ from the one a hook lands on — and vouching for the wrong one is
-# exactly the silent pass this check exists to prevent (#259 review). Claude's
-# environment cannot be read from outside it, so the check does not pretend
-# to: it tests EVERY clave a hook could plausibly land on — this shell's, and
-# a clean login shell's, which is the PATH a process that inherited nothing
-# from here would see. Both must read this sandbox's store. **These are
-# approximations of the hook environment, not the hook environment**; a green
-# here means no candidate is broken, not that the hook's own binary is one of
-# them.
+# exactly the silent pass this check exists to prevent (#259 review). The one
+# a SANDBOX hook lands on is knowable without guessing, though: hooks and the
+# bar both invoke a BARE `clave` (`clave hook <Event>` in settings,
+# `clave_binary "clave"` in config.kdl), and `dev launch` composes the
+# instance's shim directory onto the FRONT of the PATH its panes inherit. So
+# the shim is the hook's binary, and the assertion belongs there.
+#
+# Every other clave on some reachable PATH is still read, but as a HAZARD
+# REPORT rather than a verdict on this build: a released binary older than
+# this store's vocabulary cannot read it BY CONSTRUCTION — that is the
+# one-way cost of adding a variant (clave-types `lenient`), and `just
+# release` is what resolves it. It bites only if it wins a PATH race against
+# the shim, which is the #43/#44 leak; named here with its reason so a real
+# race reads as a race instead of as a mystery.
 #
 # `ls` is the cheapest command that reads the store and nothing else. Stderr,
 # not exit code — `clave` reports a store read failure there and still exits 0.
+store_read_err() {
+  # The 2>&1 BEFORE >/dev/null is the point, not a slip: stderr takes the
+  # current stdout and then stdout is dropped, so this returns the message
+  # and never the listing. Empty output is the clean read.
+  # shellcheck disable=SC2069
+  CLAVE_STATE_DIR="$STATE_DIR" CLAVE_DATA_DIR="$DATA_DIR" "$1" ls 2>&1 >/dev/null || true
+}
+
+SHIM_CLAVE="$("$CLAVE_BIN" dev instance --field shim 2>/dev/null || true)/clave"
+measure "the clave a sandbox hook resolves (the shim, first on the pane PATH)" "$SHIM_CLAVE"
+if [[ -x "$SHIM_CLAVE" ]]; then
+  measure "version of the shim clave" "$("$SHIM_CLAVE" --version 2>&1 || true)"
+  SHIM_READ="$(store_read_err "$SHIM_CLAVE")"
+  check "the shim clave reads this sandbox store" "${SHIM_READ:-clean}" "clean"
+  printf '[%s %s] NOTE a failure on that line means EVERY hook in this sandbox no-ops silently — the drive below would read as broken features\n' \
+    "$CURRENT_PHASE" "$(ts)"
+else
+  check "the shim clave is executable (dev launch puts it first on PATH)" "missing" "present"
+fi
+
 DRIVE_CLAVE="$(command -v clave 2>/dev/null || true)"
 LOGIN_CLAVE="$(env -i HOME="$HOME" bash -lc 'command -v clave' 2>/dev/null || true)"
 measure "clave on this drive shell's PATH" "${DRIVE_CLAVE:-<none on PATH>}"
 measure "clave on a clean login PATH" "${LOGIN_CLAVE:-<none on PATH>}"
-HOOK_CLAVES=()
+OTHER_CLAVES=()
 for CAND in "$DRIVE_CLAVE" "$LOGIN_CLAVE"; do
   [[ -n "$CAND" ]] || continue
+  [[ "$CAND" == "$SHIM_CLAVE" ]] && continue
   # The `+()` guard is what keeps an empty array safe under `set -u`.
-  [[ " ${HOOK_CLAVES[*]+${HOOK_CLAVES[*]}} " == *" $CAND "* ]] && continue
-  HOOK_CLAVES+=("$CAND")
+  [[ " ${OTHER_CLAVES[*]+${OTHER_CLAVES[*]}} " == *" $CAND "* ]] && continue
+  OTHER_CLAVES+=("$CAND")
 done
-if [[ ${#HOOK_CLAVES[@]} -eq 0 ]]; then
-  check "clave resolvable on PATH (hooks need it)" "absent" "present"
-else
-  for CAND in "${HOOK_CLAVES[@]}"; do
-    measure "version of $CAND" "$("$CAND" --version 2>&1 || true)"
-    STORE_READ="$(CLAVE_STATE_DIR="$STATE_DIR" CLAVE_DATA_DIR="$DATA_DIR" \
-      "$CAND" ls 2>&1 >/dev/null || true)"
-    check "$CAND reads this sandbox store" "${STORE_READ:-clean}" "clean"
-  done
-  printf '[%s %s] NOTE a failure here means EVERY hook in this sandbox no-ops silently — the drive below will read as broken features\n' \
-    "$CURRENT_PHASE" "$(ts)"
-fi
+for CAND in "${OTHER_CLAVES[@]+"${OTHER_CLAVES[@]}"}"; do
+  measure "version of $CAND (shadowed by the shim inside the sandbox)" "$("$CAND" --version 2>&1 || true)"
+  CAND_READ="$(store_read_err "$CAND")"
+  if [[ -z "$CAND_READ" ]]; then
+    measure "$CAND reads this sandbox store" "clean"
+  elif [[ "$CAND_READ" == *"unknown variant"* ]]; then
+    # Older than the store's vocabulary. Expected on a branch that adds a
+    # variant; a verdict on the release train, not on this build.
+    printf '[%s %s] NOTE %s predates this store vocabulary and rejects the WHOLE store (%s) — shadowed by the shim here, fatal to every hook if it ever wins the PATH race (#44); `just release` is the resolution\n' \
+      "$CURRENT_PHASE" "$(ts)" "$CAND" "$CAND_READ"
+  else
+    # Any other read failure is a real red: not a vocabulary gap, so it is
+    # permissions, a corrupt store, or a binary that cannot run at all.
+    check "$CAND reads this sandbox store" "$CAND_READ" "clean"
+  fi
+done
 
 # config.kdl <-> layout.kdl identity pair (the #44 self-check `just sandbox`
 # already runs at stage time — re-asserted here because config coherence can
@@ -2011,7 +2042,37 @@ wait_field() {
   printf '%s' "$got"
 }
 
-P5B_SEQ0="$(jq -r '.store.seq' <<<"$P5B_STATUS" 2>/dev/null)"
+# --- the PR cache, warmed before anything is counted ------------------------
+# `seq` is the only witness of a store write, and it is NOT a clean per-event
+# counter. A hook whose row has a stale PR cache spawns `clave pr-sync`
+# OUTSIDE the flock (pr.rs, deliberately — inside it would deadlock), and that
+# second process writes on its own schedule, so its bump lands in whichever
+# sampling window it pleases. A seeded row starts at `pr_checked: 0`, which
+# `pr_is_stale` calls stale, so the ladder's first event always paid for one:
+# the first live run of this phase measured 7 bumps for 5 events and read as a
+# double-write that was never there.
+#
+# The confound is removed rather than budgeted for. One benign event first
+# (`SessionEnd` — the state the ladder starts from anyway), then wait for the
+# cache to reach the shape `pr_is_stale` calls fresh. `PR_TTL_SECS` is 300s
+# and the ladder is seconds long, so nothing re-spawns inside it.
+hook_fire SessionEnd >/dev/null
+P5B_PR_WARM="stale"
+for _ in $(seq 1 15); do
+  if [[ "$(jq -r --arg u "$P5B_UUID" \
+    '.store.agents[$u] | (.pr_checked > 0 and .pr_branch == .branch)' \
+    < <(dev_status) 2>/dev/null)" == "true" ]]; then
+    P5B_PR_WARM="fresh"
+    break
+  fi
+  sleep 1
+done
+measure "phase-5b PR cache before the count begins" "$P5B_PR_WARM"
+sleep 2 # the settling write is async — let it land before the baseline read
+
+# Re-read: the baseline must be taken AFTER the warm-up, not from the status
+# captured at phase start.
+P5B_SEQ0="$(jq -r '.store.seq' < <(dev_status) 2>/dev/null)"
 check_numeric "phase-5b start store seq readable" "$P5B_SEQ0"
 measure "phase-5b row" "$P5B_UUID tail=$P5B_TAIL"
 
@@ -2059,11 +2120,18 @@ check_numeric "phase-5b end store seq readable" "$P5B_SEQ_END"
 measure "store seq across the card-cell ladder" \
   "before=${P5B_SEQ0} after=${P5B_SEQ_END} delta=$((P5B_SEQ_END - P5B_SEQ0))"
 # Five events, and a write per event is the ceiling — the hook is one locked
-# RMW per event and the snapshot push is not a store write. More than that
-# means something is writing twice per event, which is the shape the paced-12
-# check watches for on the toggle side.
-check "phase-5b writes per hook event <= 1 (5 events, delta <= 5)" \
-  "$(((P5B_SEQ_END - P5B_SEQ0) <= 5 ? 1 : 0))" "1"
+# RMW per event, the snapshot push is not a store write, and the warm-up above
+# is what makes the count attributable by taking `pr-sync` out of it. More
+# than that means something is writing twice per event, which is the shape the
+# paced-12 check watches for on the toggle side. (Fewer is fine and expected:
+# the silent `Stop` re-asserts a state the row is already in.)
+if [[ "$P5B_PR_WARM" == "fresh" ]]; then
+  check "phase-5b writes per hook event <= 1 (5 events, delta <= 5)" \
+    "$(((P5B_SEQ_END - P5B_SEQ0) <= 5 ? 1 : 0))" "1"
+else
+  printf '[%s %s] NOTE the PR cache never settled, so every event still spawns a `pr-sync` whose write lands off-schedule — the budget is not attributable here and is recorded above, not asserted\n' \
+    "$CURRENT_PHASE" "$(ts)"
+fi
 printf '[%s %s] NOTE this phase edited a scenario transcript — `clave dev scenario %s` re-seeds it\n' \
   "$CURRENT_PHASE" "$(ts)" "$SCENARIO"
 

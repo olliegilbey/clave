@@ -107,6 +107,16 @@ the stable binary (FOOTGUNS, 2026-08-24).
 4. On failure: capture the drive log tail + the joins BEFORE any teardown,
    grep FOOTGUNS, then debug systematically. A failed phase is evidence,
    not an excuse to re-run until green.
+   **A re-run needs a fresh stage, not just a re-invocation.** The drive is
+   not idempotent by design: phase 2 rung 1 is a scripted `clave add`, so
+   every run MINTS a row and leaves tabs behind it. Phase 1's seed-count
+   check therefore only holds against a freshly seeded store, and a second
+   run against the same session goes red on the previous run's own residue —
+   which reads as a finding and is not one. The cycle is the full one each
+   time: kill, `just sandbox <scenario>`, the maintainer launches, drive.
+   (Re-seeding alone is not a shortcut: `clave dev scenario` calls
+   `run_setup`, so it regenerates config.kdl — the #44 hazard that refuses a
+   live session in the first place.)
 5. Report the per-phase table with measured values; request the two
    eyeballs; hand back the kill pair.
 
