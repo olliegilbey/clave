@@ -140,13 +140,113 @@ if [[ -z "$STATE_DIR" || -z "$DATA_DIR" ]]; then
   exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# THE AMBIENT IDENTITY — scrubbed ONCE, here, for every child this drive will
+# ever spawn.
+# ---------------------------------------------------------------------------
+# A drive shell runs INSIDE the maintainer's fleet, so it inherits
+# `ZELLIJ_SESSION_NAME=<his session>` along with `ZELLIJ`/`ZELLIJ_PANE_ID`,
+# and anything that consults them aims there. `ct.sh` scrubs them per
+# invocation — which protects what goes through it, and nothing else. That
+# gap is not theoretical: `clave hook` also PUSHES, aimed by
+# `ZELLIJ_SESSION_NAME` (hook.rs `own_session`), so a hand-rolled hook call in
+# phase 5b wrote the sandbox store and pushed at HIS bar, and hung his session
+# (2026-09-11; FOOTGUNS #281, which had already named this exact trap).
+#
+# The lesson taken is that a convention every call site must remember is the
+# wrong shape for this hazard. So the hostile variables do not survive this
+# line, and the sandbox's own identity replaces them: every child — routed,
+# hand-rolled, or added by someone who never read this comment — inherits the
+# SANDBOX. The default becomes fail-safe instead of fail-dangerous.
+#
+# `ct.sh` keeps its own per-call scrub regardless: it is also run directly,
+# and belt-as-well-as-braces is the house style for this particular hazard.
+FOREIGN_SESSION="${ZELLIJ_SESSION_NAME:-}"
+unset ZELLIJ ZELLIJ_PANE_ID
+export ZELLIJ_SESSION_NAME="$SESSION"
+# The store too, for the same reason: a child that resolves its own paths
+# must land in the sandbox even when the caller passed it nothing.
+export CLAVE_SESSION="$SESSION"
+export CLAVE_STATE_DIR="$STATE_DIR"
+export CLAVE_DATA_DIR="$DATA_DIR"
+
+# The tripwire. Cheap, and it is a REORDERING guard: everything below assumes
+# the scrub already happened, so if a future edit moves a phase above this
+# point — or re-exports the inherited name — the drive stops instead of
+# driving the wrong session.
+if [[ "${ZELLIJ_SESSION_NAME:-}" != "$SESSION" || -n "${ZELLIJ:-}" || -n "${ZELLIJ_PANE_ID:-}" ]]; then
+  cat >&2 <<EOF
+REFUSING: the ambient zellij identity is not this sandbox.
+
+  ZELLIJ_SESSION_NAME=${ZELLIJ_SESSION_NAME:-<unset>}  (want: ${SESSION})
+  ZELLIJ=${ZELLIJ:-<unset>}  ZELLIJ_PANE_ID=${ZELLIJ_PANE_ID:-<unset>}  (want both unset)
+
+Every child of this drive inherits these, and a push aimed by them reaches
+whichever bar they name. Refusing rather than driving someone else's session.
+EOF
+  exit 1
+fi
+if [[ -n "$FOREIGN_SESSION" && "$FOREIGN_SESSION" != "$SESSION" ]]; then
+  printf '==> scrubbed an inherited zellij identity: %s -> %s (every child now aims at the sandbox)\n' \
+    "$FOREIGN_SESSION" "$SESSION"
+fi
+
+# How many pushes clave REFUSED to misaim, counted from the sandbox's own
+# event log. `clave hook` decides a push's destination from the store it
+# wrote rather than from the env (hook.rs `aim_push`) and writes one
+# `push-refused` line when the two disagree — so this number is the drive's
+# witness that nothing it spawned reached a bar it had no business reaching.
+# Zero is the expected reading now that the identity is scrubbed above: a
+# refusal means the guard caught something the scrub did not, which is a
+# finding about this script, not a pass.
+count_push_refusals() {
+  local n
+  n="$(grep -c '"cmd":"push-refused"' "$STATE_DIR/clave.log" 2>/dev/null)" || n=0
+  printf '%s' "${n:-0}"
+}
+
 # `clave dev status` is liveness-gated by construction (TESTING.md, "the
 # observability map") — safe to call even against a dead session, unlike a
 # bare `zellij action`, which blocks indefinitely against one. This is the
 # fail-closed refusal: the drive never proceeds against a session that is
 # not actually up.
-STATUS_JSON="$("$CLAVE_BIN" dev status 2>/dev/null)" || STATUS_JSON=""
-SESSION_LIVE="$(printf '%s' "$STATUS_JSON" | jq -r '.session_live // false' 2>/dev/null)"
+read_liveness() {
+  STATUS_JSON="$("$CLAVE_BIN" dev status 2>/dev/null)" || STATUS_JSON=""
+  SESSION_LIVE="$(printf '%s' "$STATUS_JSON" | jq -r '.session_live // false' 2>/dev/null)"
+}
+read_liveness
+
+# WAITING for the launch, when asked to. The drive still never launches
+# anything — session lifecycle stays the human's — it just stops refusing
+# INSTANTLY, which is what made the loop three messages wide: stage, ask, wait
+# to be told, drive. With `QA_WAIT_SECS` set (`just qa` sets it) the drive
+# prints the launch command itself and blocks until the session appears, so
+# the loop is one command for the agent and one for the human, concurrently.
+QA_WAIT_SECS="${QA_WAIT_SECS:-0}"
+if [[ "$SESSION_LIVE" != "true" && "$QA_WAIT_SECS" -gt 0 ]]; then
+  cat <<EOF
+
+==> Waiting up to ${QA_WAIT_SECS}s for '${SESSION}'. Launch it YOURSELF, in a
+    NEW terminal window OUTSIDE zellij:
+
+    CLAVE_SESSION=${SESSION} \\
+    CLAVE_STATE_DIR=${STATE_DIR} \\
+    CLAVE_DATA_DIR=${DATA_DIR} \\
+    PATH="$("$CLAVE_BIN" dev instance --field shim 2>/dev/null):\$PATH" \\
+      ${CLAVE_BIN} dev launch
+
+    The drive starts by itself the moment the session is up.
+
+EOF
+  QA_WAITED=0
+  while [[ "$SESSION_LIVE" != "true" && "$QA_WAITED" -lt "$QA_WAIT_SECS" ]]; do
+    sleep 2
+    QA_WAITED=$((QA_WAITED + 2))
+    read_liveness
+  done
+  [[ "$SESSION_LIVE" == "true" ]] && printf '==> '"'"'%s'"'"' is up after %ss — driving.\n\n' "$SESSION" "$QA_WAITED"
+fi
+
 if [[ "$SESSION_LIVE" != "true" ]]; then
   cat >&2 <<EOF
 REFUSING: sandbox session '${SESSION}' is not live.
@@ -156,6 +256,9 @@ This drive never launches a session — stage and launch first:
   clave dev scenario ${SCENARIO}   # if not already seeded by \`just sandbox\`
   (human, non-zellij terminal) clave dev launch
 then re-run: $0 ${SCENARIO}
+
+Or drive the whole loop in one command, which waits for the launch:
+  just qa ${SCENARIO}
 EOF
   exit 1
 fi
@@ -496,6 +599,9 @@ fi
 # all, which is the skew that killed a whole session's hooks on 2026-09-10).
 # The bar then renders one geometry into another's pane and nothing anywhere
 # says so.
+QA_REFUSED_BEFORE="$(count_push_refusals)"
+measure "push refusals in the sandbox log before this run (forensic baseline)" "$QA_REFUSED_BEFORE"
+
 P0_ROW_HEIGHT="$(jq -r '.store.row_height' <<<"$STATUS_JSON" 2>/dev/null)"
 check_nonempty "store row_height readable" "$P0_ROW_HEIGHT"
 # Every `row_height` in the launched layout, deduped: the bar pane node and
@@ -570,13 +676,35 @@ DORMANT_COUNT="$(jq '[.store.agents[] | select(.tab_id == null)] | length' <<<"$
 measure "total rows" "$TOTAL_ROWS"
 measure "dormant rows (tab_id null)" "$DORMANT_COUNT"
 
+# SEEDED rows, counted apart from everything else in the store. A scenario's
+# rows carry deterministic `c85c` uuids (dev.rs `scenario_uuid`); anything
+# else is residue from an earlier drive, because this drive MINTS a row of its
+# own at phase 2 rung 1 (`clave add`, by design, and its uuid is a real one).
+#
+# Counting the seeded rows rather than the whole store is what makes a re-run
+# possible at all. The check used to be `total == 6`, which held only against
+# a store staged seconds earlier — so the drive's own previous run turned
+# phase 1 red, and the loop became kill, re-stage, ask for a relaunch, drive,
+# for every iteration. The property never needed the total: it is about what
+# the scenario put there and what the eager launch did with it.
+SEEDED_ROWS="$(jq '[.store.agents | keys[] | select(startswith("00000000-0000-4000-8000-c85c"))] | length' <<<"$STATUS_JSON" 2>/dev/null)"
+RESIDUE_ROWS=$((TOTAL_ROWS - SEEDED_ROWS))
+measure "seeded rows (c85c uuids)" "$SEEDED_ROWS"
+measure "non-seeded rows (this or an earlier drive's own creations)" "$RESIDUE_ROWS"
+SEEDED_DORMANT="$(jq '[.store.agents | to_entries[] | select(.key | startswith("00000000-0000-4000-8000-c85c")) | select(.value.tab_id == null)] | length' <<<"$STATUS_JSON" 2>/dev/null)"
+measure "dormant SEEDED rows (tab_id null)" "$SEEDED_DORMANT"
+
 if [[ "$SCENARIO" == "qa-fleet" ]]; then
   # qa-fleet seeds 6 dormant rows; cold start's eager-launch selection
   # (setup.rs `eager_row` — the most-recent row whose cwd still exists)
   # auto-resumes exactly one of them into a live tab, so the STEADY STATE
-  # this drive measures is 6 total / 5 still dormant / 1 bound.
-  check "total rows == scenario seed count" "$TOTAL_ROWS" "6"
-  check "dormant rows after eager resume" "$DORMANT_COUNT" "5"
+  # this drive measures is 6 seeded / 5 still dormant / 1 bound.
+  check "seeded rows == scenario seed count" "$SEEDED_ROWS" "6"
+  check "dormant seeded rows after eager resume" "$SEEDED_DORMANT" "5"
+  if [[ "$RESIDUE_ROWS" -gt 0 ]]; then
+    printf '[%s %s] NOTE %s non-seeded row(s) present — an earlier drive on this stage minted them (phase 2 rung 1). Harmless to every assertion below, which all key off the seeded set; `just qa` re-stages if you want a pristine store.\n' \
+      "$CURRENT_PHASE" "$(ts)" "$RESIDUE_ROWS"
+  fi
 fi
 
 # The eager-launch row's tab_id bound (the #178 resume face, P11). The most
@@ -2020,12 +2148,21 @@ check "phase-5b transcript is a scenario fixture (never a real conversation)" \
 # the payload on stdin, the sandbox's dirs in the environment. Exit status is
 # never the signal — the hook exits 0 by Global Constraint — so every
 # assertion below reads the STORE.
+# THROUGH ct.sh, never `clave hook` directly. Setting CLAVE_STATE_DIR alone
+# looks completely correct and is not: the store write lands in the sandbox,
+# but `clave hook` also PUSHES, and it aims that push with `--session
+# "$ZELLIJ_SESSION_NAME"` (hook.rs `own_session`) — which in a drive shell
+# running inside the maintainer's fleet names HIS session. The push then
+# arrives, precisely and by design, at the wrong bar. FOOTGUNS #281 says this
+# in as many words and names this wrapper as the only sanctioned way to drive
+# a hook; a hand-rolled `hook_fire` that bypassed it hung the maintainer's
+# live session on 2026-09-11, which is why the rule is now enforced at the
+# only site in this script that fires one.
 hook_fire() {
-  local event="$1" message="${2:-}"
-  jq -n --arg s "$P5B_UUID" --arg t "$P5B_TAIL" --arg m "$message" \
-    '{session_id:$s, transcript_path:$t} + (if $m == "" then {} else {message:$m} end)' |
-    CLAVE_STATE_DIR="$STATE_DIR" CLAVE_DATA_DIR="$DATA_DIR" \
-      "$CLAVE_BIN" hook "$event" 2>&1 | sed "s/^/[hook $event] /"
+  local event="$1" message="${2:-}" payload
+  payload="$(jq -nc --arg s "$P5B_UUID" --arg t "$P5B_TAIL" --arg m "$message" \
+    '{session_id:$s, transcript_path:$t} + (if $m == "" then {} else {message:$m} end)')"
+  "$CT" --hook "$event" "$payload" 2>&1 | sed "s/^/[hook $event] /"
 }
 
 # One field of the driven row, after a bounded wait for it to read `want`.
@@ -2175,6 +2312,51 @@ check "no new sandbox bar loaded while idle (tagged 'clave-bar: loaded' delta)" 
 P6_ZLINES1="$(wc -l <"$ZLOG" 2>/dev/null | tr -d ' ')" || P6_ZLINES1=0
 measure "global zellij log growth while idle (user-global, unattributable — forensic only)" \
   "$((P6_ZLINES1 - P6_ZLINES0))"
+
+# ===========================================================================
+# Phase 6b — the isolation witness
+# ===========================================================================
+# The one property this whole harness rests on and never used to assert: the
+# maintainer's own session was not touched. It cannot be checked by looking at
+# his session — looking IS touching, and the rule is that nothing goes that
+# way, not even a read. So it is checked from our side, where the evidence
+# actually is:
+#
+#   1. clave refuses a push whose target does not own the store it wrote, and
+#      writes one line when it does. Zero refusals means nothing this drive
+#      spawned was even POINTED anywhere else.
+#   2. The ambient identity is still the sandbox's at the end, not just at the
+#      start — a phase that re-exported the inherited name would show here.
+#   3. The inherited session's name appears nowhere as a push target.
+#
+# (1) is the load-bearing one, and it is only trustworthy because the refusal
+# lives in the BINARY: a check that the script performs on itself would have
+# passed happily on 2026-09-11, which is the day this phase was written.
+phase "P6b-isolation-witness"
+
+QA_REFUSED_AFTER="$(count_push_refusals)"
+measure "push refusals during this run" \
+  "before=${QA_REFUSED_BEFORE} after=${QA_REFUSED_AFTER} delta=$((QA_REFUSED_AFTER - QA_REFUSED_BEFORE))"
+check "no push was aimed at a bar that does not own this store" \
+  "$((QA_REFUSED_AFTER - QA_REFUSED_BEFORE))" "0"
+
+check "the ambient zellij identity is STILL the sandbox at the end of the run" \
+  "${ZELLIJ_SESSION_NAME:-<unset>}" "$SESSION"
+check "ZELLIJ is still unset (nothing re-attached this shell to a session)" \
+  "${ZELLIJ:-unset}" "unset"
+check "ZELLIJ_PANE_ID is still unset" "${ZELLIJ_PANE_ID:-unset}" "unset"
+
+if [[ -n "$FOREIGN_SESSION" && "$FOREIGN_SESSION" != "$SESSION" ]]; then
+  measure "the identity this drive inherited and scrubbed" "$FOREIGN_SESSION"
+  # Named targets are written into the refusal line; a clean log has none at
+  # all, so this is a second reading of (1) from the other direction.
+  QA_FOREIGN_HITS="$(grep -c "target=${FOREIGN_SESSION}" "$STATE_DIR/clave.log" 2>/dev/null)" || QA_FOREIGN_HITS=0
+  check "the inherited session is named nowhere as a push target" \
+    "${QA_FOREIGN_HITS:-0}" "0"
+else
+  printf '[%s %s] NOTE this drive inherited no foreign zellij identity — the scrub had nothing to do, and (3) is vacuous\n' \
+    "$CURRENT_PHASE" "$(ts)"
+fi
 
 # ===========================================================================
 # Phase 7 — teardown (the hand-back)

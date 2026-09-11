@@ -17,6 +17,37 @@ lifecycle exemption) or print the pair and leave it to the human.
 This is the drive loop (TESTING.md) made executable — its nine steps are the
 skeleton, phases below are the flesh.
 
+**One command runs the whole loop:** `just qa <scenario>` stages, prints the
+launch line, blocks until the session appears, then drives. Launching is still
+the human's and nothing in it starts a session — what it removes is the round
+trips, which used to be three messages wide (stage, ask, be told, drive) and
+every one of them a chance to drive something that is not the sandbox.
+
+### The isolation contract
+
+A drive shell runs INSIDE the maintainer's fleet, so it inherits his
+`ZELLIJ_SESSION_NAME` — and anything that reads it aims there. Three
+mechanisms, because on 2026-09-11 a convention alone let a drive hang his
+live session (FOOTGUNS #281):
+
+1. **The drive scrubs the ambient identity once, before its first phase.**
+   `ZELLIJ`/`ZELLIJ_PANE_ID` unset, `ZELLIJ_SESSION_NAME` re-pointed at the
+   sandbox, store dirs exported. Every child inherits the sandbox whether or
+   not it was routed through `ct.sh`. A tripwire refuses the run if the
+   identity is not the sandbox's at that point.
+2. **`clave hook` refuses a push whose target does not own the store it
+   wrote** (`hook.rs::aim_push`), in both directions, logging `push-refused`.
+   The env is the caller's claim; the store is the fact. This is the layer
+   that holds for callers that do not exist yet.
+3. **`crates/clave/tests/script_hygiene.rs` fails the build** if any line in
+   the drive fires a hook outside `ct.sh --hook`, or if the scrub stops
+   preceding the first phase.
+
+Phase 6b then asserts zero refusals across the run. That count is the only
+evidence of isolation obtainable without touching the session it is proving
+was not touched — looking IS touching, and nothing goes that way, not even a
+read.
+
 Non-goals, deliberately (KISS): no CI integration (that is #47's real-zellij
 harness, later), no screenshot automation (width truth stays human — the
 known-liar detectors), no automatic bisecting.
@@ -52,8 +83,9 @@ loudly and stops the run; later phases assume earlier truth.
 | 3 | Tab churn | close a NON-last tab; close the HIGHEST tab then create one; re-join after each | nav answers with exactly one focus change; no `bind-evict` in evlog; no stale binds; recycled id carries no inherited stamp | B14, B15 (#55), Z15, P4, P12/P13 |
 | 4 | Ring walk | pick into the dormant block, walk both directions, wrap; Alt+Enter one commit | single executor (one focus change per press, never two); walk stays in-block; commit opens exactly one tab | P1 (#162), P2, P16, K8 — becomes single-ring on #179 |
 | 5 | Collapse burst | 12× toggle with pauses, then 5× rapid, then 1 more | store writes per press ≤ 2; every paced press lands its store flip within a bounded wait; the rapid burst settles at parity (per-instance snapshots are not observable from outside — the store flag plus the phase-5 eyeball stand in for them); bar still answers press 18; then the WIDTH probe — the bar's pane size read from the layout dump in both settled modes, asserted only if the two readings DIFFER (a number that moves with the toggle is the applied swap position; one that does not is the declared layout, and asserting on it would be a tautology — the eyeball stays the oracle then) | B6–B9, B10/B11, P5, the #232 band collision |
-| 5b | **Card cells (hook side)** | five real `clave hook` events against the sandbox store: a permission `Notification`, `UserPromptSubmit`, two `Stop`s (one with a `turn_duration` tail carrying `pendingBackgroundAgentCount`, one silent), `SessionEnd` | `wants` arrives from the notification's own words and leaves with the next prompt; the subagent mark rises on the closing record, HOLDS on a silent tail, and clears on `SessionEnd`; status follows each event; ≤1 store write per event. Appends only to a `c85c` scenario transcript, guarded | #232's card cells — the seam two of its defects lived at |
+| 5b | **Card cells (hook side)** | five real `clave hook` events against the sandbox store: a permission `Notification`, `UserPromptSubmit`, two `Stop`s (one with a `turn_duration` tail carrying `pendingBackgroundAgentCount`, one silent), `SessionEnd` | `wants` arrives from the notification's own words and leaves with the next prompt; the subagent mark rises on the closing record, HOLDS on a silent tail, and clears on `SessionEnd`; status follows each event; ≤1 store write per event, counted AFTER a PR-cache warm-up (`seq` is not a per-event counter — a stale cache makes the hook spawn `pr-sync`, a second writer landing off-schedule; FOOTGUNS). Fires every event through `ct.sh --hook`, never `clave hook` directly, and appends only to a `c85c` scenario transcript, guarded | #232's card cells — the seam two of its defects lived at |
 | 6 | Quiescence | idle 60s | evlog and store `seq` flat; zellij log flat after the mark for sandbox-attributable lines only (the shared log is never globally flat with a live maintainer fleet — see Delivery accounting) | P17, B19/B20, drive step 6 |
+| 6b | **Isolation witness** | nothing (reads this run's own evidence) | zero `push-refused` events across the run — no push was aimed at a bar that does not own this store; the ambient zellij identity is STILL the sandbox's at the END of the run, not just at the start; the inherited session's name appears nowhere as a push target | FOOTGUNS #281, the 2026-09-11 incident |
 | 7 | Teardown | nothing | prints the kill pair (the agent may run it once both eyeballs are in) | drive step 9 |
 
 **Eyeball checkpoints** (human, one message each): after phase 2 — one bar
@@ -95,7 +127,7 @@ the stable binary (FOOTGUNS, 2026-08-24).
 
 1. `just sandbox qa-fleet` (per-worktree instance), take the log mark.
 2. Hand the launch line to the human; wait.
-3. `scripts/qa-drive.sh qa-fleet` — the full spine, phases 0–5b–7; stop on
+3. `scripts/qa-drive.sh qa-fleet` — the full spine, phases 0–7 (with 5b and 6b in between); stop on
    first failure.
    **Full 0–7 driven live green: run 4, 2026-08-17**, both eyeball
    checkpoints confirmed. Runs 1–3 each went red on one real finding (all

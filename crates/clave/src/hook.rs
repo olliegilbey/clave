@@ -875,6 +875,32 @@ pub fn push_snapshot(snap: &AgentSnapshot) {
     let Ok(payload) = serde_json::to_string(snap) else {
         return;
     };
+    // WHERE this is allowed to land, decided from the store rather than from
+    // the env alone. `own_session` reads `ZELLIJ_SESSION_NAME`, and a process
+    // can hold a env naming one session while writing a DIFFERENT session's
+    // store — which is not hypothetical: it is what every drive shell inside
+    // the maintainer's fleet looks like, and it aimed a sandbox snapshot at
+    // his live bar and hung his session (FOOTGUNS #281, again on
+    // 2026-09-11). The env is the caller's claim; the store is the fact.
+    let paths = crate::store::store_paths().ok();
+    let aim = aim_push(
+        paths.as_ref().map(|p| p.dir.as_path()),
+        own_session().as_deref(),
+    );
+    if let PushAim::Foreign { owner, target } = &aim {
+        // DROPPED, and the drop is written down. The whole reason this class
+        // of bug cost rounds is that its tell was silence: the wrong bar
+        // simply kept rendering, and the right one never heard anything.
+        let detail = format!("target={target} store-owner={owner}");
+        if let Some(p) = paths.as_ref() {
+            crate::evlog::log_event_in(&p.dir, "push-refused", &detail);
+        }
+        // stderr as well as the log: a hook's stderr is captured in the
+        // transcript's hook attachments, which is where a human looking at a
+        // misbehaving fleet actually ends up.
+        eprintln!("clave: snapshot push refused, {detail}");
+        return;
+    }
     // Discovered path (codex P2 on PR #29): hooks run as claude's children,
     // whose env may lack the interactive PATH — an off-PATH zellij made every
     // status push a silent no-op. Fire-and-forget stays: failure here must
@@ -885,12 +911,63 @@ pub fn push_snapshot(snap: &AgentSnapshot) {
         &payload,
         &discover_pipe_bound(),
         PUSH_BOUND_SECS,
-        own_session().as_deref(),
+        aim.target(),
     )
     .stdin(Stdio::null())
     .stdout(Stdio::null())
     .stderr(Stdio::null())
     .spawn();
+}
+
+/// Where a snapshot push may land.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PushAim {
+    /// Aim it at this session by name.
+    At(String),
+    /// The env names no session, so zellij's own resolution is all there is.
+    /// Left alone deliberately: outside a multiplexer there is nothing to
+    /// disagree with, and narrowing this is a change to real installs.
+    Unaimed,
+    /// The env names a session that does not own the store this snapshot
+    /// describes. Dropped.
+    Foreign { owner: String, target: String },
+}
+
+impl PushAim {
+    fn target(&self) -> Option<&str> {
+        match self {
+            PushAim::At(s) => Some(s.as_str()),
+            PushAim::Unaimed | PushAim::Foreign { .. } => None,
+        }
+    }
+}
+
+/// Decide a push's destination from the store it came from, refusing the two
+/// ways a snapshot can reach a bar that has no business seeing it.
+///
+/// A SANDBOX store may only be pushed at its own session — the mistake a
+/// drive makes, because `CLAVE_STATE_DIR` selects the store and nothing in
+/// the env has to agree. A REAL store may not be pushed at a sandbox session
+/// — the same mistake inverted, which would show a live fleet inside a test
+/// one. Anything clave cannot place (a real store, a real session) is aimed
+/// as asked: guessing there would be clave narrowing a working install.
+pub(crate) fn aim_push(state_dir: Option<&Path>, target: Option<&str>) -> PushAim {
+    let Some(target) = target else {
+        return PushAim::Unaimed;
+    };
+    let owner = state_dir.and_then(crate::sandbox::owner_session_of_store);
+    match owner {
+        Some(owner) if owner != target => PushAim::Foreign {
+            owner,
+            target: target.to_string(),
+        },
+        Some(_) => PushAim::At(target.to_string()),
+        None if crate::sandbox::is_sandbox_session(target) => PushAim::Foreign {
+            owner: "<not a sandbox store>".to_string(),
+            target: target.to_string(),
+        },
+        None => PushAim::At(target.to_string()),
+    }
 }
 
 /// Remember which conversation this row is actually living in (#99). The
@@ -1510,6 +1587,123 @@ mod tests {
         cmd.get_args()
             .map(|a| a.to_str().unwrap().to_string())
             .collect()
+    }
+
+    /// A sandbox store's snapshot, aimed at the maintainer's live fleet. This
+    /// is the 2026-09-11 incident exactly: `CLAVE_STATE_DIR` selected the
+    /// sandbox, `ZELLIJ_SESSION_NAME` still named his session, and the push
+    /// went where the env said. The store is the fact, so it is refused.
+    #[test]
+    fn a_sandbox_snapshot_may_not_be_pushed_at_the_maintainers_fleet() {
+        let sandbox = PathBuf::from("/home/u/.local/state/clave-dev-triple-card/state");
+        assert_eq!(
+            aim_push(Some(&sandbox), Some("clave")),
+            PushAim::Foreign {
+                owner: "clave-test-triple-card".to_string(),
+                target: "clave".to_string(),
+            }
+        );
+    }
+
+    /// And one sandbox may not reach ANOTHER — each worktree stages its own
+    /// instance, and the reaper joins root to session through the same
+    /// formatter this inverts.
+    #[test]
+    fn one_sandbox_snapshot_may_not_be_pushed_at_another_sandbox() {
+        let sandbox = PathBuf::from("/home/u/.local/state/clave-dev-triple-card/state");
+        assert!(matches!(
+            aim_push(Some(&sandbox), Some("clave-test-prune-wt")),
+            PushAim::Foreign { .. }
+        ));
+    }
+
+    #[test]
+    fn a_sandbox_snapshot_aimed_at_its_own_session_is_aimed_as_asked() {
+        let sandbox = PathBuf::from("/home/u/.local/state/clave-dev-triple-card/state");
+        assert_eq!(
+            aim_push(Some(&sandbox), Some("clave-test-triple-card")),
+            PushAim::At("clave-test-triple-card".to_string())
+        );
+    }
+
+    /// The main checkout's own instance keeps the bare names, and
+    /// `key_from_root_name` refuses to key it on purpose. It is still owned,
+    /// and this guard still applies to it.
+    #[test]
+    fn the_main_checkout_instance_is_owned_too() {
+        let main = PathBuf::from("/home/u/.local/state/clave-dev/state");
+        assert_eq!(
+            aim_push(Some(&main), Some("clave-test")),
+            PushAim::At("clave-test".to_string())
+        );
+        assert!(matches!(
+            aim_push(Some(&main), Some("clave")),
+            PushAim::Foreign { .. }
+        ));
+    }
+
+    /// The inverse mistake: a REAL store's snapshot pushed into a test
+    /// session, which would render a live fleet inside a sandbox.
+    #[test]
+    fn a_real_snapshot_may_not_be_pushed_at_a_sandbox_bar() {
+        let real = PathBuf::from("/home/u/.local/state/clave");
+        assert!(matches!(
+            aim_push(Some(&real), Some("clave-test-triple-card")),
+            PushAim::Foreign { .. }
+        ));
+    }
+
+    /// What must keep working: a real install, aimed at its own session.
+    /// clave cannot predict a real session's name, so an unplaceable pair is
+    /// aimed as asked — narrowing here would be clave breaking working
+    /// installs to protect a drive.
+    #[test]
+    fn a_real_install_is_aimed_as_asked() {
+        let real = PathBuf::from("/home/u/.local/state/clave");
+        assert_eq!(
+            aim_push(Some(&real), Some("clave")),
+            PushAim::At("clave".to_string())
+        );
+        assert_eq!(
+            aim_push(Some(&real), Some("some-other-multiplexer-session")),
+            PushAim::At("some-other-multiplexer-session".to_string())
+        );
+    }
+
+    /// No session in the env: outside a multiplexer there is nothing to
+    /// disagree with, and zellij's own resolution is left as it was.
+    #[test]
+    fn an_unnamed_target_stays_unaimed_rather_than_refused() {
+        let sandbox = PathBuf::from("/home/u/.local/state/clave-dev-triple-card/state");
+        assert_eq!(aim_push(Some(&sandbox), None), PushAim::Unaimed);
+        assert_eq!(aim_push(None, None), PushAim::Unaimed);
+    }
+
+    /// A refused aim carries NO target, so the spawn below it cannot
+    /// accidentally inherit zellij's fallback resolution — the very path
+    /// that made this class of bug reach a live fleet in the first place.
+    #[test]
+    fn a_refused_aim_hands_the_spawn_no_target() {
+        let foreign = PushAim::Foreign {
+            owner: "clave-test-triple-card".to_string(),
+            target: "clave".to_string(),
+        };
+        assert_eq!(foreign.target(), None);
+        assert_eq!(PushAim::Unaimed.target(), None);
+        assert_eq!(
+            PushAim::At("clave-test-x".to_string()).target(),
+            Some("clave-test-x")
+        );
+    }
+
+    /// Matched on the whole segment. A real install called `clave-testbed`
+    /// is not a sandbox, and reading it as one would refuse its own pushes.
+    #[test]
+    fn a_sandbox_session_is_matched_on_the_segment_not_the_prefix() {
+        assert!(crate::sandbox::is_sandbox_session("clave-test"));
+        assert!(crate::sandbox::is_sandbox_session("clave-test-triple-card"));
+        assert!(!crate::sandbox::is_sandbox_session("clave-testbed"));
+        assert!(!crate::sandbox::is_sandbox_session("clave"));
     }
 
     /// No coreutils (stock macOS): a pending perl `alarm` survives exec and

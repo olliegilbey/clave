@@ -184,3 +184,24 @@ mutants-file file *args:
 # Sandbox-validate this working tree WITHOUT installing to the daily surface.
 sandbox scenario="c8-cold-start":
     ./scripts/sandbox-setup.sh {{scenario}}
+
+# Stage, wait for the launch, drive. The WHOLE loop in one command, because
+# the old one was three messages wide — stage, ask the human, be told, drive —
+# and every extra round trip is a chance to drive something that is not the
+# sandbox. This prints the launch command and blocks until the session
+# appears; launching is still the human's and nothing here starts a session.
+#
+# The drive scrubs the inherited zellij identity before its first phase, so
+# every child it spawns aims at the sandbox rather than at whatever fleet this
+# terminal happens to sit inside — and `clave hook` refuses a push whose
+# target does not own the store it wrote (hook.rs `aim_push`), which the
+# drive's own P6b witness phase then counts. All three exist because the
+# 2026-09-11 drive hung the maintainer's live session.
+#
+# Re-runnable: a second `just qa` re-stages, which is what phase 1's row
+# counts assume (the drive MINTS a row at P2 rung 1 by design).
+#
+# Stage + wait for the human's launch + drive phases 0-7, in one command.
+qa scenario="qa-fleet" wait="600":
+    ./scripts/sandbox-setup.sh {{scenario}}
+    QA_WAIT_SECS={{wait}} ./scripts/qa-drive.sh {{scenario}}
