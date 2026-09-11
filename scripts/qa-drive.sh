@@ -461,8 +461,52 @@ LOADED_LINES="$(grep -F 'clave-bar: loaded' "$ZLOG" 2>/dev/null || true)"
 LOADED_TAIL="$(printf '%s\n' "$LOADED_LINES" | tail -5)"
 measure "loaded-tail (last 5)" "$LOADED_TAIL"
 TAIL_MATCH="$(printf '%s\n' "$LOADED_TAIL" | grep -F "build=$BUILD_TAG" | tail -1)"
+
+# An EXACT tag match is the happy path and the only one that needs no
+# argument. But the property this check exists for is "the bar now running
+# was built from the bar source I am testing", and HEAD moves for reasons the
+# bar does not care about: commit a host-only fix, or a doc, and the loaded
+# wasm is suddenly 'stale' by tag while being byte-identical in source. That
+# false red used to mean a kill and a relaunch to clear, which is a strong
+# incentive not to commit mid-drive — the wrong incentive entirely.
+#
+# So an older tag is accepted ONLY when git says the source it was built from
+# is the same source: the `crates/clave-bar` and `crates/clave-types` trees
+# (the bar and the only crate it links) must hash equal at that commit and at
+# HEAD. That is a STRONGER claim than tag equality, not a weaker one — tag
+# equality never looked at the source at all. Anything git cannot resolve
+# (an unknown tag, a dirty tree, `dev`) stays a failure.
+TAG_VERDICT="absent"
+if [[ -n "$TAIL_MATCH" ]]; then
+  TAG_VERDICT="present"
+else
+  # Which build DID load, per the newest loaded line we can see.
+  LOADED_BUILD="$(printf '%s\n' "$LOADED_TAIL" | grep -o 'build=[0-9a-f]\{7,\}' | tail -1 | cut -d= -f2)"
+  measure "loaded build tag (differs from HEAD ${BUILD_TAG})" "${LOADED_BUILD:-empty}"
+  if [[ -n "$LOADED_BUILD" ]]; then
+    SAME_SOURCE="yes"
+    for crate in crates/clave-bar crates/clave-types; do
+      A="$(git -C "$ROOT" rev-parse "${LOADED_BUILD}:${crate}" 2>/dev/null || echo unknown-a)"
+      B="$(git -C "$ROOT" rev-parse "HEAD:${crate}" 2>/dev/null || echo unknown-b)"
+      measure "${crate} tree: loaded=${A} head=${B}" "$([[ "$A" == "$B" ]] && echo same || echo DIFFERENT)"
+      [[ "$A" == "$B" ]] || SAME_SOURCE="no"
+    done
+    # A dirty bar source means the running wasm cannot correspond to the
+    # working tree whatever the trees say, so it is not an escape hatch.
+    if [[ -n "$(git -C "$ROOT" status --porcelain -- crates/clave-bar crates/clave-types 2>/dev/null)" ]]; then
+      SAME_SOURCE="no"
+      printf '[%s %s] NOTE bar/types source is DIRTY — the loaded wasm cannot match the working tree, so the older tag is not accepted\n' \
+        "$CURRENT_PHASE" "$(ts)"
+    fi
+    if [[ "$SAME_SOURCE" == "yes" ]]; then
+      TAG_VERDICT="present"
+      printf '[%s %s] NOTE the loaded bar is build=%s, not HEAD (%s), but the bar and types trees are IDENTICAL at both — the running wasm is the source under test, and HEAD moved on host/docs only\n' \
+        "$CURRENT_PHASE" "$(ts)" "$LOADED_BUILD" "$BUILD_TAG"
+    fi
+  fi
+fi
 measure "loaded-tail matched line (verbatim)" "$TAIL_MATCH"
-check "build tag on loaded tail (any of last 5)" "$([[ -n "$TAIL_MATCH" ]] && echo present || echo absent)" "present"
+check "the loaded bar was built from the bar source under test" "$TAG_VERDICT" "present"
 printf '[%s %s] NOTE same-HEAD re-runs cannot distinguish a stale load here — eyeball the tail timestamps\n' "$CURRENT_PHASE" "$(ts)"
 
 # The clave that HOOKS will resolve must be able to read this sandbox's store.
@@ -699,12 +743,40 @@ if [[ "$SCENARIO" == "qa-fleet" ]]; then
   # (setup.rs `eager_row` — the most-recent row whose cwd still exists)
   # auto-resumes exactly one of them into a live tab, so the STEADY STATE
   # this drive measures is 6 seeded / 5 still dormant / 1 bound.
+  #
+  # IS THIS STAGE FRESH. Asked first, and answered plainly, because the drive
+  # is NOT idempotent and never can be: phases 2-5 bind dormant rows, mint a
+  # row, churn tabs and toggle width — they consume the very starting shape
+  # they assert against. A second run on the same stage therefore fails HERE,
+  # on a count that is a perfectly correct reading of the previous run's
+  # leftovers, and the red says nothing about the code under test. Naming
+  # that cause costs two lines and saves the next agent the half hour this
+  # cost: the counts below are only meaningful against a fresh stage.
+  SEEDED_BOUND=$((SEEDED_ROWS - SEEDED_DORMANT))
+  if [[ "$SEEDED_BOUND" -gt 1 || "$RESIDUE_ROWS" -gt 0 ]]; then
+    cat >&2 <<EOF
+
+  STALE STAGE: ${SEEDED_BOUND} seeded rows are bound (a fresh stage has
+  exactly 1, the eager resume) and ${RESIDUE_ROWS} non-seeded row(s) are
+  present (phase 2 rung 1 mints one per run, by design).
+
+  This drive consumes its own starting conditions, so every count below is
+  reading the PREVIOUS run rather than this build. Re-stage and drive in one
+  command — it waits for your launch:
+
+      zellij kill-session ${SESSION} && zellij delete-session --force ${SESSION}
+      just qa ${SCENARIO}
+
+  Continuing anyway, so the phases that do not depend on the starting shape
+  still report; treat every count in phases 1-5 as suspect.
+
+EOF
+    printf '[%s %s] NOTE STALE STAGE — seeded_bound=%s (fresh: 1), residue=%s. Counts in phases 1-5 read the previous run. Re-stage with `just qa %s`.\n' \
+      "$CURRENT_PHASE" "$(ts)" "$SEEDED_BOUND" "$RESIDUE_ROWS" "$SCENARIO"
+  fi
+  check "the stage is fresh (seeded rows bound == 1, the eager resume)" "$SEEDED_BOUND" "1"
   check "seeded rows == scenario seed count" "$SEEDED_ROWS" "6"
   check "dormant seeded rows after eager resume" "$SEEDED_DORMANT" "5"
-  if [[ "$RESIDUE_ROWS" -gt 0 ]]; then
-    printf '[%s %s] NOTE %s non-seeded row(s) present — an earlier drive on this stage minted them (phase 2 rung 1). Harmless to every assertion below, which all key off the seeded set; `just qa` re-stages if you want a pristine store.\n' \
-      "$CURRENT_PHASE" "$(ts)" "$RESIDUE_ROWS"
-  fi
 fi
 
 # The eager-launch row's tab_id bound (the #178 resume face, P11). The most

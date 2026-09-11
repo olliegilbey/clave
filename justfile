@@ -198,8 +198,12 @@ sandbox scenario="c8-cold-start":
 # drive's own P6b witness phase then counts. All three exist because the
 # 2026-09-11 drive hung the maintainer's live session.
 #
-# Re-runnable: a second `just qa` re-stages, which is what phase 1's row
-# counts assume (the drive MINTS a row at P2 rung 1 by design).
+# The drive is NOT idempotent and cannot be: phases 2-5 bind dormant rows,
+# mint a row and churn tabs, consuming the starting shape they assert
+# against. So a second run needs a fresh stage — which is why this recipe
+# stages every time, and why phase 1 now names a stale stage outright
+# instead of failing on a count that is reading the previous run.
+# Re-staging needs the session down, so the loop is: kill, `just qa`, launch.
 #
 # Stage + wait for the human's launch + drive phases 0-7, in one command.
 qa scenario="qa-fleet" wait="600":
