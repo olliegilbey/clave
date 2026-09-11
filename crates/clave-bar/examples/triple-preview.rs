@@ -346,7 +346,12 @@ fn animate(frame_secs: f64) {
     print!("\u{1b}[?25l"); // hide the cursor
     let rows = fleet();
     let height = rows.len() * RowHeight::Card.lines_per_row();
-    for frame in 0.. {
+    // `wrapping_add` on a counter, not `for frame in 0..`. The shell's own
+    // `anim_frame` wraps (`main.rs`), so this is what the bar actually feeds
+    // `render_rows` — and an unbounded `for` range is a clippy error from Rust
+    // 1.97 on, which CI caught and a 1.96 toolchain cannot.
+    let mut frame: usize = 0;
+    loop {
         print!("\u{1b}[H\u{1b}[2J");
         println!(
             "{}THINKING — {frame_secs}s a frame, Ctrl-C to stop{RESET}\n",
@@ -364,6 +369,7 @@ fn animate(frame_secs: f64) {
             println!("{line}");
         }
         std::thread::sleep(std::time::Duration::from_secs_f64(frame_secs));
+        frame = frame.wrapping_add(1);
     }
 }
 
