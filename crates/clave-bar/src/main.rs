@@ -217,16 +217,30 @@ impl State {
                 // election. An un-elected emitter anywhere else, or an arm that
                 // drops what these two return, would bypass it completely.
                 Effect::AnnounceVisit { tab_id } | Effect::ReanchorVisit { tab_id } => {
-                    run_command(
-                        &[
-                            "zellij",
-                            "pipe",
-                            "--name",
-                            "clave-visited",
-                            "--",
-                            &tab_id.to_string(),
-                        ],
-                        BTreeMap::new(),
+                    // IN-PLUGIN channel, not a `zellij pipe` subprocess (#141).
+                    // The old form spawned a process per landing whose 1s CLI
+                    // timeout blocks the server router (FOOTGUNS.md:110), so
+                    // every nav paid a stall to move one integer. This is the
+                    // same delivery set by construction: with NEITHER
+                    // `plugin_url` NOR `destination_plugin_id` set, the server
+                    // takes the `(None, None)` arm and calls the very function
+                    // a payload-only `zellij pipe` reaches —
+                    // `pipe_to_all_plugins` over `all_plugin_ids()`, which is
+                    // the whole plugin asset map with NO tab or focus filter
+                    // (zellij-server-0.44.3, the `MessageFromPlugin` handler's
+                    // `(None, None)` arm at `plugins/mod.rs:1128-1138`,
+                    // `plugin_map.rs:211`). That is the load-bearing fact: the
+                    // beacon exists to converge instances whose tab is NOT
+                    // focused, and unlike `TabUpdate` this channel does reach
+                    // them. Naming our own URL instead would route through
+                    // `get_or_load_plugins`, which matches on plugin CONFIG as
+                    // well as location and can LAUNCH a plugin when none
+                    // matches — a narrower set for no gain here.
+                    //
+                    // Receivers see `PipeSource::Plugin`, so there is no CLI
+                    // blank twin to drop and no `unblock_cli_pipe_input` owed.
+                    pipe_message_to_plugin(
+                        MessageToPlugin::new("clave-visited").with_payload(tab_id.to_string()),
                     );
                 }
                 Effect::RenameTab { tab_id, name } if presumed => {
@@ -461,8 +475,16 @@ impl State {
         // delivery, and the `clave-toggle` arm below used to treat it as a
         // press — so one scripted Alt+c arrived twice and flipped the bar back
         // to where it started, while the keybind (which is not a CLI pipe)
-        // fired once. The drop line stays: those log lines are how pipe
-        // delivery is counted in the field (QA pipe-delivery P8).
+        // fired once. The drop line stays, but NOT as a delivery count — it
+        // used to be justified by a "QA pipe-delivery P8" that has never
+        // existed in the drive (which runs P0-P7), and the drive's own
+        // `count_eof_twins` says the tally is user-global and unattributable,
+        // so it is recorded for forensics and asserted nowhere. Since #141 the
+        // beacon is not a CLI pipe at all, so what this line now witnesses is
+        // the pipes the HOST binary still pushes: `clave-status` from the
+        // hooks, `clave-register` from `spawn.rs`, and `clave-nav` from the
+        // `add.rs` live pick. Beacon fan-out has its own line in the
+        // `clave-visited` arm below.
         if clave_bar::pipe::is_cli_blank_twin(
             matches!(message.source, PipeSource::Cli(_)),
             message.payload.as_deref(),
@@ -539,6 +561,53 @@ impl State {
                     // sinks ~1s after the last nav (timer per peek; the
                     // Event::Timer arm below sinks only when the count of
                     // pending timers drains to zero).
+                    //
+                    // The fan-out oracle (#141). Until this line, the evidence
+                    // that a beacon reached every instance was the blank twin
+                    // zellij appended to the old CLI announce — one per
+                    // instance, so ten per announce in a real fleet. That was
+                    // an artifact, not a record: it carried no payload and
+                    // existed only because the channel was a CLI pipe. This
+                    // line carries the tab the beacon names and the log's own
+                    // column carries the instance id, so a delivery can be
+                    // read rather than merely tallied.
+                    //
+                    // It does NOT solve the log's session problem, and an
+                    // earlier draft of this comment overclaimed that it did.
+                    // The zellij log is shared by every session on the machine
+                    // and plugin ids are per-server, so ids from two live
+                    // sessions collide and nothing in this line says which
+                    // session it came from. Counting instances across a window
+                    // is only sound when one clave session is running —
+                    // `scripts/nav-bench.sh` checks that and says so. It
+                    // answers the discriminator
+                    // FOOTGUNS spells out for a dead-looking nav: beacon lines
+                    // present and no landing means the executor election
+                    // refused, not that the channel starved. That distinction
+                    // read the wrong way for a day in #162.
+                    //
+                    // IT IS NOT FREE, and the number is here so a later perf
+                    // pass does not have to re-measure it: ten sidebars means
+                    // ten host log writes per gesture, which cost ~16ms of the
+                    // ~41ms the channel swap won back (160ms → 119ms without
+                    // this line, 135ms with it; `scripts/nav-bench.sh`, 30
+                    // gestures, ten instances). Kept deliberately — log volume
+                    // is unchanged from the blank twin this replaces, and the
+                    // #162 ambiguity is worth more than the milliseconds.
+                    // Gating it behind `dbg_log()` was considered and declined
+                    // (#257), on this file's OWN precedent: per-FRAME lines are
+                    // gated because a frame fires on every subscribed event,
+                    // and rare-but-diagnostic lines are not — `click()` logs
+                    // unconditionally because it is what the next #148-class
+                    // bug gets debugged from. A beacon is a gesture, not a
+                    // frame, and it is what the next #162-class bug gets
+                    // debugged from. The gate would also be the wrong shape
+                    // here: `CLAVE_BAR_DEBUG` is read once from the SERVER's
+                    // environment, so turning it on means relaunching the
+                    // fleet — which destroys the intermittent state you wanted
+                    // to observe. If this ever must be switchable, the shape is
+                    // a runtime pipe, not an env read.
+                    eprintln!("clave-bar: beacon {tab_id}");
                     if self.model.visited(tab_id) {
                         self.pending_peeks += 1;
                         set_timeout(PEEK_SINK_SECS); // user-tuned: 1.0 felt a touch long
@@ -572,6 +641,27 @@ impl State {
                 // keypress, a jump to the wrong tab is not.
                 let executor = self.model.nav_executor();
                 let is_executor = executor.is_some();
+                // The latency oracle (#141). One timestamped line per nav
+                // landing, from the ONE instance that acts — the zellij log
+                // stamps it to the millisecond, so the spacing between these
+                // lines is how fast nav keeps up with a key-mash. Before this
+                // line existed the per-landing router stall was inferred from
+                // the code path and never measured, which is why the announce
+                // channel could not be shown to be the cost. Executor-only
+                // keeps it at one line per gesture, not one per instance.
+                //
+                // It fires BEFORE `nav`, so it records the press ARRIVING at
+                // the elected instance, not the selection moving — a press
+                // that cannot move (a walk into the end of the ring) still
+                // logs. That is deliberate: the measurement wants the arrival
+                // timestamp, and a press whose only effect is repainting the
+                // highlight is still a gesture the user is waiting on. What a
+                // MISSING line means is therefore exact — no instance elected
+                // itself, which is the #162 election refusal — and nothing
+                // else can suppress it.
+                if is_executor {
+                    eprintln!("clave-bar: nav landed {payload}");
+                }
                 let fx = self.model.nav(payload, executor);
                 let acted = !fx.is_empty();
                 self.run_effects(fx);
@@ -657,17 +747,25 @@ impl ZellijPlugin for State {
         // not the gate. Nothing before hydration may move the pane, and
         // `load()` is the only point that precedes every render.
         self.model.await_hydration();
-        // §6.6 permission set — EXACTLY these four; grants are all-or-nothing
+        // §6.6 permission set — EXACTLY this list; grants are all-or-nothing
         // per plugin and the prompt is unanswerable in the bar pane, so
         // `clave setup` pre-seeds permissions.kdl with THIS set (both key
         // forms). Changing this list without changing the seed hangs every
-        // pipe (this re-bit S2 — see the ledger).
+        // pipe (this re-bit S2 — see the ledger). `BAR_PERMISSIONS` in
+        // `clave/src/setup.rs` is that seed, and a test there reads THIS
+        // block to keep the two from drifting.
         request_permission(&[
             PermissionType::ReadCliPipes,           // receive the clave-* pipes
             PermissionType::ChangeApplicationState, // focus_pane / rename_tab / hide_self
             PermissionType::ReadApplicationState,   // TabUpdate + PaneUpdate truth
             PermissionType::RunCommands,            // hydrate (clave snapshot) + clave focus
             PermissionType::OpenTerminalsOrPlugins, // Alt+f scratch-shell spawn (#207)
+            // The beacon's in-plugin channel (#141). zellij gates
+            // `pipe_message_to_plugin` on this one because the same call can
+            // LAUNCH a plugin; clave never does, but the check is on the
+            // command, not the arguments. Withhold it and every announce is
+            // silently refused server-side.
+            PermissionType::MessageAndLaunchOtherPlugins,
         ]);
         subscribe(&[
             EventType::TabUpdate,

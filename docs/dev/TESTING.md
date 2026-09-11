@@ -1113,6 +1113,23 @@ Four windows into what actually happened. Learn all four.
   lines_per_row=… row_line=… top=… -> key=…` (`model.rs`'s `click()`), logged
   unconditionally on every mouse click since clicks are rare enough to afford
   it and are what the next `#148`-class bug gets debugged from.
+
+  **The two nav lines are on the same footing — a gesture, not a frame — and
+  are also always on** (`#141`). `clave-bar: nav landed <payload>` comes from
+  the ONE instance the executor election picked, so it is one line per gesture
+  and its timestamps are the latency measurement; `clave-bar: beacon <tab_id>`
+  comes from EVERY instance that receives the announce, so it is one line per
+  sidebar per gesture and it is the fan-out evidence. Read together they settle
+  the ambiguity that cost `#162` a day: **beacon lines present with no landing
+  line is an election refusal, not a starved channel; no beacon lines at all is
+  the channel.** `scripts/nav-bench.sh` consumes both — it bursts N gestures at
+  this worktree's sandbox and reports the median gap between landings plus how
+  many distinct sidebars the beacon reached. Two things make its number honest:
+  fan-out is the variable (on the PRE-`#141` build, 75 ms per gesture at one
+  instance vs 160 ms at ten; the current build measures ~135 ms at ten), and
+  its scripted stimulus is itself a `zellij pipe` that a real keypress never
+  pays — so use the DELTA between two builds, not the absolute figure. The beacon line costs ~16 ms per gesture at ten sidebars, which is
+  recorded and re-decidable in `#257`.
 - **The evlog** — `clave.log`, JSON lines, one per host-side decision. There is
   one per state dir: `~/.local/state/clave/clave.log` for stable,
   `~/.local/state/clave-dev/state/clave.log` for the sandbox.
