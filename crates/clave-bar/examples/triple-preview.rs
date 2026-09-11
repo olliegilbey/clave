@@ -336,7 +336,7 @@ fn fleet() -> Vec<Row> {
 
 /// Seconds a frame holds, overridable: `--animate 0.2`. Not one second — at a
 /// second a card stutters rather than breathes. This is the plugin's own
-/// `ANIM_FRAME_SECS`, restated so the preview moves at the shipping cadence.
+/// `FAST_TICK_SECS`, restated so the preview moves at the shipping cadence.
 const DEFAULT_FRAME_SECS: f64 = 0.2;
 
 /// The whole fleet, redrawn in place until Ctrl-C. The ONLY way to judge an

@@ -274,8 +274,8 @@ pub enum Effect {
     /// not disclose, and the bar watched its own renders to find out what had
     /// happened. That loop is what ran the sidebar to 141 columns and to 11.
     SwapWidth,
-    /// `set_timeout(WIDTH_COOLDOWN_SECS)` again, without swapping anything —
-    /// the ask this expiry belonged to is owed another one (`swap_owed`).
+    /// Arm the shell's fast tick again, without swapping anything — the ask
+    /// this expiry belonged to is owed another one (`swap_owed`).
     /// Distinct from `SwapWidth` because it must NOT call `next_swap_layout`:
     /// the geometry has already been asked for, and asking twice would step
     /// the tab past it.
@@ -378,15 +378,20 @@ pub enum BindStallState {
 /// duration-cutoff scheme the dwell era used.
 pub const PEEK_SINK_SECS: f64 = 0.9;
 
-/// How long a switch ask deafens the width machine (`main.rs` arms it via
-/// `set_timeout` on every `Effect::SwapWidth`). A swap's repaints arrive
-/// QUEUED and stale — the QA-drive trace (2026-08-17) showed a burst of
-/// pre-swap widths landing within ~10ms of the ask — so a machine that
-/// judges every paint spends its whole budget on echoes of its own last
-/// move. One ask buys silence until this clock expires; the expiry judges
-/// the LATEST painted width once. 150ms is an order of magnitude past the
-/// measured burst and well under [`PEEK_SINK_SECS`], which keeps the two
-/// timer kinds separable by elapsed time.
+/// The MINIMUM deafness a switch ask needs. A swap's repaints arrive QUEUED
+/// and stale — the QA-drive trace (2026-08-17) showed a burst of pre-swap
+/// widths landing within ~10ms of the ask — so a machine that judges every
+/// paint spends its whole budget on echoes of its own last move. One ask buys
+/// silence until the deafness is over; the expiry that ends it judges the
+/// LATEST painted width once. 150ms is an order of magnitude past the measured
+/// burst and well under [`PEEK_SINK_SECS`].
+///
+/// A FLOOR, not an interval: since 2026-09-11 nothing arms a timer of this
+/// length. The shell has exactly one fast-band timer (`main.rs`'s
+/// `FAST_TICK_SECS`, 0.2s) and the deafness is measured in its ticks, because
+/// two timers in one classifier band cannot be told apart by the only thing
+/// `Event::Timer` carries. `main.rs` asserts this number stays under that one
+/// at compile time.
 pub const WIDTH_COOLDOWN_SECS: f64 = 0.15;
 
 /// The width machine's walk budget (`BarModel::walk_spent`): the most switch
@@ -684,33 +689,33 @@ pub struct BarModel {
     /// Cleared only by [`Self::width_cooldown_elapsed`], which judges the
     /// latest paint once.
     ///
-    /// A COUNT, not a flag, since 2026-09-10. The four-line card's spinner
-    /// shares the classifier's fast band with this cooldown (both under
-    /// `TIMER_KIND_CUTOFF_SECS`) and elapsed seconds cannot tell them apart,
-    /// so a spinner tick already in flight when the user toggles collapse
-    /// ends the deafness EARLY — usually, since its remaining time is uniform
-    /// in [0, 0.2) against a 0.15s cooldown. The judgement then lands on a
-    /// pre-swap echo, asks again, and spends walk budget that the walk needs:
-    /// three cooldown-spaced asks provably visit every swap position, and a
-    /// budget burnt on echoes leaves the bar stopped at the wrong width until
-    /// the next toggle, peek or refocus.
+    /// A COUNT, not a flag, since 2026-09-10. The shell's fast tick is SHARED
+    /// with the card's spinner (`main.rs`'s `FAST_TICK_SECS`), so a tick can
+    /// already be in flight when the user toggles collapse — and its
+    /// remaining time is unknown, anywhere in (0, tick]. Judging on it ends
+    /// the deafness EARLY, the judgement lands on a pre-swap echo, and it
+    /// spends walk budget the walk needs: three deafness-spaced asks provably
+    /// visit every swap position, and a budget burnt on echoes leaves the bar
+    /// stopped at the wrong width until the next toggle, peek or refocus.
     ///
-    /// So the ask asks for TWO expiries when a spinner was armed and one when
-    /// it was not. Whichever timer the first expiry belonged to, the second is
-    /// at least a full frame behind it, so the deafness is always at least one
-    /// [`WIDTH_COOLDOWN_SECS`] and usually more. `main.rs` re-arms a cooldown
-    /// each time this decrements without reaching zero, so the count cannot
-    /// strand if the spinner disarms mid-swap — which it does, the moment the
+    /// So the ask asks for TWO ticks when one was already running and one when
+    /// none was. The second is a full tick behind the first, so the deafness
+    /// is always at least one tick, which the shell asserts is at least one
+    /// [`WIDTH_COOLDOWN_SECS`]. The count is exact because there is exactly
+    /// ONE fast timer to count — that is why the shell has only one. The model
+    /// asks for the second tick itself, so the count cannot strand when the
+    /// spinner that was driving the ticks stops, which it does the moment the
     /// last turn ends.
     swap_owed: u8,
-    /// The shell's animation timer is armed (`main.rs`'s `anim_armed`,
-    /// mirrored here by [`Self::set_animating`]). MIRRORED rather than
-    /// re-derived: a second predicate over "is any row mid-turn and does this
-    /// geometry spin" could disagree with the one that actually armed the
-    /// timer, and the disagreement would show up only as a rare width bug.
-    /// Read at exactly one place — the instant of a switch ask, which is the
-    /// only moment a foreign fast-band expiry can steal.
-    animating: bool,
+    /// The shell's one fast-band timer is in flight (`main.rs`'s
+    /// `fast_armed`, mirrored here by [`Self::set_fast_tick_armed`]).
+    /// MIRRORED rather than re-derived: a second predicate over "is any row
+    /// mid-turn and does this geometry spin" could disagree with the one that
+    /// actually armed the timer, and the disagreement would show up only as a
+    /// rare width bug. Read at exactly one place — the instant of a switch
+    /// ask, which is the only moment a tick this model did not ask for can
+    /// steal something.
+    fast_tick_armed: bool,
     /// The width of the most recent paint, recorded deaf or not — what the
     /// cooldown expiry judges instead of the paint that preceded the ask.
     last_painted: Option<usize>,
@@ -3011,33 +3016,34 @@ impl BarModel {
             return Vec::new();
         }
         self.walk_spent = Some((want, spent + 1));
-        // See `swap_owed`. `animating` is the shell's answer to "is a spinner
-        // tick already in flight", asked at the instant of the ask because
-        // that is the only moment it matters.
-        self.swap_owed = if self.animating { 2 } else { 1 };
+        // See `swap_owed`. The mirror is the shell's answer to "is a fast
+        // tick already in flight" — asked at the instant of the ask, because
+        // that is the only moment it matters, and answered exactly because
+        // the shell keeps exactly one such timer.
+        self.swap_owed = if self.fast_tick_armed { 2 } else { 1 };
         vec![Effect::SwapWidth]
     }
 
-    /// The shell's animation timer was just armed, or just fired. Mirrors
-    /// `main.rs`'s `anim_armed` into the model so a switch ask can know
-    /// whether a foreign fast-band expiry is already on its way — see
-    /// `swap_owed`. The shell is the only writer, and it writes on both
-    /// edges: an unmirrored disarm would buy every ask a second expiry
-    /// forever, doubling the deafness on a fleet that stopped spinning.
-    pub fn set_animating(&mut self, armed: bool) {
-        self.animating = armed;
+    /// The shell's fast tick was just armed, or just fired. Mirrors
+    /// `main.rs`'s `fast_armed` into the model so a switch ask can know
+    /// whether a tick it did not arm is already on its way — see `swap_owed`.
+    /// The shell is the only writer, and it writes on both edges: an
+    /// unmirrored disarm would buy every ask a second tick forever, doubling
+    /// the deafness on a fleet that stopped spinning.
+    pub fn set_fast_tick_armed(&mut self, armed: bool) {
+        self.fast_tick_armed = armed;
     }
 
-    /// A fast-band timer fired: spend one of the expiries this ask is owed,
-    /// and judge the latest painted width once the last of them is in. Inert
-    /// when no ask is in flight, so a misrouted expiry (the peek sink shares
-    /// the event) costs nothing.
+    /// A timer fired: spend one of the ticks this ask is owed, and judge the
+    /// latest painted width once the last of them is in. Inert when no ask is
+    /// in flight, so a misrouted expiry (the peek sink shares the event)
+    /// costs nothing.
     ///
-    /// [`Effect::RearmWidthCooldown`] is how an ask owed two expiries still
-    /// gets them when the spinner that justified the second one disarms in
-    /// between — the model asks for its own next tick rather than trusting a
-    /// timer it does not own. Nothing here reads a clock: the model has only
-    /// whole seconds and the deafness is measured in tenths.
+    /// [`Effect::RearmWidthCooldown`] is how an ask owed two ticks still gets
+    /// them when the spinner that was driving them stops in between — the
+    /// model asks for its own next tick rather than trusting a timer it does
+    /// not own. Nothing here reads a clock: the model has only whole seconds
+    /// and the deafness is measured in tenths.
     pub fn width_cooldown_elapsed(&mut self) -> Vec<Effect> {
         if self.swap_owed == 0 {
             return Vec::new();
@@ -6270,13 +6276,12 @@ mod tests {
         assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
     }
 
-    /// **The band collision.** `Event::Timer` carries only elapsed seconds,
-    /// and the four-line card's spinner ([`ANIM_FRAME_SECS`], 0.2s) shares the
-    /// fast band with the switch cooldown ([`WIDTH_COOLDOWN_SECS`], 0.15s) —
-    /// no reading separates them. So a spinner tick already in flight when the
-    /// user toggles collapse arrives BEFORE the cooldown it is mistaken for,
-    /// and the deafness ends early: its remaining time is uniform in
-    /// [0, 0.2), so it beats a 0.15s cooldown most of the time.
+    /// **The shared tick.** The card's spinner and the switch deafness run
+    /// off the SAME timer (`main.rs`'s `FAST_TICK_SECS`) — one timer, because
+    /// `Event::Timer` carries only elapsed seconds and two intervals in one
+    /// band cannot be told apart. So a tick already in flight when the user
+    /// toggles collapse arrives before a full deafness has passed: its
+    /// remaining time is anywhere in (0, 0.2].
     ///
     /// What that costs is the whole point. The early judgement lands on a
     /// pre-swap echo — the exact paint the cooldown exists to ignore — and
@@ -6291,7 +6296,7 @@ mod tests {
     #[test]
     fn a_spinner_tick_cannot_cut_the_switch_deafness_short() {
         let mut m = focused_bar();
-        m.set_animating(true); // some row is mid-turn; a frame is in flight
+        m.set_fast_tick_armed(true); // some row is mid-turn; a frame is in flight
         m.toggle(); // wants collapsed
         assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
         // The spinner's frame lands first, wearing the cooldown's clothes.
@@ -6321,7 +6326,7 @@ mod tests {
     #[test]
     fn a_fleet_with_no_spinner_running_judges_on_the_first_expiry() {
         let mut m = focused_bar();
-        assert!(!m.animating, "default is quiet");
+        assert!(!m.fast_tick_armed, "default is quiet");
         m.toggle(); // wants collapsed
         assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
         // No frame can be in flight, so this expiry is the cooldown's own.
@@ -6341,12 +6346,12 @@ mod tests {
     #[test]
     fn the_spinner_stopping_mid_swap_does_not_strand_the_owed_expiry() {
         let mut m = focused_bar();
-        m.set_animating(true);
+        m.set_fast_tick_armed(true);
         m.toggle(); // wants collapsed
         assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
         // The last turn ends here: the frame fires, the shell disarms, and no
         // paint re-arms it. Only the model's own request is left.
-        m.set_animating(false);
+        m.set_fast_tick_armed(false);
         assert_eq!(m.width_cooldown_elapsed(), vec![Effect::RearmWidthCooldown]);
         assert_eq!(m.width_effects(Some(EXP_W)), Vec::<Effect>::new());
         assert_eq!(
@@ -6364,7 +6369,7 @@ mod tests {
     #[test]
     fn an_owed_expiry_is_never_answered_with_a_second_swap() {
         let mut m = focused_bar();
-        m.set_animating(true);
+        m.set_fast_tick_armed(true);
         m.toggle();
         assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
         let owed = m.width_cooldown_elapsed();
