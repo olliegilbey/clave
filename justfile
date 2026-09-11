@@ -205,6 +205,17 @@ sandbox scenario="c8-cold-start":
 # instead of failing on a count that is reading the previous run.
 # Re-staging needs the session down, so the loop is: kill, `just qa`, launch.
 #
+# THE MAINTAINER'S COMMAND, and his alone. `clave dev launch` refuses when
+# ZELLIJ is set, so an agent — always inside a session — cannot run this; it
+# gets a refusal that tells it to hand the command over instead. Everything
+# the launch needs is derived from the working tree: the session name, the
+# state and data dirs, and the PATH shim that makes a bare `clave` resolve to
+# THIS build instead of the stable install.
+#
+# Run it in a new terminal window OUTSIDE zellij.
+launch:
+    ./target/release/clave dev launch
+
 # Stage + wait for the human's launch + drive phases 0-7, in one command.
 qa scenario="qa-fleet" wait="600":
     ./scripts/sandbox-setup.sh {{scenario}}

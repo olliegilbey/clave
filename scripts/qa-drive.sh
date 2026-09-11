@@ -229,11 +229,12 @@ if [[ "$SESSION_LIVE" != "true" && "$QA_WAIT_SECS" -gt 0 ]]; then
 ==> Waiting up to ${QA_WAIT_SECS}s for '${SESSION}'. Launch it YOURSELF, in a
     NEW terminal window OUTSIDE zellij:
 
-    CLAVE_SESSION=${SESSION} \\
-    CLAVE_STATE_DIR=${STATE_DIR} \\
-    CLAVE_DATA_DIR=${DATA_DIR} \\
-    PATH="$("$CLAVE_BIN" dev instance --field shim 2>/dev/null):\$PATH" \\
-      ${CLAVE_BIN} dev launch
+    cd ${ROOT}
+    just launch
+
+    That derives everything — session, state and data dirs, and the PATH shim
+    that makes a bare \`clave\` resolve to THIS build. It refuses if run from
+    inside a zellij session, which is why it is yours and not the agent's.
 
     The drive starts by itself the moment the session is up.
 

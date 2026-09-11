@@ -678,9 +678,73 @@ fn force_sandbox(sb: &crate::sandbox::Sandbox) {
 /// user in a non-zellij terminal, replacing the printed env-var wall.
 pub fn run_launch() -> Result<()> {
     let sb = crate::sandbox::Sandbox::resolve()?;
+    // A sandbox session cannot be launched from INSIDE a zellij session: it
+    // would nest, and the agent driving all of this is always inside one.
+    // So the rule "launching is the human's" stops being prose a reader has
+    // to find and becomes a refusal the machine issues — which is the same
+    // move as `aim_push` and the drive's identity scrub, for the same reason:
+    // a rule nothing enforces is one edit, or one new agent, from being gone.
+    if std::env::var_os("ZELLIJ").is_some() {
+        anyhow::bail!("{}", nested_launch_refusal(&sb));
+    }
     sb.ensure()?;
     enter_sandbox(&sb);
+    shim_first_on_path(&sb);
     crate::setup::launch_session()
+}
+
+/// What to say to whoever just tried to launch from inside a session. Split
+/// out to be testable, and written for a reader with ZERO context: it names
+/// the one thing they should do instead, in full, rather than describing a
+/// rule and leaving them to derive the command.
+fn nested_launch_refusal(sb: &crate::sandbox::Sandbox) -> String {
+    let cd = match &sb.origin {
+        Some(o) => format!("cd {}\n    ", o.display()),
+        None => String::new(),
+    };
+    format!(
+        "refusing to launch '{}' from inside a zellij session (ZELLIJ is set).\n\
+         \n\
+         Launching is the MAINTAINER's step and belongs in a new terminal\n\
+         window outside zellij — nesting a sandbox inside a live session is\n\
+         how the two get confused for each other. An agent cannot do this and\n\
+         should not try: print the command and let the human run it.\n\
+         \n    \
+         {cd}just launch\n\
+         \n\
+         Staging (yours) is `just sandbox <scenario>`; `just qa <scenario>`\n\
+         stages, waits for that launch, and drives the whole QA loop.",
+        sb.session
+    )
+}
+
+/// The shim FIRST on `PATH`, so a bare `clave` anywhere inside the launched
+/// session resolves to the build under test rather than the stable install.
+///
+/// This is not cosmetic — it is the #43/#44 leak: the bar shells out to a
+/// bare `clave` (`clave_binary "clave"` in the generated config) and every
+/// Claude Code hook runs `clave hook <Event>`, so without the shim a sandbox
+/// silently tests whatever is in `~/.local/share/clave/bin`. It was the
+/// caller's job until now, pasted into a five-line `PATH=... CLAVE_...=...`
+/// prefix on every single launch, which is exactly the kind of step that gets
+/// dropped once and then debugged for an hour. `dev launch` already derives
+/// the three `CLAVE_*` vars (`enter_sandbox`); deriving the fourth makes the
+/// prefix unnecessary rather than merely tedious.
+fn shim_first_on_path(sb: &crate::sandbox::Sandbox) {
+    let shim = sb.shim_dir();
+    let current = std::env::var_os("PATH").unwrap_or_default();
+    // Idempotent: a caller still pasting the old prefix has it first already,
+    // and a second copy would only make `PATH` harder to read in a bug report.
+    if let Some(s) = current.to_str()
+        && s.split(':').next() == shim.to_str()
+    {
+        return;
+    }
+    let mut joined = std::ffi::OsString::from(&shim);
+    joined.push(":");
+    joined.push(&current);
+    // SAFETY: single-threaded CLI entry point; set before any spawn.
+    unsafe { std::env::set_var("PATH", joined) };
 }
 
 /// `clave dev instance`: which sandbox this working tree stages into.
@@ -1920,6 +1984,44 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The refusal has to TEACH, not just decline: whoever hit it is either a
+    /// human in the wrong terminal or an agent that should have handed the
+    /// command over, and both need the next action spelled out.
+    #[test]
+    fn the_nested_launch_refusal_names_the_command_to_hand_over() {
+        let home = std::path::Path::new("/home/u");
+        let sb = crate::sandbox::Sandbox::new(
+            home,
+            Some("triple-card".to_string()),
+            Some(std::path::PathBuf::from(
+                "/home/u/code/clave/.claude/worktrees/triple-card",
+            )),
+        );
+        let msg = nested_launch_refusal(&sb);
+        assert!(msg.contains("clave-test-triple-card"), "{msg}");
+        assert!(msg.contains("ZELLIJ is set"), "{msg}");
+        // The cd is load-bearing — the instance is cwd-keyed, so a launch from
+        // the wrong directory silently targets a different sandbox.
+        assert!(
+            msg.contains("cd /home/u/code/clave/.claude/worktrees/triple-card"),
+            "{msg}"
+        );
+        assert!(msg.contains("just launch"), "{msg}");
+        // And it must point at the loop, so a zero-context reader does not
+        // have to go find out what staging is called.
+        assert!(msg.contains("just qa"), "{msg}");
+    }
+
+    /// The main checkout has no origin marker (it is never a reap candidate),
+    /// so the refusal must still be useful without one.
+    #[test]
+    fn the_nested_launch_refusal_survives_an_instance_with_no_origin() {
+        let sb = crate::sandbox::Sandbox::new(std::path::Path::new("/home/u"), None, None);
+        let msg = nested_launch_refusal(&sb);
+        assert!(msg.contains("just launch"), "{msg}");
+        assert!(!msg.contains("cd \n"), "no empty cd line: {msg}");
     }
 
     #[test]
