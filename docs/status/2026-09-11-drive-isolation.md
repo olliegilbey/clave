@@ -128,8 +128,12 @@ have passed happily on the day it was written.
 
 ## Verification
 
-Four gates green: 384 + 11 + 15 + 4 + 1 host tests (the 4 are the new
-`script_hygiene` suite), 284 bar, 29 types; clippy clean; wasm builds.
+Four gates green: 382 + 11 + 15 + 4 + 1 host tests (the 4 are the new
+`script_hygiene` suite), 284 bar, 29 types; clippy clean; wasm builds. The
+host count is net-down two: `launch_command` and its two format-shape tests
+went with the env-prefix wall it printed, and the per-worktree property they
+guarded is asserted directly in `sandbox.rs`
+(`a_linked_worktree_gets_its_own_session_and_root`).
 
 Both new guards were confirmed to FAIL when the property they protect is
 broken on purpose — the script-hygiene test against a reintroduced direct

@@ -25,9 +25,19 @@ just setup-toolchain     # adds the wasm32-wasip1 target
 just sandbox             # builds, wires an isolated sandbox, verifies it
 ```
 
-`just sandbox` prints the exact command to launch it. **Run that yourself, in a
-new terminal, outside zellij** — clave creates its own multiplexer session, so
-launching from inside one nests them.
+Then launch it yourself, **in a new terminal, outside zellij** — clave creates
+its own multiplexer session, so launching from inside one nests them:
+
+```bash
+cd <your checkout>      # the instance is keyed off the working directory
+just launch
+```
+
+`clave dev launch` refuses when `ZELLIJ` is set, so that nesting is a refusal
+rather than a rule to remember — which also means an agent cannot take this
+step and will hand you the command instead. Everything else it derives: the
+session name, the state and data dirs, and the `PATH` shim that makes a bare
+`clave` resolve to your build rather than an installed one.
 
 That gives you a throwaway `clave-test` session with synthetic agents, entirely
 separate from any real clave install. Reset it any time with `clave dev reset`.
@@ -48,7 +58,7 @@ artifacts, so it reproduces production by construction.
 
 | | Day-to-day (stable) | Development (sandbox) |
 |---|---|---|
-| **Launch** | `clave`, in a non-zellij terminal | the command `just sandbox` prints |
+| **Launch** | `clave`, in a non-zellij terminal | `just launch`, in a non-zellij terminal |
 | **Zellij session** | `clave` | `clave-test` |
 | **State** (store, evlog) | `~/.local/state/clave/` | `~/.local/state/clave-dev/state/` |
 | **Artifacts** (wasm, config) | `~/.local/share/clave/` | `~/.local/state/clave-dev/data/` |

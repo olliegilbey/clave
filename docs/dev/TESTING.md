@@ -908,9 +908,11 @@ mismatches invents a bug, and filtering them out silently hides one — print
 every pane and mark the unresolvable ones.
 
 **QA-DRIVE.md and `scripts/qa-drive.sh` are this loop's phases 0–2, scripted.**
-After the human stages and launches, the script proves the build, joins the
-baseline, and drives the bind ladder in one traced run, with the same
-never-discard-output discipline as above. The manual steps here remain the
+`just qa <scenario>` runs the whole thing as one command — it stages, prints
+the launch line, waits for the human to run it, and drives the moment the
+session is up. The script proves the build, joins the baseline, and drives the
+bind ladder in one traced run, with the same never-discard-output discipline as
+above. The manual steps here remain the
 fallback, and are still the source for phases 3–7, which are not yet
 scripted.
 

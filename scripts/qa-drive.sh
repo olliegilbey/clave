@@ -6,7 +6,8 @@
 # hand-back, scripted against THIS checkout's per-worktree sandbox instance.
 #
 # ALL PHASES DRIVEN LIVE GREEN — run 4, 2026-08-17, full 0-7 pass plus both
-# human eyeball checkpoints. The list below was the FIRST LIVE RUN PENDING
+# human eyeball checkpoints; and run 11, 2026-09-11, all TEN phases (0-7 with
+# 5b card-cells and 6b isolation-witness), first run of the `just qa` loop. The list below was the FIRST LIVE RUN PENDING
 # ledger; it is kept because each entry records an assumption a live run had
 # to settle, and how the first runs settled them: runs 1-3 each went red on a
 # real finding first (the stale-executor nav wedge, the starved-bar prune of
@@ -67,15 +68,34 @@ usage() {
 usage: $0 <scenario>
 
 Drives QA-DRIVE phases 0-7 (preflight, baseline join, bind ladder, tab churn,
-ring walk, collapse burst, quiescence, teardown hand-back) against
-THIS checkout's per-worktree sandbox instance (\`clave dev instance\`). Never
-launches or kills a zellij session — stage and launch first:
+ring walk, collapse burst, card cells, quiescence, isolation witness, teardown
+hand-back) against THIS checkout's per-worktree sandbox instance
+(\`clave dev instance\`). Never launches or kills a zellij session.
+
+USUALLY YOU WANT: \`just qa <scenario>\` — it stages, prints the launch line,
+waits for the human to run it, and then calls this script. One command for the
+whole loop.
+
+This script alone assumes the session is ALREADY staged and launched:
 
   just sandbox <scenario>
-  clave dev scenario <scenario>   # if not already seeded by \`just sandbox\`
-  (human, non-zellij terminal) clave dev launch
+  (human, non-zellij terminal) cd <worktree> && just launch
 
-then run this. Refuses closed if the instance's sandbox session is not live.
+and refuses closed if the instance's sandbox session is not live. Set
+QA_WAIT_SECS=<n> to wait for the launch instead of refusing.
+
+NOT IDEMPOTENT, by design: phase 2 rung 1 mints a row and the middle phases
+consume the fleet shape they assert against, so a re-run needs a fresh stage.
+Phase 1 says so plainly when the stage is stale instead of failing a count
+that is correctly reading the previous run.
+
+Isolation: this script scrubs the inherited zellij identity before its first
+phase, so every child aims at the sandbox rather than at whatever session the
+calling terminal sits inside. Fire hooks ONLY through \`ct.sh --hook\` —
+\`crates/clave/tests/script_hygiene.rs\` fails the build otherwise, and
+\`clave hook\` itself refuses a push whose target does not own the store it
+wrote. All three exist because a hand-rolled hook call hung the maintainer's
+live session on 2026-09-11 (FOOTGUNS #281).
 
   <scenario>   the scenario name already staged/launched (e.g. qa-fleet).
                Informational for the report header and for phase 1's exact

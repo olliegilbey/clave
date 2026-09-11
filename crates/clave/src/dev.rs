@@ -595,36 +595,6 @@ pub fn scenario_rotated_uuid(n: u32) -> String {
     format!("00000000-0000-4000-8000-c85c{:08}", n + 50)
 }
 
-/// The ONE command printed for Ollie to launch the sandboxed session.
-///
-/// Deliberately NO CLAUDE_CONFIG_DIR (revised 2026-07-18, live finding +
-/// user ruling): sandboxing claude's identity dragged auth along with it
-/// ("Not logged in" / stale-credential failures) — clave is a thin wrapper
-/// for terminal control, and claude's identity is not its business. The
-/// sandbox isolates CLAVE's state only; scenario transcripts land in the
-/// real ~/.claude/projects tagged by the deterministic c85c uuids, and
-/// `dev reset` removes them by that tag.
-///
-/// `clave-dev`, NOT bare `clave` (#43b): `just dev-install` now installs the
-/// working-tree CLI under that name precisely so it stops colliding with the
-/// daily surface — so bare `clave` here would either be `command not found` on
-/// a contributor's box or, worse, silently drive the sandbox with the STABLE
-/// release instead of the working tree under test.
-///
-/// The env prefix is not decoration now that the instance is per-worktree
-/// (`sandbox.rs`): this line is meant to be pasted into a fresh terminal in
-/// an arbitrary directory, where `dev launch`'s own cwd-based derivation
-/// would resolve to the MAIN checkout's sandbox instead of the worktree that
-/// printed it. `enter_sandbox` therefore lets an explicit value win.
-pub fn launch_command(sb: &crate::sandbox::Sandbox) -> String {
-    format!(
-        "CLAVE_SESSION={} CLAVE_STATE_DIR={} CLAVE_DATA_DIR={} clave-dev",
-        sb.session,
-        sb.state_dir().display(),
-        sb.data_dir().display()
-    )
-}
-
 /// Should this variable be filled in from the derived instance? Only when
 /// the caller did not name one — same "override always wins, empty means
 /// unset" rule as `env::session_name_from` / `env::dir_from`. Pure because
@@ -637,8 +607,16 @@ pub fn env_should_be_derived(current: Option<&str>) -> bool {
 /// `claude -p` runs as the REAL user identity but its hook invocations
 /// inherit CLAVE_STATE_DIR and land in the sandbox store).
 ///
-/// An explicitly set variable WINS, so the env-prefixed `launch_command`
-/// stays truthful when it is pasted somewhere else on disk.
+/// Deliberately NO CLAUDE_CONFIG_DIR (revised 2026-07-18, live finding +
+/// user ruling): sandboxing claude's identity dragged auth along with it
+/// ("Not logged in" / stale-credential failures) — clave is a thin wrapper
+/// for terminal control, and claude's identity is not its business. The
+/// sandbox isolates CLAVE's state only; scenario transcripts land in the
+/// real ~/.claude/projects tagged by the deterministic c85c uuids, and
+/// `dev reset` removes them by that tag.
+///
+/// An explicitly set variable WINS, so a caller that names an instance
+/// explicitly (a drive script, a test harness) keeps it.
 fn enter_sandbox(sb: &crate::sandbox::Sandbox) {
     let vars: [(&str, std::ffi::OsString); 3] = [
         ("CLAVE_SESSION", sb.session.clone().into()),
@@ -900,7 +878,7 @@ pub fn run_scenario(name: &str) -> Result<()> {
         std::fs::create_dir_all(root.join(d))?;
     }
     // NO claude-identity sandboxing (2026-07-18 ruling — see
-    // launch_command): claude runs as the real user; transcripts go to the
+    // enter_sandbox): claude runs as the real user; transcripts go to the
     // real ~/.claude/projects and are c85c-tagged for reset cleanup. Hooks
     // are already registered in the real settings.json (run_setup below
     // re-merges idempotently); hook processes inherit CLAVE_STATE_DIR from
@@ -981,10 +959,19 @@ pub fn run_scenario(name: &str) -> Result<()> {
         }
     }
     crate::evlog::log_event("dev", &format!("scenario {name} seeded"));
-    println!("\nScenario `{name}` ready. Launch (your command, in a NON-zellij terminal):\n");
-    println!("  clave-dev dev launch");
-    println!("\n(equivalent env form: {})", launch_command(&sb));
-    println!("\nWhen done: `clave-dev dev reset` (prints the kill command first).");
+    println!(
+        "\nScenario `{name}` ready. Launch (the MAINTAINER's step, in a NON-zellij terminal):\n"
+    );
+    if let Some(origin) = &sb.origin {
+        println!("  cd {}", origin.display());
+    }
+    println!("  just launch");
+    // The `cd` is the only part a reader has to get right: the instance is
+    // keyed off the working directory, so launching from elsewhere stages one
+    // sandbox and launches another. Everything else is derived by `dev launch`
+    // itself - an env prefix printed here would omit the PATH shim and so
+    // silently drive the sandbox with the stable install (#43/#44).
+    println!("\nWhen done: `clave dev reset` (prints the kill command first).");
     Ok(())
 }
 
@@ -2024,48 +2011,9 @@ mod tests {
         assert!(!msg.contains("cd \n"), "no empty cd line: {msg}");
     }
 
-    #[test]
-    fn launch_command_sandboxes_clave_state_only() {
-        // §6.9 revised 2026-07-18: CLAVE state is sandboxed; claude's
-        // identity is deliberately NOT (thin-wrapper ruling — sandboxing
-        // it dragged auth along and broke seeding).
-        let main = crate::sandbox::Sandbox::new(std::path::Path::new("/h"), None, None);
-        let cmd = launch_command(&main);
-        assert!(cmd.contains("CLAVE_SESSION=clave-test"));
-        assert!(cmd.contains("CLAVE_STATE_DIR=/h/.local/state/clave-dev/state"));
-        assert!(cmd.contains("CLAVE_DATA_DIR=/h/.local/state/clave-dev/data"));
-        assert!(!cmd.contains("CLAUDE_CONFIG_DIR"));
-        // clave-dev, not clave (#43b): dev-install stopped writing the
-        // daily name, so the printed command must name what it installs.
-        assert!(cmd.trim_end().ends_with("clave-dev"));
-    }
-
-    /// The printed command is meant to be pasted into a fresh terminal in an
-    /// unknown directory, so it must carry the WORKTREE's instance and not
-    /// the one `dev launch` would derive from wherever it is run. Witness:
-    /// every one of the three values differs from the main checkout's.
-    #[test]
-    fn launch_command_carries_this_worktrees_instance_not_the_shared_one() {
-        let wt = crate::sandbox::Sandbox::new(
-            std::path::Path::new("/h"),
-            Some("prune-wt".into()),
-            Some("/h/code/clave/wt/prune-wt".into()),
-        );
-        let cmd = launch_command(&wt);
-        assert!(cmd.contains("CLAVE_SESSION=clave-test-prune-wt"), "{cmd}");
-        assert!(
-            cmd.contains("CLAVE_STATE_DIR=/h/.local/state/clave-dev-prune-wt/state"),
-            "{cmd}"
-        );
-        assert!(
-            cmd.contains("CLAVE_DATA_DIR=/h/.local/state/clave-dev-prune-wt/data"),
-            "{cmd}"
-        );
-    }
-
-    /// An explicitly set variable wins, which is what makes the pasted
-    /// `launch_command` truthful. The rival is the old unconditional
-    /// `set_var`, under which the middle case would also be derived.
+    /// An explicitly set variable wins, so a caller that names an instance
+    /// keeps it. The rival is the old unconditional `set_var`, under which
+    /// the middle case would also be derived.
     #[test]
     fn an_explicit_env_value_wins_over_the_derived_instance() {
         assert!(env_should_be_derived(None));

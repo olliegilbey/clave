@@ -20,13 +20,41 @@
 const DRIVE: &str = include_str!("../../../scripts/qa-drive.sh");
 const CT: &str = include_str!("../../../scripts/ct.sh");
 
-/// Lines that actually run something — comments and blanks carry no risk, and
-/// both scripts discuss the hazard at length in prose that must not trip this.
-fn code_lines(src: &str) -> impl Iterator<Item = (usize, &str)> {
-    src.lines()
-        .enumerate()
-        .map(|(i, l)| (i + 1, l.trim()))
-        .filter(|(_, l)| !l.is_empty() && !l.starts_with('#'))
+/// Lines that actually run something — comments, blanks and heredoc bodies
+/// carry no risk, and both scripts discuss the hazard at length in prose that
+/// must not trip this. The usage text is a heredoc and names `clave hook`
+/// twice, which is the point of it.
+fn code_lines(src: &str) -> Vec<(usize, &str)> {
+    let mut out = Vec::new();
+    let mut open: Option<String> = None;
+    for (i, raw) in src.lines().enumerate() {
+        let line = raw.trim();
+        if let Some(tag) = &open {
+            if line == tag {
+                open = None;
+            }
+            continue;
+        }
+        open = heredoc_tag(raw);
+        if !line.is_empty() && !line.starts_with('#') {
+            out.push((i + 1, line));
+        }
+    }
+    out
+}
+
+/// The tag a line opens a heredoc with, if it opens one. Quoted or not,
+/// `<<-` or not; a bare word only, so a left shift is not mistaken for one.
+fn heredoc_tag(line: &str) -> Option<String> {
+    let tag = line
+        .split("<<")
+        .nth(1)?
+        .trim_start_matches('-')
+        .trim()
+        .trim_matches(|c| c == '\'' || c == '"')
+        .to_string();
+    let wordy = !tag.is_empty() && tag.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    wordy.then_some(tag)
 }
 
 /// Lines that only REPORT. The drive narrates itself constantly, and its
@@ -42,6 +70,7 @@ fn is_reporting(line: &str) -> bool {
 #[test]
 fn the_drive_never_fires_a_hook_except_through_ct_sh() {
     let offenders: Vec<_> = code_lines(DRIVE)
+        .into_iter()
         .filter(|(_, l)| !is_reporting(l))
         .filter(|(_, l)| l.contains(" hook ") || l.contains("clave hook"))
         .filter(|(_, l)| !l.contains("--hook"))
