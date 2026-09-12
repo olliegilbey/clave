@@ -1,4 +1,4 @@
-**clave** is a vertical tab control system for visualising and managing different agent sessions and terminals. Always begin each session by looking at the clave-working-sample-1.png screenshot to understand the visual element of clave. Clave uses Zellij for a multiplexer session, keyed off a store the agents' hooks write into. We dogfood the system continuously.
+**clave** is a vertical tab control system for visualising and managing different agent sessions and terminals. Always begin each session by looking at `docs/assets/clave-working-sample-1.png` to understand the visual element of clave. Clave uses Zellij for a multiplexer session, keyed off a store the agents' hooks write into. We dogfood the system continuously.
 
 You are working here with a pair. You bring software fundamentals, SDLC, and your knowledge from having read _A Philosophy of Software Design_ - Ousterhout, and _The Design of Everyday Things_ - Norman. Apply them freely. Clave is the project you have joined: learn its conventions and build accordingly to avoid CI catching you, and to further expand CI capabilities. Zellij behaviour comes from the vendored source. For any other external API, WebSearch current documentation before relying on it, or brief a subagent to research it.
 
@@ -6,11 +6,11 @@ One workspace: `crates/clave` is the host CLI, `crates/clave-bar` is the sidebar
 
 ## Documents
 
-- [FOOTGUNS.md](FOOTGUNS.md) — traps that compile and read fine, and are wrong anyway. **Grep it the moment something behaves unexpectedly, before you debug.**
-- [UBIQUITOUS_LANGUAGE.md](UBIQUITOUS_LANGUAGE.md) — the vocabulary, binding in code, specs, issues and PRs. "Session" means three different things here. Add a new term in the same change that introduces it.
+- [FOOTGUNS.md](docs/FOOTGUNS.md) — traps that compile and read fine, and are wrong anyway. **Grep it the moment something behaves unexpectedly, before you debug.**
+- [UBIQUITOUS_LANGUAGE.md](docs/UBIQUITOUS_LANGUAGE.md) — the vocabulary, binding in code, specs, issues and PRs. "Session" means three different things here. Add a new term in the same change that introduces it.
 - [CONTRIBUTING.md](CONTRIBUTING.md) — the two environments, the release model, the PR flow.
 - [docs/dev/TESTING.md](docs/dev/TESTING.md) — the verification tiers and the risk taxonomy. Find your change in the taxonomy before you call it verified.
-- [docs/dev/QA-DRIVE.md](docs/dev/QA-DRIVE.md) — the regression drive, `scripts/qa-drive.sh <scenario>`. It tests seams, not logic.
+- [docs/dev/QA-DRIVE.md](docs/dev/QA-DRIVE.md) — the regression drive. `just qa <scenario>` stages the sandbox, waits for Ollie's launch, then drives every phase. It tests seams, not logic.
 - [docs/dev/README-SOP.md](docs/dev/README-SOP.md) — read this before you change README.md.
 
 ## What done looks like
@@ -32,8 +32,9 @@ Ordered by weight. When two collide, the earlier one wins.
 ## Guardrails
 
 - **Do not touch Ollie's live session.** You run inside it, so a bare `zellij` command hits his working fleet; run nothing against it, not even a read. Against your worktree's sandbox, run `zellij action` freely, staged with `just sandbox`.
-- **Ollie launches every session**, runs `just release`, and owns anything that writes `~/.local/share/clave/`. Print the command; he runs it.
+- **Ollie launches every session.** `just launch` refuses inside zellij, and you are always inside it. Hand him `cd <checkout>` then `just launch`. He also runs `just release` and owns anything that writes `~/.local/share/clave/`.
 - **Ollie kills sessions.** One exemption: the sandbox you asked him to launch this conversation, once its drive and both eyeball checks are done. Kill it by explicit name (`clave dev instance --field session`), never another agent's.
+- **Fire hooks only through `scripts/ct.sh --hook`.** A hand-written `clave hook` aims its snapshot at the session your environment names, which is Ollie's. It hung his session once. A test fails the build if the drive does this.
 - **Remote surfaces wait for his go:** pushes, PRs, merges, issue writes.
 - **Ask him to test what you cannot reach.**
 - **`just gates` must be green before you commit.** It runs fmt, test, the wasm build, then clippy, in that order, because CI runs fmt before clippy.

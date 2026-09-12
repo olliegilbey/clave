@@ -30,7 +30,7 @@ cite those by path and the next reader can grep them.
 came from. Two routes, both fine, and the citation itself says which was taken:
 
 - **Observed live** → cite the C-section of
-  [SUBSYSTEM-VALIDATION.md](docs/superpowers/spikes/SUBSYSTEM-VALIDATION.md)
+  [SUBSYSTEM-VALIDATION.md](superpowers/spikes/SUBSYSTEM-VALIDATION.md)
   that records it. This is the only route for anything the source cannot
   settle — timing, event ordering, what actually happened on screen.
 - **Read at a tag** → fetch it and cite `zellij-server/<path>:<lines>` the same

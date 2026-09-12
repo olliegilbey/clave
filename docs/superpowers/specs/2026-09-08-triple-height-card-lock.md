@@ -11,7 +11,7 @@ Run the design: `cargo run -p clave-bar --example triple-preview`
 Watch it move: `cargo run -p clave-bar --example triple-preview -- --animate`
 
 **Vocabulary:** _card, row, gutter, cell, ink, chip, provenance, glass, fade_
-are defined in [UBIQUITOUS_LANGUAGE.md](../../../UBIQUITOUS_LANGUAGE.md). Three
+are defined in [UBIQUITOUS_LANGUAGE.md](../../UBIQUITOUS_LANGUAGE.md). Three
 terms are new here and defined in §7: **rail**, **shadow rule**, **crop rule**.
 
 **Source-of-truth hierarchy.** _This document is authoritative_ for every
@@ -379,7 +379,7 @@ not, and neither shows in a static render or a golden. That is what caught the
 old worktree glyph (§4.2), and it is why five of the six spinner frames — which
 also come by fallback, out of Menlo — need an eyeball on the real terminal
 rather than a signed-off screenshot. All three entries are in
-[FOOTGUNS.md](../../../FOOTGUNS.md) § Text, glyphs, rendering.
+[FOOTGUNS.md](../../FOOTGUNS.md) § Text, glyphs, rendering.
 
 ## 7. New vocabulary
 
