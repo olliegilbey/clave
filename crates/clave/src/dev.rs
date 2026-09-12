@@ -62,6 +62,25 @@ pub struct ScenarioAgent {
     /// blank cell, which is the distinct "no reading yet" case and worth having
     /// on screen beside the others.
     pub context_tokens: Option<u32>,
+    /// The card's identity cells (#232), seeded because a dormant row fires
+    /// no hooks: without them a live sandbox paints the top half of every
+    /// card and leaves the rest blank, which is the one thing the README's
+    /// traced SVG cannot tell us — whether the real renderer fills a full
+    /// card from a real store. `None` is still worth seeding on some rows:
+    /// it is the distinct "nothing read yet" cell.
+    pub provider: Option<&'static str>,
+    pub model: Option<&'static str>,
+    pub effort: Option<&'static str>,
+    /// A pull request the branch is driving. A seeded row reads FRESH
+    /// (`agent_record` stamps the lookup time), so no background sync
+    /// replaces the number before anyone sees it.
+    pub pr_number: Option<u32>,
+    /// What a waiting agent is blocked on. Only ever set with
+    /// `Status::NeedsYou`: structure decides that a row is waiting, and the
+    /// words only say what for (design lock §4.7).
+    pub wants: Option<&'static str>,
+    /// Agents still running under this one. A flag, not a count.
+    pub subagents: bool,
 }
 
 impl ScenarioAgent {
@@ -82,6 +101,12 @@ impl ScenarioAgent {
         summary: "",
         status: clave_types::Status::Idle,
         context_tokens: None,
+        provider: None,
+        model: None,
+        effort: None,
+        pr_number: None,
+        wants: None,
+        subagents: false,
     };
 }
 
@@ -577,6 +602,135 @@ pub const SCENARIOS: &[Scenario] = &[
             },
         ],
     },
+    // The screenshot fleet: the row vocabulary in one frame, for the sample
+    // image AGENTS.md sends every agent to read before anything else.
+    //
+    // It mirrors `crates/clave-bar/examples/shared/showcase_fixture.rs`,
+    // which the README's SVG is traced from, so the photograph and the
+    // drawing show the same fleet. The drawing is the design's own output
+    // and stays canonical; this is the only way to learn whether the REAL
+    // renderer fills a full card from a REAL store, which is the thing a
+    // traced SVG can never tell us.
+    //
+    // Every row here is dormant until someone opens it — seeded rows always
+    // are. That is the point of seeding the identity cells: a dormant row
+    // fires no hooks, so without them the capture shows nine half-empty
+    // cards. Open two or three rows before the capture and the frame carries
+    // live rows beside dormant ones, which is the honest daily picture.
+    Scenario {
+        name: "showcase",
+        agents: &[
+            ScenarioAgent {
+                slug: "gutter",
+                ago_secs: 720,
+                worktree: true,
+                repo: Some("clave"),
+                title: Some("S6-GUT"),
+                summary: "Wire the status column into render_rows",
+                status: clave_types::Status::Working,
+                context_tokens: Some(108_000),
+                provider: Some("claude"),
+                model: Some("sonnet"),
+                effort: Some("hi"),
+                pr_number: Some(232),
+                ..ScenarioAgent::DEFAULT
+            },
+            // No chip and no PR: a blank cell is part of the vocabulary, and
+            // the row must not shift because of it.
+            ScenarioAgent {
+                slug: "spawn",
+                ago_secs: 1_500,
+                repo: Some("clave"),
+                summary: "Review the spawn identity gate",
+                status: clave_types::Status::Idle,
+                context_tokens: Some(141_000),
+                provider: Some("claude"),
+                model: Some("opus"),
+                effort: Some("xh"),
+                ..ScenarioAgent::DEFAULT
+            },
+            // Past its smart zone (412k against a 150k default), with agents
+            // still running under it. A worktree, because it shares `clave`
+            // with the rows above and `delete_cwd_after` removes exactly
+            // `cwd` — see `ensure_worktree` and ux-gate1's `vanished`.
+            ScenarioAgent {
+                slug: "kdl",
+                ago_secs: 86_400,
+                worktree: true,
+                delete_cwd_after: true,
+                repo: Some("clave"),
+                title: Some("KDL-GRD"),
+                summary: "Validate generated KDL artifacts",
+                status: clave_types::Status::Working,
+                context_tokens: Some(412_000),
+                provider: Some("claude"),
+                model: Some("fable"),
+                effort: Some("hi"),
+                pr_number: Some(219),
+                subagents: true,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "auth",
+                ago_secs: 240,
+                repo: Some("api-svc"),
+                branch: Some("key-rotation"),
+                title: Some("AUTH-7"),
+                summary: "Rotate the signing keys",
+                status: clave_types::Status::NeedsYou,
+                context_tokens: Some(52_000),
+                provider: Some("claude"),
+                model: Some("fable"),
+                effort: Some("mx"),
+                pr_number: Some(184),
+                wants: Some("Bash (cargo publish)"),
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "cart",
+                ago_secs: 3_600,
+                repo: Some("webapp"),
+                title: Some("CART-99"),
+                summary: "Fix cart total rounding mismatch",
+                status: clave_types::Status::Done,
+                context_tokens: Some(18_000),
+                provider: Some("claude"),
+                model: Some("haiku"),
+                effort: Some("lo"),
+                ..ScenarioAgent::DEFAULT
+            },
+            // The other provider, and no effort reading — Codex is not
+            // driveable yet, but a row can already carry its icon.
+            ScenarioAgent {
+                slug: "dns",
+                ago_secs: 10_800,
+                repo: Some("infra"),
+                branch: Some("dns-timeout"),
+                title: Some("DNS-TTL"),
+                summary: "Debug staging rollout DNS timeout",
+                status: clave_types::Status::Failed,
+                context_tokens: Some(79_000),
+                provider: Some("openai"),
+                model: Some("5.6sol"),
+                pr_number: Some(77),
+                ..ScenarioAgent::DEFAULT
+            },
+            // Two weeks cold, and no reading at all on the last row: the
+            // "nothing measured yet" cell beside eight that have one.
+            ScenarioAgent {
+                slug: "zsh",
+                ago_secs: 1_209_600,
+                repo: Some("notes"),
+                title: Some("ZSH"),
+                summary: "Tidy the shell startup files",
+                status: clave_types::Status::Idle,
+                provider: Some("claude"),
+                model: Some("haiku"),
+                effort: Some("md"),
+                ..ScenarioAgent::DEFAULT
+            },
+        ],
+    },
 ];
 
 /// Valid v4-shaped, deterministic, self-identifying (`c85c` ≈ c8 scenario).
@@ -595,36 +749,6 @@ pub fn scenario_rotated_uuid(n: u32) -> String {
     format!("00000000-0000-4000-8000-c85c{:08}", n + 50)
 }
 
-/// The ONE command printed for Ollie to launch the sandboxed session.
-///
-/// Deliberately NO CLAUDE_CONFIG_DIR (revised 2026-07-18, live finding +
-/// user ruling): sandboxing claude's identity dragged auth along with it
-/// ("Not logged in" / stale-credential failures) — clave is a thin wrapper
-/// for terminal control, and claude's identity is not its business. The
-/// sandbox isolates CLAVE's state only; scenario transcripts land in the
-/// real ~/.claude/projects tagged by the deterministic c85c uuids, and
-/// `dev reset` removes them by that tag.
-///
-/// `clave-dev`, NOT bare `clave` (#43b): `just dev-install` now installs the
-/// working-tree CLI under that name precisely so it stops colliding with the
-/// daily surface — so bare `clave` here would either be `command not found` on
-/// a contributor's box or, worse, silently drive the sandbox with the STABLE
-/// release instead of the working tree under test.
-///
-/// The env prefix is not decoration now that the instance is per-worktree
-/// (`sandbox.rs`): this line is meant to be pasted into a fresh terminal in
-/// an arbitrary directory, where `dev launch`'s own cwd-based derivation
-/// would resolve to the MAIN checkout's sandbox instead of the worktree that
-/// printed it. `enter_sandbox` therefore lets an explicit value win.
-pub fn launch_command(sb: &crate::sandbox::Sandbox) -> String {
-    format!(
-        "CLAVE_SESSION={} CLAVE_STATE_DIR={} CLAVE_DATA_DIR={} clave-dev",
-        sb.session,
-        sb.state_dir().display(),
-        sb.data_dir().display()
-    )
-}
-
 /// Should this variable be filled in from the derived instance? Only when
 /// the caller did not name one — same "override always wins, empty means
 /// unset" rule as `env::session_name_from` / `env::dir_from`. Pure because
@@ -637,8 +761,16 @@ pub fn env_should_be_derived(current: Option<&str>) -> bool {
 /// `claude -p` runs as the REAL user identity but its hook invocations
 /// inherit CLAVE_STATE_DIR and land in the sandbox store).
 ///
-/// An explicitly set variable WINS, so the env-prefixed `launch_command`
-/// stays truthful when it is pasted somewhere else on disk.
+/// Deliberately NO CLAUDE_CONFIG_DIR (revised 2026-07-18, live finding +
+/// user ruling): sandboxing claude's identity dragged auth along with it
+/// ("Not logged in" / stale-credential failures) — clave is a thin wrapper
+/// for terminal control, and claude's identity is not its business. The
+/// sandbox isolates CLAVE's state only; scenario transcripts land in the
+/// real ~/.claude/projects tagged by the deterministic c85c uuids, and
+/// `dev reset` removes them by that tag.
+///
+/// An explicitly set variable WINS, so a caller that names an instance
+/// explicitly (a drive script, a test harness) keeps it.
 fn enter_sandbox(sb: &crate::sandbox::Sandbox) {
     let vars: [(&str, std::ffi::OsString); 3] = [
         ("CLAVE_SESSION", sb.session.clone().into()),
@@ -678,9 +810,73 @@ fn force_sandbox(sb: &crate::sandbox::Sandbox) {
 /// user in a non-zellij terminal, replacing the printed env-var wall.
 pub fn run_launch() -> Result<()> {
     let sb = crate::sandbox::Sandbox::resolve()?;
+    // A sandbox session cannot be launched from INSIDE a zellij session: it
+    // would nest, and the agent driving all of this is always inside one.
+    // So the rule "launching is the human's" stops being prose a reader has
+    // to find and becomes a refusal the machine issues — which is the same
+    // move as `aim_push` and the drive's identity scrub, for the same reason:
+    // a rule nothing enforces is one edit, or one new agent, from being gone.
+    if std::env::var_os("ZELLIJ").is_some() {
+        anyhow::bail!("{}", nested_launch_refusal(&sb));
+    }
     sb.ensure()?;
     enter_sandbox(&sb);
+    shim_first_on_path(&sb);
     crate::setup::launch_session()
+}
+
+/// What to say to whoever just tried to launch from inside a session. Split
+/// out to be testable, and written for a reader with ZERO context: it names
+/// the one thing they should do instead, in full, rather than describing a
+/// rule and leaving them to derive the command.
+fn nested_launch_refusal(sb: &crate::sandbox::Sandbox) -> String {
+    let cd = match &sb.origin {
+        Some(o) => format!("cd {}\n    ", o.display()),
+        None => String::new(),
+    };
+    format!(
+        "refusing to launch '{}' from inside a zellij session (ZELLIJ is set).\n\
+         \n\
+         Launching is the MAINTAINER's step and belongs in a new terminal\n\
+         window outside zellij — nesting a sandbox inside a live session is\n\
+         how the two get confused for each other. An agent cannot do this and\n\
+         should not try: print the command and let the human run it.\n\
+         \n    \
+         {cd}just launch\n\
+         \n\
+         Staging (yours) is `just sandbox <scenario>`; `just qa <scenario>`\n\
+         stages, waits for that launch, and drives the whole QA loop.",
+        sb.session
+    )
+}
+
+/// The shim FIRST on `PATH`, so a bare `clave` anywhere inside the launched
+/// session resolves to the build under test rather than the stable install.
+///
+/// This is not cosmetic — it is the #43/#44 leak: the bar shells out to a
+/// bare `clave` (`clave_binary "clave"` in the generated config) and every
+/// Claude Code hook runs `clave hook <Event>`, so without the shim a sandbox
+/// silently tests whatever is in `~/.local/share/clave/bin`. It was the
+/// caller's job until now, pasted into a five-line `PATH=... CLAVE_...=...`
+/// prefix on every single launch, which is exactly the kind of step that gets
+/// dropped once and then debugged for an hour. `dev launch` already derives
+/// the three `CLAVE_*` vars (`enter_sandbox`); deriving the fourth makes the
+/// prefix unnecessary rather than merely tedious.
+fn shim_first_on_path(sb: &crate::sandbox::Sandbox) {
+    let shim = sb.shim_dir();
+    let current = std::env::var_os("PATH").unwrap_or_default();
+    // Idempotent: a caller still pasting the old prefix has it first already,
+    // and a second copy would only make `PATH` harder to read in a bug report.
+    if let Some(s) = current.to_str()
+        && s.split(':').next() == shim.to_str()
+    {
+        return;
+    }
+    let mut joined = std::ffi::OsString::from(&shim);
+    joined.push(":");
+    joined.push(&current);
+    // SAFETY: single-threaded CLI entry point; set before any spawn.
+    unsafe { std::env::set_var("PATH", joined) };
 }
 
 /// `clave dev instance`: which sandbox this working tree stages into.
@@ -765,7 +961,7 @@ fn agent_record(
         uuid: uuid.to_string(),
         cwd: cwd_str.to_string(),
         repo_root: repo_root.to_string(),
-        branch,
+        branch: branch.clone(),
         label: format!("{scenario_name}-{} · seeded", a.slug),
         status: a.status,
         last_interacted: now.saturating_sub(a.ago_secs),
@@ -810,14 +1006,21 @@ fn agent_record(
         // Not seeded: the sandbox exercises the real birth-touch inheritance
         // path (touch_in/opener_buckets) rather than a scenario-typed value.
         buckets: Default::default(),
-        // #232: not yet wired into ScenarioAgent — out of scope here, the
-        // sandbox simply seeds "never looked up".
-        model: None,
-        provider: None,
-        effort: None,
-        pr_number: None,
-        pr_checked: 0,
-        pr_branch: String::new(),
+        model: a.model.map(String::from),
+        provider: a.provider.map(String::from),
+        effort: a.effort.map(String::from),
+        pr_number: a.pr_number,
+        // A seeded number must read FRESH, or the first background sync for
+        // this branch replaces it with the nothing a sandbox repo really has
+        // (`pr_is_stale`: a zero check time is stale by definition).
+        pr_checked: if a.pr_number.is_some() { now } else { 0 },
+        pr_branch: if a.pr_number.is_some() {
+            branch.clone()
+        } else {
+            String::new()
+        },
+        wants: a.wants.map(String::from),
+        subagents: a.subagents,
     }
 }
 
@@ -834,7 +1037,7 @@ pub fn run_scenario(name: &str) -> Result<()> {
         std::fs::create_dir_all(root.join(d))?;
     }
     // NO claude-identity sandboxing (2026-07-18 ruling — see
-    // launch_command): claude runs as the real user; transcripts go to the
+    // enter_sandbox): claude runs as the real user; transcripts go to the
     // real ~/.claude/projects and are c85c-tagged for reset cleanup. Hooks
     // are already registered in the real settings.json (run_setup below
     // re-merges idempotently); hook processes inherit CLAVE_STATE_DIR from
@@ -915,10 +1118,19 @@ pub fn run_scenario(name: &str) -> Result<()> {
         }
     }
     crate::evlog::log_event("dev", &format!("scenario {name} seeded"));
-    println!("\nScenario `{name}` ready. Launch (your command, in a NON-zellij terminal):\n");
-    println!("  clave-dev dev launch");
-    println!("\n(equivalent env form: {})", launch_command(&sb));
-    println!("\nWhen done: `clave-dev dev reset` (prints the kill command first).");
+    println!(
+        "\nScenario `{name}` ready. Launch (the MAINTAINER's step, in a NON-zellij terminal):\n"
+    );
+    if let Some(origin) = &sb.origin {
+        println!("  cd {}", origin.display());
+    }
+    println!("  just launch");
+    // The `cd` is the only part a reader has to get right: the instance is
+    // keyed off the working directory, so launching from elsewhere stages one
+    // sandbox and launches another. Everything else is derived by `dev launch`
+    // itself - an env prefix printed here would omit the PATH shim and so
+    // silently drive the sandbox with the stable install (#43/#44).
+    println!("\nWhen done: `clave dev reset` (prints the kill command first).");
     Ok(())
 }
 
@@ -928,7 +1140,7 @@ pub fn run_status() -> Result<()> {
     let store = crate::store::read_store(&crate::store::store_paths()?)?;
     // Discovered zellij (2026-07-22): both reads below swallow failure with
     // unwrap_or_default, so an off-PATH zellij would report "no live session"
-    // rather than erroring — and CLAUDE.md tells agents to gate the session
+    // rather than erroring — and AGENTS.md tells agents to gate the session
     // lifecycle on exactly this output. A false negative here is worse than
     // a loud failure.
     let zellij = crate::discover::tool_path(crate::discover::ToolId::Zellij);
@@ -1253,6 +1465,111 @@ mod tests {
     }
 
     #[test]
+    fn a_seeded_pull_request_number_reads_fresh_and_a_missing_one_reads_never() {
+        // #232: a seeded row is dormant and fires no hooks, so the identity
+        // cells only appear on screen if they are seeded. The PR number needs
+        // one thing more than the others — a check TIME and the branch it was
+        // checked for. `pr_is_stale` calls a zero check time stale, so an
+        // unstamped number is replaced by the first background sync with the
+        // nothing a sandbox repo really has.
+        let with_pr = ScenarioAgent {
+            slug: "auth",
+            branch: Some("key-rotation"),
+            provider: Some("claude"),
+            model: Some("fable"),
+            effort: Some("mx"),
+            pr_number: Some(184),
+            wants: Some("Bash (cargo publish)"),
+            subagents: true,
+            ..ScenarioAgent::DEFAULT
+        };
+        let rec = agent_record(
+            "showcase",
+            &with_pr,
+            1,
+            &scenario_uuid(1),
+            "/cwd",
+            "/repo",
+            9_000,
+        );
+        assert_eq!(rec.provider.as_deref(), Some("claude"));
+        assert_eq!(rec.model.as_deref(), Some("fable"));
+        assert_eq!(rec.effort.as_deref(), Some("mx"));
+        assert_eq!(rec.wants.as_deref(), Some("Bash (cargo publish)"));
+        assert!(rec.subagents);
+        assert_eq!(rec.pr_number, Some(184));
+        assert_eq!(rec.pr_checked, 9_000);
+        assert_eq!(rec.pr_branch, "key-rotation");
+        assert!(!crate::pr::pr_is_stale(&rec, 9_000));
+
+        // No number seeded: the row must read "never looked up", which is the
+        // state that invites the real lookup rather than blocking it.
+        let without = ScenarioAgent {
+            slug: "spawn",
+            ..ScenarioAgent::DEFAULT
+        };
+        let rec = agent_record(
+            "showcase",
+            &without,
+            2,
+            &scenario_uuid(2),
+            "/cwd",
+            "/repo",
+            9_000,
+        );
+        assert_eq!(rec.pr_number, None);
+        assert_eq!(rec.pr_checked, 0);
+        assert!(rec.pr_branch.is_empty());
+    }
+
+    #[test]
+    fn the_showcase_fleet_paints_every_cell_of_the_card() {
+        // The capture is the sample image AGENTS.md sends every agent to read,
+        // so a cell missing from the fleet is a cell missing from the only
+        // picture of clave most readers ever see. Blank cells are part of the
+        // vocabulary and are asserted as deliberately present.
+        let sc = SCENARIOS.iter().find(|s| s.name == "showcase").unwrap();
+        let a = sc.agents;
+        for status in [
+            clave_types::Status::Working,
+            clave_types::Status::Idle,
+            clave_types::Status::NeedsYou,
+            clave_types::Status::Done,
+            clave_types::Status::Failed,
+        ] {
+            assert!(
+                a.iter().any(|x| x.status == status),
+                "no {status:?} row in the capture fleet"
+            );
+        }
+        assert!(a.iter().any(|x| x.provider == Some("openai")));
+        assert!(a.iter().any(|x| x.provider == Some("claude")));
+        assert!(a.iter().any(|x| x.worktree));
+        assert!(a.iter().any(|x| x.branch.is_some()));
+        assert!(a.iter().any(|x| !x.worktree && x.branch.is_none()));
+        assert!(a.iter().any(|x| x.delete_cwd_after)); // the stale mark
+        assert!(a.iter().any(|x| x.subagents));
+        assert!(a.iter().any(|x| x.pr_number.is_some()));
+        assert!(a.iter().any(|x| x.pr_number.is_none()));
+        assert!(a.iter().any(|x| x.title.is_none())); // the blank chip
+        assert!(a.iter().any(|x| x.effort.is_none()));
+        assert!(a.iter().any(|x| x.context_tokens.is_none()));
+        // Only a flagged row says what it is blocked on (design lock §4.7).
+        for x in a.iter().filter(|x| x.wants.is_some()) {
+            assert_eq!(
+                x.status,
+                clave_types::Status::NeedsYou,
+                "{}: only a flagged row may say what it wants",
+                x.slug
+            );
+        }
+        assert!(a.iter().any(|x| x.wants.is_some()));
+        // More than one repo, or the per-repo colouring shows nothing.
+        let repos: std::collections::BTreeSet<_> = a.iter().filter_map(|x| x.repo).collect();
+        assert!(repos.len() >= 4, "only {} repos in the fleet", repos.len());
+    }
+
+    #[test]
     fn seeding_skips_an_already_seeded_session() {
         // Deterministic scenario UUIDs + never-sandboxed claude identity
         // (§6.9 ruling) ⇒ a prior run's transcript persists in the REAL
@@ -1382,9 +1699,10 @@ mod tests {
 
     #[test]
     fn scenario_table_covers_the_c8_checklist() {
-        // Names map 1:1 to SUBSYSTEM-VALIDATION.md C8 steps, plus ux-gate1
-        // (the visual-design decision fixture, #85 follow-up) and tall (the
-        // #148 viewport overflow fixture). Exact list on purpose (task
+        // Names map 1:1 to the C8 validation steps, plus ux-gate1 (the
+        // visual-design decision fixture, #85 follow-up), tall (the #148
+        // viewport overflow fixture), qa-fleet (the drive's fleet) and
+        // showcase (the README capture fleet). Exact list on purpose (task
         // instruction): a `contains` would let a scenario go missing silently.
         let names: Vec<&str> = SCENARIOS.iter().map(|s| s.name).collect();
         assert_eq!(
@@ -1395,7 +1713,8 @@ mod tests {
                 "c8-stale",
                 "ux-gate1",
                 "tall",
-                "qa-fleet"
+                "qa-fleet",
+                "showcase"
             ]
         );
         // cold-start: 3 agents, staggered recency, none worktree.
@@ -1696,6 +2015,7 @@ mod tests {
                 widths,
                 &Theme::default(),
                 row_height,
+                0,
             );
             assert_eq!(lines.len(), rows.len() * per_row, "line budget at {cols}");
             for (line, row) in lines.iter().zip(rows_by_line()) {
@@ -1732,6 +2052,7 @@ mod tests {
                 widths,
                 &Theme::default(),
                 row_height,
+                0,
             )) {
                 assert_ne!(*faded, plain, "recession did not change this row at {cols}");
             }
@@ -1918,48 +2239,47 @@ mod tests {
         }
     }
 
+    /// The refusal has to TEACH, not just decline: whoever hit it is either a
+    /// human in the wrong terminal or an agent that should have handed the
+    /// command over, and both need the next action spelled out.
     #[test]
-    fn launch_command_sandboxes_clave_state_only() {
-        // §6.9 revised 2026-07-18: CLAVE state is sandboxed; claude's
-        // identity is deliberately NOT (thin-wrapper ruling — sandboxing
-        // it dragged auth along and broke seeding).
-        let main = crate::sandbox::Sandbox::new(std::path::Path::new("/h"), None, None);
-        let cmd = launch_command(&main);
-        assert!(cmd.contains("CLAVE_SESSION=clave-test"));
-        assert!(cmd.contains("CLAVE_STATE_DIR=/h/.local/state/clave-dev/state"));
-        assert!(cmd.contains("CLAVE_DATA_DIR=/h/.local/state/clave-dev/data"));
-        assert!(!cmd.contains("CLAUDE_CONFIG_DIR"));
-        // clave-dev, not clave (#43b): dev-install stopped writing the
-        // daily name, so the printed command must name what it installs.
-        assert!(cmd.trim_end().ends_with("clave-dev"));
+    fn the_nested_launch_refusal_names_the_command_to_hand_over() {
+        let home = std::path::Path::new("/home/u");
+        let sb = crate::sandbox::Sandbox::new(
+            home,
+            Some("triple-card".to_string()),
+            Some(std::path::PathBuf::from(
+                "/home/u/code/clave/.claude/worktrees/triple-card",
+            )),
+        );
+        let msg = nested_launch_refusal(&sb);
+        assert!(msg.contains("clave-test-triple-card"), "{msg}");
+        assert!(msg.contains("ZELLIJ is set"), "{msg}");
+        // The cd is load-bearing — the instance is cwd-keyed, so a launch from
+        // the wrong directory silently targets a different sandbox.
+        assert!(
+            msg.contains("cd /home/u/code/clave/.claude/worktrees/triple-card"),
+            "{msg}"
+        );
+        assert!(msg.contains("just launch"), "{msg}");
+        // And it must point at the loop, so a zero-context reader does not
+        // have to go find out what staging is called.
+        assert!(msg.contains("just qa"), "{msg}");
     }
 
-    /// The printed command is meant to be pasted into a fresh terminal in an
-    /// unknown directory, so it must carry the WORKTREE's instance and not
-    /// the one `dev launch` would derive from wherever it is run. Witness:
-    /// every one of the three values differs from the main checkout's.
+    /// The main checkout has no origin marker (it is never a reap candidate),
+    /// so the refusal must still be useful without one.
     #[test]
-    fn launch_command_carries_this_worktrees_instance_not_the_shared_one() {
-        let wt = crate::sandbox::Sandbox::new(
-            std::path::Path::new("/h"),
-            Some("prune-wt".into()),
-            Some("/h/code/clave/wt/prune-wt".into()),
-        );
-        let cmd = launch_command(&wt);
-        assert!(cmd.contains("CLAVE_SESSION=clave-test-prune-wt"), "{cmd}");
-        assert!(
-            cmd.contains("CLAVE_STATE_DIR=/h/.local/state/clave-dev-prune-wt/state"),
-            "{cmd}"
-        );
-        assert!(
-            cmd.contains("CLAVE_DATA_DIR=/h/.local/state/clave-dev-prune-wt/data"),
-            "{cmd}"
-        );
+    fn the_nested_launch_refusal_survives_an_instance_with_no_origin() {
+        let sb = crate::sandbox::Sandbox::new(std::path::Path::new("/home/u"), None, None);
+        let msg = nested_launch_refusal(&sb);
+        assert!(msg.contains("just launch"), "{msg}");
+        assert!(!msg.contains("cd \n"), "no empty cd line: {msg}");
     }
 
-    /// An explicitly set variable wins, which is what makes the pasted
-    /// `launch_command` truthful. The rival is the old unconditional
-    /// `set_var`, under which the middle case would also be derived.
+    /// An explicitly set variable wins, so a caller that names an instance
+    /// keeps it. The rival is the old unconditional `set_var`, under which
+    /// the middle case would also be derived.
     #[test]
     fn an_explicit_env_value_wins_over_the_derived_instance() {
         assert!(env_should_be_derived(None));

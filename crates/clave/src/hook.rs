@@ -285,6 +285,122 @@ pub fn summary_from_tail(tail: &str) -> Option<String> {
     last_tail_field(tail, "summary", "summary")
 }
 
+/// Whether this row has fanned out — the card's subagent mark (lock §4.6),
+/// read off the LAST `{"type":"system","subtype":"turn_duration",…}` line in
+/// `tail`. A BOOLEAN, not a count: "this row has agents under it" is the whole
+/// signal and a digit beside the mark was noise.
+///
+/// `None` is "no reading", and it is not the same as `Some(false)`: a 64 KiB
+/// tail that reaches back past the last turn boundary carries no closing
+/// record at all, and that must HOLD what the store already knows.
+///
+/// **A closing record that carries no count is a ZERO, not a silence.** Every
+/// `turn_duration` line in the sandbox drive (2026-09-09, a session that ran
+/// no background agents) omitted `pendingBackgroundAgentCount` entirely rather
+/// than writing `0`. Whether that is omit-when-zero or a field this Claude
+/// Code does not emit at all, the safe reading is the same one: absence inside
+/// a record that IS present clears the mark. Holding there would let a row
+/// earn the mark once and never lose it, which is the one failure a boolean
+/// cannot recover from.
+///
+/// **This reading is a turn behind, by construction.** `turn_duration` is
+/// written when a turn CLOSES, so what it reports is "when this turn ended, N
+/// background agents were still pending". That is the cadence clave already
+/// reads a tail on (Stop / UserPromptSubmit), and pending-at-close is the
+/// useful half of the signal anyway: an agent still running when its parent
+/// stopped is exactly the one worth a mark. Subagents launched and finished
+/// inside one turn are never seen, and that is correct — they were never
+/// something to go and look at.
+pub fn subagents_from_tail(tail: &str) -> Option<bool> {
+    tail.lines().rev().find_map(|l| {
+        let v: serde_json::Value = serde_json::from_str(l).ok()?;
+        if v.get("type")?.as_str()? != "system" || v.get("subtype")?.as_str()? != "turn_duration" {
+            return None;
+        }
+        Some(
+            v.get("pendingBackgroundAgentCount")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+                > 0,
+        )
+    })
+}
+
+/// Write, hold or clear `rec.subagents` against the event that just arrived.
+///
+/// The twin of [`take_wants`], and it exists for the same reason: a reading
+/// that HOLDS needs something that can end it. `None` is "this tail said
+/// nothing about subagents" and must hold — an older Claude Code never wrote
+/// the field, and blanking a real mark on silence would be a lie. But a
+/// `SessionEnd` is not silence. The session is over, so nothing can still be
+/// pending under it, and a held mark would sit on a dormant row claiming depth
+/// it no longer has — a row the user cannot go and look at, wearing the glyph
+/// that says go and look.
+///
+/// Returns whether the value moved, so a push happens only when a pixel would.
+pub fn take_subagents(rec: &mut AgentRecord, event: &str, reading: Option<bool>) -> bool {
+    let next = match event {
+        "SessionEnd" => false,
+        _ => reading.unwrap_or(rec.subagents),
+    };
+    let moved = rec.subagents != next;
+    rec.subagents = next;
+    moved
+}
+
+/// The anchor a permission notification's tool name follows. Claude Code's
+/// wording, matched as a substring for the same reason `status_for_event`
+/// matches its notifications that way: the CLI owns the sentence and has
+/// reworded it before, and a substring survives a prefix change.
+const PERMISSION_ANCHOR: &str = "permission to use ";
+
+/// What a blocked agent is asking for, from the `Notification` message clave
+/// already receives (lock §4.7 tier 1). `Claude needs your permission to use
+/// Bash` yields `Bash`.
+///
+/// The MESSAGE is the source and that is the whole point of the tier: the tool
+/// name is also on a `PreToolUse` payload, but clave registers five hook events
+/// and that is not one of them — reading it there would mean a hook firing on
+/// every tool call of every tracked session, to learn something the
+/// notification hands over for free. `None` for every other message, including
+/// the idle nag: the card's word for "nothing measured" is blank.
+pub fn wants_from_message(message: &str) -> Option<String> {
+    // `split_once`, not `split(..).nth(1)`: the two differ the moment the
+    // anchor appears twice, where `nth(1)` hands back the MIDDLE segment and
+    // silently drops everything past the second occurrence. What the cell
+    // wants is the whole tail after the first anchor.
+    let rest = message.split_once(PERMISSION_ANCHOR)?.1.trim();
+    (!rest.is_empty()).then(|| clamp_field(rest, WANTS_MAX_CHARS))
+}
+
+/// Cap for [`wants_from_message`]. Wider than the 28 columns the cell holds at
+/// 48 (lock §4.7), because the RENDERER does the final clamping — the store's
+/// job is only to keep an unbounded notification out of the snapshot.
+const WANTS_MAX_CHARS: usize = 64;
+
+/// Write, hold or clear `rec.wants` against the status the caller just set.
+///
+/// Three cases, and the middle one is the reason this is a function rather
+/// than an assignment. A flagged row whose message NAMES a tool takes it. A
+/// flagged row whose message does not — the CLI's ~60s idle nag, which fires
+/// while the same permission prompt still stands — HOLDS what it already had,
+/// because a message carrying no news must not erase one that did. An unflagged
+/// row wants nothing, whatever it wanted a moment ago.
+///
+/// Returns whether the value moved, so a push happens only when a pixel would.
+pub fn take_wants(rec: &mut AgentRecord, message: Option<&str>) -> bool {
+    let next = if rec.status == Status::NeedsYou {
+        message
+            .and_then(wants_from_message)
+            .or_else(|| rec.wants.clone())
+    } else {
+        None
+    };
+    let moved = rec.wants != next;
+    rec.wants = next;
+    moved
+}
+
 /// First unsigned integer following `"<key>":` in `s`. Deliberately literal:
 /// the leading quote is what keeps `"input_tokens":` from also matching
 /// `"cache_read_input_tokens":` and `"ephemeral_1h_input_tokens":`, which sit in
@@ -405,7 +521,14 @@ pub fn model_from_tail(tail: &str) -> Option<String> {
             return None;
         }
         let s = v.get("message")?.get("model")?.as_str()?.trim();
-        (!s.is_empty()).then(|| s.to_string())
+        // `<synthetic>` is Claude Code's marker on an assistant line IT wrote
+        // — an interrupt notice, an API error stub — not a model that
+        // answered. Seen live in the sandbox drive (2026-09-09), where one
+        // such line among ten real ones left the card reading `<synt…` until
+        // the next real answer overwrote it. Scanning PAST keeps the last
+        // model that actually spoke, which is the honest cell. The angle
+        // brackets are the discriminator: no model id has ever carried one.
+        (!s.is_empty() && !s.starts_with('<')).then(|| s.to_string())
     })
 }
 
@@ -625,6 +748,7 @@ fn refresh_row_fields(
 /// The lifetime bound a status-push child carries (#233). The hook process
 /// exits right after spawning, so the bound must live INSIDE the spawned
 /// process tree — nothing outside it survives long enough to reap.
+#[derive(Debug)]
 enum PipeBound {
     /// `timeout`/`gtimeout` found: `<path> <secs> zellij pipe …`.
     Coreutils(std::path::PathBuf),
@@ -664,12 +788,37 @@ fn discover_pipe_bound() -> PipeBound {
 /// Pure builder for the push child (#233): wraps the `zellij pipe`
 /// invocation in the discovered process-level bound. The payload and pipe
 /// name pass through untouched; only the outer wrapper varies by rung.
-fn bounded_pipe_command(zellij: &Path, payload: &str, bound: &PipeBound, secs: u32) -> Command {
-    let pipe_args = ["pipe", "--name", "clave-status", "--", payload];
+///
+/// `session` NAMES THE TARGET, and it is not belt-and-braces (2026-09-10).
+/// With no `--session`, zellij's `ActiveSession::One` arm serves the ONLY
+/// live session whatever `ZELLIJ_SESSION_NAME` says — the same resolution
+/// hole `scripts/ct.sh` exists to close for `zellij action`. This push
+/// inherits the pane's env and so had looked safe; it is not, and the drive
+/// caught it: a three-row sandbox snapshot fired at the maintainer's live
+/// twenty-row fleet, stopped only by `apply_snapshot`'s seq discard, which is
+/// an accident of which store had counted higher. Two rounds went chasing the
+/// sandbox bar's stale render before the aim was the suspect.
+///
+/// `None` keeps today's shape exactly — a hook fired outside zellij has no
+/// session to name, and there is nothing to guess.
+fn bounded_pipe_command(
+    zellij: &Path,
+    payload: &str,
+    bound: &PipeBound,
+    secs: u32,
+    session: Option<&str>,
+) -> Command {
+    // BEFORE the subcommand: `--session` is a flag on the `zellij` binary
+    // itself, not on `pipe` (zellij-utils-0.44.3 src/cli.rs:52-54).
+    let mut zellij_args: Vec<&str> = Vec::new();
+    if let Some(name) = session {
+        zellij_args.extend(["--session", name]);
+    }
+    zellij_args.extend(["pipe", "--name", "clave-status", "--", payload]);
     match bound {
         PipeBound::Coreutils(wrapper) => {
             let mut cmd = Command::new(wrapper);
-            cmd.arg(secs.to_string()).arg(zellij).args(pipe_args);
+            cmd.arg(secs.to_string()).arg(zellij).args(zellij_args);
             cmd
         }
         PipeBound::PerlAlarm(perl) => {
@@ -680,15 +829,36 @@ fn bounded_pipe_command(zellij: &Path, payload: &str, bound: &PipeBound, secs: u
             ])
             .arg(secs.to_string())
             .arg(zellij)
-            .args(pipe_args);
+            .args(zellij_args);
             cmd
         }
         PipeBound::Unbounded => {
             let mut cmd = Command::new(zellij);
-            cmd.args(pipe_args);
+            cmd.args(zellij_args);
             cmd
         }
     }
+}
+
+/// The rule for reading a session name out of an env value, split from the
+/// read itself so it can be tested (the read cannot be — see `.cargo/
+/// mutants.toml`, and `smart_zone`'s note on why env-mutating tests are
+/// forbidden here).
+///
+/// EMPTY IS NOT UNSET, and the asymmetry is the whole content of the
+/// function. An exported-but-empty `ZELLIJ_SESSION_NAME` is not a session
+/// name; passed to `--session` it would turn a push that today lands
+/// correctly into one that dies at argument validation on every event. The
+/// same trap `ct.sh` guards on the sandbox roots, from the other direction.
+fn session_from_env(raw: Option<String>) -> Option<String> {
+    raw.filter(|s| !s.is_empty())
+}
+
+/// The session this hook is running inside, as its own pane's env reports it.
+/// IO shell over [`session_from_env`]; the discipline is `discover_pipe_bound`
+/// over `pipe_bound_ladder`, one function up.
+fn own_session() -> Option<String> {
+    session_from_env(std::env::var("ZELLIJ_SESSION_NAME").ok())
 }
 
 /// Seconds a push child may live (#233). A healthy pipe completes in
@@ -698,22 +868,106 @@ const PUSH_BOUND_SECS: u32 = 15;
 
 /// Fire-and-forget snapshot push (§5). Spawn WITHOUT waiting: `zellij pipe`
 /// can dawdle (S1) and a global hook must never block Claude on it. The
-/// child inherits ZELLIJ env vars from the pane, targeting the right session;
-/// stdio is nulled so nothing leaks into the hook protocol on stdout.
+/// child is AIMED at this pane's own session by name rather than left to
+/// zellij's fallback resolution (see `bounded_pipe_command`); stdio is nulled
+/// so nothing leaks into the hook protocol on stdout.
 pub fn push_snapshot(snap: &AgentSnapshot) {
     let Ok(payload) = serde_json::to_string(snap) else {
         return;
     };
+    // WHERE this is allowed to land, decided from the store rather than from
+    // the env alone. `own_session` reads `ZELLIJ_SESSION_NAME`, and a process
+    // can hold a env naming one session while writing a DIFFERENT session's
+    // store — which is not hypothetical: it is what every drive shell inside
+    // the maintainer's fleet looks like, and it aimed a sandbox snapshot at
+    // his live bar and hung his session (FOOTGUNS #281, again on
+    // 2026-09-11). The env is the caller's claim; the store is the fact.
+    let paths = crate::store::store_paths().ok();
+    let aim = aim_push(
+        paths.as_ref().map(|p| p.dir.as_path()),
+        own_session().as_deref(),
+    );
+    if let PushAim::Foreign { owner, target } = &aim {
+        // DROPPED, and the drop is written down. The whole reason this class
+        // of bug cost rounds is that its tell was silence: the wrong bar
+        // simply kept rendering, and the right one never heard anything.
+        let detail = format!("target={target} store-owner={owner}");
+        if let Some(p) = paths.as_ref() {
+            crate::evlog::log_event_in(&p.dir, "push-refused", &detail);
+        }
+        // stderr as well as the log: a hook's stderr is captured in the
+        // transcript's hook attachments, which is where a human looking at a
+        // misbehaving fleet actually ends up.
+        eprintln!("clave: snapshot push refused, {detail}");
+        return;
+    }
     // Discovered path (codex P2 on PR #29): hooks run as claude's children,
     // whose env may lack the interactive PATH — an off-PATH zellij made every
     // status push a silent no-op. Fire-and-forget stays: failure here must
     // never become a hook failure (§6.5 zero-risk citizen).
     let zellij = crate::discover::tool_path(crate::discover::ToolId::Zellij);
-    let _ = bounded_pipe_command(&zellij, &payload, &discover_pipe_bound(), PUSH_BOUND_SECS)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+    let _ = bounded_pipe_command(
+        &zellij,
+        &payload,
+        &discover_pipe_bound(),
+        PUSH_BOUND_SECS,
+        aim.target(),
+    )
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .spawn();
+}
+
+/// Where a snapshot push may land.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PushAim {
+    /// Aim it at this session by name.
+    At(String),
+    /// The env names no session, so zellij's own resolution is all there is.
+    /// Left alone deliberately: outside a multiplexer there is nothing to
+    /// disagree with, and narrowing this is a change to real installs.
+    Unaimed,
+    /// The env names a session that does not own the store this snapshot
+    /// describes. Dropped.
+    Foreign { owner: String, target: String },
+}
+
+impl PushAim {
+    fn target(&self) -> Option<&str> {
+        match self {
+            PushAim::At(s) => Some(s.as_str()),
+            PushAim::Unaimed | PushAim::Foreign { .. } => None,
+        }
+    }
+}
+
+/// Decide a push's destination from the store it came from, refusing the two
+/// ways a snapshot can reach a bar that has no business seeing it.
+///
+/// A SANDBOX store may only be pushed at its own session — the mistake a
+/// drive makes, because `CLAVE_STATE_DIR` selects the store and nothing in
+/// the env has to agree. A REAL store may not be pushed at a sandbox session
+/// — the same mistake inverted, which would show a live fleet inside a test
+/// one. Anything clave cannot place (a real store, a real session) is aimed
+/// as asked: guessing there would be clave narrowing a working install.
+pub(crate) fn aim_push(state_dir: Option<&Path>, target: Option<&str>) -> PushAim {
+    let Some(target) = target else {
+        return PushAim::Unaimed;
+    };
+    let owner = state_dir.and_then(crate::sandbox::owner_session_of_store);
+    match owner {
+        Some(owner) if owner != target => PushAim::Foreign {
+            owner,
+            target: target.to_string(),
+        },
+        Some(_) => PushAim::At(target.to_string()),
+        None if crate::sandbox::is_sandbox_session(target) => PushAim::Foreign {
+            owner: "<not a sandbox store>".to_string(),
+            target: target.to_string(),
+        },
+        None => PushAim::At(target.to_string()),
+    }
 }
 
 /// Remember which conversation this row is actually living in (#99). The
@@ -828,6 +1082,10 @@ pub fn apply_hook_event(
         changed |= rec.status != next;
         rec.status = next;
     }
+    // The card's `wants` cell (lock §4.7). AFTER the transition, never before:
+    // the gate reads the status this event just produced, so the ask and the
+    // flag it explains can never disagree by one event.
+    changed |= take_wants(rec, payload.message.as_deref());
     // Which conversation the row is living in (#99), and the rotation reset
     // that rides it — see `note_live_session`. Not part of `changed`, on
     // purpose: `with_store_mut` persists the record either way; `changed`
@@ -872,6 +1130,18 @@ pub fn apply_hook_event(
     if let Some(raw) = tail.and_then(effort_from_tail) {
         changed |= take_effort(rec, &raw);
     }
+    // The card's subagent mark. Same fail-closed rule: `None` is "no reading"
+    // and HOLDS. A closing record clears it — including one that names no
+    // count, which is the shape the drive actually saw.
+    //
+    // `jsonl_tail`, NOT the metered `tail` above. The yield exists because the
+    // statusLine has a FRESHER source for those three cells; it carries no
+    // subagent reading, so there is nothing here to yield to. Gated on it, this
+    // mark reads nothing on any Stop in a released install — the meter has
+    // spoken seconds earlier — and lands one prompt late, which is after the
+    // moment it exists for. No drive can see that: the sandbox never wraps the
+    // statusLine (`statusline_wrap_allowed`), so the yield is always off there.
+    changed |= take_subagents(rec, event, jsonl_tail.and_then(subagents_from_tail));
     let level_moved = restamp_level(rec, smart_zone());
     // BOTH fields gate the push, not just the level. The glyph only moves once
     // per tenth of the zone, but #105 renders the raw count as text — gating on
@@ -1319,6 +1589,123 @@ mod tests {
             .collect()
     }
 
+    /// A sandbox store's snapshot, aimed at the maintainer's live fleet. This
+    /// is the 2026-09-11 incident exactly: `CLAVE_STATE_DIR` selected the
+    /// sandbox, `ZELLIJ_SESSION_NAME` still named his session, and the push
+    /// went where the env said. The store is the fact, so it is refused.
+    #[test]
+    fn a_sandbox_snapshot_may_not_be_pushed_at_the_maintainers_fleet() {
+        let sandbox = PathBuf::from("/home/u/.local/state/clave-dev-triple-card/state");
+        assert_eq!(
+            aim_push(Some(&sandbox), Some("clave")),
+            PushAim::Foreign {
+                owner: "clave-test-triple-card".to_string(),
+                target: "clave".to_string(),
+            }
+        );
+    }
+
+    /// And one sandbox may not reach ANOTHER — each worktree stages its own
+    /// instance, and the reaper joins root to session through the same
+    /// formatter this inverts.
+    #[test]
+    fn one_sandbox_snapshot_may_not_be_pushed_at_another_sandbox() {
+        let sandbox = PathBuf::from("/home/u/.local/state/clave-dev-triple-card/state");
+        assert!(matches!(
+            aim_push(Some(&sandbox), Some("clave-test-prune-wt")),
+            PushAim::Foreign { .. }
+        ));
+    }
+
+    #[test]
+    fn a_sandbox_snapshot_aimed_at_its_own_session_is_aimed_as_asked() {
+        let sandbox = PathBuf::from("/home/u/.local/state/clave-dev-triple-card/state");
+        assert_eq!(
+            aim_push(Some(&sandbox), Some("clave-test-triple-card")),
+            PushAim::At("clave-test-triple-card".to_string())
+        );
+    }
+
+    /// The main checkout's own instance keeps the bare names, and
+    /// `key_from_root_name` refuses to key it on purpose. It is still owned,
+    /// and this guard still applies to it.
+    #[test]
+    fn the_main_checkout_instance_is_owned_too() {
+        let main = PathBuf::from("/home/u/.local/state/clave-dev/state");
+        assert_eq!(
+            aim_push(Some(&main), Some("clave-test")),
+            PushAim::At("clave-test".to_string())
+        );
+        assert!(matches!(
+            aim_push(Some(&main), Some("clave")),
+            PushAim::Foreign { .. }
+        ));
+    }
+
+    /// The inverse mistake: a REAL store's snapshot pushed into a test
+    /// session, which would render a live fleet inside a sandbox.
+    #[test]
+    fn a_real_snapshot_may_not_be_pushed_at_a_sandbox_bar() {
+        let real = PathBuf::from("/home/u/.local/state/clave");
+        assert!(matches!(
+            aim_push(Some(&real), Some("clave-test-triple-card")),
+            PushAim::Foreign { .. }
+        ));
+    }
+
+    /// What must keep working: a real install, aimed at its own session.
+    /// clave cannot predict a real session's name, so an unplaceable pair is
+    /// aimed as asked — narrowing here would be clave breaking working
+    /// installs to protect a drive.
+    #[test]
+    fn a_real_install_is_aimed_as_asked() {
+        let real = PathBuf::from("/home/u/.local/state/clave");
+        assert_eq!(
+            aim_push(Some(&real), Some("clave")),
+            PushAim::At("clave".to_string())
+        );
+        assert_eq!(
+            aim_push(Some(&real), Some("some-other-multiplexer-session")),
+            PushAim::At("some-other-multiplexer-session".to_string())
+        );
+    }
+
+    /// No session in the env: outside a multiplexer there is nothing to
+    /// disagree with, and zellij's own resolution is left as it was.
+    #[test]
+    fn an_unnamed_target_stays_unaimed_rather_than_refused() {
+        let sandbox = PathBuf::from("/home/u/.local/state/clave-dev-triple-card/state");
+        assert_eq!(aim_push(Some(&sandbox), None), PushAim::Unaimed);
+        assert_eq!(aim_push(None, None), PushAim::Unaimed);
+    }
+
+    /// A refused aim carries NO target, so the spawn below it cannot
+    /// accidentally inherit zellij's fallback resolution — the very path
+    /// that made this class of bug reach a live fleet in the first place.
+    #[test]
+    fn a_refused_aim_hands_the_spawn_no_target() {
+        let foreign = PushAim::Foreign {
+            owner: "clave-test-triple-card".to_string(),
+            target: "clave".to_string(),
+        };
+        assert_eq!(foreign.target(), None);
+        assert_eq!(PushAim::Unaimed.target(), None);
+        assert_eq!(
+            PushAim::At("clave-test-x".to_string()).target(),
+            Some("clave-test-x")
+        );
+    }
+
+    /// Matched on the whole segment. A real install called `clave-testbed`
+    /// is not a sandbox, and reading it as one would refuse its own pushes.
+    #[test]
+    fn a_sandbox_session_is_matched_on_the_segment_not_the_prefix() {
+        assert!(crate::sandbox::is_sandbox_session("clave-test"));
+        assert!(crate::sandbox::is_sandbox_session("clave-test-triple-card"));
+        assert!(!crate::sandbox::is_sandbox_session("clave-testbed"));
+        assert!(!crate::sandbox::is_sandbox_session("clave"));
+    }
+
     /// No coreutils (stock macOS): a pending perl `alarm` survives exec and
     /// SIGALRM terminates by default, so the alarm bounds the REAL pipe
     /// client, not a wrapper. Expected script is ct.sh's ratified ladder.
@@ -1329,6 +1716,7 @@ mod tests {
             "p",
             &PipeBound::PerlAlarm(PathBuf::from("/usr/bin/perl")),
             15,
+            None,
         );
         assert_eq!(cmd.get_program(), "/usr/bin/perl");
         assert_eq!(
@@ -1367,7 +1755,7 @@ mod tests {
             "dev/CI machines must discover a rung (perl at minimum)"
         );
 
-        let mut child = bounded_pipe_command(&fake, "p", &bound, 1)
+        let mut child = bounded_pipe_command(&fake, "p", &bound, 1, None)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1412,11 +1800,92 @@ mod tests {
         ));
     }
 
+    /// **The push must AIM.** Without `--session`, zellij's one-live-session
+    /// arm serves whichever session exists, ignoring `ZELLIJ_SESSION_NAME`
+    /// entirely — so a hook carefully pointed at a sandbox store still fired
+    /// its snapshot at the maintainer's live fleet. It happened on the
+    /// four-line card's drive, and only `apply_snapshot`'s seq discard stopped
+    /// a three-row snapshot landing on a twenty-row session.
+    ///
+    /// Asserted at every rung, because the flag sits on the `zellij` binary
+    /// rather than on `pipe` and the two wrapper rungs each build that argv
+    /// separately — a fix applied to one of three is the same bug with better
+    /// odds.
+    #[test]
+    fn every_rung_aims_the_push_at_the_session_it_names() {
+        let rungs = [
+            PipeBound::Unbounded,
+            PipeBound::Coreutils(PathBuf::from("/usr/bin/timeout")),
+            PipeBound::PerlAlarm(PathBuf::from("/usr/bin/perl")),
+        ];
+        for bound in &rungs {
+            let cmd = bounded_pipe_command(
+                Path::new("/opt/zellij"),
+                "p",
+                bound,
+                15,
+                Some("clave-test-triple-card"),
+            );
+            let args = args_of(&cmd);
+            let at = args
+                .iter()
+                .position(|a| a == "--session")
+                .unwrap_or_else(|| panic!("{bound:?} sent an unaimed push: {args:?}"));
+            assert_eq!(args[at + 1], "clave-test-triple-card");
+            // BEFORE the subcommand. `zellij pipe --session x` is not the same
+            // command — `pipe` has no such flag, and the push would die at
+            // argument parsing on every event.
+            let pipe = args
+                .iter()
+                .position(|a| a == "pipe")
+                .expect("the pipe verb");
+            assert!(
+                at + 1 < pipe,
+                "{bound:?} put --session after the subcommand: {args:?}"
+            );
+        }
+    }
+
+    /// Empty is not unset. An exported-but-empty `ZELLIJ_SESSION_NAME` names
+    /// nothing, and handing it to `--session` would trade a push that lands
+    /// for one that dies at argument validation on every hook event — a
+    /// working feature turned off by a variable someone cleared.
+    #[test]
+    fn an_empty_session_variable_names_no_session() {
+        assert_eq!(session_from_env(None), None);
+        assert_eq!(session_from_env(Some(String::new())), None);
+        assert_eq!(
+            session_from_env(Some("clave-test".into())).as_deref(),
+            Some("clave-test")
+        );
+    }
+
+    /// `None` leaves the argv exactly as it was. A hook fired outside zellij
+    /// has no session to name, and inventing one would turn a push that today
+    /// does nothing into a push that errors — worse, and for no gain.
+    #[test]
+    fn a_hook_outside_zellij_sends_the_same_unaimed_push_it_always_did() {
+        let cmd = bounded_pipe_command(
+            Path::new("/opt/zellij"),
+            "p",
+            &PipeBound::Unbounded,
+            15,
+            None,
+        );
+        assert_eq!(args_of(&cmd), ["pipe", "--name", "clave-status", "--", "p"]);
+    }
+
     /// A machine with no wrapper at all keeps TODAY's behavior — a status
     /// push is never sacrificed to the bound (#233 story 5).
     #[test]
     fn no_rung_degrades_to_the_bare_unbounded_pipe() {
-        let cmd = bounded_pipe_command(Path::new("/opt/zellij"), "p", &PipeBound::Unbounded, 15);
+        let cmd = bounded_pipe_command(
+            Path::new("/opt/zellij"),
+            "p",
+            &PipeBound::Unbounded,
+            15,
+            None,
+        );
         assert_eq!(cmd.get_program(), "/opt/zellij");
         assert_eq!(args_of(&cmd), ["pipe", "--name", "clave-status", "--", "p"]);
     }
@@ -1431,6 +1900,7 @@ mod tests {
             r#"{"agents":[]}"#,
             &PipeBound::Coreutils(PathBuf::from("/usr/bin/timeout")),
             15,
+            None,
         );
         assert_eq!(cmd.get_program(), "/usr/bin/timeout");
         assert_eq!(
@@ -1479,6 +1949,8 @@ mod tests {
             pr_number: None,
             pr_checked: 0,
             pr_branch: String::new(),
+            wants: None,
+            subagents: false,
         }
     }
 
@@ -2073,6 +2545,356 @@ mod tests {
         );
         // Unknown events are a no-op — the global hook must never guess.
         assert_eq!(status_for_event("PreToolUse", None, Status::Idle), None);
+    }
+
+    #[test]
+    fn a_tail_without_a_closing_record_holds_the_subagent_mark() {
+        // §5.4 fail-closed, the same rule the token reading follows: a tail
+        // that says nothing must never blank a reading that said something.
+        let mut s = Store::default();
+        s.agents.insert("u1".into(), rec("u1"));
+        let p = HookPayload {
+            session_id: Some("u1".into()),
+            ..HookPayload::default()
+        };
+        let turn = |n: u32| {
+            format!(
+                r#"{{"type":"system","subtype":"turn_duration","pendingBackgroundAgentCount":{n}}}"#
+            )
+        };
+
+        apply_hook_event(&mut s, "u1", "Stop", &p, Some(&turn(2)), 1000, true);
+        assert!(s.agents["u1"].subagents);
+
+        // A tail with no closing record in it at all.
+        let quiet = r#"{"type":"assistant","message":{"model":"claude-opus-5"}}"#;
+        apply_hook_event(&mut s, "u1", "Stop", &p, Some(quiet), 1001, true);
+        assert!(
+            s.agents["u1"].subagents,
+            "a silent tail must hold the mark, not clear it"
+        );
+
+        // Only a record that IS present clears it.
+        apply_hook_event(&mut s, "u1", "Stop", &p, Some(&turn(0)), 1002, true);
+        assert!(!s.agents["u1"].subagents);
+
+        // And the live shape of that record names no count at all.
+        apply_hook_event(&mut s, "u1", "Stop", &p, Some(&turn(2)), 1003, true);
+        assert!(s.agents["u1"].subagents);
+        let closed = r#"{"type":"system","subtype":"turn_duration","durationMs":3200}"#;
+        apply_hook_event(&mut s, "u1", "Stop", &p, Some(closed), 1004, true);
+        assert!(
+            !s.agents["u1"].subagents,
+            "a closing record with no count is a turn that ended with nothing pending"
+        );
+    }
+
+    #[test]
+    fn the_subagent_mark_moving_is_itself_a_store_write() {
+        // `changed` is what mints an ord and pushes the fleet. A mark that
+        // flipped without reporting it would be correct in memory and stale on
+        // every bar until some unrelated event happened to push — and the
+        // reverse, a push on every quiet Stop, is traffic for nothing.
+        let mut s = Store::default();
+        s.agents.insert("u1".into(), rec("u1"));
+        let p = HookPayload {
+            session_id: Some("u1".into()),
+            ..HookPayload::default()
+        };
+        let turn = |n: u32| {
+            format!(
+                r#"{{"type":"system","subtype":"turn_duration","pendingBackgroundAgentCount":{n}}}"#
+            )
+        };
+
+        // Settle every other field first, so the mark is the only thing left
+        // that could move.
+        apply_hook_event(&mut s, "u1", "Stop", &p, Some(&turn(0)), 1000, true);
+        assert!(
+            !apply_hook_event(&mut s, "u1", "Stop", &p, Some(&turn(0)), 1001, true),
+            "a fleet where nothing moved must not mint an ord"
+        );
+        assert!(
+            apply_hook_event(&mut s, "u1", "Stop", &p, Some(&turn(2)), 1002, true),
+            "the mark lighting up is a change the bar has to be told about"
+        );
+        assert!(
+            !apply_hook_event(&mut s, "u1", "Stop", &p, Some(&turn(2)), 1003, true),
+            "and staying lit is not"
+        );
+        assert!(
+            apply_hook_event(&mut s, "u1", "Stop", &p, Some(&turn(0)), 1004, true),
+            "going out is a change too"
+        );
+    }
+
+    /// A held reading needs something that can END it. `subagents` holds on a
+    /// silent tail — correctly; an older Claude Code never wrote the field and
+    /// blanking a real mark on silence would be a lie — but `SessionEnd` is
+    /// not silence. Nothing can still be pending under a session that is over,
+    /// so a held mark would sit on a dormant row claiming depth the user
+    /// cannot go and look at, wearing the glyph that says go and look.
+    ///
+    /// `wants` already had this rule (`take_wants` clears on any status that
+    /// is not `NeedsYou`); the mark stacked directly under it did not.
+    #[test]
+    fn a_session_that_ended_carries_no_subagents_however_the_tail_reads() {
+        let mut r = rec("u1");
+        r.subagents = true;
+        // A silent tail on an ordinary event holds the mark — the whole reason
+        // the clear has to be explicit.
+        assert!(!take_subagents(&mut r, "Stop", None));
+        assert!(r.subagents, "silence must not blank a real reading");
+        // The same silence at SessionEnd clears it, and reports the move so
+        // the snapshot goes out.
+        assert!(take_subagents(&mut r, "SessionEnd", None));
+        assert!(!r.subagents);
+        // Even a tail still CLAIMING pending agents cannot resurrect it: the
+        // reading is a turn behind by construction, and the turn it describes
+        // belongs to a session that has since exited.
+        assert!(!take_subagents(&mut r, "SessionEnd", Some(true)));
+        assert!(!r.subagents, "a dead session cannot have live subagents");
+        // And a clear that changes nothing is not a push.
+        assert!(!take_subagents(&mut r, "SessionEnd", None));
+    }
+
+    /// The ordinary path, unchanged: a reading wins over what was there, in
+    /// both directions, and only a real move is reported.
+    #[test]
+    fn a_subagent_reading_wins_over_the_held_one_in_both_directions() {
+        let mut r = rec("u1");
+        assert!(take_subagents(&mut r, "Stop", Some(true)));
+        assert!(r.subagents);
+        assert!(!take_subagents(&mut r, "Stop", Some(true)), "no move");
+        assert!(take_subagents(&mut r, "Stop", Some(false)));
+        assert!(!r.subagents);
+    }
+
+    /// `split_once`, not `split(anchor).nth(1)`. The two agree until the
+    /// anchor appears twice, where `nth(1)` returns the MIDDLE segment and
+    /// drops everything past the second occurrence — so a tool invocation that
+    /// happens to quote the CLI's own sentence loses its tail. Agent-adjacent
+    /// text reaches this function; it should not be able to choose which half
+    /// of itself the card shows.
+    #[test]
+    fn a_repeated_anchor_yields_everything_after_the_first_one() {
+        assert_eq!(
+            wants_from_message(
+                "Claude needs your permission to use Bash (grep 'permission to use ' log)"
+            )
+            .as_deref(),
+            Some("Bash (grep 'permission to use ' log)")
+        );
+    }
+
+    /// A tail carrying all four readings a Stop can take: the token usage, the
+    /// model, the effort, and the turn's closing subagent count.
+    fn four_signal_tail() -> String {
+        [
+            r#"{"type":"assistant","effort":"high","message":{"model":"claude-opus-5","usage":{"input_tokens":1200,"cache_read_input_tokens":800}}}"#,
+            r#"{"type":"system","subtype":"turn_duration","pendingBackgroundAgentCount":2}"#,
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn the_subagent_mark_is_read_even_while_the_meter_is_speaking() {
+        // #245's yield exists because the statusLine meter reads the API
+        // response before the transcript has it — so while the meter speaks,
+        // the hook's tail readers keep quiet. Its scope is stated in
+        // `statusline::hook_yields`: tokens, model and effort. The meter takes
+        // NO subagent reading, so there is nothing here to yield to, and a mark
+        // gated on that yield is a mark that never lands in the field.
+        //
+        // Why no sandbox drive can catch this: `statusline_wrap_allowed`
+        // (setup.rs) requires an absolute binary path, so only a release cut
+        // wraps the slot. The sandbox shares the real ~/.claude by ruling
+        // (dev.rs, 2026-07-18 — isolating it dragged claude's auth along), so a
+        // dev setup must leave that file alone. Every drive therefore runs with
+        // the meter silent, `hook_yields` false, and this bug invisible.
+        let mut s = Store::default();
+        let mut r = rec("u1");
+        r.metered_at = 900;
+        s.agents.insert("u1".into(), r);
+        let p = HookPayload {
+            session_id: Some("u1".into()),
+            ..HookPayload::default()
+        };
+
+        assert!(
+            crate::statusline::hook_yields(&s.agents["u1"], 1000),
+            "the fixture must have the meter actually speaking, or this proves nothing"
+        );
+        apply_hook_event(
+            &mut s,
+            "u1",
+            "Stop",
+            &p,
+            Some(&four_signal_tail()),
+            1000,
+            true,
+        );
+        assert!(
+            s.agents["u1"].subagents,
+            "the turn's own closing record is the only source for this cell — a \
+             metered row must still read it"
+        );
+    }
+
+    #[test]
+    fn the_meters_yield_covers_three_cells_and_no_others() {
+        // The class guard, not the instance. The bug above was one new tail
+        // reader picking up the suppressed local instead of the raw one, and
+        // nothing about that call site looks wrong. This runs the SAME event
+        // against a metered row and a quiet one and demands the two records come
+        // out identical once the three documented cells are set aside — so a
+        // fourth cell added under the wrong local fails here, whatever it is.
+        let p = HookPayload {
+            session_id: Some("u1".into()),
+            ..HookPayload::default()
+        };
+        let tail = four_signal_tail();
+        let run = |metered_at: u64| {
+            let mut s = Store::default();
+            let mut r = rec("u1");
+            r.metered_at = metered_at;
+            s.agents.insert("u1".into(), r);
+            apply_hook_event(&mut s, "u1", "Stop", &p, Some(&tail), 1000, true);
+            s.agents["u1"].clone()
+        };
+
+        let mut quiet = run(0);
+        let mut metered = run(900);
+        for r in [&mut quiet, &mut metered] {
+            // The yield's whole scope. Three CELLS, five fields: the level is
+            // derived from the count and the provider is set alongside the
+            // model, and the meter writes both of those too — so they ride with
+            // their cell rather than being a fourth thing the yield covers.
+            r.context_tokens = None;
+            r.context_level = None;
+            r.model = None;
+            r.provider = None;
+            r.effort = None;
+        }
+        assert_eq!(
+            quiet, metered,
+            "the meter may only silence tokens, model and effort — every other \
+             cell has no fresher source to yield to"
+        );
+    }
+
+    #[test]
+    fn the_turns_closing_record_says_whether_anything_is_still_running_under_it() {
+        let turn = |n: u32| {
+            format!(
+                r#"{{"type":"system","subtype":"turn_duration","durationMs":35640,"messageCount":40,"pendingBackgroundAgentCount":{n},"sessionId":"s"}}"#
+            )
+        };
+        assert_eq!(subagents_from_tail(&turn(1)), Some(true));
+        assert_eq!(subagents_from_tail(&turn(3)), Some(true));
+        assert_eq!(subagents_from_tail(&turn(0)), Some(false));
+
+        // Newest wins: the reading is the LAST turn's, not any earlier one.
+        let two = format!("{}\n{}", turn(2), turn(0));
+        assert_eq!(subagents_from_tail(&two), Some(false));
+        let two = format!("{}\n{}", turn(0), turn(2));
+        assert_eq!(subagents_from_tail(&two), Some(true));
+
+        // No reading is not a reading of zero: a tail that reaches back past
+        // the last turn boundary carries no closing record at all, and must
+        // HOLD what the store knows rather than assert an empty fleet.
+        assert_eq!(subagents_from_tail(""), None);
+
+        // But a closing record that IS present and names no count is a zero.
+        // This is the COMMON shape, not an edge one — every `turn_duration`
+        // line in the sandbox drive looked like this. Reading it as "no
+        // reading" is what would let the mark stick to a row forever.
+        assert_eq!(
+            subagents_from_tail(r#"{"type":"system","subtype":"turn_duration","messageCount":40}"#),
+            Some(false)
+        );
+        assert_eq!(
+            subagents_from_tail(r#"{"type":"system","subtype":"away_summary","content":"x"}"#),
+            None
+        );
+        // The count also rides `type:"assistant"` lines in no transcript we
+        // have measured, and reading it off one would be a guess: the subtype
+        // is the discriminator, exactly as it is for every other system record.
+        assert_eq!(
+            subagents_from_tail(r#"{"type":"assistant","pendingBackgroundAgentCount":4}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn wants_lives_exactly_as_long_as_the_block_it_names() {
+        // Lock §4.7: structure gates, the words only fill in. `wants` is
+        // written for a row the status machine flagged, and dies with the flag
+        // — never held past the block, never invented without one.
+        let mut s = Store::default();
+        s.agents.insert("u1".into(), rec("u1"));
+        let msg = |m: &str| HookPayload {
+            session_id: Some("u1".into()),
+            message: Some(m.into()),
+            ..HookPayload::default()
+        };
+        let bare = HookPayload {
+            session_id: Some("u1".into()),
+            ..HookPayload::default()
+        };
+
+        apply_hook_event(&mut s, "u1", "UserPromptSubmit", &bare, None, 1000, true);
+        assert_eq!(s.agents["u1"].wants, None, "a working row wants nothing");
+
+        let perm = msg("Claude needs your permission to use Bash");
+        apply_hook_event(&mut s, "u1", "Notification", &perm, None, 1001, true);
+        assert_eq!(s.agents["u1"].wants.as_deref(), Some("Bash"));
+
+        // The ~60s idle nag arrives while the SAME block stands. It names no
+        // tool, and blanking here would drop a true reading for a message that
+        // carries no news.
+        let nag = msg("Claude is waiting for your input");
+        apply_hook_event(&mut s, "u1", "Notification", &nag, None, 1002, true);
+        assert_eq!(
+            s.agents["u1"].wants.as_deref(),
+            Some("Bash"),
+            "a nag mid-block holds the ask it cannot restate"
+        );
+
+        // You answered: the row is working again, so nothing is wanted.
+        apply_hook_event(&mut s, "u1", "UserPromptSubmit", &bare, None, 1003, true);
+        assert_eq!(
+            s.agents["u1"].wants, None,
+            "leaving needs-you clears the ask"
+        );
+
+        // The nag ALONE can flag a working row (§6.5), and that row is blocked
+        // on something clave cannot name. Blank, not a guess.
+        apply_hook_event(&mut s, "u1", "Notification", &nag, None, 1004, true);
+        assert_eq!(s.agents["u1"].status, Status::NeedsYou);
+        assert_eq!(s.agents["u1"].wants, None);
+    }
+
+    #[test]
+    fn a_permission_notification_names_the_tool_it_is_blocked_on() {
+        assert_eq!(
+            wants_from_message("Claude needs your permission to use Bash").as_deref(),
+            Some("Bash")
+        );
+        // The parenthetical the CLI sometimes appends is the useful half of
+        // the ask, so it rides along rather than being trimmed to the bare
+        // tool name.
+        assert_eq!(
+            wants_from_message("Claude needs your permission to use Bash (git push)").as_deref(),
+            Some("Bash (git push)")
+        );
+        // Every other notification the hook already sees yields nothing: the
+        // idle nag names no tool, and inventing one would be a measurement
+        // the card never took.
+        assert_eq!(wants_from_message("Claude is waiting for your input"), None);
+        assert_eq!(wants_from_message("compacting…"), None);
+        // A trailing anchor with nothing after it is not a tool name.
+        assert_eq!(wants_from_message("… permission to use "), None);
     }
 
     #[test]
@@ -3089,6 +3911,25 @@ mod tests {
         // last_tail_field.
         let dirty = format!("not-json\n{tail}");
         assert_eq!(model_from_tail(&dirty).as_deref(), Some("claude-fable-5"));
+
+        // A synthetic line is one Claude Code wrote itself, not a model that
+        // answered. It must be scanned PAST — not taken as the newest reading,
+        // and not treated as "no reading" either, which would leave the card
+        // holding something even staler than the real answer below it.
+        let synthetic = format!(
+            "{tail}{}\n",
+            r#"{"type":"assistant","message":{"model":"<synthetic>"}}"#
+        );
+        assert_eq!(
+            model_from_tail(&synthetic).as_deref(),
+            Some("claude-fable-5")
+        );
+        // With nothing real anywhere, it is genuinely no reading, and the
+        // fail-closed rule holds whatever the store already knew.
+        assert_eq!(
+            model_from_tail(r#"{"type":"assistant","message":{"model":"<synthetic>"}}"#),
+            None
+        );
     }
 
     #[test]

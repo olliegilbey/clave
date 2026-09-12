@@ -258,24 +258,34 @@ guard "$STABLE_LAUNCHER CHANGED — only a release cut writes the launcher (#43a
 # Session lifecycle is the human's: print, never run. A `zellij action` against
 # a dead session blocks forever, and only the human can see the screen.
 #
-# The env prefix is required, not decoration: this line gets pasted into a
-# fresh terminal in whatever directory it opens in, and `dev launch` derives
-# its instance from the CURRENT directory. Without the prefix it would resolve
-# to the main checkout's sandbox rather than this worktree's.
+# `dev launch` derives its instance from the CURRENT directory, and this line
+# gets pasted into a fresh terminal in whatever directory that opens in — so
+# the `cd` is the load-bearing part, not decoration: without it the launch
+# resolves to the MAIN checkout's sandbox instead of this worktree's.
+#
+# Everything else it needs, it now derives for itself: the session name, the
+# state and data dirs (`enter_sandbox`) and the PATH shim (`shim_first_on_path`).
+# Those used to be a five-line env prefix on every launch, which is precisely
+# the kind of step that gets dropped once and then debugged for an hour — the
+# shim especially, since without it the sandbox silently tests the STABLE
+# install instead of this build (#43/#44).
 echo
 cat <<EOF
 ==> Ready. Launch it YOURSELF, in a NEW terminal window OUTSIDE zellij:
 
-    CLAVE_SESSION=$SESSION \\
-    CLAVE_STATE_DIR=$SANDBOX/state \\
-    CLAVE_DATA_DIR=$SANDBOX/data \\
-    PATH="$SHIM:\$PATH" "$CLI" dev launch
+    cd $ROOT
+    just launch
 
     This is the '$SESSION' session — yours alone. Another agent staging from
     another worktree gets its own name and its own root, and cannot touch it.
 
-    The PATH shim is required, not cosmetic — without it the sandbox bar
-    shells out to the stable ~/.cargo/bin/clave (see the header comment).
+    The \`cd\` matters: the instance is keyed off the working directory, so
+    launching from elsewhere would stage-and-launch different sandboxes.
+    Everything else — state dir, data dir, and the PATH shim that makes a
+    bare \`clave\` resolve to THIS build — is derived by \`dev launch\` itself.
+
+    It refuses to run from inside a zellij session, which is what makes this
+    step yours: an agent is always inside one.
 
     Your live 'clave' session is untouched: nothing here wrote ~/.cargo/bin.
 EOF

@@ -18,16 +18,24 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use clave_types::{Agent, AgentSnapshot, Status};
+// `lenient` is the shared read-tolerance helper: a value this binary has no
+// name for is the FUTURE, not corruption. It lives in `clave-types` because
+// BOTH sides need it — the store reader here and the snapshot the bar parses
+// off the pipe — and its doc carries the limits on reaching for it.
+use clave_types::{Agent, AgentSnapshot, Status, lenient};
 use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 
 /// Where an agent's label came from (§6.4). While `FirstPrompt`, `clave hook`
 /// keeps tail-scanning the jsonl for a session summary; once `Summary`, it
 /// stops re-scanning forever (the label only meaningfully changes once).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LabelSource {
+    /// `#[default]` is for the store's lenient read (see `lenient`), and this
+    /// is the safe direction of the two: "keep scanning" costs one tail read,
+    /// where guessing `Summary` would freeze a label this binary cannot judge.
+    #[default]
     FirstPrompt,
     Summary,
 }
@@ -47,6 +55,7 @@ pub struct AgentRecord {
     pub branch: String,
     /// `dir · branch · summary-or-first-prompt` (§6.4).
     pub label: String,
+    #[serde(default, deserialize_with = "lenient")]
     pub status: Status,
     /// unix s; bumped on UserPromptSubmit. DISPLAY and cross-session policy
     /// only (`clave ls`, the §6.3 picker, eager-launch selection) — NOT the
@@ -64,6 +73,7 @@ pub struct AgentRecord {
     pub last_visited: u64,
     /// Worktree path if `clave add --worktree` created one (§6.3), else None.
     pub worktree: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
     pub label_source: LabelSource,
     /// Zellij tab id hosting this agent (§6.6 Design B), bound by the agent
     /// tab's own bar via `clave bind`. Keys the hook's prompt→timeline stamp
@@ -208,6 +218,29 @@ pub struct AgentRecord {
     /// `pr_checked == 0`. `default` keeps pre-field store files loading.
     #[serde(default)]
     pub pr_branch: String,
+    /// What this row is blocked on, in the words its own notification used —
+    /// the card's `wants` cell (lock §4.7). Wire twin of
+    /// `clave_types::Agent::wants`.
+    ///
+    /// Written and cleared by `hook::take_wants`, which gates it on
+    /// `Status::NeedsYou`: the STRUCTURE decides whether a row is waiting, and
+    /// the words only say what for. That gate is why this field can never lie
+    /// — an ask outliving its block would be worse than no ask at all, and the
+    /// only way for it to survive is for the row to still be flagged.
+    /// `None` renders blank, which is most rows. `default` keeps pre-field
+    /// store files loading.
+    #[serde(default)]
+    pub wants: Option<String>,
+    /// Whether this row has any agent still running under it — the card's
+    /// subagent mark (lock 4.6). Wire twin of `clave_types::Agent::subagents`.
+    ///
+    /// A BOOLEAN, not a count, and read from the transcript's closing
+    /// `turn_duration` record by `hook::subagents_from_tail`, which carries
+    /// the cadence caveat. Held when a tail carries no such record, so a
+    /// missed read never blanks a true mark. `default` keeps pre-field store
+    /// files loading.
+    #[serde(default)]
+    pub subagents: bool,
 }
 
 /// The whole store file. `seq` is the monotonic snapshot counter of the §5
@@ -250,7 +283,7 @@ pub struct Store {
     pub tab_buckets: BTreeMap<usize, BTreeMap<u32, u32>>,
     /// Row-ordering mode + dial — see `clave_types::OrderMode`. Store
     /// state under the `collapsed` doctrine: one writer, rides every push.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub order: clave_types::OrderMode,
     /// tab_id → unix seconds of the last USER interaction with that tab —
     /// the wall-clock twin of `tab_order` above, which is ordinal-only and
@@ -265,10 +298,14 @@ pub struct Store {
     /// (unlike `collapsed`/`order`): geometry is launch-baked into fixed pane
     /// sizes and a plugin-config line, and a LIVE bar can neither resize its
     /// own pane nor swap its own plugin config, so there is nothing for a
-    /// running instance to react to. `default` (Double, matching
-    /// `RowHeight`'s own default) keeps pre-field store files loading and is
-    /// exactly the fresh-install behaviour: nothing set → double.
-    #[serde(default)]
+    /// running instance to react to. `default` keeps pre-field store files
+    /// loading and is exactly the fresh-install behaviour.
+    ///
+    /// `deserialize_with` for the OTHER direction, which `default` does not
+    /// cover: `default` answers a MISSING field, and the field being present
+    /// with an unfamiliar value is a different question with a much worse
+    /// answer. See [`clave_types::lenient`].
+    #[serde(default, deserialize_with = "lenient")]
     pub row_height: clave_types::RowHeight,
 }
 
@@ -448,6 +485,8 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
                 provider: r.provider.clone(),
                 effort: r.effort.clone(),
                 pr_number: r.pr_number,
+                wants: r.wants.clone(),
+                subagents: r.subagents,
             })
             .collect(),
     }
@@ -955,7 +994,242 @@ mod tests {
             pr_number: None,
             pr_checked: 0,
             pr_branch: String::new(),
+            wants: None,
+            subagents: false,
         }
+    }
+
+    #[test]
+    fn a_row_height_from_the_future_loads_the_store_instead_of_killing_it() {
+        // The failure this prevents is total and silent. serde fails the whole
+        // struct on an unknown enum variant, so one unfamiliar `row_height`
+        // makes the ENTIRE store unreadable — and `clave hook` exits 0 by
+        // Global Constraint, reporting only on stderr, so the fleet just stops
+        // updating with nothing to see. Measured 2026-09-10: a v0.4.0 hook
+        // against a `card` store printed `unknown variant \`card\`` and gave up
+        // on every event.
+        //
+        // Both directions matter. A value from the future degrades to the
+        // default; the two this binary knows still round-trip, or the leniency
+        // would be hiding a real read.
+        let store = |v: &str| -> Store {
+            serde_json::from_str(&format!(r#"{{"seq":3,"agents":{{}},"row_height":{v}}}"#))
+                .expect("an unfamiliar row height must not fail the whole store")
+        };
+        assert_eq!(
+            store(r#""single""#).row_height,
+            clave_types::RowHeight::Single
+        );
+        assert_eq!(
+            store(r#""double""#).row_height,
+            clave_types::RowHeight::Double
+        );
+        assert_eq!(store(r#""card""#).row_height, clave_types::RowHeight::Card);
+        // The future: a spelling, and a SHAPE. Neither may take the store with
+        // it, and the rest of the store must still arrive intact.
+        let ahead = store(r#""quadruple""#);
+        assert_eq!(ahead.row_height, clave_types::RowHeight::default());
+        assert_eq!(ahead.seq, 3, "the rest of the store must survive the guess");
+        assert_eq!(store("null").row_height, clave_types::RowHeight::default());
+        assert_eq!(
+            store("{\"lines\":6}").row_height,
+            clave_types::RowHeight::default()
+        );
+        // A missing field is the OTHER question, and `default` still answers it.
+        let bare: Store = serde_json::from_str(r#"{"seq":1,"agents":{}}"#).unwrap();
+        assert_eq!(bare.row_height, clave_types::RowHeight::default());
+    }
+
+    /// A store JSON built from a REAL record, with `overrides` spliced onto the
+    /// agent and `store_overrides` onto the store. Built this way rather than
+    /// hand-written so the fixture cannot rot the moment a required field is
+    /// added — a hand-rolled agent literal fails on the missing field instead
+    /// of on the thing under test, which is exactly the noise these guards are
+    /// meant to cut through.
+    fn store_json(
+        overrides: &[(&str, serde_json::Value)],
+        store_overrides: &[(&str, serde_json::Value)],
+    ) -> String {
+        let mut agent = serde_json::to_value(rec("u1")).expect("the record serializes");
+        for (k, v) in overrides {
+            agent[*k] = v.clone();
+        }
+        let mut store = serde_json::json!({"seq": 9, "agents": {"u1": agent}});
+        for (k, v) in store_overrides {
+            store[*k] = v.clone();
+        }
+        store.to_string()
+    }
+
+    #[test]
+    fn every_persisted_enum_survives_a_value_from_the_future() {
+        // The class guard. The instance above pins `row_height`; this pins the
+        // RULE, because the bug was never really about row heights — it was
+        // serde failing the whole struct on one unfamiliar value, and all four
+        // persisted enums have that same edge.
+        //
+        // Each case is a store a NEWER clave could plausibly write. None may
+        // take the file down, and the fields around it must still arrive —
+        // that second half is the point, because a store that loads with
+        // everything blanked is no better than one that fails.
+        let parse = |json: String| -> Store {
+            serde_json::from_str(&json)
+                .expect("a value from the future must never fail the whole store")
+        };
+        let j = serde_json::json!("ascended");
+
+        let s = parse(store_json(&[("status", j.clone())], &[]));
+        assert_eq!(s.agents["u1"].status, Status::default());
+        assert_eq!(s.agents["u1"].cwd, "/x", "the row around it survives");
+
+        let s = parse(store_json(&[("label_source", j.clone())], &[]));
+        assert_eq!(s.agents["u1"].label_source, LabelSource::FirstPrompt);
+        assert_eq!(s.agents["u1"].branch, "main");
+
+        // Store-level. `order` is the interesting one: a struct variant, so the
+        // future can add a DIAL as easily as a name and both shapes must be
+        // survivable — a `String`-first reader would have failed the second.
+        let s = parse(store_json(&[], &[("order", j.clone())]));
+        assert_eq!(s.order, clave_types::OrderMode::default());
+        assert_eq!(s.seq, 9, "the store around it survives");
+
+        let s = parse(store_json(
+            &[],
+            &[("order", serde_json::json!({"quantum": {"spin": 3}}))],
+        ));
+        assert_eq!(s.order, clave_types::OrderMode::default());
+
+        let s = parse(store_json(&[], &[("row_height", j.clone())]));
+        assert_eq!(s.row_height, clave_types::RowHeight::default());
+
+        // All of them at once — the actual shape of a version skew, where one
+        // newer clave wrote the whole file rather than one field of it.
+        let s = parse(store_json(
+            &[("status", j.clone()), ("label_source", j.clone())],
+            &[("order", j.clone()), ("row_height", j.clone())],
+        ));
+        assert_eq!(s.agents["u1"].status, Status::default());
+        assert_eq!(s.agents["u1"].label_source, LabelSource::FirstPrompt);
+        assert_eq!(s.order, clave_types::OrderMode::default());
+        assert_eq!(s.row_height, clave_types::RowHeight::default());
+        assert_eq!(s.agents["u1"].label, "x · main");
+    }
+
+    #[test]
+    fn leniency_does_not_swallow_the_values_this_binary_does_know() {
+        // The other half, and the reason the guard above is not just
+        // `unwrap_or_default()` wearing a test. Leniency that also ate REAL
+        // values would satisfy every assertion up there while quietly
+        // flattening the store to defaults on every read — a worse bug than the
+        // one it replaced, and completely invisible.
+        let s: Store = serde_json::from_str(&store_json(
+            &[
+                ("status", serde_json::json!("needs_you")),
+                ("label_source", serde_json::json!("summary")),
+            ],
+            &[
+                ("row_height", serde_json::json!("single")),
+                ("order", serde_json::json!({"recency": null})),
+            ],
+        ))
+        .expect("a store this binary fully understands");
+        assert_eq!(s.agents["u1"].status, Status::NeedsYou);
+        assert_eq!(s.agents["u1"].label_source, LabelSource::Summary);
+        assert_eq!(s.row_height, clave_types::RowHeight::Single);
+        assert_eq!(s.order, clave_types::OrderMode::Recency);
+
+        // And the dial inside the struct variant — the natural thing for a
+        // `Value`-first reader to lose while still looking like it works.
+        let s: Store = serde_json::from_str(&store_json(
+            &[],
+            &[(
+                "order",
+                serde_json::json!({"frecency": {"half_life_hours": 72}}),
+            )],
+        ))
+        .unwrap();
+        assert_eq!(
+            s.order,
+            clave_types::OrderMode::Frecency {
+                half_life_hours: 72
+            }
+        );
+    }
+
+    #[test]
+    fn every_field_the_wire_shares_with_the_record_is_carried_verbatim() {
+        // The class guard for the projection. `snapshot_from` is a long
+        // hand-written field list, and the failure mode when a line is missing
+        // is the worst kind: the host computes the value, the store holds it,
+        // the bar's own tests prove it renders — and the cell is blank in
+        // production because nothing joins the two. It cost the `wants` and
+        // `subagents` cells exactly that, and neither `cargo test` nor `cargo
+        // mutants` could see it (mutants does not generate struct-literal field
+        // mutations).
+        //
+        // So this asserts the rule instead of the fields: every key the wire
+        // `Agent` shares a NAME with the record must hold the record's value,
+        // verbatim. A new cell added to both types and forgotten in the middle
+        // fails here without anyone remembering to extend a list. Store-only
+        // fields (`pr_checked`, `pr_branch`, `label_source`) are absent from
+        // the wire and simply do not match a key, so they cost nothing.
+        //
+        // Every value below is deliberately NON-default: a field copied as
+        // `Default::default()` is only distinguishable from a real copy if the
+        // source differs from the default.
+        let mut r = rec("u-wire");
+        r.cwd = "/repo/wt".into();
+        r.repo_root = "/repo".into();
+        r.branch = "feature/x".into();
+        r.label = "wt · feature/x".into();
+        r.status = Status::NeedsYou;
+        r.last_interacted = 1_700_000_000;
+        r.commit_ord = 7;
+        r.last_visited = 1_699_999_000;
+        r.worktree = Some("wt".into());
+        r.tab_id = Some(3);
+        r.pane_id = Some(9);
+        r.stale = true;
+        r.title = Some("a title".into());
+        r.summary = "a summary".into();
+        r.default_branch = Some("main".into());
+        r.context_tokens = Some(105_000);
+        r.context_level = Some(4);
+        r.buckets = BTreeMap::from([(1_u32, 2_u32)]);
+        r.model = Some("opus".into());
+        r.provider = Some("claude".into());
+        r.effort = Some("xh".into());
+        r.pr_number = Some(1234);
+        r.wants = Some("Bash (git push --force)".into());
+        r.subagents = true;
+
+        let mut s = Store::default();
+        s.agents.insert(r.uuid.clone(), r.clone());
+        let snap = snapshot_from(&s);
+        let wire = serde_json::to_value(&snap.agents[0]).expect("the wire agent serializes");
+        let record = serde_json::to_value(&r).expect("the record serializes");
+
+        let wire = wire.as_object().expect("an object");
+        let record = record.as_object().expect("an object");
+        let mut shared = 0;
+        for (key, on_the_wire) in wire {
+            let Some(in_the_record) = record.get(key) else {
+                continue; // wire-only, if there ever is one
+            };
+            shared += 1;
+            assert_eq!(
+                in_the_record, on_the_wire,
+                "`{key}` did not survive `snapshot_from` — the host computed it \
+                 and the bar will render it blank"
+            );
+        }
+        // Guards the guard: if the two types ever stop sharing names the loop
+        // above would pass by matching nothing at all.
+        assert!(
+            shared >= 24,
+            "only {shared} shared fields found — the projection guard is not \
+             looking at the record it thinks it is"
+        );
     }
 
     /// #149: only unprotected rows past the cutoff go; a protected row NEVER
@@ -1182,8 +1456,8 @@ mod tests {
         let p = tmp_paths(d.path());
         assert_eq!(
             read_store(&p).unwrap().row_height,
-            clave_types::RowHeight::Double,
-            "fresh install defaults to double"
+            clave_types::RowHeight::Card,
+            "fresh install defaults to the four-line card"
         );
         let seq0 = read_store(&p).unwrap().seq;
         set_row_height(&p, clave_types::RowHeight::Single).unwrap();

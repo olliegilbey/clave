@@ -27,7 +27,12 @@ pub fn resolve_binary(config: &BTreeMap<String, String>) -> Option<String> {
 /// (#232). Every layout since Task 5 bakes `row_height` alongside
 /// `clave_binary`, so the key is present in steady state; a pre-#232 layout
 /// or a hand-edited config lacks it and `RowHeight::from_config_value` fails
-/// CLOSED to `Double`, never a surprise legacy `Single` render.
+/// CLOSED to the default `Card` — the four-line geometry a fresh install
+/// draws (lock §1) — and never to a surprise legacy `Single` render. A value
+/// this build has no name for lands in the same place, for the same reason:
+/// the config is a launch-baked line, so the wrong answer is a geometry, and
+/// the geometry the user would have got by installing today is the one guess
+/// that cannot surprise them.
 ///
 /// Pure so it unit-tests on the host, same discipline as `resolve_binary`.
 pub fn resolve_row_height(config: &BTreeMap<String, String>) -> clave_types::RowHeight {
@@ -82,13 +87,15 @@ mod tests {
     }
 
     #[test]
-    fn resolve_row_height_reads_the_key_and_defaults_double() {
+    fn resolve_row_height_reads_the_key_and_defaults_card() {
         let mut c = BTreeMap::new();
-        assert_eq!(resolve_row_height(&c), clave_types::RowHeight::Double);
+        assert_eq!(resolve_row_height(&c), clave_types::RowHeight::Card);
         c.insert(clave_types::ROW_HEIGHT_KEY.into(), "single".into());
         assert_eq!(resolve_row_height(&c), clave_types::RowHeight::Single);
-        c.insert(clave_types::ROW_HEIGHT_KEY.into(), "garbage".into());
+        c.insert(clave_types::ROW_HEIGHT_KEY.into(), "double".into());
         assert_eq!(resolve_row_height(&c), clave_types::RowHeight::Double);
+        c.insert(clave_types::ROW_HEIGHT_KEY.into(), "garbage".into());
+        assert_eq!(resolve_row_height(&c), clave_types::RowHeight::Card);
     }
 
     #[test]

@@ -8,7 +8,7 @@ confusing, or out of date, **that is a bug** — open an issue, or fix it in a P
 Documentation fixes are real contributions and are reviewed like any other.
 
 New to the project? [README.md](README.md) explains what clave *is*.
-[UBIQUITOUS_LANGUAGE.md](UBIQUITOUS_LANGUAGE.md) is short and worth five
+[UBIQUITOUS_LANGUAGE.md](docs/UBIQUITOUS_LANGUAGE.md) is short and worth five
 minutes — "session" alone means three different things in this codebase.
 
 ---
@@ -25,9 +25,19 @@ just setup-toolchain     # adds the wasm32-wasip1 target
 just sandbox             # builds, wires an isolated sandbox, verifies it
 ```
 
-`just sandbox` prints the exact command to launch it. **Run that yourself, in a
-new terminal, outside zellij** — clave creates its own multiplexer session, so
-launching from inside one nests them.
+Then launch it yourself, **in a new terminal, outside zellij** — clave creates
+its own multiplexer session, so launching from inside one nests them:
+
+```bash
+cd <your checkout>      # the instance is keyed off the working directory
+just launch
+```
+
+`clave dev launch` refuses when `ZELLIJ` is set, so that nesting is a refusal
+rather than a rule to remember — which also means an agent cannot take this
+step and will hand you the command instead. Everything else it derives: the
+session name, the state and data dirs, and the `PATH` shim that makes a bare
+`clave` resolve to your build rather than an installed one.
 
 That gives you a throwaway `clave-test` session with synthetic agents, entirely
 separate from any real clave install. Reset it any time with `clave dev reset`.
@@ -48,7 +58,7 @@ artifacts, so it reproduces production by construction.
 
 | | Day-to-day (stable) | Development (sandbox) |
 |---|---|---|
-| **Launch** | `clave`, in a non-zellij terminal | the command `just sandbox` prints |
+| **Launch** | `clave`, in a non-zellij terminal | `just launch`, in a non-zellij terminal |
 | **Zellij session** | `clave` | `clave-test` |
 | **State** (store, evlog) | `~/.local/state/clave/` | `~/.local/state/clave-dev/state/` |
 | **Artifacts** (wasm, config) | `~/.local/share/clave/` | `~/.local/state/clave-dev/data/` |
@@ -107,7 +117,7 @@ identity, so a regenerated config re-keys the keybinds to a plugin that isn't
 there, and zellij's response to that miss is to **start a second one**.
 
 The symptom is two sidebars and half-working navigation. It shipped once, in
-v0.1.1. [FOOTGUNS.md](FOOTGUNS.md) has the mechanism and the one-line
+v0.1.1. [FOOTGUNS.md](docs/FOOTGUNS.md) has the mechanism and the one-line
 diagnosis.
 
 So: after any `just release`, `clave setup`, or `clave dev scenario` that
@@ -159,7 +169,7 @@ Live, interactive behaviour is not covered by any automated test — that is wha
 
 Two documents will save you a wasted afternoon:
 
-- **[FOOTGUNS.md](FOOTGUNS.md)** — traps that already cost someone a round.
+- **[FOOTGUNS.md](docs/FOOTGUNS.md)** — traps that already cost someone a round.
   Grep it the moment something behaves unexpectedly, *before* you start
   debugging. If you lose time to something new, add it.
 - **[SUBSYSTEM-VALIDATION.md](docs/superpowers/spikes/SUBSYSTEM-VALIDATION.md)**
@@ -178,9 +188,9 @@ Plenty of contributors here will be. The repo is set up for it:
 
 - **[AGENTS.md](AGENTS.md)** is the entry point — deliberately short, and it
   points at everything else. Most agent harnesses read it automatically.
-- **[FOOTGUNS.md](FOOTGUNS.md)** is written to be *grepped*, with the error
+- **[FOOTGUNS.md](docs/FOOTGUNS.md)** is written to be *grepped*, with the error
   string or symbol at the front of each line. Point your agent at it.
-- **[UBIQUITOUS_LANGUAGE.md](UBIQUITOUS_LANGUAGE.md)** stops the ambiguity that
+- **[UBIQUITOUS_LANGUAGE.md](docs/UBIQUITOUS_LANGUAGE.md)** stops the ambiguity that
   causes the most wasted agent turns.
 
 Two things to hold your agent to:

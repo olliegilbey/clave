@@ -143,6 +143,66 @@ fi
 unset ZELLIJ ZELLIJ_PANE_ID
 export ZELLIJ_SESSION_NAME="$SESSION"
 
+# 3b. THE SECOND DOOR (2026-09-10). Everything above guards `zellij action`.
+#     `clave hook` needs the identical guard for a reason that was invisible
+#     until it bit: the hook writes the store (safe — CLAVE_STATE_DIR selects
+#     it) and then PUSHES the resulting snapshot with `zellij pipe`, and that
+#     push carried no `--session`. So a drive that carefully set
+#     CLAVE_STATE_DIR and nothing else wrote the right store and fired the
+#     notification at the MAINTAINER'S FLEET.
+#
+#     That happened while driving the four-line card: a 3-row sandbox snapshot
+#     was aimed at a live 20-row session, and only `apply_snapshot`'s
+#     `snap.seq <= self.seq` discard stopped it landing. That guard is an
+#     accident of which store had the higher seq, not protection.
+#
+#     The failure is SILENT in the direction that matters — the sandbox bar
+#     keeps rendering its stale snapshot, so the feature under test looks
+#     broken and the drive chases the wrong bug. Two rounds went that way.
+#
+#     THE PUSH ITSELF IS FIXED: `bounded_pipe_command` now passes
+#     `--session "$ZELLIJ_SESSION_NAME"` when the hook's env names one
+#     (hook.rs, `own_session`). This block stays, and not merely as belt to
+#     that brace — it is what SETS `CLAVE_SESSION` and the two sandbox roots,
+#     and an agent shell inherits the maintainer's `ZELLIJ_SESSION_NAME`, so
+#     the export at step 3 above is what the fixed push then reads. Invoking
+#     `clave hook` outside this wrapper still aims at his fleet, correctly and
+#     precisely.
+#
+#     Usage:  scripts/ct.sh --hook UserPromptSubmit '{"session_id":"…"}'
+if [[ "${1:-}" == "--hook" ]]; then
+  shift
+  [[ $# -ge 1 ]] || { echo "usage: ct.sh --hook <Event> [payload-json]" >&2; exit 2; }
+  hook_event="$1"; shift
+  # Same discipline as SESSION above: ask the binary that owns the sandbox,
+  # never reconstruct the paths here, or the wrapper and the CLI can disagree
+  # about which root a drive is writing.
+  hook_state="$("$CLAVE_BIN" dev instance --field state)"
+  hook_data="$("$CLAVE_BIN" dev instance --field data)"
+  # EMPTY IS NOT UNSET HERE, and that asymmetry is the hazard: `env.rs`'s
+  # `dir_from` treats an empty value as absent and falls back to the
+  # maintainer's REAL store and data dir. So an empty answer above would not
+  # fail — it would silently aim a sandbox drive at his live fleet's store,
+  # which is the one outcome this whole wrapper exists to make unexpressible.
+  # Same discipline as the `-z` check on SESSION: refuse rather than guess.
+  if [[ -z "$hook_state" || -z "$hook_data" ]]; then
+    cat >&2 <<EOF
+REFUSING: this checkout's sandbox roots came back empty.
+  state='${hook_state}'
+  data='${hook_data}'
+
+An empty CLAVE_STATE_DIR is not "no override" — it reads as UNSET, and the
+hook would then write the maintainer's real store. There is deliberately no
+fallback.
+EOF
+    exit 1
+  fi
+  exec env CLAVE_SESSION="$SESSION" \
+    CLAVE_STATE_DIR="$hook_state" \
+    CLAVE_DATA_DIR="$hook_data" \
+    "$CLAVE_BIN" hook "$hook_event" <<<"${1:-{\}}"
+fi
+
 # 4. Bound it (CodeRabbit, PR #152). Every check above races with the session
 #    dying, and `zellij action` against a dead or wedged session BLOCKS
 #    INDEFINITELY AND NEVER ERRORS (FOOTGUNS) — which is the single worst thing

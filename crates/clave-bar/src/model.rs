@@ -152,10 +152,34 @@ fn is_default_checkout(a: &Agent) -> bool {
         }
 }
 
+/// The same instant [`elapsed_label`] measures, at the resolution a turn in
+/// flight needs: SECONDS under the first minute, and the staleness ladder
+/// above it. Ruled from the drive (2026-09-09) — the card sat on `0m` for the
+/// whole of a turn Claude Code's own footer was counting in seconds, which is
+/// the one stretch where the number is worth watching rather than glancing at.
+///
+/// Three characters wide at the widest (`59s`), so it costs the cell nothing.
+/// The bar already repaints every 0.2s while any row is thinking and arms
+/// nothing at all when none is, so this reading is free at both ends: no new
+/// timer to drive it, and no idle fleet paying for a clock nobody is watching.
+pub(crate) fn turn_label(now: u64, then: u64) -> Option<String> {
+    if then == 0 {
+        return None;
+    }
+    match now.saturating_sub(then) {
+        s if s < 60 => Some(format!("{s}s")),
+        _ => elapsed_label(now, then),
+    }
+}
+
 /// m → h → d → w, each unit taking over at 1.0 of itself; sub-minute is "0m".
 /// `then == 0` is "never" (no interaction on record — the store never mints
 /// that value for a real one), which renders blank rather than "now": the bar
 /// never invents a measurement (#232).
+///
+/// This is the STALENESS reading. While a turn is in flight the same instant
+/// is read by [`turn_label`] instead, at seconds — one number, two
+/// resolutions (lock §4.4).
 pub(crate) fn elapsed_label(now: u64, then: u64) -> Option<String> {
     if then == 0 {
         return None;
@@ -250,6 +274,12 @@ pub enum Effect {
     /// not disclose, and the bar watched its own renders to find out what had
     /// happened. That loop is what ran the sidebar to 141 columns and to 11.
     SwapWidth,
+    /// Arm the shell's fast tick again, without swapping anything — the ask
+    /// this expiry belonged to is owed another one (`swap_owed`).
+    /// Distinct from `SwapWidth` because it must NOT call `next_swap_layout`:
+    /// the geometry has already been asked for, and asking twice would step
+    /// the tab past it.
+    RearmWidthCooldown,
     /// set_timeout(PEEK_SINK_SECS) + pending_peeks bump — a dormant-row nav
     /// landing on a collapsed bar peeks like live nav does (no visited pipe
     /// exists for it, so the model asks explicitly).
@@ -348,15 +378,20 @@ pub enum BindStallState {
 /// duration-cutoff scheme the dwell era used.
 pub const PEEK_SINK_SECS: f64 = 0.9;
 
-/// How long a switch ask deafens the width machine (`main.rs` arms it via
-/// `set_timeout` on every `Effect::SwapWidth`). A swap's repaints arrive
-/// QUEUED and stale — the QA-drive trace (2026-08-17) showed a burst of
-/// pre-swap widths landing within ~10ms of the ask — so a machine that
-/// judges every paint spends its whole budget on echoes of its own last
-/// move. One ask buys silence until this clock expires; the expiry judges
-/// the LATEST painted width once. 150ms is an order of magnitude past the
-/// measured burst and well under [`PEEK_SINK_SECS`], which keeps the two
-/// timer kinds separable by elapsed time.
+/// The MINIMUM deafness a switch ask needs. A swap's repaints arrive QUEUED
+/// and stale — the QA-drive trace (2026-08-17) showed a burst of pre-swap
+/// widths landing within ~10ms of the ask — so a machine that judges every
+/// paint spends its whole budget on echoes of its own last move. One ask buys
+/// silence until the deafness is over; the expiry that ends it judges the
+/// LATEST painted width once. 150ms is an order of magnitude past the measured
+/// burst and well under [`PEEK_SINK_SECS`].
+///
+/// A FLOOR, not an interval: since 2026-09-11 nothing arms a timer of this
+/// length. The shell has exactly one fast-band timer (`main.rs`'s
+/// `FAST_TICK_SECS`, 0.2s) and the deafness is measured in its ticks, because
+/// two timers in one classifier band cannot be told apart by the only thing
+/// `Event::Timer` carries. `main.rs` asserts this number stays under that one
+/// at compile time.
 pub const WIDTH_COOLDOWN_SECS: f64 = 0.15;
 
 /// The width machine's walk budget (`BarModel::walk_spent`): the most switch
@@ -645,15 +680,42 @@ pub struct BarModel {
     /// against a constant). There is no queue to replay, only an end state
     /// to reach; a mode that leaves and returns owes nothing.
     ///
-    /// `swap_in_flight`: an ask has been sent and its cooldown timer has not
-    /// fired yet. While set the machine records paints but judges none of
+    /// `swap_owed`: an ask has been sent and the fast-band expiries it is
+    /// owed have not all arrived. While non-zero the machine records paints but judges none of
     /// them — a swap's repaints arrive queued and STALE, and a machine that
     /// judged them spent its whole budget on echoes of its own last move,
     /// which is exactly the infinite toggle loop the QA drive filmed
     /// (three asks per millisecond, each burst re-arming the next).
     /// Cleared only by [`Self::width_cooldown_elapsed`], which judges the
     /// latest paint once.
-    swap_in_flight: bool,
+    ///
+    /// A COUNT, not a flag, since 2026-09-10. The shell's fast tick is SHARED
+    /// with the card's spinner (`main.rs`'s `FAST_TICK_SECS`), so a tick can
+    /// already be in flight when the user toggles collapse — and its
+    /// remaining time is unknown, anywhere in (0, tick]. Judging on it ends
+    /// the deafness EARLY, the judgement lands on a pre-swap echo, and it
+    /// spends walk budget the walk needs: three deafness-spaced asks provably
+    /// visit every swap position, and a budget burnt on echoes leaves the bar
+    /// stopped at the wrong width until the next toggle, peek or refocus.
+    ///
+    /// So the ask asks for TWO ticks when one was already running and one when
+    /// none was. The second is a full tick behind the first, so the deafness
+    /// is always at least one tick, which the shell asserts is at least one
+    /// [`WIDTH_COOLDOWN_SECS`]. The count is exact because there is exactly
+    /// ONE fast timer to count — that is why the shell has only one. The model
+    /// asks for the second tick itself, so the count cannot strand when the
+    /// spinner that was driving the ticks stops, which it does the moment the
+    /// last turn ends.
+    swap_owed: u8,
+    /// The shell's one fast-band timer is in flight (`main.rs`'s
+    /// `fast_armed`, mirrored here by [`Self::set_fast_tick_armed`]).
+    /// MIRRORED rather than re-derived: a second predicate over "is any row
+    /// mid-turn and does this geometry spin" could disagree with the one that
+    /// actually armed the timer, and the disagreement would show up only as a
+    /// rare width bug. Read at exactly one place — the instant of a switch
+    /// ask, which is the only moment a tick this model did not ask for can
+    /// steal something.
+    fast_tick_armed: bool,
     /// The width of the most recent paint, recorded deaf or not — what the
     /// cooldown expiry judges instead of the paint that preceded the ask.
     last_painted: Option<usize>,
@@ -2164,7 +2226,46 @@ impl BarModel {
             } else {
                 a.branch.clone()
             },
-            elapsed: elapsed_label(self.now, a.last_interacted),
+            // One instant, two resolutions (lock §4.4). Mid-turn the number is
+            // a turn clock and wants SECONDS — the drive caught the card
+            // saying `0m` through a turn Claude Code called 3s. Once the turn
+            // is over the same number means staleness, where minutes and hours
+            // are the honest grain and seconds would be noise that repaints
+            // forever. `status`, not `a.status`: a row the local override has
+            // already quieted is not thinking, whatever the store still says.
+            //
+            // Gated on `animates()` because seconds are only honest where
+            // something repaints them. The two legacy geometries arm no timer,
+            // so a seconds count there would freeze at whatever the last store
+            // push saw — worse than the coarse reading it replaced, which at
+            // least sits still on purpose.
+            elapsed: if self.row_height().animates() && status.thinking() {
+                turn_label(self.now, a.last_interacted)
+            } else {
+                elapsed_label(self.now, a.last_interacted)
+            },
+            // Gated on the PROJECTED status, not the wire's — the same
+            // `status`/`a.status` distinction the clock above makes, and for
+            // the same reason (amended 2026-09-10; lock §4.7 had it straight
+            // off the wire).
+            //
+            // The host keeps `wants` exactly coextensive with `NeedsYou`
+            // (`take_wants` clears it on every other status), so the wire is
+            // already coherent for a LIVE row and this changes nothing there.
+            // What it fixes is the four model states that OUTRANK the store's
+            // status: stale, opening, dormant and dormant-selected. A dormant
+            // row has no process to be blocked; a stale row's checkout is
+            // gone; an opening row is starting a NEW session and the words
+            // belong to the old one. Each of them rendered "waiting on Bash"
+            // beside a glyph that says otherwise — the card contradicting
+            // itself in the one cell whose whole job is to say what to do
+            // next.
+            wants: if status == RowStatus::NeedsYou {
+                a.wants.clone()
+            } else {
+                None
+            },
+            subagents: a.subagents,
         }
     }
 
@@ -2826,7 +2927,7 @@ impl BarModel {
     /// The painted width is the one input zellij cannot withhold: it arrives
     /// with every render, and it is the very thing the user sees.
     ///
-    /// **The cooldown** (`swap_in_flight` + [`WIDTH_COOLDOWN_SECS`]). A
+    /// **The cooldown** (`swap_owed` + [`WIDTH_COOLDOWN_SECS`]). A
     /// swap's repaints arrive queued and STALE — a toggle's pane resize
     /// lands renders after its `TabUpdate` (measured 2026-08-15), and the
     /// 2026-08-17 QA drive filmed the consequence: paints echoing the
@@ -2834,7 +2935,7 @@ impl BarModel {
     /// walk lapped the whole cycle, and the walk's own paint wake re-armed
     /// the next burst — an infinite expand/collapse loop at paint speed.
     /// So an ask buys deafness: paints are recorded (`last_painted`) but not
-    /// judged until the cooldown timer fires and
+    /// judged until the fast tick that ends the deafness fires and
     /// [`Self::width_cooldown_elapsed`] judges the latest width exactly
     /// once. Every ask is thereby judged against the width the previous ask
     /// actually produced, never against its echoes. The first mismatching
@@ -2899,7 +3000,7 @@ impl BarModel {
         // Deaf: an ask is in flight and its repaint echoes prove nothing.
         // The cooldown expiry judges `last_painted` once, in this instant's
         // place.
-        if self.swap_in_flight {
+        if self.swap_owed > 0 {
             return Vec::new();
         }
         let want = self.showing_collapsed();
@@ -2915,20 +3016,42 @@ impl BarModel {
             return Vec::new();
         }
         self.walk_spent = Some((want, spent + 1));
-        self.swap_in_flight = true;
+        // See `swap_owed`. The mirror is the shell's answer to "is a fast
+        // tick already in flight" — asked at the instant of the ask, because
+        // that is the only moment it matters, and answered exactly because
+        // the shell keeps exactly one such timer.
+        self.swap_owed = if self.fast_tick_armed { 2 } else { 1 };
         vec![Effect::SwapWidth]
     }
 
-    /// The width cooldown fired (`main.rs` arms one [`WIDTH_COOLDOWN_SECS`]
-    /// timer per `Effect::SwapWidth`): end the deafness and judge the latest
-    /// painted width exactly once. Inert when no ask is in flight, so a
-    /// misrouted timer expiry (the peek sink shares the event) costs
-    /// nothing.
+    /// The shell's fast tick was just armed, or just fired. Mirrors
+    /// `main.rs`'s `fast_armed` into the model so a switch ask can know
+    /// whether a tick it did not arm is already on its way — see `swap_owed`.
+    /// The shell is the only writer, and it writes on both edges: an
+    /// unmirrored disarm would buy every ask a second tick forever, doubling
+    /// the deafness on a fleet that stopped spinning.
+    pub fn set_fast_tick_armed(&mut self, armed: bool) {
+        self.fast_tick_armed = armed;
+    }
+
+    /// A timer fired: spend one of the ticks this ask is owed, and judge the
+    /// latest painted width once the last of them is in. Inert when no ask is
+    /// in flight, so a misrouted expiry (the peek sink shares the event)
+    /// costs nothing.
+    ///
+    /// [`Effect::RearmWidthCooldown`] is how an ask owed two ticks still gets
+    /// them when the spinner that was driving them stops in between — the
+    /// model asks for its own next tick rather than trusting a timer it does
+    /// not own. Nothing here reads a clock: the model has only whole seconds
+    /// and the deafness is measured in tenths.
     pub fn width_cooldown_elapsed(&mut self) -> Vec<Effect> {
-        if !self.swap_in_flight {
+        if self.swap_owed == 0 {
             return Vec::new();
         }
-        self.swap_in_flight = false;
+        self.swap_owed -= 1;
+        if self.swap_owed > 0 {
+            return vec![Effect::RearmWidthCooldown];
+        }
         self.width_effects(self.last_painted)
     }
 }
@@ -2966,6 +3089,8 @@ mod tests {
             provider: None,
             effort: None,
             pr_number: None,
+            wants: None,
+            subagents: false,
         }
     }
 
@@ -3007,6 +3132,8 @@ mod tests {
             provider: None,
             effort: None,
             pr_number: None,
+            wants: None,
+            subagents: false,
         }
     }
 
@@ -3465,6 +3592,15 @@ mod tests {
     /// `a_click_on_either_line_of_a_card_selects_that_card`.
     fn one_line_bar(mut m: BarModel) -> BarModel {
         m.set_row_height(RowHeight::Single);
+        m
+    }
+
+    /// The two-line card, said out loud for the same reason — it was the
+    /// default when its click map was written and is not any more. The
+    /// four-line card's own map is
+    /// `a_click_on_any_of_a_cards_four_lines_selects_that_card`.
+    fn two_line_bar(mut m: BarModel) -> BarModel {
+        m.set_row_height(RowHeight::Double);
         m
     }
 
@@ -6100,12 +6236,12 @@ mod tests {
 
     /// The two widths the layouts declare, verbatim (fixed column counts since
     /// the 2026-08-17 rebuild — the machine compares painted width against
-    /// these constants and nothing else). Pinned to the `Double` arm (#232's
-    /// shipping default, and every `BarModel::default()` model's mode below)
-    /// — a test that needs to pin `Single` builds its own model via
-    /// `model_with_row_height(RowHeight::Single)` instead of this pair.
-    const EXP_W: usize = RowHeight::Double.target_cols(false);
-    const COL_W: usize = RowHeight::Double.target_cols(true);
+    /// these constants and nothing else). Pinned to the `Card` arm, which is
+    /// the shipping default and therefore every `BarModel::default()` model's
+    /// mode below — a test that needs another mode builds its own model via
+    /// `model_with_row_height(...)` instead of this pair.
+    const EXP_W: usize = RowHeight::Card.target_cols(false);
+    const COL_W: usize = RowHeight::Card.target_cols(true);
 
     /// Test-only constructor for a model whose row-height mode is not the
     /// default (#232) — mirrors production's `set_row_height`, called from
@@ -6138,6 +6274,110 @@ mod tests {
         assert_eq!(m.width_effects(Some(COL_W)), vec![Effect::SwapWidth]);
         assert_eq!(m.width_effects(Some(EXP_W)), Vec::<Effect>::new());
         assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
+    }
+
+    /// **The shared tick.** The card's spinner and the switch deafness run
+    /// off the SAME timer (`main.rs`'s `FAST_TICK_SECS`) — one timer, because
+    /// `Event::Timer` carries only elapsed seconds and two intervals in one
+    /// band cannot be told apart. So a tick already in flight when the user
+    /// toggles collapse arrives before a full deafness has passed: its
+    /// remaining time is anywhere in (0, 0.2].
+    ///
+    /// What that costs is the whole point. The early judgement lands on a
+    /// pre-swap echo — the exact paint the cooldown exists to ignore — and
+    /// spends a second ask on it. The walk has three ([`WALK_ASK_CAP`]), and
+    /// needs all three to cross the swap cycle's hidden birth position, so an
+    /// ask burnt on an echo can leave the bar STOPPED at the wrong width until
+    /// the next toggle, peek or refocus.
+    ///
+    /// The fix counts expiries instead of trusting one. Replayed here as a
+    /// live bar sees it: spinner armed, toggle, ask, echoes, the stolen
+    /// expiry, the true landing, the real expiry.
+    #[test]
+    fn a_spinner_tick_cannot_cut_the_switch_deafness_short() {
+        let mut m = focused_bar();
+        m.set_fast_tick_armed(true); // some row is mid-turn; a frame is in flight
+        m.toggle(); // wants collapsed
+        assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        // The spinner's frame lands first, wearing the cooldown's clothes.
+        // It must buy the ask another expiry, not judge in its place.
+        assert_eq!(
+            m.width_cooldown_elapsed(),
+            vec![Effect::RearmWidthCooldown],
+            "a spinner tick judged the width and ended the deafness early"
+        );
+        // Pre-swap echoes, still deaf. Before the fix the line above returned
+        // a second `SwapWidth` against the first of these.
+        for _ in 0..3 {
+            assert_eq!(m.width_effects(Some(EXP_W)), Vec::<Effect>::new());
+        }
+        // The switch lands, then the ask's own cooldown finally fires.
+        assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
+        assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
+        // One ask spent, not two — the walk still has its budget.
+        m.toggle();
+        assert_eq!(m.width_effects(Some(COL_W)), vec![Effect::SwapWidth]);
+    }
+
+    /// The other half: the second expiry is bought only when a spinner could
+    /// have stolen the first. A model that always asked for two would double
+    /// every switch's deafness on the two legacy row modes and on any fleet
+    /// that has stopped spinning — 300ms of ignored paints for nothing.
+    #[test]
+    fn a_fleet_with_no_spinner_running_judges_on_the_first_expiry() {
+        let mut m = focused_bar();
+        assert!(!m.fast_tick_armed, "default is quiet");
+        m.toggle(); // wants collapsed
+        assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        // No frame can be in flight, so this expiry is the cooldown's own.
+        // Judged here against a pre-swap echo, which asks again.
+        assert_eq!(m.width_effects(Some(EXP_W)), Vec::<Effect>::new());
+        assert_eq!(m.width_cooldown_elapsed(), vec![Effect::SwapWidth]);
+    }
+
+    /// The owed expiry cannot STRAND. The spinner stops the moment the last
+    /// turn ends — `main.rs` disarms it on expiry and only a paint that still
+    /// finds a working row re-arms it — so an ask made while it was running
+    /// routinely outlives it. The second expiry is therefore the model's to
+    /// ask for ([`Effect::RearmWidthCooldown`]), never a frame it hopes will
+    /// arrive: without that, a bar that stopped spinning mid-swap would stay
+    /// deaf until the next toggle, which is the same wrong-width rest the
+    /// count exists to prevent.
+    #[test]
+    fn the_spinner_stopping_mid_swap_does_not_strand_the_owed_expiry() {
+        let mut m = focused_bar();
+        m.set_fast_tick_armed(true);
+        m.toggle(); // wants collapsed
+        assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        // The last turn ends here: the frame fires, the shell disarms, and no
+        // paint re-arms it. Only the model's own request is left.
+        m.set_fast_tick_armed(false);
+        assert_eq!(m.width_cooldown_elapsed(), vec![Effect::RearmWidthCooldown]);
+        assert_eq!(m.width_effects(Some(EXP_W)), Vec::<Effect>::new());
+        assert_eq!(
+            m.width_cooldown_elapsed(),
+            vec![Effect::SwapWidth],
+            "the deafness never ended — the machine is stranded"
+        );
+    }
+
+    /// A `RearmWidthCooldown` is not a swap: it must not step the tab to
+    /// another position. Stated as an invariant over the whole episode
+    /// because the two effects are one `set_timeout` apart in `main.rs` and
+    /// the wrong arm there is invisible to every other test — the width
+    /// would simply walk one position too far and rest wrong.
+    #[test]
+    fn an_owed_expiry_is_never_answered_with_a_second_swap() {
+        let mut m = focused_bar();
+        m.set_fast_tick_armed(true);
+        m.toggle();
+        assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        let owed = m.width_cooldown_elapsed();
+        assert!(
+            !owed.contains(&Effect::SwapWidth),
+            "the owed expiry asked zellij to swap again: {owed:?}"
+        );
+        assert_eq!(owed, vec![Effect::RearmWidthCooldown]);
     }
 
     /// The swap cycle hides the tab's birth layout as a position of its own
@@ -6292,6 +6532,41 @@ mod tests {
         assert_eq!(m.width_effects(Some(EXP_W)), Vec::<Effect>::new());
         m.toggle(); // wants collapsed: same width, fresh intent
         assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+    }
+
+    /// The walk budget is per INTENT, and the intent guard is the only thing
+    /// that re-arms it — nothing else writes `walk_spent`. The companion test
+    /// above flips the mode onto a width that is ALREADY the new target, so
+    /// the landing clears the budget and the guard never has to: a mutant that
+    /// ignored the recorded intent entirely survived the whole suite.
+    ///
+    /// What it survived is a bar that cannot be un-stuck. Exhaust three asks
+    /// on an intent zellij will not serve, change your mind, and the new
+    /// intent inherits the old one's spent budget — so the toggle emits
+    /// nothing and the width stays where the failed walk left it, through
+    /// every further press.
+    #[test]
+    fn a_walk_that_never_landed_still_hands_the_next_intent_a_full_budget() {
+        // Neither target, so no paint below can end an episode by landing —
+        // the budget can only be re-armed by the intent changing.
+        const NEITHER: usize = EXP_W - 1;
+        let mut m = focused_bar();
+        m.toggle(); // wants collapsed
+        assert_eq!(m.width_effects(Some(NEITHER)), vec![Effect::SwapWidth]);
+        for _ in 1..WALK_ASK_CAP {
+            assert_eq!(m.width_cooldown_elapsed(), vec![Effect::SwapWidth]);
+        }
+        assert_eq!(
+            m.width_cooldown_elapsed(),
+            Vec::<Effect>::new(),
+            "the budget should be spent"
+        );
+        m.toggle(); // wants expanded — a new intent, from the same width
+        assert_eq!(
+            m.width_effects(Some(NEITHER)),
+            vec![Effect::SwapWidth],
+            "the new intent inherited the failed walk's budget and cannot ask"
+        );
     }
 
     /// A toggle pressed while an ask is in flight is not lost and not
@@ -6833,6 +7108,55 @@ mod tests {
     }
 
     #[test]
+    fn the_turn_clock_counts_seconds_where_staleness_would_say_nothing() {
+        // The whole reason the reading exists: `elapsed_label` spends the
+        // entire first minute saying `0m`, and that minute is exactly when a
+        // turn is worth watching. Measured against a real turn in the sandbox
+        // drive, where the card read `0m` and Claude Code's footer read 3s.
+        assert_eq!(turn_label(103, 100).as_deref(), Some("3s"));
+        assert_eq!(elapsed_label(103, 100).as_deref(), Some("0m"));
+        assert_eq!(turn_label(100, 100).as_deref(), Some("0s"));
+        assert_eq!(turn_label(159, 100).as_deref(), Some("59s"));
+        // Three characters at its widest, which is what lets it share the
+        // staleness cell rather than needing one of its own.
+        assert_eq!(turn_label(159, 100).map(|s| s.len()), Some(3));
+        // Past the minute the two readings converge — a long turn is stale in
+        // the same units, and one ladder is easier to read than two.
+        assert_eq!(turn_label(160, 100).as_deref(), Some("1m"));
+        assert_eq!(turn_label(100 + 2 * 3600, 100).as_deref(), Some("2h"));
+        // And it invents nothing where there is nothing, same as elapsed.
+        assert_eq!(turn_label(1000, 0), None);
+    }
+
+    #[test]
+    fn only_a_geometry_that_repaints_gets_a_seconds_clock() {
+        // Seconds are only honest where something ticks them. The four-line
+        // card arms a 0.2s timer for its spinner and the two legacy geometries
+        // arm nothing, so a seconds count there would freeze at whatever the
+        // last store push happened to see — worse than the coarse reading it
+        // replaced, because a stale `0m` at least looks like it means to sit
+        // still. One predicate drives both the resolution and the timer
+        // (`RowHeight::animates`); this is what stops them drifting apart.
+        let clock = |h: RowHeight| {
+            let mut m = BarModel::default();
+            m.set_row_height(h);
+            m.apply_tabs(vec![tab(10, 0, "a", false)]);
+            m.tick(1_003);
+            let mut a = dressed("u1", "/r/one", "main", None, Some(10));
+            a.status = Status::Working;
+            a.last_interacted = 1_000;
+            m.apply_snapshot(snap(1, vec![a]));
+            match content_at(&m, 0) {
+                RowContent::Agent { elapsed, .. } => elapsed,
+                other => panic!("expected an agent row, got {other:?}"),
+            }
+        };
+        assert_eq!(clock(RowHeight::Card).as_deref(), Some("3s"));
+        assert_eq!(clock(RowHeight::Double).as_deref(), Some("0m"));
+        assert_eq!(clock(RowHeight::Single).as_deref(), Some("0m"));
+    }
+
+    #[test]
     fn agent_content_carries_the_card_fields() {
         let mut m = BarModel::default();
         m.apply_tabs(vec![tab(10, 0, "a", false), tab(11, 1, "b", false)]);
@@ -6894,6 +7218,64 @@ mod tests {
         assert_eq!(status_at(&m, 0), Some(RowStatus::Done));
         m.apply_tabs(vec![tab(10, 0, "t", true)]); // focus marks it read
         assert_eq!(status_at(&m, 0), Some(RowStatus::Idle));
+    }
+
+    /// **The card must not contradict itself.** `wants` is the cell that says
+    /// what to do next, and it rode straight off the wire — so every model
+    /// state that OUTRANKS the store's status left the words behind. A dormant
+    /// row has no process to be blocked. A stale row's checkout is gone. An
+    /// opening row is starting a NEW session, and the words describe the old
+    /// one. All three drew "waiting on Bash" beside a glyph saying otherwise.
+    ///
+    /// Note what this does NOT change: a live `NeedsYou` row keeps its words,
+    /// because the host already keeps `wants` coextensive with `NeedsYou`
+    /// (`take_wants`). The wire was never incoherent; the projection was.
+    #[test]
+    fn a_row_that_is_not_asking_shows_no_words_however_the_wire_reads() {
+        // Every fixture below carries the same live-looking wire value, so a
+        // blank cell can only come from the projection.
+        let asking = |tab: Option<usize>| {
+            let mut a = agent("u1", Status::NeedsYou, tab);
+            a.wants = Some("Bash (git push --force)".into());
+            a
+        };
+        let wants_of = |m: &BarModel| match content_at(m, 0) {
+            RowContent::Agent { wants, .. } => wants,
+            other => panic!("expected an agent row, got {other:?}"),
+        };
+
+        // The live row it was written for — unchanged, and asserted first so a
+        // gate that simply blanked everything cannot pass this test.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "t", false)]);
+        m.apply_snapshot(snap(1, vec![asking(Some(10))]));
+        assert_eq!(status_at(&m, 0), Some(RowStatus::NeedsYou));
+        assert_eq!(
+            wants_of(&m).as_deref(),
+            Some("Bash (git push --force)"),
+            "a row that IS asking must still say what for"
+        );
+
+        // Dormant: no process, nothing to be blocked on.
+        let mut m = BarModel::default();
+        m.apply_snapshot(snap(1, vec![asking(None)]));
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Dormant));
+        assert_eq!(wants_of(&m), None, "a dormant row is asking nobody");
+
+        // Opening: the words belong to the session being replaced.
+        m.opening.insert("u1".into());
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Opening));
+        assert_eq!(wants_of(&m), None, "an opening row's ask is the old one's");
+        m.opening.clear();
+
+        // Stale, live and bound — the case the dormant path cannot reach.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "t", false)]);
+        let mut a = asking(Some(10));
+        a.stale = true;
+        m.apply_snapshot(snap(1, vec![a]));
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Stale));
+        assert_eq!(wants_of(&m), None, "a stale row's checkout is gone");
     }
 
     #[test]
@@ -7855,7 +8237,6 @@ mod tests {
     /// same cards.
     #[test]
     fn a_click_on_either_line_of_a_card_selects_that_card() {
-        // The shipping default: `BarModel::default()` is already `Double`.
         // 12 rows (one live tab, eleven dormant) in an EIGHT-line pane — four
         // cards, model rows 0..=3, because the selection rests at the top.
         let live = vec![
@@ -7863,13 +8244,13 @@ mod tests {
             Effect::AnnounceVisit { tab_id: 1 },
         ];
         for line in [0, 1] {
-            let mut m = overflowing_fleet(11);
+            let mut m = two_line_bar(overflowing_fleet(11));
             assert_eq!(m.click(line, 8), live, "line {line} is the first card");
         }
         // The fourth card spans lines 6 and 7 — dormant row `u-02`, which a
         // click SELECTS rather than opens (#100).
         for line in [6, 7] {
-            let mut m = overflowing_fleet(11);
+            let mut m = two_line_bar(overflowing_fleet(11));
             assert!(m.click(line, 8).is_empty(), "a dormant click opens nothing");
             let mut expected = vec![false; 12];
             expected[3] = true;
@@ -7880,19 +8261,19 @@ mod tests {
         // not fold onto the first OFF-SCREEN row (card 3, `u-03`) — that would
         // silently jump focus past the edge of the screen (the #148 shape).
         for line in [0, 1] {
-            let mut m = overflowing_fleet(11);
+            let mut m = two_line_bar(overflowing_fleet(11));
             assert_eq!(m.click(line, 7), live, "line {line} is the first card");
         }
         for (lines, row) in [([2, 3], 1), ([4, 5], 2)] {
             for line in lines {
-                let mut m = overflowing_fleet(11);
+                let mut m = two_line_bar(overflowing_fleet(11));
                 assert!(m.click(line, 7).is_empty(), "a dormant click opens nothing");
                 let mut expected = vec![false; 12];
                 expected[row] = true;
                 assert_eq!(selected(&m), expected, "line {line} is card {row}");
             }
         }
-        let mut m = overflowing_fleet(11);
+        let mut m = two_line_bar(overflowing_fleet(11));
         assert!(
             m.click(6, 7).is_empty(),
             "the blank remainder line selects nothing"
@@ -7907,7 +8288,7 @@ mod tests {
         // Scrolled, in cards: selecting the last row slides the card window to
         // model rows 9..=11 in a six-line (three-card) pane, and line 0 of
         // that pane is model row 9 — the whole #148 lesson, one geometry over.
-        let mut m = overflowing_fleet(11);
+        let mut m = two_line_bar(overflowing_fleet(11));
         m.nav("{\"row\":12}", Some(1));
         assert!(selected(&m)[11], "the fixture must be scrolled to the end");
         m.click(1, 6);
@@ -7924,6 +8305,76 @@ mod tests {
         let mut expected = vec![false; 12];
         expected[3] = true;
         assert_eq!(selected(&m), expected, "Single still maps line 3 to row 3");
+    }
+
+    /// The four-line card's click map — the same rule one geometry further
+    /// out. All four of a card's screen lines are one target, including the
+    /// blank separator, which is the card's own line and not a gap between
+    /// cards. The remainder case matters more here than it did at two lines:
+    /// a pane can now be three lines short of a whole card, and every one of
+    /// them must be dropped rather than folded onto the first row off screen.
+    #[test]
+    fn a_click_on_any_of_a_cards_four_lines_selects_that_card() {
+        let live = vec![
+            Effect::SwitchTab { position: 0 },
+            Effect::AnnounceVisit { tab_id: 1 },
+        ];
+        // 12 rows in a SIXTEEN-line pane — four cards, model rows 0..=3.
+        for line in [0, 1, 2, 3] {
+            let mut m = overflowing_fleet(11);
+            assert_eq!(m.click(line, 16), live, "line {line} is the first card");
+        }
+        // The fourth card spans lines 12..=15 — dormant row `u-02`, selected
+        // rather than opened (#100).
+        for line in [12, 13, 14, 15] {
+            let mut m = overflowing_fleet(11);
+            assert!(
+                m.click(line, 16).is_empty(),
+                "a dormant click opens nothing"
+            );
+            let mut expected = vec![false; 12];
+            expected[3] = true;
+            assert_eq!(selected(&m), expected, "line {line} is the fourth card");
+        }
+        // Height 15: three whole cards on lines 0..=11, and lines 12, 13, 14
+        // are drawn by nobody. Each must be dropped, not folded onto card 3.
+        for (lines, row) in [([4, 5, 6, 7], 1), ([8, 9, 10, 11], 2)] {
+            for line in lines {
+                let mut m = overflowing_fleet(11);
+                assert!(m.click(line, 15).is_empty());
+                let mut expected = vec![false; 12];
+                expected[row] = true;
+                assert_eq!(selected(&m), expected, "line {line} is card {row}");
+            }
+        }
+        for line in [12, 13, 14] {
+            let mut m = overflowing_fleet(11);
+            assert!(
+                m.click(line, 15).is_empty(),
+                "remainder line {line} selects nothing"
+            );
+            let mut expected = vec![false; 12];
+            expected[0] = true;
+            assert_eq!(
+                selected(&m),
+                expected,
+                "remainder line {line} must not move the selection"
+            );
+        }
+        // Scrolled, in cards: the last row selected slides the window to model
+        // rows 9..=11 in a twelve-line (three-card) pane, so line 0 of that
+        // pane is model row 9.
+        let mut m = overflowing_fleet(11);
+        m.nav("{\"row\":12}", Some(1));
+        assert!(selected(&m)[11], "the fixture must be scrolled to the end");
+        m.click(2, 12);
+        let mut expected = vec![false; 12];
+        expected[9] = true;
+        assert_eq!(
+            selected(&m),
+            expected,
+            "the top visible card is model row 9"
+        );
     }
 
     #[test]

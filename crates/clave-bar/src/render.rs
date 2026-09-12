@@ -175,9 +175,9 @@ impl Widths {
 // dev preview reach the vocabulary through the module that uses it.
 
 pub use crate::theme::{
-    BASE, BATTERY, CHIP_INK, CLAUDE_GLYPH, CLAUDE_INK, CONSOLE, DEFAULT_INK, DORMANT_FADE, FADE,
-    GREEN, OPENAI_GLYPH, OPENAI_INK, ORANGE, PALETTE, RED, RESET, Rgb, SEL_BG, Theme, UNTINTED,
-    YELLOW,
+    BASE, BATTERY, BRANCH_INK, CHIP_INK, CLAUDE_GLYPH, CLAUDE_INK, CONSOLE, DEFAULT_INK,
+    DORMANT_FADE, FADE, GREEN, OPENAI_GLYPH, OPENAI_INK, ORANGE, PALETTE, RED, RESET, Rgb, SEL_BG,
+    SUBS_INK, SUBS_MARK, Theme, UNTINTED, WORKTREE_INK, YELLOW,
 };
 use crate::theme::{
     DONE_INK, ELLIPSIS, FAILED_INK, LCAP, NEEDS_YOU_INK, OPENING_INK, RCAP, RULE, TERM_GLYPH,
@@ -205,6 +205,18 @@ pub enum RowStatus {
 }
 
 impl RowStatus {
+    /// Whether this row's status mark BREATHES — the four-line card's spinner.
+    /// Only a turn actually in flight does. A row blocked on you does not: the
+    /// spinner stopping is what makes "Claude is asking" legible at a glance,
+    /// and a fleet where everything animates says nothing.
+    ///
+    /// One definition, two callers. The card asks it to pick the glyph, and
+    /// the shell asks it to decide whether to arm another animation frame — so
+    /// an animating card and a sleeping timer cannot disagree.
+    pub fn thinking(self) -> bool {
+        matches!(self, RowStatus::Working)
+    }
+
     /// The COLOUR is the state; the shape varies only where the state is not a
     /// conversation at all (lock §5). `Failed` is U+2716 HEAVY multiplication
     /// x and `Stale` is U+2717 BALLOT x — different glyphs for different
@@ -216,6 +228,9 @@ impl RowStatus {
     /// grey and `Dormant`'s default ink follow the user's theme, while the
     /// lifecycle hues stay the fixed consts — red means failed under every
     /// theme (#145).
+    ///
+    /// The four-line card overrides the glyph (not the ink) while
+    /// [`Self::thinking`] holds — see `card.rs`'s spinner.
     pub fn mark(self, theme: &Theme) -> (char, Rgb) {
         match self {
             RowStatus::NeedsYou => ('\u{25cf}', NEEDS_YOU_INK),
@@ -271,17 +286,30 @@ pub enum Provenance {
     Worktree,
 }
 
+/// `nf-md-source_branch` — lazygit's branch mark.
+pub const BRANCH_MARK: char = '\u{f062c}';
+
+/// `nf-fa-tree` — the worktree mark. CHANGED 2026-09-08 from U+168C2, BAMUM
+/// LETTER PHASE-C MBERAE, which is in no Nerd Font: it was arriving by
+/// terminal fallback out of a proportional historic-script face, and so
+/// rendered visibly off-centre in its cell. That passed unnoticed beside one
+/// other glyph and did not survive the four-line card's third mark joining the
+/// column. No surveyed icon set contains a literal worktree depiction, so this
+/// is a metaphor instead — and it is IN the font, which is the trade the whole
+/// entry in FOOTGUNS now records: prefer an in-font metaphor to an exact
+/// out-of-font depiction, because a fallback face brings its own metrics.
+pub const WORKTREE_MARK: char = '\u{f1bb}';
+
 impl Provenance {
     /// A main checkout renders NOTHING, and that is the researched choice, not
     /// an omission: essentially no surveyed tool marks the default branch with
     /// a glyph, and blanking the most common row is what makes the two marked
-    /// states mean something (lock §5.1). The worktree glyph is an invention —
-    /// there is no worktree glyph anywhere (lock §5.2).
+    /// states mean something (lock §5.1).
     pub fn mark(self) -> Option<char> {
         match self {
             Provenance::Main => None,
-            Provenance::Branch => Some('\u{f062c}'), // nf-md-source_branch (lazygit's)
-            Provenance::Worktree => Some('\u{168c2}'), // bamum tree
+            Provenance::Branch => Some(BRANCH_MARK),
+            Provenance::Worktree => Some(WORKTREE_MARK),
         }
     }
 }
@@ -338,6 +366,16 @@ pub enum RowContent {
         /// agent activity, never focus. `None` renders blank: no measurement
         /// invented for a tab that has never seen a prompt.
         elapsed: Option<String>,
+        /// What this row is blocked on, in the words its own notification
+        /// used — the four-line card's `wants` cell. `None` renders blank,
+        /// and blank is the common case: the host sets this only for a row it
+        /// has already flagged, so the bar never decides whether an ask is
+        /// still live.
+        wants: Option<String>,
+        /// Whether this row has any agent still running under it — the
+        /// four-line card's subagent mark. A boolean, not a count: "this row
+        /// has fanned out" is the whole signal.
+        subagents: bool,
     },
     Terminal {
         /// The zellij tab name — the chip. Lock §7.1: this is the only row
@@ -651,6 +689,11 @@ pub fn viewport_top(len: usize, selected: Option<usize>, height: usize) -> usize
 /// row-unit for both arms. That division is the one `BarModel::click` does to
 /// its own two arguments: one copy of the follow rule, two callers, which is
 /// the #148 discipline this file was rewritten around.
+///
+/// `frame` is the status spinner's animation tick, and only the four-line card
+/// reads it. It is an argument rather than a clock read in here because this
+/// module renders from values handed to it — the same discipline that keeps
+/// the elapsed cell's `now` in the shell.
 pub fn render_rows(
     rows: &[Row],
     cols: usize,
@@ -658,6 +701,7 @@ pub fn render_rows(
     widths: Widths,
     theme: &Theme,
     row_height: RowHeight,
+    frame: usize,
 ) -> Vec<String> {
     // The viewport (#148): the pane height is a hard budget, and a bar that
     // printed past it drew rows zellij clipped away — nav-reachable, invisible.
@@ -687,7 +731,7 @@ pub fn render_rows(
                 }
             })
             .collect(),
-        // No clip here, unlike the arm above: `render_card` builds at its own
+        // No clip here, unlike the arm above: `render_double_card` builds at its own
         // floor and clips BOTH lines to `cols` on the way out, so its two
         // strings are already exactly `cols` cells at every width. A second
         // clip would be dead code pretending to be a safeguard.
@@ -705,9 +749,16 @@ pub fn render_rows(
                 // list: the stripe is anchored to the SCREEN, so the pane's
                 // top card always wears the same bracket ink and a row
                 // arriving above the view cannot invert every stripe on it.
-                let (l1, l2) = card::render_card(row, cols, any_selected, i % 2 == 1, theme);
+                let (l1, l2) = card::render_double_card(row, cols, any_selected, i % 2 == 1, theme);
                 [l1, l2]
             })
+            .collect(),
+        // The four-line card takes no parity: its separator line does the job
+        // the two-line card's alternating bracket was reaching for, so there
+        // is no zebra to anchor to the screen and no index to pass.
+        RowHeight::Card => rows
+            .iter()
+            .flat_map(|row| card::render_card(row, cols, any_selected, frame, theme))
             .collect(),
     }
 }
@@ -1094,6 +1145,7 @@ mod tests {
             widths,
             &Theme::default(),
             RowHeight::Single,
+            0,
         )
     }
 
@@ -1124,6 +1176,8 @@ mod tests {
                 pr: None,
                 branch: String::new(),
                 elapsed: None,
+                wants: None,
+                subagents: false,
             },
             selected: false,
             // The helper mirrors the model's tier: a fixture asking for a
@@ -1170,6 +1224,8 @@ mod tests {
                     pr: None,
                     branch: String::new(),
                     elapsed: None,
+                    wants: None,
+                    subagents: false,
                 },
                 selected: false,
                 dormant: true,
@@ -1697,7 +1753,7 @@ mod tests {
         );
         assert_eq!(
             cell_slice(&worktree, provenance, provenance + 1),
-            "\u{168c2}"
+            "\u{f1bb}"
         );
         // Same width, same text origin: the blank cost exactly one column.
         assert_eq!(display_cells(&main), display_cells(&worktree));
@@ -1900,7 +1956,7 @@ mod tests {
         ];
         let expected = [
             " \u{1b}[38;2;179;86;98m\u{25cf} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;180;154;109m105k             \u{1b}[38;2;102;125;172mclave   \u{1b}[38;2;173;169;150mI just passed the spe\u{2026} \u{1b}[0m ",
-            "\u{1b}[38;2;45;79;103m\u{e0b6}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m\u{1b}[38;2;255;158;59m\u{25cf}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;220;215;186m\u{2502}\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;230;195;132m105k\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;126;156;216m\u{168c2}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;122;168;159m\u{1b}[38;2;22;22;29mS6-GUT   \u{1b}[0m\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;126;156;216mclave  \u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m picking the gutter set\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[0m\u{1b}[38;2;45;79;103m\u{e0b4}\u{1b}[0m",
+            "\u{1b}[38;2;45;79;103m\u{e0b6}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m\u{1b}[38;2;255;158;59m\u{25cf}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;220;215;186m\u{2502}\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;230;195;132m105k\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;126;156;216m\u{f1bb}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;122;168;159m\u{1b}[38;2;22;22;29mS6-GUT   \u{1b}[0m\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;126;156;216mclave  \u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m picking the gutter set\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[0m\u{1b}[38;2;45;79;103m\u{e0b4}\u{1b}[0m",
             " \u{1b}[38;2;173;169;150m\u{f018d} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;173;169;150mTERM   \u{1b}[48;2;24;24;32m\u{1b}[38;2;220;215;186mTab #16  \u{1b}[0m \u{1b}[38;2;173;169;150m        \u{1b}[38;2;173;169;150m                       \u{1b}[0m ",
         ];
         assert_eq!(render_all(&rows, DESIGN_COLS, Widths::EXPANDED), expected);
@@ -1997,7 +2053,7 @@ mod tests {
         ];
         let expected = [
             " \u{1b}[38;2;179;86;98m\u{25cf} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;180;154;109m\u{f007c}           \u{1b}[38;2;102;125;172mcla \u{1b}[38;2;173;169;150mI just\u{2026} \u{1b}[0m ",
-            "\u{1b}[38;2;45;79;103m\u{e0b6}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m\u{1b}[38;2;255;158;59m\u{25cf}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;220;215;186m\u{2502}\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;230;195;132m\u{f007c}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;126;156;216m\u{168c2}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;122;168;159m\u{1b}[38;2;22;22;29mS6-GUT \u{1b}[0m\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;126;156;216mcla\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m pickin\u{2026}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[0m\u{1b}[38;2;45;79;103m\u{e0b4}\u{1b}[0m",
+            "\u{1b}[38;2;45;79;103m\u{e0b6}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m\u{1b}[38;2;255;158;59m\u{25cf}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;220;215;186m\u{2502}\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;230;195;132m\u{f007c}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;126;156;216m\u{f1bb}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;122;168;159m\u{1b}[38;2;22;22;29mS6-GUT \u{1b}[0m\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;126;156;216mcla\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m pickin\u{2026}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[0m\u{1b}[38;2;45;79;103m\u{e0b4}\u{1b}[0m",
             " \u{1b}[38;2;173;169;150m\u{f018d} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;173;169;150m\u{f120}   \u{1b}[48;2;24;24;32m\u{1b}[38;2;220;215;186mTab #16\u{1b}[0m \u{1b}[38;2;173;169;150m    \u{1b}[38;2;173;169;150m        \u{1b}[0m ",
         ];
         assert_eq!(
@@ -2284,6 +2340,7 @@ mod tests {
             widths,
             &Theme::default(),
             RowHeight::Single,
+            0,
         )
         .iter()
         .map(|line| {
@@ -2382,7 +2439,8 @@ mod tests {
                 0,
                 Widths::EXPANDED,
                 &Theme::default(),
-                RowHeight::Single
+                RowHeight::Single,
+                0
             )
             .is_empty()
         );
@@ -2398,7 +2456,8 @@ mod tests {
                 4,
                 Widths::EXPANDED,
                 &Theme::default(),
-                RowHeight::Single
+                RowHeight::Single,
+                0
             )
             .is_empty()
         );
@@ -2474,6 +2533,114 @@ mod tests {
     /// discipline the single-line viewport tests use works here too.
     const CARD_COLS: usize = RowHeight::Double.target_cols(false);
 
+    /// The four-line card's contract at the dispatch seam (2026-09-08 lock
+    /// §1): one row is four terminal lines, and every one of them is exactly
+    /// as wide as the pane. The line COUNT is what the viewport and the click
+    /// hit-test both divide by, so it is pinned here independently of what the
+    /// four lines eventually say.
+    #[test]
+    fn card_mode_emits_four_lines_per_row_each_exactly_cols() {
+        let rows = numbered(3, 0);
+        for cols in [
+            RowHeight::Card.target_cols(false),
+            RowHeight::Card.target_cols(true),
+        ] {
+            let lines = render_rows(
+                &rows,
+                cols,
+                12,
+                Widths::EXPANDED,
+                &Theme::default(),
+                RowHeight::Card,
+                0,
+            );
+            assert_eq!(lines.len(), 12, "3 cards at {cols} cols is 12 lines");
+            for (i, line) in lines.iter().enumerate() {
+                assert_eq!(
+                    display_cells(&strip_sgr(line)),
+                    cols,
+                    "line {i} at {cols} cols: {:?}",
+                    strip_sgr(line)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_animation_frame_reaches_the_card_it_is_meant_to_spin() {
+        // The whole spinner runs on `frame` travelling from the shell's timer
+        // through `render_rows` into `render_card`, and NOTHING tested the
+        // journey: `card.rs` calls `render_card` directly with a frame it
+        // chooses, every `render_rows` test passes 0, and `main.rs`'s
+        // `arm_anim` lives in the wasm shell, which has no test module at all.
+        // Replacing `frame` with a literal `0` at the call site survived the
+        // entire suite — the spinner would be frozen on screen with a green PR.
+        //
+        // Two frames of the same fleet, compared. Frame 0 and frame 1 are
+        // adjacent in the ping-pong cycle and must differ; a full cycle later
+        // must come back to where it started, which is what makes this an
+        // assertion about the CYCLE rather than about "something changed".
+        let rows = vec![agent(RowStatus::Working, Provenance::Main, Some("T"), "s")];
+        let at = |frame: usize| {
+            render_rows(
+                &rows,
+                RowHeight::Card.target_cols(false),
+                4,
+                Widths::EXPANDED,
+                &Theme::default(),
+                RowHeight::Card,
+                frame,
+            )
+        };
+        assert_ne!(
+            at(0)[0],
+            at(1)[0],
+            "the frame never reached the card — the spinner is frozen"
+        );
+        assert_eq!(
+            at(0)[0],
+            at(crate::card::THINK_CYCLE)[0],
+            "a full cycle must land back on frame 0"
+        );
+        // Only line 1 carries the mark, so a frame that leaked into any other
+        // line would be a different bug wearing the same green.
+        for line in 1..4 {
+            assert_eq!(
+                at(0)[line],
+                at(1)[line],
+                "line {line} moved with the animation frame and must not"
+            );
+        }
+    }
+
+    #[test]
+    fn a_row_that_is_not_working_ignores_the_animation_frame_entirely() {
+        // The other half: the frame must reach a card, and must change nothing
+        // on a card with no turn in flight. Without this, "the frame arrives"
+        // could be satisfied by a renderer that spins every row — which is the
+        // exact complaint the maintainer raised against a live sandbox ("the
+        // flower is animated even though the agent isn't doing anything").
+        for status in [RowStatus::Idle, RowStatus::Done, RowStatus::NeedsYou] {
+            let rows = vec![agent(status, Provenance::Main, Some("T"), "s")];
+            let at = |frame: usize| {
+                render_rows(
+                    &rows,
+                    RowHeight::Card.target_cols(false),
+                    4,
+                    Widths::EXPANDED,
+                    &Theme::default(),
+                    RowHeight::Card,
+                    frame,
+                )
+            };
+            assert_eq!(
+                at(0),
+                at(3),
+                "{status:?} has no turn running and must not animate"
+            );
+        }
+    }
+
     /// [`on_screen_at`]'s card counterpart: the model indices the pane shows,
     /// recovered from LINE 1 of each card (the name lives in the chip, which is
     /// a line-1 cell). Asserts the pair-ness on the way through — a half card
@@ -2486,6 +2653,7 @@ mod tests {
             Widths::EXPANDED,
             &Theme::default(),
             RowHeight::Double,
+            0,
         );
         assert_eq!(lines.len() % 2, 0, "a half card reached the screen");
         lines
@@ -2514,6 +2682,7 @@ mod tests {
                 Widths::EXPANDED,
                 &Theme::default(),
                 RowHeight::Double,
+                0,
             );
             assert_eq!(out.len(), (height / 2) * 2, "height {height}");
         }
@@ -2544,6 +2713,7 @@ mod tests {
                 Widths::EXPANDED,
                 &theme,
                 RowHeight::Double,
+                0,
             )
             .chunks(2)
             .map(|card| {
@@ -2601,6 +2771,7 @@ mod tests {
                 Widths::EXPANDED,
                 &Theme::default(),
                 RowHeight::Double,
+                0,
             ) {
                 let width = display_cells(&strip_sgr(&line));
                 assert_eq!(width, cols, "card line is {width} cells at {cols}");
@@ -2667,7 +2838,8 @@ mod tests {
                     rows.len(),
                     widths,
                     &Theme::default(),
-                    RowHeight::Single
+                    RowHeight::Single,
+                    0
                 ),
                 want,
                 "single-line output forked at {cols}"

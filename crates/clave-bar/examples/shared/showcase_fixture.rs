@@ -38,10 +38,36 @@ pub fn agent(
             pr: None,
             branch: String::new(),
             elapsed: None,
+            wants: None,
+            subagents: false,
         },
         selected: false,
         dormant: matches!(status, RowStatus::Dormant | RowStatus::DormantSelected),
     }
+}
+
+/// Fill the `wants` cell. Only ever applied to a `NeedsYou` row, because that
+/// is the rule the host enforces (lock 4.7): structure decides whether a row
+/// is waiting, and the words only say what for. A fixture that filled this on
+/// a working row would show a card the product cannot produce.
+pub fn blocked_on(mut row: Row, ask: &str) -> Row {
+    if let RowContent::Agent { status, wants, .. } = &mut row.content {
+        assert!(
+            matches!(status, RowStatus::NeedsYou),
+            "only a flagged row wants anything"
+        );
+        *wants = Some(String::from(ask));
+    }
+    row
+}
+
+/// Mark the row as having agents still running under it. A boolean, not a
+/// count: the mark says "this row has fanned out" and nothing more.
+pub fn fanned_out(mut row: Row) -> Row {
+    if let RowContent::Agent { subagents, .. } = &mut row.content {
+        *subagents = true;
+    }
+    row
 }
 
 /// A terminal row with its pane facts filled in (#206): the tab name is the
@@ -130,32 +156,47 @@ pub const WEBAPP: u8 = 5;
 /// The screenshot fleet (`--showcase`): the row vocabulary in one frame, with
 /// NO preview chrome — no ruler, no border, no column map — so a screenshot of
 /// this is a screenshot of the bar rather than of the graph paper it is drawn
-/// on. Used for the README until a real capture replaces it.
+/// on.
 ///
-/// The battery levels span the ramp on purpose (S7, #62): the fleet shows a
-/// fresh row, a couple past halfway, one nearly out and one past its smart zone,
-/// because a promotional image of a meter that reads the same on every row sells
-/// the column short. Each count is a plausible tenth of the default 150k zone
-/// for the level beside it (#105) — and the row past its zone reads `412k`
-/// against a glyph that has run out of levels, which is the case the count
-/// exists for. The dormant row carries a real level too — a dormant conversation
-/// consumes nothing, so its reading is exactly current, which is the ruling that
-/// closed design-lock §7.2.
+/// SIX rows, not nine (Ollie, 2026-09-12): three live, one terminal, two
+/// dormant says everything the vocabulary can say, and a taller frame only
+/// costs the reader vertical scroll on the page where clave is introduced.
+/// Every permutation that matters survives the cut — a worktree and a branch
+/// and two plain checkouts, both providers, a chip and a blank one, the
+/// subagent mark, and one row waiting on a person.
+///
+/// Two states are deliberately ABSENT. `Failed` is unreachable in the field
+/// (#157: an API error leaves the row amber), and its heavy cross had never
+/// appeared in any real session — an image is the wrong place to promise a
+/// state the product cannot produce. `Stale` went with the row that carried
+/// it, which was also the only reading past the smart zone; nothing in the
+/// frame now reads above 141k, because a promotional frame showing a
+/// conversation four times past its useful length sells the meter, not the
+/// product.
+///
+/// The battery levels still span most of the ramp (S7, #62): a row barely
+/// started, two past halfway, one near the top. Each count is a plausible
+/// tenth of the default 150k zone for the level beside it (#105). The dormant
+/// rows carry real levels too — a dormant conversation consumes nothing, so
+/// its reading is exactly current, which is the ruling that closed
+/// design-lock §7.2.
 ///
 /// The summaries copy the SHAPE of real `ai-title` values, sampled from the
 /// local transcript corpus 2026-07-31: sentence case, verb first, no trailing
 /// period, 13-60 characters. They are invented rather than copied — the corpus
 /// is the maintainer's own work and this repo is public — but a fixture that
 /// invents the format too would misrepresent the column in the one image most
-/// people will ever see. Several run past the 22-cell summary column and
-/// truncate, which is the honest common case.
+/// people will ever see. Several run past the summary column and truncate,
+/// which is the honest common case.
+///
 /// The rows sit in cluster order (#234): a repo's tabs travel together, and
-/// clusters rank by their summed frecency — clave's four tabs are the hottest
-/// cluster, then api-svc, webapp and infra, with the dormant block last. A
-/// fixture that interleaved repos would show an order the live block can no
-/// longer produce.
+/// clusters rank by their summed frecency — clave's two tabs are the hottest
+/// cluster, then api-svc and webapp, with the dormant block last. A fixture
+/// that interleaved repos would show an order the live block can no longer
+/// produce.
 pub fn showcase() -> Vec<Row> {
     let mut rows = vec![
+        // clave's cluster: the agent being watched, and the shell beside it.
         detail(
             agent(
                 RowStatus::Working,
@@ -188,44 +229,12 @@ pub fn showcase() -> Vec<Row> {
             "double-rows",
             "2m",
         ),
-        detail(
+        // The second working row: a plain branch, and the only one that has
+        // fanned out to subagents.
+        fanned_out(detail(
             agent(
-                RowStatus::Idle,
+                RowStatus::Working,
                 Some((9, 141_000)),
-                Provenance::Main,
-                "clave",
-                CLAVE,
-                None,
-                "Review the spawn identity gate",
-            ),
-            "opus",
-            "xh",
-            "claude",
-            None,
-            "",
-            "25m",
-        ),
-        detail(
-            agent(
-                RowStatus::Stale,
-                Some((10, 412_000)),
-                Provenance::Worktree,
-                "clave",
-                CLAVE,
-                Some(("KDL-GRD", 7)),
-                "Validate generated KDL artifacts",
-            ),
-            "fable",
-            "hi",
-            "claude",
-            Some(219),
-            "kdl-guard",
-            "1d",
-        ),
-        detail(
-            agent(
-                RowStatus::NeedsYou,
-                Some((3, 52_000)),
                 Provenance::Branch,
                 "api-svc",
                 API_SVC,
@@ -233,34 +242,41 @@ pub fn showcase() -> Vec<Row> {
                 "Rotate the signing keys",
             ),
             "fable",
-            "mx",
+            "hi",
             "claude",
             Some(184),
             "key-rotation",
             "4m",
-        ),
-        detail(
-            agent(
-                RowStatus::Done,
-                Some((1, 18_000)),
-                Provenance::Main,
-                "webapp",
-                WEBAPP,
-                Some(("CART-99", 6)),
-                "Fix cart total rounding mismatch",
+        )),
+        // The one row waiting on a person — the state the sidebar exists to
+        // make visible from across the room.
+        blocked_on(
+            detail(
+                agent(
+                    RowStatus::NeedsYou,
+                    Some((3, 52_000)),
+                    Provenance::Main,
+                    "webapp",
+                    WEBAPP,
+                    Some(("CART-99", 6)),
+                    "Fix cart total rounding mismatch",
+                ),
+                "haiku",
+                "lo",
+                "claude",
+                None,
+                "",
+                "9m",
             ),
-            "haiku",
-            "lo",
-            "claude",
-            None,
-            "",
-            "1h",
+            "Bash (cargo publish)",
         ),
+        // The dormant block: half-faded, opens where it left off. One of them
+        // carries the other provider, so both icons appear in the frame.
         detail(
             agent(
-                RowStatus::Failed,
+                RowStatus::Dormant,
                 Some((5, 79_000)),
-                Provenance::Branch,
+                Provenance::Main,
                 "infra",
                 INFRA,
                 Some(("DNS-TTL", 1)),
@@ -269,24 +285,9 @@ pub fn showcase() -> Vec<Row> {
             "5.6sol",
             "",
             "openai",
-            Some(77),
-            "dns-timeout",
-            "3h",
-        ),
-        detail(
-            terminal(
-                "logs",
-                TermStatus::Failed,
-                Provenance::Main,
-                Some(("infra", INFRA)),
-                "kubectl logs -f api-7d9",
-            ),
-            "",
-            "",
-            "",
             None,
             "",
-            "8m",
+            "3h",
         ),
         detail(
             agent(

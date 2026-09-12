@@ -1,11 +1,24 @@
-//! The two-line card (#232) — the double-height row's geometry.
+//! The card geometries — two of them, one per row-height mode.
 //!
-//! A PORT, not a redesign. Every cell budget, ink and glyph below comes from
-//! `render_f_pair` in `examples/double-preview.rs`, ratified 2026-08-26 ("that's
-//! the one"); that file is the picture this module reproduces, and the goldens
-//! at the bottom pin its exact output. Two profiles, one function: the
-//! COLLAPSED card is 38 columns, the EXPANDED one 48 and the branch cell exists
-//! only in the second.
+//! Both are PORTS, not redesigns, and both were ratified from rendered output
+//! rather than from prose. Each function below reproduces a picture that was
+//! signed off, and the goldens at the bottom pin its exact output.
+//!
+//! **`render_card` — the four-line card, the `card` mode and the default.**
+//! Ratified 2026-09-08 by the lock in `docs/superpowers/specs/`; that document
+//! is authoritative for every number here. Three lines of content plus a
+//! hairline that closes the card, 48 columns expanded and 16 collapsed.
+//!
+//! ```text
+//!   line 1:  status  │ chip-pill  summary
+//!   line 2:  prov    │ repo [branch]  #PR   provider model effort
+//!   line 3:  subs    │ tokens  clock  wants
+//!   line 4:  the shadow rule — a hairline that closes the card
+//! ```
+//!
+//! **`render_double_card` — the two-line card, the `double` mode.** Ratified
+//! 2026-08-26 from `examples/double-preview.rs`, which is still the picture it
+//! reproduces. 48 columns expanded, 38 collapsed, branch in the second only.
 //!
 //! ```text
 //!   line 1:  status ╭ chip-pill  summary            tokens
@@ -15,15 +28,18 @@
 //! Glass discipline (lock §6, and Ollie's terminal probe): a painted cell
 //! background is OPAQUE, so translucency exists only where nothing is painted.
 //! Unselected cards paint NO background and re-assert `\u{1b}[49m` on every
-//! segment; the selected card is a full opaque bar across both lines.
+//! segment; the selected card is a full opaque bar across its content lines.
 //!
 //! GLYPH RULE — every glyph is a `\u{...}` escape, never a literal (lock §5.4).
+//! And every one is checked against the INSTALLED font's character map, not a
+//! cheat sheet — two candidates for the four-line card's marks turned out not
+//! to exist at the codepoints published for them (FOOTGUNS, 2026-09-08).
 
 use crate::render::{Row, RowContent, cell_slice, clip_to_cells, display_cells, hue, strip_sgr};
 use crate::theme::{
-    BATTERY, BRACKET_A, BRACKET_B, CARD_BOT, CARD_TOP, CLAUDE_GLYPH, CLAUDE_INK, CONSOLE,
-    DORMANT_FADE, ELLIPSIS, FADE, LCAP, META_INK, OPENAI_GLYPH, OPENAI_INK, PR_INK, RCAP, RESET,
-    Rgb, TERM_MARK, Theme,
+    BATTERY, BRACKET_A, BRACKET_B, BRANCH_INK, CARD_BOT, CARD_TOP, CLAUDE_GLYPH, CLAUDE_INK,
+    CONSOLE, DORMANT_FADE, ELLIPSIS, FADE, LCAP, META_INK, NEEDS_YOU_INK, OPENAI_GLYPH, OPENAI_INK,
+    PR_INK, RCAP, RESET, RULE, Rgb, SUBS_INK, SUBS_MARK, TERM_MARK, TURN_INK, Theme, WORKTREE_INK,
 };
 
 // ── the budgets (the example's fixed cells) ─────────────────────────────────
@@ -54,6 +70,83 @@ const ELAPSED_W: usize = 3;
 /// pane gets and the geometry the card draws cannot disagree.
 const COLLAPSED_COLS: usize = clave_types::RowHeight::Double.target_cols(true);
 const EXPANDED_COLS: usize = clave_types::RowHeight::Double.target_cols(false);
+
+// ── the four-line card's own budgets (lock §2, §3, §5) ──────────────────────
+
+/// Its floor and threshold, from its own mode for the same reason as above.
+const CARD_COLLAPSED_COLS: usize = clave_types::RowHeight::Card.target_cols(true);
+const CARD_EXPANDED_COLS: usize = clave_types::RowHeight::Card.target_cols(false);
+
+/// The card's left chrome: margin, mark, air, rail, air. A four-cell version
+/// that butted the rail against the mark column was rejected on sight — the
+/// rule sat on top of the glyphs. The fifth column costs nothing that matters:
+/// the collapsed profile still lands exactly on 16.
+const CHROME: usize = 5;
+
+/// Where lines 2 and 3 start their content — flush with the chrome, so the
+/// repo name and the token count sit under the pill's left CAP. Indenting one
+/// further, to the pill's LABEL, was tried and rejected by eye: the pill is a
+/// solid block of colour, so the edge the column reads against is its outer
+/// edge, not the first letter inside it.
+const INDENT: usize = CHROME;
+
+/// The gap between the token count and the time beside it. Two cells is the
+/// floor — at one they read as a single figure, the same failure that keeps
+/// the two clocks apart. THREE is what it is, because the collapsed profile
+/// gets the last word: there the time is flushed to the right edge, which at
+/// 16 columns lands it three cells past the token field. Ruled from rendered
+/// output 2026-09-09 — the cell was one column left of its collapsed self, and
+/// the crop rule says collapsed is a strict left-crop of expanded, so any cell
+/// surviving the crop must not MOVE across it.
+const TOKEN_GAP: usize = 3;
+
+/// The tail line 2 pays for provider, model and effort in the expanded
+/// profile, and hands entirely to the repo in the collapsed one.
+const META_TAIL_W: usize = 12;
+
+/// Line 4's hairline and its ink — a rule so dark it reads as a shadow under
+/// the card rather than as a border between two. Chosen by eye from a swatch
+/// of four glyphs at three intensities, because how thin "thin" looks is a
+/// property of the font and the panel, not of the codepoint.
+const SHADOW: char = '\u{2500}'; // box drawings light horizontal
+const SHADOW_INK: Rgb = Rgb(0x2A, 0x2A, 0x37); // sumiInk4
+
+/// Claude Code's own spinner, in the card's status cell. ORDER IS THE
+/// ANIMATION: the mark grows from a dot through progressively heavier stars
+/// and back, so it reads as one shape breathing. Listing them in any other
+/// sequence gives six glyphs flickering.
+///
+/// FONT WARNING, measured: most of these are absent from the Nerd Fonts
+/// installed here and arrive by terminal FALLBACK out of Menlo, which carries
+/// all six. Menlo is monospace so the cell width holds — but weight and
+/// baseline do not show up in a golden, so this is the one part of the card
+/// that can only be signed off on a real terminal.
+const THINK_FRAMES: [char; 6] = [
+    '\u{00b7}', // interpunct
+    '\u{2722}', // four teardrop-spoked asterisk
+    '\u{2733}', // eight-spoked asterisk
+    '\u{2736}', // six pointed black star
+    '\u{273b}', // teardrop-spoked asterisk
+    '\u{273d}', // heavy teardrop-spoked asterisk
+];
+
+/// Ping-pong: the frames out and the inner ones back, so the cycle turns over
+/// without a jump. DERIVED from the frame list rather than written down — the
+/// two ends are visited once and every inner frame twice — because a cycle
+/// length left behind by an edit to [`THINK_FRAMES`] would silently drop a
+/// glyph off the walk back, or index past the end of it.
+pub(crate) const THINK_CYCLE: usize = 2 * THINK_FRAMES.len() - 2;
+
+/// The spinner's glyph at animation frame `t`. `pub(crate)` so the shell can
+/// decide whether any row is animating without a second copy of the cycle.
+pub(crate) fn think_frame(t: usize) -> char {
+    let i = t % THINK_CYCLE;
+    THINK_FRAMES[if i < THINK_FRAMES.len() {
+        i
+    } else {
+        THINK_CYCLE - i
+    }]
+}
 
 /// The provider's brand cell. An unrecognised provider renders NOTHING — same
 /// "blank is the meaning" rule the main-checkout provenance follows: the bar
@@ -98,6 +191,22 @@ struct Cells<'a> {
     /// The two-letter effort tag; empty when the host has no reading.
     effort: &'a str,
     elapsed: &'a str,
+
+    // ── the four-line card's own cells. The two-line card ignores all four.
+    /// Working right now, so the status mark animates instead of sitting
+    /// still. Derived from the status the card already draws — no new wire
+    /// field, and no way for the spinner and the mark's colour to disagree.
+    thinking: bool,
+    /// Whether this row has any subagent in flight, off the transcript's
+    /// pending-background-agent count (lock 4.6). A terminal row never has
+    /// one.
+    subs: bool,
+    /// What this row is blocked on, in its own words (lock §4.7). Tier 1 is
+    /// wired: the tool name off the permission notification clave's hook
+    /// already receives. Blank is the common case and the point — an idle
+    /// fleet has a quiet right-hand column, and the one row that wants you
+    /// grows text.
+    wants: &'a str,
 }
 
 fn cells<'a>(content: &'a RowContent, theme: &Theme) -> Cells<'a> {
@@ -118,6 +227,8 @@ fn cells<'a>(content: &'a RowContent, theme: &Theme) -> Cells<'a> {
             pr,
             branch,
             elapsed,
+            wants,
+            subagents,
         } => {
             // CLAMPED like `render_row`'s: the wire crosses a version boundary
             // and a newer host's longer ramp must read "at least this bad"
@@ -144,6 +255,9 @@ fn cells<'a>(content: &'a RowContent, theme: &Theme) -> Cells<'a> {
                 model: model.as_deref().unwrap_or(""),
                 effort: effort.as_deref().unwrap_or(""),
                 elapsed: elapsed.as_deref().unwrap_or(""),
+                thinking: status.thinking(),
+                subs: *subagents,
+                wants: wants.as_deref().unwrap_or(""),
             }
         }
         RowContent::Terminal {
@@ -176,6 +290,12 @@ fn cells<'a>(content: &'a RowContent, theme: &Theme) -> Cells<'a> {
             model: "",
             effort: "",
             elapsed: elapsed.as_deref().unwrap_or(""),
+            // A terminal row has no turn, no subagents and nothing it is
+            // blocked on — and a shell running a command is not "thinking" in
+            // the sense the spinner means.
+            thinking: false,
+            subs: false,
+            wants: "",
         },
     }
 }
@@ -188,7 +308,7 @@ fn cells<'a>(content: &'a RowContent, theme: &Theme) -> Cells<'a> {
 /// `pub(crate)` since #232 task 9 gave it its caller: `render_rows` is the
 /// bar's ONE entry point (LEDGER D5) and the card is a geometry inside it, not
 /// a second public renderer for a caller to reach past the dispatch and pick.
-pub(crate) fn render_card(
+pub(crate) fn render_double_card(
     row: &Row,
     cols: usize,
     any_selected: bool,
@@ -352,6 +472,249 @@ pub(crate) fn render_card(
     (clip_to_cells(&l1, cols), clip_to_cells(&l2, cols))
 }
 
+/// One row as FOUR lines, each EXACTLY `cols` display cells — the `card` mode
+/// and the bar's default geometry.
+///
+/// `frame` is the animation tick driving the status spinner; a row that is not
+/// working ignores it, so a still fleet renders identically at every frame and
+/// the goldens below can pin frame 0 without freezing the animation out.
+///
+/// Every cell now has a source. Where one has no reading the cell renders
+/// BLANK rather than an invented value — blank is the meaning on this card,
+/// and a quiet fleet is supposed to look quiet.
+///
+/// `pub(crate)` for the same reason as its two-line sibling: `render_rows` is
+/// the bar's one entry point, and a card is a geometry inside it rather than a
+/// second public renderer for a caller to reach past the dispatch and pick.
+pub(crate) fn render_card(
+    row: &Row,
+    cols: usize,
+    any_selected: bool,
+    frame: usize,
+    theme: &Theme,
+) -> [String; 4] {
+    // Built at the design floor even when the pane is narrower, then clipped —
+    // the fixed cells cannot reflow, so a sub-floor card over-runs UNIFORMLY
+    // and loses the same trailing cells on every row rather than going ragged
+    // or, worse, wrapping into a fifth line.
+    let build = cols.max(CARD_COLLAPSED_COLS);
+    let expanded = build >= CARD_EXPANDED_COLS;
+    let c = cells(&row.content, theme);
+
+    let dormant = row.dormant
+        && !matches!(
+            row.content,
+            RowContent::Agent {
+                status: crate::render::RowStatus::Opening,
+                ..
+            }
+        );
+    let fade = if row.selected {
+        0.0
+    } else if dormant {
+        DORMANT_FADE
+    } else if !any_selected {
+        0.0
+    } else {
+        FADE
+    };
+    let ink = |c: Rgb| c.mix(theme.base, fade);
+    let row_bg: Option<Rgb> = row.selected.then_some(theme.sel_bg);
+    let seg = |c: Rgb, s: &str| match row_bg {
+        Some(b) => format!("{}{}{s}", b.bg(), c.fg()),
+        None => format!("\u{1b}[49m{}{s}", c.fg()),
+    };
+    // The rail IS the repo's colour, running the card's full height — one
+    // continuous identity spine per card. It replaced an arc whose two neutrals
+    // alternated card by card, which was linework doing a separator's job
+    // because glass forbade a painted stripe. Line 4 does that job properly,
+    // so the zebra retired with the arc and this function takes no parity.
+    let rail = ink(c.repo_ink);
+
+    // ── line 1: status │ chip-pill summary ──
+    let mut l1 = String::new();
+    let (mark, mark_ink) = c.mark;
+    // A row blocked on you does NOT animate: the spinner stops when Claude
+    // asks, which is what makes a stopped spinner mean something.
+    let mark = if c.thinking { think_frame(frame) } else { mark };
+    l1.push_str(&seg(ink(mark_ink), &format!(" {mark} ")));
+    l1.push_str(&seg(rail, &format!("{RULE} ")));
+    match &c.chip {
+        Some((label, Some(bg))) => {
+            let chip_bg = ink(*bg);
+            l1.push_str(&seg(chip_bg, &LCAP.to_string()));
+            l1.push_str(&format!(
+                "{}{}{}{RESET}",
+                chip_bg.bg(),
+                ink(theme.chip_ink).fg(),
+                pad(label, CHIP_W)
+            ));
+            l1.push_str(&seg(chip_bg, &RCAP.to_string()));
+        }
+        // The TERM pill: the title chip's shape in theme black.
+        Some((label, None)) => {
+            l1.push_str(&seg(ink(theme.chip_ink), &LCAP.to_string()));
+            l1.push_str(&format!(
+                "{}{}{}{RESET}",
+                theme.chip_ink.bg(),
+                ink(theme.default_ink).fg(),
+                pad(label, CHIP_W)
+            ));
+            l1.push_str(&seg(ink(theme.chip_ink), &RCAP.to_string()));
+        }
+        None => {}
+    }
+    // A chipless card hands the pill's nine columns to the summary AND its
+    // trailing gap, so the summary starts flush at the indent with the repo
+    // and the token count below it. The gap is the pill's air, not an indent:
+    // with no pill there is nothing to hold air away from, and that space read
+    // as a one-cell stagger against every other line.
+    let gap = if c.chip.is_some() { " " } else { "" };
+    let summary_w = build.saturating_sub(if c.chip.is_some() {
+        CHROME + 11
+    } else {
+        CHROME + 1
+    });
+    // A cell with room for an ellipsis and nothing else says less than a blank
+    // one: at 16 columns the pill IS the line, and a lone `…` after it is noise.
+    let summary = if summary_w < 4 { "" } else { c.summary };
+    l1.push_str(&seg(
+        ink(theme.default_ink),
+        &format!("{gap}{}", pad(summary, summary_w)),
+    ));
+    l1.push_str(&seg(theme.default_ink, " "));
+
+    // ── line 2: prov │ repo [branch] #PR provider model effort ──
+    let mut l2 = String::new();
+    let (prov, prov_ink) = match c.prov {
+        Some(g) if g == crate::render::WORKTREE_MARK => (g.to_string(), WORKTREE_INK),
+        Some(g) => (g.to_string(), BRANCH_INK),
+        None => (" ".to_string(), theme.default_ink),
+    };
+    l2.push_str(&seg(ink(prov_ink), &format!(" {prov} ")));
+    l2.push_str(&seg(rail, &format!("{RULE} ")));
+    // The PR is IDENTITY — "this branch has a PR open" — which is why it lives
+    // on line 2 and not among line 3's measurements, where it reserved five
+    // cells for an absence on every row without one. A card with no PR folds
+    // those columns back into the repo-and-branch budget.
+    let pr_w = if expanded && c.pr.is_some() {
+        PR_W + 1
+    } else {
+        0
+    };
+    let tail_w = if expanded { META_TAIL_W } else { 0 };
+    let budget = build.saturating_sub(INDENT + pr_w + tail_w + 1);
+    // The branch renders only where it can carry its guaranteed minimum. A
+    // five-cell fragment of `fix/evlog-…` identifies nothing, and those columns
+    // are worth more to the repo name, which at least names the checkout.
+    let branch_fits = budget >= display_cells(c.repo).min(REPO_W) + 1 + BRANCH_MIN;
+    if c.branch.is_empty() || !branch_fits {
+        l2.push_str(&seg(ink(c.repo_ink), &pad(c.repo, budget)));
+    } else {
+        // The branch starts one space after the repo NAME and claims whatever
+        // the repo did not use, so a long repo truncates before a branch does.
+        let repo_w = display_cells(c.repo).min(REPO_W);
+        l2.push_str(&seg(ink(c.repo_ink), &pad(c.repo, repo_w)));
+        l2.push_str(&seg(
+            ink(META_INK),
+            &format!(" {}", pad(c.branch, budget - repo_w - 1)),
+        ));
+    }
+    if pr_w > 0 {
+        let pr = c.pr.map_or_else(String::new, |n| format!("#{n}"));
+        l2.push_str(&seg(ink(PR_INK), &format!(" {}", pad(&pr, PR_W))));
+    }
+    if expanded {
+        match c.provider {
+            Some((glyph, brand)) => l2.push_str(&seg(ink(brand), &format!(" {glyph}"))),
+            None => l2.push_str(&seg(theme.default_ink, "  ")),
+        }
+        l2.push_str(&seg(ink(META_INK), &format!(" {}", pad(c.model, MODEL_W))));
+        l2.push_str(&seg(
+            ink(META_INK),
+            &format!(" {}", pad(c.effort, EFFORT_W)),
+        ));
+    }
+    l2.push_str(&seg(theme.default_ink, " "));
+
+    // ── line 3: subs │ tokens  clock  wants ──
+    let mut l3 = String::new();
+    // The third structural mark, stacked under status and provenance. A
+    // BOOLEAN, not a count: "this row has fanned out" is the whole signal, and
+    // a digit beside it was noise.
+    let subs = if c.subs { SUBS_MARK } else { ' ' };
+    l3.push_str(&seg(ink(SUBS_INK), &format!(" {subs} ")));
+    l3.push_str(&seg(rail, &format!("{RULE} ")));
+    // Left-aligned, unlike the two-line card's right-aligned count: the four
+    // lines share ONE left edge, and line 3's numbers start at it.
+    let token_text = match &c.tokens {
+        TokenCell::Count(text, band) => (text.clone(), *band),
+        TokenCell::Term => (TERM_MARK.to_string(), META_INK),
+        TokenCell::Blank => (String::new(), theme.default_ink),
+    };
+    l3.push_str(&seg(ink(token_text.1), &pad(&token_text.0, TOKEN_W)));
+    if expanded {
+        // Two measurements and one message. `wants` claims every cell the
+        // numbers do not — including the four the turn clock used to hold.
+        let wants_w = build.saturating_sub(INDENT + TOKEN_W + TOKEN_GAP + ELAPSED_W + 1 + 1);
+        // ONE clock, rendered two ways (lock §4.4, ruled from the drive
+        // 2026-09-09). There was never a second number to print: the store
+        // bumps `last_interacted` on `UserPromptSubmit` and nothing else, and
+        // `UserPromptSubmit` is the only event that sets `Working` — so "when
+        // the turn began" and "when you last interacted" are the same instant,
+        // always, and a turn cell would have printed elapsed's number two
+        // cells away. What the two readings differ in is RESOLUTION and what
+        // they mean, not the instant they measure from, so the cell carries
+        // both: crystalBlue and counting seconds while the turn is in flight,
+        // dimmed and coarse once it is over and the number means staleness.
+        // The drive is what made this obvious — the card said `0m` through a
+        // turn Claude Code's own footer was calling 3s.
+        let clock_ink = if c.thinking { TURN_INK } else { META_INK };
+        l3.push_str(&seg(
+            ink(clock_ink),
+            &format!("{}{}", " ".repeat(TOKEN_GAP), rpad(c.elapsed, ELAPSED_W)),
+        ));
+        l3.push_str(&seg(
+            ink(NEEDS_YOU_INK),
+            &format!(" {}", pad(c.wants, wants_w)),
+        ));
+        l3.push_str(&seg(theme.default_ink, " "));
+    } else {
+        // The crop rule: collapsed is a LEFT-CROP of expanded, never a
+        // re-arrangement, so a cell's column IS its priority. Line 3's crop
+        // reaches the token count and the clock — how hot, and how long — and
+        // stops. The clock LOCKS to the right edge, one cell in, and that is
+        // the RULED position: the expanded card's `TOKEN_GAP` is chosen to put
+        // it in the same columns, not the other way round. The fill is
+        // whatever is left rather than a fixed cell, so the line lands on
+        // `build` without a second constant to keep in step.
+        let fill = build.saturating_sub(display_cells(&strip_sgr(&l3)) + ELAPSED_W + 1);
+        l3.push_str(&seg(theme.default_ink, &" ".repeat(fill)));
+        let clock_ink = if c.thinking { TURN_INK } else { META_INK };
+        l3.push_str(&seg(ink(clock_ink), &rpad(c.elapsed, ELAPSED_W)));
+        l3.push_str(&seg(theme.default_ink, " "));
+    }
+
+    // ── line 4: the shadow rule ──
+    // Full width and OUTSIDE the selection bar: the separator rhythm stays
+    // unbroken across the whole fleet, and the selection is exactly the three
+    // lines that carry content.
+    let l4 = format!(
+        "\u{1b}[49m{}{}",
+        SHADOW_INK.fg(),
+        SHADOW.to_string().repeat(build)
+    );
+
+    // ONE exit for all four lines, as the two-line card has for its two: the
+    // clip closes the SGR state and guarantees exactly `cols` cells.
+    [
+        clip_to_cells(&l1, cols),
+        clip_to_cells(&l2, cols),
+        clip_to_cells(&l3, cols),
+        clip_to_cells(&l4, cols),
+    ]
+}
+
 /// A fixed-width cell, measured in CELLS: truncate with an ellipsis when long,
 /// pad when short.
 ///
@@ -405,6 +768,25 @@ mod tests {
     /// straight off that file's output; 16 and 17 add the two corners the mock
     /// had no field for (an unknown provider, and the `Opening` row that
     /// escapes the dormant fade).
+    /// The ink a specific CELL wears: the last SGR colour opened before its
+    /// own text. `line.contains(&INK.fg())` is NOT this and must not be used
+    /// for it (FOOTGUNS) — the line already contains the sequence if any other
+    /// cell on it does, and the card's inks are not distinct byte-strings.
+    /// `WORKTREE_INK` and `PR_INK` are both springGreen; `TURN_INK` is the
+    /// rail's crystalBlue. A `contains` check against any of those passes on
+    /// every row ever rendered, which is a tautology wearing a colour test's
+    /// name.
+    fn ink_before(line: &str, needle: &str) -> String {
+        let at = line
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} is not on this line: {line:?}"));
+        let start = line[..at]
+            .rfind("\u{1b}[38;2;")
+            .unwrap_or_else(|| panic!("no ink opened before {needle:?}: {line:?}"));
+        let run = &line[start..];
+        run[..=run.find('m').expect("a terminated SGR")].to_string()
+    }
+
     struct A {
         status: RowStatus,
         prov: Provenance,
@@ -421,6 +803,8 @@ mod tests {
         battery: Option<u8>,
         elapsed: &'static str,
         summary: &'static str,
+        wants: Option<&'static str>,
+        subs: bool,
         selected: bool,
         dormant: bool,
     }
@@ -443,6 +827,8 @@ mod tests {
                 battery: Some(5),
                 elapsed: "1m",
                 summary: "",
+                wants: None,
+                subs: false,
                 selected: false,
                 dormant: false,
             }
@@ -468,6 +854,8 @@ mod tests {
                     pr: self.pr,
                     branch: self.branch.into(),
                     elapsed: Some(self.elapsed.into()),
+                    wants: self.wants.map(String::from),
+                    subagents: self.subs,
                 },
                 selected: self.selected,
                 dormant: self.dormant,
@@ -520,6 +908,19 @@ mod tests {
                 battery: Some(6),
                 elapsed: "3m",
                 summary: "Qdos IR35 assessment: the contract",
+                // The only fleet row with an ask. `wants` is written for
+                // flagged rows and nothing else, so this row is also the only
+                // one that COULD carry it — and pinning it is what holds
+                // line 3's right-hand arithmetic, which the width invariant
+                // alone cannot: `clip_to_cells` would silently eat a
+                // miscounted cell that had nothing in it.
+                //
+                // Long enough to OVERFLOW the cell, deliberately. An ask that
+                // fits leaves trailing spaces, and a mis-sized cell full of
+                // spaces clips to the same line — which is how eight `wants_w`
+                // mutants survived twice. Overflowing puts the ellipsis at a
+                // column, and a column is a thing a golden can see.
+                wants: Some("Bash (cargo mutants --in-diff main)"),
                 ..A::default()
             }
             .row(),
@@ -570,6 +971,9 @@ mod tests {
                 battery: Some(7),
                 elapsed: "45m",
                 summary: "Drive launch",
+                // The one fleet row that has fanned out, so the golden pins
+                // both states of the third structural mark.
+                subs: true,
                 ..A::default()
             }
             .row(),
@@ -764,7 +1168,7 @@ mod tests {
 
     /// Both lines of a card, SGR stripped — the picture, measured.
     fn pin(row: &Row, cols: usize) -> (String, String) {
-        let (l1, l2) = render_card(row, cols, true, false, &Theme::default());
+        let (l1, l2) = render_double_card(row, cols, true, false, &Theme::default());
         (strip_sgr(&l1), strip_sgr(&l2))
     }
 
@@ -774,7 +1178,7 @@ mod tests {
             for (i, row) in fleet().iter().enumerate() {
                 for zebra in [false, true] {
                     for any in [false, true] {
-                        let (l1, l2) = render_card(row, cols, any, zebra, &Theme::default());
+                        let (l1, l2) = render_double_card(row, cols, any, zebra, &Theme::default());
                         for l in [&l1, &l2] {
                             assert_eq!(display_cells(&strip_sgr(l)), cols, "row {i} at {cols}");
                         }
@@ -791,7 +1195,7 @@ mod tests {
     fn a_card_holds_its_width_at_every_pane_width() {
         for cols in 1..=80 {
             for (i, row) in fleet().iter().enumerate() {
-                let (l1, l2) = render_card(row, cols, true, i % 2 == 1, &Theme::default());
+                let (l1, l2) = render_double_card(row, cols, true, i % 2 == 1, &Theme::default());
                 for l in [&l1, &l2] {
                     assert_eq!(display_cells(&strip_sgr(l)), cols, "row {i} at {cols}");
                 }
@@ -810,7 +1214,7 @@ mod tests {
             (
                 " \u{25cf} \u{256d} \u{e0b6}CLV-M2 \u{e0b4} Goal is shipping\u{2026} 130k "
                     .to_string(),
-                " \u{168c2} \u{2570}  clave     #225  \u{ec82} fable  xh  5m ".to_string(),
+                " \u{f1bb} \u{2570}  clave     #225  \u{ec82} fable  xh  5m ".to_string(),
             )
         );
         assert_eq!(
@@ -818,10 +1222,766 @@ mod tests {
             (
                 " \u{25cf} \u{256d} \u{e0b6}CLV-M2 \u{e0b4} Goal is shipping v0.2.2 cl\u{2026} 130k "
                     .to_string(),
-                " \u{168c2} \u{2570}  clave v022-prep     #225  \u{ec82} fable  xh  5m ".to_string(),
+                " \u{f1bb} \u{2570}  clave v022-prep     #225  \u{ec82} fable  xh  5m ".to_string(),
             )
         );
     }
+
+    // ── the four-line card ──────────────────────────────────────────────────
+
+    /// The four-line card, cell for cell, at both profiles. Lines 1-3 only —
+    /// line 4 is the same rule on every card, and is pinned once by
+    /// `the_shadow_rule_closes_every_card_outside_the_selection` rather than
+    /// repeated seven times here.
+    ///
+    /// Seven rows, chosen for their corners: a worktree with a PR and a branch,
+    /// a terminal, a chipless card, a repo past its budget beside a branch, a
+    /// failed row whose summary truncates, a row with NO token reading at all
+    /// (line 3 goes fully blank, which is the design and not a hole), and the
+    /// `Opening` row that escapes the dormant fade.
+    ///
+    /// One row carries an `ask` and one the subagent mark. That is deliberate
+    /// and not decoration: `clip_to_cells` guarantees every line's width at the
+    /// exit, so a golden whose flex cells are all BLANK cannot see arithmetic
+    /// that only moves where the right edge falls — the mutation run found
+    /// eight survivors living in exactly that gap (FOOTGUNS).
+    #[test]
+    fn the_four_line_card_pins_both_profiles() {
+        let f = fleet();
+        let want: [(usize, [&str; 3], [&str; 3]); 8] = [
+            (
+                // The one flagged row, and so the only one carrying an ask.
+                // Its line 3 is what pins the right-hand arithmetic: the
+                // ellipsis lands where `wants_w` says it does, and a
+                // miscount that `clip_to_cells` would swallow on a blank
+                // cell moves it here.
+                0,
+                [
+                    " \u{25cf} \u{2502} \u{e0b6}CORTI2 \u{e0b4} Qdos IR35 assessment: the contr\u{2026} ",
+                    "   \u{2502} hermes                         \u{ec82} fable  hi ",
+                    "   \u{2502} 105k    3m Bash (cargo mutants --in-diff \u{2026} ",
+                ],
+                [
+                    " \u{25cf} \u{2502} \u{e0b6}CORTI2 \u{e0b4}  ",
+                    "   \u{2502} hermes     ",
+                    "   \u{2502} 105k    3m ",
+                ],
+            ),
+            (
+                4,
+                [
+                    " \u{b7} \u{2502} \u{e0b6}CLV-3  \u{e0b4} Drive launch                     ",
+                    " \u{f1bb} \u{2502} clave drive-launch       #204  \u{ec82} sonnet hi ",
+                    " \u{f171a} \u{2502} 117k   45m                                 ",
+                ],
+                [
+                    " \u{b7} \u{2502} \u{e0b6}CLV-3  \u{e0b4}  ",
+                    " \u{f1bb} \u{2502} clave      ",
+                    " \u{f171a} \u{2502} 117k   45m ",
+                ],
+            ),
+            (
+                6,
+                [
+                    " \u{f018d} \u{2502} \u{e0b6}Tab #12\u{e0b4} zsh                              ",
+                    "   \u{2502} clave                                      ",
+                    "   \u{2502} TERM    7m                                 ",
+                ],
+                [
+                    " \u{f018d} \u{2502} \u{e0b6}Tab #12\u{e0b4}  ",
+                    "   \u{2502} clave      ",
+                    "   \u{2502} TERM    7m ",
+                ],
+            ),
+            (
+                9,
+                [
+                    " \u{b7} \u{2502} Create close conversation summary flow     ",
+                    "   \u{2502} hermes                         \u{ec82} opus   hi ",
+                    "   \u{2502} 34k     2h                                 ",
+                ],
+                [
+                    " \u{b7} \u{2502} Create cl\u{2026} ",
+                    "   \u{2502} hermes     ",
+                    "   \u{2502} 34k     2h ",
+                ],
+            ),
+            (
+                13,
+                [
+                    " \u{b7} \u{2502} Landing page hero copy rewrite pass        ",
+                    " \u{f062c} \u{2502} clave-we\u{2026} hero-copy      #12   \u{ec81} gpt-5     ",
+                    "   \u{2502} 55k    30m                                 ",
+                ],
+                [
+                    " \u{b7} \u{2502} Landing p\u{2026} ",
+                    " \u{f062c} \u{2502} clave-web\u{2026} ",
+                    "   \u{2502} 55k    30m ",
+                ],
+            ),
+            (
+                14,
+                [
+                    " \u{2716} \u{2502} \u{e0b6}MIGRATE\u{e0b4} Postgres 15 to 17 migration run\u{2026} ",
+                    " \u{f1bb} \u{2502} market-s\u{2026} pg17-migrate   #88   \u{ec82} sonnet hi ",
+                    "   \u{2502} 201k    4h                                 ",
+                ],
+                [
+                    " \u{2716} \u{2502} \u{e0b6}MIGRATE\u{e0b4}  ",
+                    " \u{f1bb} \u{2502} market-sc\u{2026} ",
+                    "   \u{2502} 201k    4h ",
+                ],
+            ),
+            (
+                16,
+                [
+                    " \u{b7} \u{2502} \u{e0b6}GROK   \u{e0b4} Provider clave has never heard \u{2026} ",
+                    "   \u{2502} clave                                      ",
+                    "   \u{2502}                                            ",
+                ],
+                [
+                    " \u{b7} \u{2502} \u{e0b6}GROK   \u{e0b4}  ",
+                    "   \u{2502} clave      ",
+                    "   \u{2502}            ",
+                ],
+            ),
+            (
+                17,
+                [
+                    " \u{21bb} \u{2502} \u{e0b6}OPENING\u{e0b4} Just launched                    ",
+                    "   \u{2502} clave                            fable     ",
+                    "   \u{2502} 100k    1m                                 ",
+                ],
+                [
+                    " \u{21bb} \u{2502} \u{e0b6}OPENING\u{e0b4}  ",
+                    "   \u{2502} clave      ",
+                    "   \u{2502} 100k    1m ",
+                ],
+            ),
+        ];
+        for (i, expanded, collapsed) in want {
+            for (cols, want_lines) in [
+                (CARD_EXPANDED_COLS, expanded),
+                (CARD_COLLAPSED_COLS, collapsed),
+            ] {
+                let got = render_card(&f[i], cols, true, 0, &Theme::default());
+                for (line, want_line) in want_lines.iter().enumerate() {
+                    assert_eq!(
+                        strip_sgr(&got[line]),
+                        *want_line,
+                        "row {i} line {} at {cols} cols",
+                        line + 1
+                    );
+                }
+            }
+        }
+    }
+
+    /// Line 4 is the whole reason the card grew: three dense lines butted
+    /// against the next three read fine one card at a time and stop being
+    /// glanceable as a fleet, because the eye cannot find where one card ends.
+    ///
+    /// Two properties, and the second is the subtle one. The rule spans the
+    /// full pane at every width — and it carries NO background even on the
+    /// selected card, because the separator rhythm has to stay unbroken across
+    /// the whole fleet while the selection is exactly the three lines that
+    /// carry content.
+    #[test]
+    fn the_shadow_rule_closes_every_card_outside_the_selection() {
+        let f = fleet();
+        let bar = Theme::default().sel_bg.bg();
+        for cols in [CARD_EXPANDED_COLS, CARD_COLLAPSED_COLS, 30, 8] {
+            for (i, row) in f.iter().enumerate() {
+                let l4 = &render_card(row, cols, true, 0, &Theme::default())[3];
+                assert_eq!(
+                    strip_sgr(l4),
+                    SHADOW.to_string().repeat(cols),
+                    "row {i} at {cols} cols is not a full-width rule"
+                );
+                assert!(
+                    !l4.contains(&bar),
+                    "row {i} painted the selection background onto the separator"
+                );
+            }
+        }
+        // The selected card proves the second property rather than assuming
+        // it: its three content lines DO paint the bar, and its fourth does
+        // not, so the assertion above is measuring something real.
+        let selected = f.iter().position(|r| r.selected).expect("fleet fixture");
+        let card = render_card(&f[selected], CARD_EXPANDED_COLS, true, 0, &Theme::default());
+        for (line, painted) in card.iter().take(3).enumerate() {
+            assert!(
+                painted.contains(&bar),
+                "the selected card's line {} lost its bar",
+                line + 1
+            );
+        }
+    }
+
+    /// The crop rule: collapsed is a strict LEFT-CROP of expanded, never a
+    /// re-arrangement — so a cell's column IS its priority, and every argument
+    /// about ordering is an argument about what survives 16 columns.
+    ///
+    /// The crop is over CELLS, not characters, and the difference is not a
+    /// technicality. Collapsing hands the branch, PR, provider, model and
+    /// effort columns back to the repo cell, so a repo name that truncates at
+    /// 48 shows MORE of itself at 16 — `clave-we…` becomes `clave-web…`. A
+    /// naive "the narrow line is a prefix of the wide one" property is
+    /// therefore false on a correct card, and this test asserts the three
+    /// things that actually hold.
+    ///
+    /// One: the chrome is at the same columns in both profiles, on all three
+    /// content lines — that is the "one left edge for all four lines" ruling,
+    /// and it is what a re-arrangement would break first. Two: the pill is
+    /// untouched by the crop, because it is what survives 16 columns. Three:
+    /// the elapsed clock is flush to the right margin in both profiles, so
+    /// whichever clock is rightmost sits in the same column and the eye finds
+    /// a duration in one place.
+    /// Sixteen columns is a tight budget, so pin what actually competes for it
+    /// at the widest each cell can be. The maintainer's worry was a collapsed
+    /// line reading `123k #1234 30m` — three cells where there is room for two.
+    /// It cannot happen: the PR lives on line 2 and the crop drops it there,
+    /// so line 3 collapsed is the token count and the clock and nothing else.
+    #[test]
+    fn the_collapsed_card_fits_its_widest_cells() {
+        let row = A {
+            // 9.9m is the widest the token formatter can produce below the
+            // point it drops the tenth (`render::token_text`), so this is the
+            // worst case for that cell, not a big-looking number.
+            tokens: Some(9_949_999),
+            pr: Some(1234),
+            branch: "feat/some-long-branch-name",
+            repo: "a-long-repository-name",
+            elapsed: "59s",
+            ..A::default()
+        }
+        .row();
+        let narrow = render_card(&row, CARD_COLLAPSED_COLS, false, 0, &Theme::default());
+        let l2 = strip_sgr(&narrow[1]);
+        let l3 = strip_sgr(&narrow[2]);
+        assert!(
+            !l2.contains("1234") && !l3.contains("1234"),
+            "the PR must not survive the crop: {l2:?} / {l3:?}"
+        );
+        assert!(
+            l3.contains("9.9m") && l3.contains("59s"),
+            "both of line 3's cells must survive at their widest: {l3:?}"
+        );
+        // And the row still holds its width — the guarantee that makes the
+        // above a statement about CONTENT rather than about overflow.
+        for (i, line) in narrow.iter().enumerate() {
+            assert_eq!(
+                display_cells(&strip_sgr(line)),
+                CARD_COLLAPSED_COLS,
+                "line {} left the collapsed width",
+                i + 1
+            );
+        }
+    }
+
+    #[test]
+    fn the_collapsed_card_crops_cells_without_moving_them() {
+        let f = fleet();
+        for (i, row) in f.iter().enumerate() {
+            let wide = render_card(row, CARD_EXPANDED_COLS, true, 0, &Theme::default());
+            let narrow = render_card(row, CARD_COLLAPSED_COLS, true, 0, &Theme::default());
+            for line in 0..3 {
+                let w: String = strip_sgr(&wide[line]).chars().take(CHROME).collect();
+                let n: String = strip_sgr(&narrow[line]).chars().take(CHROME).collect();
+                assert_eq!(w, n, "row {i} line {} moved its chrome", line + 1);
+                assert!(
+                    w.ends_with(&format!("{RULE} ")),
+                    "row {i} line {}: the rail left its column ({w:?})",
+                    line + 1
+                );
+            }
+            // The pill survives the crop whole — it is the first thing the
+            // column order protects.
+            let pill: String = strip_sgr(&wide[0]).chars().skip(CHROME).take(9).collect();
+            let cropped: String = strip_sgr(&narrow[0]).chars().skip(CHROME).take(9).collect();
+            assert_eq!(pill, cropped, "row {i} clipped its pill");
+            // Line 3 keeps a right margin at both widths. The clock is the
+            // rightmost thing in the collapsed profile; expanded, `wants` may
+            // run past it, but the margin holds either way.
+            for card in [&wide, &narrow] {
+                let l3 = strip_sgr(&card[2]);
+                assert!(
+                    l3.ends_with(' '),
+                    "row {i} line 3 lost its right margin: {l3:?}"
+                );
+            }
+            // Only where there IS a reading. A row that has never been touched
+            // renders the cell blank rather than inventing a duration, which
+            // is the same "blank is the meaning" rule the whole line follows.
+            if !cells(&row.content, &Theme::default()).elapsed.is_empty() {
+                let narrow_l3 = strip_sgr(&narrow[2]);
+                let tail: String = narrow_l3.chars().rev().skip(1).take(ELAPSED_W).collect();
+                assert!(
+                    !tail.trim().is_empty(),
+                    "row {i}: the collapsed card's elapsed clock is not flush right ({narrow_l3:?})"
+                );
+
+                // And the expanded card puts it in the SAME columns. This is
+                // the crop rule applied to the one cell that has a position at
+                // both widths: collapsed is a left-crop of expanded, so a cell
+                // surviving the crop must not shift under it. The column comes
+                // from the COLLAPSED geometry — flush right, one margin in —
+                // so this cannot agree with the expanded arithmetic by
+                // sharing a constant with it. It caught a one-column drift the
+                // goldens could not see (ruled by eye 2026-09-09).
+                let at = |s: &str| -> String {
+                    s.chars()
+                        .skip(CARD_COLLAPSED_COLS - 1 - ELAPSED_W)
+                        .take(ELAPSED_W)
+                        .collect()
+                };
+                assert_eq!(
+                    at(&strip_sgr(&wide[2])),
+                    at(&narrow_l3),
+                    "row {i}: the elapsed clock moved across the crop"
+                );
+            }
+        }
+    }
+
+    /// **Order IS the animation** (lock §4.5). The mark grows from a dot
+    /// through progressively heavier stars and back; any other sequence over
+    /// the same six glyphs gives six things flickering rather than one shape
+    /// breathing, and every property the spinner test asserts — the cycle
+    /// closes, all six are visited, the walk back reflects the walk out —
+    /// survives shuffling `THINK_FRAMES` completely.
+    ///
+    /// So the ratified sequence is pinned as a literal, taken from the spec
+    /// rather than recomputed from the array it is checking. Ten frames: six
+    /// out, the four inner ones back.
+    #[test]
+    fn the_spinner_walks_the_ratified_sequence_and_no_other() {
+        const RATIFIED: [char; THINK_CYCLE] = [
+            '\u{00b7}', // interpunct — the quietest possible mark
+            '\u{2722}', // four teardrop-spoked asterisk
+            '\u{2733}', // eight-spoked asterisk
+            '\u{2736}', // six pointed black star
+            '\u{273b}', // teardrop-spoked asterisk
+            '\u{273d}', // heavy teardrop-spoked asterisk — the peak
+            '\u{273b}', // and back down the same way it came
+            '\u{2736}', '\u{2733}', '\u{2722}',
+        ];
+        let walked: Vec<char> = (0..THINK_CYCLE).map(think_frame).collect();
+        assert_eq!(
+            walked, RATIFIED,
+            "the spinner is not breathing, it is flickering"
+        );
+        // The glyphs must reach the CARD in that order too — `think_frame` is
+        // reachable from the shell, so a card that picked its own would keep
+        // this green.
+        let working = A {
+            status: RowStatus::Working,
+            ..A::default()
+        }
+        .row();
+        for (t, want) in RATIFIED.iter().enumerate() {
+            let line = strip_sgr(
+                &render_card(&working, CARD_EXPANDED_COLS, false, t, &Theme::default())[0],
+            );
+            assert!(
+                line.contains(*want),
+                "frame {t} should draw {want:?}: {line:?}"
+            );
+        }
+    }
+
+    /// The subagent mark's ink, which nothing asserted — the glyph could have
+    /// arrived in any colour and every golden (stripped text) and every width
+    /// test would have stayed green.
+    ///
+    /// `SUBS_INK` is a quiet blue-grey on purpose (lock §4.6): the mark says
+    /// "this row has depth", not "this row is hot", so it must not borrow a
+    /// lifecycle hue. Read off the mark's own run, never `contains` — line 3's
+    /// rail and its token band are both painted too.
+    #[test]
+    fn the_subagent_mark_is_quiet_blue_grey_and_absent_when_there_is_none() {
+        let line3 = |subs: bool, cols: usize| {
+            render_card(
+                &A {
+                    subs,
+                    ..A::default()
+                }
+                .row(),
+                cols,
+                false,
+                0,
+                &Theme::default(),
+            )[2]
+            .clone()
+        };
+        // Both widths: the mark is a gutter cell, so it survives the crop —
+        // which is exactly why its ink has to be right at 16 columns too.
+        for cols in [CARD_EXPANDED_COLS, CARD_COLLAPSED_COLS] {
+            let marked = line3(true, cols);
+            assert_eq!(
+                ink_before(&marked, &SUBS_MARK.to_string()),
+                SUBS_INK.fg(),
+                "at {cols} cols the subagent mark must be its own quiet ink: {marked:?}"
+            );
+            // Absent is BLANK, not a fallback glyph, and the cell it left
+            // behind is the same width — the crop rule depends on it.
+            let bare = line3(false, cols);
+            assert!(!strip_sgr(&bare).contains(SUBS_MARK));
+            assert_eq!(display_cells(&strip_sgr(&bare)), cols);
+            // The gutter is ` X `, so everything from the third character on
+            // must be identical — the mark is one cell and claims no more.
+            assert_eq!(
+                strip_sgr(&marked).chars().skip(2).collect::<String>(),
+                strip_sgr(&bare).chars().skip(2).collect::<String>(),
+                "at {cols} cols the mark moved something other than its own cell"
+            );
+        }
+    }
+
+    /// The spinner: a working row's status mark BREATHES, and nothing else on
+    /// the card moves with it. A row blocked on you holds still, which is what
+    /// makes a stopped spinner mean "Claude is asking".
+    #[test]
+    fn only_a_working_rows_mark_animates() {
+        let working = A {
+            status: RowStatus::Working,
+            ..A::default()
+        }
+        .row();
+        let asking = A {
+            status: RowStatus::NeedsYou,
+            ..A::default()
+        }
+        .row();
+        let at = |row: &Row, frame: usize| {
+            strip_sgr(&render_card(row, CARD_EXPANDED_COLS, false, frame, &Theme::default())[0])
+        };
+        // The ping-pong closes: frame 10 is frame 0 again, so the cycle turns
+        // over without a jump, and every one of the six glyphs is visited.
+        let cycle: Vec<String> = (0..THINK_CYCLE).map(|t| at(&working, t)).collect();
+        assert_eq!(at(&working, THINK_CYCLE), cycle[0], "the cycle must close");
+        assert_eq!(
+            cycle
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            THINK_FRAMES.len(),
+            "the ping-pong must visit every frame"
+        );
+        // Only the mark moves: every frame is identical past the status cell,
+        // so an animating card cannot smuggle a reflow through.
+        for (t, line) in cycle.iter().enumerate() {
+            assert_eq!(display_cells(line), CARD_EXPANDED_COLS, "frame {t} width");
+            assert_eq!(
+                line.chars().skip(2).collect::<String>(),
+                cycle[0].chars().skip(2).collect::<String>(),
+                "frame {t} moved something other than the status mark"
+            );
+        }
+        // The ping-pong is a REFLECTION, not just a closed loop: the walk back
+        // must retrace the frames it walked out on. Counting distinct frames
+        // cannot see that — a cycle that returned by some other route would
+        // still visit all six — so the symmetry is asserted directly.
+        for k in 1..THINK_FRAMES.len() {
+            assert_eq!(
+                think_frame(THINK_CYCLE - k),
+                think_frame(k),
+                "frame {} is not the reflection of frame {k}",
+                THINK_CYCLE - k
+            );
+        }
+
+        // The row blocked on you holds still across the whole cycle.
+        let still = at(&asking, 0);
+        for t in 0..THINK_CYCLE {
+            assert_eq!(
+                at(&asking, t),
+                still,
+                "a NeedsYou row animated at frame {t}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_opening_row_is_never_faded_even_while_the_store_still_calls_it_dormant() {
+        // A row stays flagged dormant until its agent answers, so the moment
+        // between the click and the first hook event is exactly when the card
+        // is BOTH dormant and opening. Fading it there dims the one row the
+        // user just acted on. The exemption is a `!matches!` inside the fade
+        // ladder, and nothing but this can see it.
+        let opening = |dormant: bool| {
+            render_card(
+                &Row {
+                    content: A {
+                        status: RowStatus::Opening,
+                        ..A::default()
+                    }
+                    .row()
+                    .content,
+                    selected: false,
+                    dormant,
+                },
+                CARD_EXPANDED_COLS,
+                true,
+                0,
+                &Theme::default(),
+            )
+        };
+        assert_eq!(
+            opening(true),
+            opening(false),
+            "an opening row must render identically whether or not it is still flagged dormant"
+        );
+        // And the exemption is narrow: an ordinary dormant row IS faded, so
+        // the assertion above is not passing because nothing fades at all.
+        let ordinary = |dormant: bool| {
+            render_card(
+                &Row {
+                    content: A::default().row().content,
+                    selected: false,
+                    dormant,
+                },
+                CARD_EXPANDED_COLS,
+                true,
+                0,
+                &Theme::default(),
+            )
+        };
+        assert_ne!(ordinary(true), ordinary(false));
+    }
+
+    #[test]
+    fn the_branch_needs_its_whole_minimum_and_one_column_of_air() {
+        // `branch_fits` reserves the repo, ONE separating space and
+        // `BRANCH_MIN`. Off by that single column the branch appears with no
+        // gap before it, which reads as one long name. The boundary is the
+        // only place the space is visible, so it is pinned there: at 24
+        // columns a nine-cell repo leaves exactly `BRANCH_MIN` and no air.
+        let row = A {
+            repo: "market-scanner",
+            branch: "pg17-migrate",
+            ..A::default()
+        }
+        .row();
+        let at = |cols: usize| strip_sgr(&render_card(&row, cols, false, 0, &Theme::default())[1]);
+        let tight = at(24);
+        assert!(
+            !tight.contains("pg17"),
+            "the branch must not take the column that separates it from the repo: {tight:?}"
+        );
+        // One column more and it earns its place, air included.
+        let roomy = at(25);
+        assert!(
+            roomy.contains("pg17"),
+            "one column further out the branch fits: {roomy:?}"
+        );
+        assert!(
+            roomy.contains("\u{2026} pg17"),
+            "and it is separated from the repo by a space: {roomy:?}"
+        );
+    }
+
+    /// Lock §4.4: there is ONE clock and it is rendered two ways. While the
+    /// turn is in flight it is crystalBlue and counting; the moment it is over
+    /// the same cell dims and the number means staleness instead. The text
+    /// alone cannot carry that — `3m` reads identically either way — so this
+    /// reads the SGR, and it checks BOTH profiles because the clock is the one
+    /// cell that survives the crop.
+    #[test]
+    fn the_clock_is_lit_while_the_turn_runs_and_dim_once_it_is_over() {
+        let line3 = |status: RowStatus, cols: usize| {
+            render_card(
+                &A {
+                    status,
+                    elapsed: "42s",
+                    ..A::default()
+                }
+                .row(),
+                cols,
+                false,
+                0,
+                &Theme::default(),
+            )[2]
+            .clone()
+        };
+        let clock_ink = |line: &str| ink_before(line, "42s");
+        for cols in [CARD_EXPANDED_COLS, CARD_COLLAPSED_COLS] {
+            let running = line3(RowStatus::Working, cols);
+            let over = line3(RowStatus::Idle, cols);
+            assert_eq!(
+                clock_ink(&running),
+                TURN_INK.fg(),
+                "at {cols} cols a running turn's clock must be crystalBlue: {running:?}"
+            );
+            assert_eq!(
+                clock_ink(&over),
+                META_INK.fg(),
+                "at {cols} cols a finished turn's clock must dim to meta: {over:?}"
+            );
+            // And only the INK moved — a row that lit up must not also have
+            // shifted the number it lit.
+            assert_eq!(
+                strip_sgr(&running),
+                strip_sgr(&over),
+                "at {cols} cols the clock's ink changed its column"
+            );
+        }
+    }
+
+    #[test]
+    fn provenance_wears_a_fixed_semantic_ink_not_the_rows() {
+        // Lock §4.2: worktree green, branch violet, and an ordinary checkout
+        // no mark at all. The inks are the reason a third glyph could join
+        // that column at all, and a golden over stripped text cannot see them
+        // — so this reads the SGR the goldens throw away.
+        let line2 = |prov: Provenance| {
+            render_card(
+                &A {
+                    prov,
+                    branch: "topic",
+                    // The trap this test exists to avoid needs a PR present:
+                    // `PR_INK` and `WORKTREE_INK` are the same bytes.
+                    pr: Some(232),
+                    ..A::default()
+                }
+                .row(),
+                CARD_EXPANDED_COLS,
+                false,
+                0,
+                &Theme::default(),
+            )[1]
+            .clone()
+        };
+        // Read the MARK's own ink, never `line.contains` (FOOTGUNS): line 2
+        // also carries the PR cell, and `PR_INK` is byte-identical to
+        // `WORKTREE_INK` — both springGreen. Every card below therefore has a
+        // PR open, so a `contains` check would pass on all three, including
+        // the `Main` row written to reject it.
+        let mark_ink = |line: &str, mark: char| ink_before(line, &mark.to_string());
+        let worktree = line2(Provenance::Worktree);
+        let branch = line2(Provenance::Branch);
+        assert_eq!(
+            mark_ink(&worktree, crate::render::WORKTREE_MARK),
+            WORKTREE_INK.fg(),
+            "the worktree mark must be springGreen: {worktree:?}"
+        );
+        assert_eq!(
+            mark_ink(&branch, crate::render::BRANCH_MARK),
+            BRANCH_INK.fg(),
+            "the branch mark must be oniViolet: {branch:?}"
+        );
+        // Neither card wears the other's glyph at all — the ink follows the
+        // mark, so the marks must not be interchangeable either.
+        assert!(!strip_sgr(&worktree).contains(crate::render::BRANCH_MARK));
+        assert!(!strip_sgr(&branch).contains(crate::render::WORKTREE_MARK));
+        // An ordinary checkout has no mark: the gutter cell is blank, and its
+        // ink is the theme's, not a semantic one.
+        let main = line2(Provenance::Main);
+        assert!(!strip_sgr(&main).contains(crate::render::WORKTREE_MARK));
+        assert!(!strip_sgr(&main).contains(crate::render::BRANCH_MARK));
+        // The gutter is the line's FIRST cell, so its ink is the line's first
+        // SGR — the one place `ink_before` cannot reach, because the cell it
+        // paints is a space with nothing before it.
+        let opening_ink = |line: &str| {
+            let run = &line[line.find("\u{1b}[38;2;").expect("an opening ink")..];
+            run[..=run.find('m').expect("a terminated SGR")].to_string()
+        };
+        assert_eq!(
+            opening_ink(&main),
+            Theme::default().default_ink.fg(),
+            "a main-checkout row must not open a semantic ink it has no mark for"
+        );
+        // And the two that DO have a mark open on their own ink, which is the
+        // same statement read from the other end.
+        assert_eq!(opening_ink(&worktree), WORKTREE_INK.fg());
+        assert_eq!(opening_ink(&branch), BRANCH_INK.fg());
+    }
+
+    #[test]
+    fn a_summary_cell_too_narrow_to_say_anything_says_nothing() {
+        // Lock §2: a cell with room for an ellipsis and nothing else says less
+        // than a blank one. The threshold is four cells, so the card is swept
+        // across the widths where it is crossed rather than pinned at one.
+        let row = A {
+            chip: Some("CHIPPED"),
+            summary: "a summary long enough to be cut",
+            ..A::default()
+        }
+        .row();
+        let said = |cols: usize| {
+            let l1 = strip_sgr(&render_card(&row, cols, false, 0, &Theme::default())[0]);
+            assert_eq!(display_cells(&l1), cols, "width at {cols}");
+            l1.split('\u{e0b4}').nth(1).unwrap_or("").trim().to_string()
+        };
+        for cols in CARD_COLLAPSED_COLS..CARD_EXPANDED_COLS {
+            let shown = said(cols);
+            assert!(
+                shown.is_empty() || shown.chars().filter(|c| *c != ELLIPSIS).count() >= 3,
+                "at {cols} the summary cell said only {shown:?}"
+            );
+        }
+        // The threshold is FOUR, and it is a floor rather than a fence: four
+        // cells buy three characters and an ellipsis, which is the narrowest
+        // cell that still says something. A test that only swept could not
+        // tell that from a threshold of five, so the boundary is named. The
+        // chip claims eleven columns and the chrome five, so four cells left
+        // over is exactly twenty.
+        assert_eq!(said(20).chars().count(), 4, "four cells must still speak");
+        assert!(said(19).is_empty(), "three cells must stay quiet");
+    }
+
+    #[test]
+    fn the_wants_cell_carries_the_ask_and_survives_the_crop_only_as_far_as_it_fits() {
+        // Lock §4.7: `wants` claims every cell the numbers on line 3 leave, so
+        // the expanded card shows the ask and the collapsed one — 16 columns,
+        // all of them spoken for by the token count and the clock — shows none
+        // of it. Blank stays blank: a row that is not blocked grows no text.
+        let blocked = A {
+            status: RowStatus::NeedsYou,
+            wants: Some("Bash (git push --force)"),
+            ..A::default()
+        }
+        .row();
+        let quiet = A {
+            status: RowStatus::NeedsYou,
+            ..A::default()
+        }
+        .row();
+        let line3 = |row: &Row, cols: usize| {
+            strip_sgr(&render_card(row, cols, false, 0, &Theme::default())[2])
+        };
+
+        let wide = line3(&blocked, CARD_EXPANDED_COLS);
+        assert!(
+            wide.contains("Bash (git push --for"),
+            "the expanded card must show the ask: {wide:?}"
+        );
+        assert_eq!(display_cells(&wide), CARD_EXPANDED_COLS);
+
+        let narrow = line3(&blocked, CARD_COLLAPSED_COLS);
+        assert!(
+            !narrow.contains("Bash"),
+            "16 columns have no room for an ask: {narrow:?}"
+        );
+        assert_eq!(display_cells(&narrow), CARD_COLLAPSED_COLS);
+
+        // The unblocked row's line 3 is the same shape with the cell empty —
+        // the ask grows into space that was already there, it does not reflow
+        // the numbers beside it.
+        let empty = line3(&quiet, CARD_EXPANDED_COLS);
+        assert_eq!(display_cells(&empty), CARD_EXPANDED_COLS);
+        let shared = empty
+            .chars()
+            .zip(wide.chars())
+            .take_while(|(a, b)| a == b)
+            .count();
+        assert!(
+            empty.chars().skip(shared).all(char::is_whitespace),
+            "the ask must grow into space that was already blank: {empty:?}"
+        );
+    }
+
+    // ── the two-line card ───────────────────────────────────────────────────
 
     /// The rest of the ratified picture, at the corners of the variant space:
     /// the branch card, the TERM pill, the chipless flex, the exactly-9 repo,
@@ -833,9 +1993,9 @@ mod tests {
             (
                 4,
                 " \u{25cf} \u{256d} \u{e0b6}CLV-3  \u{e0b4} Drive launch      117k ",
-                " \u{168c2} \u{2570}  clave     #204  \u{ec82} sonnet hi 45m ",
+                " \u{f1bb} \u{2570}  clave     #204  \u{ec82} sonnet hi 45m ",
                 " \u{25cf} \u{256d} \u{e0b6}CLV-3  \u{e0b4} Drive launch                117k ",
-                " \u{168c2} \u{2570}  clave drive-launch  #204  \u{ec82} sonnet hi 45m ",
+                " \u{f1bb} \u{2570}  clave drive-launch  #204  \u{ec82} sonnet hi 45m ",
             ),
             (
                 6,
@@ -868,9 +2028,9 @@ mod tests {
             (
                 14,
                 " \u{2716} \u{256d} \u{e0b6}MIGRATE\u{e0b4} Postgres 15 to 1\u{2026} 201k ",
-                " \u{168c2} \u{2570}  market-s\u{2026} #88   \u{ec82} sonnet hi  4h ",
+                " \u{f1bb} \u{2570}  market-s\u{2026} #88   \u{ec82} sonnet hi  4h ",
                 " \u{2716} \u{256d} \u{e0b6}MIGRATE\u{e0b4} Postgres 15 to 17 migratio\u{2026} 201k ",
-                " \u{168c2} \u{2570}  market-s\u{2026} pg17-mig\u{2026} #88   \u{ec82} sonnet hi  4h ",
+                " \u{f1bb} \u{2570}  market-s\u{2026} pg17-mig\u{2026} #88   \u{ec82} sonnet hi  4h ",
             ),
             (
                 15,
@@ -907,11 +2067,11 @@ mod tests {
         // expanded shows `resume-fix` whole.
         assert_eq!(
             pin(&f[12], 38).1,
-            " \u{168c2} \u{2570}  resumaker resu\u{2026}              1h "
+            " \u{f1bb} \u{2570}  resumaker resu\u{2026}              1h "
         );
         assert_eq!(
             pin(&f[12], 48).1,
-            " \u{168c2} \u{2570}  resumaker resume-fix                   1h "
+            " \u{f1bb} \u{2570}  resumaker resume-fix                   1h "
         );
     }
 
@@ -919,7 +2079,7 @@ mod tests {
     fn glass_rows_reassert_default_bg_and_selection_paints_sel_bg() {
         let theme = Theme::default();
         let f = fleet();
-        let (l1, l2) = render_card(&f[0], 38, true, false, &theme);
+        let (l1, l2) = render_double_card(&f[0], 38, true, false, &theme);
         for l in [&l1, &l2] {
             assert!(
                 l.contains("\u{1b}[49m"),
@@ -930,7 +2090,7 @@ mod tests {
                 "unselected card must paint no selection"
             );
         }
-        let (s1, s2) = render_card(&f[7], 38, true, false, &theme);
+        let (s1, s2) = render_double_card(&f[7], 38, true, false, &theme);
         for l in [&s1, &s2] {
             assert!(
                 l.contains(&theme.sel_bg.bg()),
@@ -983,7 +2143,7 @@ mod tests {
             ..A::default()
         }
         .row();
-        let (_, l2) = render_card(&row, 38, true, false, &Theme::default());
+        let (_, l2) = render_double_card(&row, 38, true, false, &Theme::default());
         assert!(!strip_sgr(&l2).contains("colour"), "{}", strip_sgr(&l2));
     }
 
@@ -1000,7 +2160,7 @@ mod tests {
                 ..A::default()
             }
             .row();
-            render_card(&row, 38, false, false, &theme).0
+            render_double_card(&row, 38, false, false, &theme).0
         };
         assert!(band(Some(0)).contains(&BATTERY[0].1.fg()));
         assert!(band(Some(10)).contains(&BATTERY[10].1.fg()));
@@ -1039,16 +2199,16 @@ mod tests {
         let f = fleet();
         let ink = |c: Rgb, f: f64| c.mix(theme.base, f).fg();
         // Nothing selected: no recession at all.
-        let (l1, _) = render_card(&f[0], 38, false, false, &theme);
+        let (l1, _) = render_double_card(&f[0], 38, false, false, &theme);
         assert!(l1.contains(&ink(theme.default_ink, 0.0)));
         // Something selected: an unselected card recedes — line 1's summary
         // ink and line 2's metadata ink both.
-        let (l1, l2) = render_card(&f[0], 38, true, false, &theme);
+        let (l1, l2) = render_double_card(&f[0], 38, true, false, &theme);
         assert!(l1.contains(&ink(theme.default_ink, FADE)));
         assert!(l2.contains(&ink(META_INK, FADE)));
         // Dormant: both lines, whether or not anything is selected.
         for any in [false, true] {
-            let (l1, l2) = render_card(&f[15], 38, any, false, &theme);
+            let (l1, l2) = render_double_card(&f[15], 38, any, false, &theme);
             for l in [&l1, &l2] {
                 assert!(
                     l.contains(&ink(META_INK, DORMANT_FADE)),
@@ -1057,7 +2217,7 @@ mod tests {
             }
         }
         // Opening: flagged dormant, rendered live.
-        let (l1, _) = render_card(&f[17], 38, false, false, &theme);
+        let (l1, _) = render_double_card(&f[17], 38, false, false, &theme);
         assert!(!l1.contains(&ink(META_INK, DORMANT_FADE)));
     }
 
@@ -1067,11 +2227,74 @@ mod tests {
     fn the_zebra_alternates_the_bracket_ink() {
         let theme = Theme::default();
         let f = fleet();
-        let (a1, a2) = render_card(&f[0], 38, false, false, &theme);
-        let (b1, b2) = render_card(&f[0], 38, false, true, &theme);
+        let (a1, a2) = render_double_card(&f[0], 38, false, false, &theme);
+        let (b1, b2) = render_double_card(&f[0], 38, false, true, &theme);
         assert!(a1.contains(&BRACKET_A.fg()) && a2.contains(&BRACKET_A.fg()));
         assert!(b1.contains(&BRACKET_B.fg()) && b2.contains(&BRACKET_B.fg()));
         assert_eq!(strip_sgr(&a1), strip_sgr(&b1), "the zebra costs no cells");
+    }
+
+    /// The four-line card's version of the sweep below, which only ever
+    /// covered `render_double_card`. The card added three cells that carry
+    /// agent-authored text the double card never had — `wants`, `model` and
+    /// `effort` — plus a title chip, and it has a CROP rule the two-line card
+    /// does not: collapsed is a strict left-crop of expanded, so a wide glyph
+    /// straddling the crop boundary is a width bug on the one line that must
+    /// hold its column count exactly.
+    ///
+    /// `wants` is the one that matters most. It is quoted from a Claude Code
+    /// notification, so its content is whatever tool invocation the model
+    /// chose to name — a shell command with CJK in it, or an emoji, arrives
+    /// here verbatim.
+    #[test]
+    fn hostile_text_cannot_break_a_four_line_card() {
+        const CJK: &str = "\u{65e5}\u{672c}\u{8a9e}\u{3067}\u{3059}";
+        const CONTROL: &str = "one\ntwo\rthree\u{1b}[31m";
+        const EMOJI: &str = "\u{1f600}\u{1f600}\u{1f600}";
+        // A leading wide glyph is the case that straddles the crop boundary
+        // when the card narrows to 16 columns — a cell wide enough to be cut
+        // in half rather than dropped whole.
+        for hostile in [CJK, CONTROL, EMOJI, "\u{1f600}x", "\u{200b}\u{200b}zero"] {
+            for cols in [CARD_COLLAPSED_COLS, 24, 33, CARD_EXPANDED_COLS, 80] {
+                let row = A {
+                    status: RowStatus::NeedsYou,
+                    chip: Some(hostile),
+                    repo: hostile,
+                    branch: hostile,
+                    summary: hostile,
+                    wants: Some(hostile),
+                    model: Some(hostile),
+                    effort: Some(hostile),
+                    prov: Provenance::Worktree,
+                    pr: Some(1234),
+                    subs: true,
+                    ..A::default()
+                }
+                .row();
+                let card = render_card(&row, cols, false, 0, &Theme::default());
+                assert_eq!(card.len(), 4, "{hostile:?} at {cols} lost a line");
+                for (i, line) in card.iter().enumerate() {
+                    let bare = strip_sgr(line);
+                    assert_eq!(
+                        display_cells(&bare),
+                        cols,
+                        "{hostile:?} line {i} at {cols} cols: {bare:?}"
+                    );
+                    // A newline would tear the card apart in the pane.
+                    assert!(!bare.contains('\n'), "{hostile:?} line {i} kept a newline");
+                    // And the injected SGR must not survive INTO the raw line,
+                    // where the card's own escapes live — checked on `line`,
+                    // not on `bare`, because `strip_sgr` would erase the very
+                    // thing being looked for and pass either way. The card
+                    // paints only 38;2 / 48;2 / 49 / 0, so a `[31m` on the
+                    // wire could only be the agent's.
+                    assert!(
+                        !line.contains("\u{1b}[31m"),
+                        "{hostile:?} line {i} let agent text repaint the bar: {line:?}"
+                    );
+                }
+            }
+        }
     }
 
     /// Agent-authored text reaches these cells raw. A control character
@@ -1093,7 +2316,7 @@ mod tests {
                     ..A::default()
                 }
                 .row();
-                let (l1, l2) = render_card(&row, cols, true, false, &Theme::default());
+                let (l1, l2) = render_double_card(&row, cols, true, false, &Theme::default());
                 for l in [&l1, &l2] {
                     assert_eq!(display_cells(&strip_sgr(l)), cols, "{summary:?} at {cols}");
                 }

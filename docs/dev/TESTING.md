@@ -908,9 +908,11 @@ mismatches invents a bug, and filtering them out silently hides one — print
 every pane and mark the unresolvable ones.
 
 **QA-DRIVE.md and `scripts/qa-drive.sh` are this loop's phases 0–2, scripted.**
-After the human stages and launches, the script proves the build, joins the
-baseline, and drives the bind ladder in one traced run, with the same
-never-discard-output discipline as above. The manual steps here remain the
+`just qa <scenario>` runs the whole thing as one command — it stages, prints
+the launch line, waits for the human to run it, and drives the moment the
+session is up. The script proves the build, joins the baseline, and drives the
+bind ladder in one traced run, with the same never-discard-output discipline as
+above. The manual steps here remain the
 fallback, and are still the source for phases 3–7, which are not yet
 scripted.
 
@@ -1034,8 +1036,25 @@ the human's to run in a **non-zellij terminal**; the rest an agent may run.
    the scenario transcripts (see *What reset removes*).
 3. **Seed a scenario:** `clave dev scenario <name>` — creates the fixture world
    and prints the launch command.
-4. **Launch (human, non-zellij terminal):** `clave dev launch` — attaches or
-   creates the `clave-test` session against the sandbox state and data dirs.
+4. **Launch (human, non-zellij terminal):** `cd <worktree> && just launch` —
+   attaches or creates this worktree's `clave-test…` session against the
+   sandbox state and data dirs. The `cd` is the load-bearing part: the
+   instance is keyed off the working directory, so launching from elsewhere
+   targets a different sandbox. Everything else is derived — session name,
+   state and data dirs (`enter_sandbox`) and the PATH shim that makes a bare
+   `clave` resolve to the build under test rather than the stable install
+   (`shim_first_on_path`). Those were a five-line env prefix until
+   2026-09-11; the shim in particular is the #43/#44 leak, and a launch that
+   forgot it silently tested `~/.local/share/clave` instead of the worktree.
+
+   **`clave dev launch` refuses when `ZELLIJ` is set**, so this step cannot
+   be taken by an agent — which is always inside a session — and the refusal
+   names the command to hand over. The rule was always "launching is the
+   human's"; now it is enforced rather than remembered.
+
+   Or skip the whole handoff: **`just qa <scenario>`** stages, prints this
+   launch line, waits for it, and drives phases 0-7 the moment the session is
+   up.
 
 > **After `just dev-install`, re-run step 3 (`clave dev scenario <name>`)
 > before launching.** `clave dev launch` composes `launch.kdl` fresh every

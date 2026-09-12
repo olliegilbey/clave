@@ -70,7 +70,7 @@ here in the same change.**
 ## 3. The sidebar
 
 > The terms in this section describe a design that is **locked and rendered**:
-> [`docs/superpowers/specs/2026-07-25-sidebar-visual-design-lock.md`](docs/superpowers/specs/2026-07-25-sidebar-visual-design-lock.md)
+> [`docs/superpowers/specs/2026-07-25-sidebar-visual-design-lock.md`](superpowers/specs/2026-07-25-sidebar-visual-design-lock.md)
 > is the ruling and the reasoning; `cargo run -p clave-bar --example bar-preview`
 > draws it. If a word here is unclear, run the preview — it is one screen.
 
@@ -98,15 +98,16 @@ column target, was deleted at #181; the term survives only in the ledger.)
 - **terminal tab** — a zellij tab with no agent session bound to it.
 
 **Row is the data-side word — a row is what gets rendered, never the shape it is
-rendered in.** The shape is the **row height**, and there are two:
+rendered in.** The shape is the **row height**, and there are three:
 
 | Term | Means |
 |---|---|
-| **card** | A row's **two-line** rendering, the default since #232. Line 1 is status, chip and token count; line 2 is identity — provenance, repo, branch, PR, provider, model, effort and elapsed. The two lines are one unit: one click target, one viewport slot, one zebra parity. Locked in `docs/superpowers/specs/2026-08-26-double-height-card-lock.md`. |
+| **card** | A row's **four-line** rendering, the default since the four-line lock. Line 1 is status, chip and summary; line 2 is identity — provenance, repo, branch, PR, provider, model and effort; line 3 is state — subagents, tokens, the clock and what it wants (four cells, not five: the clock is ONE cell at two resolutions, seconds while the turn runs and coarse staleness after — lock §4.4); line 4 is a hairline that closes the card. The four lines are one unit: one click target, one viewport slot. The separator does the job zebra parity used to. Locked in `docs/superpowers/specs/2026-09-08-triple-height-card-lock.md`. |
+| **double card** | The earlier **two-line** card, retained behind `clave rows double`. Line 1 is status, chip, summary and token count; line 2 is identity. Locked in `docs/superpowers/specs/2026-08-26-double-height-card-lock.md`. |
 | **single-line row** | The original one-line rendering, retained behind `clave rows single` and locked in `docs/superpowers/specs/2026-07-25-sidebar-visual-design-lock.md`. Its geometry is §3.2 below. |
 
-Both come in the same two **width states**, expanded and collapsed; height and
-width are independent choices.
+All three come in the same two **width states**, expanded and collapsed; height
+and width are independent choices.
 
 **Live and dormant rows both take their text from the STORE record** — title,
 repo and summary as separate fields. A live row does *not* render the zellij tab
@@ -137,7 +138,7 @@ status rule battery │     title    repo        summary
 | **rule** | The vertical line separating the status cell from the rest, so the status hue is not read against the battery hue. |
 | **cap** | The powerline half-circle at each end of the **selected row**. Its column is reserved on every row so nothing shifts. |
 | **text area** | Everything right of the gutter: title, repo, summary. |
-| **status glyph** | The dot. Its **colour** is the state — the shape barely varies. On a terminal tab the glyph is the console mark instead, coloured the same way: Running / Done / Failed for a command pane, Idle / Running for a shell — an interactive shell never exits while its tab lives, so it has no Done or Failed. A shell binary absent from `SHELLS` degrades to always-Running, its argv reading as a command that never finishes (#206). |
+| **status glyph** | The dot. Its **colour** is the state — the shape barely varies, except on the four-line card, where a row with a turn in flight **breathes**: the dot is replaced by a six-frame spinner at 5fps. It stops the moment Claude asks you something, which is what makes a blocked row legible at a glance. On a terminal tab the glyph is the console mark instead, coloured the same way: Running / Done / Failed for a command pane, Idle / Running for a shell — an interactive shell never exits while its tab lives, so it has no Done or Failed. A shell binary absent from `SHELLS` degrades to always-Running, its argv reading as a command that never finishes (#206). |
 | **battery** | How much of its **smart zone** that agent session has spent. Two readings of one number: the expanded view prints the **count** — thousands of tokens, right-aligned, inked with the ramp's band (`105k`, `1.1m`) — and the collapsed view shows the **ramp glyph**, which empties a tenth at a time. A terminal tab has no context window; its battery cell shows `TERM` expanded and the prompt glyph collapsed, and the console mark lives in the status cell (#206 — this moved; it used to sit here). |
 | **smart zone** | How many tokens of context *this user* trusts a model to stay sharp within — set once, globally, in `CLAVE_AGENT_SMART_ZONE_TOKENS` (default 150,000). Explicitly **not** the model's context window: the window is where Claude auto-compacts, which is not a thing anyone steers by, and the same smart zone holds across a 200k model, a 1M model, or a future non-Claude agent. It is where the battery turns **red** — not where the ramp ends. |
 | **provenance** | Whether the row's checkout is a **worktree**, on a **branch**, or a **main checkout**. Rendered as a glyph tinted with the repo ink; a main checkout shows nothing. |

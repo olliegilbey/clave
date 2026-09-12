@@ -56,11 +56,76 @@ pub const DEFAULT_SMART_ZONE_TOKENS: u32 = 150_000;
 /// must be exactly this long, and nothing else links the two numbers.
 pub const BATTERY_LEVELS: u8 = 11;
 
+/// A value this binary has no name for is the FUTURE, not corruption — a newer
+/// clave wrote it. Take the field's default and keep reading.
+///
+/// **Why this is not a nicety.** serde fails the WHOLE STRUCT on an unknown
+/// enum variant, so one unfamiliar value costs the entire payload, and both
+/// sides of the wire fail in the worst possible way. On the STORE side (the
+/// `clave` reader) every `clave hook` dies on the read, and the hook exits 0 by
+/// Global Constraint reporting only on stderr — the fleet simply stops updating
+/// with no status, no tokens, no pane binding, no adoption, no error, and
+/// presents as whichever feature is being tested at the time. On the WIRE side
+/// `clave-bar` drops the snapshot it cannot parse and keeps painting the last
+/// one it could, so the bar goes quietly inert against a live fleet.
+///
+/// Measured 2026-09-10: a v0.4.0 hook against a store carrying `row_height:
+/// "card"` printed ``unknown variant `card`, expected `single` or `double` ``
+/// and gave up on every event of the session. One version's skew from another
+/// — a rollback, a partial upgrade, or clave's own stable-vs-worktree split,
+/// which is how it was found.
+///
+/// **The limit, so nobody reads more into this than it does.** This fixes the
+/// READER, and every released reader is frozen. A store or a pipe written by a
+/// newer clave still kills an older one outright. So: adding a variant to a
+/// persisted or piped enum is a BREAKING change unless the leniency shipped a
+/// version first.
+///
+/// **What a wrong guess costs, per field, because that is the only question
+/// that matters here.** `row_height` costs a row geometry until the next launch
+/// (it is re-read at session create). `order` costs a sort until the next push.
+/// `label_source` degrades to `FirstPrompt`, which means "keep scanning" — the
+/// safe direction, since the wrong answer merely re-reads a tail. `status`
+/// degrades to `Idle`, the one state that claims nothing. None of them invents
+/// a fact. **A field where a wrong guess WOULD invent one must fail loudly
+/// instead — do not reach for this without asking that question first.**
+pub fn lenient<'de, D, T>(d: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    // `untagged` buffers the input and tries the arms in order, so an
+    // unfamiliar SHAPE is survived as well as an unfamiliar spelling — a
+    // variant that grows a field one day would otherwise just trade one
+    // strict-parse failure for another. `IgnoredAny` accepts anything, so the
+    // second arm cannot fail. Done with serde's own buffering rather than
+    // `serde_json::Value` deliberately: this crate carries serde and nothing
+    // else at runtime (invariant #9).
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOf<T> {
+        Known(T),
+        Unknown(serde::de::IgnoredAny),
+    }
+
+    Ok(match OneOf::deserialize(d)? {
+        OneOf::Known(known) => known,
+        OneOf::Unknown(_) => T::default(),
+    })
+}
+
 /// Per-agent status. This is a *latest-wins state machine* (spec §6.5), not a
 /// priority-max: a later event can downgrade an earlier one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
+    /// `#[default]` exists for the store's lenient read, not for a fresh row —
+    /// every mint sets a status explicitly. It is the answer to "this store was
+    /// written by a newer clave and names a status I do not know", and `Idle`
+    /// is the right guess there because it is the one state that claims
+    /// nothing: dim, unread, no session. Any other default would invent a fact
+    /// about an agent this binary cannot see.
+    #[default]
     Idle,
     Working,
     NeedsYou,
@@ -176,7 +241,10 @@ pub struct Agent {
     pub branch: String,
     /// `cwd · branch · summary` (spec §6.4).
     pub label: String,
-    /// Per-agent status (latest-wins state machine, spec §6.5).
+    /// Per-agent status (latest-wins state machine, spec §6.5). `lenient`
+    /// because a newer host can name a status this bar has never heard of,
+    /// and rejecting the variant would reject the whole SNAPSHOT.
+    #[serde(default, deserialize_with = "lenient")]
     pub status: Status,
     /// unix seconds; bumped on UserPromptSubmit. DISPLAY and cross-session
     /// policy only (`clave ls`, the picker, eager-launch selection) — it is
@@ -301,6 +369,23 @@ pub struct Agent {
     /// rides the wire. `default` keeps pre-field payloads parseable.
     #[serde(default)]
     pub pr_number: Option<u32>,
+    /// What this row is blocked on, in the words its own notification used —
+    /// the card's `wants` cell (four-line lock §4.7). `None` renders blank,
+    /// which is every row that is not waiting on you.
+    ///
+    /// The host writes this ONLY for a row it has already flagged
+    /// `Status::NeedsYou` (`hook::take_wants`), so the bar never has to decide
+    /// whether an ask is still live: if the field is set, the block is
+    /// standing. `default` keeps pre-field payloads parseable.
+    #[serde(default)]
+    pub wants: Option<String>,
+    /// Whether this row has any agent still running under it — the card's
+    /// subagent mark (four-line lock 4.6). A boolean, not a count: "this row
+    /// has fanned out" is the whole signal, and a digit beside the mark was
+    /// noise. `false` renders a blank cell. `default` keeps pre-field payloads
+    /// parseable.
+    #[serde(default)]
+    pub subagents: bool,
 }
 
 /// The full-replace snapshot `clave` pushes to `clave-bar` on every change
@@ -333,8 +418,9 @@ pub struct AgentSnapshot {
     pub collapsed: bool,
     /// Row-ordering mode + dial (2026-08-19 spec). Store state like
     /// `collapsed` above, same doctrine. `default` keeps pre-field
-    /// payloads parseable.
-    #[serde(default)]
+    /// payloads parseable; `lenient` keeps a mode this bar cannot spell
+    /// from costing the whole snapshot, and it rides every push.
+    #[serde(default, deserialize_with = "lenient")]
     pub order: OrderMode,
     /// Unix HOUR at projection time, stamped by the host so both sides
     /// share one bucket arithmetic. Frecency ages every bucket against this.
@@ -464,18 +550,20 @@ pub fn target_cols_for(collapsed: bool) -> usize {
     }
 }
 
-/// Which row geometry the bar renders — the #232 flag. `Double` is the
-/// two-line card (the default); `Single` is the legacy one-line row,
-/// retained intact behind this flag. Chosen per LAUNCH: the launch layout
-/// bakes both the pane sizes and the plugin-config key from it, so the
-/// geometry zellij gives the pane and the geometry the bar draws can never
-/// disagree mid-session.
+/// Which row geometry the bar renders — the #232 flag. `Card` is the
+/// four-line card ratified by the 2026-09-08 lock and **the default a fresh
+/// install draws**; `Double` is the two-line card it revises, and `Single`
+/// the legacy one-line row, both retained intact behind this flag. Chosen
+/// per LAUNCH: the launch layout bakes both the pane sizes and the
+/// plugin-config key from it, so the geometry zellij gives the pane and the
+/// geometry the bar draws can never disagree mid-session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RowHeight {
     Single,
-    #[default]
     Double,
+    #[default]
+    Card,
 }
 
 /// The zellij plugin-config key carrying the mode into the bar (same
@@ -489,6 +577,8 @@ impl RowHeight {
     /// off it at compile time instead of duplicating the numbers.
     pub const fn target_cols(self, collapsed: bool) -> usize {
         match (self, collapsed) {
+            (RowHeight::Card, false) => 48,
+            (RowHeight::Card, true) => 16,
             (RowHeight::Double, false) => 48,
             (RowHeight::Double, true) => 38,
             (RowHeight::Single, false) => BAR_TARGET_COLS,
@@ -502,7 +592,22 @@ impl RowHeight {
         match self {
             RowHeight::Single => 1,
             RowHeight::Double => 2,
+            RowHeight::Card => 4,
         }
+    }
+
+    /// Whether this geometry repaints on a sub-second timer — the four-line
+    /// card's spinner is the only thing that arms one (`arm_anim`).
+    ///
+    /// **Two callers, and they MUST agree.** The bar's animation timer asks
+    /// this before arming, and the row projection asks it before rendering a
+    /// clock in SECONDS. A seconds-resolution number in a geometry that only
+    /// repaints on store pushes would freeze mid-count and read as broken,
+    /// where the coarse `0m` it replaced sat still and read as correct. One
+    /// predicate rather than two `lines_per_row() == 4` tests is what keeps
+    /// the reading and the cadence that drives it from drifting apart.
+    pub fn animates(self) -> bool {
+        self.lines_per_row() == 4
     }
 
     /// Parse the plugin-config value, failing CLOSED to the default: a
@@ -511,7 +616,8 @@ impl RowHeight {
     pub fn from_config_value(v: Option<&str>) -> RowHeight {
         match v {
             Some("single") => RowHeight::Single,
-            _ => RowHeight::Double,
+            Some("double") => RowHeight::Double,
+            _ => RowHeight::Card,
         }
     }
 
@@ -526,6 +632,7 @@ impl RowHeight {
         match self {
             RowHeight::Single => "single",
             RowHeight::Double => "double",
+            RowHeight::Card => "card",
         }
     }
 }
@@ -696,6 +803,72 @@ mod tests {
         }
     }
 
+    /// A minimal wire row, with `status` spliced in as a raw JSON literal so a
+    /// test can post a value no `Status` variant spells.
+    fn wire_row(status: &str) -> String {
+        format!(
+            r#"{{"uuid":"u1","cwd":"/x","repo_root":"/x","branch":"main",
+                 "label":"x · main","status":{status},
+                 "last_interacted":1,"last_visited":0}}"#
+        )
+    }
+
+    #[test]
+    fn a_status_this_bar_cannot_read_costs_the_field_not_the_snapshot() {
+        // The store reader got `lenient` in #232; the WIRE did not, and the
+        // failure there is worse-behaved: serde fails the whole STRUCT on an
+        // unknown variant, so one row carrying a status from a newer host made
+        // `clave-bar` drop the entire snapshot and keep painting the last one
+        // it could parse. The bar goes inert against a live fleet with nothing
+        // on screen to say why.
+        let json = format!(r#"{{"seq":1,"agents":[{}]}}"#, wire_row(r#""paused""#));
+        let snap: AgentSnapshot = serde_json::from_str(&json).expect("the snapshot survives");
+        assert_eq!(snap.agents.len(), 1, "the row is kept, not dropped");
+        assert_eq!(
+            snap.agents[0].status,
+            Status::Idle,
+            "an unreadable status degrades to the one state that claims nothing"
+        );
+        assert_eq!(
+            snap.agents[0].label, "x · main",
+            "the rest of the row is intact"
+        );
+    }
+
+    #[test]
+    fn a_status_this_bar_does_know_still_arrives_as_itself() {
+        // The other half of `lenient`: the tolerant arm must be the SECOND one
+        // tried. If it ever wins first, every row on the wire reads `Idle` and
+        // the bar is uniformly wrong instead of occasionally lenient.
+        let json = format!(r#"{{"seq":1,"agents":[{}]}}"#, wire_row(r#""needs_you""#));
+        let snap: AgentSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(snap.agents[0].status, Status::NeedsYou);
+    }
+
+    #[test]
+    fn an_order_mode_from_the_future_keeps_the_dial_we_ship() {
+        // `order` is the snapshot's other enum, and it rides EVERY push — so a
+        // newer host's sort mode would have cost the fleet every update, not
+        // one row. A wrong guess here costs a sort until the next push.
+        let unknown: AgentSnapshot =
+            serde_json::from_str(r#"{"seq":1,"agents":[],"order":"alphabetical"}"#).unwrap();
+        assert_eq!(unknown.order, OrderMode::default());
+
+        // And a variant that GREW A SHAPE, which `#[serde(default)]` alone
+        // cannot survive either: the spelling is one we know, the payload is
+        // not. `untagged` buffers the input, so this falls back too.
+        let reshaped: AgentSnapshot =
+            serde_json::from_str(r#"{"seq":1,"agents":[],"order":{"frecency":{}}}"#).unwrap();
+        assert_eq!(reshaped.order, OrderMode::default());
+
+        // The dial a host we DO understand names still lands.
+        let known: AgentSnapshot = serde_json::from_str(
+            r#"{"seq":1,"agents":[],"order":{"frecency":{"half_life_hours":9}}}"#,
+        )
+        .unwrap();
+        assert_eq!(known.order, OrderMode::Frecency { half_life_hours: 9 });
+    }
+
     #[test]
     fn agent_json_has_no_archived_field() {
         // §6.7 deleted archiving; the pipe schema must not carry the field.
@@ -723,6 +896,8 @@ mod tests {
             provider: None,
             effort: None,
             pr_number: None,
+            wants: None,
+            subagents: false,
         };
         assert!(!serde_json::to_string(&a).unwrap().contains("archived"));
     }
@@ -761,6 +936,8 @@ mod tests {
                 provider: None,
                 effort: None,
                 pr_number: None,
+                wants: None,
+                subagents: false,
             }],
         };
         let json = serde_json::to_string(&snap).unwrap();
@@ -798,6 +975,8 @@ mod tests {
             provider: None,
             effort: None,
             pr_number: None,
+            wants: None,
+            subagents: false,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert_eq!(back.tab_id, Some(4));
@@ -837,6 +1016,8 @@ mod tests {
             provider: None,
             effort: None,
             pr_number: None,
+            wants: None,
+            subagents: false,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert!(back.stale);
@@ -878,6 +1059,8 @@ mod tests {
             provider: None,
             effort: None,
             pr_number: None,
+            wants: None,
+            subagents: false,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert_eq!(back.title.as_deref(), Some("CLA-MAIN"));
@@ -933,6 +1116,8 @@ mod tests {
             provider: None,
             effort: None,
             pr_number: None,
+            wants: None,
+            subagents: false,
         };
         let back: Agent = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert_eq!(back.default_branch.as_deref(), Some("trunk"));
@@ -1016,6 +1201,8 @@ mod tests {
             provider: None,
             effort: None,
             pr_number: None,
+            wants: None,
+            subagents: false,
         };
         let mut v: serde_json::Value = serde_json::to_value(&a).unwrap();
         v.as_object_mut().unwrap().remove("commit_ord");
@@ -1088,9 +1275,20 @@ mod tests {
         }
     }
 
+    /// The four-line card (2026-09-08 lock §1): three lines of content plus
+    /// the shadow rule that closes it, 48 columns expanded and 16 collapsed.
+    /// Collapsed drops from `Double`'s 38 because a card still showing the
+    /// model, the branch and two clocks is not collapsed, it is narrow.
     #[test]
-    fn row_height_defaults_to_double_and_maps_its_targets() {
-        assert_eq!(RowHeight::default(), RowHeight::Double);
+    fn row_height_card_is_four_lines_at_forty_eight_and_sixteen() {
+        assert_eq!(RowHeight::Card.lines_per_row(), 4);
+        assert_eq!(RowHeight::Card.target_cols(false), 48);
+        assert_eq!(RowHeight::Card.target_cols(true), 16);
+    }
+
+    #[test]
+    fn row_height_defaults_to_card_and_maps_its_targets() {
+        assert_eq!(RowHeight::default(), RowHeight::Card);
         // Double: the ratified card budgets (#232). Single: the legacy pair,
         // which MUST keep reading the existing constants so the old design
         // cannot drift from the flag's legacy arm.
@@ -1103,7 +1301,7 @@ mod tests {
     }
 
     #[test]
-    fn row_height_parses_its_config_value_failing_closed_to_double() {
+    fn row_height_parses_its_config_value_failing_closed_to_card() {
         assert_eq!(
             RowHeight::from_config_value(Some("single")),
             RowHeight::Single
@@ -1112,14 +1310,14 @@ mod tests {
             RowHeight::from_config_value(Some("double")),
             RowHeight::Double
         );
+        assert_eq!(RowHeight::from_config_value(Some("card")), RowHeight::Card);
         // Absent, empty, or junk → the default. A typo must not strand a user
-        // in a mode they didn't ask for.
-        assert_eq!(RowHeight::from_config_value(None), RowHeight::Double);
-        assert_eq!(RowHeight::from_config_value(Some("")), RowHeight::Double);
-        assert_eq!(
-            RowHeight::from_config_value(Some("tall")),
-            RowHeight::Double
-        );
+        // in a mode they didn't ask for. Both named modes are spelled out
+        // above the fallthrough now, so the arm cannot quietly capture one of
+        // them the way it did when `Double` was both the default and unnamed.
+        assert_eq!(RowHeight::from_config_value(None), RowHeight::Card);
+        assert_eq!(RowHeight::from_config_value(Some("")), RowHeight::Card);
+        assert_eq!(RowHeight::from_config_value(Some("tall")), RowHeight::Card);
     }
 
     #[test]
@@ -1127,7 +1325,7 @@ mod tests {
         // The one spelling of each mode, both directions: whatever
         // `as_config_value` writes, `from_config_value` reads back as the
         // same variant (#232 final review, finding 2).
-        for rh in [RowHeight::Single, RowHeight::Double] {
+        for rh in [RowHeight::Single, RowHeight::Double, RowHeight::Card] {
             assert_eq!(RowHeight::from_config_value(Some(rh.as_config_value())), rh);
         }
     }

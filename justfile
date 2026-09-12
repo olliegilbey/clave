@@ -184,3 +184,39 @@ mutants-file file *args:
 # Sandbox-validate this working tree WITHOUT installing to the daily surface.
 sandbox scenario="c8-cold-start":
     ./scripts/sandbox-setup.sh {{scenario}}
+
+# Stage, wait for the launch, drive. The WHOLE loop in one command, because
+# the old one was three messages wide — stage, ask the human, be told, drive —
+# and every extra round trip is a chance to drive something that is not the
+# sandbox. This prints the launch command and blocks until the session
+# appears; launching is still the human's and nothing here starts a session.
+#
+# The drive scrubs the inherited zellij identity before its first phase, so
+# every child it spawns aims at the sandbox rather than at whatever fleet this
+# terminal happens to sit inside — and `clave hook` refuses a push whose
+# target does not own the store it wrote (hook.rs `aim_push`), which the
+# drive's own P6b witness phase then counts. All three exist because the
+# 2026-09-11 drive hung the maintainer's live session.
+#
+# The drive is NOT idempotent and cannot be: phases 2-5 bind dormant rows,
+# mint a row and churn tabs, consuming the starting shape they assert
+# against. So a second run needs a fresh stage — which is why this recipe
+# stages every time, and why phase 1 now names a stale stage outright
+# instead of failing on a count that is reading the previous run.
+# Re-staging needs the session down, so the loop is: kill, `just qa`, launch.
+#
+# THE MAINTAINER'S COMMAND, and his alone. `clave dev launch` refuses when
+# ZELLIJ is set, so an agent — always inside a session — cannot run this; it
+# gets a refusal that tells it to hand the command over instead. Everything
+# the launch needs is derived from the working tree: the session name, the
+# state and data dirs, and the PATH shim that makes a bare `clave` resolve to
+# THIS build instead of the stable install.
+#
+# Run it in a new terminal window OUTSIDE zellij.
+launch:
+    ./target/release/clave dev launch
+
+# Stage + wait for the human's launch + drive phases 0-7, in one command.
+qa scenario="qa-fleet" wait="600":
+    ./scripts/sandbox-setup.sh {{scenario}}
+    QA_WAIT_SECS={{wait}} ./scripts/qa-drive.sh {{scenario}}
