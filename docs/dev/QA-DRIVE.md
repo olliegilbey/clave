@@ -8,8 +8,9 @@ owns everything they structurally cannot reach._
 
 ## Shape
 
-One script, `scripts/qa-drive.sh <scenario>`, driven **by an agent** against
-the per-worktree sandbox (`clave dev instance`), every zellij touch through
+One script, `scripts/qa-drive.sh <scenario>` — plus the instrument it reads
+with, `scripts/qa/lib.sh` — driven **by an agent** against the per-worktree
+sandbox (`clave dev instance`), every zellij touch through
 `scripts/ct.sh` (fail-closed — Z14). The human launches; the agent stages,
 drives, joins, and reports; two eyeball checkpoints go to the human; once
 both are in, the agent may kill the sandbox it asked for (TESTING.md's
@@ -62,6 +63,25 @@ known-liar detectors), no automatic bisecting.
   read is "lines after the mark", filtered by build tag on the tail.
 - **Assertions print what they measured**, pass or fail — "empty" is written
   as the word, so a silent failure and a clean pass never look alike.
+- **The instrument is a file of its own**: `scripts/qa/lib.sh` holds the
+  tracing helpers, the assertions and every zellij-log reading; `qa-drive.sh`
+  is the phases. The split is what makes the log parsing testable at all —
+  `scripts/qa/lib-selftest.sh` runs it against a fixture log in under a
+  second, gated by `crates/clave/tests/qa_lib.rs`, instead of needing a
+  maintainer-launched session to find out whether a `sed` expression was
+  right.
+- **Read the log per BAR INSTANCE, not per line.** zellij stamps every plugin
+  line with `[id: N]`, and until 2026-09-12 nothing used it: every reading was
+  a count of lines, which cannot tell one busy instance from five quiet ones.
+  That is exactly why the terminal-facts flicker was invisible — one bar of
+  five had the facts and the line count said the pipeline worked. Ids are
+  attributed to this sandbox by intersecting them with the instances that
+  logged a build-tagged `loaded` line, because the log is user-global and most
+  bar lines carry no tag.
+- **Every run prints the instance ledger**: one row per sandbox bar, naming
+  the capabilities its own log shows it exercising. Asserted nowhere — it is
+  the first thing to read when a phase goes red, and it distinguishes a
+  fleet-wide behaviour from one instance's.
 - Delivery accounting: expected EOF-twin deltas are computed per phase
   (pipes-sent × live-instances) and RECORDED alongside the measured delta —
   never asserted. The zellij log is user-global and its truncated source
@@ -84,6 +104,7 @@ loudly and stops the run; later phases assume earlier truth.
 | 4 | Ring walk | pick into the dormant block, walk both directions, wrap; Alt+Enter one commit | single executor (one focus change per press, never two); walk stays in-block; commit opens exactly one tab | P1 (#162), P2, P16, K8 — becomes single-ring on #179 |
 | 5 | Collapse burst | 12× toggle with pauses, then 5× rapid, then 1 more | store writes per press ≤ 2; every paced press lands its store flip within a bounded wait; the rapid burst settles at parity (per-instance snapshots are not observable from outside — the store flag plus the phase-5 eyeball stand in for them); bar still answers press 18; then the WIDTH probe — the bar's pane size read from the layout dump in both settled modes, asserted only if the two readings DIFFER (a number that moves with the toggle is the applied swap position; one that does not is the declared layout, and asserting on it would be a tautology — the eyeball stays the oracle then) | B6–B9, B10/B11, P5, the #232 band collision |
 | 5b | **Card cells (hook side)** | five real `clave hook` events against the sandbox store: a permission `Notification`, `UserPromptSubmit`, two `Stop`s (one with a `turn_duration` tail carrying `pendingBackgroundAgentCount`, one silent), `SessionEnd` | `wants` arrives from the notification's own words and leaves with the next prompt; the subagent mark rises on the closing record, HOLDS on a silent tail, and clears on `SessionEnd`; status follows each event; ≤1 store write per event, counted AFTER a PR-cache warm-up (`seq` is not a per-event counter — a stale cache makes the hook spawn `pr-sync`, a second writer landing off-schedule; FOOTGUNS). Fires every event through `ct.sh --hook`, never `clave hook` directly, and appends only to a `c85c` scenario transcript, guarded | #232's card cells — the seam two of its defects lived at |
+| 5c | **Terminal facts (OS side)** | a real `sleep` typed into a plain shell tab, behind a shell allowlist, while that tab is focused; then focus moves to an agent tab with the command still running | leg A: at least one sandbox bar learns the change — the OS-facts pipeline (`get_pane_cwd`/`get_pane_running_command` → `apply_pane_facts` → the terminal row) delivers end to end, which nothing tested before. Leg B MEASURES whether a second instance learns it from another tab, the open question under the store-backed fix, and asserts nothing: the facts are per-instance today, so "every bar agrees" is not yet true and a drive must not go red on a known-open defect | the 2026-09-12 flicker (a terminal row with facts under one tab and none under another), #206, #239 |
 | 6 | Quiescence | idle 60s | evlog and store `seq` flat; zellij log flat after the mark for sandbox-attributable lines only (the shared log is never globally flat with a live maintainer fleet — see Delivery accounting) | P17, B19/B20, drive step 6 |
 | 6b | **Isolation witness** | nothing (reads this run's own evidence) | zero `push-refused` events across the run — no push was aimed at a bar that does not own this store; the ambient zellij identity is STILL the sandbox's at the END of the run, not just at the start; the inherited session's name appears nowhere as a push target | FOOTGUNS #281, the 2026-09-11 incident |
 | 7 | Teardown | nothing | prints the kill pair (the agent may run it once both eyeballs are in) | drive step 9 |
@@ -134,8 +155,8 @@ the stable binary (FOOTGUNS, 2026-08-24).
    2. Hand the launch line to the human (`cd <worktree> && just launch`);
       wait. The agent CANNOT do this: `clave dev launch` refuses when
       `ZELLIJ` is set, and an agent is always inside a session.
-   3. `scripts/qa-drive.sh qa-fleet` — the full spine, phases 0–7 (with 5b
-      and 6b in between); stop on first failure.
+   3. `scripts/qa-drive.sh qa-fleet` — the full spine, phases 0–7 (with 5b,
+      5c and 6b in between); stop on first failure.
    **Full 0–7 driven live green: run 4, 2026-08-17**, both eyeball
    checkpoints confirmed; and **run 11, 2026-09-11**, all ten phases
    including the new 5b and 6b, on the first run of the one-command loop. Runs 1–3 each went red on one real finding (all

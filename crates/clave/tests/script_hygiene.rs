@@ -19,6 +19,18 @@
 
 const DRIVE: &str = include_str!("../../../scripts/qa-drive.sh");
 const CT: &str = include_str!("../../../scripts/ct.sh");
+const LIB: &str = include_str!("../../../scripts/qa/lib.sh");
+const SELFTEST: &str = include_str!("../../../scripts/qa/lib-selftest.sh");
+
+/// Every script the drive is made of. The hook rule is about the WHOLE drive,
+/// not about one file of it: the instrument was split out of qa-drive.sh on
+/// 2026-09-12, and a rule that only read the file it was written against
+/// would have stopped covering anything that moved.
+const DRIVE_SOURCES: [(&str, &str); 3] = [
+    ("scripts/qa-drive.sh", DRIVE),
+    ("scripts/qa/lib.sh", LIB),
+    ("scripts/qa/lib-selftest.sh", SELFTEST),
+];
 
 /// Lines that actually run something — comments, blanks and heredoc bodies
 /// carry no risk, and both scripts discuss the hazard at length in prose that
@@ -61,16 +73,21 @@ fn heredoc_tag(line: &str) -> Option<String> {
 /// prose is full of the word `hook` — including whole paragraphs about this
 /// very hazard. None of it runs anything.
 fn is_reporting(line: &str) -> bool {
-    const REPORTERS: [&str; 8] = [
-        "measure ", "check ", "check_", "printf ", "echo ", "cat ", "usage ", "phase ",
+    const REPORTERS: [&str; 9] = [
+        "measure ", "note ", "check ", "check_", "printf ", "echo ", "cat ", "usage ", "phase ",
     ];
     REPORTERS.iter().any(|r| line.starts_with(r))
 }
 
 #[test]
 fn the_drive_never_fires_a_hook_except_through_ct_sh() {
-    let offenders: Vec<_> = code_lines(DRIVE)
-        .into_iter()
+    let offenders: Vec<_> = DRIVE_SOURCES
+        .iter()
+        .flat_map(|(name, src)| {
+            code_lines(src)
+                .into_iter()
+                .map(move |(n, l)| (format!("{name}:{n}"), l))
+        })
         .filter(|(_, l)| !is_reporting(l))
         .filter(|(_, l)| l.contains(" hook ") || l.contains("clave hook"))
         .filter(|(_, l)| !l.contains("--hook"))
@@ -132,5 +149,92 @@ fn the_drive_witnesses_its_own_isolation() {
     assert!(
         DRIVE.contains("P6b-isolation-witness"),
         "the isolation witness phase must exist"
+    );
+}
+
+#[test]
+fn a_keystroke_only_reaches_a_pane_the_drive_proved_is_a_shell() {
+    // `write-chars` goes to whatever pane holds focus, and at a claude prompt
+    // it SUBMITS A TURN. Phase 5c needs one — a real command in a real shell
+    // is the only way to drive the OS-facts pipeline — so the allowlist that
+    // guards it is checked here rather than trusted: a keystroke added
+    // anywhere else in the drive fails this test.
+    let code = code_lines(DRIVE);
+    let line_of = |needle: &str| -> usize {
+        code.iter()
+            .find(|(_, l)| l.contains(needle))
+            .map(|(n, _)| *n)
+            .unwrap_or_else(|| panic!("the drive must contain `{needle}`"))
+    };
+    let keystrokes: Vec<_> = code
+        .iter()
+        .filter(|(_, l)| l.contains("write-chars") || l.contains("\"$CT\" write "))
+        .collect();
+    assert!(
+        !keystrokes.is_empty(),
+        "phase 5c types to drive the OS-facts pipeline; if that is gone, so is \
+         the only evidence the pipeline delivers"
+    );
+
+    // Two properties, both about WHERE a keystroke can appear. Line numbers
+    // rather than byte offsets: the prose above the guard names `write-chars`
+    // (it explains the hazard), so a byte search finds a comment.
+    //
+    // 1. Every keystroke is inside phase 5c, the one phase that decides
+    //    whether the focused pane is a shell.
+    let phase_start = line_of(r#"phase "P5c-term-facts""#);
+    let phase_end = line_of(r#"phase "P6-quiescence""#);
+    let strays: Vec<_> = keystrokes
+        .iter()
+        .filter(|(n, _)| *n < phase_start || *n > phase_end)
+        .collect();
+    assert!(
+        strays.is_empty(),
+        "a keystroke outside phase 5c (lines {phase_start}-{phase_end}). At a \
+         claude prompt `write-chars` SUBMITS A TURN, so a keystroke anywhere \
+         else needs its own guard and this test updated deliberately.\n{strays:#?}"
+    );
+
+    // 2. Nothing types before the allowlist has answered. The typing itself
+    //    lives in one helper, so the sites that matter are the CALLS: they
+    //    must all sit after the `P5C_WRITABLE` gate. (Text order is the proxy
+    //    for run order that bash gives us; the helper's own body is exempt
+    //    because it only runs when called.)
+    let allowlist = line_of(r#"zsh | bash | sh | fish | dash) P5C_WRITABLE="yes" ;;"#);
+    let gate = line_of(r#"if [[ "$P5C_WRITABLE" != "yes" ]]; then"#);
+    assert!(
+        allowlist < gate && gate < phase_end,
+        "the allowlist must be decided before the gate that reads it \
+         (allowlist {allowlist}, gate {gate})"
+    );
+    let helper = line_of("p5c_leg() {");
+    let helper_end = code
+        .iter()
+        .find(|(n, l)| *n > helper && *l == "}")
+        .map(|(n, _)| *n)
+        .expect("the keystroke helper must close");
+    let early: Vec<_> = keystrokes
+        .iter()
+        .filter(|(n, _)| *n < helper || *n > helper_end)
+        .filter(|(n, _)| *n < gate)
+        .collect();
+    assert!(
+        early.is_empty(),
+        "a keystroke outside the helper and before the shell gate at line \
+         {gate}\n{early:#?}"
+    );
+    let calls: Vec<_> = code
+        .iter()
+        .filter(|(_, l)| l.starts_with("p5c_leg "))
+        .collect();
+    assert!(
+        !calls.is_empty() && calls.iter().all(|(n, _)| *n > gate),
+        "every typing leg must be called after the shell gate at line \
+         {gate}\n{calls:#?}"
+    );
+    assert!(
+        DRIVE.contains("P5c-term-facts"),
+        "the terminal-facts witness phase must exist — it is the only \
+         automated evidence that the OS-facts pipeline delivers at all"
     );
 }

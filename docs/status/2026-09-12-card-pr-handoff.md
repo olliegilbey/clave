@@ -1,8 +1,6 @@
-# 2026-09-12 — the card PR: screenshots, hero frame, and the terminal-facts finding
+# 2026-09-12 — the card PR: screenshots, the hero frame, and the QA witness
 
-Branch `worktree-triple-card`, PR #259. Four gates green at `05a10ad`.
-Remote is behind: **five commits unpushed** (`48ada8d`, `e1436f3`, `d4c114d`,
-`be1873b`, `05a10ad`) — a plain push, no force.
+Branch `worktree-triple-card`, PR #259. Four gates green.
 
 ## Done this session
 
@@ -33,53 +31,76 @@ Remote is behind: **five commits unpushed** (`48ada8d`, `e1436f3`, `d4c114d`,
   reading past the smart zone. Nothing reads above 141k now. README alt text
   and the battery-glyph aside updated with it.
 
-## Open: the terminal row's facts flicker
+## Measured: the terminal row's facts (and the diagnosis corrected)
 
 **Ollie's ask was to revert what this PR changed. There is nothing to revert
-— checked function by function.** `git diff main...HEAD` touches none of
+— checked function by function.** The branch diff against main touches none of
 `probe_term_facts`, `own_tab_focused`, `probe_targets`, `pane_facts`, or the
 terminal row builder. What IS new is the card's line 2, which displays
-`branch` and `pr` for a terminal row; main's renderer took `..` over both.
+`branch` and `pr` for a terminal row; main's renderer took `..` over both. He
+ruled: keep the line.
 
-So the gap is pre-existing and was invisible:
+Then the mechanism was MEASURED against the live 7-tab sandbox, and the first
+diagnosis in this file was half wrong. One `cd` and one `sleep` in one shell
+tab produced a fact delta from **all seven bars**. `Event::CwdChanged` and
+`Event::CommandChanged` are ungated in `main.rs` — every instance ingests
+them. Only the focused instance ever logged a *probe*.
 
-- Terminal facts (cwd, last command, running) live in per-instance plugin
-  state, filled by OS probes (`get_pane_cwd` / `get_pane_running_command`).
-- Only the instance whose own tab is focused probes (nav-lag fix,
-  2026-08-18), and non-focused instances get no pane manifest at all
-  (FOOTGUNS: TabUpdate/PaneUpdate reach only the active tab).
-- Nothing shares what one instance learned. The log from the capture session
-  shows five bars running and exactly one recording a term-facts update.
-- The repo cell has the same dependency, so main flickers too — it just had
-  one cell to lose instead of three.
+So the hole is narrower and stranger than "nothing shares what one instance
+learned": it is the pane **nothing has happened to**. A shell sitting at its
+prompt since before a bar was born fires no event, and that bar never probes
+it unless its own tab has been focused while the pane was listed. It has
+nothing to render, and having nothing writes no log line.
 
-**The fix, and the precedent:** `collapsed` and `tab_order` both began as
-per-instance state synced by broadcast, both diverged in the field, and both
-moved into the store so every instance rebuilds from one writer. Terminal
-facts are the last piece of that shape. Separate PR.
+The fix is still the store, for the same reason `collapsed` and `tab_order`
+went there — one writer, every instance rebuilding from it. Separate PR. What
+this PR adds is the guard that the event fan-out stays fleet-wide, because
+gating those two arms behind visibility would read as an optimisation.
 
-**Unmeasured, and the next thing to measure:** whether `get_pane_cwd`
-answers for a pane in a NON-active tab. If it does, the focused instance
-learns every terminal's facts and the flicker is a transient before the first
-probe answers; if it does not, a terminal's facts can only ever be known in
-its own tab's bar. The answer decides whether the store fix needs a host-side
-resolver (#239's shape) or only a publish step.
+Recorded in FOOTGUNS (the bar's model section) with the measurement.
 
-## Open: prevent it in the auto-QA drive
+## Built: the QA witness, and the instrument it needed
 
-Asked for, not yet built. The constraint: bar pixels are unreadable
-(`dump-screen` is empty for plugin panes), so the only witness is
-`zellij.log`. Proposal, in the drive's own idiom:
+- **`scripts/qa/lib.sh`** — the instrument, split out of the drive: tracing,
+  the assertions, the zellij log read **per bar instance**, and the session
+  readers (`dev_status`, `ct_list_panes`, focus). zellij stamps every plugin
+  line with `[id: N]` and nothing had ever read it: every reading was a count
+  of LINES, which cannot tell one busy bar from five quiet ones. That is
+  exactly why the flicker was invisible.
+- **`scripts/qa/lib-selftest.sh`** — 27 assertions over a fixture log,
+  offline, gated by `crates/clave/tests/qa_lib.rs`. The fixture holds two
+  fleets with COLLIDING instance ids, because that is the real log's shape;
+  ids are attributed by intersecting them with the build-tagged `loaded`
+  lines. Before this, a wrong `sed` expression could only be found by asking
+  Ollie to launch a session.
+- **Every run prints an instance ledger** — one row per sandbox bar, naming
+  the capabilities its own log shows it exercising. Asserted nowhere; it is
+  the first thing to read when a phase goes red.
+- **Phase 5c, `P5c-term-facts`** — types a `cd` and a `sleep` into a plain
+  shell tab and asserts that the delta reaches **every live bar**, counted as
+  live tabs (one bar per tab) rather than as log instances, because phase 3
+  closes tabs and their `loaded` lines outlive them. Driven live green
+  against the showcase sandbox before it was committed: 7 of 7 on both legs.
+- **The keystroke guard.** `write-chars` at a claude prompt submits a turn, so
+  the phase types only into a pane whose own process is a shell from an
+  allowlist, and `script_hygiene.rs` fails the build if a keystroke appears
+  outside phase 5c or before that gate. Both halves were proved to bite.
+- The 17 hand-rolled NOTE printfs are now one `note` helper, and the
+  script-hygiene guards read every QA script rather than the one file they
+  were written against.
 
-1. After the terminal-tab phase, count DISTINCT instance ids that logged
-   `term-facts probe updated`, and print it beside the bar count as a NOTE.
-2. Hard-check only what is true today: at least one instance learned them.
-3. When the store fix lands, the NOTE becomes a check — every instance
-   renders the same terminal row, read from the store rather than the log.
+What phase 5c deliberately does NOT assert: that every bar holds the same
+facts. That cannot be true until the facts are store-backed, and a drive must
+go red on regressions, not on known-open defects. When the fix lands, the
+phase reads the row every bar renders instead of the deliveries it can see.
 
 ## Also open
 
-- Spinner motion and weight: the one eyeball check still unconfirmed.
+- Spinner motion and weight: the one eyeball check still unconfirmed. The
+  "only S6-GUT spins" sighting is not a defect — `arm_spinner` is gated on
+  `own_tab_focused()`, so only the bar being looked at animates, and only a
+  row actually mid-turn has anything to animate. Every other showcase row is
+  dormant, waiting, or idle.
 - Ordering churn while navigating: frecency plus cluster grouping (#234),
   amplified by a seeded store with no bucket history. #217 covers the stale
   half. Whether the order should hold still under the cursor is a design
