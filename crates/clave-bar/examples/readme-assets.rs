@@ -14,10 +14,11 @@
 //!   `RowHeight::Card` at the card's own two width targets, because that is
 //!   what a fresh install draws.
 //!
-//! The hero renders at animation frame 0, so the status spinner on a working
-//! row is its first frame rather than a mid-cycle one. A still image cannot
-//! show motion, and picking a heavier frame would only misrepresent the card's
-//! resting state.
+//! The hero renders at animation frame [`HERO_FRAME`], the spinner's open
+//! flower rather than its first frame. A still image cannot show motion, so
+//! the frame it freezes on has to carry the meaning instead: frame 0 is a bare
+//! dot, which reads as a row doing nothing at all — the opposite of what a
+//! working row is saying (Ollie, 2026-09-12).
 //!
 //! Colours come from `clave_bar::render` (`RowStatus::mark`, `BATTERY`,
 //! `PALETTE`, `BASE`, …), never copied, so the assets cannot drift from the
@@ -403,6 +404,11 @@ fn parse_row(line: &str) -> (Vec<Span>, Vec<(usize, usize, Rgb)>) {
     (spans, bgs)
 }
 
+/// The animation frame the still frames on — the spinner's heaviest, most
+/// open glyph. See the module note: a still has one frame to say "this agent
+/// is thinking", and the resting dot does not say it.
+const HERO_FRAME: usize = 5;
+
 /// The same fleet in either state: `cols`/`widths` are the only difference
 /// between the expanded and collapsed frames, exactly as in the plugin.
 fn hero_svg(fonts: &[Font], cols: usize, widths: Widths) -> String {
@@ -417,7 +423,7 @@ fn hero_svg(fonts: &[Font], cols: usize, widths: Widths) -> String {
         widths,
         &Theme::default(),
         RowHeight::Card,
-        0,
+        HERO_FRAME,
     );
     assert_eq!(lines.len(), height, "the frame drops cards");
     for (i, line) in lines.iter().enumerate() {

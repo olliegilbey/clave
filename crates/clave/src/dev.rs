@@ -62,6 +62,25 @@ pub struct ScenarioAgent {
     /// blank cell, which is the distinct "no reading yet" case and worth having
     /// on screen beside the others.
     pub context_tokens: Option<u32>,
+    /// The card's identity cells (#232), seeded because a dormant row fires
+    /// no hooks: without them a live sandbox paints the top half of every
+    /// card and leaves the rest blank, which is the one thing the README's
+    /// traced SVG cannot tell us — whether the real renderer fills a full
+    /// card from a real store. `None` is still worth seeding on some rows:
+    /// it is the distinct "nothing read yet" cell.
+    pub provider: Option<&'static str>,
+    pub model: Option<&'static str>,
+    pub effort: Option<&'static str>,
+    /// A pull request the branch is driving. A seeded row reads FRESH
+    /// (`agent_record` stamps the lookup time), so no background sync
+    /// replaces the number before anyone sees it.
+    pub pr_number: Option<u32>,
+    /// What a waiting agent is blocked on. Only ever set with
+    /// `Status::NeedsYou`: structure decides that a row is waiting, and the
+    /// words only say what for (design lock §4.7).
+    pub wants: Option<&'static str>,
+    /// Agents still running under this one. A flag, not a count.
+    pub subagents: bool,
 }
 
 impl ScenarioAgent {
@@ -82,6 +101,12 @@ impl ScenarioAgent {
         summary: "",
         status: clave_types::Status::Idle,
         context_tokens: None,
+        provider: None,
+        model: None,
+        effort: None,
+        pr_number: None,
+        wants: None,
+        subagents: false,
     };
 }
 
@@ -577,6 +602,135 @@ pub const SCENARIOS: &[Scenario] = &[
             },
         ],
     },
+    // The screenshot fleet: the row vocabulary in one frame, for the sample
+    // image AGENTS.md sends every agent to read before anything else.
+    //
+    // It mirrors `crates/clave-bar/examples/shared/showcase_fixture.rs`,
+    // which the README's SVG is traced from, so the photograph and the
+    // drawing show the same fleet. The drawing is the design's own output
+    // and stays canonical; this is the only way to learn whether the REAL
+    // renderer fills a full card from a REAL store, which is the thing a
+    // traced SVG can never tell us.
+    //
+    // Every row here is dormant until someone opens it — seeded rows always
+    // are. That is the point of seeding the identity cells: a dormant row
+    // fires no hooks, so without them the capture shows nine half-empty
+    // cards. Open two or three rows before the capture and the frame carries
+    // live rows beside dormant ones, which is the honest daily picture.
+    Scenario {
+        name: "showcase",
+        agents: &[
+            ScenarioAgent {
+                slug: "gutter",
+                ago_secs: 720,
+                worktree: true,
+                repo: Some("clave"),
+                title: Some("S6-GUT"),
+                summary: "Wire the status column into render_rows",
+                status: clave_types::Status::Working,
+                context_tokens: Some(108_000),
+                provider: Some("claude"),
+                model: Some("sonnet"),
+                effort: Some("hi"),
+                pr_number: Some(232),
+                ..ScenarioAgent::DEFAULT
+            },
+            // No chip and no PR: a blank cell is part of the vocabulary, and
+            // the row must not shift because of it.
+            ScenarioAgent {
+                slug: "spawn",
+                ago_secs: 1_500,
+                repo: Some("clave"),
+                summary: "Review the spawn identity gate",
+                status: clave_types::Status::Idle,
+                context_tokens: Some(141_000),
+                provider: Some("claude"),
+                model: Some("opus"),
+                effort: Some("xh"),
+                ..ScenarioAgent::DEFAULT
+            },
+            // Past its smart zone (412k against a 150k default), with agents
+            // still running under it. A worktree, because it shares `clave`
+            // with the rows above and `delete_cwd_after` removes exactly
+            // `cwd` — see `ensure_worktree` and ux-gate1's `vanished`.
+            ScenarioAgent {
+                slug: "kdl",
+                ago_secs: 86_400,
+                worktree: true,
+                delete_cwd_after: true,
+                repo: Some("clave"),
+                title: Some("KDL-GRD"),
+                summary: "Validate generated KDL artifacts",
+                status: clave_types::Status::Working,
+                context_tokens: Some(412_000),
+                provider: Some("claude"),
+                model: Some("fable"),
+                effort: Some("hi"),
+                pr_number: Some(219),
+                subagents: true,
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "auth",
+                ago_secs: 240,
+                repo: Some("api-svc"),
+                branch: Some("key-rotation"),
+                title: Some("AUTH-7"),
+                summary: "Rotate the signing keys",
+                status: clave_types::Status::NeedsYou,
+                context_tokens: Some(52_000),
+                provider: Some("claude"),
+                model: Some("fable"),
+                effort: Some("mx"),
+                pr_number: Some(184),
+                wants: Some("Bash (cargo publish)"),
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "cart",
+                ago_secs: 3_600,
+                repo: Some("webapp"),
+                title: Some("CART-99"),
+                summary: "Fix cart total rounding mismatch",
+                status: clave_types::Status::Done,
+                context_tokens: Some(18_000),
+                provider: Some("claude"),
+                model: Some("haiku"),
+                effort: Some("lo"),
+                ..ScenarioAgent::DEFAULT
+            },
+            // The other provider, and no effort reading — Codex is not
+            // driveable yet, but a row can already carry its icon.
+            ScenarioAgent {
+                slug: "dns",
+                ago_secs: 10_800,
+                repo: Some("infra"),
+                branch: Some("dns-timeout"),
+                title: Some("DNS-TTL"),
+                summary: "Debug staging rollout DNS timeout",
+                status: clave_types::Status::Failed,
+                context_tokens: Some(79_000),
+                provider: Some("openai"),
+                model: Some("5.6sol"),
+                pr_number: Some(77),
+                ..ScenarioAgent::DEFAULT
+            },
+            // Two weeks cold, and no reading at all on the last row: the
+            // "nothing measured yet" cell beside eight that have one.
+            ScenarioAgent {
+                slug: "zsh",
+                ago_secs: 1_209_600,
+                repo: Some("notes"),
+                title: Some("ZSH"),
+                summary: "Tidy the shell startup files",
+                status: clave_types::Status::Idle,
+                provider: Some("claude"),
+                model: Some("haiku"),
+                effort: Some("md"),
+                ..ScenarioAgent::DEFAULT
+            },
+        ],
+    },
 ];
 
 /// Valid v4-shaped, deterministic, self-identifying (`c85c` ≈ c8 scenario).
@@ -807,7 +961,7 @@ fn agent_record(
         uuid: uuid.to_string(),
         cwd: cwd_str.to_string(),
         repo_root: repo_root.to_string(),
-        branch,
+        branch: branch.clone(),
         label: format!("{scenario_name}-{} · seeded", a.slug),
         status: a.status,
         last_interacted: now.saturating_sub(a.ago_secs),
@@ -852,16 +1006,21 @@ fn agent_record(
         // Not seeded: the sandbox exercises the real birth-touch inheritance
         // path (touch_in/opener_buckets) rather than a scenario-typed value.
         buckets: Default::default(),
-        // #232: not yet wired into ScenarioAgent — out of scope here, the
-        // sandbox simply seeds "never looked up".
-        model: None,
-        provider: None,
-        effort: None,
-        pr_number: None,
-        pr_checked: 0,
-        pr_branch: String::new(),
-        wants: None,
-        subagents: false,
+        model: a.model.map(String::from),
+        provider: a.provider.map(String::from),
+        effort: a.effort.map(String::from),
+        pr_number: a.pr_number,
+        // A seeded number must read FRESH, or the first background sync for
+        // this branch replaces it with the nothing a sandbox repo really has
+        // (`pr_is_stale`: a zero check time is stale by definition).
+        pr_checked: if a.pr_number.is_some() { now } else { 0 },
+        pr_branch: if a.pr_number.is_some() {
+            branch.clone()
+        } else {
+            String::new()
+        },
+        wants: a.wants.map(String::from),
+        subagents: a.subagents,
     }
 }
 
@@ -1306,6 +1465,111 @@ mod tests {
     }
 
     #[test]
+    fn a_seeded_pull_request_number_reads_fresh_and_a_missing_one_reads_never() {
+        // #232: a seeded row is dormant and fires no hooks, so the identity
+        // cells only appear on screen if they are seeded. The PR number needs
+        // one thing more than the others — a check TIME and the branch it was
+        // checked for. `pr_is_stale` calls a zero check time stale, so an
+        // unstamped number is replaced by the first background sync with the
+        // nothing a sandbox repo really has.
+        let with_pr = ScenarioAgent {
+            slug: "auth",
+            branch: Some("key-rotation"),
+            provider: Some("claude"),
+            model: Some("fable"),
+            effort: Some("mx"),
+            pr_number: Some(184),
+            wants: Some("Bash (cargo publish)"),
+            subagents: true,
+            ..ScenarioAgent::DEFAULT
+        };
+        let rec = agent_record(
+            "showcase",
+            &with_pr,
+            1,
+            &scenario_uuid(1),
+            "/cwd",
+            "/repo",
+            9_000,
+        );
+        assert_eq!(rec.provider.as_deref(), Some("claude"));
+        assert_eq!(rec.model.as_deref(), Some("fable"));
+        assert_eq!(rec.effort.as_deref(), Some("mx"));
+        assert_eq!(rec.wants.as_deref(), Some("Bash (cargo publish)"));
+        assert!(rec.subagents);
+        assert_eq!(rec.pr_number, Some(184));
+        assert_eq!(rec.pr_checked, 9_000);
+        assert_eq!(rec.pr_branch, "key-rotation");
+        assert!(!crate::pr::pr_is_stale(&rec, 9_000));
+
+        // No number seeded: the row must read "never looked up", which is the
+        // state that invites the real lookup rather than blocking it.
+        let without = ScenarioAgent {
+            slug: "spawn",
+            ..ScenarioAgent::DEFAULT
+        };
+        let rec = agent_record(
+            "showcase",
+            &without,
+            2,
+            &scenario_uuid(2),
+            "/cwd",
+            "/repo",
+            9_000,
+        );
+        assert_eq!(rec.pr_number, None);
+        assert_eq!(rec.pr_checked, 0);
+        assert!(rec.pr_branch.is_empty());
+    }
+
+    #[test]
+    fn the_showcase_fleet_paints_every_cell_of_the_card() {
+        // The capture is the sample image AGENTS.md sends every agent to read,
+        // so a cell missing from the fleet is a cell missing from the only
+        // picture of clave most readers ever see. Blank cells are part of the
+        // vocabulary and are asserted as deliberately present.
+        let sc = SCENARIOS.iter().find(|s| s.name == "showcase").unwrap();
+        let a = sc.agents;
+        for status in [
+            clave_types::Status::Working,
+            clave_types::Status::Idle,
+            clave_types::Status::NeedsYou,
+            clave_types::Status::Done,
+            clave_types::Status::Failed,
+        ] {
+            assert!(
+                a.iter().any(|x| x.status == status),
+                "no {status:?} row in the capture fleet"
+            );
+        }
+        assert!(a.iter().any(|x| x.provider == Some("openai")));
+        assert!(a.iter().any(|x| x.provider == Some("claude")));
+        assert!(a.iter().any(|x| x.worktree));
+        assert!(a.iter().any(|x| x.branch.is_some()));
+        assert!(a.iter().any(|x| !x.worktree && x.branch.is_none()));
+        assert!(a.iter().any(|x| x.delete_cwd_after)); // the stale mark
+        assert!(a.iter().any(|x| x.subagents));
+        assert!(a.iter().any(|x| x.pr_number.is_some()));
+        assert!(a.iter().any(|x| x.pr_number.is_none()));
+        assert!(a.iter().any(|x| x.title.is_none())); // the blank chip
+        assert!(a.iter().any(|x| x.effort.is_none()));
+        assert!(a.iter().any(|x| x.context_tokens.is_none()));
+        // Only a flagged row says what it is blocked on (design lock §4.7).
+        for x in a.iter().filter(|x| x.wants.is_some()) {
+            assert_eq!(
+                x.status,
+                clave_types::Status::NeedsYou,
+                "{}: only a flagged row may say what it wants",
+                x.slug
+            );
+        }
+        assert!(a.iter().any(|x| x.wants.is_some()));
+        // More than one repo, or the per-repo colouring shows nothing.
+        let repos: std::collections::BTreeSet<_> = a.iter().filter_map(|x| x.repo).collect();
+        assert!(repos.len() >= 4, "only {} repos in the fleet", repos.len());
+    }
+
+    #[test]
     fn seeding_skips_an_already_seeded_session() {
         // Deterministic scenario UUIDs + never-sandboxed claude identity
         // (§6.9 ruling) ⇒ a prior run's transcript persists in the REAL
@@ -1435,9 +1699,10 @@ mod tests {
 
     #[test]
     fn scenario_table_covers_the_c8_checklist() {
-        // Names map 1:1 to SUBSYSTEM-VALIDATION.md C8 steps, plus ux-gate1
-        // (the visual-design decision fixture, #85 follow-up) and tall (the
-        // #148 viewport overflow fixture). Exact list on purpose (task
+        // Names map 1:1 to the C8 validation steps, plus ux-gate1 (the
+        // visual-design decision fixture, #85 follow-up), tall (the #148
+        // viewport overflow fixture), qa-fleet (the drive's fleet) and
+        // showcase (the README capture fleet). Exact list on purpose (task
         // instruction): a `contains` would let a scenario go missing silently.
         let names: Vec<&str> = SCENARIOS.iter().map(|s| s.name).collect();
         assert_eq!(
@@ -1448,7 +1713,8 @@ mod tests {
                 "c8-stale",
                 "ux-gate1",
                 "tall",
-                "qa-fleet"
+                "qa-fleet",
+                "showcase"
             ]
         );
         // cold-start: 3 agents, staggered recency, none worktree.

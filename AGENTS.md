@@ -27,7 +27,7 @@ Ordered by weight. When two collide, the earlier one wins.
 - **The model is pure; the shell is thin.** `model.rs` runs without zellij, and that is the only reason the bar is testable. Logic that moves into the event shell leaves the tier we test well, and enters the tier that needs a human at a terminal. Move it back.
 - **One code path.** The sandbox is the same code as the stable build, with three environment variables moved. Never branch on "am I in dev".
 - **Claude is one agent kind, not the only one.** clave will drive other CLI agents; name the seams for agents in general.
-- **Write down what cost you time.** Trap → FOOTGUNS.md. Term → UBIQUITOUS_LANGUAGE.md. Dead end → the subsystem's C-section. Using clave → README.md. Working on clave → CONTRIBUTING.md. Not here: this file is the index, not the knowledge.
+- **Write down what cost you time.** Trap → FOOTGUNS.md. Term → UBIQUITOUS_LANGUAGE.md. Approach that failed → FOOTGUNS.md too, with what you measured. Using clave → README.md. Working on clave → CONTRIBUTING.md. Not here: this file is the index, not the knowledge.
 
 ## Guardrails
 

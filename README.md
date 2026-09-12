@@ -1,8 +1,4 @@
-# clave 🥁
-
-**C**ommand **L**ine **A**gent **V**iew **E**ngine
-
-## The tool for **C**onducting **L**ots of **A**gents, **V**ery **E**ffectively
+# clave 🥁 - **C**ommand **L**ine **A**gent **V**iew **E**ngine
 
 **Coordinate your many agents with ease from a terminal sidebar - giving you glanceable information and quick navigation - where you are right at home already.**
 
@@ -16,11 +12,11 @@ Stop dealing with everyone creating yet another Electron app to manage agents an
 
 Every agent is a four-line card, and the sidebar has an expanded and a collapsed view:
 
-| expanded                                                                                                                                                                                                                                                                                     | collapsed                                                                                                                                                                             |
-| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| <img src="docs/assets/sidebar-expanded.svg" alt="The expanded clave sidebar: nine four-line cards. Each card shows a coloured status mark, a rename chip and a description on its first line, then a branch or worktree mark, the repo, the branch, a PR number, a provider icon, the model and its effort level, then a mark for agents still running under it, a token count, time since you last touched it, and what a waiting agent is blocked on, then a hairline that closes the card." width="560"> | <img src="docs/assets/sidebar-collapsed.svg" alt="The same nine cards collapsed to a narrow strip: the description and the branch drop, the chip, the repo, the token count and the clock stay put." width="206"> |
+| expanded                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | collapsed                                                                                                                                                                                                         |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| <img src="docs/assets/sidebar-expanded.svg" alt="The expanded clave sidebar: six four-line cards. Each card shows a coloured status mark, a rename chip and a description on its first line, then a branch or worktree mark, the repo, the branch, a PR number, a provider icon, the model and its effort level, then a mark for agents still running under it, a token count, time since you last touched it, and what a waiting agent is blocked on, then a hairline that closes the card." width="560"> | <img src="docs/assets/sidebar-collapsed.svg" alt="The same six cards collapsed to a narrow strip: the description and the branch drop, the chip, the repo, the token count and the clock stay put." width="206"> |
 
-Want it denser? Two shorter row heights fold the card back to two lines, or to the classic dense list, where the token count becomes a battery glyph (<img alt="" src="docs/assets/glyphs/battery-00.svg" width="16"><img alt="" src="docs/assets/glyphs/battery-06.svg" width="16"><img alt="" src="docs/assets/glyphs/battery-08.svg" width="16"><img alt="" src="docs/assets/glyphs/battery-10.svg" width="16">) when the bar is collapsed. It takes effect at your next launch.
+Want it denser? Two shorter row heights fold the card back to two lines, or to the classic dense list. It takes effect at your next launch.
 
 ## What the colours and glyphs mean
 
