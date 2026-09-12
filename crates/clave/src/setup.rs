@@ -1170,6 +1170,28 @@ pub fn eager_row(store: &crate::store::Store) -> Option<&crate::store::AgentReco
         .max_by_key(|r| r.last_interacted)
 }
 
+/// The rows a relaunch rebuilds the layout from: the previous session's live
+/// set (`Store::last_live`, written by `clear_session_order`), resolved to
+/// records and kept in SCREEN order — the order they sat in when the session
+/// died, never reordered by recency or frecency.
+///
+/// Two kinds of entry are dropped, because the snapshot is a faithful record
+/// rather than a filtered one: a uuid naming no row (idle-pruned between
+/// sessions), and a row whose cwd has vanished (a deleted worktree) — the
+/// latter is `eager_row`'s existing guard, and for the same reason. Baking a
+/// tab for either emits a spawn that dies at canonicalize.
+///
+/// Empty is the ordinary cold-start answer, not an error: a first run, or a
+/// session quit with nothing open. Launch falls back to the single eager row.
+pub fn restore_rows(store: &crate::store::Store) -> Vec<&crate::store::AgentRecord> {
+    store
+        .last_live
+        .iter()
+        .filter_map(|uuid| store.agents.get(uuid))
+        .filter(|r| std::path::Path::new(&r.cwd).is_dir())
+        .collect()
+}
+
 /// First-run consent (spec §First run): the plan prints ALWAYS; the prompt
 /// fires only on a TTY — never prompt without one (Homebrew 2026). Pure
 /// over (tty, read line) so the gate is unit-testable.
@@ -1882,6 +1904,77 @@ mod tests {
         none.agents
             .insert("gone".into(), mk("gone", "/no/such/clave/eager/dir", 200));
         assert!(eager_row(&none).is_none());
+        let _ = std::fs::remove_dir_all(&live_dir);
+    }
+
+    /// The read side of the live-set snapshot: `last_live` is a faithful
+    /// record, so it can name rows that no longer exist (idle-pruned between
+    /// sessions) or whose directory has since gone (a deleted worktree). Both
+    /// are dropped here rather than at write time — the store stays the honest
+    /// record, and only what launch can actually BAKE survives this call. A
+    /// vanished cwd left in would emit a tab whose spawn dies at canonicalize,
+    /// the same trap `eager_row` already guards.
+    #[test]
+    fn restore_rows_keeps_screen_order_and_drops_pruned_and_vanished_rows() {
+        use crate::store::{AgentRecord, LabelSource, Store};
+        let live_dir = std::env::temp_dir().join(format!("clave-restore-{}", std::process::id()));
+        std::fs::create_dir_all(&live_dir).unwrap();
+        let mk = |uuid: &str, cwd: &str| AgentRecord {
+            uuid: uuid.into(),
+            cwd: cwd.into(),
+            repo_root: String::new(),
+            branch: String::new(),
+            label: uuid.into(),
+            status: clave_types::Status::Idle,
+            last_interacted: 0,
+            commit_ord: 0,
+            last_visited: 0,
+            worktree: None,
+            label_source: LabelSource::FirstPrompt,
+            tab_id: None,
+            pane_id: None,
+            stale: false,
+            title: None,
+            summary: String::new(),
+            default_branch: None,
+            context_tokens: None,
+            context_level: None,
+            live_session: None,
+            metered_at: 0,
+            buckets: Default::default(),
+            model: None,
+            provider: None,
+            effort: None,
+            pr_number: None,
+            pr_checked: 0,
+            pr_branch: String::new(),
+            wants: None,
+            subagents: false,
+        };
+        let here = live_dir.to_str().unwrap();
+        let mut store = Store::default();
+        // Screen order deliberately disagrees with uuid order, so a pass that
+        // iterated `agents` instead of `last_live` would come out wrong.
+        store.agents.insert("u-b".into(), mk("u-b", here));
+        store.agents.insert("u-a".into(), mk("u-a", here));
+        store
+            .agents
+            .insert("u-gone".into(), mk("u-gone", "/no/such/clave/restore/dir"));
+        store.last_live = vec![
+            "u-pruned".into(), // named in the snapshot, no longer a row
+            "u-b".into(),
+            "u-gone".into(), // row exists, its directory does not
+            "u-a".into(),
+        ];
+        let got: Vec<&str> = restore_rows(&store)
+            .iter()
+            .map(|r| r.uuid.as_str())
+            .collect();
+        assert_eq!(got, vec!["u-b", "u-a"], "snapshot order, viable rows only");
+        assert!(
+            restore_rows(&Store::default()).is_empty(),
+            "no snapshot ⇒ nothing to restore, and launch falls back to the eager row"
+        );
         let _ = std::fs::remove_dir_all(&live_dir);
     }
 

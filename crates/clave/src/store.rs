@@ -304,6 +304,24 @@ pub struct Store {
     /// session recreate). `default` keeps pre-field store files loading.
     #[serde(default)]
     pub tab_touched: BTreeMap<usize, u64>,
+    /// The rows that held a tab when the PREVIOUS zellij session died, in the
+    /// order they sat on screen — the set a relaunch restores. Written by
+    /// `clear_session_order`, which is the one pass that both runs at every
+    /// launch and still sees the old binds a beat before it clears them; read
+    /// by `launch_layout_kdl`. Nothing else writes it.
+    ///
+    /// Deliberately UNRANKED and UNCAPPED: it is the faithful record of what
+    /// was on screen, and any policy about how much of it comes back hot is
+    /// applied on the read side. Keeping those apart is what lets the restore
+    /// policy be retuned without touching the store's correctness.
+    ///
+    /// Agent-scoped, unlike `tab_order`/`tab_buckets`/`tab_touched` beside it:
+    /// those hold session-scoped tab ids and must die with the session, while
+    /// this holds agent uuids, which outlive it. `default` (empty) keeps
+    /// pre-field store files loading and means "nothing to restore" — the
+    /// single-eager-row path launch already takes.
+    #[serde(default)]
+    pub last_live: Vec<String>,
     /// Which row geometry the NEXT `clave` launch bakes (#232). Read once by
     /// `launch_layout_kdl` at session-create time — never rides the pipe
     /// (unlike `collapsed`/`order`): geometry is launch-baked into fixed pane
@@ -883,6 +901,25 @@ pub fn clear_session_order(paths: &StorePaths) -> Result<()> {
             .values()
             .any(|r| r.tab_id.is_some() || r.pane_id.is_some());
         let mut changed = false;
+        // Record the set a beat BEFORE clearing it: this pass is the last
+        // moment the previous session's binds exist, and `last_live` is what
+        // the next launch rebuilds the layout from. Assigned UNCONDITIONALLY,
+        // not inside the clear below — a session quit with no tabs open must
+        // leave an EMPTY set, and a conditional write would silently restore
+        // the set from two launches ago instead.
+        let live_set: Vec<String> = {
+            let mut by_tab: Vec<(usize, &str)> = s
+                .agents
+                .values()
+                .filter_map(|r| r.tab_id.map(|t| (t, r.uuid.as_str())))
+                .collect();
+            by_tab.sort_unstable(); // screen order: ascending tab id
+            by_tab.into_iter().map(|(_, u)| u.to_string()).collect()
+        };
+        if s.last_live != live_set {
+            s.last_live = live_set;
+            changed = true;
+        }
         if !s.tab_order.is_empty() || bound {
             s.tab_order.clear();
             s.tab_buckets.clear();
@@ -1888,6 +1925,63 @@ mod tests {
         assert_eq!(
             before.agents, after.agents,
             "backfill must run exactly once"
+        );
+    }
+
+    /// The launch pass that clears the session-scoped binds RECORDS them
+    /// first: `last_live` is the previous session's live set in SCREEN order
+    /// (ascending tab id), which is what a relaunch rebuilds the layout from.
+    /// Without this the knowledge dies on the same pass that clears it, and
+    /// every previously-live row comes back dormant — the relaunch complaint.
+    #[test]
+    fn clear_session_order_records_the_live_set_in_tab_order() {
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            // Inserted out of tab order, and keyed by uuid in a BTreeMap, so a
+            // pass that recorded iteration order rather than TAB order would
+            // pass by luck on a two-row fixture. Here uuid order and tab order
+            // disagree deliberately.
+            for (uuid, tab) in [("u-c", 1usize), ("u-a", 9), ("u-b", 4)] {
+                let mut a = rec(uuid);
+                a.tab_id = Some(tab);
+                s.agents.insert(uuid.into(), a);
+                s.tab_order.insert(tab, 0);
+            }
+            // A dormant row holds no tab and is not part of the live set.
+            s.agents.insert("u-dormant".into(), rec("u-dormant"));
+        })
+        .unwrap();
+        clear_session_order(&p).unwrap();
+        let s = read_store(&p).unwrap();
+        assert_eq!(
+            s.last_live,
+            vec!["u-c".to_string(), "u-b".to_string(), "u-a".to_string()],
+            "screen order (tab 1, 4, 9), not uuid order, and dormant rows excluded"
+        );
+        // The binds themselves still go — recording must not preserve them.
+        assert!(s.agents.values().all(|r| r.tab_id.is_none()));
+    }
+
+    /// Quitting with nothing open must leave an EMPTY set, not the set from
+    /// the launch before. The write is unconditional for exactly this case:
+    /// nothing is bound, so the clear below has nothing to do and does not
+    /// run, and a recording that rode inside it would silently resurrect a
+    /// two-launches-ago layout. Empty is also the signal launch reads to take
+    /// its existing single-eager-row path.
+    #[test]
+    fn clear_session_order_empties_the_live_set_when_nothing_was_bound() {
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            s.last_live = vec!["u-stale".into()];
+            s.agents.insert("u-dormant".into(), rec("u-dormant"));
+        })
+        .unwrap();
+        clear_session_order(&p).unwrap();
+        assert!(
+            read_store(&p).unwrap().last_live.is_empty(),
+            "a launch with nothing bound clears the set rather than keeping it"
         );
     }
 
