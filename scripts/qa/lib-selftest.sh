@@ -30,7 +30,15 @@ want() {
 # apart. Instance ids COLLIDE across fleets (id 3 is both), deliberately:
 # that collision is the residual the lib documents, and a parser that ignores
 # the tag reads his bars as ours.
-FIXTURE="$(mktemp -t qa-lib-selftest)"
+# `mktemp -t <name>` is NOT portable: GNU mktemp treats the argument as a
+# template and refuses one with no `X`s, while BSD/macOS takes it as a prefix.
+# A full template works on both (CI caught this — it greens on the maintainer's
+# mac and dies on ubuntu).
+FIXTURE="$(mktemp "${TMPDIR:-/tmp}/qa-lib-selftest.XXXXXX")"
+if [[ -z "$FIXTURE" || ! -f "$FIXTURE" ]]; then
+  echo "FAIL cannot create the fixture log — every reading below would be vacuous" >&2
+  exit 1
+fi
 trap 'rm -f "$FIXTURE"' EXIT
 cat >"$FIXTURE" <<'LOG'
 DEBUG  |/Users/x/.local| 2026-09-12 13:44:54.761 [id: 2     ] clave-bar: loaded v0.4.0 build=deadbee
