@@ -6,12 +6,11 @@ Spec: canonical spec §9 status note (demoted checkpoints) + §6.6 verify-live i
 visual observation. Never marked PASS headless. Zellij plugin log (for `eprintln!`):
 `$TMPDIR/zellij-<uid>/zellij-log/zellij.log`.
 
-Setup (once, user present — touches real settings.json + permission cache):
-
-```bash
-just install          # binary on PATH + wasm into ~/.local/share/clave/
-clave setup           # generated config/layout + hooks merge + permission seed
-```
+> **Historical — take no command from this file.** It was written when
+> `just install` put the working tree on PATH. That target is retired: it wrote
+> over the stable surface, and that is the #43/#44 outage. The current path is
+> `cd <checkout>` then `just launch` — see CONTRIBUTING.md. What is still worth
+> reading below is the ledger of approaches tried and why they failed.
 
 Carried into this checklist from task reviews:
 - **Task 6:** if renames/`clave focus` never fire live, suspect `get_plugin_ids()`
