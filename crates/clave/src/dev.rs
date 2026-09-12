@@ -981,7 +981,7 @@ pub fn run_status() -> Result<()> {
     let store = crate::store::read_store(&crate::store::store_paths()?)?;
     // Discovered zellij (2026-07-22): both reads below swallow failure with
     // unwrap_or_default, so an off-PATH zellij would report "no live session"
-    // rather than erroring — and CLAUDE.md tells agents to gate the session
+    // rather than erroring — and AGENTS.md tells agents to gate the session
     // lifecycle on exactly this output. A false negative here is worse than
     // a loud failure.
     let zellij = crate::discover::tool_path(crate::discover::ToolId::Zellij);

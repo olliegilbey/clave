@@ -11,7 +11,7 @@
 //!
 //! The channel is a MEASUREMENT of the live conversation, not a history
 //! source: fresh-install population and backfill still derive from the
-//! transcripts (CLAUDE.md, the jsonl store is the source of truth).
+//! transcripts (AGENTS.md: the transcripts out-rank the store).
 //!
 //! Two rules keep the two sources from fighting:
 //!

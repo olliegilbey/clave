@@ -1,75 +1,58 @@
-# AGENTS.md — clave
+**clave** is a vertical tab control system for visualising and managing different agent sessions and terminals. Always begin each session by looking at the clave-working-sample-1.png screenshot to understand the visual element of clave. Clave uses Zellij for a multiplexer session, keyed off a store the agents' hooks write into. We dogfood the system continuously.
 
-**clave** is a Zellij fleet-orchestration sidebar: it controls and manages a set of `claude` agents as vertical tabs in one multiplexer session, keyed off a store the agents' hooks write into. It builds its own daily driver — we live inside a clave session while developing clave from a session inside it.
+You are working here with a pair. You bring software fundamentals, SDLC, and your knowledge from having read _A Philosophy of Software Design_ - Ousterhout, and _The Design of Everyday Things_ - Norman. Apply them freely. Clave is the project you have joined: learn its conventions and build accordingly to avoid CI catching you, and to further expand CI capabilities. Zellij behaviour comes from the vendored source. For any other external API, WebSearch current documentation before relying on it, or brief a subagent to research it.
 
-clave will support other CLI-based agents down the line, keep this in mind as a design decision for DRY and neat APIs that are sensible and straightforward.
+One workspace: `crates/clave` is the host CLI, `crates/clave-bar` is the sidebar plugin built for `wasm32-wasip1`, and `crates/clave-types` carries the shared vocabulary.
 
-Be deliberate in avoiding overengineering early - this is greenfield, we are iterating quickly with minimal buildout to achieve the goals. Focus on KISS.
+## Documents
 
-Ground all work in the screenshots - look at the clave-working-sample PNG images in the root first to gain a visual understanding.
+- [FOOTGUNS.md](FOOTGUNS.md) — traps that compile and read fine, and are wrong anyway. **Grep it the moment something behaves unexpectedly, before you debug.**
+- [UBIQUITOUS_LANGUAGE.md](UBIQUITOUS_LANGUAGE.md) — the vocabulary, binding in code, specs, issues and PRs. "Session" means three different things here. Add a new term in the same change that introduces it.
+- [CONTRIBUTING.md](CONTRIBUTING.md) — the two environments, the release model, the PR flow.
+- [docs/dev/TESTING.md](docs/dev/TESTING.md) — the verification tiers and the risk taxonomy. Find your change in the taxonomy before you call it verified.
+- [docs/dev/QA-DRIVE.md](docs/dev/QA-DRIVE.md) — the regression drive, `scripts/qa-drive.sh <scenario>`. It tests seams, not logic.
+- [docs/dev/README-SOP.md](docs/dev/README-SOP.md) — read this before you change README.md.
 
-Two crates, one workspace:
+## What done looks like
 
-| Crate              | Target          | What it is                                                                                 |
-| ------------------ | --------------- | ------------------------------------------------------------------------------------------ |
-| `crates/clave`     | host binary     | the `clave` CLI — store, setup/release, KDL generation, hooks, the `dev` sandbox           |
-| `crates/clave-bar` | `wasm32-wasip1` | the sidebar plugin — pure state machine (`model.rs`) plus a thin zellij event/effect shell |
+Done is a change Ollie keeps, not a test that passes. `main` is releasable at every commit; a `vX.Y.Z` tag with `just release` promotes it. Any feature that uses history meets one more bar: a fresh install on a months-old Claude Code history comes up warm from the jsonl alone — conversations resumable, frecency populated, nothing cold the transcripts could have answered.
 
-`crates/clave-types` carries the shared vocabulary. `main` is always releasable;
-a `vX.Y.Z` tag plus `just release` is the promotion event.
+## Principles
 
-## Useful Documents:
+Ordered by weight. When two collide, the earlier one wins.
 
-[FOOTGUNS.md](FOOTGUNS.md) | traps that already cost someone a round — things that compile, read, or look fine and are wrong anyway. **Grep it the moment something behaves unexpectedly**, before you start debugging. Add to it when you lose time to something the next agent would also lose time to
+- **KISS.** The simplest correct thing is almost always right. Build the minimum that reaches the goal, then stop. Do not keep complexity because it is already there. Do not add machinery because it looks impressive.
+- **The transcripts out-rank the store.** Claude writes `~/.claude/projects/**/*.jsonl`. Those files outlive clave, so our store is only a cache over them. Derive history from the transcripts. Never mint a second source.
+- **Measured beats assumed.** Take zellij behaviour from the vendored source (`~/.cargo/registry/src/*/zellij-tile-0.44.3/`, `…/zellij-utils-0.44.3/`), or from a run you did yourself. `TabUpdate` reaches only the active tab. `resize_pane_with_id` refuses fixed panes, and says nothing. `show_self` is a focus action. Each cost a round. Cite the path you read, so the next agent can grep it.
+- **The model is pure; the shell is thin.** `model.rs` runs without zellij, and that is the only reason the bar is testable. Logic that moves into the event shell leaves the tier we test well, and enters the tier that needs a human at a terminal. Move it back.
+- **One code path.** The sandbox is the same code as the stable build, with three environment variables moved. Never branch on "am I in dev".
+- **Claude is one agent kind, not the only one.** clave will drive other CLI agents; name the seams for agents in general.
+- **Write down what cost you time.** Trap → FOOTGUNS.md. Term → UBIQUITOUS_LANGUAGE.md. Dead end → the subsystem's C-section. Using clave → README.md. Working on clave → CONTRIBUTING.md. Not here: this file is the index, not the knowledge.
 
-[UBIQUITOUS_LANGUAGE.md](UBIQUITOUS_LANGUAGE.md) | the shared vocabulary. **zellij session vs agent session**, **title vs label**, gutter · cell · ink · chip · provenance. Short, and it unlocks every other document — "session" alone is ambiguous three ways in this codebase - add to it when a term is agreed upon between you and the maintainer.
+## Guardrails
 
-[CONTRIBUTING.md](CONTRIBUTING.md) | the two environments (stable vs sandbox), the release model, the PR flow, where work is tracked — **and "The one leak"**, the PATH hazard that broke v0.1.1 in the field (#43, #44)
+- **Do not touch Ollie's live session.** You run inside it, so a bare `zellij` command hits his working fleet; run nothing against it, not even a read. Against your worktree's sandbox, run `zellij action` freely, staged with `just sandbox`.
+- **Ollie launches every session**, runs `just release`, and owns anything that writes `~/.local/share/clave/`. Print the command; he runs it.
+- **Ollie kills sessions.** One exemption: the sandbox you asked him to launch this conversation, once its drive and both eyeball checks are done. Kill it by explicit name (`clave dev instance --field session`), never another agent's.
+- **Remote surfaces wait for his go:** pushes, PRs, merges, issue writes.
+- **Ask him to test what you cannot reach.**
+- **`just gates` must be green before you commit.** It runs fmt, test, the wasm build, then clippy, in that order, because CI runs fmt before clippy.
 
-[docs/dev/README-SOP.md](docs/dev/README-SOP.md) | touching README.md? The ratified rules, layout and exemplar every README change is written from and checked against
+## Great code here
 
-[docs/dev/TESTING.md](docs/dev/TESTING.md) | the three verification tiers, the risk taxonomy (change class → required verification), the escape record, and the live-validation SOP
+Rust stable, over zellij 0.44.3. Write code that passes the gate by construction.
 
-[SUBSYSTEM-VALIDATION.md](docs/superpowers/spikes/SUBSYSTEM-VALIDATION.md) | the C-section for the subsystem you are about to change — the ledger of approaches tried and _why they failed_. Read it first; every forbidden path was expensive to learn
+- **Make modules deep.** A module must hide more than it shows. When a file gets long, ask whether its interface got wider. A long file behind a narrow interface beats three shallow ones that pass state between them.
+- **Design errors out of existence.** A type that cannot hold the bad state beats a branch that handles it. Conflating the minted and live uuids passed every test, then froze the row in the field.
+- **Comments give the reason and the source.** A comment that repeats the line is noise. Name the measurement, the issue, or the file you read.
+- **Write tests that fail when the logic flips.** Run `just mutants` over what the branch changed; it is expected, and deliberately not a gate.
+- **Delete dead code.** Do not annotate around it.
+- **The bar is read at a glance, all day.** Legibility is the feature: two states a person cannot tell apart are one state, whatever the model holds. Show what changed, not that something changed.
 
-**Drive the sandbox; never touch his session.** Ollie dog-foods clave daily —
-the Claude you are is running _inside_ a live clave session, so a bare `zellij`
-command targets his working fleet. Against `clave-test` you may run `zellij
-action` freely (`ZELLIJ_SESSION_NAME=clave-test …` — stage it with `just
-sandbox`); against his session you run nothing, not even a read. **Launching
-any session is his**, as is `just release` and anything writing
-`~/.local/share/clave/`. Print those; let him run them. Killing is his too,
-with one exemption: a sandbox you asked him to launch in this conversation,
-once its drive and both eyeball checkpoints are done — kill it by its explicit
-name (`clave dev instance --field session`), never a sandbox another agent
-staged (each has its own name and root). The loop is
-[docs/dev/TESTING.md](docs/dev/TESTING.md) § the sandbox drive loop.
+## Style
 
-Something behaving strangely? Grep FOOTGUNS.md before you start debugging.
-
-Write what you learn where it belongs — trap → FOOTGUNS.md · term →
-UBIQUITOUS*LANGUAGE.md · dead end → the subsystem's C-section · how to \_use*
-clave → README.md · how to _work on_ clave → CONTRIBUTING.md. Not here. This
-file is the index, not the knowledge.
-
-Read the vendored source for zellij behaviour
-(`~/.cargo/registry/src/*/zellij-tile-0.44.3/`, `…/zellij-utils-0.44.3/`) before
-building on it — `TabUpdate` reaches only the active tab, `resize_pane_with_id`
-silently refuses fixed panes, `show_self` is a focus action. Each of those cost a
-round.
-
-Ollie is happy to test anything you can't discover yourself inside his terminal or clave session.
-
-The four commands a PR must show green — or `just gates`, which runs exactly
-these in this order:
-
-```bash
-cargo fmt --all --check      # CI's lint job runs fmt BEFORE clippy
-cargo test --workspace
-cargo build -p clave-bar --target wasm32-wasip1
-cargo clippy --workspace --all-targets -- -D warnings
-```
-
-And use cargo mutants.
-
-When considering updates for CLAUDE.md or AGENTS.md, first have a conversation with Ollie to lock in directives and information.
+- **Use ASD-STE100 Simplified Technical English** in comments, new docs, and everything you write to Ollie. One meaning per word. Short sentences. Active voice. One instruction per sentence.
+- **Ollie knows this product well and does not read the code.** Give him the decision, not the mechanism: what we chose, what we gave up, why. Never use a symbol he would have to grep.
+- **Send prose after a run of tool calls**, because a message between calls is buried in tool output. The final message is a report, not a log.
+- **Commits:** Conventional Commits, scoped to the crate or subsystem. Say what was wrong, how you know it is fixed, and cite the issue. Fill `.github/PULL_REQUEST_TEMPLATE.md` with `--body-file`.
+- **Agree changes to this file with Ollie before you write them.**
