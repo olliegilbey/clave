@@ -1051,25 +1051,40 @@ impl ZellijPlugin for State {
                 //
                 // A tick the host reports OUTSIDE the fast band is the strand
                 // this branch fixed, in its last remaining form: the claim
-                // stays set, and the paint that would re-arm is the very thing
-                // it blocks. So every expiry drops a claim older than the
-                // strand window, and a drop is a repaint, because only a paint
+                // stays set, no fast timer is left outstanding, and the paint
+                // that would arm the next one is the very thing the claim
+                // withholds. Two answers cover it, and they cover each other.
+                //
+                // ELIMINATION, first: the shell arms three kinds and no more,
+                // so with no peek and no term poll outstanding a timer expiry
+                // can only be the fast one — whatever elapsed came with it.
+                // `pending_peeks` and `term_poll_armed` count REAL outstanding
+                // timers (a cancelled peek still decrements on its own expiry),
+                // and they are read BEFORE the legs below clear them.
+                //
+                // AGE, second: while another kind is armed, elimination must
+                // not steal that kind's expiry — but that kind's expiry is
+                // itself a wake-up, and a claim past the strand window is
+                // dropped on it. A drop is a repaint, because only a paint
                 // re-arms the spinner.
-                let healed = self.model.expire_stale_fast_tick();
-                let fast_tick =
-                    if elapsed < TIMER_KIND_CUTOFF_SECS && self.model.fast_tick_in_flight() {
-                        self.model.fast_tick_fired();
-                        // The frame index is the tick's own count, bumped whoever
-                        // asked for the tick. At five frames a second a spinner
-                        // stepping early off a swap's tick is invisible, and the
-                        // alternative is a second predicate over "was this tick
-                        // the spinner's" that could disagree with the one that
-                        // armed it.
-                        self.anim_frame = self.anim_frame.wrapping_add(1);
-                        true
-                    } else {
-                        false
-                    };
+                let other_timers_armed = self.pending_peeks > 0 || self.term_poll_armed;
+                let owns = self
+                    .model
+                    .fast_tick_owns_expiry(elapsed < TIMER_KIND_CUTOFF_SECS, other_timers_armed);
+                let healed = !owns && self.model.expire_stale_fast_tick();
+                let fast_tick = if owns {
+                    self.model.fast_tick_fired();
+                    // The frame index is the tick's own count, bumped whoever
+                    // asked for the tick. At five frames a second a spinner
+                    // stepping early off a swap's tick is invisible, and the
+                    // alternative is a second predicate over "was this tick
+                    // the spinner's" that could disagree with the one that
+                    // armed it.
+                    self.anim_frame = self.anim_frame.wrapping_add(1);
+                    true
+                } else {
+                    false
+                };
                 // The width leg runs on EVERY expiry — `width_cooldown_elapsed`
                 // is inert unless an ask is in flight, so a peek expiry ending
                 // the deafness a few ms early is harmless, and no expiry can

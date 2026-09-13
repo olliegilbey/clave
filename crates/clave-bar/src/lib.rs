@@ -116,6 +116,12 @@ mod shell_text {
              honoured; leave it to the next paint and the paint never \
              comes:\n{update}"
         );
+        assert!(
+            update.contains("self.pending_peeks > 0 || self.term_poll_armed"),
+            "the elimination needs the OTHER kinds' outstanding timers, read \
+             before the legs below clear them; without it a misreported fast \
+             expiry is recovered two seconds late, if at all:\n{update}"
+        );
     }
 
     /// The body of a `fn` in the shell, signature to the next one at the same

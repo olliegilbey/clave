@@ -3086,6 +3086,25 @@ impl BarModel {
         self.fast_tick_armed_at = None;
     }
 
+    /// Whether this timer expiry IS the claimed fast tick.
+    ///
+    /// `Event::Timer` carries elapsed seconds and nothing else, so the band is
+    /// the first answer: under the cutoff, it is ours. A host that reports a
+    /// 0.2s expiry as 0.9s breaks that, and the cost is the whole strand —
+    /// the claim survives, no fast timer is left outstanding, and the paint
+    /// that would arm the next one is what the claim withholds.
+    ///
+    /// So the second answer is ELIMINATION, and it is proof, not a guess: the
+    /// shell arms three kinds and no more. With no peek and no term poll
+    /// outstanding, a timer expiry can only be the fast one, whatever number
+    /// came with it. The band is still consulted first, so a genuine peek or
+    /// term-poll expiry never steals the claim while one of those is armed —
+    /// and while one IS armed, its own expiry carries the age-based drop
+    /// ([`Self::expire_stale_fast_tick`]). The two cover each other.
+    pub fn fast_tick_owns_expiry(&self, in_fast_band: bool, other_timers_armed: bool) -> bool {
+        self.fast_tick_in_flight() && (in_fast_band || !other_timers_armed)
+    }
+
     /// Drop a claim that outlived the strand window, and say whether one was
     /// dropped. The shell calls this on every timer expiry, so the window ages
     /// on the host's own clock: [`Self::arm_fast_tick`] can also clear a stale
@@ -6441,6 +6460,46 @@ mod tests {
             !m.arm_fast_tick(),
             "the re-arm must re-stamp its claim, or every later ask starts \
              another timer and the band holds more than one"
+        );
+    }
+
+    /// A misreported fast expiry is recovered by ELIMINATION, on the first
+    /// one, not two seconds later.
+    ///
+    /// The host can report a 0.2s expiry as 0.9s. That reading alone sends it
+    /// out of the fast band, where it clears nothing — and the fast timer is
+    /// spent, so no later expiry comes to fix it. The claim then blocks the
+    /// paint, and the paint is what would arm the next tick. But the shell
+    /// arms three kinds and no more, so with no peek and no term poll
+    /// outstanding the expiry can only be the fast one.
+    #[test]
+    fn an_expiry_no_other_timer_could_own_is_the_fast_tick() {
+        let mut m = focused_bar();
+        m.tick(100);
+        assert!(m.arm_fast_tick(), "the claim is made");
+
+        assert!(
+            m.fast_tick_owns_expiry(true, true),
+            "inside the band it is ours, armed peeks or not — that is the \
+             reading the bands were built for"
+        );
+        assert!(
+            !m.fast_tick_owns_expiry(false, true),
+            "outside the band, with another kind armed, the claim must not \
+             steal that kind's expiry; the age drop rides on it instead"
+        );
+        assert!(
+            m.fast_tick_owns_expiry(false, false),
+            "outside the band with nothing else armed, no other kind EXISTS \
+             to own this expiry — reading it as anything else strands the \
+             spinner for the life of the instance"
+        );
+
+        m.fast_tick_fired();
+        assert!(
+            !m.fast_tick_owns_expiry(false, false),
+            "with no claim outstanding the elimination must claim nothing, or \
+             a peek expiry bumps a frame nobody asked for"
         );
     }
 
