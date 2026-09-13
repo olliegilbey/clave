@@ -1067,6 +1067,29 @@ impl ZellijPlugin for State {
                 // itself a wake-up, and a claim past the strand window is
                 // dropped on it. A drop is a repaint, because only a paint
                 // re-arms the spinner.
+                //
+                // WHY A WAKE-UP ALWAYS REMAINS, which is the whole property:
+                // a claim never outlives every outstanding timer. Either the
+                // claim's own timer has not fired — one is outstanding — or it
+                // fired and some leg took it. Taken by the fast leg, the claim
+                // is gone. Taken by the peek leg, the REAL peek timer it was
+                // counted against is still outstanding (`pending_peeks` is
+                // only ever incremented beside a `set_timeout`, and only ever
+                // decremented on an expiry). Taken by the term-poll leg, that
+                // leg re-arms, and where it does not, the real 3s timer has
+                // still to fire. So the ambiguous case CodeRabbit named — a
+                // fast expiry reported in the peek band with a peek
+                // outstanding — recovers on the peek's own expiry, which then
+                // meets an empty board and is claimed by elimination.
+                //
+                // That is a bound, not an identity: at worst PEEK_SINK_SECS,
+                // or one TERM_POLL_SECS with the strand window met. True
+                // identity is not available — `Event::Timer` carries elapsed
+                // seconds and nothing else (zellij-tile-0.44.3) — and the
+                // window cannot be tightened below a second either, because
+                // `wall_now()` counts whole seconds. Clearing the claim eagerly
+                // instead would put a second timer in a band that must hold
+                // one, which is the bug `swap_owed` exists to prevent.
                 let other_timers_armed = self.pending_peeks > 0 || self.term_poll_armed;
                 let owns = self
                     .model

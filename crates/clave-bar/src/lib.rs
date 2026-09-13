@@ -124,6 +124,38 @@ mod shell_text {
         );
     }
 
+    /// Every counted peek is a REAL outstanding timer.
+    ///
+    /// This is what makes the fast band's recovery a proof instead of a hope:
+    /// a claim never outlives every outstanding timer, so some expiry always
+    /// arrives to drop it. The peek leg can consume a fast expiry the host
+    /// reported in its band, and the argument that the peek's own timer is
+    /// still to come holds only while `pending_peeks` counts timers that were
+    /// actually armed. A bare increment — a "peek pending" flag set without a
+    /// `set_timeout` — silently ends the wake-up chain.
+    #[test]
+    fn every_counted_peek_has_a_timer_behind_it() {
+        let lines: Vec<&str> = SHELL.lines().collect();
+        let counted = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.contains("pending_peeks += 1"));
+        let mut seen = 0;
+        for (i, l) in counted {
+            seen += 1;
+            let next = lines.get(i + 1).copied().unwrap_or("");
+            assert!(
+                next.contains("set_timeout(PEEK_SINK_SECS)"),
+                "line {} counts a peek without arming its timer:\n{l}\n{next}",
+                i + 1
+            );
+        }
+        assert!(
+            seen > 0,
+            "the search string went stale — no `pending_peeks += 1` in main.rs"
+        );
+    }
+
     /// The body of a `fn` in the shell, signature to the next one at the same
     /// indentation. Crude on purpose: it only has to be sharp enough to say
     /// which function a line of text sits in.
