@@ -16,7 +16,7 @@ clean. Verdict was **merge with changes**.
 Two lanes reached the hook-guard hole independently, which is the strongest
 signal the method produces.
 
-## Fixed — four commits, gates green
+## Fixed — five commits, gates green
 
 - `88245c6` **the two script guards passed while their hazard was present.**
   The hook guard exempted any line starting with `check`/`measure`/`echo`;
@@ -37,6 +37,14 @@ signal the method produces.
   believing it is not focused (stock Alt+h/Alt+l carry no beacon) and it
   printed a frozen `7s` through a whole turn.
 - `533d014` **the store write-back.** NOT fixed — see Open below.
+- `02ec613` **the last face of the strand, from CodeRabbit round 2.** The
+  claim's clock advanced only in `render`, and a paint is the only caller
+  of `arm_fast_tick` — so the heal could not reach the one claim that stops
+  the paints. The clock now advances at the head of every event, and every
+  expiry drops a claim past the window and asks for the repaint that
+  re-arms. Round 2's three small items rode with it: the showcase count,
+  `just launch`'s message, and three rationale comments citing the lock
+  spec (§1, §5.2, §4.5, §4.4) and the review record.
 - `d53b3cc` **stale defaults, counts and the phase list.** Both `Double`
   fallback comments, TESTING.md's self-contradiction on which phases are
   scripted, the showcase inventory, the seven-card scenario, the preview's
@@ -98,7 +106,15 @@ fast-tick strand.
 
 ## Where I was
 
-Pushed, and asked CodeRabbit for a fresh review of the four commits. Next
-step is its reply, then fix what is valid. Its previous round (through
-`d4c53a1`) had 10 comments; 9 are done, the tenth is the `swap_owed` item
-above.
+Pushed to `02ec613` and asked CodeRabbit for a third review
+(comment 5656762700). Its rounds so far: round 1 had 10 comments, 9 done
+and the tenth is the `swap_owed` item above; round 2 had 4, all done in
+`02ec613`.
+
+**The push needs HTTPS right now.** `git push origin …` fails with
+`Permission denied (publickey)` — `ssh-add -l` says the agent holds no
+identities this session. `git push https://github.com/olliegilbey/clave.git
+worktree-triple-card` works, because `gh` holds a token in the keyring.
+Either that, or Ollie reloads the key (`ssh-add --apple-load-keychain`).
+
+Nothing else is in flight. The next action is CodeRabbit's reply.
