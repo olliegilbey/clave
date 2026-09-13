@@ -71,12 +71,53 @@ fn heredoc_tag(line: &str) -> Option<String> {
 
 /// Lines that only REPORT. The drive narrates itself constantly, and its
 /// prose is full of the word `hook` — including whole paragraphs about this
-/// very hazard. None of it runs anything.
+/// very hazard.
+///
+/// A reporting line runs nothing ONLY while it stays literal. `check "x" "$(…)"`
+/// is the drive's most common shape (127 lines of it), and the substitution runs
+/// before `check` is ever called — so `measure "fired" "$("$CLAVE_BIN" hook Stop)"`
+/// would narrate and fire, which is the 2026-09-11 incident exactly. A reporter
+/// that substitutes is therefore not exempt, and is read like any other command.
 fn is_reporting(line: &str) -> bool {
     const REPORTERS: [&str; 9] = [
         "measure ", "note ", "check ", "check_", "printf ", "echo ", "cat ", "usage ", "phase ",
     ];
     REPORTERS.iter().any(|r| line.starts_with(r))
+        && !line.contains("$(")
+        && !backtick_outside_single_quotes(line)
+}
+
+/// Whether a backtick on this line could open a legacy command substitution.
+/// The drive writes six report lines with backticks in their prose, all inside
+/// single quotes, where bash expands nothing — so the character alone cannot
+/// disqualify a reporter without forcing prose churn. Outside single quotes it
+/// is a second way to run a command, and gets the same treatment as `$(`.
+fn backtick_outside_single_quotes(line: &str) -> bool {
+    let mut in_single = false;
+    for c in line.chars() {
+        match c {
+            '\'' => in_single = !in_single,
+            '`' if !in_single => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Whether this line types into a pane. `write-chars` sends text and `write`
+/// sends one key code; both land on whatever pane holds focus, so both are
+/// keystrokes and neither is safer than the other.
+///
+/// Read as tokens, not as source text. The earlier form of this check looked
+/// for the literal `"$CT" write `, so `$CT write 13` and `"${CT}" write 13` —
+/// the same command, quoted differently — matched nothing and could sit in any
+/// phase with the test still green.
+fn is_keystroke(line: &str) -> bool {
+    let flat = line.replace(['"', '\''], "").replace("${CT}", "$CT");
+    let tokens: Vec<&str> = flat.split_whitespace().collect();
+    tokens.windows(2).any(|w| {
+        (w[0].contains("$CT") || w[0].ends_with("ct.sh")) && matches!(w[1], "write" | "write-chars")
+    })
 }
 
 #[test]
@@ -166,10 +207,7 @@ fn a_keystroke_only_reaches_a_pane_the_drive_proved_is_a_shell() {
             .map(|(n, _)| *n)
             .unwrap_or_else(|| panic!("the drive must contain `{needle}`"))
     };
-    let keystrokes: Vec<_> = code
-        .iter()
-        .filter(|(_, l)| l.contains("write-chars") || l.contains("\"$CT\" write "))
-        .collect();
+    let keystrokes: Vec<_> = code.iter().filter(|(_, l)| is_keystroke(l)).collect();
     assert!(
         !keystrokes.is_empty(),
         "phase 5c types to drive the OS-facts pipeline; if that is gone, so is \
