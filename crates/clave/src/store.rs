@@ -1040,6 +1040,35 @@ mod tests {
         assert_eq!(bare.row_height, clave_types::RowHeight::default());
     }
 
+    #[test]
+    fn a_guessed_row_height_is_written_back_over_the_users_choice() {
+        // What the leniency above COSTS, pinned rather than assumed. Every
+        // store write is read-modify-write (`with_store_mut`), so the default
+        // this binary substituted for a value it could not name is what the
+        // next hook of any kind persists: the user's `clave rows` choice is not
+        // misread for one session, it is erased. Silently, and by a binary that
+        // is behaving exactly as designed.
+        //
+        // Asserted so the erasure is a known fact with a test attached, and so
+        // the fix — keeping the unfamiliar spelling across the round trip,
+        // which needs raw text this crate's runtime deps cannot hold (#9) —
+        // arrives by flipping this test rather than by surprising someone.
+        let ahead: Store =
+            serde_json::from_str(r#"{"seq":3,"agents":{},"row_height":"quadruple"}"#)
+                .expect("the read must survive it — that is the other test");
+        let written = serde_json::to_string(&ahead).expect("the store must re-serialize");
+        assert!(
+            !written.contains("quadruple"),
+            "the spelling survived the round trip — good, and this test is now \
+             the wrong way round"
+        );
+        assert!(
+            written.contains(r#""row_height":"card""#),
+            "the write-back must land the default this binary guessed, which is \
+             the whole cost: {written}"
+        );
+    }
+
     /// A store JSON built from a REAL record, with `overrides` spliced onto the
     /// agent and `store_overrides` onto the store. Built this way rather than
     /// hand-written so the fixture cannot rot the moment a required field is
