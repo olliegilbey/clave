@@ -81,9 +81,22 @@ pub const BATTERY_LEVELS: u8 = 11;
 /// persisted or piped enum is a BREAKING change unless the leniency shipped a
 /// version first.
 ///
+/// **The degraded value is WRITTEN BACK, so on the store side the cost is
+/// permanent, not temporary.** `with_store_mut` is read-modify-**write**: the
+/// next `clave hook` of any kind re-serializes the whole store, and the value
+/// that lands is the default this function substituted. So an older binary does
+/// not merely misread the user's `clave rows` choice for one session — it
+/// erases it, silently, on the first event after it runs. Corrected 2026-09-13;
+/// this doc said "until the next launch", which is true only of the PIPE side,
+/// where nothing persists. Preserving the unfamiliar spelling instead needs the
+/// raw text kept across the round trip, and this crate carries serde and
+/// nothing else at runtime (invariant #9), so that is a deliberate decision and
+/// not a patch. Until it is taken, `just release` after a merge is what keeps
+/// two binaries from disagreeing (#43, #44).
+///
 /// **What a wrong guess costs, per field, because that is the only question
-/// that matters here.** `row_height` costs a row geometry until the next launch
-/// (it is re-read at session create). `order` costs a sort until the next push.
+/// that matters here.** `row_height` costs the row geometry the user chose, for
+/// good, per the paragraph above. `order` costs a sort until the next push.
 /// `label_source` degrades to `FirstPrompt`, which means "keep scanning" — the
 /// safe direction, since the wrong answer merely re-reads a tail. `status`
 /// degrades to `Idle`, the one state that claims nothing. None of them invents
@@ -596,16 +609,15 @@ impl RowHeight {
         }
     }
 
-    /// Whether this geometry repaints on a sub-second timer — the four-line
-    /// card's spinner is the only thing that arms one (`arm_anim`).
+    /// Whether this geometry CAN repaint on a sub-second timer — the four-line
+    /// card's spinner is the only thing that arms one.
     ///
-    /// **Two callers, and they MUST agree.** The bar's animation timer asks
-    /// this before arming, and the row projection asks it before rendering a
-    /// clock in SECONDS. A seconds-resolution number in a geometry that only
-    /// repaints on store pushes would freeze mid-count and read as broken,
-    /// where the coarse `0m` it replaced sat still and read as correct. One
-    /// predicate rather than two `lines_per_row() == 4` tests is what keeps
-    /// the reading and the cadence that drives it from drifting apart.
+    /// Geometry only. Whether a given bar repaints right now needs the second
+    /// half, its own tab being on screen, and the bar composes both in one
+    /// place (`BarModel::animates_now`) for the timer and the clock to share.
+    /// A seconds-resolution number where nothing repaints would freeze
+    /// mid-count and read as broken, where the coarse `0m` it replaced sat
+    /// still and read as correct.
     pub fn animates(self) -> bool {
         self.lines_per_row() == 4
     }

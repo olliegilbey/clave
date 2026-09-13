@@ -122,20 +122,6 @@ struct State {
     /// over ten frames, so what it needs is a monotonic index, and the render
     /// path stays a pure function of values passed to it.
     anim_frame: usize,
-    /// The one fast-band timer is in flight ([`FAST_TICK_SECS`]) — the
-    /// spinner's frame clock and the width machine's switch deafness both.
-    /// ONE bool because there is one timer, which is the whole point: a
-    /// classifier that reads only elapsed seconds cannot tell two fast
-    /// timers apart, and while there were two, a width expiry could disarm a
-    /// spinner whose frame was still pending and the next paint would arm a
-    /// second one. Mirrored into the model (`set_fast_tick_armed`) so a
-    /// switch ask knows whether a tick it did not arm is already on its way.
-    ///
-    /// Re-armed on expiry only while some row is mid-turn or an ask is still
-    /// owed a tick. An idle fleet arms NOTHING, which is what the drive
-    /// loop's quiescence assertion requires and what keeps a bar with no
-    /// working agent from waking five times a second.
-    fast_armed: bool,
     /// The user's zellij theme, mapped onto the bar's colour roles (#145).
     /// Arrives via `ModeUpdate` (`ModeInfo.style.colors`); `Default` — the
     /// curated kanagawa — stands until the first one lands, which also keeps
@@ -208,45 +194,27 @@ impl State {
         }
     }
 
-    /// The one fast-band timer, armed if it is not already running. Every
-    /// caller funnels through here — that is what makes "one timer" true, and
-    /// `swap_owed` counts on it (see [`FAST_TICK_SECS`]).
+    /// The one fast-band timer, started if the model is not already owed one.
+    /// Every caller funnels through here — that is what makes "one timer"
+    /// true, and `swap_owed` counts on it (see [`FAST_TICK_SECS`]).
     ///
-    /// Deliberately ungated: the spinner's gates live in `arm_spinner`, and
-    /// the width machine's ask has none to apply. An instance whose tab is not
-    /// focused still swaps its own pane — collapse arrives by broadcast — and
-    /// still owes that swap a deafness.
+    /// The shell owns the timer; the model owns whether one is in flight, and
+    /// answers that from one place ([`BarModel::arm_fast_tick`]). Deliberately
+    /// ungated here: the spinner's gates live in the model too, and the width
+    /// machine's ask has none to apply. An instance whose tab is not focused
+    /// still swaps its own pane — collapse arrives by broadcast — and still
+    /// owes that swap a deafness.
     fn arm_fast_tick(&mut self) {
-        if self.fast_armed {
-            return;
+        if self.model.arm_fast_tick() {
+            set_timeout(FAST_TICK_SECS);
         }
-        self.fast_armed = true;
-        self.model.set_fast_tick_armed(true);
-        set_timeout(FAST_TICK_SECS);
     }
 
-    /// Ask for a fast tick on the SPINNER's behalf: only while the geometry
-    /// that draws one is on screen AND some row is actually mid-turn. Both
-    /// gates matter — the two legacy row modes have no spinner to drive, and
-    /// an idle fleet must arm nothing at all.
-    ///
-    /// Visibility-gated like the term poll, and for the same reason — a hidden
-    /// instance re-arming a 0.2s timer forever is the worst version of this
-    /// feature, and nobody would see the animation it was paying for.
+    /// Ask for a fast tick on the SPINNER's behalf. The decision is
+    /// [`BarModel::wants_spinner_tick`], where a test can reach it; this is
+    /// the wire from the paint that built the rows to the timer.
     fn arm_spinner(&mut self, rows: &[Row]) {
-        if self.fast_armed || !self.model.own_tab_focused() {
-            return;
-        }
-        // The same predicate the clock's resolution reads, so the seconds and
-        // the timer that ticks them can never disagree (`RowHeight::animates`).
-        if !self.model.row_height().animates() {
-            return;
-        }
-        let thinking = rows.iter().any(|r| match &r.content {
-            clave_bar::render::RowContent::Agent { status, .. } => status.thinking(),
-            clave_bar::render::RowContent::Terminal { .. } => false,
-        });
-        if thinking {
+        if self.model.wants_spinner_tick(rows) {
             self.arm_fast_tick();
         }
     }
@@ -827,7 +795,7 @@ impl ZellijPlugin for State {
         // plugin configuration `resolve_binary` just read. Every layout since
         // Task 5 bakes `row_height` alongside `clave_binary`, so a present key
         // is the steady state; an absent one (pre-#232 layout, hand-edited
-        // config) fails CLOSED to `Double` inside `resolve_row_height` — no
+        // config) fails CLOSED to `Card` inside `resolve_row_height` — no
         // warning owed, unlike the binary path, because there is no wrong
         // subprocess to run, only a design default to draw.
         let row_height = resolve_row_height(&config);
@@ -1066,28 +1034,28 @@ impl ZellijPlugin for State {
                 // timer, because no elapsed reading separates 0.15 from 0.2
                 // once the host has rounded them (see FAST_TICK_SECS).
                 //
-                // The fast leg runs FIRST, and clearing the flag before the
+                // The fast leg runs FIRST, and ending the flight before the
                 // width machine runs is load-bearing: `width_cooldown_elapsed`
                 // can ask for another tick, and `arm_fast_tick` is a no-op
-                // while the flag still claims one is in flight. Disarming here
+                // while the model still holds one in flight. Disarming here
                 // and letting `render` re-arm is also what stops the spinner
                 // the moment the last turn ends — the next tick is only armed
                 // by a paint that found a row still working, or by an ask
                 // still owed one.
-                let fast_tick = if elapsed < TIMER_KIND_CUTOFF_SECS && self.fast_armed {
-                    self.fast_armed = false;
-                    self.model.set_fast_tick_armed(false);
-                    // The frame index is the tick's own count, bumped whoever
-                    // asked for the tick. At five frames a second a spinner
-                    // stepping early off a swap's tick is invisible, and the
-                    // alternative is a second predicate over "was this tick
-                    // the spinner's" that could disagree with the one that
-                    // armed it.
-                    self.anim_frame = self.anim_frame.wrapping_add(1);
-                    true
-                } else {
-                    false
-                };
+                let fast_tick =
+                    if elapsed < TIMER_KIND_CUTOFF_SECS && self.model.fast_tick_in_flight() {
+                        self.model.fast_tick_fired();
+                        // The frame index is the tick's own count, bumped whoever
+                        // asked for the tick. At five frames a second a spinner
+                        // stepping early off a swap's tick is invisible, and the
+                        // alternative is a second predicate over "was this tick
+                        // the spinner's" that could disagree with the one that
+                        // armed it.
+                        self.anim_frame = self.anim_frame.wrapping_add(1);
+                        true
+                    } else {
+                        false
+                    };
                 // The width leg runs on EVERY expiry — `width_cooldown_elapsed`
                 // is inert unless an ask is in flight, so a peek expiry ending
                 // the deafness a few ms early is harmless, and no expiry can
@@ -1193,7 +1161,12 @@ impl ZellijPlugin for State {
         // row still working — so the animation starts with the first working
         // row and stops with the last, without any other code having to know
         // the fleet's state.
-        self.arm_spinner(&list);
+        //
+        // Over the VISIBLE slice, not the whole fleet: a working row scrolled
+        // out of the viewport draws no spinner, so arming for it would wake the
+        // bar five times a second to animate nothing. Same call the paint makes
+        // one line down, so the two cannot disagree about what is on screen.
+        self.arm_spinner(clave_bar::render::visible_rows(&list, rows, row_height));
         let lines = render_rows(
             &list,
             cols,

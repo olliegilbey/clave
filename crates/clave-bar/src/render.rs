@@ -694,6 +694,23 @@ pub fn viewport_top(len: usize, selected: Option<usize>, height: usize) -> usize
 /// reads it. It is an argument rather than a clock read in here because this
 /// module renders from values handed to it — the same discipline that keeps
 /// the elapsed cell's `now` in the shell.
+/// The rows a pane of `height` lines actually SHOWS (#148): the pane height is
+/// a hard budget, and a bar that printed past it drew rows zellij clipped away
+/// — nav-reachable, invisible. Rounded DOWN, which is the odd-remainder rule: a
+/// pane with room for two and a half cards draws two, and its last line is
+/// blank BY OMISSION. Half a card — a top arc with no bottom — is not a thing
+/// the design has.
+///
+/// Public because the spinner's timer must ask the same question the paint
+/// does: an off-screen row that is mid-turn would otherwise wake the bar five
+/// times a second to animate a glyph nobody can see. One follow rule, one
+/// caller's worth of arithmetic, no second copy.
+pub fn visible_rows(rows: &[Row], height: usize, row_height: RowHeight) -> &[Row] {
+    let budget = height / row_height.lines_per_row();
+    let top = viewport_top(rows.len(), rows.iter().position(|r| r.selected), budget);
+    &rows[top..top.saturating_add(budget).min(rows.len())]
+}
+
 pub fn render_rows(
     rows: &[Row],
     cols: usize,
@@ -703,14 +720,7 @@ pub fn render_rows(
     row_height: RowHeight,
     frame: usize,
 ) -> Vec<String> {
-    // The viewport (#148): the pane height is a hard budget, and a bar that
-    // printed past it drew rows zellij clipped away — nav-reachable, invisible.
-    // Rounded DOWN, which is the odd-remainder rule: a pane with room for two
-    // and a half cards draws two, and its last line is blank BY OMISSION.
-    // Half a card — a top arc with no bottom — is not a thing the design has.
-    let budget = height / row_height.lines_per_row();
-    let top = viewport_top(rows.len(), rows.iter().position(|r| r.selected), budget);
-    let rows = &rows[top..top.saturating_add(budget).min(rows.len())];
+    let rows = visible_rows(rows, height, row_height);
     // `viewport_top` guarantees the selected row (if any) is inside this
     // slice — pinned by the proptest — so the fade computed over the slice
     // is equivalent to computing it over the whole list.

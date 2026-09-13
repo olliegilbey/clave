@@ -707,15 +707,23 @@ pub struct BarModel {
     /// spinner that was driving the ticks stops, which it does the moment the
     /// last turn ends.
     swap_owed: u8,
-    /// The shell's one fast-band timer is in flight (`main.rs`'s
-    /// `fast_armed`, mirrored here by [`Self::set_fast_tick_armed`]).
-    /// MIRRORED rather than re-derived: a second predicate over "is any row
-    /// mid-turn and does this geometry spin" could disagree with the one that
-    /// actually armed the timer, and the disagreement would show up only as a
-    /// rare width bug. Read at exactly one place — the instant of a switch
-    /// ask, which is the only moment a tick this model did not ask for can
-    /// steal something.
+    /// The shell's one fast-band timer is in flight ([`Self::arm_fast_tick`]
+    /// says whether to start it, [`Self::fast_tick_fired`] ends it).
+    ///
+    /// The model owns the fact; the shell owns the timer. It was a shell bool
+    /// with a mirror here until 2026-09-13, and the pair needed a test that
+    /// read `main.rs` as text to keep the two writes together — a third writer
+    /// would have passed that test and doubled every switch's deafness.
     fast_tick_armed: bool,
+    /// The whole second [`Self::arm_fast_tick`] last said yes, which is what
+    /// makes the flag self-healing. `Event::Timer` carries elapsed seconds and
+    /// nothing else, so the shell classifies a 0.2s expiry by a 0.5s cutoff
+    /// that `main.rs`'s own `FAST_TICK_SECS` doc calls approximate. One
+    /// expiry the host reports long is classified out of the fast band, the
+    /// flag is never cleared, and a flag that claims a timer nothing will fire
+    /// stops the spinner on that instance for good. After
+    /// [`FAST_TICK_STRAND_SECS`] the claim is not believed.
+    fast_tick_armed_at: Option<u64>,
     /// The width of the most recent paint, recorded deaf or not — what the
     /// cooldown expiry judges instead of the paint that preceded the ask.
     last_painted: Option<usize>,
@@ -815,8 +823,8 @@ pub struct BarModel {
     /// `width_effects`) reads the target through `RowHeight::target_cols`
     /// instead of a raw `BAR_TARGET_COLS`/`COLLAPSED_TARGET_COLS` constant,
     /// so the two arms of the flag share one seek machine. Defaults to
-    /// `RowHeight::default()` (`Double`) so existing tests that never call
-    /// `set_row_height` keep testing the shipping default.
+    /// `RowHeight::default()` (`Card`) so a test that never calls
+    /// `set_row_height` keeps testing the shipping default.
     row_height: RowHeight,
     /// The shell's wall clock, set by [`Self::tick`] (#232). A field rather
     /// than a parameter threaded through `rows`/`click`/`agent_content`/
@@ -2234,12 +2242,20 @@ impl BarModel {
             // forever. `status`, not `a.status`: a row the local override has
             // already quieted is not thinking, whatever the store still says.
             //
-            // Gated on `animates()` because seconds are only honest where
-            // something repaints them. The two legacy geometries arm no timer,
-            // so a seconds count there would freeze at whatever the last store
-            // push saw — worse than the coarse reading it replaced, which at
-            // least sits still on purpose.
-            elapsed: if self.row_height().animates() && status.thinking() {
+            // Gated on the same predicate the TIMER is gated on, because
+            // seconds are only honest where something repaints them. Two
+            // gates, not one: the two legacy geometries arm no timer at all,
+            // and a bar whose own tab is off screen arms none either
+            // (`wants_spinner_tick`). Either way the count would freeze at
+            // whatever the last store push saw — worse than the coarse reading
+            // it replaced, which at least sits still on purpose.
+            //
+            // The focus half was missing until 2026-09-13. Stock zellij keeps
+            // its own `Alt+h`/`Alt+l` (setup.rs leaves `clear-defaults=false`),
+            // and those switch tabs without a beacon, so a bar can become
+            // VISIBLE while it still believes it is not focused: it printed a
+            // frozen `7s` for the whole turn.
+            elapsed: if self.animates_now() && status.thinking() {
                 turn_label(self.now, a.last_interacted)
             } else {
                 elapsed_label(self.now, a.last_interacted)
@@ -3016,22 +3032,80 @@ impl BarModel {
             return Vec::new();
         }
         self.walk_spent = Some((want, spent + 1));
-        // See `swap_owed`. The mirror is the shell's answer to "is a fast
-        // tick already in flight" — asked at the instant of the ask, because
-        // that is the only moment it matters, and answered exactly because
-        // the shell keeps exactly one such timer.
-        self.swap_owed = if self.fast_tick_armed { 2 } else { 1 };
+        // See `swap_owed`. This is the answer to "is a fast tick already in
+        // flight" — asked at the instant of the ask, because that is the only
+        // moment it matters, and answered exactly because the shell keeps
+        // exactly one such timer.
+        self.swap_owed = if self.fast_tick_in_flight() { 2 } else { 1 };
         vec![Effect::SwapWidth]
     }
 
-    /// The shell's fast tick was just armed, or just fired. Mirrors
-    /// `main.rs`'s `fast_armed` into the model so a switch ask can know
-    /// whether a tick it did not arm is already on its way — see `swap_owed`.
-    /// The shell is the only writer, and it writes on both edges: an
-    /// unmirrored disarm would buy every ask a second tick forever, doubling
-    /// the deafness on a fleet that stopped spinning.
-    pub fn set_fast_tick_armed(&mut self, armed: bool) {
-        self.fast_tick_armed = armed;
+    /// How long a claimed fast tick is believed. Two seconds is ten of them:
+    /// long enough that a loaded host delivering one late cannot look stranded,
+    /// short enough that a person does not read a frozen spinner as a hung
+    /// agent.
+    const FAST_TICK_STRAND_SECS: u64 = 2;
+
+    /// A fast tick is in flight AND the claim is still credible. Every reader
+    /// goes through here, so the switch ask cannot owe two ticks against a
+    /// timer that will never fire.
+    pub fn fast_tick_in_flight(&self) -> bool {
+        self.fast_tick_armed
+            && self
+                .fast_tick_armed_at
+                .is_some_and(|at| self.now.saturating_sub(at) < Self::FAST_TICK_STRAND_SECS)
+    }
+
+    /// Ask for the one fast-band timer. Answers whether the shell must start
+    /// it: `false` while a credible tick is already on its way, which is what
+    /// keeps the band to one timer and makes `swap_owed` exact.
+    ///
+    /// Returns `true` again once a claimed tick has gone stale
+    /// ([`Self::FAST_TICK_STRAND_SECS`]), because a claim nothing will honour
+    /// is worse than no claim: the spinner and the turn clock are driven by
+    /// this timer, and without the re-arm one mis-classified expiry stops both
+    /// for the life of the instance.
+    pub fn arm_fast_tick(&mut self) -> bool {
+        if self.fast_tick_in_flight() {
+            return false;
+        }
+        self.fast_tick_armed = true;
+        self.fast_tick_armed_at = Some(self.now);
+        true
+    }
+
+    /// The fast tick fired. The shell re-arms from the next paint, which is
+    /// what stops the spinner the moment the last turn ends.
+    pub fn fast_tick_fired(&mut self) {
+        self.fast_tick_armed = false;
+        self.fast_tick_armed_at = None;
+    }
+
+    /// Whether anything repaints this bar on a sub-second timer right now.
+    /// The geometry must draw a spinner, and this instance's own tab must be
+    /// on screen — a hidden bar arms nothing, which is deliberate (re-arming a
+    /// 0.2s timer where nobody can see it is the worst version of this
+    /// feature) and is exactly why its clock must not count seconds.
+    ///
+    /// ONE predicate, read by the timer that arms the ticks and by the clock
+    /// that spends them, so the reading and the cadence driving it cannot
+    /// drift apart.
+    fn animates_now(&self) -> bool {
+        self.row_height().animates() && self.own_tab_focused()
+    }
+
+    /// Whether the shell should ask for a fast tick on the SPINNER's behalf:
+    /// something repaints this bar, and some row is actually mid-turn.
+    ///
+    /// Takes the rows the paint already built rather than re-deriving them: a
+    /// second predicate over "is any row mid-turn" could disagree with what was
+    /// drawn, and the local override quiets a row the wire still calls busy.
+    pub fn wants_spinner_tick(&self, rows: &[Row]) -> bool {
+        self.animates_now()
+            && rows.iter().any(|r| match &r.content {
+                RowContent::Agent { status, .. } => status.thinking(),
+                RowContent::Terminal { .. } => false,
+            })
     }
 
     /// A timer fired: spend one of the ticks this ask is owed, and judge the
@@ -6296,7 +6370,7 @@ mod tests {
     #[test]
     fn a_spinner_tick_cannot_cut_the_switch_deafness_short() {
         let mut m = focused_bar();
-        m.set_fast_tick_armed(true); // some row is mid-turn; a frame is in flight
+        m.arm_fast_tick(); // some row is mid-turn; a frame is in flight
         m.toggle(); // wants collapsed
         assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
         // The spinner's frame lands first, wearing the cooldown's clothes.
@@ -6317,6 +6391,38 @@ mod tests {
         // One ask spent, not two — the walk still has its budget.
         m.toggle();
         assert_eq!(m.width_effects(Some(COL_W)), vec![Effect::SwapWidth]);
+    }
+
+    /// A tick the host never delivers in its own band must not silence the
+    /// instance for good.
+    ///
+    /// `Event::Timer` carries elapsed seconds and nothing else, so the shell
+    /// sorts a 0.2s expiry from a 0.9s one by a 0.5s cutoff. One expiry the
+    /// host reports long is sorted into the wrong band and never clears the
+    /// flag; before the stamp, `arm_fast_tick` then refused forever and the
+    /// spinner and the turn clock both stopped for the life of that bar.
+    #[test]
+    fn a_tick_that_never_fired_stops_being_believed() {
+        let mut m = focused_bar();
+        m.tick(100);
+        assert!(m.arm_fast_tick(), "the first ask starts the timer");
+        m.tick(101);
+        assert!(
+            !m.arm_fast_tick(),
+            "a tick still credible must not start a second timer — the band \
+             holds ONE, and `swap_owed` counts on it"
+        );
+        // Nothing cleared it: the expiry was classified out of the fast band.
+        m.tick(102);
+        assert!(
+            m.arm_fast_tick(),
+            "a claimed tick nothing will honour must not outlive its credit"
+        );
+        assert!(
+            !m.arm_fast_tick(),
+            "the re-arm must re-stamp its claim, or every later ask starts \
+             another timer and the band holds more than one"
+        );
     }
 
     /// The other half: the second expiry is bought only when a spinner could
@@ -6346,12 +6452,12 @@ mod tests {
     #[test]
     fn the_spinner_stopping_mid_swap_does_not_strand_the_owed_expiry() {
         let mut m = focused_bar();
-        m.set_fast_tick_armed(true);
+        m.arm_fast_tick();
         m.toggle(); // wants collapsed
         assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
         // The last turn ends here: the frame fires, the shell disarms, and no
         // paint re-arms it. Only the model's own request is left.
-        m.set_fast_tick_armed(false);
+        m.fast_tick_fired();
         assert_eq!(m.width_cooldown_elapsed(), vec![Effect::RearmWidthCooldown]);
         assert_eq!(m.width_effects(Some(EXP_W)), Vec::<Effect>::new());
         assert_eq!(
@@ -6369,7 +6475,7 @@ mod tests {
     #[test]
     fn an_owed_expiry_is_never_answered_with_a_second_swap() {
         let mut m = focused_bar();
-        m.set_fast_tick_armed(true);
+        m.arm_fast_tick();
         m.toggle();
         assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
         let owed = m.width_cooldown_elapsed();
@@ -7129,31 +7235,42 @@ mod tests {
     }
 
     #[test]
-    fn only_a_geometry_that_repaints_gets_a_seconds_clock() {
+    fn only_a_bar_that_repaints_gets_a_seconds_clock() {
         // Seconds are only honest where something ticks them. The four-line
         // card arms a 0.2s timer for its spinner and the two legacy geometries
         // arm nothing, so a seconds count there would freeze at whatever the
         // last store push happened to see — worse than the coarse reading it
         // replaced, because a stale `0m` at least looks like it means to sit
-        // still. One predicate drives both the resolution and the timer
-        // (`RowHeight::animates`); this is what stops them drifting apart.
-        let clock = |h: RowHeight| {
-            let mut m = BarModel::default();
+        // still.
+        //
+        // Focus is the second half, and it was missing until 2026-09-13: the
+        // timer is armed only while this instance's own tab is on screen, so a
+        // background bar counted seconds that nothing advanced. Stock zellij
+        // keeps its own Alt+h/Alt+l, which switch tabs with no beacon, so a bar
+        // can be VISIBLE and still believe it is not focused — and that is the
+        // one that printed a frozen `7s` through a whole turn.
+        let clock = |h: RowHeight, focused: bool| {
+            let mut m = fleet_bar(11, if focused { 11 } else { 10 });
+            m.beacon(if focused { 11 } else { 10 });
             m.set_row_height(h);
-            m.apply_tabs(vec![tab(10, 0, "a", false)]);
             m.tick(1_003);
-            let mut a = dressed("u1", "/r/one", "main", None, Some(10));
+            let mut a = dressed("u1", "/r/one", "main", None, Some(11));
             a.status = Status::Working;
             a.last_interacted = 1_000;
             m.apply_snapshot(snap(1, vec![a]));
-            match content_at(&m, 0) {
-                RowContent::Agent { elapsed, .. } => elapsed,
-                other => panic!("expected an agent row, got {other:?}"),
-            }
+            assert_eq!(m.own_tab_focused(), focused, "the fixture lies");
+            m.rows()
+                .into_iter()
+                .find_map(|r| match r.1.content {
+                    RowContent::Agent { elapsed, .. } => Some(elapsed),
+                    RowContent::Terminal { .. } => None,
+                })
+                .expect("the fleet must hold the agent row")
         };
-        assert_eq!(clock(RowHeight::Card).as_deref(), Some("3s"));
-        assert_eq!(clock(RowHeight::Double).as_deref(), Some("0m"));
-        assert_eq!(clock(RowHeight::Single).as_deref(), Some("0m"));
+        assert_eq!(clock(RowHeight::Card, true).as_deref(), Some("3s"));
+        assert_eq!(clock(RowHeight::Card, false).as_deref(), Some("0m"));
+        assert_eq!(clock(RowHeight::Double, true).as_deref(), Some("0m"));
+        assert_eq!(clock(RowHeight::Single, true).as_deref(), Some("0m"));
     }
 
     #[test]

@@ -63,35 +63,35 @@ mod shell_text {
         );
     }
 
-    /// The shell's flag and the model's mirror are one fact in two places. A
-    /// disarm that forgot the mirror would buy every later ask a second tick
-    /// forever — twice the deafness on a fleet that stopped spinning — and an
-    /// arm that forgot it would buy none, which is the early judgement the
-    /// count exists to prevent.
+    /// The shell holds no copy of "a tick is in flight". It held one until
+    /// 2026-09-13, mirrored into the model, and the pair needed a test that
+    /// read the two writes as adjacent lines of text to stay together. The
+    /// model owns the fact now, so the property is a type instead of a
+    /// string search — and this is what stops the copy coming back.
     #[test]
-    fn the_armed_flag_and_its_mirror_are_written_together() {
-        let lines: Vec<&str> = SHELL.lines().collect();
-        let edges: Vec<(usize, &str)> = lines
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| l.contains("self.fast_armed = "))
-            .map(|(i, l)| (i, *l))
-            .collect();
-        assert_eq!(
-            edges.len(),
-            2,
-            "expected exactly the arm and the disarm, found {edges:?}"
+    fn the_shell_keeps_no_second_copy_of_the_armed_flag() {
+        assert!(
+            !SHELL.contains("fast_armed"),
+            "the fast-tick flag is the model's (`BarModel::arm_fast_tick`); a \
+             shell-side copy is one fact in two places, and the disarm that \
+             forgets the other buys every later ask a second tick forever"
         );
-        for (at, line) in edges {
-            let armed = line.contains("= true");
-            let mirror = format!("set_fast_tick_armed({armed})");
-            assert!(
-                lines[at + 1].contains(&mirror),
-                "`{}` is not followed by `{mirror}` — the model's mirror has \
-                 drifted from the shell's timer",
-                line.trim()
-            );
-        }
+    }
+
+    /// The spinner is armed over what the pane SHOWS, not over the fleet. A
+    /// row mid-turn below the viewport draws no spinner, so arming for it wakes
+    /// the bar five times a second to animate a glyph nobody can see — the
+    /// quiescence class the drive's phase 6 measures. `visible_rows` is the
+    /// same call the paint makes on the next line, so the two cannot disagree
+    /// about what is on screen.
+    #[test]
+    fn the_spinner_is_armed_over_the_visible_slice() {
+        let render = fn_body("render");
+        assert!(
+            render.contains("arm_spinner(clave_bar::render::visible_rows("),
+            "the spinner must be armed from the viewport slice, not the whole \
+             row list:\n{render}"
+        );
     }
 
     /// The body of a `fn` in the shell, signature to the next one at the same
