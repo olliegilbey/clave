@@ -162,8 +162,9 @@ pub const WEBAPP: u8 = 5;
 /// dormant says everything the vocabulary can say, and a taller frame only
 /// costs the reader vertical scroll on the page where clave is introduced.
 /// Every permutation that matters survives the cut — a worktree and a branch
-/// and two plain checkouts, both providers, a chip and a blank one, the
-/// subagent mark, and one row waiting on a person.
+/// and three plain checkouts, both providers, the subagent mark, and one row
+/// waiting on a person. The blank chip went with the ninth row: every row that
+/// remains carries a title, which is the steady state the frame should sell.
 ///
 /// Two states are deliberately ABSENT. `Failed` is unreachable in the field
 /// (#157: an API error leaves the row amber), and its heavy cross had never

@@ -414,7 +414,9 @@ const HERO_FRAME: usize = 5;
 fn hero_svg(fonts: &[Font], cols: usize, widths: Widths) -> String {
     let rows = showcase();
     // The default height: what a fresh install draws. `height` is a count of
-    // TERMINAL LINES, so a frame showing the whole fleet asks for two per card.
+    // TERMINAL LINES, and the default card is four of them, so a frame showing
+    // the whole fleet asks `lines_per_row` rather than naming a number that
+    // would rot the next time the geometry moves.
     let height = rows.len() * RowHeight::Card.lines_per_row();
     let lines = render_rows(
         &rows,

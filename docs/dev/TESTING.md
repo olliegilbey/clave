@@ -907,14 +907,13 @@ visible are joinable; the rest are unknown, not mismatched. Reading them as
 mismatches invents a bug, and filtering them out silently hides one — print
 every pane and mark the unresolvable ones.
 
-**QA-DRIVE.md and `scripts/qa-drive.sh` are this loop's phases 0–2, scripted.**
-`just qa <scenario>` runs the whole thing as one command — it stages, prints
-the launch line, waits for the human to run it, and drives the moment the
-session is up. The script proves the build, joins the baseline, and drives the
-bind ladder in one traced run, with the same never-discard-output discipline as
-above. The manual steps here remain the
-fallback, and are still the source for phases 3–7, which are not yet
-scripted.
+**QA-DRIVE.md and `scripts/qa-drive.sh` are this loop's whole spine, scripted.**
+`just qa <scenario>` runs it as one command — it stages, prints the launch line,
+waits for the human to run it, and drives every phase the moment the session is
+up, with the same never-discard-output discipline as above. QA-DRIVE.md owns the
+phase list; do not keep a second copy of it here. The manual steps in this
+section remain the fallback, and are what you reach for when the drive cannot
+run at all.
 
 ## Agent-side sanctioned commands
 

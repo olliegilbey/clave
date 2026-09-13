@@ -213,7 +213,14 @@ sandbox scenario="c8-cold-start":
 # THIS build instead of the stable install.
 #
 # Run it in a new terminal window OUTSIDE zellij.
+#
+# It runs the staged binary and does NOT build one. `just qa` builds and stages
+# in the same breath, and the drive's preflight then vouches for that exact
+# build by tag — a rebuild here could hand the session a different binary than
+# the one the preflight read, and nothing downstream would say so. So a missing
+# build is an error with the staging command in it, not a silent rebuild.
 launch:
+    @test -x ./target/release/clave || { echo 'no staged build: run "just qa <scenario>" first (it builds and stages), or "just dist-build" for a bare one'; exit 1; }
     ./target/release/clave dev launch
 
 # Stage + wait for the human's launch + drive phases 0-7, in one command.

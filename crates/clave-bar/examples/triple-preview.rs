@@ -45,7 +45,10 @@ use clave_bar::render::{
 /// The preview's own chrome — the profile captions. Not part of the design.
 const DIM: Rgb = Rgb(0x71, 0x7C, 0x7C);
 
-/// One mock agent card, field-for-field the shape `RowContent::Agent` carries.
+/// One mock agent card. Field-for-field the shape `RowContent::Agent` carries,
+/// because the preview must not be able to draw a row the plugin cannot: the
+/// fixture converts into a real `RowContent::Agent` and goes through
+/// `render_rows`, so a field this struct invented would not compile.
 struct A {
     status: RowStatus,
     prov: Provenance,
@@ -359,7 +362,7 @@ fn animate(frame_secs: f64) {
         );
         for line in render_rows(
             &rows,
-            48,
+            RowHeight::Card.target_cols(false),
             height,
             Widths::EXPANDED,
             &Theme::default(),

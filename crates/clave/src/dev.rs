@@ -614,7 +614,7 @@ pub const SCENARIOS: &[Scenario] = &[
     //
     // Every row here is dormant until someone opens it — seeded rows always
     // are. That is the point of seeding the identity cells: a dormant row
-    // fires no hooks, so without them the capture shows nine half-empty
+    // fires no hooks, so without them the capture shows a fleet of half-empty
     // cards. Open two or three rows before the capture and the frame carries
     // live rows beside dormant ones, which is the honest daily picture.
     Scenario {
