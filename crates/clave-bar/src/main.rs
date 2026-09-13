@@ -872,6 +872,12 @@ impl ZellijPlugin for State {
     }
 
     fn update(&mut self, event: Event) -> bool {
+        // The clock advances on EVERY event, not only on a paint (#232 put it
+        // in `render` alone). Two things read it outside a paint: the fast
+        // tick's strand window, which must age in real time so a claim the
+        // host never delivered stops blocking the next arm, and the stamp
+        // `arm_fast_tick` writes when a width ask books a tick between paints.
+        self.model.tick(wall_now());
         match event {
             Event::PermissionRequestResult(_) => {
                 // Permissions just landed (pre-seeded → immediate): hydrate
@@ -1042,6 +1048,14 @@ impl ZellijPlugin for State {
                 // the moment the last turn ends — the next tick is only armed
                 // by a paint that found a row still working, or by an ask
                 // still owed one.
+                //
+                // A tick the host reports OUTSIDE the fast band is the strand
+                // this branch fixed, in its last remaining form: the claim
+                // stays set, and the paint that would re-arm is the very thing
+                // it blocks. So every expiry drops a claim older than the
+                // strand window, and a drop is a repaint, because only a paint
+                // re-arms the spinner.
+                let healed = self.model.expire_stale_fast_tick();
                 let fast_tick =
                     if elapsed < TIMER_KIND_CUTOFF_SECS && self.model.fast_tick_in_flight() {
                         self.model.fast_tick_fired();
@@ -1070,7 +1084,7 @@ impl ZellijPlugin for State {
                     self.term_poll_armed = false;
                     let changed = self.probe_term_facts();
                     self.arm_term_poll();
-                    return width_moved || changed || fast_tick;
+                    return width_moved || changed || fast_tick || healed;
                 }
                 // The peek leg is the one that must NOT run on a width
                 // expiry: it counts armed peeks, and a foreign decrement
@@ -1084,7 +1098,7 @@ impl ZellijPlugin for State {
                 } else {
                     false
                 };
-                width_moved || peek_sunk || fast_tick
+                width_moved || peek_sunk || fast_tick || healed
             }
             Event::Mouse(Mouse::LeftClick(line, _col)) => {
                 // §6.6: rows are mouse-clickable. line is the rendered row.

@@ -37,7 +37,10 @@ pub mod theme;
 mod shell_text {
     const SHELL: &str = include_str!("main.rs");
 
-    /// **The fast band holds ONE timer.** `model::BarModel`'s `swap_owed`
+    /// **The fast band holds ONE timer.** Branch-review finding, recorded in
+    /// `docs/status/2026-09-13-swarm-review-fixes.md` under `31844a3`.
+    ///
+    /// `model::BarModel`'s `swap_owed`
     /// asks for two fast ticks when one was already in flight at the instant
     /// of a switch ask, and that count is exact only while there is exactly
     /// one fast timer to count. `Event::Timer` carries the elapsed seconds
@@ -91,6 +94,27 @@ mod shell_text {
             render.contains("arm_spinner(clave_bar::render::visible_rows("),
             "the spinner must be armed from the viewport slice, not the whole \
              row list:\n{render}"
+        );
+    }
+
+    /// Every event heals the fast band, and every event advances the clock
+    /// the heal is judged on. `render` alone used to tick it (#232), which
+    /// made the strand window age in paints — and a stale claim is exactly
+    /// what stops the paints, because the spinner is re-armed by one.
+    #[test]
+    fn every_event_ages_the_fast_band_and_can_drop_a_stale_claim() {
+        let update = fn_body("update");
+        assert!(
+            update.contains("self.model.tick(wall_now());"),
+            "the clock must advance on every event, or a tick armed between \
+             paints carries a stamp minutes old and is judged stale at \
+             once:\n{update}"
+        );
+        assert!(
+            update.contains("expire_stale_fast_tick()"),
+            "a timer expiry must be allowed to drop a claim the host never \
+             honoured; leave it to the next paint and the paint never \
+             comes:\n{update}"
         );
     }
 

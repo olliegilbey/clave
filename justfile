@@ -220,7 +220,7 @@ sandbox scenario="c8-cold-start":
 # the one the preflight read, and nothing downstream would say so. So a missing
 # build is an error with the staging command in it, not a silent rebuild.
 launch:
-    @test -x ./target/release/clave || { echo 'no staged build: run "just qa <scenario>" first (it builds and stages), or "just dist-build" for a bare one'; exit 1; }
+    @test -x ./target/release/clave || { echo 'no staged build: run "just qa" first (it builds and stages), or "just dist-build" for a bare one'; exit 1; }
     ./target/release/clave dev launch
 
 # Stage + wait for the human's launch + drive phases 0-7, in one command.

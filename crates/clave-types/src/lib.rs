@@ -617,7 +617,10 @@ impl RowHeight {
     /// place (`BarModel::animates_now`) for the timer and the clock to share.
     /// A seconds-resolution number where nothing repaints would freeze
     /// mid-count and read as broken, where the coarse `0m` it replaced sat
-    /// still and read as correct.
+    /// still and read as correct. Both halves are ratified in
+    /// docs/superpowers/specs/2026-09-08-triple-height-card-lock.md: §4.5
+    /// (the status mark animates while working) and §4.4 (the turn clock is
+    /// the only live number on the card).
     pub fn animates(self) -> bool {
         self.lines_per_row() == 4
     }

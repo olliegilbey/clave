@@ -1117,11 +1117,16 @@ impl BarModel {
         self.row_height
     }
 
-    /// The shell's wall clock, called once before every render (#232):
-    /// `main.rs` supplies `wall_now()`, and the existing `TERM_POLL_SECS`
-    /// cadence's re-render is what keeps the elapsed cell's minutes honest
-    /// between pushes. See the `now` field doc for why this is a tick rather
-    /// than a parameter on `rows`.
+    /// The shell's wall clock. `main.rs` supplies `wall_now()` before every
+    /// render (#232) AND at the head of every event, and the existing
+    /// `TERM_POLL_SECS` cadence's re-render is what keeps the elapsed cell's
+    /// minutes honest between pushes. See the `now` field doc for why this is
+    /// a tick rather than a parameter on `rows`.
+    ///
+    /// Ticking on events too is what makes the fast-tick strand window age in
+    /// real time: a claim is stamped with this clock, and a paint is the only
+    /// thing that re-arms — so a window that advanced only on paints could not
+    /// time out the one claim that stops them.
     pub fn tick(&mut self, now: u64) {
         self.now = now;
     }
@@ -3079,6 +3084,20 @@ impl BarModel {
     pub fn fast_tick_fired(&mut self) {
         self.fast_tick_armed = false;
         self.fast_tick_armed_at = None;
+    }
+
+    /// Drop a claim that outlived the strand window, and say whether one was
+    /// dropped. The shell calls this on every timer expiry, so the window ages
+    /// on the host's own clock: [`Self::arm_fast_tick`] can also clear a stale
+    /// claim, but only a PAINT asks it, and a paint is the thing the stale
+    /// claim withholds. A drop is worth a repaint for the same reason — the
+    /// spinner is re-armed by the paint, not by the expiry.
+    pub fn expire_stale_fast_tick(&mut self) -> bool {
+        let stale = self.fast_tick_armed && !self.fast_tick_in_flight();
+        if stale {
+            self.fast_tick_fired();
+        }
+        stale
     }
 
     /// Whether anything repaints this bar on a sub-second timer right now.
@@ -6422,6 +6441,42 @@ mod tests {
             !m.arm_fast_tick(),
             "the re-arm must re-stamp its claim, or every later ask starts \
              another timer and the band holds more than one"
+        );
+    }
+
+    /// The strand window ages on the host's clock, not on paints.
+    ///
+    /// `arm_fast_tick` can also drop a stale claim, but a PAINT is the only
+    /// caller, and a stale claim stops the paints: the spinner is re-armed by
+    /// the paint, so a mis-sorted expiry kills the animation until some other
+    /// event repaints the bar. Every expiry therefore gets to drop the claim,
+    /// and says so, so the shell repaints and re-arms.
+    #[test]
+    fn any_expiry_drops_a_claim_the_host_never_honoured() {
+        let mut m = focused_bar();
+        m.tick(100);
+        assert!(m.arm_fast_tick(), "the first ask starts the timer");
+        m.tick(101);
+        assert!(
+            !m.expire_stale_fast_tick(),
+            "a tick still credible is left alone — dropping it early would put \
+             two timers in a band that holds one"
+        );
+        m.tick(102);
+        assert!(
+            m.expire_stale_fast_tick(),
+            "past the strand window the claim is dropped, and the drop is \
+             reported so the shell repaints"
+        );
+        assert!(
+            !m.expire_stale_fast_tick(),
+            "nothing is claimed now, so nothing is dropped and no repaint is \
+             bought"
+        );
+        assert!(
+            m.arm_fast_tick(),
+            "the drop must leave the band armable, or the heal is only half a \
+             heal"
         );
     }
 

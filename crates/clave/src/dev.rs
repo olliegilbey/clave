@@ -716,7 +716,7 @@ pub const SCENARIOS: &[Scenario] = &[
                 ..ScenarioAgent::DEFAULT
             },
             // Two weeks cold, and no reading at all on the last row: the
-            // "nothing measured yet" cell beside eight that have one.
+            // "nothing measured yet" cell beside six that have one.
             ScenarioAgent {
                 slug: "zsh",
                 ago_secs: 1_209_600,
