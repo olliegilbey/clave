@@ -565,14 +565,21 @@ pub const SCENARIOS: &[Scenario] = &[
     // session died, plus two that were not. It stages the one state a kill
     // leaves behind — rows still holding their dead session's tab binds — so
     // a single launch exercises the whole path: `clear_session_order` records
-    // the live set, the layout bakes a tab per row in that order, and only
-    // the focused one runs.
+    // the live set, `restore_rows` ranks it, the layout bakes a tab per row,
+    // and only the first one runs.
     //
-    // The tab numbers are deliberately NOT 0,1,2,3. Screen order is the
-    // ascending tab id, which must survive both the store's uuid-keyed
-    // iteration and the gaps a real session accumulates as tabs close; a
-    // contiguous run would pass by luck. Expected order is therefore
-    // `restored-a, restored-b, restored-c, restored-d`.
+    // The tab numbers are deliberately NOT 0,1,2,3: the set must survive both
+    // the store's uuid-keyed iteration and the gaps a real session accumulates
+    // as tabs close, and a contiguous run would pass by luck.
+    //
+    // RECENCY DISAGREES WITH TAB ORDER, also deliberately. Tab order is
+    // a, b, c, d; `clear_session_order` backfills ordinals from
+    // `last_interacted`, so the RANK is d, b, c, a. Staging them in agreement
+    // would let a relaunch that simply baked the tab strip pass. So the
+    // expectations are: rows read `restored-d, restored-b, restored-c,
+    // restored-a`, and the ONE row that starts is `restored-d` — which is
+    // also the rotated row, so the launch resumes the rotated conversation
+    // rather than the minted one.
     //
     // Four, not eleven: a resume costs ~350 MB resident whatever the
     // transcript weighs, and the point of the drive is the one-runs-rest-held
@@ -583,7 +590,7 @@ pub const SCENARIOS: &[Scenario] = &[
         agents: &[
             ScenarioAgent {
                 slug: "restored-a",
-                ago_secs: 120,
+                ago_secs: 900,
                 bound_tab: Some(0),
                 ..ScenarioAgent::DEFAULT
             },
@@ -611,7 +618,7 @@ pub const SCENARIOS: &[Scenario] = &[
             // now a LATER moment than it used to be, so it is worth watching.
             ScenarioAgent {
                 slug: "restored-d",
-                ago_secs: 900,
+                ago_secs: 120,
                 rotated: true,
                 bound_tab: Some(9),
                 ..ScenarioAgent::DEFAULT
@@ -1828,6 +1835,32 @@ mod tests {
         assert!(
             bound.windows(2).any(|w| w[1].0 > w[0].0 + 1),
             "the bound tabs must not be contiguous"
+        );
+        // And the RANK must disagree with the tab order, or a relaunch that
+        // simply baked the tab strip would pass this fixture. Ordinals are
+        // backfilled from `last_interacted` at launch, so rank is recency.
+        let mut by_rank: Vec<&str> = bound.iter().map(|&(_, slug)| slug).collect();
+        let age = |slug: &str| rr.agents.iter().find(|a| a.slug == slug).unwrap().ago_secs;
+        by_rank.sort_by_key(|slug| age(slug));
+        assert_eq!(
+            by_rank,
+            vec!["restored-d", "restored-b", "restored-c", "restored-a"],
+            "the order the fleet comes back in"
+        );
+        assert_ne!(
+            by_rank,
+            bound.iter().map(|&(_, slug)| slug).collect::<Vec<_>>(),
+            "rank must not agree with tab order"
+        );
+        // The top of that rank is the one row a relaunch actually starts, and
+        // it is the ROTATED row: the launch resumes the rotated conversation,
+        // not the minted one (#99), which used to happen only on navigation.
+        assert!(
+            rr.agents
+                .iter()
+                .find(|a| a.slug == by_rank[0])
+                .is_some_and(|a| a.rotated),
+            "the row that starts is the rotated one"
         );
         let dormant: Vec<&str> = rr
             .agents
