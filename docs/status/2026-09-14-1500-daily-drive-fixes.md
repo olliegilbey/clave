@@ -9,8 +9,18 @@ repository"), so it was asked explicitly in a comment; the CLI lane had already
 run against `origin/main` and its three findings are fixed in `dc996eb`.
 The PR round then found two more, fixed in `adb2d8a`. Five findings, none
 declined. Each thread has a reply; **the threads need Ollie to resolve
-them** — the agent's token is refused on `resolveReviewThread`, and a merge
-is blocked until every thread is resolved.
+them** — the agent's token is refused on `resolveReviewThread`. That is
+CONTRIBUTING's convention, not a gate: GitHub reports the PR `MERGEABLE` /
+`CLEAN` with both threads open, so resolution is not enforced by branch
+protection.
+
+**Three blind reviewers then read the branch** (one per area: the worktree
+recording, the status transition, the card geometry). They found one MAJOR
+defect in a fix committed the same afternoon, one inverse defect the
+widening had made reachable, two tests that passed by construction, and two
+user-facing docs left stale. All fixed. The card geometry was proved sound
+exhaustively — every reading 0..1300s crossed with nine token values, both
+widths, every column 1..=80.
 
 ## Done and committed
 
@@ -25,6 +35,9 @@ is blocked until every thread is resolved.
 | `77f64ee` | QA-DRIVE.md phase 5d — the meter seam, specified. |
 | `dc996eb` | Review round: the worktree repair was spawning git inside the store lock, so every hook in the fleet queued behind it. The calls moved out; only the mutation takes the lock. |
 | `adb2d8a` | Second review round: the repair compared a row's `cwd` to worktree roots for EQUALITY, but a row's cwd is wherever it was added from, so every row added in a subdirectory of a worktree kept the branch mark. It also recorded the cwd rather than the worktree, which disagreed with the add path. Both fixed by `worktree_holding`. |
+| `9d01f68` | **The red fix was wrong, and its failure mode was worse than the defect.** It compared the reading to the count in the RECORD, which `count_due` can hold back — so a prompt landing in that gap cleared on the withheld figure, then the idle nag restored red. Red → amber → red, with the `wants` cell blanking each time. Two readings inside the block are needed; `metered_at` counts them. |
+| `31d6ce1` | `apply_relocation` left `worktree` set, so a row following its transcript OUT of a worktree kept the tree mark forever — the inverse of `435e69a`, made reachable by it. Plus a resume test that passed by construction. |
+| `7d67682` | Nothing tied the clock's widest reading to the cell that holds it; README and UBIQUITOUS_LANGUAGE still described a two-band clock. |
 
 Each is gated (`fmt`, `test --workspace`, wasm build, `clippy -D warnings`).
 Every new test was proved to fail without its fix.
@@ -91,13 +104,31 @@ number, widen the collapsed card from 16 columns, do not narrow the clock.
 
 ## Open
 
-- **Phase 5d is spec-only.** Script it.
+- **Phase 5d is spec-only.** Script it. It is now the ONLY automated check
+  that could reach the red transition, and that transition has been wrong once
+  already.
+- **`heal_worktrees` and `linked_worktree_root` have no test against a real
+  repo.** Only the pure helpers are covered. The fact the whole feature rests
+  on — that `rev-parse --show-toplevel` and a `worktree list --porcelain` entry
+  canonicalize to the SAME string — is asserted nowhere. The harness exists
+  (`store_worktree_dirs_lists_main_and_linked_from_a_real_repo` builds a real
+  repo with a real linked worktree in a tempdir), so this is a dozen lines.
+- **The worktree repair has no hand-run verb.** `backfill` has `clave
+  backfill` for exactly the "it did not run when it should have" case; this
+  has nothing, and it only runs on a version refresh.
 - **`clave rows` is not atomic.** It writes the store, then regenerates. A
   failure between them leaves the split that shows as a second sidebar. The
   release fix removed today's cause, not the class.
 - **A row whose worktree was DELETED stays unmarked** — git cannot vouch for
   it and the bar asserts nothing it cannot measure. Three of Ollie's dormant
   rows are in this state. Deliberate.
+- **Legibility to judge by eye, named by the review:** the middle band's real
+  worst case is not `130k9m59s` but `113k 1m 7s` — the gap between the two
+  numbers is one cell and the gap INSIDE the clock is also one cell, so line 3
+  can read as three evenly spaced groups instead of two numbers. A megatoken
+  row makes it `1m   1m 7s`, two different `m` units on one line. Ink separates
+  them while the turn is live and stops doing so after. §5.3's escape hatch is
+  two more columns on the collapsed card.
 - **Eyeball checks this branch has never had**: tofu on the provider and
   worktree marks (Nerd Fonts 3.5+), the spinner's six frames (five arrive by
   fallback from Menlo, so weight and baseline can jump), `Alt+c` at 16
