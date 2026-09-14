@@ -1,7 +1,7 @@
 # 2026-09-14 12:20 — the second bar after the 0.5.0 cut
 
 Live on Ollie's fleet, after `just release` (v0.5.0) and `clave rows card`.
-**Not fixed. Diagnosed from disk only — no session touched.**
+**Root cause found and fixed. See "Resolved" at the end.**
 
 ## Symptom
 
@@ -60,3 +60,50 @@ back when regeneration fails. FOOTGUNS entry to follow.
 
 `chore/release-0.5.0` — the 0.5.0 bump + cut record. Local only, no tag,
 nothing pushed. Cut record: `docs/status/2026-09-14-0.5.0-cut.md`.
+
+## Resolved — 2026-09-14 13:xx
+
+The error text, once captured, was the whole bug. The installed launcher
+refused its own setup with the guard that exists to stop a DEV binary
+writing a release install.
+
+It was right to refuse, by its own test. `run_setup` tells a release
+binary from a dev one by asking whether the bar wasm is embedded in it
+(`release::embedded_wasm()`). The `release:` recipe in the justfile built
+the CLI **without `CLAVE_BAR_WASM`** — only `dist-build` and release CI
+set it. So every binary ever installed by `just release` answered "dev
+build" about itself.
+
+Measured, not inferred: no `clave-v*` under `~/.local/share/clave/bin/`,
+v0.1.0 through v0.5.0, contains a wasm module. The installed v0.5.0 is
+2,496,832 bytes; rebuilt with the embed it is 4,808,656, which is the
+2.3 MB bar wasm riding inside it.
+
+Consequences, all of them latent since v0.1.0:
+
+- `clave setup` could never run on a machine cut with `just release`.
+- `clave rows` regenerates through the same function, so it could never
+  change the geometry either. It wrote the store, failed, and left the
+  split this document describes.
+
+### The fix
+
+1. `justfile` — the `release:` recipe sets `CLAVE_BAR_WASM` on the CLI
+   build, as `dist-build` already did. A local cut now produces the same
+   KIND of artifact cargo-dist ships.
+2. `crates/clave/tests/release_recipe.rs` — a new gate. The code tests
+   the artifact for a property; nothing made the recipe that builds the
+   artifact carry it. This test is that link, for both recipes.
+3. `docs/FOOTGUNS.md` — the entry, under PATH and version coherence,
+   beside the dev-setup guard it interacts with.
+
+Verified by building: the CLI built through the fixed line carries the
+wasm magic; the one on disk does not.
+
+### Still owed
+
+`clave rows` is not atomic, and that is a separate defect. It persists
+the mode, then regenerates. Any failure between the two leaves the store
+and the generated files disagreeing, and the only symptom the operator
+sees is a second sidebar. The fix above removes today's cause, not the
+class. Roll the store back when regeneration fails.
