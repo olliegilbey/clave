@@ -158,8 +158,10 @@ the stable binary (FOOTGUNS, 2026-08-24).
    3. `scripts/qa-drive.sh qa-fleet` — the full spine, phases 0–7 (with 5b,
       5c and 6b in between); stop on first failure.
    **Full 0–7 driven live green: run 4, 2026-08-17**, both eyeball
-   checkpoints confirmed; and **run 11, 2026-09-11**, all ten phases
-   including the new 5b and 6b, on the first run of the one-command loop. Runs 1–3 each went red on one real finding (all
+   checkpoints confirmed; and **run 11, 2026-09-11**, the ten labels that
+   existed then (5b and 6b were the new ones), on the first run of the
+   one-command loop. The drive carries **eleven** now: 5c joined on
+   2026-09-12 and has not been driven live yet. Runs 1–3 each went red on one real finding (all
    fixed and recorded in FOOTGUNS.md); the script header's ledger records
    how each once-pending assumption settled. Still awaiting a first live
    run: the CONCURRENT burst shape (ledger (6) — runs 1–4 drove the burst

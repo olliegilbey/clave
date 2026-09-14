@@ -228,6 +228,24 @@ waiting on a frame — the spinner stops the moment the last turn ends, and an a
 that outlived it must not strand. Tagged timers remain the prerequisite for
 anything FASTER than 0.15s.
 
+**Amended 2026-09-13 — one timer, not two in one band.** The paragraphs above
+are the chronology, and the collision they solve is now history rather than a
+live hazard: the spinner and the width cooldown do not each arm a timer. They
+share ONE, at `FAST_TICK_SECS`, armed through the single funnel
+`main.rs::arm_fast_tick`, which asks `BarModel::arm_fast_tick` whether a tick
+is already in flight. `swap_owed` is unchanged and still counts one or two
+expiries — that count is exact precisely BECAUSE there is one timer to count.
+Both `Effect::SwapWidth` and `Effect::RearmWidthCooldown` go through the same
+funnel.
+
+What replaced the collision is a smaller problem: a claimed tick that the host
+reports outside its band. The claim must not outlive the timer behind it, or
+the spinner freezes — a paint is what re-arms, and the stale claim is what
+withholds the paint. Two answers, in `main.rs`'s `Event::Timer`: elimination
+(with no peek and no term poll outstanding, an expiry can only be the fast one)
+and a strand window on the model clock. Tagged timers remain the prerequisite
+for anything FASTER than 0.15s.
+
 ### 4.6 The subagent mark is a boolean
 
 `\u{f171a}` `md-robot_happy_outline`, in `#9CABCA` — the quiet blue-grey of a

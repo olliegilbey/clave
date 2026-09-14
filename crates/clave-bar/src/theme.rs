@@ -124,6 +124,9 @@ pub const PALETTE_LEN: usize = 8;
 /// way on every card. Main draws nothing, as ever. Fixed under every theme for
 /// the same reason the status inks are — a green that meant "worktree" only
 /// under kanagawa would be a legend the reader has to relearn per theme.
+///
+/// The glyph-and-ink table is docs/superpowers/specs/2026-09-08-triple-height-card-lock.md
+/// §4.2, over §4.1's rail.
 pub const WORKTREE_INK: Rgb = Rgb(0x98, 0xBB, 0x6C); // springGreen
 pub const BRANCH_INK: Rgb = Rgb(0x95, 0x7F, 0xB8); // oniViolet
 
@@ -147,6 +150,10 @@ pub const TURN_INK: Rgb = Rgb(0x7E, 0x9C, 0xD8);
 /// reading its character map rather than a cheat sheet. The codicon set has no
 /// `cod-robot` at all, and `fa-robot` is not at the codepoint published for it;
 /// both candidates would have shipped as tofu.
+///
+/// The boolean is docs/superpowers/specs/2026-09-08-triple-height-card-lock.md
+/// §4.6; the two tofu candidates are its §6, and FOOTGUNS.md § Text, glyphs,
+/// rendering.
 pub const SUBS_INK: Rgb = Rgb(0x9C, 0xAB, 0xCA);
 pub const SUBS_MARK: char = '\u{f171a}';
 

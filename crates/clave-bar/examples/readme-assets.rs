@@ -18,7 +18,8 @@
 //! flower rather than its first frame. A still image cannot show motion, so
 //! the frame it freezes on has to carry the meaning instead: frame 0 is a bare
 //! dot, which reads as a row doing nothing at all — the opposite of what a
-//! working row is saying (Ollie, 2026-09-12).
+//! working row is saying (Ollie, 2026-09-12, over the animation ratified in
+//! docs/superpowers/specs/2026-09-08-triple-height-card-lock.md §4.5).
 //!
 //! Colours come from `clave_bar::render` (`RowStatus::mark`, `BATTERY`,
 //! `PALETTE`, `BASE`, …), never copied, so the assets cannot drift from the
@@ -99,7 +100,10 @@ fn load_fonts() -> Vec<Font> {
     // carry a worktree mark that no icon set has. That mark is now `fa-tree`,
     // which JetBrainsMono carries — and the reason to change it was exactly
     // this dependency's cost on screen: a fallback face brings its own
-    // metrics, so the glyph rendered off-centre in its cell.
+    // metrics, so the glyph rendered off-centre in its cell. The swap and its
+    // reason are docs/superpowers/specs/2026-09-08-triple-height-card-lock.md
+    // §4.2, under the rule in its §6: read the font's own cmap, never a cheat
+    // sheet.
     let mut fonts = vec![mono];
     // Nerd Fonts' Symbols-Only face, for glyphs newer than the patched mono
     // font installed here. The provider marks are the live case: they landed in
@@ -447,9 +451,12 @@ fn hero_svg(fonts: &[Font], cols: usize, widths: Widths) -> String {
         * font_px;
     let ascent = face.ascender() as f32 / upem * font_px;
     let descent = -face.descender() as f32 / upem * font_px;
-    // No extra leading (#232): a terminal cell has none, and the card's whole
-    // idea is the arc BINDING its two lines — six percent of slack between the
-    // rows is enough to break the join and leave two disconnected brackets.
+    // No extra leading (#232, and it outlived the geometry that made it): a
+    // terminal cell has none, and the card is held together down the column —
+    // the rail beside every line, and the shadow rule closing the last one
+    // (docs/superpowers/specs/2026-09-08-triple-height-card-lock.md
+    // §4.1, §5.2). Six percent of slack between rows breaks that column into
+    // four unrelated strips, the same way it once broke the two-line arc.
     let cell_h = ascent + descent;
     let pad = 12.0;
     let width = cols as f32 * advance + pad * 2.0;

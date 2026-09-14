@@ -108,7 +108,11 @@ impl A {
                 pr: self.pr,
                 branch: self.branch.into(),
                 elapsed: Some(self.elapsed.into()),
-                // The two-line card has no `wants` cell.
+                // Named because the fixture mirrors `RowContent::Agent`
+                // field for field; `None` because `wants` is the four-line
+                // card's flexing cell and no earlier geometry has anywhere to
+                // put it (docs/superpowers/specs/2026-09-08-triple-height-card-lock.md
+                // §4.7).
                 wants: None,
                 subagents: false,
             },

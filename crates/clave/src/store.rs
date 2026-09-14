@@ -22,6 +22,13 @@ use anyhow::{Context, Result};
 // name for is the FUTURE, not corruption. It lives in `clave-types` because
 // BOTH sides need it — the store reader here and the snapshot the bar parses
 // off the pipe — and its doc carries the limits on reaching for it.
+//
+// The compatibility rule it comes from, measured 2026-09-10, is in
+// FOOTGUNS.md: "An older clave reading a newer store dies on the whole FILE,
+// not the field". Adding a variant to a persisted enum is a BREAKING store
+// change unless the field already read leniently in the version before it
+// ships. Its cost on the store side is the entry below that one: the guess is
+// written back, so it erases rather than misreads.
 use clave_types::{Agent, AgentSnapshot, Status, lenient};
 use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
@@ -35,6 +42,10 @@ pub enum LabelSource {
     /// `#[default]` is for the store's lenient read (see `lenient`), and this
     /// is the safe direction of the two: "keep scanning" costs one tail read,
     /// where guessing `Summary` would freeze a label this binary cannot judge.
+    ///
+    /// The direction matters because the guess PERSISTS — `with_store_mut` is
+    /// read-modify-write (FOOTGUNS.md, "`lenient` survives an unknown enum
+    /// value; the WRITE-BACK then makes the guess permanent").
     #[default]
     FirstPrompt,
     Summary,
@@ -304,7 +315,11 @@ pub struct Store {
     /// `deserialize_with` for the OTHER direction, which `default` does not
     /// cover: `default` answers a MISSING field, and the field being present
     /// with an unfamiliar value is a different question with a much worse
-    /// answer. See [`clave_types::lenient`].
+    /// answer. See [`clave_types::lenient`], and FOOTGUNS.md's two entries on
+    /// it — the outage it prevents (2026-09-10) and the erase it cannot,
+    /// which [`Self::row_height`]'s own pinning test
+    /// (`a_guessed_row_height_is_written_back_over_the_users_choice`) holds
+    /// until that decision is taken.
     #[serde(default, deserialize_with = "lenient")]
     pub row_height: clave_types::RowHeight,
 }

@@ -213,6 +213,9 @@ impl RowStatus {
     /// One definition, two callers. The card asks it to pick the glyph, and
     /// the shell asks it to decide whether to arm another animation frame — so
     /// an animating card and a sleeping timer cannot disagree.
+    ///
+    /// Ratified in docs/superpowers/specs/2026-09-08-triple-height-card-lock.md
+    /// §4.5, "The status mark animates while working".
     pub fn thinking(self) -> bool {
         matches!(self, RowStatus::Working)
     }
