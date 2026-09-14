@@ -1091,6 +1091,16 @@ pub fn apply_hook_event(
     };
     let mut changed = false;
     if let Some(next) = status_for_event(event, payload.message.as_deref(), rec.status) {
+        // Entering the block clears the meter's stamp, exactly as `Stop` does
+        // below and for the same reason: the next reading must land whatever
+        // the interval says. `statusline::apply_statusline` reads a zero stamp
+        // as "no count has landed since the block began", which is what stops
+        // a count the PACING withheld before the block from reading as the
+        // response that ended it. Only on the transition IN — a repeated
+        // notification must not re-open that window.
+        if next == Status::NeedsYou && rec.status != next {
+            rec.metered_at = 0;
+        }
         changed |= rec.status != next;
         rec.status = next;
     }
@@ -2896,6 +2906,48 @@ mod tests {
         apply_hook_event(&mut s, "u1", "Notification", &nag, None, 1004, true);
         assert_eq!(s.agents["u1"].status, Status::NeedsYou);
         assert_eq!(s.agents["u1"].wants, None);
+    }
+
+    #[test]
+    fn entering_the_block_clears_the_meters_stamp_but_a_repeat_does_not() {
+        // The meter needs a baseline taken INSIDE the block, or a count the
+        // pacing withheld beforehand reads as the response that ended it
+        // (`statusline::apply_statusline`). A zero stamp is how the meter
+        // knows it has not read one yet, so entering the block clears it —
+        // and a repeated notification must NOT, or the window re-opens on
+        // every ~60s nag.
+        let mut s = Store::default();
+        s.agents.insert("u1".into(), rec("u1"));
+        let msg = |m: &str| HookPayload {
+            session_id: Some("u1".into()),
+            message: Some(m.into()),
+            ..HookPayload::default()
+        };
+        let perm = msg("Claude needs your permission to use Bash");
+        let nag = msg("Claude is waiting for your input");
+
+        // A working row mid-turn, with a reading already stamped.
+        let bare = HookPayload {
+            session_id: Some("u1".into()),
+            ..HookPayload::default()
+        };
+        apply_hook_event(&mut s, "u1", "UserPromptSubmit", &bare, None, 1000, true);
+        s.agents.get_mut("u1").unwrap().metered_at = 1000;
+        assert_eq!(s.agents["u1"].status, Status::Working);
+
+        apply_hook_event(&mut s, "u1", "Notification", &perm, None, 1001, true);
+        assert_eq!(s.agents["u1"].status, Status::NeedsYou);
+        assert_eq!(s.agents["u1"].metered_at, 0, "the block resets the meter");
+
+        // A reading lands and stamps again; the nag that follows must leave
+        // that baseline alone.
+        s.agents.get_mut("u1").unwrap().metered_at = 1002;
+        apply_hook_event(&mut s, "u1", "Notification", &nag, None, 1003, true);
+        assert_eq!(s.agents["u1"].status, Status::NeedsYou);
+        assert_eq!(
+            s.agents["u1"].metered_at, 1002,
+            "a repeated notification must not re-open the window"
+        );
     }
 
     #[test]

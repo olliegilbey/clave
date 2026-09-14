@@ -202,28 +202,46 @@ pub fn apply_statusline(
     let tokens_before = rec.context_tokens;
     note_live_session(rec, uuid, reading.session_id.as_deref(), own_claude);
     let mut changed = false;
-    // Red must not outlive the block. Approving a permission prompt fires no
-    // hook clave could listen to, and there is no such event to register:
-    // `PermissionRequest` fires BEFORE the decision and `PermissionDenied`
-    // only for auto-mode denials (hook reference, read 2026-09-14). So
-    // `NeedsYou` used to survive to the turn's `Stop` — seen live on the
-    // 0.5.0 cut, the card red while the agent's own footer counted the turn.
+    // Red must not outlive the block. Answering a permission prompt fires no
+    // hook clave listens to — `HOOK_EVENTS` (setup.rs) registers five events
+    // and none of them means "answered" — so `NeedsYou` used to survive to
+    // the turn's `Stop`, the card red while the agent's own footer counted
+    // the turn. Seen live on the 0.5.0 cut.
     //
     // The meter already answers it, and costs nothing: this process is being
     // spawned anyway. A token count that has MOVED is an API response that
-    // landed, and no response lands while a prompt waits for an answer. The
-    // RAW reading, not the applied one, so the pacing below cannot swallow
-    // the proof.
+    // landed, and no response lands while a prompt waits for an answer.
+    //
+    // TWO readings are needed, not one, and the stamp is what counts them.
+    // The count in the record can be OLDER than the reading, because
+    // `count_due` withholds a move inside `APPLY_INTERVAL_SECS` — in the
+    // measured turn (see that constant) the store held 19179 from 29s to 38s
+    // while every reading carried 19811. Comparing a reading against that
+    // withheld figure reads the LAST response before the block as the first
+    // one after it, and clears red with the prompt still on screen. The
+    // fixture in this file proves the re-run that would do it happens:
+    // `CAPTURED_WINDOWS` 2 and 3 are byte-identical, one response read twice.
+    //
+    // So the hook zeroes `metered_at` on the way into the block, and a zero
+    // stamp here means no reading has landed since. The first blocked reading
+    // therefore does not clear — it falls through and `count_due` lands it,
+    // establishing a baseline taken INSIDE the block. Only a later reading
+    // that exceeds THAT can clear, and only a response can produce one.
+    //
+    // The cost is one store write per block, and a clear that waits for the
+    // next reading when a prompt is answered before any reading arrives. Both
+    // are cheap against the alternative, which is not "red clears late" but
+    // red → amber → red: the idle nag restores it ~60s later, and the `wants`
+    // cell blanks with the colour (`clave-bar` gates the ask on `NeedsYou`).
+    // A flicker in the one colour that means "act now" is worse than a late
+    // clear, and the bar's rule is that two states a person cannot tell apart
+    // are one state.
     //
     // ONLY `NeedsYou` is cleared. A moved count after `Stop` is the
     // one-response-behind case this whole module exists for, not a turn
     // restarting, and promoting `Done` would undo the hook that just ran.
-    //
-    // The residual is narrow and named: if a reading is paced out and the
-    // statusLine then re-runs DURING the block, the withheld figure reads as
-    // movement and clears red early. Accepted against red that never clears
-    // at all, and the trigger is message-shaped rather than a wall clock.
     if rec.status == clave_types::Status::NeedsYou
+        && rec.metered_at != 0
         && reading
             .tokens
             .is_some_and(|t| t > tokens_before.unwrap_or(0))
@@ -515,6 +533,9 @@ mod tests {
         // answers it, the agent resumes — and the row stays red for the rest
         // of the turn. There is no "permission answered" hook to listen to,
         // so the meter is the evidence.
+        // A block the meter has already read once inside: `metered_at` is
+        // stamped, so the count in the record was taken DURING the block and
+        // anything above it is a response that landed after it.
         let blocked = || {
             let mut s = metered_store();
             s.agents.get_mut("minted").unwrap().status = Status::NeedsYou;
@@ -543,6 +564,49 @@ mod tests {
         s.agents.get_mut("minted").unwrap().status = Status::Done;
         apply_statusline(&mut s, "minted", &moved, later, true, ZONE);
         assert_eq!(s.agents["minted"].status, Status::Done);
+    }
+
+    #[test]
+    fn the_count_the_pacing_withheld_does_not_pass_as_the_answer() {
+        // The reading can be AHEAD of the record, because `count_due` holds a
+        // move inside `APPLY_INTERVAL_SECS`: in the measured turn the store
+        // held 19179 from 29s to 38s while every reading carried 19811. If a
+        // permission prompt lands in that gap, the withheld figure is the LAST
+        // response before the block, and reading it as the first one after
+        // would clear red with the prompt still on screen — then the idle nag
+        // restores it, which is a flicker in the one colour that means "act
+        // now". `apply_hook_event` zeroes the stamp on the way in, and a zero
+        // stamp means no reading has landed since.
+        let entering = || {
+            let mut s = metered_store();
+            let r = s.agents.get_mut("minted").unwrap();
+            r.status = Status::NeedsYou;
+            r.metered_at = 0; // what the hook stamps entering the block
+            s
+        };
+        let withheld = reading("minted", Some(19_811), "claude-fable-5-1", "medium");
+        let answered = reading("minted", Some(20_508), "claude-fable-5-1", "medium");
+
+        // The first reading inside the block does NOT clear — but it lands,
+        // so the next one has a baseline taken inside the block.
+        let mut s = entering();
+        apply_statusline(&mut s, "minted", &withheld, 1100, true, ZONE);
+        assert_eq!(
+            s.agents["minted"].status,
+            Status::NeedsYou,
+            "a count the pacing withheld is not proof the block ended"
+        );
+        assert_eq!(s.agents["minted"].context_tokens, Some(19_811));
+        assert_eq!(s.agents["minted"].metered_at, 1100);
+
+        // Re-runs carrying that same figure keep proving nothing.
+        apply_statusline(&mut s, "minted", &withheld, 1101, true, ZONE);
+        assert_eq!(s.agents["minted"].status, Status::NeedsYou);
+
+        // The response that follows the answer exceeds the baseline the block
+        // itself landed, and only that clears.
+        apply_statusline(&mut s, "minted", &answered, 1200, true, ZONE);
+        assert_eq!(s.agents["minted"].status, Status::Working);
     }
 
     #[test]
