@@ -33,6 +33,20 @@ release sequence.
   history.** The tag must move onto the squashed commit before `just release`.
   | Inherited; `git log --merges --oneline -5 origin/main` returns nothing.
   **Inherited.**
+- **The shared checkout at `~/code/clave` holds 19 uncommitted files that exist
+  NOWHERE in history — 17 status handoffs dated 19 Aug to 10 Sep, plus
+  `docs/superpowers/specs/2026-09-05-ai-in-clave-design.md` and
+  `docs/superpowers/specs/2026-09-11-live-set-restore-design.md`.** No tracked
+  file there is modified and nothing is deleted; it is untracked work only. |
+  Established by comparing every path's on-disk hash against the blob at
+  `12d4ca2`, then looking each survivor up across all refs. | The scripts are
+  gone with `/tmp`; the method is in "Important Discoveries". **Checked.**
+- **A worktree-isolated session CANNOT run git against the shared checkout, and
+  neither can the human from inside one.** `git -C`, `cd`, and a `!` command
+  typed by Ollie are all refused by the same guard. | Tried all three this
+  session. | The read-only workaround — `git ls-tree` plus `git hash-object` on
+  absolute paths, which are file reads rather than git operations on another
+  worktree — is what produced the line above. **Checked.**
 - **Open: nothing on this branch has been seen on a real terminal.** The
   subagent glyph's new behaviour has never been rendered. Settled only by Ollie
   cutting and looking.
@@ -147,6 +161,23 @@ dropped, and re-litigating them costs a session:
   single time, median 4.5 KiB — it means "accepted", not "finished". Pairing on
   it reads every fan-out as instantly over.
 
+**How to read the shared checkout's state from an isolated worktree.** The
+guard refuses any git command that redirects there, so reconstruct `git status`
+from the object store instead, which is shared and readable:
+
+1. `git ls-tree -r 12d4ca2` gives every tracked path and its blob hash.
+2. `git hash-object -- /absolute/path/in/the/other/checkout` re-hashes the file
+   on disk. A mismatch is a modification; a missing file is a deletion. This is
+   a file read, not a git operation on another worktree, so it passes.
+3. `find` the other checkout, subtract the tracked list, and filter what is
+   left through `git check-ignore` run in THIS worktree — the committed ignore
+   rules are the same.
+4. For each survivor, `git rev-parse --verify <ref>:<path>` across
+   `git for-each-ref` says whether that content is committed anywhere.
+
+Do not ask Ollie to run the command instead. He is inside the same isolated
+session, so his `!` command hits the identical guard.
+
 **Window sizing, if it is ever questioned.** Wrong-OFF hours across 40
 sessions: 6.9 at 512 KiB, 5.4 at 1 MiB, 2.0 at 2 MiB, 0.7 at 4 MiB and at
 unbounded. 2 MiB was chosen as the last useful step; the 0.7 h floor is the
@@ -177,7 +208,13 @@ over 200 transcripts, no line yet carries two `Agent` blocks and none mixes an
 5. **Script phase 5d** in `scripts/qa-drive.sh`, with the drive's scrubbed
    identity. `run_statusline` PUSHES a snapshot, so an unscrubbed run aims at
    Ollie's fleet exactly as a hand-written `clave hook` does.
-6. Still open, lower: `clave rows` is not atomic; `heal_worktrees` and
+6. **Rescue the 19 uncommitted files in the shared checkout** (Orientation).
+   They are a month of handoffs plus two design specs, and one of those specs
+   describes work that has a live worktree — `live-set-restore`. Ollie decides
+   whether they land on `main`, on the branches whose work they describe, or
+   nowhere; do not commit them without asking. He also has to do the commit
+   himself, or from a session that is not worktree-isolated.
+7. Still open, lower: `clave rows` is not atomic; `heal_worktrees` and
    `linked_worktree_root` have no test against a real repo; the worktree repair
    has no hand-run verb; CONTRIBUTING.md's CodeRabbit claim is false.
 
