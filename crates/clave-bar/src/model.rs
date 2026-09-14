@@ -4830,6 +4830,47 @@ mod tests {
         );
     }
 
+    /// The order a relaunch comes back in is the FLEET's order, not the
+    /// layout's. A restored tab has no session-scoped ranking data at all —
+    /// tab ordinals and tab buckets die with the session that minted them —
+    /// so its rank has to come from the agent record, which survives. It
+    /// does, through the same `agent_in_tab` join the row content uses: kill
+    /// that join and every restored row scores zero and falls back to the
+    /// baked left-to-right tab order, which is only where the previous
+    /// session happened to leave them on screen.
+    #[test]
+    fn restored_rows_rank_by_their_own_frecency_not_by_the_baked_tab_order() {
+        let mut m = BarModel::default();
+        let mut panes = panes_at(&FLEET_PANES);
+        let terminals: Vec<&mut PaneMeta> = panes.iter_mut().filter(|p| !p.is_plugin).collect();
+        for (p, uuid) in terminals.into_iter().zip(["u-a", "u-b", "u-c"]) {
+            p.is_held = true;
+            p.terminal_command = Some(format!("clave spawn {uuid} --name x --cwd /r"));
+        }
+        m.apply_panes(panes);
+        m.apply_tabs(vec![
+            tab(10, 0, "one", true),
+            tab(11, 1, "two", false),
+            tab(12, 2, "three", false),
+        ]);
+        // Baked order is a, b, c. Investment says b, c, a.
+        let invested = |uuid: &str, count: u32| {
+            let mut a = agent(uuid, Status::Idle, None);
+            a.buckets.insert(0, count); // `snap` fixes now_hour at 0
+            a
+        };
+        m.apply_snapshot(snap(
+            1,
+            vec![invested("u-a", 1), invested("u-b", 5), invested("u-c", 3)],
+        ));
+        let keys: Vec<RowKey> = m.rows().into_iter().map(|(k, _)| k).collect();
+        assert_eq!(
+            keys,
+            vec![RowKey::Tab(11), RowKey::Tab(12), RowKey::Tab(10)],
+            "the fleet's own ranking, not the order the layout baked"
+        );
+    }
+
     /// The join is on tab POSITION, and the position has to match: a command
     /// pane names the agent of ITS OWN tab and of no other. Without that, one
     /// restored tab anywhere in the fleet would hand its agent to every tab.
