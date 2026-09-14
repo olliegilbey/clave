@@ -1139,6 +1139,11 @@ pub fn run_setup() -> Result<()> {
     // all. Seed-only + best-effort, so re-running is free and a failure
     // cannot break setup.
     crate::backfill::run_on_version_refresh();
+    // The same shape, for the same reason: `worktree` was written only by
+    // `clave add --worktree` until 2026-09-14, so an existing store carries
+    // none and the card draws a branch mark where a tree belongs. Seed-only
+    // and best-effort, so a failure cannot break setup.
+    crate::add::heal_worktrees_on_refresh();
     Ok(())
 }
 

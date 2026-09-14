@@ -82,7 +82,15 @@ pub struct AgentRecord {
     pub commit_ord: u64,
     /// unix s; bumped on focus (`clave focus`) → clears done-unread.
     pub last_visited: u64,
-    /// Worktree path if `clave add --worktree` created one (§6.3), else None.
+    /// The LINKED worktree this agent runs in, else None (§6.3).
+    ///
+    /// Widened 2026-09-14. It used to mean "clave created this worktree", set
+    /// by `clave add --worktree` alone — so a worktree made by Claude Code
+    /// (`.claude/worktrees/`) or by hand recorded nothing, and the card drew
+    /// the branch mark for it. Measured on the live store that day: 195 rows,
+    /// not one set, and the tree glyph had never rendered. `add` now asks git
+    /// about the agent's own directory (`add::linked_worktree_root`), and a
+    /// resume re-measures, which is the heal for rows already written.
     pub worktree: Option<String>,
     #[serde(default, deserialize_with = "lenient")]
     pub label_source: LabelSource,
