@@ -102,6 +102,52 @@ which needs a field on the record.
 The escape hatch is written into §5.3: if `130k 9m59s` ever reads as one
 number, widen the collapsed card from 16 columns, do not narrow the clock.
 
+## NEXT DEFECT, diagnosed and NOT yet fixed — the subagent mark sticks
+
+Ollie, 2026-09-14 16:30: the subagent glyph appeared while three reviewers ran
+and **never went away** after they finished. Same class as the red glyph: a
+held state whose only clearing signal cannot reach the code.
+
+`take_subagents` (`hook.rs`) holds on `None` by design — "no reading" must not
+blank a real mark — and only `SessionEnd` forces it false. The reading comes
+from `subagents_from_tail`, which wants the last `system` / `turn_duration`
+record in the 64 KiB tail (`hook.rs`, `read_tail(&path, 64 * 1024)`).
+
+**Measured on the live transcript of this very session:**
+
+| | |
+|---|---|
+| transcript size | 37.2 MB |
+| `turn_duration` records in it | 110 |
+| records inside the 64 KiB window | **0** |
+| distance from EOF to the last one | **742,873 bytes** (11x the window) |
+| median gap between consecutive records | 125,755 bytes (2x the window) |
+| max gap | 4,264,884 bytes |
+| that last record's `pendingBackgroundAgentCount` | absent, so it would have read FALSE and cleared |
+
+So on any tool-heavy session `subagents_from_tail` returns `None` on every
+`Stop`, the hold rule fires every time, and a mark set once can never clear.
+The hold was written to protect a Claude Code too old to emit the field; the
+field is emitted 110 times here, just never where we look. FOOTGUNS already
+predicted this shape for `title`/`summary` ("a tool-output-heavy turn is the
+shape that would break it") — this is that prediction coming true on a
+different field, and on a boolean it is unrecoverable rather than merely stale.
+
+`pendingBackgroundAgentCount` appears nowhere else as data: the 29 string hits
+inside the window are this conversation TALKING about the field, not carrying
+it. `system` / `turn_duration` is the only source.
+
+**Recommended fix, not yet written.** A bounded backward search for the record
+on `Stop` only, capped around 1 MiB — the median gap says that finds it almost
+always, the record is authoritative when found, and the hold stays as the
+fallback when it is not. Rejected: widening the shared tail (every hook pays,
+and 4.2 MB gaps beat any sane cap), and clearing on silence (silence is now the
+normal case, so the mark would blank while subagents are still running).
+
+Whatever is chosen, the test that pins it must assert against a tail with NO
+`turn_duration` record in it, because that is the live shape and no existing
+test uses it.
+
 ## Open
 
 - **Phase 5d is spec-only.** Script it. It is now the ONLY automated check
