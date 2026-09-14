@@ -306,6 +306,33 @@ pub fn key_from_root_name(name: &str) -> Option<&str> {
         .filter(|k| !k.is_empty())
 }
 
+/// Is this session name one of ours — the main-checkout sandbox or any
+/// per-agent one? Matched on the whole segment, never as a bare prefix, so a
+/// real install that happens to be called `clave-testbed` is not mistaken
+/// for a sandbox.
+pub fn is_sandbox_session(name: &str) -> bool {
+    name == SESSION_PREFIX || name.starts_with(&format!("{SESSION_PREFIX}-"))
+}
+
+/// The session that OWNS a store, read back from the store's own directory —
+/// the inverse of [`session_name_for`], and the only way a process holding a
+/// store can know which bar is entitled to hear about it.
+///
+/// `state_dir` is the store directory itself (`StorePaths::dir`): a sandbox
+/// keeps it at `<root>/state`, so the ROOT's name carries the key. Anything
+/// else is a real install, whose session name clave does not get to predict —
+/// `None` means "not a sandbox store", not "no owner".
+pub fn owner_session_of_store(state_dir: &Path) -> Option<String> {
+    let root = state_dir.parent()?.file_name()?.to_str()?;
+    if root == ROOT_PREFIX {
+        // The main checkout's own instance, which `key_from_root_name`
+        // deliberately refuses to key — it still has a session, and it is
+        // exactly as entitled to this guard as a per-agent root.
+        return Some(SESSION_PREFIX.to_string());
+    }
+    key_from_root_name(root).map(session_name_for)
+}
+
 /// Every per-agent sandbox root under `state_parent` (`~/.local/state`),
 /// sorted by key so output and tests are deterministic.
 pub fn scan(state_parent: &Path) -> Vec<Found> {

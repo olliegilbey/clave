@@ -8,7 +8,7 @@ single-line row, still reachable with `clave rows single`._
 Run the design: `cargo run -p clave-bar --example double-preview`
 
 **Vocabulary:** *card, row, gutter, cell, ink, chip, provenance, glass, fade,
-zebra* are defined in [UBIQUITOUS_LANGUAGE.md](../../../UBIQUITOUS_LANGUAGE.md).
+zebra* are defined in [UBIQUITOUS_LANGUAGE.md](../../UBIQUITOUS_LANGUAGE.md).
 A **row** is the data side; a **card** is its two-line rendering.
 
 **Source-of-truth hierarchy.** *This document is authoritative* for every

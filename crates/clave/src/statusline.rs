@@ -11,7 +11,7 @@
 //!
 //! The channel is a MEASUREMENT of the live conversation, not a history
 //! source: fresh-install population and backfill still derive from the
-//! transcripts (CLAUDE.md, the jsonl store is the source of truth).
+//! transcripts (AGENTS.md: the transcripts out-rank the store).
 //!
 //! Two rules keep the two sources from fighting:
 //!
@@ -153,6 +153,15 @@ pub const HOOK_YIELD_SECS: u64 = 600;
 /// hook's tail readers keep quiet on tokens, model and effort. `0` is "not
 /// metered since the last rotation or Stop" — the resets those two perform.
 /// A clock stepped backwards reads as recent, never as an underflow.
+///
+/// **Three cells, and only these three.** The scope is not a style note: a
+/// reader gated on this yield reads NOTHING on a Stop in any released install,
+/// because the meter has spoken seconds earlier. A cell the meter takes no
+/// reading of has nothing to yield to and must read `jsonl_tail` directly —
+/// the subagent mark was gated here by mistake and never landed (#245 follow-
+/// up). `the_meters_yield_covers_three_cells_and_no_others` in `hook.rs` is
+/// the executable form of this paragraph, and it counts five FIELDS: the level
+/// rides with the count and the provider rides with the model.
 pub fn hook_yields(rec: &AgentRecord, now: u64) -> bool {
     rec.metered_at != 0 && now.saturating_sub(rec.metered_at) < HOOK_YIELD_SECS
 }
@@ -371,6 +380,8 @@ mod tests {
             pr_number: None,
             pr_checked: 0,
             pr_branch: String::new(),
+            wants: None,
+            subagents: false,
         }
     }
 

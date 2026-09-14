@@ -152,10 +152,19 @@ Two consequences worth knowing before you run it:
   `just sandbox` twice proves nothing about re-runnability; `dev scenario` twice
   is that test, and it is not this one.
 
-**S3 — launch (human, non-zellij terminal).** Use the command the script printed,
-verbatim, **including the PATH shim** — the sandbox bakes bare `clave`, so without
-the shim the bar shells out to the stable launcher and the run tests the wrong
-binary.
+**S3 — launch (human, non-zellij terminal).** Two lines:
+
+```bash
+cd <your checkout>      # the instance is keyed off the working directory
+just launch
+```
+
+The `cd` is the load-bearing part; the session name, the state and data dirs and
+the **PATH shim** are all derived by `dev launch` itself. The shim is not
+optional decoration — the sandbox bakes bare `clave`, so without it the bar
+shells out to the stable launcher and the run tests the wrong binary, which is
+why deriving it beat printing it. `clave dev launch` refuses when `ZELLIJ` is
+set, so an agent cannot take this step and will hand you these two lines.
 
 **S4 — first paint, and the fleet you should be looking at.** The launch layout
 eagerly opens the single most-recent row and leaves the rest dormant, so expect

@@ -151,6 +151,7 @@ fn bar(rows: &[Row], cols: usize, widths: Widths, label: &str) {
         widths,
         &Theme::default(),
         RowHeight::Single,
+        0,
     )
     .iter()
     .zip(rows)
@@ -177,6 +178,7 @@ fn print_showcase() {
         Widths::EXPANDED,
         &Theme::default(),
         RowHeight::Single,
+        0,
     )
     .iter()
     .zip(&rows)

@@ -74,4 +74,24 @@ exclude_re = [
     # pinned by `rmw_roundtrips_and_bumps_seq` in store.rs. The seam itself is a
     # live-run check: the PR cell filling within a TTL on a PR branch.
     "run_pr_sync",
+    # Reads `ZELLIJ_SESSION_NAME` and forwards it. Under `cargo test` the
+    # variable is whatever the developer's shell happens to hold, so `None`,
+    # `Some("")` and `Some("xyzzy")` are all indistinguishable from the real
+    # answer — and the honest fix, setting the variable in a test, is the
+    # process-global race `smart_zone` forbids. The RULE it applies is split
+    # out and mutated: `session_from_env` carries the empty-is-not-unset
+    # asymmetry, and `every_rung_aims_the_push_at_the_session_it_names` pins
+    # what the name is then used for.
+    "own_session",
+    # Fire-and-forget by contract (§5), the same argument as `spawn_pr_sync`
+    # above: serialises the snapshot, spawns `zellij pipe` with every stream
+    # nulled, and DROPS the child, because a global hook must never block
+    # Claude on a pipe that can dawdle. Replacing the whole body with `()` is
+    # indistinguishable from success to any host test — the observable is a
+    # bar in another process repainting. Every decision it makes IS mutated:
+    # `bounded_pipe_command` builds the argv (including which session it aims
+    # at), `pipe_bound_ladder` picks the wrapper rung, `session_from_env`
+    # carries the empty-is-not-unset rule. The seam itself is a live check —
+    # a row's cells moving in the sandbox bar after a driven hook.
+    "push_snapshot",
 ]

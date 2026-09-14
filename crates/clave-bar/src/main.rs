@@ -17,9 +17,9 @@ use clave_bar::render::{Row, render_rows};
 use clave_bar::theme::Theme;
 use zellij_tile::prelude::*;
 
-/// Event::Timer echoes the elapsed seconds, and the bar's two timer kinds sit
-/// either side of this line: the width cooldown (0.15s) below it, the peek
-/// sink (0.9s) above. The dwell era's classify_timer scheme, revived.
+/// Event::Timer echoes the elapsed seconds, and the bar's timer kinds sit
+/// either side of this line: the fast tick (0.2s) below it, the peek sink
+/// (0.9s) above. The dwell era's classify_timer scheme, revived.
 const TIMER_KIND_CUTOFF_SECS: f64 = 0.5;
 
 /// The term-facts poll (#206): zellij pushes `CommandChanged` when a
@@ -35,11 +35,40 @@ const TIMER_KIND_CUTOFF_SECS: f64 = 0.5;
 const TERM_POLL_CUTOFF_SECS: f64 = 2.0;
 const TERM_POLL_SECS: f64 = 3.0;
 
-// The Timer classifier reads elapsed seconds alone, so the three durations
-// must hold their bands or one kind silently eats another's expiry — nothing
-// would fail except a live session. Same shape as the collapsed<expanded
-// width guard.
-const _: () = assert!(WIDTH_COOLDOWN_SECS < TIMER_KIND_CUTOFF_SECS);
+/// The bar's ONE fast-band timer. It drives the four-line card's status
+/// spinner at five frames a second, near Claude Code's own — not one second,
+/// at a second a card stutters rather than breathes — and it is also the clock
+/// the width machine's switch deafness is measured in.
+///
+/// **One timer, because the classifier cannot split a band.** `Event::Timer`
+/// carries the elapsed seconds and nothing else, and 0.15 against 0.2 does not
+/// survive the host's rounding. While the spinner and the cooldown each armed
+/// their own, the fast leg had to disarm the spinner on ANY fast expiry — it
+/// cannot tell whose the expiry was — so a cooldown expiry disarmed a spinner
+/// whose own timer was still pending, and the next paint armed a SECOND frame
+/// timer. Two pending frames break `swap_owed`'s two-tick rule outright
+/// (0.05s + 0.10s spends both ticks inside one 0.15s deafness), which is the
+/// bug the count was added to prevent. With a single timer the ambiguity does
+/// not exist to be classified: whoever wants a fast tick gets the same one,
+/// and `swap_owed` counts ticks that provably exist.
+///
+/// Anything FASTER than this would need the classifier replaced with properly
+/// tagged timers first, and it must never go under [`WIDTH_COOLDOWN_SECS`];
+/// both are asserted below.
+const FAST_TICK_SECS: f64 = 0.2;
+
+// The Timer classifier reads elapsed seconds alone, so the durations must hold
+// their bands or one kind silently eats another's expiry — nothing would fail
+// except a live session. Same shape as the collapsed<expanded width guard.
+const _: () = assert!(FAST_TICK_SECS < TIMER_KIND_CUTOFF_SECS);
+// The width machine's deafness is now measured in fast ticks, so the tick must
+// be at least as long as the deafness it stands in for. An ask made with no
+// tick running buys one tick, and one tick must outlast a swap's queued echoes
+// (WIDTH_COOLDOWN_SECS); an ask made with a tick already running buys two, and
+// the second is a full tick behind the first. Lower this under the cooldown and
+// a single-tick deafness is too short, which restores the toggle loop the
+// cooldown exists to prevent — with nothing failing but a live session.
+const _: () = assert!(WIDTH_COOLDOWN_SECS <= FAST_TICK_SECS);
 const _: () = assert!(TIMER_KIND_CUTOFF_SECS <= PEEK_SINK_SECS);
 const _: () = assert!(PEEK_SINK_SECS < TERM_POLL_CUTOFF_SECS);
 const _: () = assert!(TERM_POLL_CUTOFF_SECS <= TERM_POLL_SECS);
@@ -88,6 +117,11 @@ struct State {
     /// A term-facts poll timer is in flight (#206) — one at a time, re-armed
     /// on expiry only while `term_poll_wanted()` holds.
     term_poll_armed: bool,
+    /// The four-line card's status-spinner tick, handed to `render_rows`. A
+    /// plain counter rather than a clock reading: the cycle is a ping-pong
+    /// over ten frames, so what it needs is a monotonic index, and the render
+    /// path stays a pure function of values passed to it.
+    anim_frame: usize,
     /// The user's zellij theme, mapped onto the bar's colour roles (#145).
     /// Arrives via `ModeUpdate` (`ModeInfo.style.colors`); `Default` — the
     /// curated kanagawa — stands until the first one lands, which also keeps
@@ -157,6 +191,31 @@ impl State {
         if !self.term_poll_armed && self.model.term_poll_wanted() {
             self.term_poll_armed = true;
             set_timeout(TERM_POLL_SECS);
+        }
+    }
+
+    /// The one fast-band timer, started if the model is not already owed one.
+    /// Every caller funnels through here — that is what makes "one timer"
+    /// true, and `swap_owed` counts on it (see [`FAST_TICK_SECS`]).
+    ///
+    /// The shell owns the timer; the model owns whether one is in flight, and
+    /// answers that from one place ([`BarModel::arm_fast_tick`]). Deliberately
+    /// ungated here: the spinner's gates live in the model too, and the width
+    /// machine's ask has none to apply. An instance whose tab is not focused
+    /// still swaps its own pane — collapse arrives by broadcast — and still
+    /// owes that swap a deafness.
+    fn arm_fast_tick(&mut self) {
+        if self.model.arm_fast_tick() {
+            set_timeout(FAST_TICK_SECS);
+        }
+    }
+
+    /// Ask for a fast tick on the SPINNER's behalf. The decision is
+    /// [`BarModel::wants_spinner_tick`], where a test can reach it; this is
+    /// the wire from the paint that built the rows to the timer.
+    fn arm_spinner(&mut self, rows: &[Row]) {
+        if self.model.wants_spinner_tick(rows) {
+            self.arm_fast_tick();
         }
     }
 
@@ -341,9 +400,21 @@ impl State {
                 // The timer ends the ask's deafness: the swap's queued
                 // repaints echo the PRE-swap width, and judging them is the
                 // paint-speed toggle loop the 2026-08-17 QA drive filmed.
-                Effect::SwapWidth => {
-                    next_swap_layout();
-                    set_timeout(WIDTH_COOLDOWN_SECS);
+                //
+                // ONE arm for both, and one `arm_fast_tick` inside it. The
+                // two differ only in whether they swap: `RearmWidthCooldown`
+                // is an ask owed a second tick because one was already in
+                // flight when it was made (`swap_owed`), and swapping again
+                // for it would step the tab past the geometry it already asked
+                // for. Written as two arms, the arming is a line either could
+                // lose — and `main.rs` does not link on the host (Cargo.toml),
+                // so nothing here is reachable by a test. An arm that cannot
+                // be tested should not be duplicated.
+                e @ (Effect::SwapWidth | Effect::RearmWidthCooldown) => {
+                    if matches!(e, Effect::SwapWidth) {
+                        next_swap_layout();
+                    }
+                    self.arm_fast_tick();
                 }
                 // §6.6 C8 dormant nav (ungated — click reaches exactly one
                 // instance, nav effects are executor-only by construction,
@@ -724,7 +795,7 @@ impl ZellijPlugin for State {
         // plugin configuration `resolve_binary` just read. Every layout since
         // Task 5 bakes `row_height` alongside `clave_binary`, so a present key
         // is the steady state; an absent one (pre-#232 layout, hand-edited
-        // config) fails CLOSED to `Double` inside `resolve_row_height` — no
+        // config) fails CLOSED to `Card` inside `resolve_row_height` — no
         // warning owed, unlike the binary path, because there is no wrong
         // subprocess to run, only a design default to draw.
         let row_height = resolve_row_height(&config);
@@ -801,6 +872,12 @@ impl ZellijPlugin for State {
     }
 
     fn update(&mut self, event: Event) -> bool {
+        // The clock advances on EVERY event, not only on a paint (#232 put it
+        // in `render` alone). Two things read it outside a paint: the fast
+        // tick's strand window, which must age in real time so a claim the
+        // host never delivered stops blocking the next arm, and the stamp
+        // `arm_fast_tick` writes when a width ask books a tick between paints.
+        self.model.tick(wall_now());
         match event {
             Event::PermissionRequestResult(_) => {
                 // Permissions just landed (pre-seeded → immediate): hydrate
@@ -955,14 +1032,86 @@ impl ZellijPlugin for State {
             }
             Event::CwdChanged(..) | Event::CommandChanged(..) => false,
             Event::Timer(elapsed) => {
-                // TWO timer kinds share this event again (the dwell era's
+                // THREE timer kinds share this event (the dwell era's
                 // classify_timer scheme, revived for the width cooldown):
-                // Timer echoes the ELAPSED seconds, and the two durations
-                // sit either side of the cutoff. The width leg runs on
-                // EVERY expiry — `width_cooldown_elapsed` is inert unless
-                // an ask is in flight, so a peek expiry (or a delayed
-                // width timer classified long) ending the deafness a few
-                // ms early is harmless, and no expiry can strand it.
+                // Timer echoes the ELAPSED seconds, and the bands sort them —
+                // the fast tick, the peek sink, the term poll. The spinner and
+                // the switch deafness are ONE kind between them, sharing one
+                // timer, because no elapsed reading separates 0.15 from 0.2
+                // once the host has rounded them (see FAST_TICK_SECS).
+                //
+                // The fast leg runs FIRST, and ending the flight before the
+                // width machine runs is load-bearing: `width_cooldown_elapsed`
+                // can ask for another tick, and `arm_fast_tick` is a no-op
+                // while the model still holds one in flight. Disarming here
+                // and letting `render` re-arm is also what stops the spinner
+                // the moment the last turn ends — the next tick is only armed
+                // by a paint that found a row still working, or by an ask
+                // still owed one.
+                //
+                // A tick the host reports OUTSIDE the fast band is the strand
+                // this branch fixed, in its last remaining form: the claim
+                // stays set, no fast timer is left outstanding, and the paint
+                // that would arm the next one is the very thing the claim
+                // withholds. Two answers cover it, and they cover each other.
+                //
+                // ELIMINATION, first: the shell arms three kinds and no more,
+                // so with no peek and no term poll outstanding a timer expiry
+                // can only be the fast one — whatever elapsed came with it.
+                // `pending_peeks` and `term_poll_armed` count REAL outstanding
+                // timers (a cancelled peek still decrements on its own expiry),
+                // and they are read BEFORE the legs below clear them.
+                //
+                // AGE, second: while another kind is armed, elimination must
+                // not steal that kind's expiry — but that kind's expiry is
+                // itself a wake-up, and a claim past the strand window is
+                // dropped on it. A drop is a repaint, because only a paint
+                // re-arms the spinner.
+                //
+                // WHY A WAKE-UP ALWAYS REMAINS, which is the whole property:
+                // a claim never outlives every outstanding timer. Either the
+                // claim's own timer has not fired — one is outstanding — or it
+                // fired and some leg took it. Taken by the fast leg, the claim
+                // is gone. Taken by the peek leg, the REAL peek timer it was
+                // counted against is still outstanding (`pending_peeks` is
+                // only ever incremented beside a `set_timeout`, and only ever
+                // decremented on an expiry). Taken by the term-poll leg, that
+                // leg re-arms, and where it does not, the real 3s timer has
+                // still to fire. So the ambiguous case CodeRabbit named — a
+                // fast expiry reported in the peek band with a peek
+                // outstanding — recovers on the peek's own expiry, which then
+                // meets an empty board and is claimed by elimination.
+                //
+                // That is a bound, not an identity: at worst PEEK_SINK_SECS,
+                // or one TERM_POLL_SECS with the strand window met. True
+                // identity is not available — `Event::Timer` carries elapsed
+                // seconds and nothing else (zellij-tile-0.44.3) — and the
+                // window cannot be tightened below a second either, because
+                // `wall_now()` counts whole seconds. Clearing the claim eagerly
+                // instead would put a second timer in a band that must hold
+                // one, which is the bug `swap_owed` exists to prevent.
+                let other_timers_armed = self.pending_peeks > 0 || self.term_poll_armed;
+                let owns = self
+                    .model
+                    .fast_tick_owns_expiry(elapsed < TIMER_KIND_CUTOFF_SECS, other_timers_armed);
+                let healed = !owns && self.model.expire_stale_fast_tick();
+                let fast_tick = if owns {
+                    self.model.fast_tick_fired();
+                    // The frame index is the tick's own count, bumped whoever
+                    // asked for the tick. At five frames a second a spinner
+                    // stepping early off a swap's tick is invisible, and the
+                    // alternative is a second predicate over "was this tick
+                    // the spinner's" that could disagree with the one that
+                    // armed it.
+                    self.anim_frame = self.anim_frame.wrapping_add(1);
+                    true
+                } else {
+                    false
+                };
+                // The width leg runs on EVERY expiry — `width_cooldown_elapsed`
+                // is inert unless an ask is in flight, so a peek expiry ending
+                // the deafness a few ms early is harmless, and no expiry can
+                // strand it.
                 let fx = self.model.width_cooldown_elapsed();
                 let width_moved = !fx.is_empty();
                 self.run_effects(fx);
@@ -973,7 +1122,7 @@ impl ZellijPlugin for State {
                     self.term_poll_armed = false;
                     let changed = self.probe_term_facts();
                     self.arm_term_poll();
-                    return width_moved || changed;
+                    return width_moved || changed || fast_tick || healed;
                 }
                 // The peek leg is the one that must NOT run on a width
                 // expiry: it counts armed peeks, and a foreign decrement
@@ -987,7 +1136,7 @@ impl ZellijPlugin for State {
                 } else {
                     false
                 };
-                width_moved || peek_sunk
+                width_moved || peek_sunk || fast_tick || healed
             }
             Event::Mouse(Mouse::LeftClick(line, _col)) => {
                 // §6.6: rows are mouse-clickable. line is the rendered row.
@@ -1060,6 +1209,16 @@ impl ZellijPlugin for State {
         self.model.tick(wall_now());
         let list: Vec<Row> = self.model.rows().into_iter().map(|(_, row)| row).collect();
         let row_height = self.model.row_height();
+        // The spinner's next frame is armed HERE, by the paint that found a
+        // row still working — so the animation starts with the first working
+        // row and stops with the last, without any other code having to know
+        // the fleet's state.
+        //
+        // Over the VISIBLE slice, not the whole fleet: a working row scrolled
+        // out of the viewport draws no spinner, so arming for it would wake the
+        // bar five times a second to animate nothing. Same call the paint makes
+        // one line down, so the two cannot disagree about what is on screen.
+        self.arm_spinner(clave_bar::render::visible_rows(&list, rows, row_height));
         let lines = render_rows(
             &list,
             cols,
@@ -1067,6 +1226,7 @@ impl ZellijPlugin for State {
             self.model.widths_at(cols),
             &self.theme,
             row_height,
+            self.anim_frame,
         );
         // #232, the maintainer's resilience ask: one line per frame naming the
         // geometry, the pane and the slice. Gated — a render fires on every

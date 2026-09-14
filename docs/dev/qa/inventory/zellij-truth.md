@@ -6,7 +6,7 @@ tree from valid-looking KDL, geometry actions zellij refuses or warps
 silently, dump output that lies, and session targeting that falls back onto
 the wrong session. Vocabulary (zellij session vs agent session, tab, pane,
 bar instance, store, bind) is
-[UBIQUITOUS_LANGUAGE.md](../../../../UBIQUITOUS_LANGUAGE.md). Four standing
+[UBIQUITOUS_LANGUAGE.md](../../../UBIQUITOUS_LANGUAGE.md). Four standing
 facts govern the plane: **`dump-layout` lies about width** (it normalises
 splits to 33%/67% whatever the live geometry — trust it for *structure* and
 serialized commands only; a maintainer screenshot is the only width oracle);

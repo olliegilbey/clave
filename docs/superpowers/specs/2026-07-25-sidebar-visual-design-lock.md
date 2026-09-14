@@ -21,7 +21,7 @@ Run the design: `cargo run -p clave-bar --example bar-preview`
 
 **Vocabulary:** every term used here — *gutter, cell, rule, cap, provenance,
 ink, chip, tint, fade, title vs label, live vs dormant row* — is defined in
-[UBIQUITOUS_LANGUAGE.md](../../../UBIQUITOUS_LANGUAGE.md) §3. Read that first if
+[UBIQUITOUS_LANGUAGE.md](../../UBIQUITOUS_LANGUAGE.md) §3. Read that first if
 any word below is doing more work than you expect.
 
 **Source-of-truth hierarchy — one rule, no ambiguity.** *This document is

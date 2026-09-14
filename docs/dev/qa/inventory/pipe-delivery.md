@@ -6,7 +6,7 @@ instances (**bar instances**, one per zellij tab) that receive it: routing,
 payload arrival, and the **executor election** (exactly one instance may act on
 a broadcast; it is named by the last `clave-visited` **beacon**). Vocabulary
 (store, snapshot, bind, dormant row, minted uuid) is
-[UBIQUITOUS_LANGUAGE.md](../../../../UBIQUITOUS_LANGUAGE.md). Two standing
+[UBIQUITOUS_LANGUAGE.md](../../../UBIQUITOUS_LANGUAGE.md). Two standing
 facts govern every item: **every non-tty `zellij pipe` also delivers one empty
 "EOF-twin" message per live instance**, logged as `clave-bar: dropped <name>
 pipe with empty payload` — those lines are the only *log trace* of a broadcast

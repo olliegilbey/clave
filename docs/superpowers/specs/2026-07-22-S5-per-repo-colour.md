@@ -1544,7 +1544,7 @@ Vocabulary: **repo tint** = the colour of the repo column's text; **title
 chip** = the filled 7-column block the title sits in, its ink the background.
 Neither is the status glyph, whose colour is the status
 (design-lock §4.1). All three terms are defined in
-[UBIQUITOUS_LANGUAGE.md](../../../UBIQUITOUS_LANGUAGE.md) §3.
+[UBIQUITOUS_LANGUAGE.md](../../UBIQUITOUS_LANGUAGE.md) §3.
 
 ### Step 0 — pre-flight (issue #44 is unfixed; skip this and every reading below is suspect)
 

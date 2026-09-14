@@ -10,7 +10,7 @@
 > Read that before S5, S6 or S8, and run
 > `cargo run -p clave-bar --example bar-preview` to see the result.
 >
-> Vocabulary for all of it: [`UBIQUITOUS_LANGUAGE.md`](../../../UBIQUITOUS_LANGUAGE.md).
+> Vocabulary for all of it: [`UBIQUITOUS_LANGUAGE.md`](../../UBIQUITOUS_LANGUAGE.md).
 
 _2026-07-22 · research synthesis, main `50fa26a` (v0.1.1 + PR #29) · read-only investigation_
 

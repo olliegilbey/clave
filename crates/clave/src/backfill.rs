@@ -1,4 +1,4 @@
-//! Frecency bucket backfill from Claude's transcripts (§CLAUDE.md: the jsonl
+//! Frecency bucket backfill from Claude's transcripts (AGENTS.md: the jsonl
 //! store is the source of truth; clave's store is a cache over it). Two
 //! consumers: `add::mint_record` seeds a RESUMED row from its own history at
 //! birth, and `setup::launch_session` runs the fleet-wide one-shot on version
@@ -447,6 +447,8 @@ mod tests {
             pr_number: None,
             pr_checked: 0,
             pr_branch: String::new(),
+            wants: None,
+            subagents: false,
         }
     }
 

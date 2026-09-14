@@ -2,11 +2,17 @@
 # qa-drive.sh — the automated regression drive, phases 0-7 (docs/dev/QA-DRIVE.md).
 #
 # What this is: preflight, baseline join, the dormant-row bind ladder, tab
-# churn, the nav ring walk, the collapse burst, quiescence and the teardown
-# hand-back, scripted against THIS checkout's per-worktree sandbox instance.
+# churn, the nav ring walk, the collapse burst, the card cells, the terminal
+# facts, quiescence, the isolation witness and the teardown hand-back,
+# scripted against THIS checkout's per-worktree sandbox instance.
+#
+# The instrument it reads with — tracing, assertions, and the zellij log read
+# per BAR INSTANCE — is `scripts/qa/lib.sh`, tested offline by
+# `scripts/qa/lib-selftest.sh` (gated: `crates/clave/tests/qa_lib.rs`).
 #
 # ALL PHASES DRIVEN LIVE GREEN — run 4, 2026-08-17, full 0-7 pass plus both
-# human eyeball checkpoints. The list below was the FIRST LIVE RUN PENDING
+# human eyeball checkpoints; and run 11, 2026-09-11, all TEN phases (0-7 with
+# 5b card-cells and 6b isolation-witness), first run of the `just qa` loop. The list below was the FIRST LIVE RUN PENDING
 # ledger; it is kept because each entry records an assumption a live run had
 # to settle, and how the first runs settled them: runs 1-3 each went red on a
 # real finding first (the stale-executor nav wedge, the starved-bar prune of
@@ -36,6 +42,16 @@
 #       agent that still ticks (an unfinished claude -p, a background
 #       SessionEnd) advances `seq` under the flat-line check and reads as a
 #       false red. The check prints both readings so that shape is legible.
+#   (8) phase 5c's leg A assumes `write-chars` reaches the focused pane of the
+#       FOCUSED TAB (it is a client-level action, so it should), and that a
+#       `sleep` started there reads back as a running foreground command. If
+#       leg A goes red, read the pane before the bar: an unreached keystroke
+#       and an undelivered fact look identical in the log, which is why the
+#       phase prints the pane's own process first;
+#   (9) phase 5c's leg B is the OPEN question, not an assumption — whether
+#       `get_pane_cwd` answers for a pane in a non-active tab. It is measured
+#       every run and asserted never, and its answer decides the shape of the
+#       store-backed fix.
 #
 # What this is NOT: a launcher. It assumes a human has ALREADY staged
 # (`just sandbox <scenario>`) and LAUNCHED the sandbox session. It never runs
@@ -67,15 +83,34 @@ usage() {
 usage: $0 <scenario>
 
 Drives QA-DRIVE phases 0-7 (preflight, baseline join, bind ladder, tab churn,
-ring walk, collapse burst, quiescence, teardown hand-back) against
-THIS checkout's per-worktree sandbox instance (\`clave dev instance\`). Never
-launches or kills a zellij session — stage and launch first:
+ring walk, collapse burst, card cells, terminal facts, quiescence, isolation
+witness, teardown hand-back) against THIS checkout's per-worktree sandbox instance
+(\`clave dev instance\`). Never launches or kills a zellij session.
+
+USUALLY YOU WANT: \`just qa <scenario>\` — it stages, prints the launch line,
+waits for the human to run it, and then calls this script. One command for the
+whole loop.
+
+This script alone assumes the session is ALREADY staged and launched:
 
   just sandbox <scenario>
-  clave dev scenario <scenario>   # if not already seeded by \`just sandbox\`
-  (human, non-zellij terminal) clave dev launch
+  (human, non-zellij terminal) cd <worktree> && just launch
 
-then run this. Refuses closed if the instance's sandbox session is not live.
+and refuses closed if the instance's sandbox session is not live. Set
+QA_WAIT_SECS=<n> to wait for the launch instead of refusing.
+
+NOT IDEMPOTENT, by design: phase 2 rung 1 mints a row and the middle phases
+consume the fleet shape they assert against, so a re-run needs a fresh stage.
+Phase 1 says so plainly when the stage is stale instead of failing a count
+that is correctly reading the previous run.
+
+Isolation: this script scrubs the inherited zellij identity before its first
+phase, so every child aims at the sandbox rather than at whatever session the
+calling terminal sits inside. Fire hooks ONLY through \`ct.sh --hook\` —
+\`crates/clave/tests/script_hygiene.rs\` fails the build otherwise, and
+\`clave hook\` itself refuses a push whose target does not own the store it
+wrote. All three exist because a hand-rolled hook call hung the maintainer's
+live session on 2026-09-11 (FOOTGUNS #281).
 
   <scenario>   the scenario name already staged/launched (e.g. qa-fleet).
                Informational for the report header and for phase 1's exact
@@ -140,13 +175,114 @@ if [[ -z "$STATE_DIR" || -z "$DATA_DIR" ]]; then
   exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# THE AMBIENT IDENTITY — scrubbed ONCE, here, for every child this drive will
+# ever spawn.
+# ---------------------------------------------------------------------------
+# A drive shell runs INSIDE the maintainer's fleet, so it inherits
+# `ZELLIJ_SESSION_NAME=<his session>` along with `ZELLIJ`/`ZELLIJ_PANE_ID`,
+# and anything that consults them aims there. `ct.sh` scrubs them per
+# invocation — which protects what goes through it, and nothing else. That
+# gap is not theoretical: `clave hook` also PUSHES, aimed by
+# `ZELLIJ_SESSION_NAME` (hook.rs `own_session`), so a hand-rolled hook call in
+# phase 5b wrote the sandbox store and pushed at HIS bar, and hung his session
+# (2026-09-11; FOOTGUNS #281, which had already named this exact trap).
+#
+# The lesson taken is that a convention every call site must remember is the
+# wrong shape for this hazard. So the hostile variables do not survive this
+# line, and the sandbox's own identity replaces them: every child — routed,
+# hand-rolled, or added by someone who never read this comment — inherits the
+# SANDBOX. The default becomes fail-safe instead of fail-dangerous.
+#
+# `ct.sh` keeps its own per-call scrub regardless: it is also run directly,
+# and belt-as-well-as-braces is the house style for this particular hazard.
+FOREIGN_SESSION="${ZELLIJ_SESSION_NAME:-}"
+unset ZELLIJ ZELLIJ_PANE_ID
+export ZELLIJ_SESSION_NAME="$SESSION"
+# The store too, for the same reason: a child that resolves its own paths
+# must land in the sandbox even when the caller passed it nothing.
+export CLAVE_SESSION="$SESSION"
+export CLAVE_STATE_DIR="$STATE_DIR"
+export CLAVE_DATA_DIR="$DATA_DIR"
+
+# The tripwire. Cheap, and it is a REORDERING guard: everything below assumes
+# the scrub already happened, so if a future edit moves a phase above this
+# point — or re-exports the inherited name — the drive stops instead of
+# driving the wrong session.
+if [[ "${ZELLIJ_SESSION_NAME:-}" != "$SESSION" || -n "${ZELLIJ:-}" || -n "${ZELLIJ_PANE_ID:-}" ]]; then
+  cat >&2 <<EOF
+REFUSING: the ambient zellij identity is not this sandbox.
+
+  ZELLIJ_SESSION_NAME=${ZELLIJ_SESSION_NAME:-<unset>}  (want: ${SESSION})
+  ZELLIJ=${ZELLIJ:-<unset>}  ZELLIJ_PANE_ID=${ZELLIJ_PANE_ID:-<unset>}  (want both unset)
+
+Every child of this drive inherits these, and a push aimed by them reaches
+whichever bar they name. Refusing rather than driving someone else's session.
+EOF
+  exit 1
+fi
+if [[ -n "$FOREIGN_SESSION" && "$FOREIGN_SESSION" != "$SESSION" ]]; then
+  printf '==> scrubbed an inherited zellij identity: %s -> %s (every child now aims at the sandbox)\n' \
+    "$FOREIGN_SESSION" "$SESSION"
+fi
+
+# How many pushes clave REFUSED to misaim, counted from the sandbox's own
+# event log. `clave hook` decides a push's destination from the store it
+# wrote rather than from the env (hook.rs `aim_push`) and writes one
+# `push-refused` line when the two disagree — so this number is the drive's
+# witness that nothing it spawned reached a bar it had no business reaching.
+# Zero is the expected reading now that the identity is scrubbed above: a
+# refusal means the guard caught something the scrub did not, which is a
+# finding about this script, not a pass.
+count_push_refusals() {
+  local n
+  n="$(grep -c '"cmd":"push-refused"' "$STATE_DIR/clave.log" 2>/dev/null)" || n=0
+  printf '%s' "${n:-0}"
+}
+
 # `clave dev status` is liveness-gated by construction (TESTING.md, "the
 # observability map") — safe to call even against a dead session, unlike a
 # bare `zellij action`, which blocks indefinitely against one. This is the
 # fail-closed refusal: the drive never proceeds against a session that is
 # not actually up.
-STATUS_JSON="$("$CLAVE_BIN" dev status 2>/dev/null)" || STATUS_JSON=""
-SESSION_LIVE="$(printf '%s' "$STATUS_JSON" | jq -r '.session_live // false' 2>/dev/null)"
+read_liveness() {
+  STATUS_JSON="$("$CLAVE_BIN" dev status 2>/dev/null)" || STATUS_JSON=""
+  SESSION_LIVE="$(printf '%s' "$STATUS_JSON" | jq -r '.session_live // false' 2>/dev/null)"
+}
+read_liveness
+
+# WAITING for the launch, when asked to. The drive still never launches
+# anything — session lifecycle stays the human's — it just stops refusing
+# INSTANTLY, which is what made the loop three messages wide: stage, ask, wait
+# to be told, drive. With `QA_WAIT_SECS` set (`just qa` sets it) the drive
+# prints the launch command itself and blocks until the session appears, so
+# the loop is one command for the agent and one for the human, concurrently.
+QA_WAIT_SECS="${QA_WAIT_SECS:-0}"
+if [[ "$SESSION_LIVE" != "true" && "$QA_WAIT_SECS" -gt 0 ]]; then
+  cat <<EOF
+
+==> Waiting up to ${QA_WAIT_SECS}s for '${SESSION}'. Launch it YOURSELF, in a
+    NEW terminal window OUTSIDE zellij:
+
+    cd ${ROOT}
+    just launch
+
+    That derives everything — session, state and data dirs, and the PATH shim
+    that makes a bare \`clave\` resolve to THIS build. It refuses if run from
+    inside a zellij session, which is why it is yours and not the agent's.
+
+    The drive starts by itself the moment the session is up.
+
+EOF
+  QA_WAITED=0
+  while [[ "$SESSION_LIVE" != "true" && "$QA_WAITED" -lt "$QA_WAIT_SECS" ]]; do
+    sleep 2
+    QA_WAITED=$((QA_WAITED + 2))
+    read_liveness
+  done
+  [[ "$SESSION_LIVE" == "true" ]] && printf '==> '"'"'%s'"'"' is up after %ss — driving.\n\n' "$SESSION" "$QA_WAITED"
+fi
+
 if [[ "$SESSION_LIVE" != "true" ]]; then
   cat >&2 <<EOF
 REFUSING: sandbox session '${SESSION}' is not live.
@@ -154,8 +290,11 @@ REFUSING: sandbox session '${SESSION}' is not live.
 This drive never launches a session — stage and launch first:
   just sandbox ${SCENARIO}
   clave dev scenario ${SCENARIO}   # if not already seeded by \`just sandbox\`
-  (human, non-zellij terminal) clave dev launch
+  (human, non-zellij terminal) cd ${ROOT} && just launch
 then re-run: $0 ${SCENARIO}
+
+Or drive the whole loop in one command, which waits for the launch:
+  just qa ${SCENARIO}
 EOF
   exit 1
 fi
@@ -183,148 +322,22 @@ echo "log=${DRIVE_LOG}"
 TMP="${TMPDIR:-/tmp}"
 ZLOG="${TMP%/}/zellij-$(id -u)/zellij-log/zellij.log"
 
-# The mark: everything phase 1+ reads from the zellij log is lines AFTER
-# this point, taken at THIS script's start. Phase 0's build-tag check is the
-# deliberate exception — see the comment at that check.
-if [[ -r "$ZLOG" ]]; then
-  LOGMARK="$(wc -l <"$ZLOG" | tr -d ' ')"
-else
-  LOGMARK=0
-fi
-zlog_tail() {
-  if [[ -r "$ZLOG" ]]; then
-    tail -n "+$((LOGMARK + 1))" "$ZLOG"
-  fi
-}
-
 # The build tag `just sandbox` baked (sandbox-setup.sh derives it from
 # `git rev-parse --short HEAD` in the checkout that staged it — same
 # derivation here, from THIS checkout).
 BUILD_TAG="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo dev)"
 
-# ---------------------------------------------------------------------------
-# phase()/check()/measure() — the tracing spec's helpers.
-# ---------------------------------------------------------------------------
+# The instrument: tracing, assertions, and the zellij log read per bar
+# instance (scripts/qa/lib.sh — see its header for what it expects set, all
+# of which is above it). Sourced rather than inlined so the log parsing can be
+# tested without a launched session: scripts/qa/lib-selftest.sh.
+# shellcheck source=scripts/qa/lib.sh
+source "$SCRIPT_DIR/qa/lib.sh"
 
-CURRENT_PHASE=""
-PHASE_NAMES=()
-PHASE_RESULTS=()
-
-ts() { date '+%H:%M:%S'; }
-
-phase() {
-  CURRENT_PHASE="$1"
-  PHASE_NAMES+=("$1")
-  PHASE_RESULTS+=("PASS")
-  printf '\n[%s %s] PHASE START\n' "$CURRENT_PHASE" "$(ts)"
-}
-
-# A recorded reading — not an assertion. "empty" is printed as the word.
-measure() {
-  local desc="$1" val="${2:-}"
-  [[ -z "$val" ]] && val="empty"
-  printf '[%s %s] MEASURE %s: %s\n' "$CURRENT_PHASE" "$(ts)" "$desc" "$val"
-}
-
-print_summary() {
-  echo
-  echo "== QA drive summary (${SCENARIO}) =="
-  local i
-  for i in "${!PHASE_NAMES[@]}"; do
-    printf '  %-18s %s\n' "${PHASE_NAMES[$i]}" "${PHASE_RESULTS[$i]}"
-  done
-  echo "log: ${DRIVE_LOG}"
-  echo "Full 0-7 driven live green: run 4, 2026-08-17 — the header's ledger records how each pending assumption settled."
-}
-
-# Mark the current phase FAILED, print the summary, and stop the run. The
-# log and sandbox are left exactly as they are — forensics, not a re-run.
-fail_phase() {
-  local last=$((${#PHASE_RESULTS[@]} - 1))
-  PHASE_RESULTS[last]="FAIL"
-  printf '\nPHASE %s FAILED\n' "$CURRENT_PHASE"
-  print_summary
-  exit 1
-}
-
-# check <desc> <measured> <expected> — exact string match. First FAIL stops
-# the run (fail_phase exits non-zero).
-check() {
-  local desc="$1" measured="${2:-}" expected="${3:-}"
-  [[ -z "$measured" ]] && measured="empty"
-  [[ -z "$expected" ]] && expected="empty"
-  if [[ "$measured" == "$expected" ]]; then
-    printf '[%s %s] CHECK %s: measured=%s expected=%s PASS\n' "$CURRENT_PHASE" "$(ts)" "$desc" "$measured" "$expected"
-  else
-    printf '[%s %s] CHECK %s: measured=%s expected=%s FAIL\n' "$CURRENT_PHASE" "$(ts)" "$desc" "$measured" "$expected"
-    fail_phase
-  fi
-}
-
-# check_min <desc> <measured-int> <min-int> — measured >= min.
-check_min() {
-  local desc="$1" measured="${2:-}" min="$3" verdict="FAIL"
-  if [[ "$measured" =~ ^[0-9]+$ ]] && ((measured >= min)); then
-    verdict="PASS"
-  fi
-  printf '[%s %s] CHECK %s: measured=%s expected=>=%s %s\n' "$CURRENT_PHASE" "$(ts)" "$desc" "${measured:-empty}" "$min" "$verdict"
-  [[ "$verdict" == "FAIL" ]] && fail_phase
-}
-
-# check_numeric <desc> <measured> — measured must be a bare integer. The
-# guard for asserted READS: a `// 0` or `:-0` fallback lets a dead
-# dev_status or an unreadable log read 0 on BOTH ends of a window, and a
-# flat/bounded check then passes without having observed anything
-# (CodeRabbit, PR #202 — same family as run 3's jq `//` blindness to
-# `false`). jq prints `null` for a missing key, which this rejects too.
-check_numeric() {
-  local desc="$1" measured="${2:-}" verdict="FAIL"
-  [[ "$measured" =~ ^[0-9]+$ ]] && verdict="PASS"
-  printf '[%s %s] CHECK %s: measured=%s expected=<integer> %s\n' "$CURRENT_PHASE" "$(ts)" "$desc" "${measured:-empty}" "$verdict"
-  [[ "$verdict" == "FAIL" ]] && fail_phase
-}
-
-# check_nonempty <desc> <measured> — measured must be non-blank (used where
-# the expected value is only known once measured, e.g. a bound tab_id).
-check_nonempty() {
-  local desc="$1" measured="${2:-}" verdict="FAIL"
-  [[ -n "$measured" ]] && verdict="PASS"
-  printf '[%s %s] CHECK %s: measured=%s expected=<non-empty> %s\n' "$CURRENT_PHASE" "$(ts)" "$desc" "${measured:-empty}" "$verdict"
-  [[ "$verdict" == "FAIL" ]] && fail_phase
-}
-
-dev_status() { "$CLAVE_BIN" dev status 2>/dev/null; }
-
-# Guarded list-panes read. Never the bare env-var form (TESTING.md, "the
-# sandbox drive loop" step — a dead/absent session hangs `zellij action`
-# forever; ct.sh bounds it). Returns "[]" and a non-zero status on any
-# failure so callers can jq it unconditionally — but "[]" is a VALID empty
-# panes list too, so a caller that only looks at the JSON and not the
-# return code cannot tell a genuine empty read from a ct.sh refusal
-# (FOOTGUNS, "the wrapper's refusal is the only thing it prints" — a
-# swallowed stderr here is exactly that trap). ct.sh's own stderr is
-# deliberately NOT redirected to /dev/null: it flows to this script's fd2,
-# which is already teed into DRIVE_LOG by the top-level `exec` redirect, so
-# a refusal is never discarded. Every caller MUST check the return code.
-# `-c` (final review BLOCKER 1): `pane_command` is
-# `#[serde(skip_serializing_if = "Option::is_none")]` on zellij's
-# `PaneListEntry` and is only populated when `list-panes` is asked for
-# running-command info — without it every join below reads `pane_command`
-# as absent and resolves UNRESOLVED unconditionally.
-ct_list_panes() {
-  local out
-  if ! out="$("$CT" list-panes -t -c -j)"; then
-    printf '[%s %s] ct.sh list-panes -t -c -j FAILED (stderr above)\n' "$CURRENT_PHASE" "$(ts)" >&2
-    echo "[]"
-    return 1
-  fi
-  if ! jq -e . >/dev/null 2>&1 <<<"$out"; then
-    printf '[%s %s] ct.sh list-panes -t -c -j returned non-JSON: %s\n' "$CURRENT_PHASE" "$(ts)" "$out" >&2
-    echo "[]"
-    return 1
-  fi
-  printf '%s' "$out"
-}
+# The mark: everything phase 1+ reads from the zellij log is lines AFTER
+# this point, taken at THIS script's start. Phase 0's build-tag check is the
+# deliberate exception — see the comment at that check.
+LOGMARK="$(zlog_now)"
 
 # ===========================================================================
 # Phase 0 — preflight
@@ -358,9 +371,136 @@ LOADED_LINES="$(grep -F 'clave-bar: loaded' "$ZLOG" 2>/dev/null || true)"
 LOADED_TAIL="$(printf '%s\n' "$LOADED_LINES" | tail -5)"
 measure "loaded-tail (last 5)" "$LOADED_TAIL"
 TAIL_MATCH="$(printf '%s\n' "$LOADED_TAIL" | grep -F "build=$BUILD_TAG" | tail -1)"
+
+# An EXACT tag match is the happy path and the only one that needs no
+# argument. But the property this check exists for is "the bar now running
+# was built from the bar source I am testing", and HEAD moves for reasons the
+# bar does not care about: commit a host-only fix, or a doc, and the loaded
+# wasm is suddenly 'stale' by tag while being byte-identical in source. That
+# false red used to mean a kill and a relaunch to clear, which is a strong
+# incentive not to commit mid-drive — the wrong incentive entirely.
+#
+# So an older tag is accepted ONLY when git says the source it was built from
+# is the same source: the `crates/clave-bar` and `crates/clave-types` trees
+# (the bar and the only crate it links) must hash equal at that commit and at
+# HEAD. That is a STRONGER claim than tag equality, not a weaker one — tag
+# equality never looked at the source at all. Anything git cannot resolve
+# (an unknown tag, a dirty tree, `dev`) stays a failure.
+TAG_VERDICT="absent"
+if [[ -n "$TAIL_MATCH" ]]; then
+  TAG_VERDICT="present"
+else
+  # Which build DID load, per the newest loaded line we can see.
+  LOADED_BUILD="$(printf '%s\n' "$LOADED_TAIL" | grep -o 'build=[0-9a-f]\{7,\}' | tail -1 | cut -d= -f2)"
+  measure "loaded build tag (differs from HEAD ${BUILD_TAG})" "${LOADED_BUILD:-empty}"
+  if [[ -n "$LOADED_BUILD" ]]; then
+    SAME_SOURCE="yes"
+    for crate in crates/clave-bar crates/clave-types; do
+      A="$(git -C "$ROOT" rev-parse "${LOADED_BUILD}:${crate}" 2>/dev/null || echo unknown-a)"
+      B="$(git -C "$ROOT" rev-parse "HEAD:${crate}" 2>/dev/null || echo unknown-b)"
+      measure "${crate} tree: loaded=${A} head=${B}" "$([[ "$A" == "$B" ]] && echo same || echo DIFFERENT)"
+      [[ "$A" == "$B" ]] || SAME_SOURCE="no"
+    done
+    # A dirty bar source means the running wasm cannot correspond to the
+    # working tree whatever the trees say, so it is not an escape hatch.
+    if [[ -n "$(git -C "$ROOT" status --porcelain -- crates/clave-bar crates/clave-types 2>/dev/null)" ]]; then
+      SAME_SOURCE="no"
+      note 'bar/types source is DIRTY — the loaded wasm cannot match the working tree, so the older tag is not accepted'
+    fi
+    if [[ "$SAME_SOURCE" == "yes" ]]; then
+      TAG_VERDICT="present"
+      note 'the loaded bar is build=%s, not HEAD (%s), but the bar and types trees are IDENTICAL at both — the running wasm is the source under test, and HEAD moved on host/docs only' "$LOADED_BUILD" "$BUILD_TAG"
+    fi
+  fi
+fi
 measure "loaded-tail matched line (verbatim)" "$TAIL_MATCH"
-check "build tag on loaded tail (any of last 5)" "$([[ -n "$TAIL_MATCH" ]] && echo present || echo absent)" "present"
-printf '[%s %s] NOTE same-HEAD re-runs cannot distinguish a stale load here — eyeball the tail timestamps\n' "$CURRENT_PHASE" "$(ts)"
+check "the loaded bar was built from the bar source under test" "$TAG_VERDICT" "present"
+note 'same-HEAD re-runs cannot distinguish a stale load here — eyeball the tail timestamps'
+
+# The clave that HOOKS will resolve must be able to read this sandbox's store.
+#
+# Added 2026-09-10 after a round lost to its absence. Hooks are registered in
+# the shared ~/.claude/settings.json as bare `clave` — they must be, since that
+# file is the maintainer's real one and a versioned path there is "the one
+# leak" (#43/#44). But the sandbox's PATH shim does NOT reach the hook process
+# Claude Code spawns: the pane's env survives (CLAVE_SESSION, CLAVE_STATE_DIR,
+# ZELLIJ_PANE_ID are all correct, and `command -v clave` in the pane resolves
+# to the shim), while its PATH does not. So bare `clave` lands on the RELEASE
+# launcher, and the release binary is handed the SANDBOX store.
+#
+# That pairing is silent and total. An older clave hits an enum variant it has
+# no name for, serde fails the whole struct, and every hook dies on the read —
+# exiting 0 by Global Constraint with the message only on stderr. The fleet
+# stops updating entirely and it presents as "the feature under test is
+# broken": `card` did exactly this, and cost a round diagnosed as an adoption
+# bug when adoption was fine.
+#
+# WHICH `clave`, though. This drive runs in its own terminal and the hook
+# process does not inherit this shell's PATH, so the binary resolved HERE can
+# differ from the one a hook lands on — and vouching for the wrong one is
+# exactly the silent pass this check exists to prevent (#259 review). The one
+# a SANDBOX hook lands on is knowable without guessing, though: hooks and the
+# bar both invoke a BARE `clave` (`clave hook <Event>` in settings,
+# `clave_binary "clave"` in config.kdl), and `dev launch` composes the
+# instance's shim directory onto the FRONT of the PATH its panes inherit. So
+# the shim is the hook's binary, and the assertion belongs there.
+#
+# Every other clave on some reachable PATH is still read, but as a HAZARD
+# REPORT rather than a verdict on this build: a released binary older than
+# this store's vocabulary cannot read it BY CONSTRUCTION — that is the
+# one-way cost of adding a variant (clave-types `lenient`), and `just
+# release` is what resolves it. It bites only if it wins a PATH race against
+# the shim, which is the #43/#44 leak; named here with its reason so a real
+# race reads as a race instead of as a mystery.
+#
+# `ls` is the cheapest command that reads the store and nothing else. Stderr,
+# not exit code — `clave` reports a store read failure there and still exits 0.
+store_read_err() {
+  # The 2>&1 BEFORE >/dev/null is the point, not a slip: stderr takes the
+  # current stdout and then stdout is dropped, so this returns the message
+  # and never the listing. Empty output is the clean read.
+  # shellcheck disable=SC2069
+  CLAVE_STATE_DIR="$STATE_DIR" CLAVE_DATA_DIR="$DATA_DIR" "$1" ls 2>&1 >/dev/null || true
+}
+
+SHIM_CLAVE="$("$CLAVE_BIN" dev instance --field shim 2>/dev/null || true)/clave"
+measure "the clave a sandbox hook resolves (the shim, first on the pane PATH)" "$SHIM_CLAVE"
+if [[ -x "$SHIM_CLAVE" ]]; then
+  measure "version of the shim clave" "$("$SHIM_CLAVE" --version 2>&1 || true)"
+  SHIM_READ="$(store_read_err "$SHIM_CLAVE")"
+  check "the shim clave reads this sandbox store" "${SHIM_READ:-clean}" "clean"
+  note 'a failure on that line means EVERY hook in this sandbox no-ops silently — the drive below would read as broken features'
+else
+  check "the shim clave is executable (dev launch puts it first on PATH)" "missing" "present"
+fi
+
+DRIVE_CLAVE="$(command -v clave 2>/dev/null || true)"
+LOGIN_CLAVE="$(env -i HOME="$HOME" bash -lc 'command -v clave' 2>/dev/null || true)"
+measure "clave on this drive shell's PATH" "${DRIVE_CLAVE:-<none on PATH>}"
+measure "clave on a clean login PATH" "${LOGIN_CLAVE:-<none on PATH>}"
+OTHER_CLAVES=()
+for CAND in "$DRIVE_CLAVE" "$LOGIN_CLAVE"; do
+  [[ -n "$CAND" ]] || continue
+  [[ "$CAND" == "$SHIM_CLAVE" ]] && continue
+  # The `+()` guard is what keeps an empty array safe under `set -u`.
+  [[ " ${OTHER_CLAVES[*]+${OTHER_CLAVES[*]}} " == *" $CAND "* ]] && continue
+  OTHER_CLAVES+=("$CAND")
+done
+for CAND in "${OTHER_CLAVES[@]+"${OTHER_CLAVES[@]}"}"; do
+  measure "version of $CAND (shadowed by the shim inside the sandbox)" "$("$CAND" --version 2>&1 || true)"
+  CAND_READ="$(store_read_err "$CAND")"
+  if [[ -z "$CAND_READ" ]]; then
+    measure "$CAND reads this sandbox store" "clean"
+  elif [[ "$CAND_READ" == *"unknown variant"* ]]; then
+    # Older than the store's vocabulary. Expected on a branch that adds a
+    # variant; a verdict on the release train, not on this build.
+    note '%s predates this store vocabulary and rejects the WHOLE store (%s) — shadowed by the shim here, fatal to every hook if it ever wins the PATH race (#44); `just release` is the resolution' "$CAND" "$CAND_READ"
+  else
+    # Any other read failure is a real red: not a vocabulary gap, so it is
+    # permissions, a corrupt store, or a binary that cannot run at all.
+    check "$CAND reads this sandbox store" "$CAND_READ" "clean"
+  fi
+done
 
 # config.kdl <-> layout.kdl identity pair (the #44 self-check `just sandbox`
 # already runs at stage time — re-asserted here because config coherence can
@@ -398,6 +538,48 @@ if [[ -f "$LAUNCH" ]]; then
   check "identity pair config.kdl<->launch.kdl (post-launch)" "$LAUNCHVAL" "$CFGVAL"
 else
   check "present: launch.kdl (post-launch)" "missing" "present"
+fi
+
+# The ROW GEOMETRY is launch-baked (#232), so it is a preflight fact and not a
+# runtime one: the layout carries both the bar's fixed pane width and the
+# `row_height` plugin-config key, and a LIVE bar can neither resize its own
+# pane nor swap its own config. The failure this catches is a STALE STAGE — a
+# store asking for one geometry while the launched layout was generated by a
+# binary that bakes another (or by one that had never heard of this mode at
+# all, which is the skew that killed a whole session's hooks on 2026-09-10).
+# The bar then renders one geometry into another's pane and nothing anywhere
+# says so.
+QA_REFUSED_BEFORE="$(count_push_refusals)"
+measure "push refusals in the sandbox log before this run (forensic baseline)" "$QA_REFUSED_BEFORE"
+
+P0_ROW_HEIGHT="$(jq -r '.store.row_height' <<<"$STATUS_JSON" 2>/dev/null)"
+check_nonempty "store row_height readable" "$P0_ROW_HEIGHT"
+# Every `row_height` in the launched layout, deduped: the bar pane node and
+# every MessagePlugin keybind bake it, and zellij matches a pipe's
+# destination on (location, configuration) EXACTLY — so two spellings in one
+# file is two bars, not one (setup.rs:101's warning, asserted).
+P0_LAY_RH="$(grep -o 'row_height "[^"]*"' "$LAUNCH" 2>/dev/null | sort -u | tr -d '\n')"
+check "launch.kdl bakes ONE row_height, and it is the store's" \
+  "$P0_LAY_RH" "row_height \"${P0_ROW_HEIGHT}\""
+P0_CFG_RH="$(grep -o 'row_height "[^"]*"' "$CFG" 2>/dev/null | sort -u | tr -d '\n')"
+check "config.kdl agrees with launch.kdl on row_height" "$P0_CFG_RH" "$P0_LAY_RH"
+
+# The two declared bar widths. Both geometries live in the layout as
+# `swap_tiled_layout` nodes, so the file carries exactly two distinct bar
+# pane sizes — expanded and collapsed — and the collapsed one must be the
+# smaller of the pair. Asserted as a PAIR rather than against a hardcoded
+# number wherever possible, so this survives a future mode; the card's own
+# numbers are then pinned from the lock (§1: 48 expanded, 16 collapsed),
+# which is the independent expectation, not a re-derivation of the generator.
+P0_BAR_SIZES="$(grep -o 'pane size=[0-9]* borderless=true' "$LAUNCH" 2>/dev/null |
+  grep -o '[0-9]*' | sort -n -u | tr '\n' ' ' | sed 's/ $//')"
+measure "bar pane widths declared in launch.kdl" "$P0_BAR_SIZES"
+check "exactly two declared bar widths" "$(wc -w <<<"$P0_BAR_SIZES" | tr -d ' ')" "2"
+if [[ "$P0_ROW_HEIGHT" == "card" ]]; then
+  check "the card's ratified geometry (lock §1: 16 collapsed, 48 expanded)" \
+    "$P0_BAR_SIZES" "16 48"
+else
+  note 'row_height=%s — the card pair is not asserted; widths recorded above' "$P0_ROW_HEIGHT"
 fi
 
 # Permission cache seeded under BOTH key forms (K7, #178-adjacent class: a
@@ -443,13 +625,62 @@ DORMANT_COUNT="$(jq '[.store.agents[] | select(.tab_id == null)] | length' <<<"$
 measure "total rows" "$TOTAL_ROWS"
 measure "dormant rows (tab_id null)" "$DORMANT_COUNT"
 
+# SEEDED rows, counted apart from everything else in the store. A scenario's
+# rows carry deterministic `c85c` uuids (dev.rs `scenario_uuid`); anything
+# else is residue from an earlier drive, because this drive MINTS a row of its
+# own at phase 2 rung 1 (`clave add`, by design, and its uuid is a real one).
+#
+# Counting the seeded rows rather than the whole store is what makes a re-run
+# possible at all. The check used to be `total == 6`, which held only against
+# a store staged seconds earlier — so the drive's own previous run turned
+# phase 1 red, and the loop became kill, re-stage, ask for a relaunch, drive,
+# for every iteration. The property never needed the total: it is about what
+# the scenario put there and what the eager launch did with it.
+SEEDED_ROWS="$(jq '[.store.agents | keys[] | select(startswith("00000000-0000-4000-8000-c85c"))] | length' <<<"$STATUS_JSON" 2>/dev/null)"
+RESIDUE_ROWS=$((TOTAL_ROWS - SEEDED_ROWS))
+measure "seeded rows (c85c uuids)" "$SEEDED_ROWS"
+measure "non-seeded rows (this or an earlier drive's own creations)" "$RESIDUE_ROWS"
+SEEDED_DORMANT="$(jq '[.store.agents | to_entries[] | select(.key | startswith("00000000-0000-4000-8000-c85c")) | select(.value.tab_id == null)] | length' <<<"$STATUS_JSON" 2>/dev/null)"
+measure "dormant SEEDED rows (tab_id null)" "$SEEDED_DORMANT"
+
 if [[ "$SCENARIO" == "qa-fleet" ]]; then
   # qa-fleet seeds 6 dormant rows; cold start's eager-launch selection
   # (setup.rs `eager_row` — the most-recent row whose cwd still exists)
   # auto-resumes exactly one of them into a live tab, so the STEADY STATE
-  # this drive measures is 6 total / 5 still dormant / 1 bound.
-  check "total rows == scenario seed count" "$TOTAL_ROWS" "6"
-  check "dormant rows after eager resume" "$DORMANT_COUNT" "5"
+  # this drive measures is 6 seeded / 5 still dormant / 1 bound.
+  #
+  # IS THIS STAGE FRESH. Asked first, and answered plainly, because the drive
+  # is NOT idempotent and never can be: phases 2-5 bind dormant rows, mint a
+  # row, churn tabs and toggle width — they consume the very starting shape
+  # they assert against. A second run on the same stage therefore fails HERE,
+  # on a count that is a perfectly correct reading of the previous run's
+  # leftovers, and the red says nothing about the code under test. Naming
+  # that cause costs two lines and saves the next agent the half hour this
+  # cost: the counts below are only meaningful against a fresh stage.
+  SEEDED_BOUND=$((SEEDED_ROWS - SEEDED_DORMANT))
+  if [[ "$SEEDED_BOUND" -gt 1 || "$RESIDUE_ROWS" -gt 0 ]]; then
+    cat >&2 <<EOF
+
+  STALE STAGE: ${SEEDED_BOUND} seeded rows are bound (a fresh stage has
+  exactly 1, the eager resume) and ${RESIDUE_ROWS} non-seeded row(s) are
+  present (phase 2 rung 1 mints one per run, by design).
+
+  This drive consumes its own starting conditions, so every count below is
+  reading the PREVIOUS run rather than this build. Re-stage and drive in one
+  command — it waits for your launch:
+
+      zellij kill-session ${SESSION} && zellij delete-session --force ${SESSION}
+      just qa ${SCENARIO}
+
+  Continuing anyway, so the phases that do not depend on the starting shape
+  still report; treat every count in phases 1-5 as suspect.
+
+EOF
+    note 'STALE STAGE — seeded_bound=%s (fresh: 1), residue=%s. Counts in phases 1-5 read the previous run. Re-stage with `just qa %s`.' "$SEEDED_BOUND" "$RESIDUE_ROWS" "$SCENARIO"
+  fi
+  check "the stage is fresh (seeded rows bound == 1, the eager resume)" "$SEEDED_BOUND" "1"
+  check "seeded rows == scenario seed count" "$SEEDED_ROWS" "6"
+  check "dormant seeded rows after eager resume" "$SEEDED_DORMANT" "5"
 fi
 
 # The eager-launch row's tab_id bound (the #178 resume face, P11). The most
@@ -545,38 +776,6 @@ measure "store seq" "$SEQ"
 # ===========================================================================
 phase "P2-bind-ladder"
 
-# There is NO count_live_instances: the bar's panes are invisible to
-# `list-panes`. Measured on the 2026-08-13 run: two instances provably
-# loaded (fresh `clave-bar: loaded` lines, ids 1 and 2), zero clave-bar
-# panes in the list — the only plugin pane it showed was zellij's own
-# built-in `zellij:link`. Likely mechanism: the bar sets
-# `set_selectable(false)` (FOOTGUNS "cannot be focused by clicking") and
-# list-panes appears to serialize selectable panes only — unverified,
-# zellij-server is not vendored. Live bar instances are therefore counted
-# as live TABS (`count_live_tabs`): one bar per tab is the layout's design,
-# and the loaded-line evidence above confirmed it (tab 1's bar loaded the
-# instant `clave add` created the tab).
-#
-# NOT a `ct_list_panes | jq …` pipe: with `pipefail` set, a failed
-# ct_list_panes (which still prints valid empty-JSON "[]" so jq itself
-# succeeds) would leave the pipeline's exit status 0 — the exact
-# swallowed-refusal trap this rewrite exists to close. Capture the panes
-# read and its status separately instead.
-#
-# Selectors are FLAT (final review BLOCKER 1) — see the comment on
-# `ct_list_panes` above.
-#
-# The live block's TRUE size, for ROW arithmetic (BLOCKER 2 finding 2):
-# counting store rows with `tab_id != null` undercounts it the moment the
-# sandbox also carries a plain terminal tab with no agent behind it, since
-# model.rs's live block is one row per zellij TAB, not per bound agent. The
-# unique tab_id count across every pane is what the bar actually renders.
-count_live_tabs() {
-  local panes
-  panes="$(ct_list_panes)" || return 1
-  jq '[.[] | .tab_id] | unique | length' <<<"$panes" 2>/dev/null
-}
-
 count_dormant() {
   jq '[.store.agents[] | select(.tab_id == null)] | length' < <(dev_status) 2>/dev/null
 }
@@ -651,8 +850,7 @@ width_belief() {
     seek_width="$(printf '%s' "$seek_line" | grep -oE 'cols=[0-9]+' | head -1 | cut -d= -f2)"
     check "rung $rung width belief" "$seek_width" "$width_target"
   else
-    printf '[%s %s] NOTE rung %s width belief: measured=unavailable — seek-trace instrumentation is not in the shipped bar (scripts/seek-trace.sh header); not a check, not a PASS\n' \
-      "$CURRENT_PHASE" "$(ts)" "$rung"
+    note 'rung %s width belief: measured=unavailable — seek-trace instrumentation is not in the shipped bar (scripts/seek-trace.sh header); not a check, not a PASS' "$rung"
   fi
 }
 
@@ -936,99 +1134,6 @@ evlog_count() {
   printf '%s' "${n:-0}"
 }
 
-# Fresh `clave-bar: loaded` lines carrying THIS build's tag, since the script's
-# log mark. The only way to count bar instances at all: the bar is invisible to
-# `list-panes` (FOOTGUNS, "list-panes does not show the clave-bar at all"), so
-# a new tab's bar is proved to have loaded by its own log line and nothing
-# else. Attributable by CONTENT (the build tag), which is what makes it usable
-# in a user-global log — with one honest residual: a second worktree sitting at
-# the same HEAD would share the tag.
-bar_loaded_count() {
-  local n
-  n="$(zlog_tail | grep -F 'clave-bar: loaded' | grep -c -F "build=$BUILD_TAG")" || n=0
-  printf '%s' "${n:-0}"
-}
-
-# The live tab id set as a compact JSON array. One bar per tab is the layout's
-# design, so this is also the bar's LIVE BLOCK membership (count_live_tabs'
-# rationale, phase 2).
-live_tab_ids() {
-  local panes
-  panes="$(ct_list_panes)" || return 1
-  jq -c '[.[] | .tab_id] | unique' <<<"$panes" 2>/dev/null
-}
-
-ct_dump_layout() {
-  local out
-  if ! out="$("$CT" dump-layout)"; then
-    printf '[%s %s] ct.sh dump-layout FAILED (stderr above)\n' "$CURRENT_PHASE" "$(ts)" >&2
-    return 1
-  fi
-  printf '%s' "$out"
-}
-
-# WHICH TAB IS FOCUSED, as a tab_id — the one focus observable this drive has,
-# and the spine of both phases below.
-#
-# `list-panes` cannot answer it: `PaneInfo.is_focused` is "focused in its
-# LAYER" (zellij-utils data.rs:2302), so every tab reports a focused pane.
-# `dump-layout` can: `serialize_tab` writes `focus=true` on the focused tab
-# node and on no other (zellij-utils session_serialization.rs:109, snapshot
-# `can_serialize_tab_focus`). The dump names no ids, so the focused node's RANK
-# among tab nodes is joined back to a tab_id through `list-panes`' own
-# tab_position ordering — a rank join, deliberately, because it does not care
-# whether zellij counts tab positions from 0 or from 1.
-#
-# FIRST LIVE RUN PENDING (2): the join assumes the dump lists tabs in tab
-# position order. Every caller prints the id it read, so a wrong join shows up
-# as a focus that never matches anything rather than as a silent pass.
-focused_tab_id() {
-  local dump idx panes
-  dump="$(ct_dump_layout)" || return 1
-  idx="$(awk '$1 == "tab" { i++; if ($0 ~ /focus=true/) { print i; exit } }' <<<"$dump")"
-  [[ -z "$idx" ]] && return 1
-  panes="$(ct_list_panes)" || return 1
-  jq -r --argjson i "$idx" \
-    '[.[] | {tab_id, tab_position}] | unique_by(.tab_id) | sort_by(.tab_position) | .[$i - 1].tab_id // empty' \
-    <<<"$panes" 2>/dev/null
-}
-
-# Focus a tab BY ID, then PROVE it landed. Nothing here touches a pane.
-# `go-to-tab-by-id` is zellij 0.44's stable-id action (zellij-utils
-# cli.rs:1213 "Go to tab with stable ID"); the positional `go-to-tab` fallback
-# is for an older server, and the +1 is the documented 0-indexed tab_position
-# → 1-based tab index conversion (data.rs:2277).
-#
-# FIRST LIVE RUN PENDING (1): which of the two legs the maintainer's server
-# takes. The verification loop below is why it does not matter — a fallback
-# that converts wrongly fails here, loudly, instead of drifting one tab off.
-focus_tab() {
-  local want="$1" panes pos got
-  if ! "$CT" go-to-tab-by-id "$want"; then
-    printf '[%s %s] NOTE go-to-tab-by-id refused for tab %s — falling back to positional go-to-tab\n' \
-      "$CURRENT_PHASE" "$(ts)" "$want"
-    panes="$(ct_list_panes)" || return 1
-    pos="$(jq -r --argjson t "$want" '[.[] | select(.tab_id == $t) | .tab_position] | unique | .[0] // empty' <<<"$panes" 2>/dev/null)"
-    [[ -z "$pos" ]] && return 1
-    "$CT" go-to-tab "$((pos + 1))" || return 1
-  fi
-  for _ in $(seq 1 5); do
-    got="$(focused_tab_id)"
-    [[ -n "$got" && "$got" == "$want" ]] && return 0
-    sleep 1
-  done
-  return 1
-}
-
-# Focus a tab and assert the landing, in one line of drive.
-focus_tab_checked() {
-  local want="$1" label="$2" rc
-  focus_tab "$want"
-  rc=$?
-  check "$label focus landed on tab $want" \
-    "$([[ $rc -eq 0 ]] && echo "tab=$want" || echo "focused=$(focused_tab_id)")" "tab=$want"
-}
-
 # The re-join, run after EVERY churn step (QA-DRIVE phase 3: "re-join after
 # each"). Two store-side faces of the #55 mis-bind class:
 #   - a bind pointing at a tab that is gone (the prune echo never landed), and
@@ -1245,8 +1350,7 @@ nav_focus_check() {
   here="$(focused_tab_id)"
   measure "$label predicted top live row (ordinal desc, ties by position)" "${want:-empty} (focus parked on ${here:-empty})"
   if [[ -z "$want" || "$want" == "$here" ]]; then
-    printf '[%s %s] NOTE %s nav focus check NOT EXERCISED: every tab tried is itself the top live row, so a press could not move focus. Not a pass.\n' \
-      "$CURRENT_PHASE" "$(ts)" "$label"
+    note '%s nav focus check NOT EXERCISED: every tab tried is itself the top live row, so a press could not move focus. Not a pass.' "$label"
     return
   fi
   nav_pipe '{"row":1}'
@@ -1349,8 +1453,7 @@ NEW_TAB="$NEW_IDS"
 if [[ "$NEW_TAB" == "$B_TAB" ]]; then
   measure "churn B tab id recycling" "recycled: the new tab took the closed tab's id ${B_TAB}"
 else
-  printf '[%s %s] NOTE churn B: the new tab is id %s, not the closed %s — this run did NOT exercise recycling, so the inherited-stamp check below is a control, not the property.\n' \
-    "$CURRENT_PHASE" "$(ts)" "$NEW_TAB" "$B_TAB"
+  note 'churn B: the new tab is id %s, not the closed %s — this run did NOT exercise recycling, so the inherited-stamp check below is a control, not the property.' "$NEW_TAB" "$B_TAB"
 fi
 
 # The birth stamp is fire-and-forget (`Effect::Touch` → `clave touch <tab>`),
@@ -1380,8 +1483,7 @@ fi
 # missing one is a live sighting of that class, and it belongs in the report as
 # a finding, not as a red gate on a known-open defect.
 if [[ -z "$NEW_ORD" ]]; then
-  printf '[%s %s] NOTE churn B: the new tab has NO tab_order stamp. That is the birth_touch latch signature (B15/#55) — record it, do not read it as this phase failing.\n' \
-    "$CURRENT_PHASE" "$(ts)"
+  note 'churn B: the new tab has NO tab_order stamp. That is the birth_touch latch signature (B15/#55) — record it, do not read it as this phase failing.'
 fi
 
 LOADED_AFTER="$LOADED_BEFORE"
@@ -1774,6 +1876,376 @@ check "total writes per press <= 2 (18 presses, delta <= 36)" \
 measure "phase 5 EOF-twin delta (user-global log, unattributable — forensic only)" \
   "$(($(count_eof_twins) - P5_TWINS_BEFORE))"
 
+# --- the width the fleet actually rests at ---------------------------------
+# The bug this branch found and fixed rests the bar at the WRONG WIDTH after
+# a toggle — a walk ask spent on a pre-swap echo, and the walk needs all
+# three. Nothing above can see it: the store's `collapsed` flag is the
+# INTENT, and every press asserted so far only proves the intent landed.
+#
+# So: read the width from zellij and treat the reading as suspect until it
+# proves itself. `list-panes` omits the bar entirely (FOOTGUNS), and the lock
+# calls every automated width probe a known liar, which is why the phase-5
+# eyeball exists. The layout dump does carry the bar's pane node — but a file
+# that only ever echoes the DECLARED layout would make the assertion a
+# tautology. The escape: measure in BOTH settled modes and assert only if the
+# two readings DIFFER. A number that moves with the toggle is reporting the
+# applied swap position, and nothing else can be.
+dump_bar_widths() {
+  local out
+  out="$("$CT" dump-layout 2>/dev/null)" || return 1
+  # The bar's own pane node: the size sits on the `pane` line that opens the
+  # node whose plugin is the bar wasm, a few lines above it.
+  grep -B4 -F 'clave-bar.wasm' <<<"$out" |
+    grep -o 'size=[0-9]*' | grep -o '[0-9]*' | sort -n -u | tr '\n' ' ' | sed 's/ $//'
+}
+
+toggle_pipe
+P5_RC=$?
+check "width-probe press (to collapsed) accepted" "$([[ $P5_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+if [[ "$P5_COLLAPSED0" == "true" ]]; then P5_EXPECT="false"; else P5_EXPECT="true"; fi
+check "width-probe press landed" "$(wait_collapsed "$P5_EXPECT")" "$P5_EXPECT"
+sleep 2 # past the switch's own deafness (WIDTH_COOLDOWN_SECS) and its echoes
+P5_W_A="$(dump_bar_widths || true)"
+measure "bar pane width(s) in the dump, collapsed=${P5_EXPECT}" "$P5_W_A"
+
+toggle_pipe
+P5_RC=$?
+check "width-probe press (back) accepted" "$([[ $P5_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+check "width-probe press landed back" "$(wait_collapsed "$P5_COLLAPSED0")" "$P5_COLLAPSED0"
+sleep 2
+P5_W_B="$(dump_bar_widths || true)"
+measure "bar pane width(s) in the dump, collapsed=${P5_COLLAPSED0}" "$P5_W_B"
+
+if [[ -z "$P5_W_A" || -z "$P5_W_B" ]]; then
+  note 'the layout dump carries no bar pane size — width truth stays with the phase-5 eyeball'
+elif [[ "$P5_W_A" == "$P5_W_B" ]]; then
+  note 'the dump reports the same width in both modes (%s) — it is the DECLARED layout, not pane truth; asserting on it would be a tautology, so width truth stays with the phase-5 eyeball' "$P5_W_A"
+else
+  # It moves with the toggle, so it is the applied position. Two assertions
+  # follow, and the second is the phase-5 eyeball's own question: one width
+  # per mode across the WHOLE fleet — every instance flips itself off the
+  # same store flag, so a second value is an instance resting wrong.
+  check "one bar width across the fleet, collapsed=${P5_EXPECT} (no outliers)" \
+    "$(wc -w <<<"$P5_W_A" | tr -d ' ')" "1"
+  check "one bar width across the fleet, collapsed=${P5_COLLAPSED0} (no outliers)" \
+    "$(wc -w <<<"$P5_W_B" | tr -d ' ')" "1"
+  if [[ "$P0_ROW_HEIGHT" == "card" ]]; then
+    # The card's ratified targets (lock §1), joined to the mode each belongs
+    # to: this is the assertion the band-collision bug would have failed.
+    if [[ "$P5_EXPECT" == "true" ]]; then
+      check "the collapsed fleet rests at the card's 16" "$P5_W_A" "16"
+      check "the expanded fleet rests at the card's 48" "$P5_W_B" "48"
+    else
+      check "the expanded fleet rests at the card's 48" "$P5_W_A" "48"
+      check "the collapsed fleet rests at the card's 16" "$P5_W_B" "16"
+    fi
+  fi
+fi
+
+# ===========================================================================
+# Phase 5b — the card's new cells, from the hook side
+# ===========================================================================
+# The four-line card added three cells that no earlier phase can reach:
+# `wants` (what a blocked agent is asking for, quoted from its own
+# notification), the subagent mark (a boolean from the turn's closing record)
+# and the status the two are gated on. Every one of them is written by
+# `clave hook` into the store — so this phase drives the REAL binary against
+# the REAL store file and the REAL transcript reader, which is the seam the
+# unit tests cannot see: two of this branch's defects lived exactly here (the
+# mark read the statusLine-suppressed tail and so never landed in a released
+# install; the hold had no end, so an exited session kept its mark).
+#
+# Ordering: after the burst and before quiescence. It bumps `seq` and moves
+# statuses, which no later phase reads, and it deliberately leaves the row
+# IDLE — a row left Working would spin the card's 0.2s tick straight into
+# phase 6's idle window.
+phase "P5b-card-cells"
+
+CLAUDE_PROJECTS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"
+
+# The row to drive: scenario-seeded, not stale, and its own session id (so
+# `resolve_transcript`'s derived path and the payload path agree). `stale`
+# rows have no cwd left, and the rotated row's session id is not its uuid.
+P5B_STATUS="$(dev_status)"
+P5B_UUID="$(jq -r '
+  .store.agents | to_entries
+  | map(select(.value.stale != true))
+  | map(select(.key | startswith("00000000-0000-4000-8000-c85c")))
+  | .[0].key // empty' <<<"$P5B_STATUS" 2>/dev/null)"
+check_nonempty "phase-5b target row (scenario-seeded, not stale)" "$P5B_UUID"
+
+# Its transcript, found by globbing rather than by munging the cwd here — the
+# munge is the binary's job and a second implementation of it in bash is a
+# second thing to get wrong.
+P5B_TAIL=""
+for f in "$CLAUDE_PROJECTS"/*/"$P5B_UUID".jsonl; do
+  [[ -f "$f" ]] && P5B_TAIL="$f" && break
+done
+check_nonempty "phase-5b transcript on disk (${P5B_UUID})" "$P5B_TAIL"
+# GUARD, load-bearing: this phase APPENDS a line, and the only files it may
+# ever append to are scenario fixtures — deterministic `c85c` uuids that
+# `clave dev reset` sweeps (dev.rs `is_scenario_jsonl`). A real conversation
+# must be unreachable from here even if the row selection above is changed.
+check "phase-5b transcript is a scenario fixture (never a real conversation)" \
+  "$(basename "$P5B_TAIL" | grep -c '^00000000-0000-4000-8000-c85c.*\.jsonl$' || true)" "1"
+
+# One hook event, exactly as Claude Code fires it: the event name as argv,
+# the payload on stdin, the sandbox's dirs in the environment. Exit status is
+# never the signal — the hook exits 0 by Global Constraint — so every
+# assertion below reads the STORE.
+# THROUGH ct.sh, never `clave hook` directly. Setting CLAVE_STATE_DIR alone
+# looks completely correct and is not: the store write lands in the sandbox,
+# but `clave hook` also PUSHES, and it aims that push with `--session
+# "$ZELLIJ_SESSION_NAME"` (hook.rs `own_session`) — which in a drive shell
+# running inside the maintainer's fleet names HIS session. The push then
+# arrives, precisely and by design, at the wrong bar. FOOTGUNS #281 says this
+# in as many words and names this wrapper as the only sanctioned way to drive
+# a hook; a hand-rolled `hook_fire` that bypassed it hung the maintainer's
+# live session on 2026-09-11, which is why the rule is now enforced at the
+# only site in this script that fires one.
+hook_fire() {
+  local event="$1" message="${2:-}" payload
+  payload="$(jq -nc --arg s "$P5B_UUID" --arg t "$P5B_TAIL" --arg m "$message" \
+    '{session_id:$s, transcript_path:$t} + (if $m == "" then {} else {message:$m} end)')"
+  "$CT" --hook "$event" "$payload" 2>&1 | sed "s/^/[hook $event] /"
+}
+
+# One field of the driven row, after a bounded wait for it to read `want`.
+# Prints the settled value either way; the caller checks it. A bare jq path,
+# never `// empty` — `false` and `null` are both answers here and `//` cannot
+# tell them from absent (run 3's P5 lost a press to exactly that).
+wait_field() {
+  local field="$1" want="$2" i got=""
+  for i in $(seq 1 10); do
+    got="$(jq -r --arg u "$P5B_UUID" ".store.agents[\$u].${field}" < <(dev_status) 2>/dev/null)"
+    [[ "$got" == "$want" ]] && break
+    sleep 1
+  done
+  printf '%s' "$got"
+}
+
+# --- the PR cache, warmed before anything is counted ------------------------
+# `seq` is the only witness of a store write, and it is NOT a clean per-event
+# counter. A hook whose row has a stale PR cache spawns `clave pr-sync`
+# OUTSIDE the flock (pr.rs, deliberately — inside it would deadlock), and that
+# second process writes on its own schedule, so its bump lands in whichever
+# sampling window it pleases. A seeded row starts at `pr_checked: 0`, which
+# `pr_is_stale` calls stale, so the ladder's first event always paid for one:
+# the first live run of this phase measured 7 bumps for 5 events and read as a
+# double-write that was never there.
+#
+# The confound is removed rather than budgeted for. One benign event first
+# (`SessionEnd` — the state the ladder starts from anyway), then wait for the
+# cache to reach the shape `pr_is_stale` calls fresh. `PR_TTL_SECS` is 300s
+# and the ladder is seconds long, so nothing re-spawns inside it.
+hook_fire SessionEnd >/dev/null
+P5B_PR_WARM="stale"
+for _ in $(seq 1 15); do
+  if [[ "$(jq -r --arg u "$P5B_UUID" \
+    '.store.agents[$u] | (.pr_checked > 0 and .pr_branch == .branch)' \
+    < <(dev_status) 2>/dev/null)" == "true" ]]; then
+    P5B_PR_WARM="fresh"
+    break
+  fi
+  sleep 1
+done
+measure "phase-5b PR cache before the count begins" "$P5B_PR_WARM"
+sleep 2 # the settling write is async — let it land before the baseline read
+
+# Re-read: the baseline must be taken AFTER the warm-up, not from the status
+# captured at phase start.
+P5B_SEQ0="$(jq -r '.store.seq' < <(dev_status) 2>/dev/null)"
+check_numeric "phase-5b start store seq readable" "$P5B_SEQ0"
+measure "phase-5b row" "$P5B_UUID tail=$P5B_TAIL"
+
+# --- wants: the words come off the agent's own notification -----------------
+# The anchor is Claude Code's wording and is matched as a substring, because
+# the CLI owns the sentence and has reworded it before.
+hook_fire Notification "Claude needs your permission to use Bash"
+check "a permission notification turns the row red" "$(wait_field status needs_you)" "needs_you"
+check "and the card learns what it is asking for" "$(wait_field wants Bash)" "Bash"
+
+# --- and it does not outlive the asking -------------------------------------
+# `wants` is coextensive with NeedsYou on the wire; the next prompt is what
+# ends the ask, and the words must go with it or the card contradicts its own
+# glyph.
+hook_fire UserPromptSubmit
+check "the next turn clears the ask" "$(wait_field status working)" "working"
+check "and takes its words with it" "$(wait_field wants null)" "null"
+
+# --- the subagent mark: a boolean from the turn's closing record ------------
+# `pendingBackgroundAgentCount` rides a `system`/`turn_duration` line, which
+# is what Claude Code writes at the end of a turn. Appended here rather than
+# simulated, so the real tail reader is what answers.
+printf '%s\n' '{"type":"system","subtype":"turn_duration","pendingBackgroundAgentCount":2}' >>"$P5B_TAIL"
+hook_fire Stop
+check "the turn's closing record raises the subagent mark" "$(wait_field subagents true)" "true"
+check "and the turn is over" "$(wait_field status "done")" "done"
+
+# A silent tail must HOLD the mark — an older Claude Code never wrote the
+# field, and blanking a real mark on silence would be a lie.
+printf '%s\n' '{"type":"assistant","message":{"content":[]}}' >>"$P5B_TAIL"
+hook_fire Stop
+check "a silent tail holds the mark rather than blanking it" "$(wait_field subagents true)" "true"
+
+# --- and the hold has an end ------------------------------------------------
+# The session is over, so nothing can still be pending under it. A held mark
+# would sit on a dormant row claiming depth the user cannot go and look at,
+# wearing the glyph that says go and look.
+hook_fire SessionEnd
+check "SessionEnd clears the subagent mark" "$(wait_field subagents false)" "false"
+check "and the row goes idle (nothing left Working into phase 6)" \
+  "$(wait_field status idle)" "idle"
+
+P5B_SEQ_END="$(jq -r '.store.seq' < <(dev_status) 2>/dev/null)"
+check_numeric "phase-5b end store seq readable" "$P5B_SEQ_END"
+measure "store seq across the card-cell ladder" \
+  "before=${P5B_SEQ0} after=${P5B_SEQ_END} delta=$((P5B_SEQ_END - P5B_SEQ0))"
+# Five events, and a write per event is the ceiling — the hook is one locked
+# RMW per event, the snapshot push is not a store write, and the warm-up above
+# is what makes the count attributable by taking `pr-sync` out of it. More
+# than that means something is writing twice per event, which is the shape the
+# paced-12 check watches for on the toggle side. (Fewer is fine and expected:
+# the silent `Stop` re-asserts a state the row is already in.)
+if [[ "$P5B_PR_WARM" == "fresh" ]]; then
+  check "phase-5b writes per hook event <= 1 (5 events, delta <= 5)" \
+    "$(((P5B_SEQ_END - P5B_SEQ0) <= 5 ? 1 : 0))" "1"
+else
+  note 'the PR cache never settled, so every event still spawns a `pr-sync` whose write lands off-schedule — the budget is not attributable here and is recorded above, not asserted'
+fi
+note 'this phase edited a scenario transcript — `clave dev scenario %s` re-seeds it' "$SCENARIO"
+
+# ===========================================================================
+# Phase 5c — the terminal row's facts (the OS-facts witness)
+# ===========================================================================
+# The card's terminal row shows what a plain shell tab is DOING: its cwd, its
+# last command, and whether that command is still running. None of it comes
+# from the store. Each bar keeps its own copy, filled three ways — zellij's
+# `CwdChanged` and `CommandChanged` events, and an OS probe
+# (`get_pane_cwd`/`get_pane_running_command`) that only the bar whose tab is
+# focused pays for (main.rs `probe_term_facts`, gated on `own_tab_focused`).
+#
+# On 2026-09-12 the maintainer saw the same terminal row carry its facts under
+# one tab and none under another. So this phase drives the two delivery paths
+# that CAN be witnessed and asserts the property that was silently assumed:
+#
+#   Leg A — a `cd` in a real shell pane. Leg B — a real command run in it.
+#   Both must reach EVERY LIVE BAR, not merely one. `CwdChanged` and
+#   `CommandChanged` are ingested by every instance (main.rs, both arms
+#   ungated), which is what makes the fleet-wide count an assertion rather
+#   than a hope: gating those arms behind visibility would look like an
+#   optimisation and would take the terminal row with it.
+#
+# Measured live before this phase existed (sandbox drive, 2026-09-12): one
+# `sleep` in one shell tab produced a `term-facts command delta` line from all
+# SEVEN bars in the fleet. That is the number this phase pins.
+#
+# WHAT NO LOG CAN SHOW, and the reason the fix is a separate PR: a bar that
+# never learned a QUIET pane's facts. A pane already sitting at its prompt
+# when that bar was born fires no event, and only the focused bar probes — so
+# the instance simply has nothing, and "nothing happened" writes no line. That
+# is the flicker's real shape, and it stops being invisible when the facts
+# move into the store, where `collapsed` and `tab_order` both ended up after
+# diverging the same way. Then this phase reads the row every bar renders,
+# instead of the deliveries it can see.
+phase "P5c-term-facts"
+
+# The denominator is LIVE bars, one per tab (the layout's design, and the same
+# reading phase 2 uses for the live block). Not the log's instance list: phase
+# 3 closed two tabs, and their `clave-bar: loaded` lines outlive them, so the
+# log's fleet is every bar this session EVER had.
+P5C_LIVE_TABS="$(count_live_tabs)"
+check_numeric "phase-5c live tab count (one bar per tab)" "$P5C_LIVE_TABS"
+measure "bar instances in the log, live and dead (the log's fleet, for context)" \
+  "$(sandbox_instance_count)"
+
+# A terminal tab is one no agent is bound to — the same definition the bar
+# renders from (model.rs `probe_targets` excludes tabs with an agent). Read
+# from the store and the layout together, never from a tab name: phase 3's
+# `ct.sh new-tab` creates exactly this, and its name is zellij's default.
+P5C_PANES="$(ct_list_panes)"
+P5C_PANES_RC=$?
+check "ct.sh list-panes -t -c -j (phase 5c)" \
+  "$([[ $P5C_PANES_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+P5C_TERM_TABS="$(jq -r --argjson panes "$P5C_PANES" '
+  ([.store.agents[] | select(.tab_id != null) | .tab_id]) as $bound
+  | [$panes[].tab_id] | unique
+  | [.[] | select(. as $t | $bound | index($t) | not)] | join(",")' \
+  < <(dev_status) 2>/dev/null)"
+measure "terminal tabs (no agent bound)" "${P5C_TERM_TABS:-none}"
+P5C_TAB="${P5C_TERM_TABS%%,*}"
+
+# One leg: type a line, then count the LIVE bars that logged a fact delta for
+# it. `instances_logging_since` takes its own sub-mark so the count is this
+# leg's own — the run-long mark would answer with phase 3's traffic.
+p5c_leg() {
+  local label="$1" keys="$2" pattern="$3" mark learned ids
+  mark="$(zlog_now)"
+  "$CT" write-chars "$keys"
+  "$CT" write 13
+  learned=0
+  for _ in $(seq 1 10); do
+    learned="$(instance_count_logging_since "$mark" "$pattern")"
+    ((learned >= P5C_LIVE_TABS)) && break
+    sleep 1
+  done
+  ids="$(instances_logging_since "$mark" "$pattern" | tr '\n' ' ')"
+  measure "$label bars that learned it" "${ids:-none} (live tabs: ${P5C_LIVE_TABS})"
+  check_min "$label reaches a bar at all (the pipeline delivers)" "$learned" 1
+  check "$label reaches EVERY live bar (both event arms are ungated by design)" \
+    "$learned" "$P5C_LIVE_TABS"
+}
+
+if [[ -z "$P5C_TAB" ]]; then
+  note 'no terminal tab in this fleet, so the OS-facts pipeline has nothing to report on. Phase 3 creates one; a run that skipped or lost it lands here. NOT a pass — the legs below did not run.'
+else
+  focus_tab_checked "$P5C_TAB" "phase-5c terminal tab"
+
+  # THE WRITE GUARD, load-bearing. The legs below type into the focused pane,
+  # and the one thing that must be unexpressible is typing into an agent:
+  # `write-chars` at a claude prompt submits a turn. Three conditions, all
+  # re-read immediately before the write rather than inherited from above —
+  # the tab carries no agent in the store (checked in the selection), the
+  # focused tab is the one we selected, and the focused pane's own process is
+  # a SHELL from an allowlist. A denylist would let any unrecognised process
+  # through, which is the wrong default for a keystroke.
+  P5C_PANES="$(ct_list_panes)"
+  P5C_PANES_RC=$?
+  check "ct.sh list-panes -t -c -j (phase 5c write guard)" \
+    "$([[ $P5C_PANES_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+  P5C_PROC="$(jq -r --argjson t "$P5C_TAB" \
+    '[.[] | select(.tab_id == $t and .is_focused == true and .is_plugin == false) | .pane_command // ""] | first // ""' \
+    <<<"$P5C_PANES" 2>/dev/null)"
+  P5C_SHELL="$(basename -- "${P5C_PROC:-none}")"
+  measure "the focused pane's process in tab ${P5C_TAB}" "${P5C_PROC:-empty}"
+  P5C_WRITABLE="no"
+  case "$P5C_SHELL" in
+    zsh | bash | sh | fish | dash) P5C_WRITABLE="yes" ;;
+  esac
+  check "phase-5c focus is still on the terminal tab" "$(focused_tab_id)" "$P5C_TAB"
+
+  if [[ "$P5C_WRITABLE" != "yes" ]]; then
+    note 'the focused pane in tab %s runs `%s`, which is not in the shell allowlist — nothing is typed into a pane this drive cannot identify as a shell. The legs did not run.' \
+      "$P5C_TAB" "${P5C_PROC:-empty}"
+  else
+    # --- leg A: the cwd half ------------------------------------------------
+    # `/tmp` exists everywhere and belongs to nobody. `cd -` puts the pane
+    # back, so the row this sandbox's eyeball checks still reads its repo.
+    p5c_leg "a cd in a shell tab" "cd /tmp" 'clave-bar: term-facts cwd delta'
+    "$CT" write-chars "cd -"
+    "$CT" write 13
+
+    # --- leg B: the running-command half ------------------------------------
+    # `sleep` and nothing else: it changes the pane's foreground command (the
+    # fact under test), touches no file, and ends by itself well inside this
+    # phase — a command still running at phase 6 would arm the bar's 3s term
+    # poll through the window that is meant to be idle.
+    p5c_leg "a running command" "sleep 6" 'clave-bar: term-facts command delta'
+    sleep 8
+    note 'the `sleep` is over and the pane is back at its prompt in its original directory.'
+  fi
+fi
+
 # ===========================================================================
 # Phase 6 — quiescence
 # ===========================================================================
@@ -1814,6 +2286,50 @@ check "no new sandbox bar loaded while idle (tagged 'clave-bar: loaded' delta)" 
 P6_ZLINES1="$(wc -l <"$ZLOG" 2>/dev/null | tr -d ' ')" || P6_ZLINES1=0
 measure "global zellij log growth while idle (user-global, unattributable — forensic only)" \
   "$((P6_ZLINES1 - P6_ZLINES0))"
+
+# ===========================================================================
+# Phase 6b — the isolation witness
+# ===========================================================================
+# The one property this whole harness rests on and never used to assert: the
+# maintainer's own session was not touched. It cannot be checked by looking at
+# his session — looking IS touching, and the rule is that nothing goes that
+# way, not even a read. So it is checked from our side, where the evidence
+# actually is:
+#
+#   1. clave refuses a push whose target does not own the store it wrote, and
+#      writes one line when it does. Zero refusals means nothing this drive
+#      spawned was even POINTED anywhere else.
+#   2. The ambient identity is still the sandbox's at the end, not just at the
+#      start — a phase that re-exported the inherited name would show here.
+#   3. The inherited session's name appears nowhere as a push target.
+#
+# (1) is the load-bearing one, and it is only trustworthy because the refusal
+# lives in the BINARY: a check that the script performs on itself would have
+# passed happily on 2026-09-11, which is the day this phase was written.
+phase "P6b-isolation-witness"
+
+QA_REFUSED_AFTER="$(count_push_refusals)"
+measure "push refusals during this run" \
+  "before=${QA_REFUSED_BEFORE} after=${QA_REFUSED_AFTER} delta=$((QA_REFUSED_AFTER - QA_REFUSED_BEFORE))"
+check "no push was aimed at a bar that does not own this store" \
+  "$((QA_REFUSED_AFTER - QA_REFUSED_BEFORE))" "0"
+
+check "the ambient zellij identity is STILL the sandbox at the end of the run" \
+  "${ZELLIJ_SESSION_NAME:-<unset>}" "$SESSION"
+check "ZELLIJ is still unset (nothing re-attached this shell to a session)" \
+  "${ZELLIJ:-unset}" "unset"
+check "ZELLIJ_PANE_ID is still unset" "${ZELLIJ_PANE_ID:-unset}" "unset"
+
+if [[ -n "$FOREIGN_SESSION" && "$FOREIGN_SESSION" != "$SESSION" ]]; then
+  measure "the identity this drive inherited and scrubbed" "$FOREIGN_SESSION"
+  # Named targets are written into the refusal line; a clean log has none at
+  # all, so this is a second reading of (1) from the other direction.
+  QA_FOREIGN_HITS="$(grep -c "target=${FOREIGN_SESSION}" "$STATE_DIR/clave.log" 2>/dev/null)" || QA_FOREIGN_HITS=0
+  check "the inherited session is named nowhere as a push target" \
+    "${QA_FOREIGN_HITS:-0}" "0"
+else
+  note 'this drive inherited no foreign zellij identity — the scrub had nothing to do, and (3) is vacuous'
+fi
 
 # ===========================================================================
 # Phase 7 — teardown (the hand-back)

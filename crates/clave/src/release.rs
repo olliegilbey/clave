@@ -225,7 +225,7 @@ pub fn runtime_binary() -> String {
             // Name the repair inline, NOT "run clave doctor": in the case this
             // fires (own version behind the newest installed copy) doctor
             // reports OK and gives no advice (doctor.rs), so deferring to it
-            // dead-ends. Same `cp` CONTRIBUTING/CLAUDE.md carry.
+            // dead-ends. Same `cp` CONTRIBUTING carries.
             let bin = dir
                 .as_ref()
                 .map(|d| d.join("bin").display().to_string())

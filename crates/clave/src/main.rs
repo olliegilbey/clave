@@ -200,15 +200,15 @@ enum Command {
     },
 
     /// Set (or print) the sidebar row-height mode (#232). `clave rows`
-    /// prints the current value; `clave rows single|double` persists it.
+    /// prints the current value; `clave rows card|double|single` persists it.
     /// UNLIKE `order`, this pushes NO snapshot: geometry is baked into the
     /// layout at LAUNCH (`launch_layout_kdl`) from the store's value, and a
     /// live bar pane can neither resize itself nor swap its own plugin
     /// config — there is nothing for a running instance to react to. The
     /// new mode takes effect on the next `clave` launch.
     Rows {
-        /// "single" or "double"
-        #[arg(value_parser = ["single", "double"])]
+        /// "card" (the default, four lines), "double" or "single"
+        #[arg(value_parser = ["card", "double", "single"])]
         mode: Option<String>,
     },
 
@@ -668,9 +668,10 @@ fn main() -> Result<()> {
             let parsed = match mode_str.as_str() {
                 "single" => clave_types::RowHeight::Single,
                 "double" => clave_types::RowHeight::Double,
+                "card" => clave_types::RowHeight::Card,
                 // Unreachable behind clap's value_parser; kept so the match
                 // stays exhaustive when a future mode string lands.
-                other => anyhow::bail!("unknown row height {other:?} (single|double)"),
+                other => anyhow::bail!("unknown row height {other:?} (card|double|single)"),
             };
             store::set_row_height(&paths, parsed)?;
             // No pipe push (store::set_row_height doc): geometry is
@@ -892,7 +893,7 @@ mod tests {
             Some(Command::Rows { mode: None }) => {}
             other => panic!("bare rows misparsed: {other:?}"),
         }
-        for m in ["single", "double"] {
+        for m in ["single", "double", "card"] {
             let full = Cli::parse_from(["clave", "rows", m]);
             match full.command {
                 Some(Command::Rows { mode: Some(v) }) => assert_eq!(v, m),
