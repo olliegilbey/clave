@@ -784,10 +784,14 @@ pub fn merge_resume_record(existing: Option<&AgentRecord>, fresh: AgentRecord) -
             wants: None,
             // Fill, never erase (2026-09-14). A resume MEASURES the worktree
             // again, and that is the only heal for every row written while
-            // the field was set solely by `clave add --worktree`. But a
-            // `None` from a picker aimed at another repo means "not found
-            // here", not "gone", so a known worktree survives an ignorant
-            // resume — the same conservatism the rest of this merge has.
+            // the field was set solely by `clave add --worktree`. A `None`
+            // here is git failing or the directory being gone — never a
+            // picker aimed elsewhere, because this arm runs only for an
+            // existing row and `agent_cwd` is then the ROW's own cwd. So it
+            // means "could not measure", not "measured nothing", and a known
+            // worktree survives it. The one move that genuinely takes a row
+            // out of its worktree is a relocation, and `apply_relocation`
+            // clears the field there.
             worktree: fresh.worktree.or_else(|| row.worktree.clone()),
             ..row.clone()
         },
@@ -1979,14 +1983,27 @@ mod tests {
             merge_resume_record(Some(&row), fresh).worktree.as_deref(),
             Some("/repo/.claude/worktrees/triple-card")
         );
-        // It fills; it never erases. A picker aimed at another repo cannot
-        // see this row's worktree, and "not found here" is not "gone".
+        // It fills; it never erases. A `None` from the fresh side means git
+        // could not answer, which is not "gone".
         let mut known = rec("u-wt");
         known.worktree = Some("/repo/.claude-worktrees/abc12345".into());
         let blind = rec("u-wt");
         assert_eq!(
             merge_resume_record(Some(&known), blind).worktree.as_deref(),
             Some("/repo/.claude-worktrees/abc12345")
+        );
+        // Both sides know, and they disagree: the FRESH measurement wins.
+        // Without this case the assertion is blind to which way the `or`
+        // points — with at most one `Some` between them, `fresh.or(row)` and
+        // `row.or(fresh)` are the same function.
+        let mut was = rec("u-wt");
+        was.worktree = Some("/repo/.claude/worktrees/old".into());
+        let mut now = rec("u-wt");
+        now.worktree = Some("/repo/.claude/worktrees/new".into());
+        assert_eq!(
+            merge_resume_record(Some(&was), now).worktree.as_deref(),
+            Some("/repo/.claude/worktrees/new"),
+            "a row that moved worktrees must not keep the old mark"
         );
     }
 
