@@ -231,7 +231,10 @@ fn fleet() -> Vec<Row> {
             ..A::default()
         }
         .row(),
-        // Selected, with a PR.
+        // Selected, with a PR — and the WIDEST turn clock, against a
+        // four-digit token count. This is line 3's tightest pair: the gap
+        // between them is one cell, and whether that reads as two numbers or
+        // as one is a question only a rendered frame can answer.
         A {
             status: Working,
             chip: Some("CLV-M2"),
@@ -241,7 +244,7 @@ fn fleet() -> Vec<Row> {
             pr: Some(225),
             effort: Some("xh"),
             battery: Some((8, 130_000)),
-            elapsed: "5m",
+            elapsed: "9m59s",
             summary: "Goal is shipping v0.2.2 cleanly",
             selected: true,
             ..A::default()

@@ -171,8 +171,21 @@ What the two readings genuinely differ in is **resolution and meaning**:
 | | while `Working` | once the turn is over |
 |---|---|---|
 | ink | crystalBlue `#7E9CD8` | dimmed meta |
-| grain | seconds under a minute (`3s`, `59s`) | minutes and up (`5m`, `2h`) |
+| grain | seconds under a minute (`3s`, `59s`), then minutes AND seconds to ten (`1m 0s`, `9m59s`) | minutes and up (`5m`, `2h`) |
 | means | how long this turn has run | how stale this row is |
+
+**Amended 2026-09-14 — the seconds run to ten minutes, not to one.** Driving
+the cut, the card fell from `59s` straight to `1m` and then said nothing new
+for a whole minute. The seconds earn their cells for as long as a turn is
+worth waiting out, so the live reading now has THREE bands: seconds under the
+minute, minutes and seconds up to ten, and the staleness ladder above that.
+Ten is where a turn stops being in progress and starts being long; past it a
+digit changing every second is noise.
+
+The middle band is five cells wide, always — the minutes digit cannot reach
+two before the band ends, so the seconds right-align into their own pair and
+the number never shifts under the eye. That widened the clock cell from three
+to five, and §5.3's gap paid for it.
 
 The drive is what settled it: the card read `0m` for the whole of a turn Claude
 Code's own footer was calling `3s`. Staleness in seconds would be noise; a turn
@@ -326,16 +339,25 @@ figure is a different question, asked less often, and it would cost columns the
 | subs    | 3 (` X `)   | the subagent mark, boolean (§4.6)      | `#9CABCA`              |
 | rail    | 2 (`│ `)    | the spine                              | the repo's ink         |
 | tokens  | **4**       | thousands of tokens (`211k`, `1.1m`)   | the battery ramp band  |
-| gap     | **3**       | —                                      | —                      |
-| clock   | **3**, right-aligned | ONE cell, two resolutions (§4.4) | crystalBlue while `Working`, else meta ink |
+| gap     | **1**       | — (was 3; see below)                   | —                      |
+| clock   | **5**, right-aligned | ONE cell, three resolutions (§4.4) | crystalBlue while `Working`, else meta ink |
 | wants   | 1 + flex    | §4.7 — expanded only                   | needs-you ink          |
 | margin  | 1           | —                                      | —                      |
 
-**The token gap is three cells, not one.** At one, `211k 20m` reads as a single
-figure — the same failure that kept the two clocks apart. Two was the ruling
-until the card was driven; three is what actually puts the expanded clock in the
-columns the COLLAPSED card holds it in, and the collapsed position is the ruled
-one (§5.3). The number is load-bearing, not taste.
+**The token gap is not a free choice.** It is whatever the collapsed profile
+has left once the chrome, the token field and the clock have taken theirs,
+because the clock must occupy the SAME columns in both profiles and only one
+gap does that. The collapsed position is the ruled one (§5.3).
+
+**Amended 2026-09-14 — one cell, and the trade is recorded.** Three was the
+number while the clock was three cells wide. §4.4's middle band took two of
+them. At one cell `130k 9m59s` can read as a single figure, which is the exact
+failure that once kept the two clocks apart, and Ollie made the call with that
+named: the seconds are the reading someone is waiting on, and the two numbers
+carry different inks while a turn is live. **If the pair ever does read as one
+number, the fix is two more columns on the collapsed card, not a narrower
+clock.** Sixteen was chosen when the clock was three wide; it is the constraint
+here, not the gap.
 
 **Collapsed locks the clock to the right edge**, one cell in, computed from what
 the line has already spent rather than from a second margin constant. With one
