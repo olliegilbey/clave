@@ -1,21 +1,26 @@
-# 2026-09-14 — daily-driving the 0.5.0 cut: three fixes, one bug open
+# 2026-09-14 — daily-driving the 0.5.0 cut: four fixes
 
-Branch `chore/release-0.5.0`, four commits past `main`. **Nothing pushed, and
+Branch `chore/release-0.5.0`, six commits past `main`. **Nothing pushed, and
 CI has seen none of it.** Ollie is running the cut on his daily fleet and
-reporting what he sees; each item below came from that.
+reporting what he sees; every item below came from that.
 
 ## Done and committed
 
 | Commit | What was wrong |
 |---|---|
-| `37a9b4f` | `just release` never set `CLAVE_BAR_WASM`, so every locally cut launcher answered "dev build" about itself and its own `clave setup` refused. Fixed in the recipe; `tests/release_recipe.rs` is the new gate. |
+| `37a9b4f` | `just release` never set `CLAVE_BAR_WASM`, so every locally cut launcher answered "dev build" about itself and its own `clave setup` refused. Fixed in the recipe; `tests/release_recipe.rs` is the gate. |
 | `12d4ca2` | Status record closing the 12:20 second-sidebar diagnosis. |
-| `e5cfbc4` | The turn clock went coarse at one minute. Three bands now, five cells wide, and the token gap paid two of them. |
-| `435e69a` | `worktree` was recorded only when clave itself created the worktree, so the tree mark had never rendered. git decides it now, plus a fleet repair. |
+| `e5cfbc4` | The turn clock went coarse at one minute. Three bands now (`59s` → `1m 0s`…`9m59s` → `10m`), five cells wide; the token gap paid two of them and is now ONE cell, a trade Ollie made with the risk named. |
+| `435e69a` | `worktree` was recorded only when clave itself created the worktree, so the tree mark had never rendered on a real fleet. git decides it now, plus a fleet repair in the launch and cut tails. |
+| `447853f` | Red outlived the block: answering a permission prompt fires no hook, so `NeedsYou` survived to `Stop`. The statusLine meter clears it — a moved token count is an API response, and none lands while a prompt waits. |
 
 Each is gated (`fmt`, `test --workspace`, wasm build, `clippy -D warnings`).
+Every new test was proved to fail without its fix.
 
-### What Ollie still has to run
+## What Ollie still has to run
+
+He has NOT yet released anything past `12d4ca2`. The clock, the tree mark and
+the red fix are all unseen on a real terminal.
 
 ```bash
 cd /Users/olliegilbey/code/clave
@@ -25,74 +30,36 @@ just release        # expect: "clave: recorded the worktree for 5 row(s)"
 zellij kill-session clave && zellij delete-session --force clave && clave
 ```
 
-He has NOT run this for the last two commits yet. The clock and the tree mark
-are unseen on a real terminal.
+## The reasoning worth keeping
 
-## Open — the red glyph outlives the block
+**On the red fix.** The obvious route was to register `PostToolUse` and clear
+red when a tool ran. Ollie pushed back — "the data should be somewhere, if
+other systems know this" — and he was right. `statusline.rs` is a channel that
+already runs on every assistant message and is already spawned, so the fix
+cost nothing. Reach for an existing measurement before adding a hook: the hook
+budget is the resource this design has always protected.
 
-**Reported 2026-09-14 ~14:54 with a screenshot.** A row goes red on a
-permission prompt. Ollie approves. The agent resumes (`Spelunking… 1m 6s` in
-its own footer) and **the row stays red** for the rest of the turn.
+**The residual on that fix**, named in the code: a reading paced out by
+`APPLY_INTERVAL_SECS`, followed by a statusLine re-run DURING the block, reads
+as movement and clears red early. Accepted against red that never clears. If
+Ollie reports red clearing too soon, that is this, and the fix is to compare
+against the last RAW reading rather than the stored one — which needs a field.
 
-Diagnosed, not fixed. It is a hole in the transition table, not a race.
-
-`setup.rs::HOOK_EVENTS` registers exactly five: `UserPromptSubmit`, `Stop`,
-`Notification`, `SessionEnd`, `SessionStart`. `hook.rs::status_for_event` maps
-them. Once `Notification` (message contains `permission`) sets `NeedsYou`, the
-only events that can arrive are:
-
-- another `Notification` — the `waiting for your input` arm is gated on
-  `current == Working`, so it returns `None` and changes nothing;
-- `Stop` → `Done`, at the END of the turn;
-- `UserPromptSubmit` → `Working`, only if Ollie types again.
-
-**Approving a permission fires no hook clave listens to.** The tool simply
-runs. So there is no event that means "the block cleared", and red persists
-until the turn ends.
-
-### The candidate fix, and why it needs a ruling
-
-Register `PostToolUse` and map it to "clear `NeedsYou` back to `Working`" —
-a tool that has RUN is proof the block is gone.
-
-The cost is the whole question: `PostToolUse` fires on **every tool call of
-every tracked agent**, and each firing is a subprocess doing a locked store
-RMW plus a zellij pipe. `hook.rs:1536` already names that budget when it
-explains why the transcript tail is gated on two events. A fleet of ten busy
-agents would multiply the hook rate by a large factor.
-
-Options worth weighing before writing anything:
-
-1. **Register `PostToolUse`, and make the handler cheap and conditional** —
-   return before taking the lock unless the row is actually `NeedsYou`. Most
-   firings would then be a read and an exit. Needs measuring, not assuming:
-   the read still opens the store.
-2. **Matcher-scoped registration.** Claude Code's `PostToolUse` takes a tool
-   matcher. Permission prompts cluster on a few tools (`Bash`, `Write`,
-   `Edit`, MCP calls). Registering the matcher rather than `*` cuts the rate
-   a long way at the price of missing the rest.
-3. **Leave it and dim instead.** Red that lies is worse than red that fades;
-   the bar could treat a `NeedsYou` older than its last activity as stale.
-   This invents a measurement, which §4.4's ruling forbids elsewhere.
-
-**Ollie has not chosen.** Ask before building — option 1 changes the hook rate
-on his live fleet, which is the one resource this design has always protected.
-
-## Other things known and not done
+## Open
 
 - **`clave rows` is not atomic.** It writes the store, then regenerates. A
   failure between them leaves the split that shows as a second sidebar. The
   release fix removed today's cause, not the class.
 - **A row whose worktree was DELETED stays unmarked** — git cannot vouch for
-  it, and the bar asserts nothing it cannot measure. Three of Ollie's dormant
-  rows are in this state. Deliberate; revisit only if he asks.
+  it and the bar asserts nothing it cannot measure. Three of Ollie's dormant
+  rows are in this state. Deliberate.
 - **The eyeball checks this branch has never had**: tofu on the provider and
-  worktree marks (Nerd Fonts 3.5+ required), the spinner's six frames (five
-  arrive by fallback from Menlo, so weight and baseline can jump), `Alt+c` at
-  16 columns, the four-line card's stacked marks.
-- **Housekeeping**: the `triple-card` worktree and its branch, the stale
-  sandbox root `~/.local/state/clave-dev-triple-card`, and a PR for all four
-  commits before the `v0.5.0` tag is pushed.
+  worktree marks (Nerd Fonts 3.5+), the spinner's six frames (five arrive by
+  fallback from Menlo, so weight and baseline can jump), `Alt+c` at 16
+  columns, the stacked marks on a busy row.
+- **Housekeeping**: a PR for all five code/doc commits before the `v0.5.0` tag
+  is pushed; then the `triple-card` worktree, its branch, and the stale
+  sandbox root `~/.local/state/clave-dev-triple-card`.
 
 ## Standing constraints
 
