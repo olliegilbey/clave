@@ -24,7 +24,7 @@ fn recipe_body(name: &str) -> Vec<&'static str> {
         .skip_while(|l| !(l.starts_with(name) && l[name.len()..].starts_with(':')));
     lines
         .next()
-        .expect("recipe {name} is missing from the justfile");
+        .unwrap_or_else(|| panic!("recipe {name} is missing from the justfile"));
     lines
         .take_while(|l| l.trim().is_empty() || l.starts_with([' ', '\t']))
         .collect()

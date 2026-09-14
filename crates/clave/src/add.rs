@@ -349,7 +349,8 @@ pub fn linked_worktrees(list: &[WorktreeEntry]) -> Vec<&str> {
 ///
 /// ONE `git worktree list` per distinct repo root, not per row: a repo's
 /// worktree set answers for every row that belongs to it, and a fleet spread
-/// over a dozen repos costs a dozen calls rather than two hundred.
+/// over a dozen repos costs a dozen calls rather than two hundred. Every one
+/// of them runs OUTSIDE the store lock; only the mutation takes it.
 ///
 /// Seed-only and never destructive, exactly like the frecency backfill it
 /// runs beside: a row that already names a worktree is left alone, and a repo
@@ -358,17 +359,40 @@ pub fn linked_worktrees(list: &[WorktreeEntry]) -> Vec<&str> {
 pub fn heal_worktrees() -> Result<usize> {
     let git = tool_path(crate::discover::ToolId::Git);
     let paths = store_paths()?;
+
+    // Ask git BEFORE the lock. `with_store_mut` holds an exclusive flock
+    // across the whole read-modify-write, so every subprocess spawned inside
+    // it stalls every hook in the fleet; ten `worktree list` calls is a tenth
+    // of a second of that, at exactly the moment a launch is firing hooks.
+    // `read_store` is lock-free by design (writers rename atomically), and it
+    // is only used here to choose which repos to ask about.
+    let roots: std::collections::BTreeSet<String> = crate::store::read_store(&paths)?
+        .agents
+        .values()
+        .filter(|r| r.worktree.is_none())
+        .map(|r| r.repo_root.clone())
+        .collect();
+    let asked: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> = roots
+        .into_iter()
+        .map(|root| {
+            let trees = linked_worktrees_of(&git, &root);
+            (root, trees)
+        })
+        .collect();
+
     crate::store::with_store_mut(&paths, |s| {
-        let mut asked: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
-            Default::default();
         let mut healed = 0;
         for r in s.agents.values_mut() {
+            // Re-checked under the lock, so a row that learned its worktree
+            // while we were asking git keeps what it learned. A row ADDED in
+            // that window has no entry here and waits for the next tail —
+            // seed-only, like the backfill beside it.
             if r.worktree.is_some() {
                 continue;
             }
-            let trees = asked
-                .entry(r.repo_root.clone())
-                .or_insert_with(|| linked_worktrees_of(&git, &r.repo_root));
+            let Some(trees) = asked.get(&r.repo_root) else {
+                continue;
+            };
             if trees.contains(&r.cwd) {
                 r.worktree = Some(r.cwd.clone());
                 healed += 1;

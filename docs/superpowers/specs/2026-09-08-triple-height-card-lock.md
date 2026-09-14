@@ -171,7 +171,7 @@ What the two readings genuinely differ in is **resolution and meaning**:
 | | while `Working` | once the turn is over |
 |---|---|---|
 | ink | crystalBlue `#7E9CD8` | dimmed meta |
-| grain | seconds under a minute (`3s`, `59s`), then minutes AND seconds to ten (`1m 0s`, `9m59s`) | minutes and up (`5m`, `2h`) |
+| grain | seconds under a minute (`3s`, `59s`), then minutes AND seconds from `1m 0s` to `9m59s`, then minutes only from `10m` | minutes and up (`5m`, `2h`) |
 | means | how long this turn has run | how stale this row is |
 
 **Amended 2026-09-14 — the seconds run to ten minutes, not to one.** Driving
