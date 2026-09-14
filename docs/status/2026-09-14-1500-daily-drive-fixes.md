@@ -7,6 +7,10 @@ CI passed on the first run: `test`, `wasm-build`, `lint`, `plan`, GitGuardian.
 The PR-side CodeRabbit skipped itself ("manual review required for this OSS
 repository"), so it was asked explicitly in a comment; the CLI lane had already
 run against `origin/main` and its three findings are fixed in `dc996eb`.
+The PR round then found two more, fixed in `adb2d8a`. Five findings, none
+declined. Each thread has a reply; **the threads need Ollie to resolve
+them** — the agent's token is refused on `resolveReviewThread`, and a merge
+is blocked until every thread is resolved.
 
 ## Done and committed
 
@@ -20,6 +24,7 @@ run against `origin/main` and its three findings are fixed in `dc996eb`.
 | `6bb83ad` | This record. |
 | `77f64ee` | QA-DRIVE.md phase 5d — the meter seam, specified. |
 | `dc996eb` | Review round: the worktree repair was spawning git inside the store lock, so every hook in the fleet queued behind it. The calls moved out; only the mutation takes the lock. |
+| `adb2d8a` | Second review round: the repair compared a row's `cwd` to worktree roots for EQUALITY, but a row's cwd is wherever it was added from, so every row added in a subdirectory of a worktree kept the branch mark. It also recorded the cwd rather than the worktree, which disagreed with the add path. Both fixed by `worktree_holding`. |
 
 Each is gated (`fmt`, `test --workspace`, wasm build, `clippy -D warnings`).
 Every new test was proved to fail without its fix.
@@ -30,7 +35,7 @@ The clock, the tree mark and the red fix have only ever been rendered by tests
 and by `examples/triple-preview.rs`. Ollie has released nothing past `12d4ca2`.
 
 **The repo squash-merges** — every commit on `main` ends in `(#N)` and there
-are no merge commits in its history. So PR #260's eleven commits become ONE new
+are no merge commits in its history. So PR #260's commits become ONE new
 commit, and the local `v0.5.0` tag at `12d4ca2` names a commit that will never
 exist in public history. The tag has to move onto the squashed commit.
 
