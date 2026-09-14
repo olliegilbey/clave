@@ -616,6 +616,14 @@ pub fn merge_resume_record(existing: Option<&AgentRecord>, fresh: AgentRecord) -
             // definition. The new tab's bar re-binds on join (§6.6 B).
             tab_id: None,
             pane_id: None,
+            // `wants` belongs to `NeedsYou` and to no other status —
+            // `hook::take_wants` blanks it on every reading that is not one.
+            // Carrying it past a reset to `Idle` would mint the pair the
+            // model forbids, and `take_wants` keeps the last value when a
+            // permission prompt carries no message of its own: the card would
+            // then print the PREVIOUS conversation's ask as this one's
+            // (CodeRabbit, 2026-09-13).
+            wants: None,
             ..row.clone()
         },
         None => fresh,
@@ -1724,6 +1732,7 @@ mod tests {
         row.commit_ord = 88;
         row.tab_id = Some(3); // the DEAD tab that hosted it last time
         row.pane_id = Some(9); // and the dead pane inside it (#178)
+        row.wants = Some("Bash(rm -rf)".into()); // what it asked LAST time
         let fresh = rec("u-wt"); // what the weave derives from the PICKED dir
         let merged = merge_resume_record(Some(&row), fresh.clone());
         assert_eq!(merged.status, Status::Idle);
@@ -1744,6 +1753,11 @@ mod tests {
         // mutants 2026-08-15: deleting `pane_id: None` from the merge survived
         // while its `tab_id` twin one line above was pinned.)
         assert_eq!(merged.pane_id, None);
+        // `wants` is `NeedsYou`'s cell and nobody else's. Kept across a reset
+        // to `Idle` it survives as the fallback `take_wants` reaches for when
+        // a permission prompt carries no message, and the card prints the
+        // last conversation's ask beside this one's work.
+        assert_eq!(merged.wants, None);
         assert_eq!(merged.cwd, row.cwd); // worktree cwd NOT relocated
         assert_eq!(merged.worktree, row.worktree);
         assert_eq!(merged.label, row.label); // earned label survives

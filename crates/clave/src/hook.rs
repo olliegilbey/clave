@@ -951,11 +951,23 @@ impl PushAim {
 /// — the same mistake inverted, which would show a live fleet inside a test
 /// one. Anything clave cannot place (a real store, a real session) is aimed
 /// as asked: guessing there would be clave narrowing a working install.
+///
+/// An UNNAMED target is the same hazard with the claim missing rather than
+/// wrong (CodeRabbit, 2026-09-13). Unaimed is not "nowhere": zellij resolves
+/// a session of its own choosing, which on the machine that matters is the
+/// maintainer's live fleet. A real store still goes unaimed, because clave
+/// does not get to predict a real install's session name — but a sandbox
+/// store does not have to guess, it knows its owner, and the store is the
+/// fact. If that session is not running, the push simply fails, which is the
+/// outcome the whole module prefers to a snapshot landing on a live bar.
 pub(crate) fn aim_push(state_dir: Option<&Path>, target: Option<&str>) -> PushAim {
-    let Some(target) = target else {
-        return PushAim::Unaimed;
-    };
     let owner = state_dir.and_then(crate::sandbox::owner_session_of_store);
+    let Some(target) = target else {
+        return match owner {
+            Some(owner) => PushAim::At(owner),
+            None => PushAim::Unaimed,
+        };
+    };
     match owner {
         Some(owner) if owner != target => PushAim::Foreign {
             owner,
@@ -1670,12 +1682,23 @@ mod tests {
         );
     }
 
-    /// No session in the env: outside a multiplexer there is nothing to
-    /// disagree with, and zellij's own resolution is left as it was.
+    /// No session in the env. A REAL store is left to zellij's own
+    /// resolution — outside a multiplexer there is nothing to disagree with,
+    /// and clave cannot predict a real install's session name.
+    ///
+    /// A SANDBOX store is not left there, and the difference is the point:
+    /// unaimed means zellij picks, and what it picks on this machine is the
+    /// maintainer's live fleet. The store knows its owner, so the push goes
+    /// there or nowhere.
     #[test]
-    fn an_unnamed_target_stays_unaimed_rather_than_refused() {
+    fn an_unnamed_target_follows_the_store_when_the_store_knows_its_own() {
         let sandbox = PathBuf::from("/home/u/.local/state/clave-dev-triple-card/state");
-        assert_eq!(aim_push(Some(&sandbox), None), PushAim::Unaimed);
+        assert_eq!(
+            aim_push(Some(&sandbox), None),
+            PushAim::At("clave-test-triple-card".to_string())
+        );
+        let real = PathBuf::from("/home/u/.local/share/clave");
+        assert_eq!(aim_push(Some(&real), None), PushAim::Unaimed);
         assert_eq!(aim_push(None, None), PushAim::Unaimed);
     }
 

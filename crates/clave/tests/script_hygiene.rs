@@ -47,10 +47,16 @@ fn code_lines(src: &str) -> Vec<(usize, &str)> {
             }
             continue;
         }
-        open = heredoc_tag(raw);
-        if !line.is_empty() && !line.starts_with('#') {
-            out.push((i + 1, line));
+        // The comment and blank filter runs BEFORE the heredoc test, and
+        // that order is the guard: prose here discusses heredocs, and a `#`
+        // line naming one would otherwise open a phantom body that swallows
+        // every real line until its tag appeared — a guard that reads less
+        // than it claims to, silently (CodeRabbit, 2026-09-13).
+        if line.is_empty() || line.starts_with('#') {
+            continue;
         }
+        open = heredoc_tag(raw);
+        out.push((i + 1, line));
     }
     out
 }
@@ -118,6 +124,39 @@ fn is_keystroke(line: &str) -> bool {
     tokens.windows(2).any(|w| {
         (w[0].contains("$CT") || w[0].ends_with("ct.sh")) && matches!(w[1], "write" | "write-chars")
     })
+}
+
+/// The reader every guard below stands on must not be fooled by prose.
+///
+/// These scripts DISCUSS heredocs, and a `#` line naming one used to open a
+/// phantom body: every following line was read as a heredoc body — that is,
+/// as harmless — until the tag turned up, which it never does in prose. A
+/// guard that silently stops reading is worse than no guard, because the
+/// build stays green. Two of these tests already failed open once this
+/// branch; this is the same class, in the layer under them.
+#[test]
+fn a_comment_about_a_heredoc_does_not_blind_the_reader() {
+    let src = "\
+# the usage text is a heredoc <<USAGE
+\"$CT\" write-chars 'y'
+cat <<USAGE
+  harmless body naming clave hook Stop
+USAGE
+echo done
+";
+    let read: Vec<&str> = code_lines(src).into_iter().map(|(_, l)| l).collect();
+    assert!(
+        read.contains(&"\"$CT\" write-chars 'y'"),
+        "a comment naming a heredoc swallowed the live line after it: {read:?}"
+    );
+    assert!(
+        !read.iter().any(|l| l.contains("harmless body")),
+        "a real heredoc body must still be skipped: {read:?}"
+    );
+    assert!(
+        read.contains(&"echo done"),
+        "the reader must resume after the real heredoc closes: {read:?}"
+    );
 }
 
 #[test]
