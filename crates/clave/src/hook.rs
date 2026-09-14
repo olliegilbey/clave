@@ -285,45 +285,135 @@ pub fn summary_from_tail(tail: &str) -> Option<String> {
     last_tail_field(tail, "summary", "summary")
 }
 
-/// Whether this row has fanned out — the card's subagent mark (lock §4.6),
-/// read off the LAST `{"type":"system","subtype":"turn_duration",…}` line in
-/// `tail`. A BOOLEAN, not a count: "this row has agents under it" is the whole
-/// signal and a digit beside the mark was noise.
+/// The tool names a fan-out arrives under. `Agent` is what every transcript
+/// since 2026-08 writes; `Task` is the older spelling, still present in
+/// months-old jsonl a fresh install must come up warm from.
+const AGENT_TOOLS: [&str; 2] = ["Agent", "Task"];
+
+/// Whether this row has fanned out — the card's subagent mark (lock §4.6). A
+/// BOOLEAN, not a count: "this row has agents under it" is the whole signal,
+/// and a digit beside the mark was noise.
 ///
-/// `None` is "no reading", and it is not the same as `Some(false)`: a 64 KiB
-/// tail that reaches back past the last turn boundary carries no closing
-/// record at all, and that must HOLD what the store already knows.
+/// A LEDGER over the window: every launch it holds, minus every launch it has
+/// seen finish. Both marks are written at the moment the thing happens, so the
+/// mark rises at the first hook event after a fan-out and falls at the first
+/// one after the last agent stops.
 ///
-/// **A closing record that carries no count is a ZERO, not a silence.** Every
-/// `turn_duration` line in the sandbox drive (2026-09-09, a session that ran
-/// no background agents) omitted `pendingBackgroundAgentCount` entirely rather
-/// than writing `0`. Whether that is omit-when-zero or a field this Claude
-/// Code does not emit at all, the safe reading is the same one: absence inside
-/// a record that IS present clears the mark. Holding there would let a row
-/// earn the mark once and never lose it, which is the one failure a boolean
-/// cannot recover from.
+/// **Why not `turn_duration.pendingBackgroundAgentCount`, which is the field
+/// Claude Code declares for this.** Because clave cannot reach it in time.
+/// That record is written AFTER the Stop hook runs — `stop_hook_summary`
+/// precedes it on every transcript measured — so at Stop the newest one on
+/// disk always describes the PREVIOUS turn. Measured 2026-09-14 over 40 live
+/// transcripts, the glyph sat on rows with nothing under them for 22.5 hours;
+/// on the session that reported the defect it outlived its agents by 32
+/// minutes. Widening the window made it WORSE (24.1 h), because a wider window
+/// only reaches a staler record. This ledger scores 0.0 h over the same
+/// sessions. Do not restore the count without new numbers.
 ///
-/// **This reading is a turn behind, by construction.** `turn_duration` is
-/// written when a turn CLOSES, so what it reports is "when this turn ended, N
-/// background agents were still pending". That is the cadence clave already
-/// reads a tail on (Stop / UserPromptSubmit), and pending-at-close is the
-/// useful half of the signal anyway: an agent still running when its parent
-/// stopped is exactly the one worth a mark. Subagents launched and finished
-/// inside one turn are never seen, and that is correct — they were never
-/// something to go and look at.
-pub fn subagents_from_tail(tail: &str) -> Option<bool> {
-    tail.lines().rev().find_map(|l| {
-        let v: serde_json::Value = serde_json::from_str(l).ok()?;
-        if v.get("type")?.as_str()? != "system" || v.get("subtype")?.as_str()? != "turn_duration" {
-            return None;
+/// **A launch can outrun the window.** Then the ledger sees no agent traffic
+/// and reads false, and a genuinely live agent loses its mark. Measured at
+/// [`SUBAGENT_TAIL_BYTES`] that is 2.0 hours across those 40 sessions against
+/// an unavoidable floor of 0.7 (the mark can only move when a hook fires).
+/// Wrong-off is the safer error: it under-claims depth rather than sending
+/// the user to look at a row where nothing is running.
+pub fn subagents_from_tail(tail: &str) -> bool {
+    // Built once per call, not once per line: the loop below runs over every
+    // line of a 2 MiB window.
+    let markers: Vec<String> = AGENT_TOOLS
+        .iter()
+        .map(|n| format!(r#""name":"{n}""#))
+        .collect();
+    let mut launched: Vec<String> = Vec::new();
+    let mut finished: Vec<String> = Vec::new();
+    for line in tail.lines() {
+        // Byte pre-filter before any parse, and it is what lets this mark read
+        // a window 32× wider than everything else on this tail: ~14 lines in
+        // 2 MiB match, against the ~500 a parse-everything scan would take.
+        // The transcript is compact machine JSON, one record per line, so the
+        // spelling is exact — and it has to be. A looser token finds the
+        // CONVERSATION talking about agents instead: 29 hits in one 64 KiB
+        // window, not one of them a record.
+        if markers.iter().any(|m| line.contains(m.as_str())) {
+            launched.extend(agent_launch_ids(line));
+        } else if line.contains("<task-notification>")
+            && let Some(id) = notified_tool_use_id(line)
+        {
+            finished.push(id);
         }
-        Some(
-            v.get("pendingBackgroundAgentCount")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0)
-                > 0,
-        )
-    })
+    }
+    launched.iter().any(|id| !finished.contains(id))
+}
+
+/// Every fan-out opened on one assistant line, by `tool_use` id. Empty for
+/// every other line.
+///
+/// EVERY one, not the first. One message can carry several `tool_use` blocks,
+/// and batching agents into a single message is how they are launched in
+/// parallel. Measured 2026-09-14 over 200 transcripts, no line yet carries two
+/// — but taking only the first would lose the siblings, and a mark that clears
+/// while two of three agents still run is the failure this whole function
+/// exists to avoid. One `filter` costs nothing and removes the case.
+///
+/// A launch inside a SIDECHAIN is the agent's OWN fan-out, not this row's.
+/// Claude Code notifies a parent only once its agent has no live children left
+/// (the note it writes into every task-notification), so a nested launch has
+/// no closing record that reaches this row — counting it would mint a mark
+/// that can never clear.
+fn agent_launch_ids(line: &str) -> Vec<String> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+        return Vec::new();
+    };
+    if v.get("type").and_then(serde_json::Value::as_str) != Some("assistant")
+        || v.get("isSidechain").and_then(serde_json::Value::as_bool) != Some(false)
+    {
+        return Vec::new();
+    }
+    v.get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(serde_json::Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|b| {
+                    b.get("type").and_then(serde_json::Value::as_str) == Some("tool_use")
+                        && b.get("name")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|n| AGENT_TOOLS.contains(&n))
+                })
+                .filter_map(|b| b.get("id")?.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The `tool-use-id` a task-notification closes, whatever it closes.
+///
+/// NOT filtered to agents, and it does not need to be. The same record carries
+/// background commands and monitors — measured over 120 transcripts: 951 agent
+/// notifications, 468 background-command, 108 monitor — but a `tool_use` id is
+/// unique, so a Bash notification can only ever fail to match a launch. The
+/// `summary` field WOULD discriminate (`Agent "…" finished` against
+/// `Background command "…" completed`); reading it was redundant, and a test
+/// written to pin it could not be made to fail.
+///
+/// Every terminal status counts — `completed`, `failed`, `killed`, `stopped`.
+/// The mark asks whether anything is still running, not whether it succeeded.
+fn notified_tool_use_id(line: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    if v.get("type")?.as_str()? != "queue-operation" {
+        return None;
+    }
+    // The tags live INSIDE a JSON string, so the content must be parsed before
+    // it is split — the raw line carries `\n` and `\"` as escapes.
+    Some(
+        v.get("content")?
+            .as_str()?
+            .split_once("<tool-use-id>")?
+            .1
+            .split_once("</tool-use-id>")?
+            .0
+            .to_owned(),
+    )
 }
 
 /// Write, hold or clear `rec.subagents` against the event that just arrived.
@@ -602,6 +692,43 @@ pub fn battery_level(tokens: u32, zone: u32) -> u8 {
     // u32 well before the clamp would rescue it.
     let tenths = u64::from(tokens) * 10 / u64::from(zone);
     tenths.min(u64::from(clave_types::BATTERY_LEVELS - 1)) as u8
+}
+
+/// How much of the transcript every reading EXCEPT the subagent mark sees.
+/// These parse each line they are handed, so the window is also their cost.
+pub const PARSED_TAIL_BYTES: usize = 64 * 1024;
+
+/// How much of the transcript the subagent mark sees, and the whole read.
+///
+/// 32× the parsed window, and affordable only because
+/// [`subagents_from_tail`] byte-filters before it parses: ~14 lines in 2 MiB
+/// match, so the JSON it parses is the same order as the 64 KiB every other
+/// reading parses in full. The read-and-scan is under a millisecond against a
+/// hook that already takes ~29 ms.
+///
+/// Sized by measurement (2026-09-14, 40 live transcripts). A launch outside
+/// the window costs the mark; the missed time is 6.9 h at 512 KiB, 5.4 h at
+/// 1 MiB, 2.0 h here, against a floor of 0.7 h that no window can beat.
+pub const SUBAGENT_TAIL_BYTES: u64 = 2 * 1024 * 1024;
+
+/// The last `max_bytes` of `tail`, cut forward to the next line boundary.
+///
+/// [`read_tail`] itself may start mid-line and the readers tolerate that — an
+/// unparseable fragment is skipped. This cut does NOT rely on that, because
+/// the fragment it would leave is a well-formed PREFIX of a real record often
+/// enough to parse as one and report a stale field.
+fn parsed_window(tail: &str, max_bytes: usize) -> &str {
+    if tail.len() <= max_bytes {
+        return tail;
+    }
+    let from = tail.len() - max_bytes;
+    // Searched over BYTES, not `&tail[from..]`: `from` is an arithmetic offset
+    // and may land inside a multi-byte character, which panics a str slice.
+    // The result is always safe — one past a `\n` is a character boundary.
+    match tail.as_bytes()[from..].iter().position(|&b| b == b'\n') {
+        Some(nl) => &tail[from + nl + 1..],
+        None => "",
+    }
 }
 
 /// Last ≤`max_bytes` of `path` (lossy UTF-8; we only pattern-match). The
@@ -1122,7 +1249,13 @@ pub fn apply_hook_event(
     // yet had flushed to it. While the meter is speaking the tail keeps quiet
     // on them; `title` and `summary` still read the whole tail
     // (`refresh_label`, below), those stay on the transcript by design.
-    let tail = jsonl_tail.filter(|_| !crate::statusline::hook_yields(rec, now));
+    // One read, two windows. `jsonl_tail` is the wide read and it feeds the
+    // subagent mark alone, because that mark byte-filters before it parses.
+    // Every reading below parses each line it is handed, so they keep the
+    // 64 KiB they were sized for — a suffix of the same buffer, not a second
+    // syscall, and not a second cost.
+    let parsed = jsonl_tail.map(|t| parsed_window(t, PARSED_TAIL_BYTES));
+    let tail = parsed.filter(|_| !crate::statusline::hook_yields(rec, now));
     // Stop hands the floor back — AFTER the yield decision above, so this
     // Stop's own stale tail never lands. A cleared stamp lets the meter's
     // next reading land regardless of its interval (the turn's last count is
@@ -1152,18 +1285,25 @@ pub fn apply_hook_event(
     if let Some(raw) = tail.and_then(effort_from_tail) {
         changed |= take_effort(rec, &raw);
     }
-    // The card's subagent mark. Same fail-closed rule: `None` is "no reading"
-    // and HOLDS. A closing record clears it — including one that names no
-    // count, which is the shape the drive actually saw.
+    // The card's subagent mark, off the WIDE window and never the metered
+    // `tail`. Two reasons, and both matter.
     //
-    // `jsonl_tail`, NOT the metered `tail` above. The yield exists because the
-    // statusLine has a FRESHER source for those three cells; it carries no
-    // subagent reading, so there is nothing here to yield to. Gated on it, this
-    // mark reads nothing on any Stop in a released install — the meter has
-    // spoken seconds earlier — and lands one prompt late, which is after the
-    // moment it exists for. No drive can see that: the sandbox never wraps the
-    // statusLine (`statusline_wrap_allowed`), so the yield is always off there.
-    changed |= take_subagents(rec, event, jsonl_tail.and_then(subagents_from_tail));
+    // Wide, because the ledger needs to reach the launch that opened a
+    // fan-out, and a parent writing megabytes while its agents run pushes that
+    // launch far past the parsed window.
+    //
+    // Unmetered, because the yield exists where the statusLine has a FRESHER
+    // source, and the statusLine carries no subagent reading — there is
+    // nothing here to yield to. Gated on it, this mark would read nothing on
+    // any Stop in a released install (the meter has spoken seconds earlier)
+    // and land a prompt late, after the moment it exists for. No drive would
+    // catch that: the sandbox never wraps the statusLine
+    // (`statusline_wrap_allowed`), so the yield is always off there.
+    //
+    // `None` here is no tail AT ALL — the event gate in `run_hook` — and that
+    // holds. Silence inside a tail we did read is not a hold; it is an empty
+    // fleet. See [`subagents_from_tail`].
+    changed |= take_subagents(rec, event, jsonl_tail.map(subagents_from_tail));
     let level_moved = restamp_level(rec, smart_zone());
     // BOTH fields gate the push, not just the level. The glyph only moves once
     // per tenth of the zone, but #105 renders the raw count as text — gating on
@@ -1185,7 +1325,7 @@ pub fn apply_hook_event(
         commit_tab = rec.tab_id;
         changed = true;
     }
-    changed |= refresh_label(rec, event, payload, jsonl_tail);
+    changed |= refresh_label(rec, event, payload, parsed);
     if !changed {
         return false;
     }
@@ -1536,8 +1676,11 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
         // row (design-lock §7.1), so gating the read on "the label has not
         // been earned yet" would freeze the bar's two live columns the moment
         // the label froze — the regression this exists to remove. Cost is one
-        // 64 KiB tail read on the two label-bearing events, well inside the
-        // §6.5 hook budget; the other events still read nothing.
+        // [`SUBAGENT_TAIL_BYTES`] read on the two label-bearing events, well
+        // inside the §6.5 hook budget; the other events still read nothing.
+        // `apply_hook_event` cuts it back to [`PARSED_TAIL_BYTES`] for every
+        // reading except the subagent mark, so the wide window costs a read
+        // and a byte scan, not a wider parse.
         let tail = s.agents.get(&uuid).and_then(|rec| {
             // Event gate FIRST. `resolve_transcript` does up to two
             // `canonicalize` calls, and this closure runs while
@@ -1560,7 +1703,7 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
                 &rec.cwd,
                 &uuid,
             )
-            .and_then(|path| read_tail(&path, 64 * 1024))
+            .and_then(|path| read_tail(&path, SUBAGENT_TAIL_BYTES))
         });
         let mut changed = apply_hook_event(
             s,
@@ -2580,46 +2723,54 @@ mod tests {
         assert_eq!(status_for_event("PreToolUse", None, Status::Idle), None);
     }
 
+    /// NO TAIL holds the mark. A QUIET TAIL clears it. The two are different
+    /// facts and the old rule conflated them, which is how the glyph outlived
+    /// its agents: an event clave read nothing on cannot contradict the store,
+    /// but a window clave DID read and found no agent traffic in is evidence.
     #[test]
-    fn a_tail_without_a_closing_record_holds_the_subagent_mark() {
-        // §5.4 fail-closed, the same rule the token reading follows: a tail
-        // that says nothing must never blank a reading that said something.
+    fn a_tail_clave_never_read_holds_the_mark_and_a_quiet_one_clears_it() {
         let mut s = Store::default();
         s.agents.insert("u1".into(), rec("u1"));
         let p = HookPayload {
             session_id: Some("u1".into()),
             ..HookPayload::default()
         };
-        let turn = |n: u32| {
-            format!(
-                r#"{{"type":"system","subtype":"turn_duration","pendingBackgroundAgentCount":{n}}}"#
-            )
-        };
 
-        apply_hook_event(&mut s, "u1", "Stop", &p, Some(&turn(2)), 1000, true);
+        apply_hook_event(
+            &mut s,
+            "u1",
+            "Stop",
+            &p,
+            Some(&launch("toolu_a")),
+            1000,
+            true,
+        );
         assert!(s.agents["u1"].subagents);
 
-        // A tail with no closing record in it at all.
-        let quiet = r#"{"type":"assistant","message":{"model":"claude-opus-5"}}"#;
-        apply_hook_event(&mut s, "u1", "Stop", &p, Some(quiet), 1001, true);
+        // `None` is the event gate in `run_hook` — Notification and SessionEnd
+        // read no transcript at all. Nothing was measured, so nothing moves.
+        apply_hook_event(&mut s, "u1", "Notification", &p, None, 1001, true);
         assert!(
             s.agents["u1"].subagents,
-            "a silent tail must hold the mark, not clear it"
+            "an event that read no transcript cannot contradict the store"
         );
 
-        // Only a record that IS present clears it.
-        apply_hook_event(&mut s, "u1", "Stop", &p, Some(&turn(0)), 1002, true);
-        assert!(!s.agents["u1"].subagents);
-
-        // And the live shape of that record names no count at all.
-        apply_hook_event(&mut s, "u1", "Stop", &p, Some(&turn(2)), 1003, true);
-        assert!(s.agents["u1"].subagents);
-        let closed = r#"{"type":"system","subtype":"turn_duration","durationMs":3200}"#;
-        apply_hook_event(&mut s, "u1", "Stop", &p, Some(closed), 1004, true);
+        // A window we DID read, carrying no agent traffic, is a measurement.
+        let quiet = r#"{"type":"assistant","message":{"model":"claude-opus-5"}}"#;
+        apply_hook_event(&mut s, "u1", "Stop", &p, Some(quiet), 1002, true);
         assert!(
             !s.agents["u1"].subagents,
-            "a closing record with no count is a turn that ended with nothing pending"
+            "a window with no agent traffic in it is an empty fleet, not a hold"
         );
+
+        // And the agent's own closing notification clears it directly, which
+        // is the path that runs when the launch is still inside the window.
+        let fanned = format!("{}\n{}", launch("toolu_a"), launch("toolu_b"));
+        apply_hook_event(&mut s, "u1", "Stop", &p, Some(&fanned), 1003, true);
+        assert!(s.agents["u1"].subagents);
+        let closed = format!("{fanned}\n{}\n{}", finish("toolu_a"), finish("toolu_b"));
+        apply_hook_event(&mut s, "u1", "Stop", &p, Some(&closed), 1004, true);
+        assert!(!s.agents["u1"].subagents);
     }
 
     #[test]
@@ -2634,29 +2785,26 @@ mod tests {
             session_id: Some("u1".into()),
             ..HookPayload::default()
         };
-        let turn = |n: u32| {
-            format!(
-                r#"{{"type":"system","subtype":"turn_duration","pendingBackgroundAgentCount":{n}}}"#
-            )
-        };
+        let quiet = String::from(r#"{"type":"assistant","message":{"model":"claude-opus-5"}}"#);
+        let fanned = format!("{quiet}\n{}", launch("toolu_a"));
 
         // Settle every other field first, so the mark is the only thing left
         // that could move.
-        apply_hook_event(&mut s, "u1", "Stop", &p, Some(&turn(0)), 1000, true);
+        apply_hook_event(&mut s, "u1", "Stop", &p, Some(&quiet), 1000, true);
         assert!(
-            !apply_hook_event(&mut s, "u1", "Stop", &p, Some(&turn(0)), 1001, true),
+            !apply_hook_event(&mut s, "u1", "Stop", &p, Some(&quiet), 1001, true),
             "a fleet where nothing moved must not mint an ord"
         );
         assert!(
-            apply_hook_event(&mut s, "u1", "Stop", &p, Some(&turn(2)), 1002, true),
+            apply_hook_event(&mut s, "u1", "Stop", &p, Some(&fanned), 1002, true),
             "the mark lighting up is a change the bar has to be told about"
         );
         assert!(
-            !apply_hook_event(&mut s, "u1", "Stop", &p, Some(&turn(2)), 1003, true),
+            !apply_hook_event(&mut s, "u1", "Stop", &p, Some(&fanned), 1003, true),
             "and staying lit is not"
         );
         assert!(
-            apply_hook_event(&mut s, "u1", "Stop", &p, Some(&turn(0)), 1004, true),
+            apply_hook_event(&mut s, "u1", "Stop", &p, Some(&quiet), 1004, true),
             "going out is a change too"
         );
     }
@@ -2725,9 +2873,10 @@ mod tests {
     fn four_signal_tail() -> String {
         [
             r#"{"type":"assistant","effort":"high","message":{"model":"claude-opus-5","usage":{"input_tokens":1200,"cache_read_input_tokens":800}}}"#,
-            r#"{"type":"system","subtype":"turn_duration","pendingBackgroundAgentCount":2}"#,
         ]
         .join("\n")
+            + "\n"
+            + &launch("toolu_a")
     }
 
     #[test]
@@ -2769,8 +2918,8 @@ mod tests {
         );
         assert!(
             s.agents["u1"].subagents,
-            "the turn's own closing record is the only source for this cell — a \
-             metered row must still read it"
+            "the transcript is the only source for this cell — a metered row must \
+             still read it"
         );
     }
 
@@ -2816,47 +2965,252 @@ mod tests {
         );
     }
 
+    /// Fixtures in the byte shape Claude Code actually writes, copied from a
+    /// live transcript and genericised. The compact `"name":"Agent"` spelling
+    /// is load-bearing: the scan pre-filters on it before it parses anything.
+    fn launch(id: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","isSidechain":false,"message":{{"role":"assistant","content":[{{"type":"tool_use","id":"{id}","name":"Agent","input":{{"description":"Review lane"}}}}]}}}}"#
+        )
+    }
+    fn notification(id: &str, summary: &str) -> String {
+        format!(
+            r#"{{"type":"queue-operation","operation":"enqueue","content":"<task-notification>\n<task-id>t1</task-id>\n<tool-use-id>{id}</tool-use-id>\n<status>completed</status>\n<summary>{summary}</summary>\n</task-notification>"}}"#
+        )
+    }
+    fn finish(id: &str) -> String {
+        notification(id, r#"Agent \"Review lane\" finished"#)
+    }
+
+    /// The mark is a LEDGER over the window — every launch it holds, minus
+    /// every launch it has seen finish — not a reading of one record.
+    ///
+    /// This replaced a reading of `turn_duration.pendingBackgroundAgentCount`,
+    /// and the reason is measured (2026-09-14, 40 live transcripts). That
+    /// record is written AFTER the Stop hook runs: `stop_hook_summary`
+    /// precedes it on every transcript. So at Stop the newest one on disk
+    /// always describes the PREVIOUS turn, and across those sessions the glyph
+    /// sat on rows with nothing under them for 22.5 hours. Widening the window
+    /// made it WORSE (24.1 h) — a wider window only reaches a staler record.
+    /// The ledger scores 0.0 h. Do not restore the count without new numbers.
     #[test]
-    fn the_turns_closing_record_says_whether_anything_is_still_running_under_it() {
-        let turn = |n: u32| {
-            format!(
-                r#"{{"type":"system","subtype":"turn_duration","durationMs":35640,"messageCount":40,"pendingBackgroundAgentCount":{n},"sessionId":"s"}}"#
-            )
-        };
-        assert_eq!(subagents_from_tail(&turn(1)), Some(true));
-        assert_eq!(subagents_from_tail(&turn(3)), Some(true));
-        assert_eq!(subagents_from_tail(&turn(0)), Some(false));
-
-        // Newest wins: the reading is the LAST turn's, not any earlier one.
-        let two = format!("{}\n{}", turn(2), turn(0));
-        assert_eq!(subagents_from_tail(&two), Some(false));
-        let two = format!("{}\n{}", turn(0), turn(2));
-        assert_eq!(subagents_from_tail(&two), Some(true));
-
-        // No reading is not a reading of zero: a tail that reaches back past
-        // the last turn boundary carries no closing record at all, and must
-        // HOLD what the store knows rather than assert an empty fleet.
-        assert_eq!(subagents_from_tail(""), None);
-
-        // But a closing record that IS present and names no count is a zero.
-        // This is the COMMON shape, not an edge one — every `turn_duration`
-        // line in the sandbox drive looked like this. Reading it as "no
-        // reading" is what would let the mark stick to a row forever.
-        assert_eq!(
-            subagents_from_tail(r#"{"type":"system","subtype":"turn_duration","messageCount":40}"#),
-            Some(false)
+    fn the_mark_is_every_launch_the_window_holds_minus_every_one_it_saw_finish() {
+        // A launch with nothing to close it: agents are under this row.
+        assert!(subagents_from_tail(&launch("toolu_a")));
+        // Closed by its own notification, which Claude Code writes within
+        // seconds of the agent stopping. That freshness is the whole change.
+        assert!(!subagents_from_tail(&format!(
+            "{}\n{}",
+            launch("toolu_a"),
+            finish("toolu_a")
+        )));
+        // Siblings are counted, not collapsed: one of three finishing must not
+        // clear a mark the other two still earn.
+        let three = format!(
+            "{}\n{}\n{}\n{}",
+            launch("toolu_a"),
+            launch("toolu_b"),
+            launch("toolu_c"),
+            finish("toolu_b")
         );
-        assert_eq!(
-            subagents_from_tail(r#"{"type":"system","subtype":"away_summary","content":"x"}"#),
-            None
+        assert!(subagents_from_tail(&three));
+        assert!(!subagents_from_tail(&format!(
+            "{}\n{}\n{}",
+            three,
+            finish("toolu_a"),
+            finish("toolu_c")
+        )));
+    }
+
+    /// Silence is NOT a hold. A window carrying no agent traffic means no
+    /// agents, and saying so is what stops a mark outliving its agents.
+    ///
+    /// The rule this replaced held on silence, so one stuck mark stayed stuck
+    /// for the life of the row. Over the same 40 transcripts the hold buys
+    /// nothing at the window this code reads — wrong-ON and wrong-OFF are
+    /// identical with it and without it — so it is gone, and with it the one
+    /// failure a boolean cannot recover from.
+    #[test]
+    fn a_window_with_no_agent_traffic_reads_as_no_agents() {
+        assert!(!subagents_from_tail(""));
+        assert!(!subagents_from_tail(
+            r#"{"type":"system","subtype":"turn_duration","messageCount":40}"#
+        ));
+        // Including a record still CLAIMING pending agents. The count is a
+        // turn behind by construction and is no longer read at all.
+        assert!(!subagents_from_tail(
+            r#"{"type":"system","subtype":"turn_duration","pendingBackgroundAgentCount":3}"#
+        ));
+        // A notification whose launch has scrolled out of the window still
+        // says "the agent traffic here has closed" — the safe reading, and the
+        // one that clears a mark whose launch is long gone.
+        assert!(!subagents_from_tail(&finish("toolu_gone")));
+    }
+
+    /// A notification closes the launch it NAMES, and no other. The same
+    /// record carries background commands and monitors — 468 and 108 of them
+    /// against 951 agent notifications across 120 transcripts — so a rule that
+    /// cleared on any notification would blank the mark every time a
+    /// background command finished beside a live agent.
+    ///
+    /// Matching on the `tool-use-id` is what makes that impossible, and it is
+    /// why no `summary` filter is needed: a `tool_use` id is unique, so a Bash
+    /// notification can only ever fail to match.
+    #[test]
+    fn a_notification_closes_the_launch_it_names_and_no_other() {
+        let command = notification(
+            "toolu_bash",
+            r#"Background command \"just gates\" completed"#,
         );
-        // The count also rides `type:"assistant"` lines in no transcript we
-        // have measured, and reading it off one would be a guess: the subtype
-        // is the discriminator, exactly as it is for every other system record.
-        assert_eq!(
-            subagents_from_tail(r#"{"type":"assistant","pendingBackgroundAgentCount":4}"#),
-            None
+        assert!(subagents_from_tail(&format!(
+            "{}\n{}",
+            launch("toolu_a"),
+            command
+        )));
+        // A notification for a launch this window never saw is not evidence of
+        // anything running: with no launch held, there is nothing to be live.
+        assert!(!subagents_from_tail(&command));
+        // And the agent's own id does close it.
+        assert!(!subagents_from_tail(&format!(
+            "{}\n{}\n{}",
+            launch("toolu_a"),
+            command,
+            finish("toolu_a")
+        )));
+    }
+
+    /// An agent's OWN fan-out belongs to the agent, not to this row. Claude
+    /// Code notifies a parent only once its agent has no live children left —
+    /// the note inside every task-notification says so — so counting a
+    /// sidechain launch here would add a launch whose closing notification
+    /// never reaches this row. That is a mark that can never clear, which is
+    /// the exact defect this function exists to remove.
+    #[test]
+    fn a_launch_inside_a_sidechain_belongs_to_the_agent_not_to_this_row() {
+        let nested = launch("toolu_n").replace(r#""isSidechain":false"#, r#""isSidechain":true"#);
+        assert!(!subagents_from_tail(&nested));
+    }
+
+    /// Agents can be resumed, so one tool-use-id notifies more than once —
+    /// "the same task-id may notify more than once" is Claude Code's own note
+    /// inside the record. Set semantics, not a counter: two closings for one
+    /// launch must not drive a tally below zero and mask a live sibling.
+    #[test]
+    fn a_repeated_notification_does_not_mask_a_live_sibling() {
+        let t = format!(
+            "{}\n{}\n{}\n{}",
+            launch("toolu_a"),
+            launch("toolu_b"),
+            finish("toolu_a"),
+            finish("toolu_a")
         );
+        assert!(subagents_from_tail(&t), "toolu_b is still under this row");
+    }
+
+    /// One message, several tool calls, and only some of them fan-outs. The
+    /// blocks are FILTERED, not searched: taking the first `tool_use` would
+    /// record a Bash call as a launch — an id no notification can ever close,
+    /// so a mark that can never clear — and taking only the first AGENT block
+    /// would lose the siblings batched beside it, clearing the mark while two
+    /// of three are still running.
+    #[test]
+    fn one_message_can_open_several_fan_outs_beside_other_tool_calls() {
+        let mixed = r#"{"type":"assistant","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"Dispatching."},{"type":"tool_use","id":"toolu_bash","name":"Bash","input":{"command":"ls"}},{"type":"tool_use","id":"toolu_a","name":"Agent","input":{}},{"type":"tool_use","id":"toolu_b","name":"Agent","input":{}}]}}"#;
+        assert_eq!(
+            agent_launch_ids(mixed),
+            vec!["toolu_a".to_string(), "toolu_b".to_string()],
+            "the Bash call is not a fan-out, and the second Agent is not optional"
+        );
+        // Closing only the first leaves the second holding the mark up.
+        assert!(subagents_from_tail(&format!(
+            "{mixed}\n{}",
+            finish("toolu_a")
+        )));
+        assert!(!subagents_from_tail(&format!(
+            "{mixed}\n{}\n{}",
+            finish("toolu_a"),
+            finish("toolu_b")
+        )));
+        // A Bash notification cannot stand in for either of them.
+        assert!(subagents_from_tail(&format!(
+            "{mixed}\n{}\n{}",
+            finish("toolu_a"),
+            notification("toolu_bash", r#"Background command \"ls\" completed"#)
+        )));
+    }
+
+    /// The two windows, pinned to the measurements that chose them. Neither is
+    /// a round number someone liked: [`SUBAGENT_TAIL_BYTES`] is where the
+    /// missed-mark time stops falling usefully (6.9 h at 512 KiB, 5.4 h at
+    /// 1 MiB, 2.0 h here, against a 0.7 h floor), and [`PARSED_TAIL_BYTES`] is
+    /// the window every OTHER reading on this tail was measured against.
+    ///
+    /// Pinned because nothing else fails when they move: every unit test feeds
+    /// a tail smaller than either, so a window quietly shrinking to a
+    /// kilobyte would pass the whole suite and lose the mark in the field.
+    #[test]
+    fn the_two_windows_are_the_sizes_the_measurements_chose() {
+        assert_eq!(PARSED_TAIL_BYTES, 65_536);
+        assert_eq!(SUBAGENT_TAIL_BYTES, 2_097_152);
+        assert_eq!(
+            SUBAGENT_TAIL_BYTES / PARSED_TAIL_BYTES as u64,
+            32,
+            "the wide window is affordable only because the mark byte-filters \
+             before it parses — if this ratio grows, re-measure the scan cost"
+        );
+    }
+
+    /// TESTING.md's external-format row: the ledger against a CAPTURED pair,
+    /// not an invented one. A 2026-09-14 field capture of one real fan-out —
+    /// the launch and the notification that closed it, byte order and field
+    /// order preserved, home path scrubbed, and only two bulky values trimmed
+    /// (the agent's prompt, and the review it returned).
+    ///
+    /// This is what the hand-written fixtures above are checked against. Three
+    /// things it pins that an invented line would not: the compact
+    /// `"name":"Agent"` spelling the scan pre-filters on, `isSidechain` as a
+    /// TOP-LEVEL field rather than one inside `message`, and the tag layout
+    /// inside a task-notification's `content` string.
+    #[test]
+    fn the_captured_fan_out_reads_as_found_in_the_field() {
+        let captured =
+            include_str!("../tests/fixtures/transcripts/subagent-fanout-2026-09-14.jsonl");
+        let launch_line = captured.lines().next().unwrap();
+        let notification_line = captured.lines().nth(1).unwrap();
+
+        // Alone, the launch is a live fan-out.
+        assert!(subagents_from_tail(launch_line));
+        // The record that closed it names the same id, and clears the mark.
+        assert_eq!(
+            agent_launch_ids(launch_line),
+            notified_tool_use_id(notification_line)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            "the pairing is only real if the two records agree on the id"
+        );
+        assert!(!subagents_from_tail(captured));
+    }
+
+    /// The wide window feeds ONLY the mark. Every other reading on the tail —
+    /// tokens, model, effort, the title fields — keeps the 64 KiB it always
+    /// had, because those parse every line and the mark does not.
+    #[test]
+    fn the_parsed_window_is_cut_back_to_its_own_size_on_a_line_boundary() {
+        let filler = "x".repeat(200);
+        let wide = (0..600)
+            .map(|i| format!(r#"{{"n":{i},"pad":"{filler}"}}"#))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(wide.len() > 64 * 1024, "the fixture must exceed the window");
+        let cut = parsed_window(&wide, 1024);
+        assert!(cut.len() <= 1024);
+        assert!(wide.ends_with(cut), "the cut is a SUFFIX, never a copy");
+        for line in cut.lines() {
+            serde_json::from_str::<serde_json::Value>(line)
+                .expect("every line handed on must be whole");
+        }
+        // A tail already inside the window is passed through untouched.
+        assert_eq!(parsed_window("a\nb", 1024), "a\nb");
     }
 
     #[test]

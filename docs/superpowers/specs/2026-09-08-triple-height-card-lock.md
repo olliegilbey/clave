@@ -268,6 +268,25 @@ is the third structural glyph, stacked under status and provenance.
 **A count was tried and dropped.** "This row has fanned out" is the whole
 signal; the digit beside it was noise.
 
+**Amended 2026-09-14: the mark is a LEDGER, not a reading.** It was read off
+`pendingBackgroundAgentCount` on the turn's own closing record. Claude Code
+writes that record AFTER the Stop hook runs, so clave always read the PREVIOUS
+turn's, and the glyph outlived its agents by half an hour at a time. Measured
+over 40 live transcripts: 22.5 hours of the glyph sitting on rows with nothing
+under them. Widening the window made it worse, because a wider window only
+reaches a staler record.
+
+The mark is now every fan-out the window holds, minus every fan-out the window
+has seen finish — both written at the moment the thing happens, so the mark
+rises at the first hook event after a launch and falls at the first one after
+the last agent stops. Same 40 transcripts, 0.0 hours of a stuck glyph.
+
+**A wrong-off is the safer error, and the one that remains.** A launch can
+outrun the window, and then a live agent loses its mark: 2.0 hours over those
+sessions, against a floor of 0.7 that no window beats, because the mark can
+only move when a hook fires. Under-claiming depth beats sending the user to
+look at a row where nothing is running.
+
 ### 4.7 `wants` — the flexing cell, and the reason for the change
 
 What this agent is blocked on, in its own words, in `NEEDS_YOU_INK`. It claims
@@ -299,6 +318,12 @@ is right — an older Claude Code never wrote the field — but nothing ended th
 hold. A `SessionEnd` now clears it (`take_subagents`): a session that has
 exited can have nothing pending under it, and a held mark would sit on a
 dormant row claiming depth the user cannot go and look at.
+
+*Superseded four days later.* The hold is gone, not patched: §4.6's amendment
+of 2026-09-14 reads a window with no fan-out traffic in it as an empty fleet.
+A hold whose only clearing signal is one specific event is the defect shape, not
+the fix. `SessionEnd` still forces the mark down, because that event reads no
+transcript at all and so has no window to judge.
 
 Its sources, cheapest first:
 
@@ -475,7 +500,7 @@ The three cells, and what wiring each one taught:
 | Cell     | Wired from                                                           |
 | -------- | -------------------------------------------------------------------- |
 | clock    | **no new field.** `last_interacted` already was the turn start, because `UserPromptSubmit` both moves it and is the only event that sets `Working`. The store timestamp §4.4 asked for was never needed. |
-| subs     | `pendingBackgroundAgentCount`, from the turn's own closing record. A closing record that names NO count is a zero, not a silence — held the mark lit forever until fixed. And it must read the raw tail, not the statusLine-suppressed one: the meter has no subagent reading to yield to, and gated on it the mark never lands in a released install. |
+| subs     | Fan-out launches minus the notifications that closed them, over a 2 MiB window — the declared count on the turn's closing record was unreachable in time, and §4.6's 2026-09-14 amendment has the measurements. Two wiring rules survive that change. It reads a WIDER window than every other cell, which is affordable only because it byte-filters before it parses. And it reads the raw tail, not the statusLine-suppressed one: the meter has no subagent reading to yield to, and gated on it the mark never lands in a released install. |
 | `wants`  | tier 1 — the permission tool name `hook.rs` was discarding. Tier 2, the scribe, is still deferred. |
 
 Blank stayed the meaning throughout, so each landed independently and the card
