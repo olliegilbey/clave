@@ -1803,6 +1803,81 @@ mod tests {
                 "showcase"
             ]
         );
+        // relaunch-restore: the drive's whole premise is the SHAPE of this
+        // table, and nothing else reads it, so assert the shape here.
+        let rr = SCENARIOS
+            .iter()
+            .find(|s| s.name == "relaunch-restore")
+            .expect("the relaunch fixture");
+        let bound: Vec<(usize, &str)> = rr
+            .agents
+            .iter()
+            .filter_map(|a| a.bound_tab.map(|t| (t, a.slug)))
+            .collect();
+        assert_eq!(
+            bound,
+            vec![
+                (0, "restored-a"),
+                (3, "restored-b"),
+                (4, "restored-c"),
+                (9, "restored-d"),
+            ]
+        );
+        // Gaps on purpose: screen order is the ascending tab id, and a
+        // contiguous 0,1,2,3 would pass on table order alone.
+        assert!(
+            bound.windows(2).any(|w| w[1].0 > w[0].0 + 1),
+            "the bound tabs must not be contiguous"
+        );
+        let dormant: Vec<&str> = rr
+            .agents
+            .iter()
+            .filter(|a| a.bound_tab.is_none())
+            .map(|a| a.slug)
+            .collect();
+        assert_eq!(dormant, vec!["dormant-e", "dormant-f"]);
+        // dormant-e is MORE recent than every bound row. A restore that reads
+        // recency instead of the binds gives it a tab, and the drive sees it.
+        let newest_bound = rr
+            .agents
+            .iter()
+            .filter(|a| a.bound_tab.is_some())
+            .map(|a| a.ago_secs)
+            .min()
+            .expect("bound rows");
+        let e = rr.agents.iter().find(|a| a.slug == "dormant-e").unwrap();
+        assert!(
+            e.ago_secs < newest_bound,
+            "dormant-e must be the newest row"
+        );
+        // One worktree row and one rotated row, both bound: a restored set
+        // must bake the worktree's own cwd and resume the rotated
+        // conversation, for every row rather than only the first.
+        assert!(
+            rr.agents
+                .iter()
+                .any(|a| a.worktree && a.bound_tab.is_some())
+        );
+        assert!(rr.agents.iter().any(|a| a.rotated && a.bound_tab.is_some()));
+        // The worktree row also names a SHARED repo directory, so the
+        // restored set carries at least one repo ink two rows could wear.
+        assert!(rr.agents.iter().any(|a| a.worktree && a.repo.is_some()));
+        // Every row's recency is distinct. Recency decides the dormant order
+        // and must not decide the restored one, and two rows that tie make
+        // either verdict unreadable.
+        let mut ages: Vec<u64> = rr.agents.iter().map(|a| a.ago_secs).collect();
+        ages.sort_unstable();
+        ages.dedup();
+        assert_eq!(ages.len(), rr.agents.len(), "recency must stagger");
+        // Every other scenario stages dormant rows only — a stray bind would
+        // change what those reviewed validation paths come up holding.
+        assert!(
+            SCENARIOS
+                .iter()
+                .filter(|s| s.name != "relaunch-restore")
+                .all(|s| s.agents.iter().all(|a| a.bound_tab.is_none())),
+            "only the relaunch fixture binds tabs"
+        );
         // cold-start: 3 agents, staggered recency, none worktree.
         let cs = &SCENARIOS[0];
         assert_eq!(cs.agents.len(), 3);

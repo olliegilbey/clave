@@ -641,6 +641,18 @@ pub struct BarModel {
     /// reborn, so whatever write raced ahead belongs to the newborn.
     witnessed_dead: BTreeSet<usize>,
     panes: Vec<PaneMeta>,
+    /// agent uuid → tab id, read off the LAUNCH COMMAND of a pane rather than
+    /// off the store. A relaunch bakes the previous live set as tabs whose
+    /// `clave spawn` has not run yet (`setup::launch_layout_kdl`), and nothing
+    /// unrun can have written a bind — so without this a restored tab renders
+    /// as a TERMINAL row showing a raw `clave spawn <uuid>` line, and its agent
+    /// renders a SECOND time as dormant. One row, shown twice, neither true.
+    ///
+    /// Cached rather than derived per question: `rows()` asks it once per tab
+    /// and once per agent, and the real store carries ~185 rows.
+    /// `apply_tabs` and `apply_panes` are the only writers of the two frames
+    /// it joins, so both rebuild it.
+    spawn_binds: Vec<(String, usize)>,
     /// pane id → what the OS said about it (#206). Written by
     /// `apply_pane_facts` (main.rs probes and event deltas), pruned by
     /// `apply_panes` when the manifest no longer carries the pane. Only
@@ -1344,11 +1356,65 @@ impl BarModel {
             .map(|p| Effect::RunHeldPane { pane_id: p.pane_id })
     }
 
+    /// Rebuild [`Self::spawn_binds`] from the two delivered frames.
+    ///
+    /// Deliberately NOT gated on `is_held`. A command pane's launch command is
+    /// static — it still reads `clave spawn …` after the process has execed —
+    /// so the same join holds through the beat between the human starting a
+    /// restored tab and the store's bind landing, which is exactly where a
+    /// flicker would show. `is_held` and `exited` gate the ACTION
+    /// ([`Self::run_held_effect`]), where starting something is at stake; here
+    /// nothing starts and the only question is which row owns the tab.
+    ///
+    /// The two frames are joined on tab POSITION, so an incoherent pair can
+    /// name the wrong tab for a beat. That is the same exposure `is_dormant`
+    /// already accepts on its pane leg, and it costs a flicker, not a write.
+    fn rebuild_spawn_binds(&mut self) {
+        self.spawn_binds = self
+            .tabs
+            .iter()
+            .filter_map(|t| {
+                let uuid = self
+                    .panes
+                    .iter()
+                    .filter(|p| p.tab_position == t.position && !p.is_plugin)
+                    .find_map(|p| p.terminal_command.as_deref().and_then(spawn_uuid))?;
+                Some((uuid.to_string(), t.tab_id))
+            })
+            .collect();
+    }
+
+    /// The store's bind, joined against the tabs that exist.
+    fn store_tab_live(&self, a: &Agent) -> bool {
+        a.tab_id
+            .is_some_and(|id| self.tabs.iter().any(|t| t.tab_id == id))
+    }
+
+    /// The agent a restored tab names in its pane's launch command, when no
+    /// snapshot bind claims that agent yet. The store's bind LEADS (§6.6
+    /// Design B): an agent already shown live in its own tab must not be
+    /// claimed a second time here, or one agent would fill two rows.
+    fn spawn_bound_agent(&self, tab_id: usize) -> Option<&Agent> {
+        let uuid = self
+            .spawn_binds
+            .iter()
+            .find(|(_, id)| *id == tab_id)
+            .map(|(u, _)| u.as_str())?;
+        self.agents
+            .iter()
+            .find(|a| a.uuid == uuid && !self.store_tab_live(a))
+    }
+
     /// The agent bound to this tab, per the SNAPSHOT (§6.6 Design B) — the
     /// only join every instance agrees on. Local register/manifest joins are
-    /// used solely to CREATE binds (bind_effects).
+    /// used solely to CREATE binds (bind_effects), with one exception: a
+    /// RESTORED tab, whose agent cannot have written a bind because its
+    /// command has not run (see [`Self::spawn_binds`]).
     fn agent_in_tab(&self, tab_id: usize) -> Option<&Agent> {
-        self.agents.iter().find(|a| a.tab_id == Some(tab_id))
+        self.agents
+            .iter()
+            .find(|a| a.tab_id == Some(tab_id))
+            .or_else(|| self.spawn_bound_agent(tab_id))
     }
 
     /// §6.6 Design B bootstrap: agents whose REGISTERED pane sits in
@@ -1508,14 +1574,16 @@ impl BarModel {
     /// divergence only flickers a dormant row briefly (harmless) — but it
     /// suppresses the duplicate row in the pre-bind beat after a tab spawns.
     fn is_dormant(&self, a: &Agent) -> bool {
-        let tab_live = a
-            .tab_id
-            .is_some_and(|id| self.tabs.iter().any(|t| t.tab_id == id));
+        let tab_live = self.store_tab_live(a);
         let pane_live = self
             .uuid_to_pane
             .get(&a.uuid)
             .is_some_and(|p| self.tab_position_of_pane(*p).is_some());
-        !tab_live && !pane_live
+        // A restored tab holds this agent's `clave spawn` and has not run it.
+        // The agent has a tab on screen, so it is not dormant — without this
+        // leg it lists a second time under the tab that already shows it.
+        let spawn_live = self.spawn_binds.iter().any(|(u, _)| *u == a.uuid);
+        !tab_live && !pane_live && !spawn_live
     }
 
     /// Drop in-flight marks that resolved: the store bound the row to a tab or
@@ -1755,6 +1823,7 @@ impl BarModel {
             self.witnessed_dead.retain(|id| !incoming.contains(id));
         }
         self.tabs = tabs;
+        self.rebuild_spawn_binds();
         let mut effects = Vec::new();
         // #23 (2026-07-21): a tab CLOSE (`Alt+w`; `Ctrl+D` closes a plain shell
         // tab but never an agent pane, FOOTGUNS.md) can STRAND the nav beacon —
@@ -1982,6 +2051,7 @@ impl BarModel {
     /// so the payment is frame-witnessed in the same sense the debt is.
     pub fn apply_panes(&mut self, panes: Vec<PaneMeta>) -> Vec<Effect> {
         self.panes = panes;
+        self.rebuild_spawn_binds();
         // A closed pane's facts must not survive it: pane ids are minted
         // monotonically by zellij, but a map that only grows is a leak in a
         // bar that lives for the session. Plugin panes are excluded from the
@@ -4678,6 +4748,125 @@ mod tests {
                 "{cmd:?} is not a clave spawn and must not be run"
             );
         }
+    }
+
+    /// A restored fleet on screen: one tab per row, each carrying a launch
+    /// command. `bound` is the tab the STORE knows about — a restored row has
+    /// none, because its `clave spawn` has not run and only a run writes a
+    /// bind.
+    fn restored_fleet(cmds: [Option<&str>; 3], bound: Option<usize>) -> BarModel {
+        let mut m = BarModel::default();
+        let mut panes = panes_at(&FLEET_PANES);
+        let terminals: Vec<&mut PaneMeta> = panes.iter_mut().filter(|p| !p.is_plugin).collect();
+        for (p, cmd) in terminals.into_iter().zip(cmds) {
+            p.is_held = cmd.is_some();
+            p.terminal_command = cmd.map(str::to_string);
+        }
+        m.apply_panes(panes);
+        m.apply_tabs(vec![
+            tab(10, 0, "one", true),
+            tab(11, 1, "two", false),
+            tab(12, 2, "three", false),
+        ]);
+        m.apply_snapshot(snap(1, vec![agent("u-restored", Status::Working, bound)]));
+        m
+    }
+
+    /// The relaunch's own row problem. A restored tab carries its agent's
+    /// `clave spawn` and nothing has run it, so no bind exists — and the bar
+    /// read the tab as a TERMINAL and the agent as DORMANT. One agent, two
+    /// rows, neither of them the fleet the human left behind.
+    #[test]
+    fn a_restored_tab_shows_its_agents_row_and_shows_it_once() {
+        let m = restored_fleet(
+            [Some("clave spawn u-restored --name x --cwd /r"), None, None],
+            None,
+        );
+        assert!(
+            matches!(content_at(&m, 0), RowContent::Agent { .. }),
+            "the restored tab is the agent's row, not a terminal showing its command line"
+        );
+        assert!(
+            !m.rows().iter().any(|(_, r)| r.dormant),
+            "an agent holding a tab on screen is not also a dormant row"
+        );
+    }
+
+    /// The join is on the LAUNCH COMMAND, not on the held flag: a command
+    /// pane keeps its launch command after the process execs. Held-only, the
+    /// row would fall back to a terminal for the beat between the human
+    /// starting a restored tab and `clave bind` landing — a flicker in the
+    /// exact moment the feature is being used.
+    #[test]
+    fn a_restored_tab_keeps_its_row_the_moment_its_spawn_starts_running() {
+        let mut m = restored_fleet(
+            [Some("clave spawn u-restored --name x --cwd /r"), None, None],
+            None,
+        );
+        let mut panes = panes_at(&FLEET_PANES);
+        for p in panes.iter_mut().filter(|p| p.pane_id == 5) {
+            p.terminal_command = Some("clave spawn u-restored --name x --cwd /r".into());
+        }
+        m.apply_panes(panes); // running now: is_held cleared, command unchanged
+        assert!(
+            matches!(content_at(&m, 0), RowContent::Agent { .. }),
+            "the row must not blink back to a terminal while the bind is in flight"
+        );
+    }
+
+    /// Only OUR command names a row. Any other command pane in the session is
+    /// a terminal tab and stays one, and an agent it does not name stays
+    /// dormant.
+    #[test]
+    fn a_held_pane_that_is_not_our_spawn_leaves_the_rows_alone() {
+        let m = restored_fleet([Some("cargo test --workspace"), None, None], None);
+        assert!(
+            matches!(content_at(&m, 0), RowContent::Terminal { .. }),
+            "someone else's held command is a terminal row"
+        );
+        assert!(
+            m.rows().iter().any(|(_, r)| r.dormant),
+            "an agent no tab names is still dormant"
+        );
+    }
+
+    /// The join is on tab POSITION, and the position has to match: a command
+    /// pane names the agent of ITS OWN tab and of no other. Without that, one
+    /// restored tab anywhere in the fleet would hand its agent to every tab.
+    #[test]
+    fn a_spawn_command_names_only_the_tab_its_pane_sits_in() {
+        let m = restored_fleet(
+            [None, Some("clave spawn u-restored --name x --cwd /r"), None],
+            None,
+        );
+        assert!(
+            matches!(content_at(&m, 0), RowContent::Terminal { .. }),
+            "a tab with no spawn of its own is a terminal row"
+        );
+        let agents = m
+            .rows()
+            .into_iter()
+            .filter(|(_, r)| matches!(r.content, RowContent::Agent { .. }))
+            .count();
+        assert_eq!(agents, 1, "exactly the tab holding the command");
+    }
+
+    /// The store's bind LEADS (§6.6 Design B). A stray pane naming an agent
+    /// that is already live in its own tab must not mint a second row for it:
+    /// the tab the store bound is the truth, and the other tab is whatever
+    /// its own content says.
+    #[test]
+    fn a_spawn_command_never_claims_an_agent_the_store_already_shows_live() {
+        let m = restored_fleet(
+            [None, Some("clave spawn u-restored --name x --cwd /r"), None],
+            Some(10),
+        );
+        let agents = m
+            .rows()
+            .into_iter()
+            .filter(|(_, r)| matches!(r.content, RowContent::Agent { .. }))
+            .count();
+        assert_eq!(agents, 1, "one agent, one row, and the store picks the tab");
     }
 
     #[test]
