@@ -1,8 +1,12 @@
 # 2026-09-14 — daily-driving the 0.5.0 cut
 
-Branch `chore/release-0.5.0`, seven commits past `main`. **Nothing pushed, and
-CI has seen none of it.** Every item came from Ollie running the cut on his
-daily fleet and reporting what he saw.
+Branch `chore/release-0.5.0`, now **pushed and open as PR #260**. Every item
+came from Ollie running the cut on his daily fleet and reporting what he saw.
+
+CI passed on the first run: `test`, `wasm-build`, `lint`, `plan`, GitGuardian.
+The PR-side CodeRabbit skipped itself ("manual review required for this OSS
+repository"), so it was asked explicitly in a comment; the CLI lane had already
+run against `origin/main` and its three findings are fixed in `dc996eb`.
 
 ## Done and committed
 
@@ -14,22 +18,36 @@ daily fleet and reporting what he saw.
 | `435e69a` | `worktree` was recorded only when clave itself created the worktree, so the tree mark had never rendered on a real fleet. git decides it now, plus a fleet repair in the launch and cut tails. |
 | `447853f` | Red outlived the block: answering a permission prompt fires no hook, so `NeedsYou` survived to `Stop`. The statusLine meter clears it — a moved token count is an API response, and none lands while a prompt waits. |
 | `6bb83ad` | This record. |
-| *(uncommitted at write time)* | QA-DRIVE.md phase 5d — the meter seam, specified. |
+| `77f64ee` | QA-DRIVE.md phase 5d — the meter seam, specified. |
+| `dc996eb` | Review round: the worktree repair was spawning git inside the store lock, so every hook in the fleet queued behind it. The calls moved out; only the mutation takes the lock. |
 
 Each is gated (`fmt`, `test --workspace`, wasm build, `clippy -D warnings`).
 Every new test was proved to fail without its fix.
 
-## NEXT ACTION — Ollie has not released past `12d4ca2`
+## NEXT ACTION — nothing here has been seen on a real terminal
 
-The clock, the tree mark and the red fix are all **unseen on a real terminal**.
+The clock, the tree mark and the red fix have only ever been rendered by tests
+and by `examples/triple-preview.rs`. Ollie has released nothing past `12d4ca2`.
+
+**The repo squash-merges** — every commit on `main` ends in `(#N)` and there
+are no merge commits in its history. So PR #260's eleven commits become ONE new
+commit, and the local `v0.5.0` tag at `12d4ca2` names a commit that will never
+exist in public history. The tag has to move onto the squashed commit.
+
+Local cut now, for the eyeball checks, while the PR sits:
 
 ```bash
-cd /Users/olliegilbey/code/clave
+cd <the main checkout>
 git merge --ff-only chore/release-0.5.0
 git tag -f v0.5.0
 just release        # expect: "clave: recorded the worktree for 5 row(s)"
 zellij kill-session clave && zellij delete-session --force clave && clave
 ```
+
+After #260 merges: reset `main` to `origin/main`, re-tag `v0.5.0` there, run
+`just release` again, and push the tag LAST — it fires `release.yml`, which
+triggers on tags. The nine numbered live steps with their expected observations
+are in the PR body.
 
 ## The QA question Ollie asked, and the answer
 
@@ -79,9 +97,8 @@ number, widen the collapsed card from 16 columns, do not narrow the clock.
   worktree marks (Nerd Fonts 3.5+), the spinner's six frames (five arrive by
   fallback from Menlo, so weight and baseline can jump), `Alt+c` at 16
   columns, the stacked marks on a busy row.
-- **Housekeeping**: a PR for every commit here before the `v0.5.0` tag is
-  pushed; then the `triple-card` worktree, its branch, and the stale sandbox
-  root `~/.local/state/clave-dev-triple-card`.
+- **Housekeeping**: after #260 merges, the `triple-card` worktree, its branch,
+  and the stale sandbox root `~/.local/state/clave-dev-triple-card`.
 
 ## Standing constraints
 
