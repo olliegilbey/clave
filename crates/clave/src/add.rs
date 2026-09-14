@@ -342,6 +342,28 @@ pub fn linked_worktrees(list: &[WorktreeEntry]) -> Vec<&str> {
     list.iter().skip(1).map(|w| w.path.as_str()).collect()
 }
 
+/// The linked worktree a row lives IN, which is not always the row's `cwd`.
+/// `clave add` scans the picked directory as well as every worktree root, so
+/// a row can be keyed to a subdirectory — `…/wt/crates/clave` under a
+/// worktree at `…/wt`. Exact equality missed exactly those rows, and it also
+/// recorded the subdirectory rather than the worktree, which disagrees with
+/// what [`linked_worktree_root`] writes on the add path (`show-toplevel` is
+/// always the root). Both are fixed by matching the ROOT and recording it.
+///
+/// `Path::starts_with` compares components, so `/repo/wt` cannot claim
+/// `/repo/wt2`. The longest match wins, because a worktree may be nested
+/// inside another worktree's tree and the innermost one is the one it runs in.
+fn worktree_holding<'a>(
+    cwd: &str,
+    trees: &'a std::collections::BTreeSet<String>,
+) -> Option<&'a String> {
+    let cwd = std::path::Path::new(cwd);
+    trees
+        .iter()
+        .filter(|tree| cwd.starts_with(tree))
+        .max_by_key(|tree| tree.len())
+}
+
 /// Fill `worktree` on rows written while the field still meant "clave created
 /// this one" (see `store::AgentRecord::worktree`). The live store on
 /// 2026-09-14 had 195 rows and not one of them set, so the tree mark had
@@ -393,8 +415,8 @@ pub fn heal_worktrees() -> Result<usize> {
             let Some(trees) = asked.get(&r.repo_root) else {
                 continue;
             };
-            if trees.contains(&r.cwd) {
-                r.worktree = Some(r.cwd.clone());
+            if let Some(tree) = worktree_holding(&r.cwd, trees) {
+                r.worktree = Some(tree.clone());
                 healed += 1;
             }
         }
@@ -1881,6 +1903,44 @@ mod tests {
                 .is_empty()
         );
         assert!(linked_worktrees(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_row_below_a_worktree_root_still_learns_its_worktree() {
+        // The repair compares a row's stored `cwd` against the worktree roots
+        // git reports, and a row's cwd is wherever it was added FROM — the
+        // resume scan takes the picked dir as well as every worktree root. So
+        // a row added in `…/wt/crates/clave` is a worktree row whose cwd is
+        // not a worktree root. Exact equality left every one of them wearing
+        // the branch mark.
+        let trees: std::collections::BTreeSet<String> = ["/repo/wt", "/repo/wt/inner", "/far/tree"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        // The root itself, and anything under it. Both record the ROOT, which
+        // is what `show-toplevel` gives the add path.
+        assert_eq!(worktree_holding("/repo/wt", &trees).unwrap(), "/repo/wt");
+        assert_eq!(
+            worktree_holding("/repo/wt/crates/clave", &trees).unwrap(),
+            "/repo/wt"
+        );
+
+        // Nested worktrees: the innermost is the one the row runs in.
+        assert_eq!(
+            worktree_holding("/repo/wt/inner/src", &trees).unwrap(),
+            "/repo/wt/inner"
+        );
+
+        // A sibling that merely shares a string prefix is NOT a match —
+        // `starts_with` compares components, which is the whole reason the
+        // comparison is not `str::starts_with`.
+        assert!(worktree_holding("/repo/wt2", &trees).is_none());
+        assert!(worktree_holding("/repo/wtx/deep", &trees).is_none());
+
+        // The main checkout, and a fleet with no linked worktrees at all.
+        assert!(worktree_holding("/repo", &trees).is_none());
+        assert!(worktree_holding("/repo/wt", &Default::default()).is_none());
     }
 
     #[test]

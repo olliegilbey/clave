@@ -16,8 +16,12 @@
 
 const JUSTFILE: &str = include_str!("../../../justfile");
 
-/// The body of a recipe: the indented lines under `<name>:`, up to the next
-/// line that starts at column 0.
+/// The body of a recipe. The boundary is column 0 because that is the only
+/// one just's syntax gives a reader of the raw text: a recipe's lines are
+/// indented, and the next unindented line starts something else. Reading the
+/// body rather than the whole file is what keeps the assertion below about
+/// ONE recipe — `release` and `dist-build` both build the CLI, and a check
+/// over the file as a whole would pass on either one alone.
 fn recipe_body(name: &str) -> Vec<&'static str> {
     let mut lines = JUSTFILE
         .lines()
