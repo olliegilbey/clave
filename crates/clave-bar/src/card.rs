@@ -1454,6 +1454,43 @@ mod tests {
     /// line reading `123k #1234 30m` — three cells where there is room for two.
     /// It cannot happen: the PR lives on line 2 and the crop drops it there,
     /// so line 3 collapsed is the token count and the clock and nothing else.
+    #[test]
+    fn the_collapsed_card_fits_its_widest_cells() {
+        let row = A {
+            // 9.9m is the widest the token formatter can produce below the
+            // point it drops the tenth (`render::token_text`), so this is the
+            // worst case for that cell, not a big-looking number.
+            tokens: Some(9_949_999),
+            pr: Some(1234),
+            branch: "feat/some-long-branch-name",
+            repo: "a-long-repository-name",
+            elapsed: "59s",
+            ..A::default()
+        }
+        .row();
+        let narrow = render_card(&row, CARD_COLLAPSED_COLS, false, 0, &Theme::default());
+        let l2 = strip_sgr(&narrow[1]);
+        let l3 = strip_sgr(&narrow[2]);
+        assert!(
+            !l2.contains("1234") && !l3.contains("1234"),
+            "the PR must not survive the crop: {l2:?} / {l3:?}"
+        );
+        assert!(
+            l3.contains("9.9m") && l3.contains("59s"),
+            "both of line 3's cells must survive at their widest: {l3:?}"
+        );
+        // And the row still holds its width — the guarantee that makes the
+        // above a statement about CONTENT rather than about overflow.
+        for (i, line) in narrow.iter().enumerate() {
+            assert_eq!(
+                display_cells(&strip_sgr(line)),
+                CARD_COLLAPSED_COLS,
+                "line {} left the collapsed width",
+                i + 1
+            );
+        }
+    }
+
     /// The cell column a needle starts at. Line 3's chrome carries a
     /// multi-byte mark and rule, so a byte offset is not a column.
     fn cell_of(line: &str, needle: &str) -> Option<usize> {
@@ -1492,43 +1529,22 @@ mod tests {
             cell_of(&narrow, "9m59s"),
             Some(CARD_COLLAPSED_COLS - 1 - CARD_CLOCK_W)
         );
-    }
-
-    #[test]
-    fn the_collapsed_card_fits_its_widest_cells() {
-        let row = A {
-            // 9.9m is the widest the token formatter can produce below the
-            // point it drops the tenth (`render::token_text`), so this is the
-            // worst case for that cell, not a big-looking number.
-            tokens: Some(9_949_999),
-            pr: Some(1234),
-            branch: "feat/some-long-branch-name",
-            repo: "a-long-repository-name",
-            elapsed: "59s",
-            ..A::default()
-        }
-        .row();
-        let narrow = render_card(&row, CARD_COLLAPSED_COLS, false, 0, &Theme::default());
-        let l2 = strip_sgr(&narrow[1]);
-        let l3 = strip_sgr(&narrow[2]);
-        assert!(
-            !l2.contains("1234") && !l3.contains("1234"),
-            "the PR must not survive the crop: {l2:?} / {l3:?}"
+        // The other half of the contract, and nothing else holds it: the
+        // widest reading the MODEL can produce for a live turn must be
+        // exactly this cell. Add a fourth band later (`1h 2m`, six cells) and
+        // the card would ellipsise a duration with every golden in this file
+        // still green — `1 + 5 == 3 + 3`, so any reading of three cells or
+        // fewer renders identically at the old constants too. The staleness
+        // ladder's widest (`2976w`) is also five, so the cell covers both.
+        let widest = (0..=600)
+            .filter_map(|s| crate::model::turn_label(1 + s, 1))
+            .map(|l| display_cells(&l))
+            .max()
+            .expect("the turn clock reads something");
+        assert_eq!(
+            widest, CARD_CLOCK_W,
+            "the clock cell and the widest live reading must be the same size"
         );
-        assert!(
-            l3.contains("9.9m") && l3.contains("59s"),
-            "both of line 3's cells must survive at their widest: {l3:?}"
-        );
-        // And the row still holds its width — the guarantee that makes the
-        // above a statement about CONTENT rather than about overflow.
-        for (i, line) in narrow.iter().enumerate() {
-            assert_eq!(
-                display_cells(&strip_sgr(line)),
-                CARD_COLLAPSED_COLS,
-                "line {} left the collapsed width",
-                i + 1
-            );
-        }
     }
 
     #[test]
