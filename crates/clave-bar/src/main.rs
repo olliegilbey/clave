@@ -247,6 +247,12 @@ impl State {
         let bin = self.clave_binary.clone();
         for e in effects {
             match e {
+                Effect::RunHeldPane { pane_id } => {
+                    // The restored tab's agent starts here — `rerun` is
+                    // zellij's one verb for a held command pane, and a pane
+                    // held from birth has simply never run once.
+                    rerun_command_pane(pane_id);
+                }
                 Effect::FocusPane { pane_id } => {
                     // S2-proven nav: focus the terminal pane; Zellij pulls
                     // its tab forward. go_to_tab is a known dead end.
@@ -976,6 +982,7 @@ impl ZellijPlugin for State {
                             is_focused: p.is_focused,
                             is_floating: p.is_floating,
                             terminal_command: p.terminal_command.clone(),
+                            is_held: p.is_held,
                             exited: p.exited,
                             exit_status: p.exit_status,
                         });

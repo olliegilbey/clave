@@ -46,11 +46,42 @@ pub struct PaneMeta {
     /// nodes) — static, never the shell's current foreground. `None` for
     /// ordinary shell panes, which is the case `TermFacts` exists for (#206).
     pub terminal_command: Option<String>,
+    /// zellij's "waiting for the human" flag. It covers TWO states that must
+    /// never be conflated: a command pane created with `start_suspended` that
+    /// has not run yet (what a restored tab is), and one that RAN and exited
+    /// and is offering to re-run. `exited` is what tells them apart.
+    pub is_held: bool,
     /// A finished command pane, and how it finished — the only place an exit
     /// code exists (an interactive shell never exits while its tab lives), so
     /// the only source of a terminal row's Done/Failed (#206).
     pub exited: bool,
     pub exit_status: Option<i32>,
+}
+
+/// The agent uuid a pane's command would spawn, if that command is one of
+/// OURS. `None` for everything else, which is the point: it is the whole test
+/// separating a restored clave tab from any other held command pane a human
+/// might have, and `run_held_effect` will start what it admits.
+///
+/// The baked binary is either the bare `clave` of a dev/sandbox session or the
+/// absolute path of a versioned copy in a release install (§2's binary split),
+/// so the match is on the file NAME, and `clave-v` must be followed by a digit
+/// — a third-party `clave-vault` on someone's PATH shares the prefix and is
+/// not ours. Same rule as the host's `setup::is_clave_bin`, kept in step with
+/// it by the pair of tests below rather than by a shared crate: the two parse
+/// different shapes (this one a space-joined command line, that one quoted KDL
+/// tokens), so the matcher is all they would have had in common.
+fn spawn_uuid(cmd: &str) -> Option<&str> {
+    let mut tokens = cmd.split_whitespace();
+    let bin = std::path::Path::new(tokens.next()?).file_name()?.to_str()?;
+    let ours = bin == "clave"
+        || bin
+            .strip_prefix("clave-v")
+            .is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit()));
+    if !ours || tokens.next()? != "spawn" {
+        return None;
+    }
+    tokens.next().filter(|u| !u.is_empty())
 }
 
 /// What the bar has learned about a terminal pane beyond the manifest (#206):
@@ -223,6 +254,13 @@ pub enum Effect {
     /// predate a close — the QA-drive nav wedge) and same-target across
     /// duplicate instances.
     FocusPane { pane_id: u32 },
+    /// rerun_command_pane(pane_id) — start a restored tab's agent, which the
+    /// launch layout deliberately created HELD so the whole previous live set
+    /// could come back on screen without every agent's memory coming back with
+    /// it. Emitted once, by the instance whose own tab the human just landed
+    /// on: the pane stops being held the moment it runs, so the next frame
+    /// finds nothing to emit and the effect cannot repeat.
+    RunHeldPane { pane_id: u32 },
     /// switch_tab_to(position + 1) — clicks and the nav fallback for tabs with
     /// no registered pane. All instances compute the same target from
     /// replicated state, so duplicates are idempotent.
@@ -1256,6 +1294,10 @@ impl BarModel {
         {
             fx.push(Effect::Touch { tab_id: active });
         }
+        // Before the bind: a restored tab has nothing to bind yet — its agent
+        // has not run, so no hook has registered a pane for it. Running it is
+        // what produces everything the bind leg below needs.
+        fx.extend(self.run_held_effect());
         fx.extend(self.bind_effects(own));
         // Prune LAST: its payload is disjoint from the touch's (dead ids vs a
         // live one) and from any bind's, so ordering is free, and keeping it
@@ -1263,6 +1305,43 @@ impl BarModel {
         // the bind first.
         fx.extend(self.prune_effect());
         fx
+    }
+
+    /// Start this tab's restored agent, if it has one waiting.
+    ///
+    /// A relaunch bakes the previous live set as tabs whose `clave spawn` is
+    /// created HELD (`setup::launch_layout_kdl`), so the fleet's shape returns
+    /// for the cost of a layout instead of ~350 MB per row. The human landing
+    /// on a tab is what converts it into a running agent, and this is where
+    /// that happens — reached through `identity_effects`, which already gates
+    /// on the frames being coherent AND naming our tab active, i.e. exactly
+    /// "the human is looking at us".
+    ///
+    /// Two guards, both load-bearing, neither about our own panes:
+    ///
+    /// - **`!exited`.** zellij's held flag also means "this command RAN, it
+    ///   finished, press ENTER to run it again". Starting that would resurrect
+    ///   an agent the human deliberately quit, just for walking past its tab.
+    /// - **The command must be ours.** Any `zellij run` command pane waiting to
+    ///   be re-run reports held as well, and re-running a stranger's command
+    ///   because the human navigated near it is clave reaching outside its own
+    ///   fleet. `spawn_uuid` is the whole test: our binary, our subcommand.
+    ///
+    /// Self-limiting rather than latched: running the pane clears its held
+    /// flag, so the next manifest has nothing to offer and no bookkeeping is
+    /// needed to stop this firing twice.
+    fn run_held_effect(&self) -> Option<Effect> {
+        let own = self.own_tab_position()?;
+        self.panes
+            .iter()
+            .find(|p| {
+                p.tab_position == own
+                    && p.is_held
+                    && !p.exited
+                    && !p.is_plugin
+                    && p.terminal_command.as_deref().and_then(spawn_uuid).is_some()
+            })
+            .map(|p| Effect::RunHeldPane { pane_id: p.pane_id })
     }
 
     /// The agent bound to this tab, per the SNAPSHOT (§6.6 Design B) — the
@@ -3305,6 +3384,7 @@ mod tests {
             is_focused: focused,
             is_floating: false,
             terminal_command: None,
+            is_held: false,
             exited: false,
             exit_status: None,
         }
@@ -4522,6 +4602,84 @@ mod tests {
     /// one, so OUR pane 101 moves from position 1 to position 0.
     const FLEET_PANES_AFTER_CLOSE: [(usize, u32, u32); 2] = [(0, 101, 6), (1, 102, 7)];
 
+    /// Same fleet, but OUR tab's terminal pane was created HELD — the
+    /// relaunch shape: the layout baked the tab, named it, and did not run
+    /// its `clave spawn`. Landing on the tab is what starts the agent, and
+    /// landing on it is precisely what this instance has just learned (zellij
+    /// delivers TabUpdate only to the active tab, so receiving a coherent
+    /// frame pair naming us active IS the focus signal — the same election
+    /// every other effect here rides).
+    fn fleet_bar_with_held_own_pane(cmd: Option<&str>, exited: bool) -> BarModel {
+        let mut m = BarModel::default();
+        m.set_own_pane(101);
+        let mut panes = panes_at(&FLEET_PANES);
+        for p in &mut panes {
+            if p.pane_id == 6 {
+                p.is_held = true;
+                p.exited = exited;
+                p.terminal_command = cmd.map(str::to_string);
+            }
+        }
+        m.apply_panes(panes);
+        m.apply_tabs(vec![
+            tab(10, 0, "a", false),
+            tab(11, 1, "b", true),
+            tab(12, 2, "c", false),
+        ]);
+        m
+    }
+
+    /// The relaunch payoff: a restored tab's agent starts when the human
+    /// arrives, and not a moment sooner. A held pane costs a tab and nothing
+    /// else; a running one costs ~350 MB that is never given back, so the
+    /// whole previous fleet can come back on screen for the price of the one
+    /// row actually being looked at.
+    #[test]
+    fn landing_on_a_restored_tab_runs_its_held_spawn() {
+        let mut m =
+            fleet_bar_with_held_own_pane(Some("clave spawn u-restored --name x --cwd /r"), false);
+        assert!(
+            m.identity_effects()
+                .contains(&Effect::RunHeldPane { pane_id: 6 }),
+            "the instance that just became active starts its own held pane"
+        );
+    }
+
+    /// `is_held` is zellij's flag for "waiting for the human", and it covers
+    /// TWO states: a command that has not run yet, and a command pane that
+    /// RAN and exited and is offering to re-run. Only the first is ours to
+    /// start. Without the exit check, walking past the tab of an agent the
+    /// human deliberately quit would silently resurrect it.
+    #[test]
+    fn a_held_pane_that_already_exited_is_never_restarted() {
+        let mut m =
+            fleet_bar_with_held_own_pane(Some("clave spawn u-restored --name x --cwd /r"), true);
+        assert!(
+            !m.identity_effects()
+                .iter()
+                .any(|e| matches!(e, Effect::RunHeldPane { .. })),
+            "an exited pane is a finished agent, not a restored one"
+        );
+    }
+
+    /// The command has to be OURS. A held pane is an ordinary thing for a
+    /// human to have — any `zellij run` command pane waiting to be re-run
+    /// reports the same flag — and re-running a stranger's command because
+    /// the human navigated past it would be clave reaching outside its own
+    /// fleet.
+    #[test]
+    fn a_held_pane_running_someone_elses_command_is_left_alone() {
+        for cmd in [None, Some("cargo test --workspace"), Some("clave ls")] {
+            let mut m = fleet_bar_with_held_own_pane(cmd, false);
+            assert!(
+                !m.identity_effects()
+                    .iter()
+                    .any(|e| matches!(e, Effect::RunHeldPane { .. })),
+                "{cmd:?} is not a clave spawn and must not be run"
+            );
+        }
+    }
+
     #[test]
     fn own_tab_is_none_while_the_pane_and_tab_frames_disagree() {
         // RC-A verbatim. The two frames are delivered independently and joined
@@ -5734,6 +5892,7 @@ mod tests {
             is_focused: false,
             is_floating: true,
             terminal_command: None,
+            is_held: false,
             exited: false,
             exit_status: None,
         });
@@ -5841,6 +6000,7 @@ mod tests {
             is_focused: false,
             is_floating: true,
             terminal_command: None,
+            is_held: false,
             exited: false,
             exit_status: None,
         });
@@ -9903,6 +10063,7 @@ mod tests {
                                         is_focused: false,
                                         is_floating: false,
                                         terminal_command: None,
+                                        is_held: false,
                                         exited: false,
                                         exit_status: None,
                                     },
@@ -9913,6 +10074,7 @@ mod tests {
                                         is_focused: false,
                                         is_floating: false,
                                         terminal_command: None,
+                                        is_held: false,
                                         exited: false,
                                         exit_status: None,
                                     },
