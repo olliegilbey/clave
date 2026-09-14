@@ -81,6 +81,14 @@ pub struct ScenarioAgent {
     pub wants: Option<&'static str>,
     /// Agents still running under this one. A flag, not a count.
     pub subagents: bool,
+    /// The tab this row held when the PREVIOUS zellij session died — the one
+    /// piece of state a killed session leaves behind, and the only input the
+    /// live-set restore needs. Seeding it is what lets a relaunch scenario be
+    /// driven in ONE launch instead of two: `clear_session_order` records
+    /// these rows as `last_live` at session create, exactly as it would after
+    /// a real kill, and the layout is composed from that. `None` is a dormant
+    /// row, which is every agent in every other scenario.
+    pub bound_tab: Option<usize>,
 }
 
 impl ScenarioAgent {
@@ -107,6 +115,7 @@ impl ScenarioAgent {
         pr_number: None,
         wants: None,
         subagents: false,
+        bound_tab: None,
     };
 }
 
@@ -552,6 +561,76 @@ pub const SCENARIOS: &[Scenario] = &[
     // human's launch line names (see docs/dev/QA-DRIVE.md), not seeded
     // here — seeding a fake "live" row would just be a second dormant row
     // wearing a different status.
+    // The relaunch fixture: four rows that were LIVE when the previous
+    // session died, plus two that were not. It stages the one state a kill
+    // leaves behind — rows still holding their dead session's tab binds — so
+    // a single launch exercises the whole path: `clear_session_order` records
+    // the live set, the layout bakes a tab per row in that order, and only
+    // the focused one runs.
+    //
+    // The tab numbers are deliberately NOT 0,1,2,3. Screen order is the
+    // ascending tab id, which must survive both the store's uuid-keyed
+    // iteration and the gaps a real session accumulates as tabs close; a
+    // contiguous run would pass by luck. Expected order is therefore
+    // `restored-a, restored-b, restored-c, restored-d`.
+    //
+    // Four, not eleven: a resume costs ~350 MB resident whatever the
+    // transcript weighs, and the point of the drive is the one-runs-rest-held
+    // assertion, which four proves as well as eleven and leaves the machine
+    // room to be worked on while it runs.
+    Scenario {
+        name: "relaunch-restore",
+        agents: &[
+            ScenarioAgent {
+                slug: "restored-a",
+                ago_secs: 120,
+                bound_tab: Some(0),
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "restored-b",
+                ago_secs: 300,
+                bound_tab: Some(3),
+                ..ScenarioAgent::DEFAULT
+            },
+            // A worktree row: its OWN cwd is baked, not the repo root, and a
+            // restored set must keep that right for every row rather than
+            // only for the one eager row that used to be baked.
+            ScenarioAgent {
+                slug: "restored-c",
+                ago_secs: 600,
+                worktree: true,
+                repo: Some("relaunch-shared"),
+                bound_tab: Some(4),
+                ..ScenarioAgent::DEFAULT
+            },
+            // Rotated: the restored tab must resume the ROTATED conversation,
+            // not the frozen minted one (#99). The held pane bakes
+            // `clave spawn <uuid>`, and the resume choice happens inside
+            // `spawn.rs::resume_target` when the human lands on it — which is
+            // now a LATER moment than it used to be, so it is worth watching.
+            ScenarioAgent {
+                slug: "restored-d",
+                ago_secs: 900,
+                rotated: true,
+                bound_tab: Some(9),
+                ..ScenarioAgent::DEFAULT
+            },
+            // Dormant: in the store, never in the layout. If either of these
+            // grows a tab, `last_live` is being derived from something other
+            // than the binds.
+            ScenarioAgent {
+                slug: "dormant-e",
+                ago_secs: 60, // MORE recent than every restored row
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "dormant-f",
+                ago_secs: 5_400,
+                ..ScenarioAgent::DEFAULT
+            },
+        ],
+    },
     Scenario {
         name: "qa-fleet",
         agents: &[
@@ -1107,10 +1186,13 @@ pub fn run_scenario(name: &str) -> Result<()> {
             seed_transcript(&cwd, &cwd_str, &scenario_rotated_uuid(n), a.slug)?;
         }
         crate::store::with_store_mut(&paths, |s| {
-            s.agents.insert(
-                uuid.clone(),
-                agent_record(name, a, n, &uuid, &cwd_str, &repo.to_string_lossy(), now),
-            );
+            let mut record =
+                agent_record(name, a, n, &uuid, &cwd_str, &repo.to_string_lossy(), now);
+            // A bind left over from a session that was killed rather than
+            // closed down tab by tab. The next launch's `clear_session_order`
+            // reads exactly these and records them as the live set to restore.
+            record.tab_id = a.bound_tab;
+            s.agents.insert(uuid.clone(), record);
             s.seq += 1;
         })?;
         if a.delete_cwd_after {
@@ -1713,6 +1795,10 @@ mod tests {
                 "c8-stale",
                 "ux-gate1",
                 "tall",
+                // The relaunch fixture: rows still holding a dead session's
+                // tab binds, which is the only state the live-set restore
+                // reads.
+                "relaunch-restore",
                 "qa-fleet",
                 "showcase"
             ]
