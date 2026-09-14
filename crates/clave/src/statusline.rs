@@ -202,6 +202,35 @@ pub fn apply_statusline(
     let tokens_before = rec.context_tokens;
     note_live_session(rec, uuid, reading.session_id.as_deref(), own_claude);
     let mut changed = false;
+    // Red must not outlive the block. Approving a permission prompt fires no
+    // hook clave could listen to, and there is no such event to register:
+    // `PermissionRequest` fires BEFORE the decision and `PermissionDenied`
+    // only for auto-mode denials (hook reference, read 2026-09-14). So
+    // `NeedsYou` used to survive to the turn's `Stop` — seen live on the
+    // 0.5.0 cut, the card red while the agent's own footer counted the turn.
+    //
+    // The meter already answers it, and costs nothing: this process is being
+    // spawned anyway. A token count that has MOVED is an API response that
+    // landed, and no response lands while a prompt waits for an answer. The
+    // RAW reading, not the applied one, so the pacing below cannot swallow
+    // the proof.
+    //
+    // ONLY `NeedsYou` is cleared. A moved count after `Stop` is the
+    // one-response-behind case this whole module exists for, not a turn
+    // restarting, and promoting `Done` would undo the hook that just ran.
+    //
+    // The residual is narrow and named: if a reading is paced out and the
+    // statusLine then re-runs DURING the block, the withheld figure reads as
+    // movement and clears red early. Accepted against red that never clears
+    // at all, and the trigger is message-shaped rather than a wall clock.
+    if rec.status == clave_types::Status::NeedsYou
+        && reading
+            .tokens
+            .is_some_and(|t| t > tokens_before.unwrap_or(0))
+    {
+        rec.status = clave_types::Status::Working;
+        changed = true;
+    }
     if let Some(raw) = reading.model.as_deref() {
         changed |= take_model(rec, raw);
     }
@@ -478,6 +507,42 @@ mod tests {
         assert_eq!(r.effort.as_deref(), Some("md"));
         assert_eq!(r.metered_at, 1000);
         assert_eq!(s.seq, 1);
+    }
+
+    #[test]
+    fn a_count_that_moved_proves_the_permission_block_cleared() {
+        // Ollie, 2026-09-14: a row goes red on a permission prompt, he
+        // answers it, the agent resumes — and the row stays red for the rest
+        // of the turn. There is no "permission answered" hook to listen to,
+        // so the meter is the evidence.
+        let blocked = || {
+            let mut s = metered_store();
+            s.agents.get_mut("minted").unwrap().status = Status::NeedsYou;
+            s
+        };
+        let later = 1000 + APPLY_INTERVAL_SECS;
+
+        let mut s = blocked();
+        let moved = reading("minted", Some(19_811), "claude-fable-5-1", "medium");
+        assert!(apply_statusline(
+            &mut s, "minted", &moved, later, true, ZONE
+        ));
+        assert_eq!(s.agents["minted"].status, Status::Working);
+
+        // The SAME count read twice is one response, not two. It proves
+        // nothing, and red must survive it — this is the case that runs while
+        // the prompt is still on screen.
+        let mut s = blocked();
+        let same = reading("minted", Some(19_110), "claude-fable-5-1", "medium");
+        apply_statusline(&mut s, "minted", &same, later, true, ZONE);
+        assert_eq!(s.agents["minted"].status, Status::NeedsYou);
+
+        // And nothing but red is touched. A moved count after `Stop` is this
+        // module's one-response-behind case, not a turn starting again.
+        let mut s = metered_store();
+        s.agents.get_mut("minted").unwrap().status = Status::Done;
+        apply_statusline(&mut s, "minted", &moved, later, true, ZONE);
+        assert_eq!(s.agents["minted"].status, Status::Done);
     }
 
     #[test]
