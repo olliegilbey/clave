@@ -16,7 +16,7 @@ clean. Verdict was **merge with changes**.
 Two lanes reached the hook-guard hole independently, which is the strongest
 signal the method produces.
 
-## Fixed — five commits, gates green
+## Fixed — nine commits, gates green
 
 - `88245c6` **the two script guards passed while their hazard was present.**
   The hook guard exempted any line starting with `check`/`measure`/`echo`;
@@ -45,6 +45,24 @@ signal the method produces.
   re-arms. Round 2's three small items rode with it: the showcase count,
   `just launch`'s message, and three rationale comments citing the lock
   spec (§1, §5.2, §4.5, §4.4) and the review record.
+- `208314a`, `788d0e8` **the strand's last two faces, from CodeRabbit
+  rounds 3 and 4.** The age-based drop needs a later expiry to ride on, and
+  the strand's own signature spends the only one. The shell arms three timer
+  kinds and no more, so with no peek and no term poll outstanding an expiry
+  can ONLY be the fast one — proof, not a guess, and it recovers on the first
+  misreported expiry. The general property is written down beside it: a claim
+  never outlives every outstanding timer, so recovery is bounded at one peek
+  interval or one term-poll cycle. CodeRabbit put a fifth case to that and
+  then withdrew it against the trace.
+- `b6dcbc5`, `7d2f32f` **CodeRabbit's full pass, eight items.** Two were
+  behaviour. `aim_push` returned `Unaimed` whenever the env named no session,
+  without asking the store — and unaimed means zellij picks, which here is
+  Ollie's fleet; a sandbox store now aims at its own owner. A resume copied
+  `wants` onto a row it had just reset to `Idle`, where `take_wants` reaches
+  for it when a permission prompt carries no message of its own. A third was
+  the third fail-open in the drive guards: `code_lines` looked for a heredoc
+  opener before filtering comments, and these scripts discuss heredocs. The
+  other five were prose. CodeRabbit's verdict: "I found no new issues."
 - `d53b3cc` **stale defaults, counts and the phase list.** Both `Double`
   fallback comments, TESTING.md's self-contradiction on which phases are
   scripted, the showcase inventory, the seven-card scenario, the preview's
@@ -106,15 +124,14 @@ fast-tick strand.
 
 ## Where I was
 
-Pushed to `02ec613` and asked CodeRabbit for a third review
-(comment 5656762700). Its rounds so far: round 1 had 10 comments, 9 done
-and the tenth is the `swap_owed` item above; round 2 had 4, all done in
-`02ec613`.
+Pushed to `7d2f32f`. **CodeRabbit is clean**: four rounds of findings, all
+fixed or answered with a trace it accepted, and its last word on the full
+pass was "I found no new issues in these changes". Rounds went 10 items,
+4, 1, 1, then 8.
 
-**The push needs HTTPS right now.** `git push origin …` fails with
-`Permission denied (publickey)` — `ssh-add -l` says the agent holds no
-identities this session. `git push https://github.com/olliegilbey/clave.git
-worktree-triple-card` works, because `gh` holds a token in the keyring.
-Either that, or Ollie reloads the key (`ssh-add --apple-load-keychain`).
+One item from round 1 is still declined on purpose — the `swap_owed` drain
+— for the reason under Open above. It needs a live drive, not more
+reasoning.
 
-Nothing else is in flight. The next action is CodeRabbit's reply.
+Nothing else is in flight. What this branch has never had is a terminal:
+see Blind spots.
