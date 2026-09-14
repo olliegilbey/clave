@@ -516,10 +516,10 @@ pub fn layout_kdl(binary: &str, wasm: &str, row_height: clave_types::RowHeight) 
 }
 
 /// §6.8 (C8): the launch layout, composed DYNAMICALLY at session-create
-/// time. Base = the bar template; `rows` is the set to bake tabs for, in
-/// SCREEN order — the previous session's live set (`restore_rows`), or the
-/// single most-recent row when there is nothing to restore. Every row gets a
-/// tab with its baked `clave spawn` (which resumes via the jsonl check);
+/// time. Base = the bar template; `rows` is the set to bake tabs for, ranked
+/// — the previous session's live set (`restore_rows`), or the single
+/// most-recent row when there is nothing to restore. Every row gets a tab
+/// with its baked `clave spawn` (which resumes via the jsonl check);
 /// everything else surfaces as dormant bar rows (§6.6).
 ///
 /// Only the FIRST row runs. The rest are created HELD — tab, name and baked
@@ -527,7 +527,9 @@ pub fn layout_kdl(binary: &str, wasm: &str, row_height: clave_types::RowHeight) 
 /// human navigates to it. The asymmetry is deliberate: the first row is the
 /// one launch focuses, and running it straight from the layout keeps the
 /// single-eager-row behaviour as the floor, so a relaunch lands in a working
-/// agent even if the bar's start-on-focus path is broken.
+/// agent even if the bar's start-on-focus path is broken. `restore_rows`
+/// ranks its output for exactly this reason — the row that runs is the top
+/// of the fleet, not whichever tab happened to be leftmost.
 pub fn launch_layout_kdl(
     binary: &str,
     wasm: &str,
@@ -1189,8 +1191,20 @@ pub fn eager_row(store: &crate::store::Store) -> Option<&crate::store::AgentReco
 
 /// The rows a relaunch rebuilds the layout from: the previous session's live
 /// set (`Store::last_live`, written by `clear_session_order`), resolved to
-/// records and kept in SCREEN order — the order they sat in when the session
-/// died, never reordered by recency or frecency.
+/// records and RANKED the way the bar ranks them.
+///
+/// `last_live` is a SET, not an order. It is written in ascending tab id,
+/// which is the order the tabs were created in — never the order the human
+/// saw, because the bar sorts its rows by investment and the zellij tab strip
+/// is not the interface (Alt+1..9 indexes rendered ROWS, `model::nav`). So
+/// the rank is computed here from the agent record, which is exactly what
+/// makes it possible: `buckets` and `commit_ord` are agent-scoped and survive
+/// the session, while every tab-scoped twin the bar would otherwise use dies
+/// with it.
+///
+/// The order decides one visible thing beyond the tab strip: launch focuses
+/// the FIRST row, so the first row is the one that starts. The top of the
+/// fleet is the row worth paying ~350 MB for.
 ///
 /// Two kinds of entry are dropped, because the snapshot is a faithful record
 /// rather than a filtered one: a uuid naming no row (idle-pruned between
@@ -1200,13 +1214,33 @@ pub fn eager_row(store: &crate::store::Store) -> Option<&crate::store::AgentReco
 ///
 /// Empty is the ordinary cold-start answer, not an error: a first run, or a
 /// session quit with nothing open. Launch falls back to the single eager row.
-pub fn restore_rows(store: &crate::store::Store) -> Vec<&crate::store::AgentRecord> {
-    store
+pub fn restore_rows(store: &crate::store::Store, now_hour: u32) -> Vec<&crate::store::AgentRecord> {
+    let mut rows: Vec<&crate::store::AgentRecord> = store
         .last_live
         .iter()
         .filter_map(|uuid| store.agents.get(uuid))
         .filter(|r| std::path::Path::new(&r.cwd).is_dir())
-        .collect()
+        .collect();
+    // `model::live_key`, read from the host side. Frecency mode scores the
+    // agent's own buckets with the fleet's own dial, and a row that scores
+    // nothing falls back to the commitment ordinal — so any scoring row
+    // outranks every unscored one, which is why the second element is zeroed
+    // rather than carried. Recency mode has no dial and is the ordinal alone.
+    let key = |r: &&crate::store::AgentRecord| match store.order {
+        clave_types::OrderMode::Recency => (0, r.commit_ord),
+        clave_types::OrderMode::Frecency { half_life_hours } => {
+            let millis = clave_types::frecency_millis(&r.buckets, now_hour, half_life_hours);
+            if millis > 0 {
+                (millis, 0)
+            } else {
+                (0, r.commit_ord)
+            }
+        }
+    };
+    // Stable, so rows the ranking cannot separate keep their tab-id order
+    // instead of an arbitrary one.
+    rows.sort_by_key(|r| std::cmp::Reverse(key(r)));
+    rows
 }
 
 /// First-run consent (spec §First run): the plan prints ALWAYS; the prompt
@@ -1367,7 +1401,8 @@ pub fn launch_session() -> Result<()> {
     // only thing the launch was going to bake, so it stays fatal and loud;
     // across a restored set one bad row must not take the other ten down, so
     // it is dropped and logged.
-    let restored = restore_rows(&store);
+    let now_hour = crate::store::unix_hour(crate::store::now_unix());
+    let restored = restore_rows(&store, now_hour);
     let rows: Vec<&crate::store::AgentRecord> = if restored.is_empty() {
         let eager: Vec<&crate::store::AgentRecord> = eager_row(&store).into_iter().collect();
         for r in &eager {
@@ -2040,8 +2075,46 @@ mod tests {
     /// record, and only what launch can actually BAKE survives this call. A
     /// vanished cwd left in would emit a tab whose spawn dies at canonicalize,
     /// the same trap `eager_row` already guards.
+    /// A store row with nothing on it but a uuid and a cwd — every field the
+    /// restore reads is set by the caller, so a test says what it means.
+    fn bare_record(uuid: &str, cwd: &str) -> crate::store::AgentRecord {
+        use crate::store::{AgentRecord, LabelSource};
+        AgentRecord {
+            uuid: uuid.into(),
+            cwd: cwd.into(),
+            repo_root: String::new(),
+            branch: String::new(),
+            label: uuid.into(),
+            status: clave_types::Status::Idle,
+            last_interacted: 0,
+            commit_ord: 0,
+            last_visited: 0,
+            worktree: None,
+            label_source: LabelSource::FirstPrompt,
+            tab_id: None,
+            pane_id: None,
+            stale: false,
+            title: None,
+            summary: String::new(),
+            default_branch: None,
+            context_tokens: None,
+            context_level: None,
+            live_session: None,
+            metered_at: 0,
+            buckets: Default::default(),
+            model: None,
+            provider: None,
+            effort: None,
+            pr_number: None,
+            pr_checked: 0,
+            pr_branch: String::new(),
+            wants: None,
+            subagents: false,
+        }
+    }
+
     #[test]
-    fn restore_rows_keeps_screen_order_and_drops_pruned_and_vanished_rows() {
+    fn restore_rows_drops_pruned_and_vanished_rows() {
         use crate::store::{AgentRecord, LabelSource, Store};
         let live_dir = std::env::temp_dir().join(format!("clave-restore-{}", std::process::id()));
         std::fs::create_dir_all(&live_dir).unwrap();
@@ -2079,8 +2152,6 @@ mod tests {
         };
         let here = live_dir.to_str().unwrap();
         let mut store = Store::default();
-        // Screen order deliberately disagrees with uuid order, so a pass that
-        // iterated `agents` instead of `last_live` would come out wrong.
         store.agents.insert("u-b".into(), mk("u-b", here));
         store.agents.insert("u-a".into(), mk("u-a", here));
         store
@@ -2092,15 +2163,62 @@ mod tests {
             "u-gone".into(), // row exists, its directory does not
             "u-a".into(),
         ];
-        let got: Vec<&str> = restore_rows(&store)
-            .iter()
-            .map(|r| r.uuid.as_str())
-            .collect();
-        assert_eq!(got, vec!["u-b", "u-a"], "snapshot order, viable rows only");
+        let uuids = |store: &Store| -> Vec<String> {
+            restore_rows(store, 0)
+                .iter()
+                .map(|r| r.uuid.to_string())
+                .collect()
+        };
+        // Nothing separates these two rows, so the set's own order stands.
+        assert_eq!(uuids(&store), vec!["u-b", "u-a"], "viable rows only");
         assert!(
-            restore_rows(&Store::default()).is_empty(),
+            restore_rows(&Store::default(), 0).is_empty(),
             "no snapshot ⇒ nothing to restore, and launch falls back to the eager row"
         );
+        let _ = std::fs::remove_dir_all(&live_dir);
+    }
+
+    /// The set is written in ascending tab id — the order the tabs were
+    /// CREATED in, which is not the order the human saw. The bar sorts rows
+    /// by investment, so a relaunch has to sort them too, or the fleet comes
+    /// back shuffled and, worse, the row launch starts (the first one) is
+    /// whichever tab happened to be leftmost rather than the one at the top.
+    #[test]
+    fn restore_rows_rank_by_the_same_key_the_bar_uses() {
+        use crate::store::Store;
+        let live_dir = std::env::temp_dir().join(format!("clave-rank-{}", std::process::id()));
+        std::fs::create_dir_all(&live_dir).unwrap();
+        let here = live_dir.to_str().unwrap().to_string();
+        let mut store = Store::default();
+        // Tab-id order is a, b, c. Investment says b, then c, then a.
+        for (uuid, count, ord) in [("u-a", 1, 9), ("u-b", 5, 1), ("u-c", 3, 2)] {
+            let mut r = bare_record(uuid, &here);
+            r.buckets.insert(0, count);
+            r.commit_ord = ord;
+            store.agents.insert(uuid.into(), r);
+            store.last_live.push(uuid.into());
+        }
+        let uuids = |store: &Store| -> Vec<String> {
+            restore_rows(store, 0)
+                .iter()
+                .map(|r| r.uuid.to_string())
+                .collect()
+        };
+        assert_eq!(uuids(&store), vec!["u-b", "u-c", "u-a"], "frecency");
+        // `commit_ord` is the fallback, and a fleet with no buckets at all —
+        // upgrade day — must still come back in a meaningful order rather
+        // than collapsing to the tab strip.
+        for r in store.agents.values_mut() {
+            r.buckets.clear();
+        }
+        assert_eq!(uuids(&store), vec!["u-a", "u-c", "u-b"], "ordinal fallback");
+        // Recency mode has no dial: the ordinal is the whole key, so the
+        // buckets above must not have been ranking it.
+        store.order = clave_types::OrderMode::Recency;
+        for (uuid, count) in [("u-a", 1), ("u-b", 5), ("u-c", 3)] {
+            store.agents.get_mut(uuid).unwrap().buckets.insert(0, count);
+        }
+        assert_eq!(uuids(&store), vec!["u-a", "u-c", "u-b"], "recency mode");
         let _ = std::fs::remove_dir_all(&live_dir);
     }
 

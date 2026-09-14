@@ -1869,6 +1869,13 @@ mod tests {
         ages.sort_unstable();
         ages.dedup();
         assert_eq!(ages.len(), rr.agents.len(), "recency must stagger");
+        // And every one of them is a real age. Zero is "this second", which
+        // is both untrue of a staged row and unreadable as a verdict.
+        assert!(rr.agents.iter().all(|a| a.ago_secs > 0));
+        // dormant-f is the oldest row in the fixture: the bottom of the list
+        // is as much a staged expectation as the top of it.
+        let f = rr.agents.iter().find(|a| a.slug == "dormant-f").unwrap();
+        assert_eq!(f.ago_secs, *ages.last().unwrap(), "dormant-f is the oldest");
         // Every other scenario stages dormant rows only — a stray bind would
         // change what those reviewed validation paths come up holding.
         assert!(

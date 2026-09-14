@@ -304,16 +304,19 @@ pub struct Store {
     /// session recreate). `default` keeps pre-field store files loading.
     #[serde(default)]
     pub tab_touched: BTreeMap<usize, u64>,
-    /// The rows that held a tab when the PREVIOUS zellij session died, in the
-    /// order they sat on screen — the set a relaunch restores. Written by
-    /// `clear_session_order`, which is the one pass that both runs at every
-    /// launch and still sees the old binds a beat before it clears them; read
-    /// by `launch_layout_kdl`. Nothing else writes it.
+    /// The rows that held a tab when the PREVIOUS zellij session died — the
+    /// set a relaunch restores. Written by `clear_session_order`, which is the
+    /// one pass that both runs at every launch and still sees the old binds a
+    /// beat before it clears them; read by `setup::restore_rows`. Nothing else
+    /// writes it.
     ///
-    /// Deliberately UNRANKED and UNCAPPED: it is the faithful record of what
-    /// was on screen, and any policy about how much of it comes back hot is
-    /// applied on the read side. Keeping those apart is what lets the restore
-    /// policy be retuned without touching the store's correctness.
+    /// Deliberately UNRANKED and UNCAPPED. A SET, written in ascending tab id
+    /// only so the file is deterministic: tab id is creation order, and the
+    /// order the human actually saw was the bar's own ranking, which
+    /// `restore_rows` recomputes from these rows' agent-scoped `buckets` and
+    /// `commit_ord`. Any policy about how much of the set comes back hot is
+    /// likewise applied on the read side. Keeping those apart is what lets the
+    /// restore policy be retuned without touching the store's correctness.
     ///
     /// Agent-scoped, unlike `tab_order`/`tab_buckets`/`tab_touched` beside it:
     /// those hold session-scoped tab ids and must die with the session, while
