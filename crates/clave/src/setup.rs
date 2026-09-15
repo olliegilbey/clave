@@ -1215,32 +1215,48 @@ pub fn eager_row(store: &crate::store::Store) -> Option<&crate::store::AgentReco
 /// Empty is the ordinary cold-start answer, not an error: a first run, or a
 /// session quit with nothing open. Launch falls back to the single eager row.
 pub fn restore_rows(store: &crate::store::Store, now_hour: u32) -> Vec<&crate::store::AgentRecord> {
-    let mut rows: Vec<&crate::store::AgentRecord> = store
+    // `model::live_key` and `model::live_group`, read from the host side.
+    // Frecency mode scores the agent's own buckets with the fleet's own dial,
+    // and a row that scores nothing falls back to the commitment ordinal — so
+    // any scoring row outranks every unscored one, which is why the second
+    // element is zeroed rather than carried. Recency mode has no dial and no
+    // repo layer: the ordinal is the whole key.
+    //
+    // `repo_root` is the PARENT repo even for a worktree agent (the worktree
+    // path lives in its own field), so worktree rows cluster with their repo
+    // exactly as they do in the bar. The tiebreak is the row's index in
+    // `last_live`, i.e. ascending tab id, so rows the ranking cannot separate
+    // keep the order the previous session left them in.
+    let mut rows: Vec<clave_types::LiveRow<&crate::store::AgentRecord>> = store
         .last_live
         .iter()
         .filter_map(|uuid| store.agents.get(uuid))
         .filter(|r| std::path::Path::new(&r.cwd).is_dir())
-        .collect();
-    // `model::live_key`, read from the host side. Frecency mode scores the
-    // agent's own buckets with the fleet's own dial, and a row that scores
-    // nothing falls back to the commitment ordinal — so any scoring row
-    // outranks every unscored one, which is why the second element is zeroed
-    // rather than carried. Recency mode has no dial and is the ordinal alone.
-    let key = |r: &&crate::store::AgentRecord| match store.order {
-        clave_types::OrderMode::Recency => (0, r.commit_ord),
-        clave_types::OrderMode::Frecency { half_life_hours } => {
-            let millis = clave_types::frecency_millis(&r.buckets, now_hour, half_life_hours);
-            if millis > 0 {
-                (millis, 0)
-            } else {
-                (0, r.commit_ord)
+        .enumerate()
+        .map(|(i, r)| {
+            let (group, key) = match store.order {
+                clave_types::OrderMode::Recency => (None, (0, r.commit_ord)),
+                clave_types::OrderMode::Frecency { half_life_hours } => {
+                    let millis =
+                        clave_types::frecency_millis(&r.buckets, now_hour, half_life_hours);
+                    let key = if millis > 0 {
+                        (millis, 0)
+                    } else {
+                        (0, r.commit_ord)
+                    };
+                    (Some(r.repo_root.clone()).filter(|s| !s.is_empty()), key)
+                }
+            };
+            clave_types::LiveRow {
+                group,
+                key,
+                tiebreak: i,
+                row: r,
             }
-        }
-    };
-    // Stable, so rows the ranking cannot separate keep their tab-id order
-    // instead of an arbitrary one.
-    rows.sort_by_key(|r| std::cmp::Reverse(key(r)));
-    rows
+        })
+        .collect();
+    clave_types::sort_live_block(&mut rows);
+    rows.into_iter().map(|e| e.row).collect()
 }
 
 /// First-run consent (spec §First run): the plan prints ALWAYS; the prompt
@@ -2219,6 +2235,58 @@ mod tests {
             store.agents.get_mut(uuid).unwrap().buckets.insert(0, count);
         }
         assert_eq!(uuids(&store), vec!["u-a", "u-c", "u-b"], "recency mode");
+        let _ = std::fs::remove_dir_all(&live_dir);
+    }
+
+    /// The layer ABOVE the row key (CodeRabbit, PR #261). The bar clusters
+    /// live rows by repo and ranks the CLUSTERS by their summed score, so a
+    /// repo holding several middling rows outranks another repo's single
+    /// better one. Ranking each row on its own crossed that: the bar showed
+    /// `a1` on top and the relaunch focused — and therefore STARTED — `b1`.
+    ///
+    /// Both sides now call `clave_types::sort_live_block`, so this asserts the
+    /// shared rule reaches the host, not a second copy of it.
+    #[test]
+    fn restore_rows_rank_repo_clusters_the_way_the_bar_does() {
+        use crate::store::Store;
+        let live_dir = std::env::temp_dir().join(format!("clave-cluster-{}", std::process::id()));
+        std::fs::create_dir_all(&live_dir).unwrap();
+        let here = live_dir.to_str().unwrap().to_string();
+        let mut store = Store::default();
+        // Flat, b1 wins at 8000. Clustered, repo a wins with Σ 9000.
+        for (uuid, repo, count) in [
+            ("u-b1", "/r/b", 8),
+            ("u-a1", "/r/a", 5),
+            ("u-a2", "/r/a", 4),
+        ] {
+            let mut r = bare_record(uuid, &here);
+            r.repo_root = repo.into();
+            r.buckets.insert(0, count);
+            store.agents.insert(uuid.into(), r);
+            store.last_live.push(uuid.into());
+        }
+        let uuids: Vec<String> = restore_rows(&store, 0)
+            .iter()
+            .map(|r| r.uuid.to_string())
+            .collect();
+        assert_eq!(
+            uuids,
+            vec!["u-a1", "u-a2", "u-b1"],
+            "the cluster's sum outranks a better lone row, and the first row is what starts"
+        );
+        // A worktree row clusters with its PARENT repo, because `repo_root` is
+        // the parent even when `worktree` is set — the same field the bar
+        // groups on, so a worktree cannot split its repo's cluster in two.
+        let wt = store.agents.get_mut("u-a2").unwrap();
+        wt.worktree = Some(format!("{here}/wt"));
+        assert_eq!(
+            restore_rows(&store, 0)
+                .iter()
+                .map(|r| r.uuid.to_string())
+                .collect::<Vec<_>>(),
+            vec!["u-a1", "u-a2", "u-b1"],
+            "a worktree row stays inside its repo's cluster"
+        );
         let _ = std::fs::remove_dir_all(&live_dir);
     }
 

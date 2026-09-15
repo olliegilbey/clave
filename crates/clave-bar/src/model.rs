@@ -2528,7 +2528,7 @@ impl BarModel {
         // dormant rows, but it costs nothing and keeps the two keys readable
         // as the single scheme they are.
         let inks = ProvisionalInks::allocate(&self.agents);
-        let mut live: Vec<(Option<String>, Ranked)> = Vec::new();
+        let mut live: Vec<clave_types::LiveRow<(RowKey, Row)>> = Vec::new();
         for t in &self.tabs {
             // Lock §7.1: the zellij tab name is used ONLY for a terminal tab.
             // An agent row's identity is its title chip and repo, both from the
@@ -2538,22 +2538,20 @@ impl BarModel {
                 Some(a) => self.agent_content(a, false, false, &inks),
                 None => self.terminal_content(t, &inks),
             };
-            live.push((
-                self.live_group(t),
-                (
-                    self.live_key(t),
-                    t.position,
-                    (
-                        RowKey::Tab(t.tab_id),
-                        Row {
-                            content,
-                            // A dormant selection steals the highlight from every tab.
-                            selected: selected_dormant.is_none() && t.active,
-                            dormant: false,
-                        },
-                    ),
+            live.push(clave_types::LiveRow {
+                group: self.live_group(t),
+                key: self.live_key(t),
+                tiebreak: t.position,
+                row: (
+                    RowKey::Tab(t.tab_id),
+                    Row {
+                        content,
+                        // A dormant selection steals the highlight from every tab.
+                        selected: selected_dormant.is_none() && t.active,
+                        dormant: false,
+                    },
                 ),
-            ));
+            });
         }
         let mut agents: Vec<&Agent> = self.agents.iter().filter(|a| self.is_dormant(a)).collect();
         agents.sort_by(|a, b| a.uuid.cmp(&b.uuid)); // stable tiebreak input
@@ -2585,40 +2583,18 @@ impl BarModel {
         }
         // ONE row comparator, applied twice — giving either block its own
         // ROW rule would be the defect two reviewers caught on PR #135. The
-        // live block adds a layer ABOVE that rule (double-layer frecency,
-        // ratified 2026-08-26): rows cluster by repo, clusters rank by
-        // (Σ member score, best member key), members keep the row rule
-        // within. A group-of-one's primary is its own key restated, so
-        // ungrouped rows — Recency mode, no repo, every pre-grouping test —
-        // sort exactly as before. The group-identity tiebreak keeps two
-        // clusters that tie exactly (identical sum AND best) contiguous
-        // rather than interleaved; zero-sum clusters hold on the best
-        // member's ordinal fallback, so a fully-decayed fleet keeps its
-        // clusters instead of de-grouping at midnight. Dormant rows never
-        // group (maintainer's caveat): dormancy leaves the repo layer.
-        let mut clusters: BTreeMap<String, (u64, (u64, u64))> = BTreeMap::new();
-        for (repo, (key, _, _)) in &live {
-            if let Some(r) = repo {
-                let c = clusters.entry(r.clone()).or_default();
-                c.0 += key.0;
-                c.1 = c.1.max(*key);
-            }
-        }
-        let primary = |(repo, ranked): &(Option<String>, Ranked)| match repo {
-            Some(r) => clusters[r.as_str()],
-            None => (ranked.0.0, ranked.0),
-        };
-        live.sort_by(|a, b| {
-            primary(b)
-                .cmp(&primary(a))
-                .then_with(|| a.0.cmp(&b.0))
-                .then_with(|| rank_desc(&a.1, &b.1))
-        });
+        // live block adds a layer ABOVE that rule, and that layer now lives
+        // in `clave_types::sort_live_block` because the HOST ranks the same
+        // rows when a relaunch bakes them: the bar's copy and a host copy
+        // disagreed the moment a repo held several rows, and a relaunch
+        // started an agent that was not the one on top (CodeRabbit, #261).
+        // Dormant rows never group (maintainer's caveat): dormancy leaves the
+        // repo layer, so the dormant block keeps the flat row rule.
+        clave_types::sort_live_block(&mut live);
         dormant.sort_by(rank_desc);
         live.into_iter()
-            .map(|(_, r)| r)
-            .chain(dormant)
-            .map(|(_, _, r)| r)
+            .map(|e| e.row)
+            .chain(dormant.into_iter().map(|(_, _, r)| r))
             .collect()
     }
 

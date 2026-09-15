@@ -239,6 +239,61 @@ pub fn frecency_millis(
     (sum * 1000.0) as u64
 }
 
+/// One row of the LIVE block, before it is sorted.
+pub struct LiveRow<T> {
+    /// The repo cluster this row belongs to. `None` is a group of one: a row
+    /// with no repo, a terminal outside every checkout, and every row in
+    /// `Recency` mode, which has no repo layer at all.
+    pub group: Option<String>,
+    /// The row's own ranking key: the score, then the ordinal a row with no
+    /// score falls back to. Any scoring row outranks every unscored one,
+    /// which is why the fallback is the SECOND element and not merged into
+    /// the first.
+    pub key: (u64, u64),
+    /// The determinism tiebreak, ASCENDING, for rows the key cannot separate.
+    pub tiebreak: usize,
+    pub row: T,
+}
+
+/// Sort the live block (double-layer frecency, ratified 2026-08-26): rows
+/// cluster by group, clusters rank by (Σ member score, best member key), and
+/// members keep the row rule within their cluster.
+///
+/// ONE function, for the same reason [`frecency_millis`] is one. The bar sorts
+/// the rows it renders; the host sorts the rows a relaunch bakes, and the
+/// FIRST of those is the only agent a relaunch starts. Two copies of the rule
+/// disagreed as soon as a repo held several rows — a cluster can outrank a
+/// higher-scoring lone row — so a relaunch focused and started an agent that
+/// was not the one at the top of the bar (CodeRabbit, PR #261).
+///
+/// A group-of-one's cluster key is its own key restated, so ungrouped rows
+/// sort exactly as the flat rule would, and `Recency` mode is unaffected. The
+/// group-identity tiebreak keeps two clusters that tie exactly (same sum AND
+/// same best) contiguous rather than interleaved. Zero-sum clusters hold on
+/// their best member's ordinal fallback, so a fully-decayed fleet keeps its
+/// clusters instead of de-grouping at midnight.
+pub fn sort_live_block<T>(rows: &mut [LiveRow<T>]) {
+    let mut clusters: std::collections::BTreeMap<String, (u64, (u64, u64))> = Default::default();
+    for r in rows.iter() {
+        if let Some(g) = &r.group {
+            let c = clusters.entry(g.clone()).or_default();
+            c.0 += r.key.0;
+            c.1 = c.1.max(r.key);
+        }
+    }
+    let primary = |r: &LiveRow<T>| match &r.group {
+        Some(g) => clusters[g.as_str()],
+        None => (r.key.0, r.key),
+    };
+    rows.sort_by(|a, b| {
+        primary(b)
+            .cmp(&primary(a))
+            .then_with(|| a.group.cmp(&b.group))
+            .then_with(|| b.key.cmp(&a.key))
+            .then_with(|| a.tiebreak.cmp(&b.tiebreak))
+    });
+}
+
 /// One agent row as the plugin renders it. Mirrors the store record's
 /// display-relevant fields (spec §5); the plugin never sees the store, only
 /// this snapshot.
