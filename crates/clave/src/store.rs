@@ -310,6 +310,12 @@ pub struct Store {
     /// beat before it clears them; read by `setup::restore_rows`. Nothing else
     /// writes it.
     ///
+    /// "Held a tab" means the BIND, and a restored tab binds before its spawn
+    /// runs (the bar's `restored_bind_effects`). Both halves are load-bearing:
+    /// derived from binds written by a running agent alone, the set recorded
+    /// only the tabs the human visited and the restored fleet decayed to a
+    /// single row over a few relaunches.
+    ///
     /// Deliberately UNRANKED and UNCAPPED. A SET, written in ascending tab id
     /// only so the file is deterministic: tab id is creation order, and the
     /// order the human actually saw was the bar's own ranking, which
@@ -916,7 +922,7 @@ pub fn clear_session_order(paths: &StorePaths) -> Result<()> {
                 .values()
                 .filter_map(|r| r.tab_id.map(|t| (t, r.uuid.as_str())))
                 .collect();
-            by_tab.sort_unstable(); // screen order: ascending tab id
+            by_tab.sort_unstable(); // ascending tab id: deterministic, NOT a rank
             by_tab.into_iter().map(|(_, u)| u.to_string()).collect()
         };
         if s.last_live != live_set {
@@ -1932,8 +1938,9 @@ mod tests {
     }
 
     /// The launch pass that clears the session-scoped binds RECORDS them
-    /// first: `last_live` is the previous session's live set in SCREEN order
-    /// (ascending tab id), which is what a relaunch rebuilds the layout from.
+    /// first: `last_live` is the previous session's live SET, written in
+    /// ascending tab id so the file is deterministic. It is not a rank — the
+    /// relaunch ranks it on the read side (`setup::restore_rows`).
     /// Without this the knowledge dies on the same pass that clears it, and
     /// every previously-live row comes back dormant — the relaunch complaint.
     #[test]
@@ -1960,10 +1967,40 @@ mod tests {
         assert_eq!(
             s.last_live,
             vec!["u-c".to_string(), "u-b".to_string(), "u-a".to_string()],
-            "screen order (tab 1, 4, 9), not uuid order, and dormant rows excluded"
+            "ascending tab id (1, 4, 9), not uuid order, and dormant rows excluded"
         );
         // The binds themselves still go — recording must not preserve them.
         assert!(s.agents.values().all(|r| r.tab_id.is_none()));
+    }
+
+    /// A RESTORED row holds a tab without ever running a process, and it must
+    /// still count as live — otherwise the set shrinks to the tabs the human
+    /// happened to visit and the restored fleet decays to one row over a few
+    /// relaunches (measured on this branch: three rows in, one row back). The
+    /// bind arrives from the bar's `restored_bind_effects`, so the discriminator
+    /// here is `tab_id` ALONE: a row with a tab and no registered pane is a
+    /// tab on screen, which is exactly what the set records.
+    #[test]
+    fn clear_session_order_counts_a_restored_row_that_never_ran() {
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            let mut visited = rec("u-visited");
+            visited.tab_id = Some(0);
+            visited.pane_id = Some(7); // ran, registered
+            s.agents.insert("u-visited".into(), visited);
+            let mut waiting = rec("u-waiting");
+            waiting.tab_id = Some(1); // a tab on screen…
+            waiting.pane_id = None; // …whose spawn never ran
+            s.agents.insert("u-waiting".into(), waiting);
+        })
+        .unwrap();
+        clear_session_order(&p).unwrap();
+        assert_eq!(
+            read_store(&p).unwrap().last_live,
+            vec!["u-visited".to_string(), "u-waiting".to_string()],
+            "a restored tab the human never reached is still a tab that was open"
+        );
     }
 
     /// Quitting with nothing open must leave an EMPTY set, not the set from

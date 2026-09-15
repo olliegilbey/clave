@@ -291,6 +291,14 @@ pub enum Effect {
     /// run_command(["clave","bind",uuid,tab_id]) — report the uuid→tab join
     /// to the STORE (§6.6 Design B), fired by the agent tab's own bar.
     Bind { uuid: String, tab_id: usize },
+    /// The same `clave bind`, for a RESTORED tab whose spawn has not run.
+    /// A distinct variant because it is UNGATED in the shell: the tab holding
+    /// the row is by definition one nobody has looked at yet, so the executor
+    /// gate every other bind rides would drop exactly the case this exists
+    /// for. Safe ungated because one bar owns one tab and this leg reads only
+    /// its OWN tab's pane — there is no second emitter to duplicate. See
+    /// `BarModel::restored_bind_effects`.
+    BindRestored { uuid: String, tab_id: usize },
     /// run_command(["clave","prune-tabs", stale_ids…]) — drop store binds and
     /// tab_order entries for CLOSED tabs (#6/F3). Carries the OBSERVED-STALE
     /// ids (bound-or-ordered ids ABSENT from the delivered live set), NOT the
@@ -1553,6 +1561,77 @@ impl BarModel {
         self.bind_sent
             .retain(|uuid, _| known.contains(uuid.as_str()));
         out
+    }
+
+    /// Record the row a RESTORED tab is holding, before the human reaches it.
+    ///
+    /// `Store::last_live` — the set the next relaunch brings back — is built
+    /// from the store's tab binds. A restored tab shows its row from the
+    /// moment the session starts, but writes no bind until its `clave spawn`
+    /// runs, so a fleet the human only partly visited recorded only the
+    /// visited part and the restored set shrank on every relaunch. This is
+    /// the leg that makes a cold tab a real bound row, which is what it
+    /// already is on screen.
+    ///
+    /// Deliberately NOT behind the active election that gates
+    /// [`Self::bind_effects`]. The evidence is self-contained: our OWN tab's
+    /// pane carries the spawn command that names the uuid, so this instance
+    /// can only ever bind its own tab to the row that tab already displays.
+    /// The RC-A class the election exists for is a CROSS-frame join — the tab
+    /// frame's active id against the pane frame's position — and this makes
+    /// no such join; `own_tab` is already coherence-gated and fails closed.
+    /// Starting a process is the arm that stays behind the beacon
+    /// ([`Self::run_held_effect`]); a bind is idempotent, store-confirmed and
+    /// self-limiting, which is why it can run from a tab nobody is looking at.
+    ///
+    /// Disjoint from `bind_effects` by construction: that leg needs a
+    /// REGISTERED pane (`uuid_to_pane`), which only a spawn that has run
+    /// produces, and this one refuses any pane that is not still waiting.
+    pub fn restored_bind_effects(&mut self) -> Vec<Effect> {
+        let (Some(own), Some(pos)) = (self.own_tab(), self.own_tab_position()) else {
+            return Vec::new();
+        };
+        // `is_held` and `!exited` carry the same two meanings they carry in
+        // `run_held_effect`: waiting to run, and not a command that already
+        // ran and quit. `spawn_uuid` is the whole test of ownership.
+        let Some(uuid) = self
+            .panes
+            .iter()
+            .find(|p| p.tab_position == pos && p.is_held && !p.exited && !p.is_plugin)
+            .and_then(|p| p.terminal_command.as_deref())
+            .and_then(spawn_uuid)
+            .map(str::to_string)
+        else {
+            return Vec::new();
+        };
+        if self
+            .agents
+            .iter()
+            .any(|a| a.uuid == uuid && a.tab_id == Some(own))
+        {
+            return Vec::new(); // the store already carries this bind
+        }
+        // The same ledger, budget and seq rule as the ordinary leg: a
+        // quiescent store costs no subprocesses however many frames arrive.
+        let seq = self.seq;
+        let (may_send, tries) = match self.bind_sent.get(&uuid) {
+            None => (true, 0),
+            Some(s) if s.tab_id != own => (true, 0),
+            Some(s) => (seq > s.at_seq && s.tries < BIND_MAX_TRIES, s.tries),
+        };
+        if !may_send {
+            return Vec::new();
+        }
+        self.bind_sent.insert(
+            uuid.clone(),
+            BindSent {
+                tab_id: own,
+                at_seq: seq,
+                tries: tries + 1,
+                confirms: 0,
+            },
+        );
+        vec![Effect::BindRestored { uuid, tab_id: own }]
     }
 
     /// The commit path (Alt+Enter, #100): mark in-flight and emit the run.
@@ -4722,6 +4801,87 @@ mod tests {
                     .iter()
                     .any(|e| matches!(e, Effect::RunHeldPane { .. })),
                 "{cmd:?} is not a clave spawn and must not be run"
+            );
+        }
+    }
+
+    /// The relaunch's durability problem, and the reason a cold tab binds at
+    /// all. `Store::last_live` — the set the NEXT relaunch restores — is
+    /// derived from the store's tab binds, and a restored tab writes no bind
+    /// until its `clave spawn` runs. So a fleet the human only partly visited
+    /// recorded only the visited part, and the set shrank on every relaunch
+    /// until one row was left. Measured on this branch: three rows restored,
+    /// one tab visited, one row came back.
+    ///
+    /// Our tab is deliberately NOT the active one here. An unvisited tab is
+    /// exactly the case that was lost.
+    #[test]
+    fn a_restored_tab_binds_its_row_before_the_human_reaches_it() {
+        let mut m =
+            fleet_bar_with_held_own_pane(Some("clave spawn u-restored --name x --cwd /r"), false);
+        m.apply_tabs(vec![
+            tab(10, 0, "a", true),
+            tab(11, 1, "b", false),
+            tab(12, 2, "c", false),
+        ]);
+        m.apply_snapshot(snap(1, vec![agent("u-restored", Status::Working, None)]));
+        assert_eq!(
+            m.restored_bind_effects(),
+            vec![Effect::BindRestored {
+                uuid: "u-restored".into(),
+                tab_id: 11,
+            }],
+            "the tab holds the row on screen, so the store must know it holds it"
+        );
+    }
+
+    /// One report per episode, the same rule the ordinary bind leg follows:
+    /// the guard is the last SEND, never the store echo, because an
+    /// echo-gated guard storms (C5 rd 4).
+    #[test]
+    fn a_restored_bind_is_reported_once_and_stops_when_the_store_confirms_it() {
+        let mut m =
+            fleet_bar_with_held_own_pane(Some("clave spawn u-restored --name x --cwd /r"), false);
+        m.apply_tabs(vec![
+            tab(10, 0, "a", true),
+            tab(11, 1, "b", false),
+            tab(12, 2, "c", false),
+        ]);
+        m.apply_snapshot(snap(1, vec![agent("u-restored", Status::Working, None)]));
+        assert_eq!(m.restored_bind_effects().len(), 1);
+        assert_eq!(m.restored_bind_effects(), Vec::<Effect>::new(), "no repeat");
+        m.apply_snapshot(snap(
+            2,
+            vec![agent("u-restored", Status::Working, Some(11))],
+        ));
+        assert_eq!(
+            m.restored_bind_effects(),
+            Vec::<Effect>::new(),
+            "the store already shows the row in our tab"
+        );
+    }
+
+    /// The same two guards the START arm carries, for the same reasons: an
+    /// exited pane is a finished agent, and a held pane is an ordinary thing
+    /// for a human to have. Neither is a row of ours to claim.
+    #[test]
+    fn a_restored_bind_never_claims_a_pane_that_is_not_our_waiting_spawn() {
+        for (cmd, exited) in [
+            (Some("clave spawn u-restored --name x --cwd /r"), true),
+            (Some("cargo test --workspace"), false),
+            (None, false),
+        ] {
+            let mut m = fleet_bar_with_held_own_pane(cmd, exited);
+            m.apply_tabs(vec![
+                tab(10, 0, "a", true),
+                tab(11, 1, "b", false),
+                tab(12, 2, "c", false),
+            ]);
+            m.apply_snapshot(snap(1, vec![agent("u-restored", Status::Working, None)]));
+            assert_eq!(
+                m.restored_bind_effects(),
+                Vec::<Effect>::new(),
+                "{cmd:?} exited={exited} is not a restored row of ours"
             );
         }
     }

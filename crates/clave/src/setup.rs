@@ -1910,7 +1910,8 @@ mod tests {
     }
 
     /// The relaunch layout: every row of the previous live set comes back as
-    /// a tab, in screen order — but only the FIRST one runs. The rest are
+    /// a tab, ranked by the fleet's own frecency (`restore_rows`, which is
+    /// where that rank is decided) — but only the FIRST one runs. The rest are
     /// created HELD, which costs a tab and a pane and no `claude` process, so
     /// a relaunch restores the whole fleet's shape at near-zero cost and the
     /// bar starts each agent when the human navigates to it.
