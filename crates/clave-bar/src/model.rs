@@ -65,23 +65,22 @@ pub struct PaneMeta {
 ///
 /// The baked binary is either the bare `clave` of a dev/sandbox session or the
 /// absolute path of a versioned copy in a release install (§2's binary split),
-/// so the match is on the file NAME, and `clave-v` must be followed by a digit
-/// — a third-party `clave-vault` on someone's PATH shares the prefix and is
-/// not ours. Same rule as the host's `setup::is_clave_bin`, kept in step with
-/// it by the pair of tests below rather than by a shared crate: the two parse
-/// different shapes (this one a space-joined command line, that one quoted KDL
-/// tokens), so the matcher is all they would have had in common.
+/// so ownership is decided by `clave_types::is_clave_binary` — the same
+/// function the host matches its own hook commands with.
+///
+/// zellij hands the launch command back as one space-joined string, so the
+/// binary is found by locating the `spawn` SUBCOMMAND and reading the token in
+/// front of it, not by taking the first token. An install path that contains a
+/// space would otherwise split into a first token that is not a binary at all,
+/// and every restored tab under it would come back as a terminal row.
 fn spawn_uuid(cmd: &str) -> Option<&str> {
-    let mut tokens = cmd.split_whitespace();
-    let bin = std::path::Path::new(tokens.next()?).file_name()?.to_str()?;
-    let ours = bin == "clave"
-        || bin
-            .strip_prefix("clave-v")
-            .is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit()));
-    if !ours || tokens.next()? != "spawn" {
+    let tokens: Vec<&str> = cmd.split_whitespace().collect();
+    let sub = tokens.iter().position(|t| *t == "spawn")?;
+    let bin = tokens.get(sub.checked_sub(1)?)?;
+    if !clave_types::is_clave_binary(bin) {
         return None;
     }
-    tokens.next().filter(|u| !u.is_empty())
+    tokens.get(sub + 1).copied().filter(|u| !u.is_empty())
 }
 
 /// What the bar has learned about a terminal pane beyond the manifest (#206):
@@ -4816,6 +4815,45 @@ mod tests {
                 .any(|e| matches!(e, Effect::RunHeldPane { .. })),
             "an exited pane is a finished agent, not a restored one"
         );
+    }
+
+    /// A RELEASE install bakes the versioned copy's absolute path, and it is
+    /// the only environment that does — a sandbox shims a bare `clave`, so
+    /// neither drive reaches this shape. Every fixture here used the bare name
+    /// until the swarm review of #261 found the gap: a regression in this arm
+    /// would leave every restored tab in a shipped build showing as a terminal
+    /// row that never starts, with the whole suite green.
+    ///
+    /// The spaced path is the second half of the same shape. zellij returns the
+    /// launch command space-joined, so an install under a directory with a
+    /// space in it is indistinguishable from a multi-token command unless the
+    /// subcommand is what anchors the parse.
+    #[test]
+    fn a_restored_tab_is_recognised_when_the_release_binary_is_an_absolute_path() {
+        for cmd in [
+            "/Users/x/.local/share/clave/bin/clave-v0.4.0 spawn u-restored --name x --cwd /r",
+            "/Users/Foo Bar/.local/share/clave/bin/clave-v0.4.0 spawn u-restored --name x",
+            "clave-v1.10.3 spawn u-restored",
+        ] {
+            assert_eq!(
+                spawn_uuid(cmd),
+                Some("u-restored"),
+                "a release install's own spawn must be recognised: {cmd}"
+            );
+        }
+    }
+
+    /// The near-miss the digit check exists for, at the shape the bar sees it.
+    /// A stranger's binary must never have its pane started for it.
+    #[test]
+    fn a_look_alike_binary_never_passes_as_our_spawn() {
+        for cmd in [
+            "clave-vault spawn u-restored",
+            "/usr/bin/clave-verify spawn u-restored",
+            "spawn u-restored",
+        ] {
+            assert_eq!(spawn_uuid(cmd), None, "{cmd} is not ours");
+        }
     }
 
     /// The command has to be OURS. A held pane is an ordinary thing for a

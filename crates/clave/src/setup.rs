@@ -621,18 +621,11 @@ pub const HOOK_EVENTS: [&str; 5] = [
     "SessionStart",
 ];
 
-/// Is `bin` one of ours — bare `clave` or a versioned copy `clave-vN…`? The
-/// `clave-v` check requires a DIGIT immediately after the prefix (not just
-/// `starts_with`): a foreign tool named `clave-vault` or `clave-verify`
-/// shares the textual prefix with our versioned binary name but is not ours,
-/// and must never be absorbed or rewritten. Shared by the hook and statusLine
-/// matchers so the rule lives once.
+/// Is `bin` one of ours? Shared by the hook and statusLine matchers here, and
+/// by the bar's held-pane matcher, so the rule lives once
+/// (`clave_types::is_clave_binary` carries the reasoning).
 fn is_clave_bin(bin: &str) -> bool {
-    matches!(
-        std::path::Path::new(bin).file_name().and_then(|n| n.to_str()),
-        Some(name) if name == "clave"
-            || name.strip_prefix("clave-v").is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit()))
-    )
+    clave_types::is_clave_binary(bin)
 }
 
 /// The single-quoted form `sh -c` reads back verbatim: the only character

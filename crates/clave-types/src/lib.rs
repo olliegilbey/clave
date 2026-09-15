@@ -255,6 +255,33 @@ pub struct LiveRow<T> {
     pub row: T,
 }
 
+/// Is `bin` one of OUR binaries — bare `clave`, or a versioned copy
+/// `clave-vN…`? Matches on the file name, so an absolute path answers the
+/// same as a bare name.
+///
+/// The `clave-v` arm requires a DIGIT immediately after the prefix rather than
+/// a bare `starts_with`: a foreign `clave-vault` or `clave-verify` on someone's
+/// PATH shares the textual prefix and is not ours, and must never be absorbed,
+/// rewritten, or started.
+///
+/// ONE function across the workspace. The host asks it of a hook command and
+/// of the baked layout; the bar asks it of a held pane's launch command before
+/// it will start that pane. Those callers parse different shapes — quoted KDL
+/// tokens against a space-joined command line — and the matcher was all they
+/// had in common, so it was copied, and the copy in the bar was covered by no
+/// test at all. A release install is the ONLY environment that bakes the
+/// versioned form (a sandbox shims a bare `clave`), so the copy that mattered
+/// was the one nothing exercised.
+pub fn is_clave_binary(bin: &str) -> bool {
+    matches!(
+        std::path::Path::new(bin).file_name().and_then(|n| n.to_str()),
+        Some(name) if name == "clave"
+            || name
+                .strip_prefix("clave-v")
+                .is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit()))
+    )
+}
+
 /// One row's ranking key, for every surface that ranks clave rows.
 ///
 /// ONE function, for the reason [`sort_live_block`] beneath it is one: the
@@ -831,6 +858,30 @@ const _: () = assert!(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The release install is the only environment that bakes the versioned
+    /// form, so this arm is the one no sandbox drive can reach. `clave-vault`
+    /// is the near-miss the digit check exists for.
+    #[test]
+    fn our_binary_is_the_bare_name_or_a_versioned_copy_and_never_a_look_alike() {
+        for ours in [
+            "clave",
+            "/Users/x/.local/share/clave/bin/clave-v0.4.0",
+            "clave-v1.10.3",
+        ] {
+            assert!(is_clave_binary(ours), "{ours} is ours");
+        }
+        for theirs in [
+            "clave-vault",
+            "clave-verify",
+            "/usr/bin/clave-vault",
+            "claved",
+            "cargo",
+            "",
+        ] {
+            assert!(!is_clave_binary(theirs), "{theirs} is not ours");
+        }
+    }
 
     /// The policy both surfaces now share. It is asserted HERE rather than in
     /// either consumer, because the defect it guards is the two consumers
