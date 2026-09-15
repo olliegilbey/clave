@@ -172,6 +172,18 @@ that a human or a machine reviewer found, and no gate did, is now nine.
 - **Three documentation debts the project's own rules mandate:** the new terms,
   and two traps left in this file instead of FOOTGUNS.md. Both now written.
 
+`just mutants main` then caught six survivors in the new bind's RETRY BUDGET —
+the happy path and the confirm path had tests, the budget did not. That budget
+is the whole reason an emitter of fire-and-forget subprocesses is safe to run
+from an unelected instance, so it is now pinned: the retry ladder, the cap, and
+the fresh budget a renumbered tab gets.
+
+**State at handoff:** ten commits on top of the original nine, all four gates
+green, 771 tests. NOT pushed — the maintainer's call. The open question for the
+next live drive is cost, not correctness: a relaunch now fires one `clave bind`
+per restored tab in the first seconds (eleven rows, eleven short subprocesses,
+each an RMW under the store's flock). Nothing measures that yet.
+
 ## Deferred, by agreement
 
 Preemptive warming: the neighbour rule, a few more by frecency
