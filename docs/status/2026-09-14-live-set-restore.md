@@ -230,9 +230,39 @@ own merits — a mistyped name reaching `just qa` must stop the run, not stage
 nothing and leave the maintainer waiting at a launch prompt for a session that
 will never make sense.
 
-**State at handoff:** twelve commits on top of the original nine, all four
-gates green, 773 tests, and a full COLD `just mutants main` over the whole
-branch diff: **136 mutants, 124 caught, 12 unviable, zero missed.**
+## The live relaunch, 2026-09-15 — the fix did not work, and now does
+
+Driven for real (`just sandbox relaunch-restore`, maintainer launched, nothing
+touched for 15 s). Everything except the bind was right: four tabs, ranked
+d/b/c/a, the top row eager and resuming the ROTATED conversation, the other
+three genuinely held with their spawn commands baked. **One bind was written.**
+
+A bar resolves its own tab id through the tab frame, and zellij delivers that
+frame only to the FOCUSED tab — the beacon exists in `main.rs` precisely
+because pipes broadcast and frames do not. So the per-tab leg could only ever
+run on the tab the human was already looking at, which is the one case needing
+no help. The feature could not fire in the only situation it was built for.
+
+The elected bar has what the others lack: the pane manifest is GLOBAL, so it
+sees every held pane and the uuid in its command, and its tab frame carries the
+whole tab list, so it can turn each pane's position into a tab id. It now
+reports for every held tab. Only the position-to-id step crosses frames, and
+`frames_coherent` — already required by the election — is the guard for exactly
+that. The ungated `Effect::BindRestored` is deleted: being elected is what the
+shell's ordinary bind gate tests, so the leg rides it like everything else.
+
+**Why no tier caught it, and this is the third time on this branch.** Every
+test handed a bar in an unfocused tab a tab frame that a bar in an unfocused
+tab never receives. The fixture's own doc recited the rule — "zellij delivers
+TabUpdate only to the active tab" — and then built a feature for unvisited tabs
+on top of it. Both traps are in FOOTGUNS.md now. The check that found it took
+about a minute: launch, touch nothing, count the binds in the store. That is
+phase 6c, and it is worth implementing rather than leaving as prose.
+
+**State at handoff:** thirteen commits on top of the original nine, all four
+gates green. The relaunch fix is REBUILT and unit-green; it has not yet been
+re-driven live, and it must be — the live drive is the only thing that has ever
+caught this leg being wrong.
 
 The open question for the next live drive is still cost, not correctness: a
 relaunch fires one `clave bind` per restored tab in the first seconds (eleven

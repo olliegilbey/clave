@@ -288,16 +288,10 @@ pub enum Effect {
     /// run_command(["clave","focus",uuid]) — persist the unread clear.
     MarkRead { uuid: String },
     /// run_command(["clave","bind",uuid,tab_id]) — report the uuid→tab join
-    /// to the STORE (§6.6 Design B), fired by the agent tab's own bar.
+    /// to the STORE (§6.6 Design B). TWO emitters, both from the elected
+    /// instance: `bind_effects` for a row whose pane is registered, and
+    /// `restored_bind_effects` for a held tab whose spawn has not run yet.
     Bind { uuid: String, tab_id: usize },
-    /// The same `clave bind`, for a RESTORED tab whose spawn has not run.
-    /// A distinct variant because it is UNGATED in the shell: the tab holding
-    /// the row is by definition one nobody has looked at yet, so the executor
-    /// gate every other bind rides would drop exactly the case this exists
-    /// for. Safe ungated because one bar owns one tab and this leg reads only
-    /// its OWN tab's pane — there is no second emitter to duplicate. See
-    /// `BarModel::restored_bind_effects`.
-    BindRestored { uuid: String, tab_id: usize },
     /// run_command(["clave","prune-tabs", stale_ids…]) — drop store binds and
     /// tab_order entries for CLOSED tabs (#6/F3). Carries the OBSERVED-STALE
     /// ids (bound-or-ordered ids ABSENT from the delivered live set), NOT the
@@ -740,8 +734,10 @@ pub struct BarModel {
     /// exactly that case — its spawn has not run, so nothing registered a
     /// pane — so a shared ledger is wiped on the very next line of
     /// `settle_identity` and `BIND_MAX_TRIES` never bites. Measured at 12
-    /// subprocesses against a budget of 4 (CodeRabbit, #261); the budget is
-    /// the whole reason `Effect::BindRestored` is safe to emit ungated.
+    /// subprocesses against a budget of 4 (CodeRabbit, #261). The budget
+    /// matters more now than it did then: the elected bar reports for EVERY
+    /// held tab, so one uncapped episode is one subprocess per restored tab
+    /// per store advance, not one.
     restored_bind_sent: BTreeMap<String, RestoredBindSent>,
     /// Last bind-leg state we reported (#178). Only a CHANGE is worth a line;
     /// see `Effect::BindStall`.
@@ -1591,7 +1587,7 @@ impl BarModel {
         out
     }
 
-    /// Record the row a RESTORED tab is holding, before the human reaches it.
+    /// Record the row EVERY held tab is holding, before the human reaches it.
     ///
     /// `Store::last_live` — the set the next relaunch brings back — is built
     /// from the store's tab binds. A restored tab shows its row from the
@@ -1601,84 +1597,100 @@ impl BarModel {
     /// the leg that makes a cold tab a real bound row, which is what it
     /// already is on screen.
     ///
-    /// Deliberately NOT behind the active election that gates
-    /// [`Self::bind_effects`]. The evidence is self-contained: our OWN tab's
-    /// pane carries the spawn command that names the uuid, so this instance
-    /// can only ever bind its own tab to the row that tab already displays.
-    /// The RC-A class the election exists for is a CROSS-frame join — the tab
-    /// frame's active id against the pane frame's position — and this makes
-    /// no such join; `own_tab` is already coherence-gated and fails closed.
-    /// Starting a process is the arm that stays behind the beacon
-    /// ([`Self::run_held_effect`]); a bind is idempotent, store-confirmed and
-    /// self-limiting, which is why it can run from a tab nobody is looking at.
+    /// **Runs from the ELECTED instance, over every tab — not from each tab
+    /// for itself.** The first version did the latter and could never fire:
+    /// a bar resolves its own tab id through `own_tab`, which needs the tab
+    /// frame, and zellij delivers that frame ONLY to the focused tab
+    /// (`main.rs`'s beacon exists for exactly this reason). So the one
+    /// instance that could act was the one tab the human was already looking
+    /// at, and the unvisited tabs this leg exists for stayed silent. Measured
+    /// on a live relaunch, 2026-09-15: four restored tabs, one bind.
     ///
-    /// Disjoint from `bind_effects` in what it EMITS: that leg needs a
+    /// The elected bar has what the others lack. `PaneUpdate` is a GLOBAL
+    /// manifest, so it sees every tab's held pane and the uuid baked into its
+    /// command; `TabUpdate` gives it the whole tab list, so it can turn each
+    /// pane's position into a tab id. Only that last step crosses frames, and
+    /// `frames_coherent` — which `elects_confirmed` already requires — is the
+    /// guard for exactly that: the uuid and the position come from the SAME
+    /// frame, so a stale pairing cannot bind a row to another row's tab.
+    ///
+    /// Emits the ordinary [`Effect::Bind`], because being elected is what the
+    /// shell's own gate on that effect tests. The earlier ungated
+    /// `BindRestored` existed only to escape an election this leg now rides.
+    ///
+    /// Disjoint from [`Self::bind_effects`] in what it EMITS: that leg needs a
     /// REGISTERED pane (`uuid_to_pane`), which only a spawn that has run
-    /// produces, and this one refuses any pane that is not still waiting.
-    ///
-    /// Read that as "and so the two can share a ledger" and you get the
-    /// defect CodeRabbit found on #261. `bind_effects` does not only write
-    /// `bind_sent` for the uuids it emits — it walks EVERY agent and clears
-    /// the entry of each one without a registered pane, which is this leg's
-    /// whole population. The ledgers are therefore separate
-    /// ([`BarModel::restored_bind_sent`]), and the test that holds the line is
-    /// `a_restored_binds_budget_survives_the_ordinary_bind_leg_running_beside_it`
-    /// — the two single-leg budget tests beside it both pass either way.
+    /// produces, and this one takes only panes still waiting to run. It is NOT
+    /// disjoint in what that leg CLEARS, which is why the ledger is separate —
+    /// see [`BarModel::restored_bind_sent`].
     pub fn restored_bind_effects(&mut self) -> Vec<Effect> {
-        let (Some(own), Some(pos)) = (self.own_tab(), self.own_tab_position()) else {
+        if !self.elects_confirmed() {
             return Vec::new();
-        };
-        // `is_held` and `!exited` carry the same two meanings they carry in
-        // `run_held_effect`: waiting to run, and not a command that already
-        // ran and quit. `spawn_uuid` is the whole test of ownership.
-        let Some(uuid) = self
-            .panes
-            .iter()
-            .find(|p| p.tab_position == pos && p.is_held && !p.exited && !p.is_plugin)
-            .and_then(|p| p.terminal_command.as_deref())
-            .and_then(spawn_uuid)
-            .map(str::to_string)
-        else {
-            return Vec::new();
-        };
-        if self
-            .agents
-            .iter()
-            .any(|a| a.uuid == uuid && a.tab_id == Some(own))
-        {
-            return Vec::new(); // the store already carries this bind
         }
-        // The same budget and seq rule as the ordinary leg — a quiescent store
-        // costs no subprocesses however many frames arrive — but its OWN
-        // ledger. `bind_effects` clears `bind_sent` for every uuid without a
-        // registered pane, which is this leg's entire population, so sharing
-        // it uncaps us. See `BarModel::restored_bind_sent`.
         let seq = self.seq;
-        let (may_send, tries) = match self.restored_bind_sent.get(&uuid) {
-            None => (true, 0),
-            Some(s) if s.tab_id != own => (true, 0),
-            Some(s) => (seq > s.at_seq && s.tries < BIND_MAX_TRIES, s.tries),
-        };
-        if !may_send {
-            return Vec::new();
+        let mut out = Vec::new();
+        let mut sent: Vec<(String, RestoredBindSent)> = Vec::new();
+        for p in &self.panes {
+            // `is_held` and `!exited` carry the same two meanings they carry
+            // in `run_held_effect`: waiting to run, and not a command that
+            // already ran and quit. `spawn_uuid` is the whole test of
+            // ownership — any `zellij run` pane reports held too.
+            if p.is_plugin || !p.is_held || p.exited {
+                continue;
+            }
+            let Some(uuid) = p.terminal_command.as_deref().and_then(spawn_uuid) else {
+                continue;
+            };
+            let Some(tab_id) = self
+                .tabs
+                .iter()
+                .find(|t| t.position == p.tab_position)
+                .map(|t| t.tab_id)
+            else {
+                continue;
+            };
+            if self
+                .agents
+                .iter()
+                .any(|a| a.uuid == uuid && a.tab_id == Some(tab_id))
+            {
+                continue; // the store already carries this bind
+            }
+            // The same budget and seq rule as the ordinary leg — a quiescent
+            // store costs no subprocesses however many frames arrive — but its
+            // OWN ledger. See `BarModel::restored_bind_sent`.
+            let (may_send, tries) = match self.restored_bind_sent.get(uuid) {
+                None => (true, 0),
+                Some(s) if s.tab_id != tab_id => (true, 0),
+                Some(s) => (seq > s.at_seq && s.tries < BIND_MAX_TRIES, s.tries),
+            };
+            if !may_send {
+                continue;
+            }
+            sent.push((
+                uuid.to_string(),
+                RestoredBindSent {
+                    tab_id,
+                    at_seq: seq,
+                    tries: tries + 1,
+                },
+            ));
+            out.push(Effect::Bind {
+                uuid: uuid.to_string(),
+                tab_id,
+            });
         }
-        self.restored_bind_sent.insert(
-            uuid.clone(),
-            RestoredBindSent {
-                tab_id: own,
-                at_seq: seq,
-                tries: tries + 1,
-            },
-        );
+        for (uuid, s) in sent {
+            self.restored_bind_sent.insert(uuid, s);
+        }
         // Ledger hygiene, as `bind_effects` does it: an agent that has left the
         // snapshot can never be matched again, so its entry would otherwise
         // persist for the life of the instance.
         let known: BTreeSet<&str> = self.agents.iter().map(|a| a.uuid.as_str()).collect();
         self.restored_bind_sent
             .retain(|uuid, _| known.contains(uuid.as_str()));
-        vec![Effect::BindRestored { uuid, tab_id: own }]
+        out
     }
-
     /// The commit path (Alt+Enter, #100): mark in-flight and emit the run.
     /// The `opening` guard is double-fire protection #1 (clave open's
     /// liveness no-op is #2). The caller has already refused stale rows —
@@ -4772,13 +4784,17 @@ mod tests {
     /// one, so OUR pane 101 moves from position 1 to position 0.
     const FLEET_PANES_AFTER_CLOSE: [(usize, u32, u32); 2] = [(0, 101, 6), (1, 102, 7)];
 
-    /// Same fleet, but OUR tab's terminal pane was created HELD — the
-    /// relaunch shape: the layout baked the tab, named it, and did not run
-    /// its `clave spawn`. Landing on the tab is what starts the agent, and
-    /// landing on it is precisely what this instance has just learned (zellij
-    /// delivers TabUpdate only to the active tab, so receiving a coherent
-    /// frame pair naming us active IS the focus signal — the same election
-    /// every other effect here rides).
+    /// Same fleet, but OUR tab's terminal pane was created HELD, and our tab
+    /// is the active one. The shape when the human has just LANDED on a
+    /// restored tab: its spawn has not run yet, and we are elected.
+    ///
+    /// Read the doc this replaced and you can watch the defect being argued
+    /// into existence — it reasoned that "TabUpdate reaches only the active
+    /// tab, so a coherent frame pair naming us active IS the focus signal",
+    /// which is true, and then built a feature for UNVISITED tabs on top of
+    /// it. An unvisited tab's bar never gets that frame pair at all. Use
+    /// `fleet_bar_with_held_neighbours` for the restored fleet as it really
+    /// arrives; this one is only the landed-on case.
     fn fleet_bar_with_held_own_pane(cmd: Option<&str>, exited: bool) -> BarModel {
         let mut m = BarModel::default();
         m.set_own_pane(101);
@@ -4788,6 +4804,38 @@ mod tests {
                 p.is_held = true;
                 p.exited = exited;
                 p.terminal_command = cmd.map(str::to_string);
+            }
+        }
+        m.apply_panes(panes);
+        m.apply_tabs(vec![
+            tab(10, 0, "a", false),
+            tab(11, 1, "b", true),
+            tab(12, 2, "c", false),
+        ]);
+        m
+    }
+
+    /// A relaunch as it really arrives: OUR tab is the eager one the launch
+    /// focused, and the NEIGHBOURS are the held restored tabs nobody has
+    /// reached. This is the fleet the live run of 2026-09-15 produced — four
+    /// tabs, one started, three waiting — and the shape no test modelled
+    /// before, which is why four rows produced one bind in the field.
+    ///
+    /// Our own pane is an ordinary running one. Every bind this fixture can
+    /// produce is therefore a bind for somebody ELSE's tab, which the old
+    /// per-tab leg could not emit even in principle.
+    fn fleet_bar_with_held_neighbours() -> BarModel {
+        let mut m = BarModel::default();
+        m.set_own_pane(101);
+        let mut panes = panes_at(&FLEET_PANES);
+        for p in &mut panes {
+            // Terminals 5 and 7 sit in tabs 10 and 12; ours (6) keeps running.
+            if p.pane_id == 5 || p.pane_id == 7 {
+                p.is_held = true;
+                p.terminal_command = Some(format!(
+                    "clave spawn u-held-{} --name x --cwd /r",
+                    p.pane_id
+                ));
             }
         }
         m.apply_panes(panes);
@@ -4921,21 +4969,18 @@ mod tests {
     /// until one row was left. Measured on this branch: three rows restored,
     /// one tab visited, one row came back.
     ///
-    /// Our tab is deliberately NOT the active one here. An unvisited tab is
-    /// exactly the case that was lost.
+    /// The landed-on case: our own tab is the held one and we are elected, so
+    /// the bind lands before the spawn has registered anything. The tab
+    /// nobody has reached is the sibling case, and it belongs to the elected
+    /// bar rather than to itself — `the_elected_bar_binds_the_held_tabs_it_does_not_own`.
     #[test]
     fn a_restored_tab_binds_its_row_before_the_human_reaches_it() {
         let mut m =
             fleet_bar_with_held_own_pane(Some("clave spawn u-restored --name x --cwd /r"), false);
-        m.apply_tabs(vec![
-            tab(10, 0, "a", true),
-            tab(11, 1, "b", false),
-            tab(12, 2, "c", false),
-        ]);
         m.apply_snapshot(snap(1, vec![agent("u-restored", Status::Working, None)]));
         assert_eq!(
             m.restored_bind_effects(),
-            vec![Effect::BindRestored {
+            vec![Effect::Bind {
                 uuid: "u-restored".into(),
                 tab_id: 11,
             }],
@@ -4950,11 +4995,6 @@ mod tests {
     fn a_restored_bind_is_reported_once_and_stops_when_the_store_confirms_it() {
         let mut m =
             fleet_bar_with_held_own_pane(Some("clave spawn u-restored --name x --cwd /r"), false);
-        m.apply_tabs(vec![
-            tab(10, 0, "a", true),
-            tab(11, 1, "b", false),
-            tab(12, 2, "c", false),
-        ]);
         m.apply_snapshot(snap(1, vec![agent("u-restored", Status::Working, None)]));
         assert_eq!(m.restored_bind_effects().len(), 1);
         assert_eq!(m.restored_bind_effects(), Vec::<Effect>::new(), "no repeat");
@@ -4978,11 +5018,6 @@ mod tests {
     fn a_restored_bind_retries_only_as_the_store_advances_and_stops_at_the_cap() {
         let mut m =
             fleet_bar_with_held_own_pane(Some("clave spawn u-restored --name x --cwd /r"), false);
-        m.apply_tabs(vec![
-            tab(10, 0, "a", true),
-            tab(11, 1, "b", false),
-            tab(12, 2, "c", false),
-        ]);
         let mut seq = 1;
         m.apply_snapshot(snap(seq, vec![agent("u-restored", Status::Working, None)]));
         assert_eq!(m.restored_bind_effects().len(), 1, "the first report");
@@ -5004,6 +5039,64 @@ mod tests {
         assert!(
             m.restored_bind_effects().is_empty(),
             "the budget runs out rather than retrying forever"
+        );
+    }
+
+    /// The defect the live relaunch found, in the tier that should have.
+    ///
+    /// Four restored tabs came back and ONE bind was written, so the next
+    /// relaunch would have restored one tab. Every test here passed, because
+    /// each handed a bar the tab frame of a tab it owned — and zellij sends
+    /// that frame only to the FOCUSED tab, so the bars this leg exists for
+    /// never had one. The elected bar reports for all of them instead.
+    #[test]
+    fn the_elected_bar_binds_the_held_tabs_it_does_not_own() {
+        let mut m = fleet_bar_with_held_neighbours();
+        m.apply_snapshot(snap(
+            1,
+            vec![
+                agent("u-held-5", Status::Idle, None),
+                agent("u-held-7", Status::Idle, None),
+            ],
+        ));
+        assert_eq!(
+            m.restored_bind_effects(),
+            vec![
+                Effect::Bind {
+                    uuid: "u-held-5".into(),
+                    tab_id: 10,
+                },
+                Effect::Bind {
+                    uuid: "u-held-7".into(),
+                    tab_id: 12,
+                },
+            ],
+            "every held tab's row is reported, not only the one bar's own tab"
+        );
+    }
+
+    /// Fails closed, like every other tab-scoped write. The join reads tab ids
+    /// from one frame and pane positions from another, which is the RC-A class
+    /// — an unelected instance may hold a frozen frame pair (`starved_bar`),
+    /// and binding a row to another row's tab is the damage that class does.
+    #[test]
+    fn an_unelected_bar_reports_no_held_tab_at_all() {
+        let mut m = fleet_bar_with_held_neighbours();
+        m.apply_tabs(vec![
+            tab(10, 0, "a", true), // somebody ELSE is active now
+            tab(11, 1, "b", false),
+            tab(12, 2, "c", false),
+        ]);
+        m.apply_snapshot(snap(
+            1,
+            vec![
+                agent("u-held-5", Status::Idle, None),
+                agent("u-held-7", Status::Idle, None),
+            ],
+        ));
+        assert!(
+            m.restored_bind_effects().is_empty(),
+            "a cross-frame join is for the elected instance alone"
         );
     }
 
@@ -5051,11 +5144,6 @@ mod tests {
     fn a_restored_bind_gets_a_fresh_budget_when_its_tab_is_renumbered() {
         let mut m =
             fleet_bar_with_held_own_pane(Some("clave spawn u-restored --name x --cwd /r"), false);
-        m.apply_tabs(vec![
-            tab(10, 0, "a", true),
-            tab(11, 1, "b", false),
-            tab(12, 2, "c", false),
-        ]);
         let mut seq = 1;
         m.apply_snapshot(snap(seq, vec![agent("u-restored", Status::Working, None)]));
         for _ in 0..BIND_MAX_TRIES {
@@ -5067,15 +5155,17 @@ mod tests {
             m.restored_bind_effects().is_empty(),
             "the budget for tab 11 is spent"
         );
-        // Same pane, same position, new tab ids: the renumbering shape.
+        // Same pane, same position, new tab ids: the renumbering shape. We
+        // stay the elected bar across it, because that is the only instance
+        // this leg runs on at all.
         m.apply_tabs(vec![
-            tab(20, 0, "a", true),
-            tab(21, 1, "b", false),
+            tab(20, 0, "a", false),
+            tab(21, 1, "b", true),
             tab(22, 2, "c", false),
         ]);
         assert_eq!(
             m.restored_bind_effects(),
-            vec![Effect::BindRestored {
+            vec![Effect::Bind {
                 uuid: "u-restored".into(),
                 tab_id: 21,
             }],

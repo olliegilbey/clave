@@ -341,18 +341,6 @@ impl State {
                         BTreeMap::new(),
                     );
                 }
-                // UNGATED on purpose, like `BindStall` below: the tab this
-                // reports is one the human has not reached, so the executor
-                // gate would drop every restored row and leave the live set to
-                // shrink on the next relaunch. One bar owns one tab, and the
-                // model reads only its own tab's pane, so there is no second
-                // emitter for the gate to suppress.
-                Effect::BindRestored { uuid, tab_id } => {
-                    run_command(
-                        &[bin.as_str(), "bind", &uuid, &tab_id.to_string()],
-                        BTreeMap::new(),
-                    );
-                }
                 Effect::PruneTabs { stale_ids } if confirmed => {
                     // #6/F3: report the OBSERVED-STALE ids (not the live set) so
                     // the store removes exactly those binds/timeline entries —
@@ -524,10 +512,14 @@ impl State {
         // out of `identity_effects` also keeps that function's contract what it
         // has always been — the actions to take, nothing else.
         let mut fx: Vec<Effect> = self.model.bind_stall_report().into_iter().collect();
-        // Taken OUTSIDE `identity_effects` for the same reason as the stall
-        // report above: that pass fails closed on an unelected instance, and a
-        // restored tab nobody has reached is never the elected one. Its own
-        // gate is coherence plus "the waiting spawn is in MY tab".
+        // The held-tab binds. Kept beside `identity_effects` rather than
+        // inside it so the two ledgers stay visibly separate — `bind_effects`
+        // clears `bind_sent` for every uuid without a registered pane, which
+        // is this leg's whole population (CodeRabbit, #261). It carries its
+        // OWN election gate and reports for every held tab, not just ours:
+        // zellij sends the tab frame only to the focused tab, so a bar in an
+        // unvisited tab cannot resolve its own tab id at all. The elected bar
+        // can, for all of them — the pane manifest is global.
         fx.extend(self.model.restored_bind_effects());
         fx.extend(self.model.identity_effects());
         if !fx.is_empty() {
