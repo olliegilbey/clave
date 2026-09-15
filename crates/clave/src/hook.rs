@@ -353,42 +353,30 @@ fn take_checkout(rec: &mut AgentRecord, facts: Option<(String, Option<String>)>)
     if rec.cwd == cwd && rec.branch == branch {
         return false;
     }
-    // Leaving the repo invalidates every repo-scoped fact on the row, not just
-    // the branch. `pr::checkout_dir` runs `gh` from `repo_root` or `worktree`,
-    // NOT from `cwd`, so a root left behind asks the old remote about the new
-    // branch — and a branch name that exists in both repos comes back with a PR
-    // number belonging to a different project. `default_branch` lies the same
-    // way, and the bar blanks the branch cell on it. Nothing here asks git
-    // where the new root is, so the honest answer is the empty root that
-    // `pr::resolve_pr` already refuses outright.
+    // NOTHING here decides which repository the row now belongs to, and that
+    // is deliberate. Two rounds of review went the other way and both were
+    // wrong, for the same reason #86 gives: a repository fact must not be read
+    // off the shape of a path.
     //
-    // A checkout belongs to this repo when it is under the main tree OR under
-    // this row's linked worktree. BOTH are needed: `repo_root` is deliberately
-    // the MAIN working tree (`add::main_worktree_path`, the fugu 2026-07-21
-    // finding), and `git worktree add` puts a linked tree anywhere on disk —
-    // `add::linked_worktree_root` says so in as many words, and #86 is the
-    // standing lesson that a repository fact must not be read off a path shape.
-    // Testing the root alone therefore cleared the facts of a row that had
-    // merely moved DEEPER INSIDE its own external worktree, or that had only
-    // changed branch inside it, which is not a move out of anything.
+    // The tempting rule is "the arriving cwd is outside `repo_root`, so the row
+    // left its repo". It does not hold, because `repo_root` is not one kind of
+    // thing. `add::run_add`'s resume arm writes the MAIN working tree, but its
+    // `new` arm and `hook::mint_adopted` both write `rev-parse --show-toplevel`
+    // of the directory in hand — and inside a linked worktree that IS the
+    // worktree (the fugu 2026-07-21 finding, `add::main_worktree_path`).
+    // Measured on the live store 2026-09-15: 4 of 199 rows have a worktree path
+    // as their root and no `worktree` set, and 0 rows have `worktree` set at
+    // all. For those four, a `cd` to the repo's own main checkout — an ordinary
+    // move, within one repository — reads as "left", and clearing on it costs
+    // the row its repo name, its colour, its PR cell and its branch cell for
+    // good: `pr::resolve_pr` refuses an empty root for ever and no writer ever
+    // restores one, so there is no way back short of a re-mint.
     //
-    // `Path::starts_with("")` is true, so a row that does not know its root
-    // reads as "still inside" and keeps what little it has — there is nothing
-    // to invalidate. Pinned by `an_unknown_root_is_not_a_move_out_of_the_repo`.
-    let arriving = std::path::Path::new(&cwd);
-    let still_in_repo = arriving.starts_with(&rec.repo_root)
-        || rec
-            .worktree
-            .as_deref()
-            .is_some_and(|w| arriving.starts_with(w));
-    if !still_in_repo {
-        rec.repo_root.clear();
-        rec.default_branch = None;
-        // The cached number answers a question about the repo just left. The
-        // branch change alone would restale it, but the card is read at a
-        // glance and must not show another project's PR for even one event.
-        rec.pr_number = None;
-    }
+    // The risk that argued for clearing was `gh` being asked about the new
+    // branch from the old repository. That is answered where it arises, by
+    // asking from the directory the session is actually in — see
+    // `pr::checkout_dir`. Consistency by construction beats a guess about
+    // containment, and it cannot strand a row.
     // The one move that can take a row OUT of a worktree, so the tree mark
     // must not outlive the directory it describes — the same component-wise
     // rule, and the same reasoning, as `store::apply_relocation`. A move
@@ -635,8 +623,10 @@ fn unix_from_iso8601(ts: &str) -> Option<u64> {
     }
     // Every field position is an ASCII digit, checked here rather than left to
     // `parse`, which accepts a leading `+`: without this `2026-+9-14T…` reads
-    // as September. It also settles the multi-byte case — `2026-09-14T15:17:4é`
-    // passes all six checks above, and `é`'s lead byte is not a digit.
+    // as September. It also covers the multi-byte case a second time —
+    // `2026-09-14T15:17:4é` is already refused above, because byte 19 lands on
+    // `é`'s continuation byte rather than on `Z` or `.`, but a digit check over
+    // every parsed position is what makes `get`-over-slice unnecessary here.
     if [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18]
         .iter()
         .any(|&i| !b[i].is_ascii_digit())
@@ -3648,95 +3638,24 @@ mod tests {
         assert_eq!(rec.cwd, "/repo/a b/dir");
     }
 
-    /// Leaving the repo must drop every fact that described it, not just the
-    /// branch.
+    /// A move must not rewrite a fact only git could settle.
     ///
-    /// CodeRabbit 2026-09-15 (major): `pr::checkout_dir` runs `gh` from
-    /// `repo_root`, never from `cwd`. A row that moved to another repository
-    /// therefore asked the OLD remote about its NEW branch, and a branch name
-    /// both repos carry answers with a PR number belonging to the other
-    /// project — a wrong number on the card, which is worse than the blank this
-    /// PR set out to fix. `default_branch` lies the same way, and the bar
-    /// blanks the branch cell on it.
-    #[test]
-    fn leaving_the_repo_drops_the_facts_that_only_describe_the_repo() {
-        let line = |cwd: &str, branch: &str| {
-            format!(
-                r#"{{"type":"user","cwd":"{cwd}","gitBranch":"{branch}","message":{{"role":"user"}}}}"#
-            )
-        };
-        let mut rec = rec("u1");
-        rec.cwd = "/repo/clave".into();
-        rec.repo_root = "/repo/clave".into();
-        rec.default_branch = Some("main".into());
-        rec.branch = "main".into();
-        rec.pr_number = Some(260);
-
-        // A move WITHIN the repo — the worktree case this whole fix exists for
-        // — keeps all of it. The repo is still the repo.
-        assert!(
-            take_checkout(
-                &mut rec,
-                checkout_from_tail(&line("/repo/clave/.claude/worktrees/card", "wt")),
-            ),
-            "the fixture must reach the guard, not die in the parser"
-        );
-        assert_eq!(
-            rec.cwd, "/repo/clave/.claude/worktrees/card",
-            "and the move must have happened, or the asserts below are vacuous"
-        );
-        assert_eq!(rec.repo_root, "/repo/clave", "same repo, same root");
-        assert_eq!(rec.default_branch.as_deref(), Some("main"));
-        assert_eq!(
-            rec.pr_number,
-            Some(260),
-            "the number still answers its repo"
-        );
-
-        // A sibling whose path merely SHARES A PREFIX is a different repo. The
-        // test is component-wise, so `/repo/clave-docs` cannot claim
-        // `/repo/clave` (#86's standing lesson, in the other direction).
-        let mut sibling = rec.clone();
-        take_checkout(
-            &mut sibling,
-            checkout_from_tail(&line("/repo/clave-docs", "wt")),
-        );
-        assert!(sibling.repo_root.is_empty(), "a prefix is not a parent");
-
-        // Out of the repo entirely: an empty root is what `pr::resolve_pr`
-        // already refuses, so no `gh` question is asked of the wrong remote.
-        take_checkout(
-            &mut rec,
-            checkout_from_tail(&line("/elsewhere/other", "wt")),
-        );
-        assert!(
-            rec.repo_root.is_empty(),
-            "the root described the repo it left"
-        );
-        assert_eq!(rec.default_branch, None);
-        assert_eq!(rec.pr_number, None, "that number was another project's");
-        assert_eq!(rec.cwd, "/elsewhere/other", "and the move still happened");
-        assert!(
-            crate::pr::resolve_pr(&|_| panic!("gh must not run"), &rec.repo_root, &rec.branch)
-                .is_none(),
-            "an empty root is refused before `gh` is reached"
-        );
-    }
-
-    /// A linked worktree lives anywhere on disk, so the repo root does not
-    /// bound the repo.
+    /// Two review rounds pushed this the other way — clear the repo facts when
+    /// the arriving cwd sits outside the recorded root — and both were wrong.
+    /// `repo_root` is not one kind of thing: `add::run_add`'s resume arm writes
+    /// the MAIN working tree, while its `new` arm and `hook::mint_adopted`
+    /// write `rev-parse --show-toplevel` of the directory in hand, which inside
+    /// a linked worktree is the WORKTREE. Measured on the live store
+    /// 2026-09-15: 4 of 199 rows carry a worktree path as their root with no
+    /// `worktree` set, and 0 rows have `worktree` set at all — so the rule
+    /// would have fired on an ordinary `cd` from a worktree to its own repo's
+    /// main checkout, inside ONE repository, and stranded the row for good.
     ///
-    /// Blind review 2026-09-15 (major): `repo_root` is deliberately the MAIN
-    /// working tree (`add::main_worktree_path`), while `git worktree add
-    /// /elsewhere/tree` puts this row's actual checkout outside it. Testing the
-    /// arriving cwd against the root ALONE therefore cleared the repo facts of
-    /// a row that had not left anything — it had moved deeper inside its own
-    /// worktree, or had only changed branch there. The consequences all landed
-    /// on a healthy row: a permanently blank PR cell (`pr::resolve_pr` refuses
-    /// an empty root for ever), no repo name, no repo colour, and a branch cell
-    /// that falls back to the main/master guess — #86's original defect, remade.
+    /// The wrong-PR risk that argued for clearing is answered in `pr.rs`, by
+    /// asking `gh` from the directory the session is in. Here, the row keeps
+    /// what only git could have told it.
     #[test]
-    fn a_row_moving_inside_its_own_external_worktree_keeps_its_repo() {
+    fn a_move_never_rewrites_a_fact_only_git_could_settle() {
         let line = |cwd: &str, branch: &str| {
             serde_json::json!({
                 "type": "user",
@@ -3746,82 +3665,43 @@ mod tests {
             })
             .to_string()
         };
-        // What `clave add` writes for a resume in `git worktree add
-        // /elsewhere/tree`: the root is the MAIN tree, the checkout is not
-        // under it, and `pr::checkout_dir` runs `gh` from the worktree anyway.
+        // The shape `mint_adopted` writes inside a linked worktree: the root IS
+        // the worktree, and `worktree` is None.
         let mut rec = rec("u1");
-        rec.repo_root = "/repo/clave".into();
-        rec.worktree = Some("/elsewhere/tree".into());
-        rec.cwd = "/elsewhere/tree".into();
-        rec.branch = "feature".into();
-        rec.default_branch = Some("trunk".into());
-        rec.pr_number = Some(260);
-
-        // A: deeper inside its own worktree.
-        assert!(take_checkout(
-            &mut rec,
-            checkout_from_tail(&line("/elsewhere/tree/crates", "feature"))
-        ));
-        assert_eq!(rec.repo_root, "/repo/clave", "it never left the repo");
-        assert_eq!(rec.default_branch.as_deref(), Some("trunk"));
-        assert_eq!(
-            rec.pr_number,
-            Some(260),
-            "the number still answers its repo"
-        );
-        assert_eq!(rec.worktree.as_deref(), Some("/elsewhere/tree"));
-
-        // B: no `cd` at all — only the branch moved, inside the same worktree.
-        assert!(take_checkout(
-            &mut rec,
-            checkout_from_tail(&line("/elsewhere/tree/crates", "feature-2"))
-        ));
-        assert_eq!(
-            rec.repo_root, "/repo/clave",
-            "a branch switch is not a move"
-        );
-        assert_eq!(rec.default_branch.as_deref(), Some("trunk"));
-
-        // And the real thing still clears: out of the main tree AND out of the
-        // worktree is the only shape that means "another repository".
-        assert!(take_checkout(
-            &mut rec,
-            checkout_from_tail(&line("/somewhere/else", "feature"))
-        ));
-        assert!(rec.repo_root.is_empty(), "that IS a different repository");
-        assert_eq!(rec.pr_number, None);
-    }
-
-    /// A row that never knew its root has nothing to invalidate.
-    ///
-    /// `take_checkout` rests on `Path::starts_with("")` being true, which reads
-    /// an unknown root as "still inside". That is the wanted behaviour — an
-    /// empty root is already the "we do not know" value `pr::resolve_pr`
-    /// refuses — but it is load-bearing and silent, so it is pinned here rather
-    /// than left for the next reader to rediscover.
-    #[test]
-    fn an_unknown_root_is_not_a_move_out_of_the_repo() {
-        assert!(
-            std::path::Path::new("/a/b").starts_with(""),
-            "the emptiness case rests on this"
-        );
-        let line = |cwd: &str| {
-            serde_json::json!({
-                "type": "user",
-                "cwd": cwd,
-                "gitBranch": "b",
-                "message": { "role": "user" },
-            })
-            .to_string()
-        };
-        let mut rec = rec("u1");
-        rec.repo_root = String::new();
+        rec.repo_root = "/repo/clave/.claude/worktrees/card".into();
+        rec.cwd = "/repo/clave/.claude/worktrees/card".into();
         rec.worktree = None;
-        rec.cwd = "/anywhere".into();
+        rec.branch = "card".into();
+        rec.default_branch = Some("trunk".into());
+        rec.pr_number = Some(259);
 
-        assert!(take_checkout(&mut rec, checkout_from_tail(&line("/other"))));
-        assert!(rec.repo_root.is_empty(), "still unknown, not re-cleared");
-        assert_eq!(rec.cwd, "/other", "and the move still happened");
+        // A `cd` to the repo's own main checkout. One repository, and the row
+        // must come through it whole.
+        assert!(take_checkout(
+            &mut rec,
+            checkout_from_tail(&line("/repo/clave", "main"))
+        ));
+        assert_eq!(rec.cwd, "/repo/clave", "the move itself still happens");
+        assert_eq!(rec.branch, "main");
+        assert_eq!(
+            rec.repo_root, "/repo/clave/.claude/worktrees/card",
+            "only git could say the root moved, and nothing here asked it"
+        );
+        assert_eq!(rec.default_branch.as_deref(), Some("trunk"));
+        assert_eq!(rec.pr_number, Some(259));
+
+        // Even a move to a genuinely different repository leaves the recorded
+        // facts alone. Clearing them cannot be undone; `pr::checkout_dir` asks
+        // from the new cwd, so the stale root cannot mislead the question.
+        assert!(take_checkout(
+            &mut rec,
+            checkout_from_tail(&line("/somewhere/else", "main"))
+        ));
+        assert_eq!(rec.cwd, "/somewhere/else");
+        assert_eq!(
+            rec.repo_root, "/repo/clave/.claude/worktrees/card",
+            "still git's to settle, not a path comparison's"
+        );
     }
 
     /// A stamp must end exactly where it claims to.

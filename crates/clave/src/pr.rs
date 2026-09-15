@@ -83,10 +83,25 @@ pub fn spawn_pr_sync(uuid: &str) {
         .spawn();
 }
 
-/// The checkout `pr-sync` should run `gh` from: the worktree if `clave add
-/// --worktree` made one, else the repo root — same choice `add::run_add`'s
-/// `agent_cwd` makes for a fresh worktree row.
+/// The directory `pr-sync` runs `gh` from: the one the session is actually in.
+///
+/// `gh` resolves the repository from its own working directory, so asking from
+/// the row's `cwd` keeps the repository and the branch consistent BY
+/// CONSTRUCTION. That is what makes the pairing safe as a session moves, and
+/// sessions do move: `hook::take_checkout` follows them, and 75 of 350
+/// transcripts change cwd mid-session. Asking from a recorded ROOT instead can
+/// pair the old repository with the new branch, and a branch name both repos
+/// carry then answers with another project's PR number — a wrong number on the
+/// card, which is worse than a blank one.
+///
+/// The worktree and the root remain the fallback for a row whose cwd is not
+/// known. A cwd that no longer exists cannot spawn `gh` at all (`gh_runner`
+/// ends in `.spawn().ok()?`), so the answer degrades to blank, never to
+/// something belonging to another project.
 fn checkout_dir(rec: &AgentRecord) -> String {
+    if !rec.cwd.is_empty() {
+        return rec.cwd.clone();
+    }
     rec.worktree
         .clone()
         .unwrap_or_else(|| rec.repo_root.clone())
@@ -294,39 +309,72 @@ mod tests {
     /// the wrong directory asks a different repo's question, or none at all,
     /// and the miss it writes back is indistinguishable from "no PR".
     #[test]
-    fn pr_sync_targets_the_rows_own_checkout() {
+    fn pr_sync_asks_from_the_directory_the_session_is_in() {
         let d = tempfile::tempdir().unwrap();
         let paths = tmp_paths(d.path());
+
+        // An ordinary checkout: cwd and root are the same place.
         let mut plain = rec("plain");
+        plain.cwd = "/repos/clave".into();
         plain.repo_root = "/repos/clave".into();
         plain.branch = "drive-launch".into();
+
+        // A worktree row: the session is in the worktree, and that is where the
+        // question belongs.
         let mut wt = rec("wt");
+        wt.cwd = "/repos/clave-wt/drive-launch".into();
         wt.repo_root = "/repos/clave".into();
         wt.worktree = Some("/repos/clave-wt/drive-launch".into());
         wt.branch = "drive-launch".into();
+
+        // A row whose session has MOVED. `hook::take_checkout` follows it and
+        // deliberately leaves `repo_root` alone, because only git could settle
+        // that. So the recorded root is stale — and asking from it would pair
+        // the old repository with the new branch, which is how another
+        // project's PR number reaches this card.
+        let mut moved = rec("moved");
+        moved.cwd = "/repos/other".into();
+        moved.repo_root = "/repos/clave".into();
+        moved.branch = "drive-launch".into();
+
+        // A row that does not know where it is falls back to what it does know.
+        let mut unknown = rec("unknown");
+        unknown.cwd = String::new();
+        unknown.repo_root = "/repos/clave".into();
+        unknown.branch = "drive-launch".into();
+
         store::with_store_mut(&paths, |s| {
             s.agents.insert("plain".into(), plain);
             s.agents.insert("wt".into(), wt);
+            s.agents.insert("moved".into(), moved);
+            s.agents.insert("unknown".into(), unknown);
         })
         .unwrap();
 
         let target =
             |uuid: &str| store::with_store_mut(&paths, |s| pr_sync_target(s, uuid, 1_000)).unwrap();
-        let triple =
-            |a: &str, b: &str, c: &str| Some((a.to_string(), b.to_string(), c.to_string()));
+        let asks_from = |uuid: &str| target(uuid).map(|(cwd, _, _)| cwd);
+
         assert_eq!(
-            target("plain"),
-            triple("/repos/clave", "/repos/clave", "drive-launch"),
-            "an ordinary checkout asks from its repo root"
+            asks_from("plain"),
+            Some("/repos/clave".to_string()),
+            "an ordinary checkout asks from itself"
         );
         assert_eq!(
-            target("wt"),
-            triple(
-                "/repos/clave-wt/drive-launch",
-                "/repos/clave",
-                "drive-launch"
-            ),
-            "a worktree row asks from the worktree"
+            asks_from("wt"),
+            Some("/repos/clave-wt/drive-launch".to_string()),
+            "a worktree row asks from the worktree it is in"
+        );
+        assert_eq!(
+            asks_from("moved"),
+            Some("/repos/other".to_string()),
+            "the question follows the session, so `gh` resolves the repository \
+             the branch actually belongs to"
+        );
+        assert_eq!(
+            asks_from("unknown"),
+            Some("/repos/clave".to_string()),
+            "and a row with no cwd still asks from what it knows"
         );
         assert_eq!(target("gone"), None, "a vanished uuid is nothing to do");
     }

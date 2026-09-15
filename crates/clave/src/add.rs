@@ -372,11 +372,14 @@ fn worktree_holding<'a>(
 /// function that needs a store on disk and a git binary.
 ///
 /// A row that already names a worktree is not asked about — the repair is
-/// seed-only. An EMPTY root is not asked about either: `hook::take_checkout`
-/// writes one for a session that moved to a repository nothing here can name,
-/// and `git -C ""` is NOT a no-op. Git resolves it against the process's own
-/// directory, so the answer would describe whatever repo `clave` was launched
-/// from, and could stamp an unrelated tree onto the row.
+/// seed-only. An EMPTY root is not asked about either, because `git -C ""` is
+/// NOT a no-op: git resolves it against the process's own directory, so the
+/// answer would describe whatever repo `clave` was launched from and could
+/// stamp an unrelated tree onto the row. No writer mints an empty root today
+/// (`add` falls back to the picked path for a non-repo dir), so this is a guard
+/// against the state, not a handler for one we create — measured with
+/// `git -C "" rev-parse --show-toplevel` from a scratch repo, which prints that
+/// repo and exits 0.
 fn roots_to_ask<'a>(
     rows: impl Iterator<Item = &'a crate::store::AgentRecord>,
 ) -> std::collections::BTreeSet<String> {
