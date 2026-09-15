@@ -218,6 +218,101 @@ instance_count_logging() {
 
 dev_status() { "$CLAVE_BIN" dev status 2>/dev/null; }
 
+# The three readings phase 6c compares across a session boundary. Each takes
+# a `dev_status` document as its argument rather than reading one itself, so
+# the two sides of the comparison are the SAME snapshot shape and can be
+# tested offline (qa/lib-selftest.sh) — this branch's whole lesson is that a
+# relaunch assertion nobody can run without a launched session is one nobody
+# runs. Sorted, because every use is a set comparison. Empty on an unreadable
+# document, never an error: the phase asserts the sets are non-empty itself.
+
+# A row is BOUND when it holds a tab id. The bind is the tab_id and nothing
+# else (store.rs §6.6) — a pane with no tab is a row mid-spawn, not a member
+# of the live set.
+bound_uuids() {
+  jq -r '.store.agents | to_entries[] | select(.value.tab_id != null) | .key' <<<"$1" 2>/dev/null | sort
+}
+
+# The HELD signature: a tab and no pane. A restored row wears this from the
+# moment the bar binds it until its agent is woken, so it is the reading that
+# separates a fleet the bar rebound by itself from tabs a human landed on.
+held_bound_uuids() {
+  jq -r '.store.agents | to_entries[]
+         | select(.value.tab_id != null and .value.pane_id == null) | .key' <<<"$1" 2>/dev/null | sort
+}
+
+# What the PREVIOUS session left. Written at launch, from the binds standing
+# when the session died (setup.rs `clear_session_order`), which is also the
+# pass that clears them — so this is the only surviving record of the fleet,
+# and the expectation the rebound set is measured against.
+last_live_uuids() {
+  jq -r '.store.last_live[]?' <<<"$1" 2>/dev/null | sort
+}
+
+# How many rows a set holds, and the set on one line for a verdict a human
+# reads. Non-empty lines only: two empty sets compare EQUAL, so a set
+# comparison built on a dead read reports a perfect restore. The count is
+# what the phase refuses on before it compares anything.
+uuid_count() { printf '%s' "${1:-}" | grep -c .; }
+uuid_line() { printf '%s' "${1:-}" | tr '\n' ' '; }
+
+# The relaunch verdict (phase 6c): does the fleet the second session holds
+# match the one the first session left? Takes the set measured before the
+# quit, the `dev status` read after the relaunch, and the row whose tab phase
+# 3 closed. Every reading comes from one snapshot, so no two verdicts below
+# can disagree about which moment they are describing.
+#
+# Here rather than in the drive because the phase costs two maintainer
+# launches, and a verdict that can only be tried by spending them is a verdict
+# nobody tries. The selftest runs it against a decayed store, where it must go
+# red.
+relaunch_checks() {
+  local before="$1" status="$2" closed="${3:-}"
+  local recorded set_after held n_before n_after n_recorded n_held
+  recorded="$(last_live_uuids "$status")"
+  set_after="$(bound_uuids "$status")"
+  held="$(held_bound_uuids "$status")"
+  n_before="$(uuid_count "$before")"
+  n_after="$(uuid_count "$set_after")"
+  n_recorded="$(uuid_count "$recorded")"
+  n_held="$(uuid_count "$held")"
+  measure "the set the launch recorded to restore" "n=${n_recorded} $(uuid_line "$recorded")"
+  measure "the set the second session rebound" "n=${n_after} $(uuid_line "$set_after")"
+
+  # First, that anything was read at all. Two empty sets compare equal, so
+  # every verdict under this one would pass on a dead store.
+  check_min "the quit recorded a set to restore" "$n_recorded" 1
+
+  # The first session RECORDED what it was holding. A restore that bakes the
+  # right tabs from a set two launches old passes everything below it.
+  check "the quit recorded the set the first session was holding" \
+    "$(uuid_line "$recorded")" "$(uuid_line "$before")"
+
+  # The decay assertion (#261). The defect bound only the tab the maintainer
+  # was looking at, so this number read 1 against a fleet of four.
+  check "the live set comes back the SAME SIZE" "$n_after" "$n_before"
+
+  # And it is the same fleet, not the same COUNT of something else.
+  check "and holds the same uuids" \
+    "$(uuid_line "$set_after")" "$(uuid_line "$recorded")"
+
+  # A tab id with no pane id is the restored leg's signature: the bar bound
+  # the row while the tab still held nothing. Every row but the eager one
+  # wears it — the eager row spawns at launch — so the floor is one less than
+  # the set.
+  check_min "restored rows were bound before their agent ran (tab, no pane)" \
+    "$n_held" "$((n_before - 1))"
+
+  # A closed tab stays closed. Not covered by the three above: a row still
+  # bound when its tab went (a prune that did not happen, phase 3's family)
+  # is in every set, so all of them match and the fleet still comes back one
+  # tab too wide.
+  if [[ -n "$closed" ]]; then
+    check "the tab closed in the first session is absent from the second" \
+      "$(grep -c -- "$closed" <<<"$set_after")" "0"
+  fi
+}
+
 # Guarded list-panes read. Never the bare env-var form (TESTING.md, "the
 # sandbox drive loop" step — a dead/absent session hangs `zellij action`
 # forever; ct.sh bounds it). Returns "[]" and a non-zero status on any

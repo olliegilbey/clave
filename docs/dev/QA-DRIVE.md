@@ -157,12 +157,17 @@ the stable binary (FOOTGUNS, 2026-08-24).
       wait. The agent CANNOT do this: `clave dev launch` refuses when
       `ZELLIJ` is set, and an agent is always inside a session.
    3. `scripts/qa-drive.sh qa-fleet` — the full spine, phases 0–7 (with 5b,
-      5c and 6b in between); stop on first failure.
+      5c, 6b and 6c in between); stop on first failure.
+   **The run needs the maintainer TWICE**: once for the first launch, and
+   again at phase 6c, which asks for a quit and a relaunch and waits for
+   both (`QA_RELAUNCH_WAIT`, default 600s each half). Tell him that when you
+   hand over the first launch line, so the second ask is expected rather
+   than a surprise mid-run.
    **Full 0–7 driven live green: run 4, 2026-08-17**, both eyeball
    checkpoints confirmed; and **run 11, 2026-09-11**, the ten labels that
    existed then (5b and 6b were the new ones), on the first run of the
-   one-command loop. The drive carries **eleven** now: 5c joined on
-   2026-09-12 and has not been driven live yet. Runs 1–3 each went red on one real finding (all
+   one-command loop. The drive carries **twelve** now: 5c joined on
+   2026-09-12 and 6c on 2026-09-16; neither has been driven live yet. Runs 1–3 each went red on one real finding (all
    fixed and recorded in FOOTGUNS.md); the script header's ledger records
    how each once-pending assumption settled. Still awaiting a first live
    run: the CONCURRENT burst shape (ledger (6) — runs 1–4 drove the burst
@@ -200,6 +205,30 @@ state that crosses a session boundary. Do not fold it into phase 1 by staging
 a pre-bound fixture: staging the binds is what makes the first launch pass
 without ever proving the first session could have RECORDED them.
 
+Three things about how it is built (2026-09-16), each of which a later edit
+could undo without any test noticing:
+
+- **It kills nothing and launches nothing.** It prints the pair and waits for
+  liveness to drop and return. Session lifecycle stays the maintainer's, and
+  `script_hygiene.rs` now fails the build for any line in the drive that
+  starts or ends a session.
+- **The verdict lives in `scripts/qa/lib.sh` (`relaunch_checks`), not in the
+  phase.** The selftest runs it against a store that decayed and requires it
+  to go RED. A comparison only two maintainer launches could try is a
+  comparison nobody tries — which is the shape of the defect the phase exists
+  for.
+- **The readings are non-vacuous because a launch CLEARS the binds** before it
+  bakes the layout, and records the set it cleared into `last_live` on the
+  same pass (`setup.rs` `clear_session_order`). So every tab id read after the
+  relaunch was made by the second session, and the store carries its own
+  expectation. Neither fact is incidental; if either changes, this phase is
+  measuring nothing.
+
+**Nothing is driven between the relaunch and the reading** — no focus, no nav,
+no keystroke. The whole defect was that a restored row bound only when the
+maintainer landed on its tab, so a drive that touched a tab first would hide
+exactly what it came to see.
+
 ## When it runs
 
 - Before every release cut — the runbook's QA-drive gate, which sits after
@@ -220,3 +249,6 @@ without ever proving the first session could have RECORDED them.
    real finding first (nav wedge, newborn-bind prune, jq `//` vs `false` —
    see FOOTGUNS).**
 4. Runbook/TESTING integration line + retire the duplicated manual steps.
+5. Phase 6c (the relaunch). LANDED (2026-09-16, #261). Not yet driven live —
+   its first run is the one that says whether the settle window is long
+   enough for a fleet bigger than the three tabs the seam was proved on.

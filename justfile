@@ -262,6 +262,11 @@ launch:
     ./target/release/clave dev launch
 
 # Stage + wait for the human's launch + drive phases 0-7, in one command.
+#
+# It asks for a SECOND launch part way through: phase 6c quits the sandbox and
+# launches it again, because the live set can only decay across a session
+# boundary and no other phase crosses one. The drive prints both commands and
+# waits; `wait` is the budget for each half.
 qa scenario="qa-fleet" wait="600":
     ./scripts/sandbox-setup.sh {{scenario}}
-    QA_WAIT_SECS={{wait}} ./scripts/qa-drive.sh {{scenario}}
+    QA_WAIT_SECS={{wait}} QA_RELAUNCH_WAIT={{wait}} ./scripts/qa-drive.sh {{scenario}}
