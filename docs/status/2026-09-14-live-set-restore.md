@@ -3,8 +3,8 @@
 Worktree `.claude/worktrees/live-set-restore`, branch
 `worktree-live-set-restore`, on `main`. It was built on `worktree-triple-card`
 — the maintainer's call, since triple-card's sandbox isolation work had to
-merge first — and rebased onto `main` once that landed as #259. Nine commits,
-all four gates green, `just mutants main` at one survivor (`run_scenario`'s own
+merge first — and rebased onto `main` once that landed as #259. Ten commits,
+all four gates green, 754 tests, `just mutants main` at one survivor of 90 (`run_scenario`'s own
 return, which only the drive exercises).
 
 The design is `docs/superpowers/specs/2026-09-11-live-set-restore-design.md`
@@ -26,7 +26,8 @@ store: 185 rows, 11 live.
    two launches ago. A SET, written in ascending tab id only so the file is
    deterministic.
 2. **`setup::restore_rows`** — the read side. Drops pruned rows and vanished
-   cwds, then RANKS what is left with `model::live_key`'s own rule.
+   cwds, then RANKS what is left with `clave_types::sort_live_block`, the comparator
+   the bar itself uses.
 3. **`setup::launch_layout_kdl` takes a slice, not an Option** — one tab per
    restored row. Only the FIRST runs; the rest are created held
    (`start_suspended`, which zellij parses as `hold_on_start`).
@@ -37,7 +38,7 @@ store: 185 rows, 11 live.
    emits `Effect::RunHeldPane`, and `main.rs` calls `rerun_command_pane`.
    `PaneMeta` gained `is_held`.
 5. **`model::spawn_binds`** — the row-to-tab join for a tab whose command has
-   not run. See "the two live findings" below.
+   not run. See the findings below.
 
 ## Five findings that shaped it — do not re-derive
 
@@ -66,10 +67,10 @@ store: 185 rows, 11 live.
 - The command must parse as our binary and our subcommand (`model::spawn_uuid`).
   Any `zellij run` command pane waiting to be re-run reports held too.
 
-## The two live findings, and what they cost
+## The three findings, and what they cost
 
-The first drive came up behaving correctly and reading wrong. Both fixes are
-in; both are worth knowing about before touching this area again.
+No gate caught any of them: two came from the maintainer looking at a
+screenshot, one from CodeRabbit. All three are fixed.
 
 **The rows split in two.** Every row-to-tab question the bar asks reads the
 store's bind, which `clave bind` writes when a spawn RUNS. A restored tab is
@@ -95,7 +96,21 @@ That ranking is only possible because `buckets` and `commit_ord` are
 through the `spawn_binds` join above: a cold tab with no agent attached scores
 nothing and sinks to the bottom of the live block.
 
-## The drive — DONE, twice, both findings above came from it
+**The ranking had a second layer.** (CodeRabbit, #261.) The bar ranks live rows
+in TWO layers: rows cluster by `repo_root`, and the clusters rank by summed
+member score. `restore_rows` reproduced only the inner one, so a repo holding
+several middling rows — which outranks another repo's single better one in the
+bar — lost on the host. Since launch runs the first row, a relaunch started an
+agent that was not the one on top.
+
+The lesson is the one the first copy already taught: **do not mint a second
+copy of a ranking rule.** The comparator now lives in
+`clave_types::sort_live_block` and both surfaces call it, beside
+`frecency_millis`, whose doc had already written down why ("one function, so
+the two surfaces can never disagree"). Anything else that ever needs to rank
+clave rows goes there too.
+
+## The drive — DONE, twice, both live findings above came from it
 
 `just sandbox relaunch-restore`, scenario in `crates/clave/src/dev.rs`.
 
