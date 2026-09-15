@@ -339,9 +339,37 @@ fn take_checkout(rec: &mut AgentRecord, facts: Option<(String, Option<String>)>)
     let Some((cwd, branch)) = facts else {
         return false;
     };
+    // The same gate `clave add` puts on a cwd, for the same reason: this value
+    // is baked RAW into generated KDL, where a `"` or `\` is a parse error and
+    // the tab silently fails to open. A directory may legally hold either, so
+    // the transcript can name one. Refuse the move instead of persisting a
+    // value a later launch cannot use; the row keeps the checkout it had, which
+    // is stale but openable. Validation only, deliberately no canonicalize:
+    // this runs on the hook's hot path and must not touch the filesystem.
+    if crate::add::validate_cwd(&cwd).is_err() {
+        return false;
+    }
     let branch = branch.unwrap_or_else(|| "-".to_string());
     if rec.cwd == cwd && rec.branch == branch {
         return false;
+    }
+    // Leaving the repo invalidates every repo-scoped fact on the row, not just
+    // the branch. `pr::checkout_dir` runs `gh` from `repo_root`, NOT from
+    // `cwd`, so a root left behind asks the old remote about the new branch —
+    // and a branch name that exists in both repos comes back with a PR number
+    // belonging to a different project. `default_branch` lies the same way, and
+    // the bar blanks the branch cell on it. Nothing here asks git where the new
+    // root is, so the honest answer is the empty root that `pr::resolve_pr`
+    // already refuses outright. A move WITHIN the repo (the worktree case this
+    // fix exists for) keeps all of it, which is why the test is the root and
+    // not merely inequality.
+    if !rec.repo_root.is_empty() && !std::path::Path::new(&cwd).starts_with(&rec.repo_root) {
+        rec.repo_root.clear();
+        rec.default_branch = None;
+        // The cached number answers a question about the repo just left. The
+        // branch change alone would restale it, but the card is read at a
+        // glance and must not show another project's PR for even one event.
+        rec.pr_number = None;
     }
     // The one move that can take a row OUT of a worktree, so the tree mark
     // must not outlive the directory it describes — the same component-wise
@@ -560,8 +588,32 @@ fn unix_from_iso8601(ts: &str) -> Option<u64> {
     // Byte 19 closes the time. `Z` ends the stamp and `.` opens the fraction;
     // anything else is an OFFSET (`+09:00`), and reading one as UTC would be
     // wrong by up to fourteen hours with nothing to show for it.
-    if !matches!(b[19], b'.' | b'Z') {
-        return None;
+    //
+    // The whole suffix is checked, not just this byte. The parser reads bytes
+    // 0..19 and stops, so testing byte 19 alone accepts `…T15:17:24Zjunk` and
+    // `…T15:17:24.bad` as valid instants. This bound exists to fail CLOSED —
+    // an unreadable stamp must drop the launch, not date it — so a stamp that
+    // does not end exactly where it claims to is refused.
+    match b[19] {
+        b'Z' => {
+            if b.len() != 20 {
+                return None;
+            }
+        }
+        b'.' => {
+            // A fraction is one or more digits, then `Z`. The value is
+            // discarded: this clock is whole seconds, and a sub-second is
+            // never the difference between a launch inside a six-hour bound
+            // and outside it.
+            let frac = &b[20..];
+            if frac.len() < 2
+                || frac[frac.len() - 1] != b'Z'
+                || !frac[..frac.len() - 1].iter().all(u8::is_ascii_digit)
+            {
+                return None;
+            }
+        }
+        _ => return None,
     }
     // Every field position is an ASCII digit, checked here rather than left to
     // `parse`, which accepts a leading `+`: without this `2026-+9-14T…` reads
@@ -3521,6 +3573,159 @@ mod tests {
 
         take_checkout(&mut rec, checkout_from_tail(&line("/repo")));
         assert_eq!(rec.worktree, None, "the row has left the tree");
+    }
+
+    /// A checkout the layout generator cannot bake must not reach the store.
+    ///
+    /// CodeRabbit 2026-09-15 (major): `cwd` is interpolated RAW into generated
+    /// KDL, and `add::validate_cwd` refuses a `"`, a `\` or a control char for
+    /// that reason. This path wrote the transcript's value straight past that
+    /// gate, so a session running in a directory holding one of those — legal
+    /// on unix, and the transcript reports it faithfully — persisted a value
+    /// that made the NEXT launch or resume fail to open a tab, long after the
+    /// hook that recorded it.
+    #[test]
+    fn a_checkout_the_layout_cannot_bake_is_refused_rather_than_stored() {
+        // Built with `json!`, not `format!`: a hand-written fixture holding a
+        // quote or a backslash is INVALID JSON, so the parser refuses it first
+        // and the test passes without ever reaching the guard. Caught by
+        // reverting the guard and finding this test still green.
+        let line = |cwd: &str| {
+            serde_json::json!({
+                "type": "user",
+                "cwd": cwd,
+                "gitBranch": "b",
+                "message": { "role": "user" },
+            })
+            .to_string()
+        };
+        let mut rec = rec("u1");
+
+        // A quote and a backslash each break the KDL string the cwd is baked
+        // into. The row keeps the checkout it had: stale, but openable.
+        for bad in ["/repo/\"evil\"", r"/repo/we\ird", "/repo/a\nb"] {
+            let facts = checkout_from_tail(&line(bad));
+            assert_eq!(
+                facts.as_ref().map(|(c, _)| c.as_str()),
+                Some(bad),
+                "the fixture must reach the guard, not die in the parser"
+            );
+            let moved = take_checkout(&mut rec, facts);
+            assert!(!moved, "{bad:?} must not move the row");
+            assert_eq!(rec.cwd, "/x", "{bad:?} must not reach the record");
+            assert_eq!(rec.branch, "main", "and must not take the branch with it");
+        }
+
+        // The gate is the character, not the move: an ordinary path still moves,
+        // spaces and all.
+        assert!(take_checkout(
+            &mut rec,
+            checkout_from_tail(&line("/repo/a b/dir"))
+        ));
+        assert_eq!(rec.cwd, "/repo/a b/dir");
+    }
+
+    /// Leaving the repo must drop every fact that described it, not just the
+    /// branch.
+    ///
+    /// CodeRabbit 2026-09-15 (major): `pr::checkout_dir` runs `gh` from
+    /// `repo_root`, never from `cwd`. A row that moved to another repository
+    /// therefore asked the OLD remote about its NEW branch, and a branch name
+    /// both repos carry answers with a PR number belonging to the other
+    /// project — a wrong number on the card, which is worse than the blank this
+    /// PR set out to fix. `default_branch` lies the same way, and the bar
+    /// blanks the branch cell on it.
+    #[test]
+    fn leaving_the_repo_drops_the_facts_that_only_describe_the_repo() {
+        let line = |cwd: &str, branch: &str| {
+            format!(
+                r#"{{"type":"user","cwd":"{cwd}","gitBranch":"{branch}","message":{{"role":"user"}}}}"#
+            )
+        };
+        let mut rec = rec("u1");
+        rec.cwd = "/repo/clave".into();
+        rec.repo_root = "/repo/clave".into();
+        rec.default_branch = Some("main".into());
+        rec.branch = "main".into();
+        rec.pr_number = Some(260);
+
+        // A move WITHIN the repo — the worktree case this whole fix exists for
+        // — keeps all of it. The repo is still the repo.
+        take_checkout(
+            &mut rec,
+            checkout_from_tail(&line("/repo/clave/.claude/worktrees/card", "wt")),
+        );
+        assert_eq!(rec.repo_root, "/repo/clave", "same repo, same root");
+        assert_eq!(rec.default_branch.as_deref(), Some("main"));
+        assert_eq!(
+            rec.pr_number,
+            Some(260),
+            "the number still answers its repo"
+        );
+
+        // A sibling whose path merely SHARES A PREFIX is a different repo. The
+        // test is component-wise, so `/repo/clave-docs` cannot claim
+        // `/repo/clave` (#86's standing lesson, in the other direction).
+        let mut sibling = rec.clone();
+        take_checkout(
+            &mut sibling,
+            checkout_from_tail(&line("/repo/clave-docs", "wt")),
+        );
+        assert!(sibling.repo_root.is_empty(), "a prefix is not a parent");
+
+        // Out of the repo entirely: an empty root is what `pr::resolve_pr`
+        // already refuses, so no `gh` question is asked of the wrong remote.
+        take_checkout(
+            &mut rec,
+            checkout_from_tail(&line("/elsewhere/other", "wt")),
+        );
+        assert!(
+            rec.repo_root.is_empty(),
+            "the root described the repo it left"
+        );
+        assert_eq!(rec.default_branch, None);
+        assert_eq!(rec.pr_number, None, "that number was another project's");
+        assert_eq!(rec.cwd, "/elsewhere/other", "and the move still happened");
+        assert!(
+            crate::pr::resolve_pr(&|_| panic!("gh must not run"), &rec.repo_root, &rec.branch)
+                .is_none(),
+            "an empty root is refused before `gh` is reached"
+        );
+    }
+
+    /// A stamp must end exactly where it claims to.
+    ///
+    /// CodeRabbit 2026-09-15 (minor): the parser reads bytes 0..19 and stops,
+    /// so checking byte 19 alone dated `…24Zjunk` and `…24.bad` as valid
+    /// instants. The bound exists to fail CLOSED — an unreadable stamp drops
+    /// the launch rather than dating it — so trailing garbage must be refused,
+    /// not ignored.
+    #[test]
+    fn a_timestamp_must_end_exactly_where_it_claims_to() {
+        // Accepted: bare `Z`, and any fraction closed by `Z`.
+        for good in [
+            "2026-09-14T15:17:24Z",
+            "2026-09-14T15:17:24.1Z",
+            "2026-09-14T15:17:24.123Z",
+            "2026-09-14T15:17:24.123456789Z",
+        ] {
+            assert_eq!(
+                unix_from_iso8601(good),
+                Some(1_789_399_044),
+                "{good} names a real instant, and the fraction is discarded"
+            );
+        }
+        // Refused: anything after the instant the stamp names.
+        for bad in [
+            "2026-09-14T15:17:24Zjunk",  // trailing garbage past a closed stamp
+            "2026-09-14T15:17:24.bad",   // a fraction that is not digits
+            "2026-09-14T15:17:24.123",   // a fraction never closed by `Z`
+            "2026-09-14T15:17:24.Z",     // an EMPTY fraction
+            "2026-09-14T15:17:24.12Zx",  // closed, then garbage
+            "2026-09-14T15:17:24+09:00", // an offset, read as UTC would be 9h wrong
+        ] {
+            assert_eq!(unix_from_iso8601(bad), None, "{bad} must not date a launch");
+        }
     }
 
     /// A launch no record ever closes must still stop holding the mark.
