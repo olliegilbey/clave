@@ -3,13 +3,13 @@
 Worktree `.claude/worktrees/live-set-restore`, branch
 `worktree-live-set-restore`, on `main`. It was built on `worktree-triple-card`
 — the maintainer's call, since triple-card's sandbox isolation work had to
-merge first — and rebased onto `main` once that landed as #259. Ten commits,
-all four gates green, 754 tests, `just mutants main` at one survivor of 90 (`run_scenario`'s own
-return, which only the drive exercises).
+merge first — and rebased onto `main` once that landed as #259. All four gates
+green at HEAD.
 
-The design is `docs/superpowers/specs/2026-09-11-live-set-restore-design.md`
-(on `main`, untracked). Read it first; this file is only what has changed
-since it was written.
+There is no committed design spec. An earlier draft of this file pointed at
+`docs/superpowers/specs/2026-09-11-live-set-restore-design.md` "on `main`,
+untracked" — it is in neither the tree nor git, so nobody in a worktree or a
+fresh clone can read it. This file is the record.
 
 ## The complaint being fixed
 
@@ -51,8 +51,10 @@ store: 185 rows, 11 live.
   machine (18 GB, ~5 GB typically free); a 16-way run started with 4.1 GB free
   took 17.3 s instead of 3.5 s.
 - **Receiving a TabUpdate IS the focus signal.** zellij delivers it only to the
-  active tab. No new signal was needed — the effect rides `identity_effects`,
-  the existing coherence+active election.
+  active tab. **Corrected 2026-09-15:** that is true of the tab frame and NOT
+  of the identity pass it was used to justify — a store snapshot re-enters
+  `identity_effects` on every instance, so the start arm now rides the beacon
+  (`own_tab_focused`), like every other arm that starts something.
 - **`add::live_uuids` already matches the baked `spawn` args form**, for the
   pre-exec window. A held pane is that window standing still, so a commit on a
   restored row already finds its tab instead of opening a second one. **No
@@ -114,10 +116,14 @@ clave rows goes there too.
 
 `just sandbox relaunch-restore`, scenario in `crates/clave/src/dev.rs`.
 
-**One launch, not two.** The store learns the live set from rows that still
-carry their dead session's tab binds — exactly what a killed session leaves
-behind — so the scenario stages rows *already bound to tabs* and a single
-launch exercises the real capture path end to end.
+**One launch, not two — and that choice is what hid the decay.** The store
+learns the live set from rows that still carry their dead session's tab binds,
+so the scenario stages rows *already bound to tabs* and a single launch
+exercises the capture path. What a single launch cannot exercise is the
+SECOND one, which is where the set is rebuilt from what the first session
+actually recorded. The drive needs a relaunch phase (see TESTING.md's escape
+record); until it has one, a re-drive of this feature must quit and relaunch by
+hand, and check the set comes back the same size.
 
 **The fixture stages recency AGAINST tab order on purpose.** Tab ids are
 0, 3, 4, 9 (non-contiguous: gaps are what a real session accumulates) in slug
@@ -133,6 +139,38 @@ the most recently touched row in the fixture.
 
 The maintainer's eyeball verdict: "this is a UX improvement overall", and
 "that seems to work perfectly now".
+
+## The swarm review, 2026-09-15 — six more findings, all fixed
+
+Seven blind lanes plus a verifier, adapted from the Olympus `swarm-review`
+skill. No gate caught any of these either; the count of defects on this branch
+that a human or a machine reviewer found, and no gate did, is now nine.
+
+- **The restored set decayed.** `last_live` is built from tab binds, and a
+  restored tab wrote no bind until its spawn ran — so the set recorded only the
+  tabs the human VISITED. Ten rows restored, two worked in, quit: two rows
+  back, then one. The complaint this branch fixes, arriving by a slower route.
+  Proved with a temporary store test before fixing. A restored tab now reports
+  its row at once (`model::restored_bind_effects`), which makes it the bound
+  row it already is on screen; closing one still removes it, through the
+  existing prune path. **This is why the second launch has to be driven.**
+- **The start arm used the poisoned gate.** See the corrected finding above.
+- **The ranking key still had three homes** (bar live, bar dormant, host), and
+  the two crates had already drifted in shape. `clave_types::live_key` now.
+  The cluster layer moved for this reason in #261; the key did not follow.
+- **The binary matcher had two homes and the release arm had no test.** A
+  release install is the only environment that bakes the versioned absolute
+  path — a sandbox shims a bare `clave` — so the copy that mattered was the one
+  neither the suite nor either drive reached. Now `clave_types::is_clave_binary`.
+  The same parse also broke on an install path containing a space.
+- **An emptied restored set launched nothing.** Emptiness was tested BEFORE the
+  cwd filter, so a day when every restored cwd is rejected baked a bar and no
+  agent — worse than the cold start it replaced. The whole bake decision moved
+  to `setup::bakeable_rows`, beside its siblings, because `launch_session` is
+  excluded from `just mutants` on the grounds that its pieces are each tested
+  directly, and that had stopped being true.
+- **Three documentation debts the project's own rules mandate:** the new terms,
+  and two traps left in this file instead of FOOTGUNS.md. Both now written.
 
 ## Deferred, by agreement
 
