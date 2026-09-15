@@ -285,6 +285,81 @@ pub fn summary_from_tail(tail: &str) -> Option<String> {
     last_tail_field(tail, "summary", "summary")
 }
 
+/// Where the session is living RIGHT NOW, and the branch of that same record:
+/// `(cwd, branch)`, with `None` for a branch the record cannot name.
+///
+/// Read as a PAIR from one record, never two scans. A cwd from one line and a
+/// branch from another can describe different checkouts, and writing that pair
+/// down would mint a row that has never existed.
+///
+/// **Why the transcript and not the payload.** Every hook event carries a
+/// `cwd`, but only the #226 adoption path reads it, so an existing row keeps
+/// whatever checkout it was minted in. Nothing else re-derives it: `clave
+/// spawn` repoints a row it finds relocated, and that is the only writer. A
+/// session that moves AFTER it is opened — a `cd` into a worktree, most often —
+/// therefore leaves its row describing the old checkout for ever, and both the
+/// branch cell and `pr-sync`'s `gh` question are asked of the wrong one.
+/// Measured 2026-09-15: 75 of 350 transcripts change cwd mid-session, 21%.
+///
+/// The transcript answers it for free — 350 of 350 carry both fields inside
+/// the 64 KiB window this hook already parses — and it is the source that
+/// out-ranks the store (AGENTS.md).
+fn checkout_from_tail(tail: &str) -> Option<(String, Option<String>)> {
+    tail.lines().rev().find_map(|line| {
+        // Byte pre-filter before the parse, same discipline as the mark above.
+        if !line.contains(r#""cwd":"#) {
+            return None;
+        }
+        let v: serde_json::Value = serde_json::from_str(line).ok()?;
+        let cwd = v.get("cwd")?.as_str()?.trim();
+        if cwd.is_empty() {
+            return None;
+        }
+        // `HEAD` is Claude Code's detached-head answer, not a branch name — 50
+        // of 350 transcripts end on it. Recording it would put the literal word
+        // HEAD in the card's branch cell and send `gh` looking for a PR on it.
+        let branch = v
+            .get("gitBranch")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|b| !b.is_empty() && *b != "HEAD")
+            .map(str::to_owned);
+        Some((cwd.to_owned(), branch))
+    })
+}
+
+/// Move the row to the checkout its transcript says it is in. Returns whether
+/// anything moved, because the card renders all three cells.
+///
+/// A branch the record could not name is written as `-`, the sentinel
+/// `add::record_branch` already uses for a detached resume and the bar already
+/// blanks. Holding the PREVIOUS branch would be worse than blank: it names a
+/// branch of the checkout the row has just left.
+fn take_checkout(rec: &mut AgentRecord, facts: Option<(String, Option<String>)>) -> bool {
+    let Some((cwd, branch)) = facts else {
+        return false;
+    };
+    let branch = branch.unwrap_or_else(|| "-".to_string());
+    if rec.cwd == cwd && rec.branch == branch {
+        return false;
+    }
+    // The one move that can take a row OUT of a worktree, so the tree mark
+    // must not outlive the directory it describes — the same component-wise
+    // rule, and the same reasoning, as `store::apply_relocation`. A move
+    // WITHIN the worktree keeps its mark; a move out drops to unknown, which
+    // is honest: nothing here has asked git where the new checkout's root is.
+    if rec
+        .worktree
+        .as_deref()
+        .is_some_and(|w| !std::path::Path::new(&cwd).starts_with(w))
+    {
+        rec.worktree = None;
+    }
+    rec.cwd = cwd;
+    rec.branch = branch;
+    true
+}
+
 /// The tool name a fan-out arrives under. Measured 2026-09-14 over 1196
 /// transcripts reaching back to 2026-08-12: every launch on record is written
 /// `Agent`, and the older `Task` spelling appears in none of them. It was
@@ -1462,6 +1537,13 @@ pub fn apply_hook_event(
     // holds. Silence inside a tail we did read is not a hold; it is an empty
     // fleet. See [`subagents_from_tail`].
     changed |= take_subagents(rec, event, jsonl_tail.map(|t| subagents_from_tail(t, now)));
+    // Which checkout this row is living in (#232's branch and PR cells). Read
+    // from `parsed`, not `tail`: the meter has no reading of its own to yield
+    // to here, exactly as the subagent mark above. A row that moved keeps a
+    // stale `pr_number` for at most one TTL — `pr_is_stale` fires on the
+    // branch change itself, so the next hook spawns `pr-sync` for the new
+    // question without waiting the 5 minutes out.
+    changed |= take_checkout(rec, parsed.and_then(checkout_from_tail));
     let level_moved = restamp_level(rec, smart_zone());
     // BOTH fields gate the push, not just the level. The glyph only moves once
     // per tenth of the zone, but #105 renders the raw count as text — gating on
@@ -3341,6 +3423,104 @@ mod tests {
             command,
             finish("toolu_a")
         )));
+    }
+
+    /// A row follows its session into a worktree, because the transcript says
+    /// where the session is and the row does not.
+    ///
+    /// Reported from the live fleet 2026-09-15: a card showing `clave` with no
+    /// branch and no PR, whose session was in `.../worktrees/live-set-restore`
+    /// on `worktree-live-set-restore` with #261 open. The row still said `main`
+    /// — so the branch cell blanked (the bar hides the default branch) and
+    /// `pr-sync` asked `gh` for a PR on `main`, correctly found none, and cached
+    /// the miss. Nothing was broken in the PR path; the question was wrong.
+    #[test]
+    fn a_row_follows_its_session_into_the_checkout_the_transcript_names() {
+        let line = |cwd: &str, branch: &str| {
+            format!(
+                r#"{{"type":"user","cwd":"{cwd}","gitBranch":"{branch}","message":{{"role":"user","content":"hi"}}}}"#
+            )
+        };
+        let mut rec = rec("u1");
+        rec.cwd = "/repo".into();
+        rec.branch = "main".into();
+
+        // The move the field reported: same repo, into a linked worktree.
+        assert!(take_checkout(
+            &mut rec,
+            checkout_from_tail(&line("/repo/.claude/worktrees/wt", "worktree-wt"))
+        ));
+        assert_eq!(rec.cwd, "/repo/.claude/worktrees/wt");
+        assert_eq!(rec.branch, "worktree-wt");
+        // Idempotent: a row already where the transcript says is not a write,
+        // and `changed` gates the snapshot push — every hook event would
+        // otherwise repaint the whole fleet for nothing.
+        assert!(!take_checkout(
+            &mut rec,
+            checkout_from_tail(&line("/repo/.claude/worktrees/wt", "worktree-wt"))
+        ));
+
+        // The NEWEST record wins, and the pair comes from ONE record: a cwd
+        // from one line beside a branch from another describes a checkout that
+        // has never existed.
+        let moved = format!(
+            "{}\n{}",
+            line("/repo/.claude/worktrees/wt", "worktree-wt"),
+            line("/repo", "main")
+        );
+        assert_eq!(
+            checkout_from_tail(&moved),
+            Some(("/repo".to_string(), Some("main".to_string())))
+        );
+
+        // A detached head is not a branch name. `HEAD` in the cell would be a
+        // lie the bar renders, and a PR question `gh` cannot answer.
+        let mut detached = rec.clone();
+        assert!(take_checkout(
+            &mut detached,
+            checkout_from_tail(&line("/repo/other", "HEAD"))
+        ));
+        assert_eq!(detached.branch, "-", "the sentinel, not the old branch");
+        assert_eq!(
+            crate::pr::resolve_pr(&|_| Some("261".into()), "/repo", "-"),
+            None,
+            "the sentinel must never reach `gh` as a --head argument"
+        );
+
+        // A record with no cwd at all leaves the row alone — the tail is the
+        // only source, and silence in it is not an instruction to move.
+        let mut untouched = rec.clone();
+        assert!(!take_checkout(
+            &mut untouched,
+            checkout_from_tail(r#"{"type":"assistant","message":{"model":"claude-opus-5"}}"#)
+        ));
+        assert_eq!(untouched.cwd, "/repo/.claude/worktrees/wt");
+    }
+
+    /// The worktree mark dies with the directory it describes.
+    ///
+    /// Component-wise, the same rule `store::apply_relocation` already applies
+    /// on the spawn path: a move WITHIN the worktree keeps the mark, a move out
+    /// drops it to unknown. Nothing here asks git where the new checkout's root
+    /// is, so unknown is the honest answer — and a tree glyph on a row that has
+    /// left the tree is the exact defect the field was widened to fix.
+    #[test]
+    fn leaving_a_worktree_drops_the_mark_and_moving_inside_it_does_not() {
+        let line = |cwd: &str| {
+            format!(
+                r#"{{"type":"user","cwd":"{cwd}","gitBranch":"b","message":{{"role":"user"}}}}"#
+            )
+        };
+        let mut rec = rec("u1");
+        rec.cwd = "/repo/wt".into();
+        rec.branch = "b".into();
+        rec.worktree = Some("/repo/wt".into());
+
+        take_checkout(&mut rec, checkout_from_tail(&line("/repo/wt/crates/clave")));
+        assert_eq!(rec.worktree.as_deref(), Some("/repo/wt"), "still inside it");
+
+        take_checkout(&mut rec, checkout_from_tail(&line("/repo")));
+        assert_eq!(rec.worktree, None, "the row has left the tree");
     }
 
     /// A launch no record ever closes must still stop holding the mark.

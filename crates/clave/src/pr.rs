@@ -35,7 +35,11 @@ pub fn resolve_pr(
     repo_root: &str,
     branch: &str,
 ) -> Option<u32> {
-    if repo_root.is_empty() || branch.is_empty() {
+    // `-` is the host's "asked and could not tell" branch (`add::record_branch`,
+    // and `hook::take_checkout` for a session that moved into a detached head).
+    // It is a sentinel, not a name: `gh pr list --head -` is a question about a
+    // branch nobody has.
+    if repo_root.is_empty() || branch.is_empty() || branch == "-" {
         return None;
     }
     let out = run(&[
