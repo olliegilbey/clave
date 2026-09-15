@@ -46,9 +46,12 @@ A bare `cargo test` exits 0 while skipping every one of the 63 model tests. Use
 `just test`.
 
 **Mutation testing is Tier 1 but deliberately not a gate.** `just mutants` runs
-`cargo-mutants` over the lines this branch changed; it is a considered act, not
-something every PR pays for. Which change classes owe a run is in the taxonomy
-below, and the reasoning is in *Six shapes of green-and-worthless test*.
+`cargo-mutants` over the lines this branch changed, and skips the mutants an
+earlier run already killed; it is a considered act, not something every PR pays
+for. Which change classes owe a run is in the taxonomy below, the reasoning is
+in *Six shapes of green-and-worthless test*, and what the cache is allowed to
+forget — plus when to reach for `just mutants-cold` — is under *Mutation
+testing* in Tier 1.
 
 Two ways this list has bitten:
 
@@ -450,8 +453,57 @@ other instrument reports.
 ```bash
 just mutants              # mutants in the lines this branch changed vs `main`
 just mutants HEAD~3       # ...vs any other base
+just mutants-cold         # the same, cache dropped — run this once before a PR
 just mutants-file crates/clave-bar/src/render.rs   # one module, deliberately
 ```
+
+#### The cache, and what it is allowed to forget
+
+`just mutants` carries two filters, and they do different jobs. `--in-diff`
+skips code this branch never touched. `--iterate` skips mutants an earlier run
+already killed. The second one exists because the first is not enough on a
+long-lived branch: the diff vs `main` only grows, so every re-run re-tested the
+whole branch. #261 reached 136 mutants and 17 minutes, of which 123 were
+already known good. **Measured 2026-09-15 on that branch: a re-run went 17m to
+52s, excluding 135 of 136, and the one mutant it did run was the open
+survivor.** Most of the 52s is the unmutated baseline build, which is the floor.
+
+The cache is a heuristic and the recipe treats it as one. Three invalidation
+layers, in the order they catch things:
+
+1. **The mutant's identity.** cargo-mutants names a mutant by file, line,
+   column and description. Edit an operator or a literal and the description
+   changes; insert a line and every mutant below it in that file moves. Either
+   way it leaves the cache and is re-tested.
+2. **Config and toolchain.** The recipe keys the cache on `cargo-mutants
+   --version`, `rustc --version` and a hash of `.cargo/mutants.toml`, in
+   `target/.mutants-cache-key`. A new `exclude_re` or a new compiler can flip a
+   verdict that a stale cache would then hide, so a moved key wipes
+   `mutants.out` and starts cold.
+3. **`just mutants-cold`.** The manual drop, for what layers 1 and 2 cannot see.
+
+**Know what layer 1 does NOT cover**, because the name misleads: it re-tests on
+identity, not on meaning. Measured the same day — changing `(ordinal, 0)` to
+`(ordinal, 7)` inside `clave_types::live_key` produced no new mutant to test,
+because no mutant's file, line, column or description moved. cargo-mutants'
+own book states the assumption plainly: your later edits never REMOVE coverage.
+
+That assumption fails in exactly one way here, and it is narrower than it
+sounds:
+
+- It cannot hide a **broken** test. cargo-mutants runs the unmutated baseline
+  before any mutant and aborts when it is red — measured, by breaking
+  `live_key` and watching the run refuse.
+- It can hide a **weakened** one. A test that asserts less still passes the
+  baseline, and the mutant it used to catch stays skipped.
+
+`just mutants-cold` is the answer to that second case, and the reason to run it
+is a change to a TEST, not a change to code. This is affordable only because
+mutation testing is advisory here and not a gate; a gate could not take a
+heuristic cache.
+
+`just mutants-file` is deliberately **not** cached. It is the deep run you
+reach for when a file is new or rewritten, and a cache would defeat its point.
 
 Configured in [`.cargo/mutants.toml`](../../.cargo/mutants.toml). Three things
 are load-bearing, and two of them are `--workspace` wearing different hats:
