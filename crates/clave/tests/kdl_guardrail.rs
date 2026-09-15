@@ -535,6 +535,11 @@ fn launch_layout_kdl_parses_a_restored_set_with_held_tabs() {
 }
 
 /// The first command pane anywhere in a tab's tree, in declaration order.
+///
+/// Recursive because the tab template is `[clave-bar (fixed) | pane]`, so the
+/// agent's command is a CHILD of the tab node and never the tab's own `run`.
+/// A non-recursive read returns `None` for every tab and the held assertion
+/// above then passes on an empty comparison.
 fn run_of(tab: &TiledPaneLayout) -> Option<&Run> {
     if tab
         .run

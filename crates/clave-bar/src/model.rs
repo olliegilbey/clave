@@ -571,6 +571,18 @@ struct BindSent {
     confirms: u32,
 }
 
+/// One instance's outstanding `clave bind` for a RESTORED tab. `BindSent`
+/// without `confirms`: that field counts the store advances that must hold a
+/// bind before `bind_effects` refunds its budget, and this leg needs no refund
+/// rule — the store carrying the bind ends the episode outright, which
+/// `restored_bind_effects` tests before it reaches the ledger at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RestoredBindSent {
+    tab_id: usize,
+    at_seq: u64,
+    tries: u32,
+}
+
 /// Bind re-emissions per (uuid, target tab) episode before we stop fighting.
 /// The heal RC-A needs is ONE; a lost push needs one or two; beyond that we
 /// are in an eviction ping-pong we cannot win (two agents whose panes both
@@ -721,6 +733,16 @@ pub struct BarModel {
     /// no matter how many frames arrive (C5 rd 4's echo gate re-fired per
     /// TabUpdate and exhausted the server's fds; this cannot).
     bind_sent: BTreeMap<String, BindSent>,
+    /// The same accounting for the RESTORED leg, kept apart on purpose.
+    ///
+    /// `bind_effects` walks every agent and CLEARS `bind_sent` for any uuid
+    /// whose pane is not registered in `uuid_to_pane`. A restored row is
+    /// exactly that case — its spawn has not run, so nothing registered a
+    /// pane — so a shared ledger is wiped on the very next line of
+    /// `settle_identity` and `BIND_MAX_TRIES` never bites. Measured at 12
+    /// subprocesses against a budget of 4 (CodeRabbit, #261); the budget is
+    /// the whole reason `Effect::BindRestored` is safe to emit ungated.
+    restored_bind_sent: BTreeMap<String, RestoredBindSent>,
     /// Last bind-leg state we reported (#178). Only a CHANGE is worth a line;
     /// see `Effect::BindStall`.
     bind_stall: Option<BindStallState>,
@@ -1590,9 +1612,18 @@ impl BarModel {
     /// ([`Self::run_held_effect`]); a bind is idempotent, store-confirmed and
     /// self-limiting, which is why it can run from a tab nobody is looking at.
     ///
-    /// Disjoint from `bind_effects` by construction: that leg needs a
+    /// Disjoint from `bind_effects` in what it EMITS: that leg needs a
     /// REGISTERED pane (`uuid_to_pane`), which only a spawn that has run
     /// produces, and this one refuses any pane that is not still waiting.
+    ///
+    /// Read that as "and so the two can share a ledger" and you get the
+    /// defect CodeRabbit found on #261. `bind_effects` does not only write
+    /// `bind_sent` for the uuids it emits — it walks EVERY agent and clears
+    /// the entry of each one without a registered pane, which is this leg's
+    /// whole population. The ledgers are therefore separate
+    /// ([`BarModel::restored_bind_sent`]), and the test that holds the line is
+    /// `a_restored_binds_budget_survives_the_ordinary_bind_leg_running_beside_it`
+    /// — the two single-leg budget tests beside it both pass either way.
     pub fn restored_bind_effects(&mut self) -> Vec<Effect> {
         let (Some(own), Some(pos)) = (self.own_tab(), self.own_tab_position()) else {
             return Vec::new();
@@ -1617,10 +1648,13 @@ impl BarModel {
         {
             return Vec::new(); // the store already carries this bind
         }
-        // The same ledger, budget and seq rule as the ordinary leg: a
-        // quiescent store costs no subprocesses however many frames arrive.
+        // The same budget and seq rule as the ordinary leg — a quiescent store
+        // costs no subprocesses however many frames arrive — but its OWN
+        // ledger. `bind_effects` clears `bind_sent` for every uuid without a
+        // registered pane, which is this leg's entire population, so sharing
+        // it uncaps us. See `BarModel::restored_bind_sent`.
         let seq = self.seq;
-        let (may_send, tries) = match self.bind_sent.get(&uuid) {
+        let (may_send, tries) = match self.restored_bind_sent.get(&uuid) {
             None => (true, 0),
             Some(s) if s.tab_id != own => (true, 0),
             Some(s) => (seq > s.at_seq && s.tries < BIND_MAX_TRIES, s.tries),
@@ -1628,15 +1662,20 @@ impl BarModel {
         if !may_send {
             return Vec::new();
         }
-        self.bind_sent.insert(
+        self.restored_bind_sent.insert(
             uuid.clone(),
-            BindSent {
+            RestoredBindSent {
                 tab_id: own,
                 at_seq: seq,
                 tries: tries + 1,
-                confirms: 0,
             },
         );
+        // Ledger hygiene, as `bind_effects` does it: an agent that has left the
+        // snapshot can never be matched again, so its entry would otherwise
+        // persist for the life of the instance.
+        let known: BTreeSet<&str> = self.agents.iter().map(|a| a.uuid.as_str()).collect();
+        self.restored_bind_sent
+            .retain(|uuid, _| known.contains(uuid.as_str()));
         vec![Effect::BindRestored { uuid, tab_id: own }]
     }
 
@@ -4965,6 +5004,41 @@ mod tests {
         assert!(
             m.restored_bind_effects().is_empty(),
             "the budget runs out rather than retrying forever"
+        );
+    }
+
+    /// The budget again, with the leg the SHELL actually runs beside it.
+    ///
+    /// `settle_identity` calls `restored_bind_effects` and then
+    /// `identity_effects` on one pass, and `bind_effects` inside the second
+    /// one walks EVERY agent and clears the ledger for any uuid whose pane is
+    /// not registered in `uuid_to_pane`. A restored row is by definition that
+    /// case — its spawn has not run, so nothing registered a pane — so a
+    /// shared ledger is wiped between passes and the cap above never bites.
+    /// The two tests above pass anyway, because they call one leg alone.
+    /// (CodeRabbit, #261.)
+    #[test]
+    fn a_restored_binds_budget_survives_the_ordinary_bind_leg_running_beside_it() {
+        // The fixture leaves OUR tab active, which the two tests above override
+        // away. That is exactly the difference: `identity_effects` bails before
+        // `bind_effects` on an unelected instance, so only an elected one — the
+        // human standing on the restored tab, before its spawn has registered a
+        // pane — reaches the clear list at all.
+        let mut m =
+            fleet_bar_with_held_own_pane(Some("clave spawn u-restored --name x --cwd /r"), false);
+        let mut seq = 1;
+        m.apply_snapshot(snap(seq, vec![agent("u-restored", Status::Working, None)]));
+        let mut reports = 0;
+        // Far past the cap: an uncapped leg emits on every store advance.
+        for _ in 0..(BIND_MAX_TRIES * 3) {
+            reports += m.restored_bind_effects().len();
+            let _ = m.identity_effects(); // the shell's very next line
+            seq += 1;
+            m.apply_snapshot(snap(seq, vec![agent("u-restored", Status::Working, None)]));
+        }
+        assert_eq!(
+            reports, BIND_MAX_TRIES as usize,
+            "the budget caps the subprocesses, whatever else runs on the pass"
         );
     }
 

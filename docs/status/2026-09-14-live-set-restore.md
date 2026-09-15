@@ -178,11 +178,59 @@ is the whole reason an emitter of fire-and-forget subprocesses is safe to run
 from an unelected instance, so it is now pinned: the retry ladder, the cap, and
 the fresh budget a renumbered tab gets.
 
-**State at handoff:** ten commits on top of the original nine, all four gates
-green, 771 tests. NOT pushed — the maintainer's call. The open question for the
-next live drive is cost, not correctness: a relaunch now fires one `clave bind`
-per restored tab in the first seconds (eleven rows, eleven short subprocesses,
-each an RMW under the store's flock). Nothing measures that yet.
+## The CodeRabbit CLI pass, 2026-09-15 — one more, and it was the budget again
+
+Run locally (`coderabbit review --base main --committed`) because the remote is
+rate limited. Five findings, all acted on; four were documentation. The tally of
+defects on this branch that a reviewer found and no gate did is now **ten**.
+
+**The restored bind's budget did not work.** The fix above gave the new leg a
+retry cap, and two tests pinned it — and both tests passed while the cap did
+nothing, because each exercises ONE leg alone. The shell runs two:
+`settle_identity` calls `restored_bind_effects` and then `identity_effects`, and
+`bind_effects` inside the second one does not only write `bind_sent` for the
+uuids it emits. It walks EVERY agent and CLEARS the entry of each one with no
+registered pane in `uuid_to_pane` — which is the restored leg's entire
+population, since a restored row's spawn has not run. So the ledger was wiped
+between passes and the cap never bit. Measured at **12 subprocesses against a
+budget of 4**, and unbounded in principle: one `clave bind` per store advance,
+for as long as the bind failed to land.
+
+It only bites an ELECTED instance, because `identity_effects` returns early
+otherwise — that is, the human standing on a restored tab in the window before
+its spawn registers a pane. Narrow, but it is the exact fd-exhaustion class
+(C5 rd 4) that `BIND_MAX_TRIES` exists to bound, and the budget is the whole
+stated reason `Effect::BindRestored` is safe to emit ungated.
+
+The ledgers are separate now (`BarModel::restored_bind_sent`), which leaves
+`bind_effects`' ping-pong reasoning untouched. The doc comment that invited the
+mistake said the two legs are "disjoint by construction"; that is true of what
+they EMIT and false of what they CLEAR, and it now says so.
+
+**The lesson is this branch's lesson for the third time:** a test that drives
+one leg of a seam proves nothing about the seam. The red test is
+`a_restored_binds_budget_survives_the_ordinary_bind_leg_running_beside_it`, and
+what makes it different from its two neighbours is one line — it calls the
+function the shell calls next.
+
+The four documentation findings: the spec still said the launch layout goes to
+a temp file (it is the stable `setup::launch_layout_path`); phase 6c asserted
+"bound before its agent runs" for every restored row including the eager first
+one, which starts at launch; the glossary's `held` row carried both meanings in
+one entry, now split into **held tab** (ours) and **zellij held flag** (theirs);
+and `run_of` in the kdl guardrail did not say why it recurses.
+
+**State at handoff:** eleven commits on top of the original nine, all four gates
+green, 772 tests. `just mutants main` after the fix: 76 re-tested, 67 caught,
+8 unviable, and the one standing survivor is `dev::run_scenario` — the QA
+drive's dispatcher, which no unit test reaches because the drive is validated by
+running it. Whether that earns an `exclude_re` entry beside `launch_session` is
+the maintainer's call, not a mutation-report call.
+
+The open question for the next live drive is still cost, not correctness: a
+relaunch fires one `clave bind` per restored tab in the first seconds (eleven
+rows, eleven short subprocesses, each an RMW under the store's flock). Nothing
+measures that yet.
 
 ## Deferred, by agreement
 

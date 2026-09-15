@@ -202,7 +202,8 @@ These three are constantly confused. They are not interchangeable.
 |---|---|
 | **selected** | The row for the currently focused tab. Exactly one. |
 | **live** / **dormant** | Has a tab open / does not — the tab decides it, not the process. A restored tab is live before its agent runs. See §3.1. |
-| **held** | A baked tab whose `clave spawn` has not run. Also zellij's flag for a command that ran and exited. See §3.1. |
+| **held tab** | OURS: a baked tab whose `clave spawn` has not run yet. See §3.1. |
+| **zellij held flag** | THEIRS: `PaneInfo.is_held`, which is also set for a command that ran and EXITED. A held tab is the subset with `!exited`. Never say "held" alone about a pane. |
 | **live set** | The rows that held a tab when the previous session died; what a relaunch brings back. See §3.1. |
 | **unread** | Finished while you were not looking — `done && !visited`. |
 | **stale** | `clave open` found the row's cwd missing. A row flag, **not** a status. |

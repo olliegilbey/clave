@@ -836,8 +836,9 @@ long-dead store rows: deferred.
   `attach --create`, ignoring `--layout`; (2) composes the launch layout
   **dynamically**: the bar-only template, plus one tab per row of the previous
   **live set**, ranked (`setup::restore_rows`) — pane command baked
-  `clave spawn <uuid> …` (resumes via the jsonl check), written to a temp file
-  and passed via `--layout`. Only the first tab runs; the rest are held. Every
+  `clave spawn <uuid> …` (resumes via the jsonl check), written to the stable
+  `setup::launch_layout_path` under the data dir — NOT a temp file — and
+  passed via `--layout`. Only the first tab runs; the rest are held. Every
   other store row appears as a dormant bar row (§6.6). **Superseded as
   written, 2026-09-15:** this paragraph described the single-eager-row launch,
   which is now only the fallback taken when the live set is empty — a first

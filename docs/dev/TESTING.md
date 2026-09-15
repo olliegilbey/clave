@@ -232,6 +232,15 @@ Two rules follow, and they are cheap:
    dev and release differ — the binary name is the standing example, and it has
    now escaped three times (#43, #44, #261). A sandbox drive cannot cover it by
    construction, so a unit fixture must.
+3. **Drive every leg the SHELL runs on one pass, not one leg alone.** #261's
+   restored bind had a retry cap and two tests pinning it, and the cap did
+   nothing: `settle_identity` calls `restored_bind_effects` and then
+   `identity_effects`, and `bind_effects` inside the second one clears the
+   shared ledger for exactly the uuids the first one writes. Both tests passed
+   because each called one function. Measured at 12 subprocesses against a
+   budget of 4. **When a test calls one model function, ask what the shell
+   calls on the next line** — and if the answer touches the same state, the
+   test proves less than its name claims.
 
 And the rule the duplicated-rule rows teach, which is not a testing rule at
 all: **do not build a checker that two copies agree — delete one of them.** A
