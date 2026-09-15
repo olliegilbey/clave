@@ -1786,6 +1786,29 @@ mod tests {
         }
     }
 
+    /// An unknown scenario name REFUSES, and says what it has.
+    ///
+    /// The only part of `run_scenario` a unit test can reach: everything after
+    /// the lookup resolves a real sandbox and writes to disk. It earns its
+    /// place twice over. A mistyped name reaching `just qa` must stop the run
+    /// rather than stage nothing and leave the maintainer waiting at a launch
+    /// prompt for a session that will never make sense — and it is the sole
+    /// assertion standing between the drive's whole entry point and
+    /// `Ok(())`, which is the mutant that survived every run on #261.
+    #[test]
+    fn an_unknown_scenario_refuses_and_names_the_ones_it_has() {
+        let err = run_scenario("no-such-scenario").expect_err("must not succeed silently");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("no-such-scenario"),
+            "the refusal repeats the name the human typed: {msg}"
+        );
+        assert!(
+            msg.contains(SCENARIOS[0].name),
+            "and lists what is available: {msg}"
+        );
+    }
+
     #[test]
     fn scenario_table_covers_the_c8_checklist() {
         // Names map 1:1 to the C8 validation steps, plus ux-gate1 (the

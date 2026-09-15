@@ -220,12 +220,19 @@ one, which starts at launch; the glossary's `held` row carried both meanings in
 one entry, now split into **held tab** (ours) and **zellij held flag** (theirs);
 and `run_of` in the kdl guardrail did not say why it recurses.
 
-**State at handoff:** eleven commits on top of the original nine, all four gates
-green, 772 tests. `just mutants main` after the fix: 76 re-tested, 67 caught,
-8 unviable, and the one standing survivor is `dev::run_scenario` — the QA
-drive's dispatcher, which no unit test reaches because the drive is validated by
-running it. Whether that earns an `exclude_re` entry beside `launch_session` is
-the maintainer's call, not a mutation-report call.
+**The last survivor is closed too.** `dev::run_scenario` could be replaced
+wholesale with `Ok(())` and every run stayed green, because the drive is
+validated by running it and no unit test reaches past the first line. The
+honest answer was a test, not an `exclude_re` entry: everything after the
+scenario lookup resolves a real sandbox and writes to disk, but the lookup
+itself returns early, so an unknown name is reachable and worth pinning on its
+own merits — a mistyped name reaching `just qa` must stop the run, not stage
+nothing and leave the maintainer waiting at a launch prompt for a session that
+will never make sense.
+
+**State at handoff:** twelve commits on top of the original nine, all four
+gates green, 773 tests, and a full COLD `just mutants main` over the whole
+branch diff: **136 mutants, 124 caught, 12 unviable, zero missed.**
 
 The open question for the next live drive is still cost, not correctness: a
 relaunch fires one `clave bind` per restored tab in the first seconds (eleven
