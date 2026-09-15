@@ -553,8 +553,7 @@ pub fn launch_layout_kdl(
                     &crate::add::sanitize_label(&r.label),
                     &r.uuid,
                     &r.cwd,
-                    i == 0,
-                    i > 0,
+                    i == 0, // the top of the rank is the one row a relaunch starts
                 )
             })
             .collect()
