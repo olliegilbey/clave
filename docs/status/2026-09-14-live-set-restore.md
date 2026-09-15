@@ -259,10 +259,17 @@ on top of it. Both traps are in FOOTGUNS.md now. The check that found it took
 about a minute: launch, touch nothing, count the binds in the store. That is
 phase 6c, and it is worth implementing rather than leaving as prose.
 
+**Re-driven live, 2026-09-15, and the relaunch loop closes.** Launch one: four
+restored tabs, nothing touched for 15 s, FOUR binds in the store (`seq` 15 to
+18 — exactly three subprocesses for three held tabs, so the budget does not
+over-fire). Killed. Launch two: baked all four again in the same rank order,
+and rebound all four without a tab being visited. Write four, quit, read four,
+rewrite four — so the set is now stable across relaunches instead of decaying
+toward one. The three held rows carry a `tab_id` with NO `pane_id`, which is
+the new leg's whole signature: a row recorded before its spawn has run.
+
 **State at handoff:** thirteen commits on top of the original nine, all four
-gates green. The relaunch fix is REBUILT and unit-green; it has not yet been
-re-driven live, and it must be — the live drive is the only thing that has ever
-caught this leg being wrong.
+gates green, and the relaunch seam verified end to end for the first time.
 
 The open question for the next live drive is still cost, not correctness: a
 relaunch fires one `clave bind` per restored tab in the first seconds (eleven
