@@ -1247,6 +1247,51 @@ pub fn restore_rows(store: &crate::store::Store, now_hour: u32) -> Vec<&crate::s
     rows.into_iter().map(|e| e.row).collect()
 }
 
+/// The rows launch actually bakes, and how a bad cwd is treated on each path.
+///
+/// Every baked cwd is guarded (`add::validate_cwd`) — a `"` or a control
+/// character emits malformed KDL and the whole session fails to create. The
+/// two paths fail differently ON PURPOSE. With one eager row a bad cwd is the
+/// only thing the launch was going to bake, so it stays fatal and loud. Across
+/// a restored set one bad row must not take the other ten down, so it is
+/// dropped, reported, and the rest still come back.
+///
+/// An emptied restored set falls through to the eager row. Checking the set
+/// for emptiness BEFORE the filter (as this did until the swarm review of
+/// #261) bakes a session with a bar and no agent at all on the day every
+/// restored cwd is rejected — strictly worse than the cold start it replaced.
+///
+/// Returns the rows and the lines to report, rather than reporting them
+/// itself: that keeps the decision pure, and the decision is the part worth
+/// testing. It lives here, beside `restore_rows` and `eager_row`, because
+/// `launch_session` is excluded from `just mutants` on the stated grounds that
+/// the pieces it orchestrates are each tested directly.
+fn bakeable_rows<'a>(
+    restored: Vec<&'a crate::store::AgentRecord>,
+    eager: Option<&'a crate::store::AgentRecord>,
+    mut check: impl FnMut(&str) -> anyhow::Result<()>,
+) -> anyhow::Result<(Vec<&'a crate::store::AgentRecord>, Vec<String>)> {
+    let mut dropped = Vec::new();
+    let kept: Vec<&crate::store::AgentRecord> = restored
+        .into_iter()
+        .filter(|r| match check(&r.cwd) {
+            Ok(()) => true,
+            Err(e) => {
+                dropped.push(format!("restore dropped {}: {e}", r.uuid));
+                false
+            }
+        })
+        .collect();
+    if !kept.is_empty() {
+        return Ok((kept, dropped));
+    }
+    let eager: Vec<&crate::store::AgentRecord> = eager.into_iter().collect();
+    for r in &eager {
+        check(&r.cwd)?;
+    }
+    Ok((eager, dropped))
+}
+
 /// First-run consent (spec §First run): the plan prints ALWAYS; the prompt
 /// fires only on a TTY — never prompt without one (Homebrew 2026). Pure
 /// over (tty, read line) so the gate is unit-testable.
@@ -1398,33 +1443,15 @@ pub fn launch_session() -> Result<()> {
     // one agent ready to work rather than a bar and no tabs.
     // Harmless when live (attach ignores --layout for an existing session).
     let store = crate::store::read_store(&crate::store::store_paths()?)?;
-    //
-    // Every baked cwd is guarded (add::validate_cwd) — a `"`/control char
-    // emits malformed KDL and the whole session fails to create. The two
-    // paths fail differently on purpose: with one eager row a bad cwd is the
-    // only thing the launch was going to bake, so it stays fatal and loud;
-    // across a restored set one bad row must not take the other ten down, so
-    // it is dropped and logged.
     let now_hour = crate::store::unix_hour(crate::store::now_unix());
-    let restored = restore_rows(&store, now_hour);
-    let rows: Vec<&crate::store::AgentRecord> = if restored.is_empty() {
-        let eager: Vec<&crate::store::AgentRecord> = eager_row(&store).into_iter().collect();
-        for r in &eager {
-            crate::add::validate_cwd(&r.cwd)?;
-        }
-        eager
-    } else {
-        restored
-            .into_iter()
-            .filter(|r| match crate::add::validate_cwd(&r.cwd) {
-                Ok(()) => true,
-                Err(e) => {
-                    crate::evlog::log_event("launch", &format!("restore dropped {}: {e}", r.uuid));
-                    false
-                }
-            })
-            .collect()
-    };
+    let (rows, dropped) = bakeable_rows(
+        restore_rows(&store, now_hour),
+        eager_row(&store),
+        crate::add::validate_cwd,
+    )?;
+    for line in dropped {
+        crate::evlog::log_event("launch", &line);
+    }
     let wasm = wasm_path()?;
     // Bake the environment's clave into the eager tab's spawn: the versioned
     // copy's absolute path in a stable session (immune to a newer PATH
@@ -2022,8 +2049,11 @@ mod tests {
         // a deleted worktree as most-recent would bake a tab whose spawn dies
         // at canonicalize. Skip it, fall through to the next viable row.
         use crate::store::{AgentRecord, LabelSource, Store};
-        let live_dir = std::env::temp_dir().join(format!("clave-eager-{}", std::process::id()));
-        std::fs::create_dir_all(&live_dir).unwrap();
+        // `tempfile` rather than a pid-keyed path: it is removed on drop, so a
+        // panicking test leaks nothing and a reused pid cannot inherit a stale
+        // directory. Same convention as the store tests.
+        let tmp = tempfile::tempdir().unwrap();
+        let live_dir = tmp.path().to_path_buf();
         let mk = |uuid: &str, cwd: &str, li: u64| AgentRecord {
             uuid: uuid.into(),
             cwd: cwd.into(),
@@ -2070,16 +2100,8 @@ mod tests {
         none.agents
             .insert("gone".into(), mk("gone", "/no/such/clave/eager/dir", 200));
         assert!(eager_row(&none).is_none());
-        let _ = std::fs::remove_dir_all(&live_dir);
     }
 
-    /// The read side of the live-set snapshot: `last_live` is a faithful
-    /// record, so it can name rows that no longer exist (idle-pruned between
-    /// sessions) or whose directory has since gone (a deleted worktree). Both
-    /// are dropped here rather than at write time — the store stays the honest
-    /// record, and only what launch can actually BAKE survives this call. A
-    /// vanished cwd left in would emit a tab whose spawn dies at canonicalize,
-    /// the same trap `eager_row` already guards.
     /// A store row with nothing on it but a uuid and a cwd — every field the
     /// restore reads is set by the caller, so a test says what it means.
     fn bare_record(uuid: &str, cwd: &str) -> crate::store::AgentRecord {
@@ -2118,11 +2140,85 @@ mod tests {
         }
     }
 
+    /// Across a restored set, one unbakeable row must not take the rest down.
+    #[test]
+    fn a_bad_cwd_in_a_restored_set_drops_that_row_and_keeps_the_others() {
+        let a = bare_record("u-a", "/good/a");
+        let b = bare_record("u-b", "/bad");
+        let c = bare_record("u-c", "/good/c");
+        let eager = bare_record("u-eager", "/good/e");
+        let (rows, dropped) = bakeable_rows(vec![&a, &b, &c], Some(&eager), |cwd| {
+            if cwd == "/bad" {
+                anyhow::bail!("bad cwd")
+            } else {
+                Ok(())
+            }
+        })
+        .expect("one bad row is not fatal across a set");
+        assert_eq!(
+            rows.iter().map(|r| r.uuid.as_str()).collect::<Vec<_>>(),
+            vec!["u-a", "u-c"]
+        );
+        assert_eq!(dropped.len(), 1, "the drop is reported, not silent");
+        assert!(dropped[0].contains("u-b"));
+    }
+
+    /// A set whose rows are ALL rejected must still launch something. Testing
+    /// the set for emptiness before the filter baked a bar and no agent —
+    /// worse than the cold start the restore replaced.
+    #[test]
+    fn a_restored_set_that_is_entirely_unbakeable_falls_back_to_the_eager_row() {
+        let a = bare_record("u-a", "/bad");
+        let eager = bare_record("u-eager", "/good");
+        let (rows, dropped) = bakeable_rows(vec![&a], Some(&eager), |cwd| {
+            if cwd == "/bad" {
+                anyhow::bail!("bad cwd")
+            } else {
+                Ok(())
+            }
+        })
+        .expect("the eager row is bakeable");
+        assert_eq!(
+            rows.iter().map(|r| r.uuid.as_str()).collect::<Vec<_>>(),
+            vec!["u-eager"],
+            "an emptied restored set falls through to the cold-start row"
+        );
+        assert_eq!(dropped.len(), 1);
+    }
+
+    /// With ONE row to bake, a bad cwd is the whole launch: fatal and loud,
+    /// never a session that silently came up empty.
+    #[test]
+    fn a_bad_cwd_on_the_eager_row_is_fatal() {
+        let eager = bare_record("u-eager", "/bad");
+        assert!(
+            bakeable_rows(vec![], Some(&eager), |_| anyhow::bail!("bad cwd")).is_err(),
+            "the cold-start path stays fatal"
+        );
+    }
+
+    /// A first run: nothing restored, nothing to be eager about, no error.
+    #[test]
+    fn nothing_to_bake_is_not_an_error() {
+        let (rows, dropped) = bakeable_rows(vec![], None, |_| Ok(())).expect("empty is ordinary");
+        assert!(rows.is_empty() && dropped.is_empty());
+    }
+
+    /// The read side of the live-set snapshot: `last_live` is a faithful
+    /// record, so it can name rows that no longer exist (idle-pruned between
+    /// sessions) or whose directory has since gone (a deleted worktree). Both
+    /// are dropped here rather than at write time — the store stays the honest
+    /// record, and only what launch can actually BAKE survives this call. A
+    /// vanished cwd left in would emit a tab whose spawn dies at canonicalize,
+    /// the same trap `eager_row` already guards.
     #[test]
     fn restore_rows_drops_pruned_and_vanished_rows() {
         use crate::store::{AgentRecord, LabelSource, Store};
-        let live_dir = std::env::temp_dir().join(format!("clave-restore-{}", std::process::id()));
-        std::fs::create_dir_all(&live_dir).unwrap();
+        // `tempfile` rather than a pid-keyed path: it is removed on drop, so a
+        // panicking test leaks nothing and a reused pid cannot inherit a stale
+        // directory. Same convention as the store tests.
+        let tmp = tempfile::tempdir().unwrap();
+        let live_dir = tmp.path().to_path_buf();
         let mk = |uuid: &str, cwd: &str| AgentRecord {
             uuid: uuid.into(),
             cwd: cwd.into(),
@@ -2180,7 +2276,6 @@ mod tests {
             restore_rows(&Store::default(), 0).is_empty(),
             "no snapshot ⇒ nothing to restore, and launch falls back to the eager row"
         );
-        let _ = std::fs::remove_dir_all(&live_dir);
     }
 
     /// The set is written in ascending tab id — the order the tabs were
@@ -2191,8 +2286,11 @@ mod tests {
     #[test]
     fn restore_rows_rank_by_the_same_key_the_bar_uses() {
         use crate::store::Store;
-        let live_dir = std::env::temp_dir().join(format!("clave-rank-{}", std::process::id()));
-        std::fs::create_dir_all(&live_dir).unwrap();
+        // `tempfile` rather than a pid-keyed path: it is removed on drop, so a
+        // panicking test leaks nothing and a reused pid cannot inherit a stale
+        // directory. Same convention as the store tests.
+        let tmp = tempfile::tempdir().unwrap();
+        let live_dir = tmp.path().to_path_buf();
         let here = live_dir.to_str().unwrap().to_string();
         let mut store = Store::default();
         // Tab-id order is a, b, c. Investment says b, then c, then a.
@@ -2224,7 +2322,6 @@ mod tests {
             store.agents.get_mut(uuid).unwrap().buckets.insert(0, count);
         }
         assert_eq!(uuids(&store), vec!["u-a", "u-c", "u-b"], "recency mode");
-        let _ = std::fs::remove_dir_all(&live_dir);
     }
 
     /// The layer ABOVE the row key (CodeRabbit, PR #261). The bar clusters
@@ -2238,8 +2335,11 @@ mod tests {
     #[test]
     fn restore_rows_rank_repo_clusters_the_way_the_bar_does() {
         use crate::store::Store;
-        let live_dir = std::env::temp_dir().join(format!("clave-cluster-{}", std::process::id()));
-        std::fs::create_dir_all(&live_dir).unwrap();
+        // `tempfile` rather than a pid-keyed path: it is removed on drop, so a
+        // panicking test leaks nothing and a reused pid cannot inherit a stale
+        // directory. Same convention as the store tests.
+        let tmp = tempfile::tempdir().unwrap();
+        let live_dir = tmp.path().to_path_buf();
         let here = live_dir.to_str().unwrap().to_string();
         let mut store = Store::default();
         // Flat, b1 wins at 8000. Clustered, repo a wins with Σ 9000.
@@ -2276,7 +2376,6 @@ mod tests {
             vec!["u-a1", "u-a2", "u-b1"],
             "a worktree row stays inside its repo's cluster"
         );
-        let _ = std::fs::remove_dir_all(&live_dir);
     }
 
     #[test]
