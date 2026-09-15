@@ -249,33 +249,55 @@ pub fn config_kdl(binary: &str, wasm: &str, row_height: clave_types::RowHeight) 
     )
 }
 
-/// The user's theme selection, extracted from their zellij config text
-/// (#145 half two's delivery channel; grill 2026-08-24).
+/// The top-level node names [`passthrough_slice_from`] copies out of the
+/// user's config. Ordered as they are written; the order is cosmetic, the
+/// membership is not — see that function for why each name earns its place.
+const PASSTHROUGH_NODES: [&str; 5] = [
+    "theme",
+    "themes",
+    "theme_dir",
+    "pane_frames",
+    "pane_frame_style",
+];
+
+/// The user's own settings that clave hands back, extracted from their zellij
+/// config text (#145 half two's delivery channel; widened by #262).
 ///
 /// `zellij --config <generated>` DISCARDS the user's own config.kdl entirely
-/// (FOOTGUNS/#122), so their `theme "…"` never reaches a clave session and
-/// the bar hardcoded kanagawa regardless. Theme DEFINITIONS need no help —
-/// even under `--config`, zellij still merges its built-in themes and the
-/// user themes dir (`apply_themes_to_config`, zellij-utils setup.rs:318-341)
-/// — so the whole passthrough is these three top-level nodes, copied
-/// verbatim: `theme` (the selection), `themes` (inline definitions) and
-/// `theme_dir` (a non-default definitions dir). First match per name, which
-/// is the read zellij itself performs (`KdlDocument::get` — FIRST match only,
-/// the same kdl 4.7.1 fact the unbind node in [`config_kdl`] leans on).
+/// (FOOTGUNS/#122), so nothing they set reaches a clave session. These node
+/// names are the carve-out, copied verbatim:
+///
+/// - `theme` (the selection), `themes` (inline definitions) and `theme_dir`
+///   (a non-default definitions dir) — #145. Theme DEFINITIONS need no help:
+///   even under `--config`, zellij still merges its built-in themes and the
+///   user themes dir (`apply_themes_to_config`, zellij-utils setup.rs:318-341).
+///   The SELECTION lives in `options`, which `--config` replaces, so it does.
+/// - `pane_frames` and `pane_frame_style` — #262. zellij 0.45.0 added the
+///   style, defaulting to `"titles"` where 0.44.x only ever drew the full box,
+///   so the same clave layout renders differently across a 0.44/0.45 pair of
+///   machines and the user had no say. 0.44.3 does not know the style key and
+///   IGNORES it (unknown option nodes are never read, so never rejected) —
+///   asserted against the pinned parser in the guardrail, not assumed.
+///
+/// First match per name, which is the read zellij itself performs
+/// (`KdlDocument::get` — FIRST match only, the same kdl 4.7.1 fact the unbind
+/// node in [`config_kdl`] leans on). Every name here must be one clave's own
+/// [`config_kdl`] does NOT emit, or the append collides with itself.
 ///
 /// An unparseable config yields nothing rather than an error: zellij would
 /// refuse that file for the user's own sessions too, and a clave launch that
 /// fails on someone else's syntax error helps nobody. Superseded by #114's
-/// layout channel (the user's whole config surviving) when that lands.
+/// layout channel (the user's whole config surviving) when that lands, at
+/// which point this whole mechanism retires.
 ///
 /// Pub for the KDL guardrail: the appended artifact must parse through the
 /// real zellij parser like every other generated KDL.
-pub fn theme_slice_from(user_config: &str) -> String {
+pub fn passthrough_slice_from(user_config: &str) -> String {
     let Ok(doc) = user_config.parse::<kdl::KdlDocument>() else {
         return String::new();
     };
     let mut out = String::new();
-    for name in ["theme", "themes", "theme_dir"] {
+    for name in PASSTHROUGH_NODES {
         if let Some(node) = doc.nodes().iter().find(|n| n.name().value() == name) {
             // Shallow trivia strip: the node's own leading whitespace and
             // comments belong to the USER's file, not the generated one.
@@ -290,20 +312,20 @@ pub fn theme_slice_from(user_config: &str) -> String {
     if !out.is_empty() {
         out.insert_str(
             0,
-            "// User theme passthrough (#145): copied from the user's zellij\n\
-             // config, which `--config` otherwise replaces wholesale.\n",
+            "// User config passthrough (#145, #262): copied from the user's\n\
+             // zellij config, which `--config` otherwise replaces wholesale.\n",
         );
     }
     out
 }
 
-/// [`theme_slice_from`] over the user's actual config file, resolved the way
+/// [`passthrough_slice_from`] over the user's actual config file, resolved the way
 /// zellij resolves it when clave execs it: `$ZELLIJ_CONFIG_FILE` wins, else
 /// `config.kdl` under the first existing candidate dir — `$ZELLIJ_CONFIG_DIR`,
 /// `~/.config/zellij`, `$XDG_CONFIG_HOME/zellij` (zellij-utils home.rs
 /// `default_config_dirs`; the system dir is omitted as it never carries a
-/// per-user theme). No file, no slice.
-fn user_theme_slice() -> String {
+/// per-user setting). No file, no slice.
+fn user_passthrough_slice() -> String {
     let path = std::env::var_os("ZELLIJ_CONFIG_FILE")
         .map(std::path::PathBuf::from)
         .or_else(|| {
@@ -319,7 +341,7 @@ fn user_theme_slice() -> String {
                 .map(|d| d.join("config.kdl"))
         });
     path.and_then(|p| std::fs::read_to_string(p).ok())
-        .map(|text| theme_slice_from(&text))
+        .map(|text| passthrough_slice_from(&text))
         .unwrap_or_default()
 }
 
@@ -907,12 +929,13 @@ pub fn write_generated(dir: &std::path::Path, binary: &str, wasm: &str) -> Resul
     // bake the SAME value (#232, `keybind_and_layout_plugin_configurations_match`)
     // — one read, passed to both.
     let row_height = crate::store::read_store(&crate::store::store_paths()?)?.row_height;
-    // The theme slice rides the generated config (#145): appended top-level
-    // nodes, which merge like any other config node — clave's own config
-    // defines no theme, so there is nothing to collide with. Re-read on every
-    // setup, so a theme change lands at the next clave launch.
+    // The passthrough slice rides the generated config (#145, #262): appended
+    // top-level nodes, which merge like any other config node — clave's own
+    // config emits none of those names, so there is nothing to collide with.
+    // Re-read on every setup, so a theme or frame change lands at the next
+    // clave launch.
     let mut config = config_kdl(binary, wasm, row_height);
-    config.push_str(&user_theme_slice());
+    config.push_str(&user_passthrough_slice());
     std::fs::write(dir.join("config.kdl"), config)?;
     std::fs::write(dir.join("layout.kdl"), layout_kdl(binary, wasm, row_height))?;
 
@@ -1373,8 +1396,8 @@ pub fn launch_session() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    mod theme_slice {
-        use crate::setup::theme_slice_from;
+    mod passthrough_slice {
+        use crate::setup::{PASSTHROUGH_NODES, passthrough_slice_from};
 
         #[test]
         fn copies_selection_inline_definitions_and_dir_nothing_else() {
@@ -1383,23 +1406,54 @@ mod tests {
                         keybinds clear-defaults=true { }\n\
                         themes {\n    custom {\n        fg 220 215 186\n    }\n}\n\
                         theme_dir \"/tmp/themes\"\n";
-            let slice = theme_slice_from(user);
+            let slice = passthrough_slice_from(user);
             assert!(slice.contains("theme \"kanagawa\""), "{slice}");
             assert!(slice.contains("themes {"), "{slice}");
             assert!(slice.contains("theme_dir \"/tmp/themes\""), "{slice}");
-            // Only the three theme nodes ride: keybinds are #114's problem,
-            // and the user's own trivia stays in the user's file.
+            // Only the listed nodes ride: keybinds are #114's problem, and the
+            // user's own trivia stays in the user's file.
             assert!(!slice.contains("keybinds"), "{slice}");
             assert!(!slice.contains("own comment"), "{slice}");
         }
 
+        /// #262: the frame pair is the whole point of widening the slice — a
+        /// 0.44 box and a 0.45 title line are the same layout on two machines,
+        /// and only the user's own config can settle which they get.
         #[test]
-        fn no_theme_nodes_or_unparseable_config_yield_an_empty_slice() {
-            assert_eq!(theme_slice_from("keybinds { }"), "");
-            assert_eq!(theme_slice_from(""), "");
+        fn copies_the_pane_frame_pair() {
+            let user = "pane_frames true\n\
+                        pane_frame_style \"full\"\n\
+                        mouse_mode false\n";
+            let slice = passthrough_slice_from(user);
+            assert!(slice.contains("pane_frames true"), "{slice}");
+            assert!(slice.contains("pane_frame_style \"full\""), "{slice}");
+            // Widening is deliberate and bounded: a neighbouring option the
+            // list does not name stays behind.
+            assert!(!slice.contains("mouse_mode"), "{slice}");
+        }
+
+        /// The append would collide with itself if clave's own config already
+        /// emitted one of these names — zellij honours the FIRST match, which
+        /// would be clave's, silently discarding the user's.
+        #[test]
+        fn no_passthrough_name_is_one_clave_emits_itself() {
+            let own = crate::setup::config_kdl("clave", "/tmp/bar.wasm", Default::default());
+            let doc: kdl::KdlDocument = own.parse().expect("clave's own config must parse");
+            for name in PASSTHROUGH_NODES {
+                assert!(
+                    !doc.nodes().iter().any(|n| n.name().value() == name),
+                    "config_kdl emits `{name}`, which the passthrough would then shadow"
+                );
+            }
+        }
+
+        #[test]
+        fn no_passthrough_nodes_or_unparseable_config_yield_an_empty_slice() {
+            assert_eq!(passthrough_slice_from("keybinds { }"), "");
+            assert_eq!(passthrough_slice_from(""), "");
             // zellij would refuse this file for the user's own sessions too;
             // clave must not fail their launch on it.
-            assert_eq!(theme_slice_from("theme \"a\" { unclosed"), "");
+            assert_eq!(passthrough_slice_from("theme \"a\" { unclosed"), "");
         }
 
         /// zellij reads config nodes via `KdlDocument::get`, FIRST match only
@@ -1407,7 +1461,7 @@ mod tests {
         /// carry the node zellij would actually honour.
         #[test]
         fn takes_the_first_theme_node_like_zellij_would() {
-            let slice = theme_slice_from("theme \"first\"\ntheme \"second\"\n");
+            let slice = passthrough_slice_from("theme \"first\"\ntheme \"second\"\n");
             assert!(slice.contains("\"first\""), "{slice}");
             assert!(!slice.contains("\"second\""), "{slice}");
         }
