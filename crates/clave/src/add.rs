@@ -334,6 +334,185 @@ pub fn main_worktree_path(worktrees: &[WorktreeEntry]) -> Option<&str> {
     worktrees.first().map(|w| w.path.as_str())
 }
 
+/// Every LINKED worktree in a parsed `worktree list`. Git documents the main
+/// tree as the FIRST entry — the fact [`main_worktree_path`] already rests on
+/// — so the linked ones are simply the rest. Pure, so the repair below tests
+/// without a repo.
+pub fn linked_worktrees(list: &[WorktreeEntry]) -> Vec<&str> {
+    list.iter().skip(1).map(|w| w.path.as_str()).collect()
+}
+
+/// The linked worktree a row lives IN, which is not always the row's `cwd`.
+/// `clave add` scans the picked directory as well as every worktree root, so
+/// a row can be keyed to a subdirectory — `…/wt/crates/clave` under a
+/// worktree at `…/wt`. Exact equality missed exactly those rows, and it also
+/// recorded the subdirectory rather than the worktree, which disagrees with
+/// what [`linked_worktree_root`] writes on the add path (`show-toplevel` is
+/// always the root). Both are fixed by matching the ROOT and recording it.
+///
+/// `Path::starts_with` compares components, so `/repo/wt` cannot claim
+/// `/repo/wt2`. The longest match wins, because a worktree may be nested
+/// inside another worktree's tree and the innermost one is the one it runs in.
+fn worktree_holding<'a>(
+    cwd: &str,
+    trees: &'a std::collections::BTreeSet<String>,
+) -> Option<&'a String> {
+    let cwd = std::path::Path::new(cwd);
+    trees
+        .iter()
+        .filter(|tree| cwd.starts_with(tree))
+        .max_by_key(|tree| tree.len())
+}
+
+/// Which repos [`heal_worktrees`] asks about: one entry per distinct root among
+/// the rows that do not yet name a worktree.
+///
+/// Split out from the shell around it because both of its rules are decisions,
+/// not plumbing, and neither is reachable by a test while it sits inside a
+/// function that needs a store on disk and a git binary.
+///
+/// A row that already names a worktree is not asked about — the repair is
+/// seed-only. An EMPTY root is not asked about either, because `git -C ""` is
+/// NOT a no-op: git resolves it against the process's own directory, so the
+/// answer would describe whatever repo `clave` was launched from and could
+/// stamp an unrelated tree onto the row. No writer mints an empty root today —
+/// `add` falls back to the picked path for a non-repo dir, and the hook writes
+/// no root at all — so this is a guard against the state, not a handler for one
+/// we create. Measured with
+/// `git -C "" rev-parse --show-toplevel` from a scratch repo, which prints that
+/// repo and exits 0.
+fn roots_to_ask<'a>(
+    rows: impl Iterator<Item = &'a crate::store::AgentRecord>,
+) -> std::collections::BTreeSet<String> {
+    rows.filter(|r| r.worktree.is_none())
+        .map(|r| r.repo_root.clone())
+        .filter(|root| !root.is_empty())
+        .collect()
+}
+
+/// Fill `worktree` on rows written while the field still meant "clave created
+/// this one" (see `store::AgentRecord::worktree`). The live store on
+/// 2026-09-14 had 195 rows and not one of them set, so the tree mark had
+/// never rendered; without this, each row would wait for its own next resume.
+///
+/// ONE `git worktree list` per distinct repo root, not per row: a repo's
+/// worktree set answers for every row that belongs to it, and a fleet spread
+/// over a dozen repos costs a dozen calls rather than two hundred. Every one
+/// of them runs OUTSIDE the store lock; only the mutation takes it.
+///
+/// Seed-only and never destructive, exactly like the frecency backfill it
+/// runs beside: a row that already names a worktree is left alone, and a repo
+/// git cannot answer for leaves its rows unknown rather than cleared.
+/// Returns the number of rows changed.
+pub fn heal_worktrees() -> Result<usize> {
+    let git = tool_path(crate::discover::ToolId::Git);
+    let paths = store_paths()?;
+
+    // Ask git BEFORE the lock. `with_store_mut` holds an exclusive flock
+    // across the whole read-modify-write, so every subprocess spawned inside
+    // it stalls every hook in the fleet; ten `worktree list` calls is a tenth
+    // of a second of that, at exactly the moment a launch is firing hooks.
+    // `read_store` is lock-free by design (writers rename atomically), and it
+    // is only used here to choose which repos to ask about.
+    let roots = roots_to_ask(crate::store::read_store(&paths)?.agents.values());
+    let asked: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> = roots
+        .into_iter()
+        .map(|root| {
+            let trees = linked_worktrees_of(&git, &root);
+            (root, trees)
+        })
+        .collect();
+
+    crate::store::with_store_mut(&paths, |s| {
+        let mut healed = 0;
+        for r in s.agents.values_mut() {
+            // Re-checked under the lock, so a row that learned its worktree
+            // while we were asking git keeps what it learned. A row ADDED in
+            // that window has no entry here and waits for the next tail —
+            // seed-only, like the backfill beside it.
+            if r.worktree.is_some() {
+                continue;
+            }
+            let Some(trees) = asked.get(&r.repo_root) else {
+                continue;
+            };
+            if let Some(tree) = worktree_holding(&r.cwd, trees) {
+                r.worktree = Some(tree.clone());
+                healed += 1;
+            }
+        }
+        healed
+    })
+}
+
+/// The launch and cut tail for [`heal_worktrees`], shaped like
+/// `backfill::run_on_version_refresh` beside it: best-effort, so a failure
+/// cannot break a setup or a release, and silent on zero, because a healthy
+/// store is the normal case and a tail must not narrate a no-op.
+pub fn heal_worktrees_on_refresh() {
+    match heal_worktrees() {
+        Ok(0) => {}
+        Ok(n) => {
+            println!("clave: recorded the worktree for {n} row(s)");
+            crate::evlog::log_event("heal", &format!("{n} rows learned their worktree"));
+        }
+        Err(e) => eprintln!("clave worktree repair: {e:#}"),
+    }
+}
+
+/// The canonical paths of `root`'s linked worktrees, or an empty set when git
+/// cannot answer. Canonical because every path a row holds is (S0b), and the
+/// caller compares the two as strings.
+fn linked_worktrees_of(
+    git: impl AsRef<std::ffi::OsStr>,
+    root: &str,
+) -> std::collections::BTreeSet<String> {
+    let git = git.as_ref();
+    let Ok(porcelain) = cmd_stdout(git, &["-C", root, "worktree", "list", "--porcelain"]) else {
+        return Default::default();
+    };
+    linked_worktrees(&parse_worktrees(&porcelain))
+        .iter()
+        .filter_map(|p| std::fs::canonicalize(p).ok())
+        .filter_map(|p| p.to_str().map(String::from))
+        .collect()
+}
+
+/// The worktree directory to RECORD for a checkout with this `toplevel`,
+/// given its repo's main tree (#61's provenance mark). `Some` only for a
+/// LINKED worktree: git counts the main checkout as one and a person does
+/// not, and lock §5.1 gives an ordinary checkout no mark at all.
+///
+/// Pure over the two paths so the decision tests without a repo — the git
+/// calls that answer them live in [`linked_worktree_root`]. Both must already
+/// be canonical, as everything keyed on a path here is (S0b).
+pub fn worktree_of(toplevel: &str, main_tree: Option<&str>) -> Option<String> {
+    match main_tree {
+        Some(main) if main != toplevel => Some(toplevel.to_string()),
+        _ => None,
+    }
+}
+
+/// [`worktree_of`], with git asked for both halves about `dir` itself.
+///
+/// Two git calls rather than a path test, and that is the point: a worktree
+/// may live inside the repo or anywhere else on disk, so its LOCATION proves
+/// nothing. `.claude/worktrees` (Claude Code's) and `.claude-worktrees`
+/// (clave's own) are merely the two spellings this machine happens to use —
+/// #86 is the standing lesson about deciding a repository fact from a name.
+///
+/// Any git failure, or a directory that no longer exists, reads as `None`:
+/// the mark is an assertion, and the bar never invents one (#232).
+fn linked_worktree_root(git: impl AsRef<std::ffi::OsStr>, dir: &str) -> Option<String> {
+    let git = git.as_ref();
+    let top = cmd_stdout(git, &["-C", dir, "rev-parse", "--show-toplevel"]).ok()?;
+    let top = std::fs::canonicalize(top.trim()).ok()?;
+    let porcelain = cmd_stdout(git, &["-C", dir, "worktree", "list", "--porcelain"]).ok()?;
+    let main = main_worktree_path(&parse_worktrees(&porcelain))
+        .and_then(|p| std::fs::canonicalize(p).ok())?;
+    worktree_of(top.to_str()?, main.to_str())
+}
+
 /// A `git worktree list --porcelain` record: the worktree path and its branch
 /// (None when the record is `detached`).
 pub struct WorktreeEntry {
@@ -624,6 +803,17 @@ pub fn merge_resume_record(existing: Option<&AgentRecord>, fresh: AgentRecord) -
             // then print the PREVIOUS conversation's ask as this one's
             // (CodeRabbit, 2026-09-13).
             wants: None,
+            // Fill, never erase (2026-09-14). A resume MEASURES the worktree
+            // again, and that is the only heal for every row written while
+            // the field was set solely by `clave add --worktree`. A `None`
+            // here is git failing or the directory being gone — never a
+            // picker aimed elsewhere, because this arm runs only for an
+            // existing row and `agent_cwd` is then the ROW's own cwd. So it
+            // means "could not measure", not "measured nothing", and a known
+            // worktree survives it. The one move that genuinely takes a row
+            // out of its worktree is a relocation, and `apply_relocation`
+            // clears the field there.
+            worktree: fresh.worktree.or_else(|| row.worktree.clone()),
             ..row.clone()
         },
         None => fresh,
@@ -1234,6 +1424,13 @@ pub fn run_add(worktree: bool) -> Result<()> {
             .to_string(),
         (None, None) => cand_cwd.clone().unwrap_or_else(|| physical_str.clone()),
     };
+    // The provenance mark's input (#61), asked of the AGENT's directory
+    // rather than the picked one: a resume opens where its transcript lives,
+    // which for a worktree session is the worktree. This was `worktree_path`
+    // until 2026-09-14 — set only when clave ITSELF created the worktree — so
+    // every worktree made by Claude Code or by hand recorded nothing and wore
+    // the branch mark. Measured on the live store that day: 195 rows, none.
+    let worktree_dir = linked_worktree_root(&git, &agent_cwd);
     // The branch recorded/labelled for a jsonl-only resume must be the
     // candidate's worktree branch — `-` when its worktree is detached — not
     // the picked dir's HEAD (else a worktree session gets the main checkout's
@@ -1327,7 +1524,7 @@ pub fn run_add(worktree: bool) -> Result<()> {
                 repo_root: resume_root.as_deref().unwrap_or(&repo_root),
                 branch: &agent_branch,
                 label: &label,
-                worktree: worktree_path.clone(),
+                worktree: worktree_dir.clone(),
                 default_branch: default_branch.clone(),
                 own_buckets: own_buckets.clone(),
             },
@@ -1698,6 +1895,50 @@ mod tests {
         assert_eq!(sanitize_label("fix \"auth\"\nflow"), "fix auth flow");
     }
 
+    /// The repair must not ask git a question about a repo it cannot name.
+    ///
+    /// Mutation testing 2026-09-15 left the empty-root guard unpinned, because
+    /// it sat inside a function that needs a store on disk and a git binary.
+    /// The guard matters: `hook::take_checkout` writes an empty root for a
+    /// session that moved to a repository nothing here can name, and `git -C ""`
+    /// resolves against the process's own directory rather than failing, so the
+    /// repair would have answered about whatever repo `clave` was launched from.
+    #[test]
+    fn the_repair_asks_only_about_repos_it_can_name() {
+        let row = |repo_root: &str, worktree: Option<&str>| {
+            let mut r = rec("u");
+            r.repo_root = repo_root.into();
+            r.worktree = worktree.map(str::to_owned);
+            r
+        };
+        let rows = [
+            row("/repo/a", None),
+            row("/repo/a", None), // same repo asked once, not twice
+            row("/repo/b", None),
+            row("", None),                 // moved to a repo nothing can name
+            row("/repo/c", Some("/wt/c")), // already knows: seed-only
+        ];
+
+        let asked = roots_to_ask(rows.iter());
+
+        assert!(
+            !asked.contains(""),
+            "an empty root would become `git -C \"\"`, which git answers from \
+             its own directory instead of refusing"
+        );
+        assert!(
+            !asked.contains("/repo/c"),
+            "a row that already names a worktree is left alone"
+        );
+        assert_eq!(
+            asked,
+            ["/repo/a".to_string(), "/repo/b".to_string()]
+                .into_iter()
+                .collect(),
+            "one question per distinct root, and no others"
+        );
+    }
+
     #[test]
     fn validate_cwd_rejects_kdl_breakers_but_passes_normal_paths() {
         // A cwd is interpolated RAW into generated KDL (cwd="{cwd}" and the
@@ -1710,6 +1951,125 @@ mod tests {
         assert!(validate_cwd("/repo/\"evil\"").is_err()); // double-quote
         assert!(validate_cwd("/repo/a\nb").is_err()); // control char
         assert!(validate_cwd("/repo/a\tb").is_err());
+    }
+
+    #[test]
+    fn the_linked_worktrees_are_every_entry_but_the_first() {
+        // Git puts the main tree first; `main_worktree_path` already rests on
+        // that, and this is the same fact read from the other end.
+        let list = parse_worktrees(
+            "worktree /repo\nbranch refs/heads/main\n\n\
+             worktree /repo/.claude/worktrees/triple-card\nbranch refs/heads/card\n\n\
+             worktree /elsewhere/tree\ndetached\n",
+        );
+        assert_eq!(
+            linked_worktrees(&list),
+            vec!["/repo/.claude/worktrees/triple-card", "/elsewhere/tree"]
+        );
+        // A plain checkout has exactly one entry, and no linked worktrees.
+        assert!(
+            linked_worktrees(&parse_worktrees("worktree /repo\nbranch refs/heads/main\n"))
+                .is_empty()
+        );
+        assert!(linked_worktrees(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_row_below_a_worktree_root_still_learns_its_worktree() {
+        // The repair compares a row's stored `cwd` against the worktree roots
+        // git reports, and a row's cwd is wherever it was added FROM — the
+        // resume scan takes the picked dir as well as every worktree root. So
+        // a row added in `…/wt/crates/clave` is a worktree row whose cwd is
+        // not a worktree root. Exact equality left every one of them wearing
+        // the branch mark.
+        let trees: std::collections::BTreeSet<String> = ["/repo/wt", "/repo/wt/inner", "/far/tree"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        // The root itself, and anything under it. Both record the ROOT, which
+        // is what `show-toplevel` gives the add path.
+        assert_eq!(worktree_holding("/repo/wt", &trees).unwrap(), "/repo/wt");
+        assert_eq!(
+            worktree_holding("/repo/wt/crates/clave", &trees).unwrap(),
+            "/repo/wt"
+        );
+
+        // Nested worktrees: the innermost is the one the row runs in.
+        assert_eq!(
+            worktree_holding("/repo/wt/inner/src", &trees).unwrap(),
+            "/repo/wt/inner"
+        );
+
+        // A sibling that merely shares a string prefix is NOT a match —
+        // `starts_with` compares components, which is the whole reason the
+        // comparison is not `str::starts_with`.
+        assert!(worktree_holding("/repo/wt2", &trees).is_none());
+        assert!(worktree_holding("/repo/wtx/deep", &trees).is_none());
+
+        // The main checkout, and a fleet with no linked worktrees at all.
+        assert!(worktree_holding("/repo", &trees).is_none());
+        assert!(worktree_holding("/repo/wt", &Default::default()).is_none());
+    }
+
+    #[test]
+    fn only_a_linked_worktree_is_recorded_as_one() {
+        // git counts the main checkout as a worktree; a person does not, and
+        // lock §5.1 gives an ordinary checkout no mark at all.
+        assert_eq!(worktree_of("/repo", Some("/repo")), None);
+        // A LINKED one records its own root — the directory name is what the
+        // mark is for, so the path, not a flag.
+        assert_eq!(
+            worktree_of("/repo/.claude/worktrees/triple-card", Some("/repo")),
+            Some("/repo/.claude/worktrees/triple-card".to_string())
+        );
+        // Location proves nothing either way: a worktree may sit outside the
+        // repo entirely, and this must still read as one.
+        assert_eq!(
+            worktree_of("/tmp/detached-tree", Some("/repo")),
+            Some("/tmp/detached-tree".to_string())
+        );
+        // No repo, no answer — and no guess from the path shape (#86).
+        assert_eq!(worktree_of("/tmp/notarepo", None), None);
+    }
+
+    #[test]
+    fn a_resume_fills_in_a_worktree_the_row_never_knew() {
+        // Until 2026-09-14 `worktree` was written ONLY by `clave add
+        // --worktree`, so every worktree made any other way — Claude Code's
+        // own, or `git worktree add` by hand — recorded nothing and wore the
+        // branch mark instead of the tree. Measured on the live store that
+        // day: 195 rows, not one of them set. A resume measures the fact
+        // again, and is therefore the heal for rows already written.
+        let row = rec("u-wt"); // worktree: None, like the whole fleet
+        let mut fresh = rec("u-wt");
+        fresh.worktree = Some("/repo/.claude/worktrees/triple-card".into());
+        assert_eq!(
+            merge_resume_record(Some(&row), fresh).worktree.as_deref(),
+            Some("/repo/.claude/worktrees/triple-card")
+        );
+        // It fills; it never erases. A `None` from the fresh side means git
+        // could not answer, which is not "gone".
+        let mut known = rec("u-wt");
+        known.worktree = Some("/repo/.claude-worktrees/abc12345".into());
+        let blind = rec("u-wt");
+        assert_eq!(
+            merge_resume_record(Some(&known), blind).worktree.as_deref(),
+            Some("/repo/.claude-worktrees/abc12345")
+        );
+        // Both sides know, and they disagree: the FRESH measurement wins.
+        // Without this case the assertion is blind to which way the `or`
+        // points — with at most one `Some` between them, `fresh.or(row)` and
+        // `row.or(fresh)` are the same function.
+        let mut was = rec("u-wt");
+        was.worktree = Some("/repo/.claude/worktrees/old".into());
+        let mut now = rec("u-wt");
+        now.worktree = Some("/repo/.claude/worktrees/new".into());
+        assert_eq!(
+            merge_resume_record(Some(&was), now).worktree.as_deref(),
+            Some("/repo/.claude/worktrees/new"),
+            "a row that moved worktrees must not keep the old mark"
+        );
     }
 
     #[test]

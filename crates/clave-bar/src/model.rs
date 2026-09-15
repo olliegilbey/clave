@@ -158,7 +158,17 @@ fn is_default_checkout(a: &Agent) -> bool {
 /// whole of a turn Claude Code's own footer was counting in seconds, which is
 /// the one stretch where the number is worth watching rather than glancing at.
 ///
-/// Three characters wide at the widest (`59s`), so it costs the cell nothing.
+/// THREE bands, not two (Ollie, 2026-09-14, watching a real turn): seconds
+/// under the minute, minutes AND seconds up to ten, then the staleness ladder.
+/// The middle band is the one that was missing — the card fell from `59s` to
+/// `1m` and then said nothing new for a whole minute, which is the reading a
+/// person is actually waiting on. Ten minutes is where the seconds stop
+/// earning their cells: past it the turn is long rather than in progress, and
+/// the digit that changes every second is noise.
+///
+/// Five cells at its widest, and five across the whole middle band — the
+/// minutes digit cannot reach two before the band ends, so the seconds
+/// right-align into their own pair and the number never shifts under the eye.
 /// The bar already repaints every 0.2s while any row is thinking and arms
 /// nothing at all when none is, so this reading is free at both ends: no new
 /// timer to drive it, and no idle fleet paying for a clock nobody is watching.
@@ -168,6 +178,7 @@ pub(crate) fn turn_label(now: u64, then: u64) -> Option<String> {
     }
     match now.saturating_sub(then) {
         s if s < 60 => Some(format!("{s}s")),
+        s if s < 600 => Some(format!("{}m{:>2}s", s / 60, s % 60)),
         _ => elapsed_label(now, then),
     }
 }
@@ -7337,15 +7348,40 @@ mod tests {
         assert_eq!(elapsed_label(103, 100).as_deref(), Some("0m"));
         assert_eq!(turn_label(100, 100).as_deref(), Some("0s"));
         assert_eq!(turn_label(159, 100).as_deref(), Some("59s"));
-        // Three characters at its widest, which is what lets it share the
-        // staleness cell rather than needing one of its own.
+        // Three characters under the minute, where staleness would say `0m`.
         assert_eq!(turn_label(159, 100).map(|s| s.len()), Some(3));
-        // Past the minute the two readings converge — a long turn is stale in
-        // the same units, and one ladder is easier to read than two.
-        assert_eq!(turn_label(160, 100).as_deref(), Some("1m"));
+        // Past TEN minutes the two readings converge — a turn that long is
+        // stale in the same units, and one ladder is easier to read than two.
+        // The band between is `a_turn_keeps_its_seconds_until_ten_minutes`.
+        assert_eq!(turn_label(100 + 600, 100).as_deref(), Some("10m"));
         assert_eq!(turn_label(100 + 2 * 3600, 100).as_deref(), Some("2h"));
         // And it invents nothing where there is nothing, same as elapsed.
         assert_eq!(turn_label(1000, 0), None);
+    }
+
+    #[test]
+    fn a_turn_keeps_its_seconds_until_ten_minutes() {
+        // Watching a real turn, 2026-09-14: the card fell from `59s` straight
+        // to `1m` and then said nothing new for a whole minute. The seconds
+        // are worth reading for as long as a turn is worth waiting out, and
+        // that is about ten minutes — past it they are noise, and the reading
+        // rejoins the staleness ladder.
+        assert_eq!(turn_label(159, 100).as_deref(), Some("59s"));
+        assert_eq!(turn_label(160, 100).as_deref(), Some("1m 0s"));
+        assert_eq!(turn_label(167, 100).as_deref(), Some("1m 7s"));
+        assert_eq!(turn_label(100 + 599, 100).as_deref(), Some("9m59s"));
+        assert_eq!(turn_label(100 + 600, 100).as_deref(), Some("10m"));
+        // FIVE cells across the whole band, never four and never six: the
+        // minutes digit cannot reach two before the band ends, and the
+        // seconds right-align into their own two. A number that keeps its
+        // width does not shift under the eye while it counts.
+        for s in 60..600 {
+            assert_eq!(
+                turn_label(100 + s, 100).map(|l| l.len()),
+                Some(5),
+                "at {s}s"
+            );
+        }
     }
 
     #[test]

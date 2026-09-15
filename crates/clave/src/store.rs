@@ -82,7 +82,15 @@ pub struct AgentRecord {
     pub commit_ord: u64,
     /// unix s; bumped on focus (`clave focus`) → clears done-unread.
     pub last_visited: u64,
-    /// Worktree path if `clave add --worktree` created one (§6.3), else None.
+    /// The LINKED worktree this agent runs in, else None (§6.3).
+    ///
+    /// Widened 2026-09-14. It used to mean "clave created this worktree", set
+    /// by `clave add --worktree` alone — so a worktree made by Claude Code
+    /// (`.claude/worktrees/`) or by hand recorded nothing, and the card drew
+    /// the branch mark for it. Measured on the live store that day: 195 rows,
+    /// not one set, and the tree glyph had never rendered. `add` now asks git
+    /// about the agent's own directory (`add::linked_worktree_root`), and a
+    /// resume re-measures, which is the heal for rows already written.
     pub worktree: Option<String>,
     #[serde(default, deserialize_with = "lenient")]
     pub label_source: LabelSource,
@@ -525,6 +533,20 @@ pub fn apply_relocation(
 ) -> Result<Option<AgentSnapshot>> {
     with_store_mut(paths, |s| {
         let r = s.agents.get_mut(uuid)?;
+        // A relocation is the one move that can take a row OUT of a worktree,
+        // and every other writer of this field fills without erasing — so
+        // without this the tree mark outlives the directory it describes,
+        // which is the exact inverse of the defect the field was widened to
+        // fix (2026-09-14). Component-wise, so a move WITHIN the worktree
+        // keeps its mark; a move out drops to unknown and the repair in
+        // `add::heal_worktrees` re-measures it on the next refresh. Unknown
+        // is the honest state: nothing here has asked git.
+        if r.worktree
+            .as_deref()
+            .is_some_and(|w| !std::path::Path::new(cwd).starts_with(w))
+        {
+            r.worktree = None;
+        }
         r.cwd = cwd.to_string();
         if let Some(b) = branch {
             r.branch = b.to_string();
@@ -1468,6 +1490,47 @@ mod tests {
                 .is_none()
         );
         assert_eq!(read_store(&p).unwrap().seq, s.seq);
+    }
+
+    #[test]
+    fn a_relocation_out_of_a_worktree_drops_the_mark_it_can_no_longer_vouch_for() {
+        // Every other writer of `worktree` fills without erasing, which is
+        // right for them and wrong here: a relocation is the one move that
+        // takes a row OUT of a worktree, so without this the tree mark
+        // outlives the directory it names — the inverse of the defect the
+        // field was widened to fix on 2026-09-14.
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        let seed = |s: &mut Store| {
+            let mut r = rec("u1");
+            r.cwd = "/repo/wt".into();
+            r.worktree = Some("/repo/wt".into());
+            s.agents.insert("u1".into(), r);
+        };
+
+        // Within the same worktree: the mark still describes where it lives.
+        with_store_mut(&p, seed).unwrap();
+        apply_relocation(&p, "u1", "/repo/wt/crates/clave", None).unwrap();
+        assert_eq!(
+            read_store(&p).unwrap().agents["u1"].worktree.as_deref(),
+            Some("/repo/wt"),
+            "a move inside the worktree keeps its mark"
+        );
+
+        // Out of it: unknown, not stale. `add::heal_worktrees` re-measures on
+        // the next refresh, and until then the bar asserts nothing.
+        apply_relocation(&p, "u1", "/repo", None).unwrap();
+        assert_eq!(
+            read_store(&p).unwrap().agents["u1"].worktree,
+            None,
+            "a move out of the worktree drops the mark"
+        );
+
+        // A sibling that merely shares a string prefix is OUT, the same
+        // component-wise test `add::worktree_holding` applies.
+        with_store_mut(&p, seed).unwrap();
+        apply_relocation(&p, "u1", "/repo/wt2", None).unwrap();
+        assert_eq!(read_store(&p).unwrap().agents["u1"].worktree, None);
     }
 
     #[test]

@@ -214,7 +214,14 @@ review context, not a mark against the change.
 2. **Explain the *why*.** The commit body and PR description should say what
    was wrong and how you know the fix works. Cite the issue.
 3. **Push and open the PR.** CI runs `test` and `wasm-build` as required checks,
-   plus `lint`; [CodeRabbit](https://coderabbit.ai) reviews automatically.
+   plus `lint`. [CodeRabbit](https://coderabbit.ai) does **not** review this
+   repo automatically — ask it with a `@coderabbitai review` comment, and check
+   that it actually ran. Its status check reports **pass** when it reviewed
+   nothing, both for `Review skipped: manual review required for this OSS
+   repository` and for `Review rate limited`. A green CodeRabbit tick is
+   evidence of a review only when a reply on the PR says the review finished.
+   The CLI (`coderabbit review --committed --base-commit <sha>`) draws on a
+   separate quota, so it still works when the PR bot is rate limited.
 4. **Expect a couple of rounds.** Review here tends to find real things —
    respond to each comment saying how you addressed it, then resolve the thread.
    Disagreeing is fine and often right; say why.

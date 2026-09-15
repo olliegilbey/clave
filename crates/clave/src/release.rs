@@ -406,6 +406,10 @@ pub fn run_release(wasm_src: &Path, cli_src: &Path) -> Result<()> {
     // migrates a store. Best-effort inside: a failed backfill prints and
     // never fails the cut.
     crate::backfill::run_on_version_refresh();
+    // And the same for `worktree`, for the same reason the line above exists:
+    // the cut is how a maintainer's own machine migrates its store, and it
+    // does not pass through `run_setup`'s tail.
+    crate::add::heal_worktrees_on_refresh();
 
     println!(
         "released v{version}:\n  {}\n  {}\n{}",

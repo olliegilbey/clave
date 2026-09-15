@@ -90,15 +90,27 @@ const CHROME: usize = 5;
 /// edge, not the first letter inside it.
 const INDENT: usize = CHROME;
 
-/// The gap between the token count and the time beside it. Two cells is the
-/// floor — at one they read as a single figure, the same failure that keeps
-/// the two clocks apart. THREE is what it is, because the collapsed profile
-/// gets the last word: there the time is flushed to the right edge, which at
-/// 16 columns lands it three cells past the token field. Ruled from rendered
-/// output 2026-09-09 — the cell was one column left of its collapsed self, and
-/// the crop rule says collapsed is a strict left-crop of expanded, so any cell
-/// surviving the crop must not MOVE across it.
-const TOKEN_GAP: usize = 3;
+/// The gap between the token count and the time beside it. The collapsed
+/// profile gets the last word: there the time is flushed to the right edge,
+/// so this gap is whatever 16 columns have left once the chrome, the token
+/// field and the clock have taken theirs. It is not a free choice — the crop
+/// rule says collapsed is a strict left-crop of expanded, so the clock must
+/// occupy the SAME columns in both, and only one gap does that.
+///
+/// ONE cell, and that is a trade made with eyes open (Ollie, 2026-09-14).
+/// Two was the floor when the clock was three cells wide, because at one the
+/// count and the time start to read as a single figure — `113k9m59s` at a
+/// glance. The turn clock's seconds were judged worth more than the
+/// separation. If the pair ever does read as one number, the fix is two more
+/// columns on the collapsed card, not a narrower clock: the seconds are the
+/// reading someone is waiting on.
+const TOKEN_GAP: usize = 1;
+
+/// The card's clock cell — its OWN, not the two-line row's `ELAPSED_W`.
+/// The two readings that share it differ in width as well as resolution, and
+/// only the card carries the wider one: `model::turn_label`'s middle band
+/// runs `1m 0s` to `9m59s`, five cells, where staleness never passes three.
+const CARD_CLOCK_W: usize = 5;
 
 /// The tail line 2 pays for provider, model and effort in the expanded
 /// profile, and hands entirely to the repo in the collapsed one.
@@ -656,7 +668,7 @@ pub(crate) fn render_card(
     if expanded {
         // Two measurements and one message. `wants` claims every cell the
         // numbers do not — including the four the turn clock used to hold.
-        let wants_w = build.saturating_sub(INDENT + TOKEN_W + TOKEN_GAP + ELAPSED_W + 1 + 1);
+        let wants_w = build.saturating_sub(INDENT + TOKEN_W + TOKEN_GAP + CARD_CLOCK_W + 1 + 1);
         // ONE clock, rendered two ways (lock §4.4, ruled from the drive
         // 2026-09-09). There was never a second number to print: the store
         // bumps `last_interacted` on `UserPromptSubmit` and nothing else, and
@@ -672,7 +684,7 @@ pub(crate) fn render_card(
         let clock_ink = if c.thinking { TURN_INK } else { META_INK };
         l3.push_str(&seg(
             ink(clock_ink),
-            &format!("{}{}", " ".repeat(TOKEN_GAP), rpad(c.elapsed, ELAPSED_W)),
+            &format!("{}{}", " ".repeat(TOKEN_GAP), rpad(c.elapsed, CARD_CLOCK_W)),
         ));
         l3.push_str(&seg(
             ink(NEEDS_YOU_INK),
@@ -688,10 +700,10 @@ pub(crate) fn render_card(
         // it in the same columns, not the other way round. The fill is
         // whatever is left rather than a fixed cell, so the line lands on
         // `build` without a second constant to keep in step.
-        let fill = build.saturating_sub(display_cells(&strip_sgr(&l3)) + ELAPSED_W + 1);
+        let fill = build.saturating_sub(display_cells(&strip_sgr(&l3)) + CARD_CLOCK_W + 1);
         l3.push_str(&seg(theme.default_ink, &" ".repeat(fill)));
         let clock_ink = if c.thinking { TURN_INK } else { META_INK };
-        l3.push_str(&seg(ink(clock_ink), &rpad(c.elapsed, ELAPSED_W)));
+        l3.push_str(&seg(ink(clock_ink), &rpad(c.elapsed, CARD_CLOCK_W)));
         l3.push_str(&seg(theme.default_ink, " "));
     }
 
@@ -1479,6 +1491,62 @@ mod tests {
         }
     }
 
+    /// The cell column a needle starts at. Line 3's chrome carries a
+    /// multi-byte mark and rule, so a byte offset is not a column.
+    fn cell_of(line: &str, needle: &str) -> Option<usize> {
+        let i = line.find(needle)?;
+        Some(display_cells(&line[..i]))
+    }
+
+    #[test]
+    fn the_clock_holds_one_column_across_the_crop() {
+        // The clock is the only cell whose column is arithmetic on BOTH sides
+        // — the gap after the token count when expanded, the right margin
+        // when collapsed — so it is the cell that drifts when either constant
+        // moves alone. The crop rule says a cell that survives must not move,
+        // and this is what keeps `TOKEN_GAP` and `CARD_CLOCK_W` in step.
+        let row = A {
+            tokens: Some(113_000),
+            elapsed: "9m59s",
+            ..A::default()
+        }
+        .row();
+        let theme = Theme::default();
+        let wide = strip_sgr(&render_card(&row, CARD_EXPANDED_COLS, true, 0, &theme)[2]);
+        let narrow = strip_sgr(&render_card(&row, CARD_COLLAPSED_COLS, true, 0, &theme)[2]);
+        assert!(
+            wide.contains("9m59s") && narrow.contains("9m59s"),
+            "the widest turn reading must fit both profiles: {wide:?} / {narrow:?}"
+        );
+        assert_eq!(
+            cell_of(&wide, "9m59s"),
+            cell_of(&narrow, "9m59s"),
+            "the clock moved across the crop: {wide:?} / {narrow:?}"
+        );
+        // One cell in from the collapsed card's right edge. That is the ruled
+        // position; the expanded gap is chosen to match it, not the reverse.
+        assert_eq!(
+            cell_of(&narrow, "9m59s"),
+            Some(CARD_COLLAPSED_COLS - 1 - CARD_CLOCK_W)
+        );
+        // The other half of the contract, and nothing else holds it: the
+        // widest reading the MODEL can produce for a live turn must be
+        // exactly this cell. Add a fourth band later (`1h 2m`, six cells) and
+        // the card would ellipsise a duration with every golden in this file
+        // still green — `1 + 5 == 3 + 3`, so any reading of three cells or
+        // fewer renders identically at the old constants too. The staleness
+        // ladder's widest (`2976w`) is also five, so the cell covers both.
+        let widest = (0..=600)
+            .filter_map(|s| crate::model::turn_label(1 + s, 1))
+            .map(|l| display_cells(&l))
+            .max()
+            .expect("the turn clock reads something");
+        assert_eq!(
+            widest, CARD_CLOCK_W,
+            "the clock cell and the widest live reading must be the same size"
+        );
+    }
+
     #[test]
     fn the_collapsed_card_crops_cells_without_moving_them() {
         let f = fleet();
@@ -1515,7 +1583,7 @@ mod tests {
             // is the same "blank is the meaning" rule the whole line follows.
             if !cells(&row.content, &Theme::default()).elapsed.is_empty() {
                 let narrow_l3 = strip_sgr(&narrow[2]);
-                let tail: String = narrow_l3.chars().rev().skip(1).take(ELAPSED_W).collect();
+                let tail: String = narrow_l3.chars().rev().skip(1).take(CARD_CLOCK_W).collect();
                 assert!(
                     !tail.trim().is_empty(),
                     "row {i}: the collapsed card's elapsed clock is not flush right ({narrow_l3:?})"
@@ -1531,8 +1599,8 @@ mod tests {
                 // goldens could not see (ruled by eye 2026-09-09).
                 let at = |s: &str| -> String {
                     s.chars()
-                        .skip(CARD_COLLAPSED_COLS - 1 - ELAPSED_W)
-                        .take(ELAPSED_W)
+                        .skip(CARD_COLLAPSED_COLS - 1 - CARD_CLOCK_W)
+                        .take(CARD_CLOCK_W)
                         .collect()
                 };
                 assert_eq!(
