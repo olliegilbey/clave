@@ -1947,13 +1947,15 @@ fi
 # ===========================================================================
 # The four-line card added three cells that no earlier phase can reach:
 # `wants` (what a blocked agent is asking for, quoted from its own
-# notification), the subagent mark (a boolean from the turn's closing record)
-# and the status the two are gated on. Every one of them is written by
-# `clave hook` into the store — so this phase drives the REAL binary against
-# the REAL store file and the REAL transcript reader, which is the seam the
-# unit tests cannot see: two of this branch's defects lived exactly here (the
-# mark read the statusLine-suppressed tail and so never landed in a released
-# install; the hold had no end, so an exited session kept its mark).
+# notification), the subagent mark (a ledger over the transcript tail — every
+# launch it holds, minus every one it has seen finish) and the status the two
+# are gated on. Every one of them is written by `clave hook` into the store —
+# so this phase drives the REAL binary against the REAL store file and the
+# REAL transcript reader, which is the seam the unit tests cannot see. Three
+# of this branch's defects lived exactly here: the mark read the
+# statusLine-suppressed tail and so never landed in a released install; it
+# read a count written after the Stop hook and so always a turn late; and a
+# launch nothing closed held it for ever.
 #
 # Ordering: after the burst and before quiescence. It bumps `seq` and moves
 # statuses, which no later phase reads, and it deliberately leaves the row
@@ -2082,7 +2084,21 @@ check "and takes its words with it" "$(wait_field wants null)" "null"
 # `turn_duration` line. That record is written AFTER the Stop hook, so a Stop
 # could never see the turn it had just ended and the glyph outlived its agents
 # by half an hour in the field (FOOTGUNS, and lock §4.6 has the numbers).
-printf '%s\n' '{"type":"assistant","isSidechain":false,"message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_qa5b","name":"Agent","input":{"description":"QA lane"}}]}}' >>"$P5B_TAIL"
+#
+# The launch is stamped at the REAL current time, because the reader ages it:
+# a launch past its bound is read as closed. `date -u -r` is BSD and `-d @` is
+# GNU, so both are tried.
+iso_utc_at() { # epoch seconds -> 2026-09-14T15:17:24.000Z
+  date -u -r "$1" +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null ||
+    date -u -d "@$1" +%Y-%m-%dT%H:%M:%S.000Z
+}
+P5B_NOW="$(date +%s)"
+agent_launch_line() { # id, iso timestamp
+  printf '{"type":"assistant","isSidechain":false,"timestamp":"%s","message":{"role":"assistant","content":[{"type":"tool_use","id":"%s","name":"Agent","input":{"description":"QA lane"}}]}}\n' "$2" "$1"
+}
+check_nonempty "phase-5b clock readable (the mark ages its launches)" \
+  "$(iso_utc_at "$P5B_NOW")"
+agent_launch_line toolu_qa5b "$(iso_utc_at "$P5B_NOW")" >>"$P5B_TAIL"
 hook_fire Stop
 check "a fan-out raises the subagent mark" "$(wait_field subagents true)" "true"
 check "and the turn is over" "$(wait_field status "done")" "done"
@@ -2100,11 +2116,31 @@ printf '%s\n' '{"type":"queue-operation","operation":"enqueue","content":"<task-
 hook_fire Stop
 check "the agent's own notification clears the mark" "$(wait_field subagents false)" "false"
 
+# --- a launch nothing ever closes must still stop holding the mark ----------
+# A session killed with `kill -9` writes no notification and fires no
+# SessionEnd, so its last launch has no closing record anywhere in the file.
+# Measured 2026-09-14: 4 of 1196 transcripts end their window on exactly that.
+# Age is what makes it unreachable, and this is the seam that proves the
+# shipped binary applies the bound — the unit test cannot see the clock the
+# hook actually reads.
+agent_launch_line toolu_qastale "$(iso_utc_at $((P5B_NOW - 7 * 3600)))" >>"$P5B_TAIL"
+hook_fire Stop
+check "a launch older than the bound never raises the mark" \
+  "$(wait_field subagents false)" "false"
+
 # --- and a dead session carries nothing, however the tail reads --------------
 # `SessionEnd` reads no transcript at all, so it has no window to judge. It
 # forces the mark down instead: nothing can still be pending under a session
 # that has exited, and a held mark would sit on a dormant row claiming depth
 # the user cannot go and look at.
+#
+# The mark is raised again FIRST. Firing SessionEnd on a row that is already
+# clear asserts nothing — the check passed before this line was added, and
+# would pass with the whole SessionEnd rule deleted.
+agent_launch_line toolu_qalive "$(iso_utc_at "$P5B_NOW")" >>"$P5B_TAIL"
+hook_fire Stop
+check "the mark is up when the session dies, or SessionEnd proves nothing" \
+  "$(wait_field subagents true)" "true"
 hook_fire SessionEnd
 check "SessionEnd leaves the subagent mark down" "$(wait_field subagents false)" "false"
 check "and the row goes idle (nothing left Working into phase 6)" \
@@ -2114,15 +2150,15 @@ P5B_SEQ_END="$(jq -r '.store.seq' < <(dev_status) 2>/dev/null)"
 check_numeric "phase-5b end store seq readable" "$P5B_SEQ_END"
 measure "store seq across the card-cell ladder" \
   "before=${P5B_SEQ0} after=${P5B_SEQ_END} delta=$((P5B_SEQ_END - P5B_SEQ0))"
-# Six events, and a write per event is the ceiling — the hook is one locked
+# Eight events, and a write per event is the ceiling — the hook is one locked
 # RMW per event, the snapshot push is not a store write, and the warm-up above
 # is what makes the count attributable by taking `pr-sync` out of it. More
 # than that means something is writing twice per event, which is the shape the
 # paced-12 check watches for on the toggle side. (Fewer is fine and expected:
 # the background-command `Stop` re-asserts a state the row is already in.)
 if [[ "$P5B_PR_WARM" == "fresh" ]]; then
-  check "phase-5b writes per hook event <= 1 (6 events, delta <= 6)" \
-    "$(((P5B_SEQ_END - P5B_SEQ0) <= 6 ? 1 : 0))" "1"
+  check "phase-5b writes per hook event <= 1 (8 events, delta <= 8)" \
+    "$(((P5B_SEQ_END - P5B_SEQ0) <= 8 ? 1 : 0))" "1"
 else
   note 'the PR cache never settled, so every event still spawns a `pr-sync` whose write lands off-schedule — the budget is not attributable here and is recorded above, not asserted'
 fi

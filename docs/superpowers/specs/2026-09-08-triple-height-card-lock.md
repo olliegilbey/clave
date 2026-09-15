@@ -281,11 +281,24 @@ has seen finish — both written at the moment the thing happens, so the mark
 rises at the first hook event after a launch and falls at the first one after
 the last agent stops. Same 40 transcripts, 0.0 hours of a stuck glyph.
 
+**A launch is also bounded by AGE — six hours.** The ledger inherits one
+failure from the rule it replaced if it is not: a session killed with `kill -9`
+writes no closing record and fires no `SessionEnd`, so its last launch holds the
+mark for as long as the window holds the line, and a resume re-arms it from the
+same line. Measured 2026-09-14: 4 of 1196 transcripts end their window on
+exactly that, 5 to 26 days stale. Six hours is where the bound stops being
+free: replayed against ground truth over the 40 sessions that hold fan-outs,
+the missed-mark time is 1.99 hours at no bound, at 24 hours, at 12 and at 6 —
+identical — then 3.67 at 2 hours and 5.28 at 1. The run lengths agree (723
+runs, median 2.7 minutes, p99 81.9); the two that passed six hours lose their
+mark.
+
 **A wrong-off is the safer error, and the one that remains.** A launch can
 outrun the window, and then a live agent loses its mark: 2.0 hours over those
 sessions, against a floor of 0.7 that no window beats, because the mark can
-only move when a hook fires. Under-claiming depth beats sending the user to
-look at a row where nothing is running.
+only move when a hook fires. The age bound and the undatable-launch rule choose
+the same way. Under-claiming depth beats sending the user to look at a row
+where nothing is running.
 
 ### 4.7 `wants` — the flexing cell, and the reason for the change
 

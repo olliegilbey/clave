@@ -285,10 +285,30 @@ pub fn summary_from_tail(tail: &str) -> Option<String> {
     last_tail_field(tail, "summary", "summary")
 }
 
-/// The tool names a fan-out arrives under. `Agent` is what every transcript
-/// since 2026-08 writes; `Task` is the older spelling, still present in
-/// months-old jsonl a fresh install must come up warm from.
-const AGENT_TOOLS: [&str; 2] = ["Agent", "Task"];
+/// The tool name a fan-out arrives under. Measured 2026-09-14 over 1196
+/// transcripts reaching back to 2026-08-12: every launch on record is written
+/// `Agent`, and the older `Task` spelling appears in none of them. It was
+/// carried here on assumption alone, so it is gone; restore it the day a
+/// transcript holds one.
+const AGENT_TOOL: &str = "Agent";
+
+/// How long a launch may hold the mark with no record closing it.
+///
+/// Without this the mark is the same bug it replaced — one that can never
+/// clear. A session killed with `kill -9` fires no `SessionEnd`, so its last
+/// launch has no closing record anywhere in the file, and a resume re-arms the
+/// mark from the same line. Measured 2026-09-14: 4 of 1196 transcripts end
+/// their window holding exactly that.
+///
+/// Six hours is where the bound stops being free. Replayed against ground
+/// truth over the 40 live sessions that hold fan-outs, the missed-mark time is
+/// 1.99 h at no bound, at 24 h, at 12 h and at 6 h — identical — then 3.67 h at
+/// 2 h and 5.28 h at 1 h. Six is the tightest bound that costs nothing
+/// measurable, and tighter is what makes a crashed launch clear sooner. The
+/// run lengths agree (723 agent runs: median 2.7 minutes, p90 10.4, p99 81.9);
+/// the two runs that passed six hours lose their mark, which is the wrong-off
+/// §4.6 already calls the safer error.
+pub const LAUNCH_MAX_AGE_SECS: u64 = 6 * 60 * 60;
 
 /// Whether this row has fanned out — the card's subagent mark (lock §4.6). A
 /// BOOLEAN, not a count: "this row has agents under it" is the whole signal,
@@ -316,26 +336,35 @@ const AGENT_TOOLS: [&str; 2] = ["Agent", "Task"];
 /// an unavoidable floor of 0.7 (the mark can only move when a hook fires).
 /// Wrong-off is the safer error: it under-claims depth rather than sending
 /// the user to look at a row where nothing is running.
-pub fn subagents_from_tail(tail: &str) -> bool {
+///
+/// **A launch can also outlive its agent.** A crash writes no closing record,
+/// so without a bound that launch holds the mark for as long as the window
+/// holds the line. `now` is wall-clock unix seconds and ages it out — see
+/// [`LAUNCH_MAX_AGE_SECS`].
+pub fn subagents_from_tail(tail: &str, now: u64) -> bool {
     // Built once per call, not once per line: the loop below runs over every
     // line of a 2 MiB window.
-    let markers: Vec<String> = AGENT_TOOLS
-        .iter()
-        .map(|n| format!(r#""name":"{n}""#))
-        .collect();
+    let marker = format!(r#""name":"{AGENT_TOOL}""#);
     let mut launched: Vec<String> = Vec::new();
     let mut finished: Vec<String> = Vec::new();
     for line in tail.lines() {
         // Byte pre-filter before any parse, and it is what lets this mark read
-        // a window 32× wider than everything else on this tail: ~14 lines in
-        // 2 MiB match, against the ~500 a parse-everything scan would take.
+        // a window 32× wider than everything else on this tail — a median of 0
+        // lines in 2 MiB match, p90 5 (see [`SUBAGENT_TAIL_BYTES`]).
         // The transcript is compact machine JSON, one record per line, so the
         // spelling is exact — and it has to be. A looser token finds the
         // CONVERSATION talking about agents instead: 29 hits in one 64 KiB
         // window, not one of them a record.
-        if markers.iter().any(|m| line.contains(m.as_str())) {
-            launched.extend(agent_launch_ids(line));
-        } else if line.contains("<task-notification>")
+        //
+        // Two independent `if`s, not an `if`/`else if`. Chaining them would
+        // say a line carrying the launch marker can never be a notification —
+        // true of every real record (of 3374 notification lines in the corpus
+        // exactly one also carries the marker, and it is an `attachment`), but
+        // it is a claim the records do not owe us, and it buys nothing.
+        if line.contains(marker.as_str()) {
+            launched.extend(live_launch_ids(line, now));
+        }
+        if line.contains("<task-notification>")
             && let Some(id) = notified_tool_use_id(line)
         {
             finished.push(id);
@@ -344,8 +373,13 @@ pub fn subagents_from_tail(tail: &str) -> bool {
     launched.iter().any(|id| !finished.contains(id))
 }
 
-/// Every fan-out opened on one assistant line, by `tool_use` id. Empty for
-/// every other line.
+/// Every fan-out opened on one assistant line that is still young enough to
+/// count, by `tool_use` id. Empty for every other line.
+///
+/// A launch older than [`LAUNCH_MAX_AGE_SECS`] is read as closed, and so is
+/// one this cannot date at all. Both are the same fail-closed choice the rest
+/// of this scan makes: the mark must be reachable from the record, and a line
+/// no clock can age is a line that could hold the mark for ever.
 ///
 /// EVERY one, not the first. One message can carry several `tool_use` blocks,
 /// and batching agents into a single message is how they are launched in
@@ -359,13 +393,26 @@ pub fn subagents_from_tail(tail: &str) -> bool {
 /// (the note it writes into every task-notification), so a nested launch has
 /// no closing record that reaches this row — counting it would mint a mark
 /// that can never clear.
-fn agent_launch_ids(line: &str) -> Vec<String> {
+fn live_launch_ids(line: &str, now: u64) -> Vec<String> {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
         return Vec::new();
     };
     if v.get("type").and_then(serde_json::Value::as_str) != Some("assistant")
         || v.get("isSidechain").and_then(serde_json::Value::as_bool) != Some(false)
     {
+        return Vec::new();
+    }
+    // Aged against the wall clock, not against the newest line in the window.
+    // The window of a dead session ends the moment the session died, so its
+    // own last timestamp would always read the final launch as seconds old.
+    let Some(at) = v
+        .get("timestamp")
+        .and_then(serde_json::Value::as_str)
+        .and_then(unix_from_iso8601)
+    else {
+        return Vec::new();
+    };
+    if now.saturating_sub(at) > LAUNCH_MAX_AGE_SECS {
         return Vec::new();
     }
     v.get("message")
@@ -376,14 +423,55 @@ fn agent_launch_ids(line: &str) -> Vec<String> {
                 .iter()
                 .filter(|b| {
                     b.get("type").and_then(serde_json::Value::as_str) == Some("tool_use")
-                        && b.get("name")
-                            .and_then(serde_json::Value::as_str)
-                            .is_some_and(|n| AGENT_TOOLS.contains(&n))
+                        && b.get("name").and_then(serde_json::Value::as_str) == Some(AGENT_TOOL)
                 })
                 .filter_map(|b| b.get("id")?.as_str().map(str::to_owned))
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Unix seconds from a transcript timestamp, `2026-09-14T15:17:24.123Z`.
+///
+/// Hand-written because the workspace carries no date crate, and this needs
+/// six integers and no formatting, no zones and no locale. The shape is not
+/// assumed: measured 2026-09-14 over 1196 transcripts, all 753 launch records
+/// carry a `timestamp`, and every one is this exact shape and UTC. Anything
+/// else returns `None`, and the caller reads that as "cannot date it".
+///
+/// The day count is Howard Hinnant's `days_from_civil` (`chrono` and `time`
+/// both use it), shifted so 1970-01-01 is day 0. It is exact for every civil
+/// date, and it needs no table.
+fn unix_from_iso8601(ts: &str) -> Option<u64> {
+    let b = ts.as_bytes();
+    if b.len() < 20
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+    {
+        return None;
+    }
+    // `get` over a range, not a slice: a bad offset returns None here where a
+    // slice would panic. The digits are also checked — `parse` rejects a sign
+    // or a space, which the separators above would otherwise let through.
+    let at = |r: std::ops::Range<usize>| ts.get(r).and_then(|s| s.parse::<i64>().ok());
+    let (year, month, day) = (at(0..4)?, at(5..7)?, at(8..10)?);
+    let (hour, minute, second) = (at(11..13)?, at(14..16)?, at(17..19)?);
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    // March-first years: February's length then falls at the end, and the
+    // leap day needs no special case.
+    let shifted = if month <= 2 { year - 1 } else { year };
+    let era = shifted.div_euclid(400);
+    let year_of_era = shifted - era * 400;
+    let month_of_era = (month + 9) % 12;
+    let day_of_year = (153 * month_of_era + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    u64::try_from(days * 86_400 + hour * 3600 + minute * 60 + second).ok()
 }
 
 /// The `tool-use-id` a task-notification closes, whatever it closes.
@@ -403,8 +491,13 @@ fn notified_tool_use_id(line: &str) -> Option<String> {
     if v.get("type")?.as_str()? != "queue-operation" {
         return None;
     }
-    // The tags live INSIDE a JSON string, so the content must be parsed before
-    // it is split — the raw line carries `\n` and `\"` as escapes.
+    // The split runs on the PARSED content, and the reason is the record type
+    // above, not the id. An id is `toolu_` and base62, and its tags carry no
+    // character JSON needs to escape, so splitting the raw line would return
+    // the same string — measured identical on all 1835 notifications in the
+    // corpus, and worth about 40 µs a window. What the raw route cannot do is
+    // tell a `queue-operation` from any other line that mentions the tag, and
+    // that discrimination is the whole point.
     Some(
         v.get("content")?
             .as_str()?
@@ -701,10 +794,18 @@ pub const PARSED_TAIL_BYTES: usize = 64 * 1024;
 /// How much of the transcript the subagent mark sees, and the whole read.
 ///
 /// 32× the parsed window, and affordable only because
-/// [`subagents_from_tail`] byte-filters before it parses: ~14 lines in 2 MiB
-/// match, so the JSON it parses is the same order as the 64 KiB every other
-/// reading parses in full. The read-and-scan is under a millisecond against a
-/// hook that already takes ~29 ms.
+/// [`subagents_from_tail`] byte-filters before it parses. Measured over 1207
+/// live transcripts (release build, 2026-09-14), lines matching the filter per
+/// window: median 0, p90 5, max 136 — so the JSON parsed is median 0 bytes and
+/// p90 54 KiB, at or under the 64 KiB every other reading parses in full. The
+/// max is 890 KiB, on the one window that holds 136 matches.
+///
+/// Cost, same sweep: the scan alone is 76 µs median, 463 µs p90, 2.0 ms worst;
+/// read and scan together 502 µs median, 1.3 ms p90, 2.9 ms worst, against a
+/// hook that already takes ~29 ms. The 134 windows that fill the whole 2 MiB
+/// are the expensive ones (1.4 ms median). Under a tenth of the hook at its
+/// worst, and the byte filter is what keeps it there — take the filter away
+/// and every one of those lines is parsed.
 ///
 /// Sized by measurement (2026-09-14, 40 live transcripts). A launch outside
 /// the window costs the mark; the missed time is 6.9 h at 512 KiB, 5.4 h at
@@ -1303,7 +1404,7 @@ pub fn apply_hook_event(
     // `None` here is no tail AT ALL — the event gate in `run_hook` — and that
     // holds. Silence inside a tail we did read is not a hold; it is an empty
     // fleet. See [`subagents_from_tail`].
-    changed |= take_subagents(rec, event, jsonl_tail.map(subagents_from_tail));
+    changed |= take_subagents(rec, event, jsonl_tail.map(|t| subagents_from_tail(t, now)));
     let level_moved = restamp_level(rec, smart_zone());
     // BOTH fields gate the push, not just the level. The glyph only moves once
     // per tenth of the zone, but #105 renders the raw count as text — gating on
@@ -2879,6 +2980,65 @@ mod tests {
             + &launch("toolu_a")
     }
 
+    /// One read, two windows — driven through `apply_hook_event`, which is
+    /// where the split is actually wired.
+    ///
+    /// The unit tests above pin each window's SIZE, and `parsed_window` pins
+    /// the cut. Neither proves that the subagent mark is handed the wide
+    /// buffer at the call site: hand it `parsed` instead and every one of them
+    /// still passes. So this drives a tail longer than [`PARSED_TAIL_BYTES`]
+    /// with the launch beyond the narrow window, where only the wide read can
+    /// reach it.
+    ///
+    /// The other direction has no behaviour to pin, and the honest note is
+    /// worth more than a test that cannot fail: the narrow window is a COST
+    /// bound, not a correctness one. Every reading on it takes the newest
+    /// record of its kind, so widening it would change no value — only the
+    /// bytes parsed. [`PARSED_TAIL_BYTES`] holds that cost; nothing observable
+    /// holds it. The second assertion here therefore says something smaller
+    /// and true: those readings still land from a CUT buffer, so the split has
+    /// not left them a truncated first line.
+    #[test]
+    fn the_wide_window_feeds_the_subagent_mark_and_nothing_else() {
+        let pad = format!(
+            "{}\n",
+            r#"{"type":"user","message":{"role":"user","content":"padding"}}"#
+        );
+        let filler = pad.repeat(1 + PARSED_TAIL_BYTES / pad.len());
+        assert!(
+            filler.len() > PARSED_TAIL_BYTES,
+            "the filler must actually push the head of the tail out of the narrow window"
+        );
+        // Oldest first, as the file is written: the launch beyond the narrow
+        // window, then the padding, then the token count inside it.
+        let tail = format!(
+            "{}\n{filler}{}\n",
+            launch("toolu_far"),
+            r#"{"type":"assistant","message":{"model":"claude-opus-5","usage":{"input_tokens":1200,"cache_read_input_tokens":800}}}"#,
+        );
+
+        let mut s = Store::default();
+        s.agents.insert("u1".into(), rec("u1"));
+        let p = HookPayload {
+            session_id: Some("u1".into()),
+            ..HookPayload::default()
+        };
+        apply_hook_event(&mut s, "u1", "Stop", &p, Some(&tail), JUST_AFTER, true);
+
+        assert!(
+            s.agents["u1"].subagents,
+            "the mark reads the WIDE window — a launch {} bytes back is still this \
+             row's fan-out",
+            filler.len()
+        );
+        assert_eq!(
+            s.agents["u1"].context_tokens,
+            Some(2000),
+            "the parsed readings still land from the cut buffer — the split must not \
+             leave them a truncated first line"
+        );
+    }
+
     #[test]
     fn the_subagent_mark_is_read_even_while_the_meter_is_speaking() {
         // #245's yield exists because the statusLine meter reads the API
@@ -2965,12 +3125,22 @@ mod tests {
         );
     }
 
+    /// The moment every fixture launch below is stamped at, and the same
+    /// moment as unix seconds. A ledger test reads the mark at [`JUST_AFTER`],
+    /// so the age bound never fires unless the test is about the age bound.
+    const LAUNCHED_AT: &str = "2026-09-14T15:17:24.123Z";
+    const LAUNCHED_UNIX: u64 = 1_789_399_044;
+    const JUST_AFTER: u64 = LAUNCHED_UNIX + 60;
+
     /// Fixtures in the byte shape Claude Code actually writes, copied from a
     /// live transcript and genericised. The compact `"name":"Agent"` spelling
     /// is load-bearing: the scan pre-filters on it before it parses anything.
     fn launch(id: &str) -> String {
+        launch_at(id, LAUNCHED_AT)
+    }
+    fn launch_at(id: &str, at: &str) -> String {
         format!(
-            r#"{{"type":"assistant","isSidechain":false,"message":{{"role":"assistant","content":[{{"type":"tool_use","id":"{id}","name":"Agent","input":{{"description":"Review lane"}}}}]}}}}"#
+            r#"{{"type":"assistant","isSidechain":false,"timestamp":"{at}","message":{{"role":"assistant","content":[{{"type":"tool_use","id":"{id}","name":"Agent","input":{{"description":"Review lane"}}}}]}}}}"#
         )
     }
     fn notification(id: &str, summary: &str) -> String {
@@ -2980,6 +3150,12 @@ mod tests {
     }
     fn finish(id: &str) -> String {
         notification(id, r#"Agent \"Review lane\" finished"#)
+    }
+    /// The mark as a hook firing a minute after the fixtures launched would
+    /// read it. Every ledger test below asks THIS, so the age bound is out of
+    /// the way except where a test aims at it.
+    fn mark(tail: &str) -> bool {
+        subagents_from_tail(tail, JUST_AFTER)
     }
 
     /// The mark is a LEDGER over the window — every launch it holds, minus
@@ -2996,10 +3172,10 @@ mod tests {
     #[test]
     fn the_mark_is_every_launch_the_window_holds_minus_every_one_it_saw_finish() {
         // A launch with nothing to close it: agents are under this row.
-        assert!(subagents_from_tail(&launch("toolu_a")));
+        assert!(mark(&launch("toolu_a")));
         // Closed by its own notification, which Claude Code writes within
         // seconds of the agent stopping. That freshness is the whole change.
-        assert!(!subagents_from_tail(&format!(
+        assert!(!mark(&format!(
             "{}\n{}",
             launch("toolu_a"),
             finish("toolu_a")
@@ -3013,8 +3189,8 @@ mod tests {
             launch("toolu_c"),
             finish("toolu_b")
         );
-        assert!(subagents_from_tail(&three));
-        assert!(!subagents_from_tail(&format!(
+        assert!(mark(&three));
+        assert!(!mark(&format!(
             "{}\n{}\n{}",
             three,
             finish("toolu_a"),
@@ -3032,19 +3208,19 @@ mod tests {
     /// failure a boolean cannot recover from.
     #[test]
     fn a_window_with_no_agent_traffic_reads_as_no_agents() {
-        assert!(!subagents_from_tail(""));
-        assert!(!subagents_from_tail(
+        assert!(!mark(""));
+        assert!(!mark(
             r#"{"type":"system","subtype":"turn_duration","messageCount":40}"#
         ));
         // Including a record still CLAIMING pending agents. The count is a
         // turn behind by construction and is no longer read at all.
-        assert!(!subagents_from_tail(
+        assert!(!mark(
             r#"{"type":"system","subtype":"turn_duration","pendingBackgroundAgentCount":3}"#
         ));
         // A notification whose launch has scrolled out of the window still
         // says "the agent traffic here has closed" — the safe reading, and the
         // one that clears a mark whose launch is long gone.
-        assert!(!subagents_from_tail(&finish("toolu_gone")));
+        assert!(!mark(&finish("toolu_gone")));
     }
 
     /// A notification closes the launch it NAMES, and no other. The same
@@ -3062,21 +3238,112 @@ mod tests {
             "toolu_bash",
             r#"Background command \"just gates\" completed"#,
         );
-        assert!(subagents_from_tail(&format!(
-            "{}\n{}",
-            launch("toolu_a"),
-            command
-        )));
+        assert!(mark(&format!("{}\n{}", launch("toolu_a"), command)));
         // A notification for a launch this window never saw is not evidence of
         // anything running: with no launch held, there is nothing to be live.
-        assert!(!subagents_from_tail(&command));
+        assert!(!mark(&command));
         // And the agent's own id does close it.
-        assert!(!subagents_from_tail(&format!(
+        assert!(!mark(&format!(
             "{}\n{}\n{}",
             launch("toolu_a"),
             command,
             finish("toolu_a")
         )));
+    }
+
+    /// A launch no record ever closes must still stop holding the mark.
+    ///
+    /// This is the one failure a ledger inherits from the rule it replaced. A
+    /// session killed with `kill -9` fires no `SessionEnd`, so nothing writes
+    /// the notification, and a resume re-reads the same launch line and re-arms
+    /// the mark from it. Measured 2026-09-14: 4 of 1196 transcripts end their
+    /// 2 MiB window holding a launch whose `tool-use-id` appears NOWHERE in the
+    /// whole file — 5, 8, 18 and 26 days stale. Age is what makes that
+    /// unreachable rather than rare.
+    #[test]
+    fn a_launch_no_record_closes_stops_holding_the_mark_once_it_is_old() {
+        assert_eq!(
+            LAUNCH_MAX_AGE_SECS, 21_600,
+            "six hours — the tightest bound that costs no measured accuracy. \
+             Replayed over 40 live sessions the missed-mark time is 1.99 h at 6 h \
+             and at no bound alike, 3.67 h at 2 h. Move it with new numbers"
+        );
+        let orphan = launch("toolu_dead");
+        // Inside the bound the mark stands: a long agent is still an agent.
+        assert!(subagents_from_tail(
+            &orphan,
+            LAUNCHED_UNIX + LAUNCH_MAX_AGE_SECS
+        ));
+        // One second past it, and the row stops claiming depth it cannot show.
+        assert!(!subagents_from_tail(
+            &orphan,
+            LAUNCHED_UNIX + LAUNCH_MAX_AGE_SECS + 1
+        ));
+        // A stale launch does not drag a fresh sibling down with it.
+        let mixed_ages = format!(
+            "{}\n{}",
+            launch_at("toolu_old", "2026-09-14T09:00:00.000Z"),
+            launch_at("toolu_new", "2026-09-14T15:00:00.000Z")
+        );
+        let at_1530 = unix_from_iso8601("2026-09-14T15:30:00.000Z").unwrap();
+        assert!(subagents_from_tail(&mixed_ages, at_1530));
+        assert!(!subagents_from_tail(
+            &mixed_ages.replace("15:00:00", "08:59:00"),
+            at_1530
+        ));
+        // A launch no clock can date is read as closed, for the same reason:
+        // a line that cannot age is a line that could hold the mark for ever.
+        assert!(!mark(&launch("toolu_a").replace(LAUNCHED_AT, "not a date")));
+        // A clock BEHIND the transcript must not age anything out. Saturating,
+        // not wrapping — an unsigned subtraction the other way round would
+        // read every launch as ancient and blank every mark on the fleet.
+        assert!(subagents_from_tail(&orphan, LAUNCHED_UNIX - 3600));
+    }
+
+    /// The timestamp reader, against dates computed outside this crate.
+    ///
+    /// Hand-written arithmetic earns a table of answers. The leap cases are
+    /// the ones that fail silently: a wrong century rule moves a mark by a
+    /// day, which the age bound would read as "always stale".
+    #[test]
+    fn transcript_timestamps_convert_to_the_unix_seconds_they_name() {
+        // `date -u -j -f %Y-%m-%dT%H:%M:%S <stamp> +%s` on each of these.
+        for (stamp, want) in [
+            ("1970-01-01T00:00:00.000Z", 0),
+            ("2026-09-14T15:17:24.123Z", 1_789_399_044),
+            ("2026-01-01T00:00:00.000Z", 1_767_225_600),
+            ("2024-02-29T12:00:00.000Z", 1_709_208_000), // leap day, leap year
+            ("2000-02-29T00:00:00.000Z", 951_782_400),   // the 400-year rule
+            ("2100-03-01T00:00:00.000Z", 4_107_542_400), // the 100-year rule
+            ("2026-12-31T23:59:59.999Z", 1_798_761_599),
+        ] {
+            assert_eq!(unix_from_iso8601(stamp), Some(want), "{stamp}");
+        }
+        // Milliseconds are not read, so a stamp without them still converts.
+        assert_eq!(
+            unix_from_iso8601("2026-09-14T15:17:24Z"),
+            Some(1_789_399_044)
+        );
+        // Anything not this shape is refused rather than guessed at. Each of
+        // the five separators is broken ALONE, so every one of them is pinned
+        // on its own: a stamp with two defects proves only that some guard
+        // fired, and leaves four of them free to be deleted.
+        for bad in [
+            "",
+            "2026-09-14",
+            "2026x09-14T15:17:24Z",  // b[4]
+            "2026-09x14T15:17:24Z",  // b[7]
+            "2026-09-14 15:17:24Z",  // b[10] — a space for the T
+            "2026-09-14T15x17:24Z",  // b[13]
+            "2026-09-14T15:17x24Z",  // b[16]
+            "2026-13-14T15:17:24Z",  // no thirteenth month
+            "2026-09-32T15:17:24Z",  // no thirty-second day
+            "2026-09-00T15:17:24Z",  // no zeroth day
+            "2026-00-14T15:17:24Z",  // no zeroth month
+            "2026-09-1４T15:17:24Z", // a multi-byte digit must not panic
+        ] {
+            assert_eq!(unix_from_iso8601(bad), None, "{bad:?}");
+        }
     }
 
     /// An agent's OWN fan-out belongs to the agent, not to this row. Claude
@@ -3088,7 +3355,7 @@ mod tests {
     #[test]
     fn a_launch_inside_a_sidechain_belongs_to_the_agent_not_to_this_row() {
         let nested = launch("toolu_n").replace(r#""isSidechain":false"#, r#""isSidechain":true"#);
-        assert!(!subagents_from_tail(&nested));
+        assert!(!mark(&nested));
     }
 
     /// Agents can be resumed, so one tool-use-id notifies more than once —
@@ -3104,7 +3371,7 @@ mod tests {
             finish("toolu_a"),
             finish("toolu_a")
         );
-        assert!(subagents_from_tail(&t), "toolu_b is still under this row");
+        assert!(mark(&t), "toolu_b is still under this row");
     }
 
     /// One message, several tool calls, and only some of them fan-outs. The
@@ -3115,24 +3382,23 @@ mod tests {
     /// of three are still running.
     #[test]
     fn one_message_can_open_several_fan_outs_beside_other_tool_calls() {
-        let mixed = r#"{"type":"assistant","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"Dispatching."},{"type":"tool_use","id":"toolu_bash","name":"Bash","input":{"command":"ls"}},{"type":"tool_use","id":"toolu_a","name":"Agent","input":{}},{"type":"tool_use","id":"toolu_b","name":"Agent","input":{}}]}}"#;
+        let mixed = &format!(
+            r#"{{"type":"assistant","isSidechain":false,"timestamp":"{LAUNCHED_AT}","message":{{"role":"assistant","content":[{{"type":"text","text":"Dispatching."}},{{"type":"tool_use","id":"toolu_bash","name":"Bash","input":{{"command":"ls"}}}},{{"type":"tool_use","id":"toolu_a","name":"Agent","input":{{}}}},{{"type":"tool_use","id":"toolu_b","name":"Agent","input":{{}}}}]}}}}"#
+        );
         assert_eq!(
-            agent_launch_ids(mixed),
+            live_launch_ids(mixed, JUST_AFTER),
             vec!["toolu_a".to_string(), "toolu_b".to_string()],
             "the Bash call is not a fan-out, and the second Agent is not optional"
         );
         // Closing only the first leaves the second holding the mark up.
-        assert!(subagents_from_tail(&format!(
-            "{mixed}\n{}",
-            finish("toolu_a")
-        )));
-        assert!(!subagents_from_tail(&format!(
+        assert!(mark(&format!("{mixed}\n{}", finish("toolu_a"))));
+        assert!(!mark(&format!(
             "{mixed}\n{}\n{}",
             finish("toolu_a"),
             finish("toolu_b")
         )));
         // A Bash notification cannot stand in for either of them.
-        assert!(subagents_from_tail(&format!(
+        assert!(mark(&format!(
             "{mixed}\n{}\n{}",
             finish("toolu_a"),
             notification("toolu_bash", r#"Background command \"ls\" completed"#)
@@ -3179,16 +3445,16 @@ mod tests {
         let notification_line = captured.lines().nth(1).unwrap();
 
         // Alone, the launch is a live fan-out.
-        assert!(subagents_from_tail(launch_line));
+        assert!(mark(launch_line));
         // The record that closed it names the same id, and clears the mark.
         assert_eq!(
-            agent_launch_ids(launch_line),
+            live_launch_ids(launch_line, JUST_AFTER),
             notified_tool_use_id(notification_line)
                 .into_iter()
                 .collect::<Vec<_>>(),
             "the pairing is only real if the two records agree on the id"
         );
-        assert!(!subagents_from_tail(captured));
+        assert!(!mark(captured));
     }
 
     /// The wide window feeds ONLY the mark. Every other reading on the tail —
@@ -3211,6 +3477,18 @@ mod tests {
         }
         // A tail already inside the window is passed through untouched.
         assert_eq!(parsed_window("a\nb", 1024), "a\nb");
+        // An oversized window with no line break in it yields NOTHING, rather
+        // than a fragment of a record. Dead in the field — of 1116 transcripts
+        // over 64 KiB, none has a newline-free last 64 KiB — but a half-line
+        // handed to a parser is the shape this whole function exists to stop,
+        // so the arm is pinned rather than trusted.
+        assert_eq!(parsed_window(&"y".repeat(2048), 1024), "");
+        // A multi-byte character straddling the cut must not panic: the offset
+        // is arithmetic, and slicing a `str` at it would.
+        // The leading `a` puts every `é` on an odd offset, so the arithmetic
+        // cut at 1402 - 1024 = 378 lands INSIDE one.
+        let wide_chars = format!("a{}\n{}", "é".repeat(600), "é".repeat(100));
+        assert_eq!(parsed_window(&wide_chars, 1024), "é".repeat(100));
     }
 
     #[test]
