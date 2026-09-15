@@ -1333,11 +1333,21 @@ impl BarModel {
     /// created HELD (`setup::launch_layout_kdl`), so the fleet's shape returns
     /// for the cost of a layout instead of ~350 MB per row. The human landing
     /// on a tab is what converts it into a running agent, and this is where
-    /// that happens — reached through `identity_effects`, which already gates
-    /// on the frames being coherent AND naming our tab active, i.e. exactly
-    /// "the human is looking at us".
+    /// that happens.
     ///
-    /// Two guards, both load-bearing, neither about our own panes:
+    /// Gated on the BEACON (`own_tab_focused`), not on the election
+    /// `identity_effects` already applied. That election reads our own tab
+    /// frame's active flag, and FOOTGUNS records why that is not a visibility
+    /// gate: "every hidden instance's stale tab set claims its own tab is
+    /// active, so anything gated on self-diagnosed 'am I active' is poisoned
+    /// during event bursts". A store snapshot re-enters this pass on EVERY
+    /// instance, so a starved bar could start an agent in a tab nobody is
+    /// looking at — ~350 MB resident, never returned, and no self-heal. The
+    /// bind and prune arms beside it survive the weaker gate because they are
+    /// idempotent; `shell_toggle` takes this same stronger one for this same
+    /// reason ("only the spawn arm is dangerous in duplicate").
+    ///
+    /// Three guards, all load-bearing, none about our own panes:
     ///
     /// - **`!exited`.** zellij's held flag also means "this command RAN, it
     ///   finished, press ENTER to run it again". Starting that would resurrect
@@ -1351,6 +1361,9 @@ impl BarModel {
     /// flag, so the next manifest has nothing to offer and no bookkeeping is
     /// needed to stop this firing twice.
     fn run_held_effect(&self) -> Option<Effect> {
+        if !self.own_tab_focused() {
+            return None;
+        }
         let own = self.own_tab_position()?;
         self.panes
             .iter()
@@ -4767,6 +4780,30 @@ mod tests {
             m.identity_effects()
                 .contains(&Effect::RunHeldPane { pane_id: 6 }),
             "the instance that just became active starts its own held pane"
+        );
+    }
+
+    /// The start arm rides the BEACON, not this instance's own opinion of
+    /// which tab is active. FOOTGUNS: "every hidden instance's stale tab set
+    /// claims its own tab is active, so anything gated on self-diagnosed 'am
+    /// I active' is poisoned during event bursts" — and a store snapshot
+    /// re-enters the identity pass on EVERY instance, not just the looked-at
+    /// one. The same reasoning already keeps `shell_toggle` behind the beacon:
+    /// only the arm that STARTS something is dangerous in duplicate. Here the
+    /// duplicate costs ~350 MB resident that is never given back, and unlike
+    /// the bind and prune arms beside it, it does not self-heal.
+    #[test]
+    fn a_starved_bar_never_starts_its_held_spawn_from_a_stale_active_flag() {
+        let mut m =
+            fleet_bar_with_held_own_pane(Some("clave spawn u-restored --name x --cwd /r"), false);
+        // Our own frame still flags OUR tab active — the frozen-frame shape.
+        // The replicated beacon says the human is somewhere else.
+        m.beacon(10);
+        assert!(
+            !m.identity_effects()
+                .iter()
+                .any(|e| matches!(e, Effect::RunHeldPane { .. })),
+            "a bar nobody is looking at must not resume an agent"
         );
     }
 
