@@ -4930,6 +4930,85 @@ mod tests {
         );
     }
 
+    /// The budget, which is the whole reason a fire-and-forget subprocess
+    /// emitter is safe to run from an unelected instance. A retry costs a
+    /// `clave bind` process, so it is spent only when the STORE has moved on
+    /// since our last report — a quiescent store costs nothing however many
+    /// frames arrive — and it runs out.
+    #[test]
+    fn a_restored_bind_retries_only_as_the_store_advances_and_stops_at_the_cap() {
+        let mut m =
+            fleet_bar_with_held_own_pane(Some("clave spawn u-restored --name x --cwd /r"), false);
+        m.apply_tabs(vec![
+            tab(10, 0, "a", true),
+            tab(11, 1, "b", false),
+            tab(12, 2, "c", false),
+        ]);
+        let mut seq = 1;
+        m.apply_snapshot(snap(seq, vec![agent("u-restored", Status::Working, None)]));
+        assert_eq!(m.restored_bind_effects().len(), 1, "the first report");
+        for attempt in 2..=BIND_MAX_TRIES {
+            assert!(
+                m.restored_bind_effects().is_empty(),
+                "silent while the store has not moved"
+            );
+            seq += 1;
+            m.apply_snapshot(snap(seq, vec![agent("u-restored", Status::Working, None)]));
+            assert_eq!(
+                m.restored_bind_effects().len(),
+                1,
+                "attempt {attempt}: the store advanced and we are still unbound"
+            );
+        }
+        seq += 1;
+        m.apply_snapshot(snap(seq, vec![agent("u-restored", Status::Working, None)]));
+        assert!(
+            m.restored_bind_effects().is_empty(),
+            "the budget runs out rather than retrying forever"
+        );
+    }
+
+    /// A DIFFERENT tab is a new episode and gets a full budget. zellij
+    /// renumbers tabs when one closes, so a restored tab can legitimately
+    /// become a different id without anything being wrong — and a spent budget
+    /// carried across that rename would silence a correct bind for the life of
+    /// the instance.
+    #[test]
+    fn a_restored_bind_gets_a_fresh_budget_when_its_tab_is_renumbered() {
+        let mut m =
+            fleet_bar_with_held_own_pane(Some("clave spawn u-restored --name x --cwd /r"), false);
+        m.apply_tabs(vec![
+            tab(10, 0, "a", true),
+            tab(11, 1, "b", false),
+            tab(12, 2, "c", false),
+        ]);
+        let mut seq = 1;
+        m.apply_snapshot(snap(seq, vec![agent("u-restored", Status::Working, None)]));
+        for _ in 0..BIND_MAX_TRIES {
+            let _ = m.restored_bind_effects();
+            seq += 1;
+            m.apply_snapshot(snap(seq, vec![agent("u-restored", Status::Working, None)]));
+        }
+        assert!(
+            m.restored_bind_effects().is_empty(),
+            "the budget for tab 11 is spent"
+        );
+        // Same pane, same position, new tab ids: the renumbering shape.
+        m.apply_tabs(vec![
+            tab(20, 0, "a", true),
+            tab(21, 1, "b", false),
+            tab(22, 2, "c", false),
+        ]);
+        assert_eq!(
+            m.restored_bind_effects(),
+            vec![Effect::BindRestored {
+                uuid: "u-restored".into(),
+                tab_id: 21,
+            }],
+            "a new target is a new episode, not a spent one"
+        );
+    }
+
     /// The same two guards the START arm carries, for the same reasons: an
     /// exited pane is a finished agent, and a held pane is an ordinary thing
     /// for a human to have. Neither is a row of ours to claim.
