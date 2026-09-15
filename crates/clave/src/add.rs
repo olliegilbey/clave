@@ -364,6 +364,28 @@ fn worktree_holding<'a>(
         .max_by_key(|tree| tree.len())
 }
 
+/// Which repos [`heal_worktrees`] asks about: one entry per distinct root among
+/// the rows that do not yet name a worktree.
+///
+/// Split out from the shell around it because both of its rules are decisions,
+/// not plumbing, and neither is reachable by a test while it sits inside a
+/// function that needs a store on disk and a git binary.
+///
+/// A row that already names a worktree is not asked about — the repair is
+/// seed-only. An EMPTY root is not asked about either: `hook::take_checkout`
+/// writes one for a session that moved to a repository nothing here can name,
+/// and `git -C ""` is NOT a no-op. Git resolves it against the process's own
+/// directory, so the answer would describe whatever repo `clave` was launched
+/// from, and could stamp an unrelated tree onto the row.
+fn roots_to_ask<'a>(
+    rows: impl Iterator<Item = &'a crate::store::AgentRecord>,
+) -> std::collections::BTreeSet<String> {
+    rows.filter(|r| r.worktree.is_none())
+        .map(|r| r.repo_root.clone())
+        .filter(|root| !root.is_empty())
+        .collect()
+}
+
 /// Fill `worktree` on rows written while the field still meant "clave created
 /// this one" (see `store::AgentRecord::worktree`). The live store on
 /// 2026-09-14 had 195 rows and not one of them set, so the tree mark had
@@ -388,12 +410,7 @@ pub fn heal_worktrees() -> Result<usize> {
     // of a second of that, at exactly the moment a launch is firing hooks.
     // `read_store` is lock-free by design (writers rename atomically), and it
     // is only used here to choose which repos to ask about.
-    let roots: std::collections::BTreeSet<String> = crate::store::read_store(&paths)?
-        .agents
-        .values()
-        .filter(|r| r.worktree.is_none())
-        .map(|r| r.repo_root.clone())
-        .collect();
+    let roots = roots_to_ask(crate::store::read_store(&paths)?.agents.values());
     let asked: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> = roots
         .into_iter()
         .map(|root| {
@@ -1872,6 +1889,50 @@ mod tests {
     #[test]
     fn sanitize_label_strips_kdl_breakers() {
         assert_eq!(sanitize_label("fix \"auth\"\nflow"), "fix auth flow");
+    }
+
+    /// The repair must not ask git a question about a repo it cannot name.
+    ///
+    /// Mutation testing 2026-09-15 left the empty-root guard unpinned, because
+    /// it sat inside a function that needs a store on disk and a git binary.
+    /// The guard matters: `hook::take_checkout` writes an empty root for a
+    /// session that moved to a repository nothing here can name, and `git -C ""`
+    /// resolves against the process's own directory rather than failing, so the
+    /// repair would have answered about whatever repo `clave` was launched from.
+    #[test]
+    fn the_repair_asks_only_about_repos_it_can_name() {
+        let row = |repo_root: &str, worktree: Option<&str>| {
+            let mut r = rec("u");
+            r.repo_root = repo_root.into();
+            r.worktree = worktree.map(str::to_owned);
+            r
+        };
+        let rows = [
+            row("/repo/a", None),
+            row("/repo/a", None), // same repo asked once, not twice
+            row("/repo/b", None),
+            row("", None),                 // moved to a repo nothing can name
+            row("/repo/c", Some("/wt/c")), // already knows: seed-only
+        ];
+
+        let asked = roots_to_ask(rows.iter());
+
+        assert!(
+            !asked.contains(""),
+            "an empty root would become `git -C \"\"`, which git answers from \
+             its own directory instead of refusing"
+        );
+        assert!(
+            !asked.contains("/repo/c"),
+            "a row that already names a worktree is left alone"
+        );
+        assert_eq!(
+            asked,
+            ["/repo/a".to_string(), "/repo/b".to_string()]
+                .into_iter()
+                .collect(),
+            "one question per distinct root, and no others"
+        );
     }
 
     #[test]
