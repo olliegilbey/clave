@@ -40,11 +40,14 @@ need the *why* of a design choice; this file carries everything needed to act.
   transcript tampering. | Hit it trying to stage a big transcript fixture. |
   Do not route around it. The human declined to change it ("nevermind about
   it"), so fixture placement must happen inside `clave dev`, or be his step.
-- **Open: the sandbox session `clave-test-live-set-459d` was LEFT RUNNING** at
-  the end of the session (the human launched it for the second relaunch check
-  and it was never killed). | Settle with `clave dev status`; kill with
-  `zellij kill-session clave-test-live-set-459d`. Only ever by that literal
-  name.
+- **No sandbox session is running; the machine is clean.** | Killed
+  `clave-test-live-set-459d` at the end of the session and confirmed. |
+  `clave dev status` reports `session_live: False`. Its store still holds the
+  relaunch evidence, so re-staging with `just sandbox relaunch-restore` gives a
+  fresh baseline rather than resuming that state.
+- **Open: whether `claude --resume` accepts a REWRITTEN transcript at all.** |
+  Never established — the harness blocked the probe. | Nothing downstream of
+  the fixture pipeline is safe to build until this is settled; see Next Steps 3.
 - **Open: the relaunch's subprocess cost is measured only at N=3.** | `seq`
   went 15→18 for three held tabs. | Eleven real rows is untested; nothing says
   the flock contention is fine at that size.
@@ -184,17 +187,14 @@ matches the loop's own command line and spins forever.
 
 ## Next Steps
 
-1. **Kill the leftover sandbox session** if it is still up:
-   `clave dev status`, then `zellij kill-session clave-test-live-set-459d`.
-   Never another name — the human's live fleet shares this machine.
-2. **Implement phase 6c in `scripts/qa-drive.sh`.** Spec is the phase 6c row in
+1. **Implement phase 6c in `scripts/qa-drive.sh`.** Spec is the phase 6c row in
    `docs/dev/QA-DRIVE.md`. It needs two maintainer launches, so the drive must
    stage, wait, assert, print the kill+relaunch pair, wait again, assert. The
    assertions that matter: the set comes back the SAME SIZE; every restored row
    carries a `tab_id`; each row except the first carries it BEFORE its agent
    runs (the first is eager and starts at launch); a tab closed in session N is
    absent in N+1.
-3. **The transcript fixture pipeline (deferred by the human, do not start
+2. **The transcript fixture pipeline (deferred by the human, do not start
    without asking).** To test long-conversation resumes, transcripts must be
    laundered from real ones — the schema is Claude Code's internal format and a
    from-scratch generator would be fragile. Real fixtures exist at
@@ -204,7 +204,7 @@ matches the loop's own command line and spins forever.
    the harness refuses; it must happen inside `run_scenario` or be the human's
    step. UNVERIFIED: whether `claude --resume` accepts a rewritten transcript
    at all. Settle that before building anything on top.
-4. **Measure relaunch cost at realistic N.** Three held tabs cost three binds;
+3. **Measure relaunch cost at realistic N.** Three held tabs cost three binds;
    eleven rows is the real case and is unmeasured.
 
 Where work stopped, verbatim:
@@ -260,8 +260,8 @@ use a symbol he would have to grep.
 
 ## Restart Hint
 
-Tree clean, everything pushed at `0e57fc9`, gates green. Safe to start
-anywhere. Check first whether `clave-test-live-set-459d` is still running.
+Tree clean, everything pushed, gates green, no sandbox session running.
+Safe to start anywhere — nothing is mid-refactor.
 
 ## Suggested Skills
 
