@@ -516,29 +516,47 @@ pub fn layout_kdl(binary: &str, wasm: &str, row_height: clave_types::RowHeight) 
 }
 
 /// §6.8 (C8): the launch layout, composed DYNAMICALLY at session-create
-/// time. Base = the bar template; store non-empty → ONE eager tab for the
-/// most-recent row, baked `clave spawn` (resumes via the jsonl check).
-/// Everything else surfaces as dormant bar rows (§6.6).
+/// time. Base = the bar template; `rows` is the set to bake tabs for, ranked
+/// — the previous session's live set (`restore_rows`), or the single
+/// most-recent row when there is nothing to restore. Every row gets a tab
+/// with its baked `clave spawn` (which resumes via the jsonl check);
+/// everything else surfaces as dormant bar rows (§6.6).
+///
+/// Only the FIRST row runs. The rest are created HELD — tab, name and baked
+/// spawn present, no `claude` process — and the bar starts each one when the
+/// human navigates to it. The asymmetry is deliberate: the first row is the
+/// one launch focuses, and running it straight from the layout keeps the
+/// single-eager-row behaviour as the floor, so a relaunch lands in a working
+/// agent even if the bar's start-on-focus path is broken. `restore_rows`
+/// ranks its output for exactly this reason — the row that runs is the top
+/// of the fleet, not whichever tab happened to be leftmost.
 pub fn launch_layout_kdl(
     binary: &str,
     wasm: &str,
-    most_recent: Option<&crate::store::AgentRecord>,
+    rows: &[&crate::store::AgentRecord],
     collapsed: bool,
     row_height: clave_types::RowHeight,
 ) -> String {
-    let tab = match most_recent {
-        // The label is re-sanitized for KDL safety: it can be hook-derived
-        // (§6.5) and only add-time labels went through sanitize_label.
-        // BARE node (no bar pane): default_tab_template wraps explicit tab
-        // nodes too, so a bar-carrying node here rendered a DOUBLE bar in
-        // the eager tab (live finding, c8-cold-start 2026-07-18).
-        Some(r) => crate::add::tab_node_bare(
-            binary,
-            &crate::add::sanitize_label(&r.label),
-            &r.uuid,
-            &r.cwd,
-        ),
-        None => "    tab name=\"clave\" focus=true\n".to_string(),
+    // The label is re-sanitized for KDL safety: it can be hook-derived
+    // (§6.5) and only add-time labels went through sanitize_label.
+    // BARE nodes (no bar pane): default_tab_template wraps explicit tab
+    // nodes too, so a bar-carrying node here rendered a DOUBLE bar in
+    // the eager tab (live finding, c8-cold-start 2026-07-18).
+    let tab = if rows.is_empty() {
+        "    tab name=\"clave\" focus=true\n".to_string()
+    } else {
+        rows.iter()
+            .enumerate()
+            .map(|(i, r)| {
+                crate::add::tab_node_bare(
+                    binary,
+                    &crate::add::sanitize_label(&r.label),
+                    &r.uuid,
+                    &r.cwd,
+                    i == 0, // the top of the rank is the one row a relaunch starts
+                )
+            })
+            .collect()
     };
     // Fixed-cols bar pane and `clave_binary` identity: see bar_pane_kdl. The
     // template is what every Alt+t tab inherits, so one correct pane here
@@ -602,18 +620,11 @@ pub const HOOK_EVENTS: [&str; 5] = [
     "SessionStart",
 ];
 
-/// Is `bin` one of ours — bare `clave` or a versioned copy `clave-vN…`? The
-/// `clave-v` check requires a DIGIT immediately after the prefix (not just
-/// `starts_with`): a foreign tool named `clave-vault` or `clave-verify`
-/// shares the textual prefix with our versioned binary name but is not ours,
-/// and must never be absorbed or rewritten. Shared by the hook and statusLine
-/// matchers so the rule lives once.
+/// Is `bin` one of ours? Shared by the hook and statusLine matchers here, and
+/// by the bar's held-pane matcher, so the rule lives once
+/// (`clave_types::is_clave_binary` carries the reasoning).
 fn is_clave_bin(bin: &str) -> bool {
-    matches!(
-        std::path::Path::new(bin).file_name().and_then(|n| n.to_str()),
-        Some(name) if name == "clave"
-            || name.strip_prefix("clave-v").is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit()))
-    )
+    clave_types::is_clave_binary(bin)
 }
 
 /// The single-quoted form `sh -c` reads back verbatim: the only character
@@ -1175,6 +1186,116 @@ pub fn eager_row(store: &crate::store::Store) -> Option<&crate::store::AgentReco
         .max_by_key(|r| r.last_interacted)
 }
 
+/// The rows a relaunch rebuilds the layout from: the previous session's live
+/// set (`Store::last_live`, written by `clear_session_order`), resolved to
+/// records and RANKED the way the bar ranks them.
+///
+/// `last_live` is a SET, not an order. It is written in ascending tab id,
+/// which is the order the tabs were created in — never the order the human
+/// saw, because the bar sorts its rows by investment and the zellij tab strip
+/// is not the interface (Alt+1..9 indexes rendered ROWS, `model::nav`). So
+/// the rank is computed here from the agent record, which is exactly what
+/// makes it possible: `buckets` and `commit_ord` are agent-scoped and survive
+/// the session, while every tab-scoped twin the bar would otherwise use dies
+/// with it.
+///
+/// The order decides one visible thing beyond the tab strip: launch focuses
+/// the FIRST row, so the first row is the one that starts. The top of the
+/// fleet is the row worth paying ~350 MB for.
+///
+/// Two kinds of entry are dropped, because the snapshot is a faithful record
+/// rather than a filtered one: a uuid naming no row (idle-pruned between
+/// sessions), and a row whose cwd has vanished (a deleted worktree) — the
+/// latter is `eager_row`'s existing guard, and for the same reason. Baking a
+/// tab for either emits a spawn that dies at canonicalize.
+///
+/// Empty is the ordinary cold-start answer, not an error: a first run, or a
+/// session quit with nothing open. Launch falls back to the single eager row.
+pub fn restore_rows(store: &crate::store::Store, now_hour: u32) -> Vec<&crate::store::AgentRecord> {
+    // `model::live_key` and `model::live_group`, read from the host side.
+    // Frecency mode scores the agent's own buckets with the fleet's own dial,
+    // and a row that scores nothing falls back to the commitment ordinal — so
+    // any scoring row outranks every unscored one, which is why the second
+    // element is zeroed rather than carried. Recency mode has no dial and no
+    // repo layer: the ordinal is the whole key.
+    //
+    // `repo_root` is the PARENT repo even for a worktree agent (the worktree
+    // path lives in its own field), so worktree rows cluster with their repo
+    // exactly as they do in the bar. The tiebreak is the row's index in
+    // `last_live`, i.e. ascending tab id, so rows the ranking cannot separate
+    // keep the order the previous session left them in.
+    let mut rows: Vec<clave_types::LiveRow<&crate::store::AgentRecord>> = store
+        .last_live
+        .iter()
+        .filter_map(|uuid| store.agents.get(uuid))
+        .filter(|r| std::path::Path::new(&r.cwd).is_dir())
+        .enumerate()
+        .map(|(i, r)| {
+            let (group, millis) = match store.order {
+                clave_types::OrderMode::Recency => (None, 0),
+                clave_types::OrderMode::Frecency { half_life_hours } => (
+                    Some(r.repo_root.clone()).filter(|s| !s.is_empty()),
+                    clave_types::frecency_millis(&r.buckets, now_hour, half_life_hours),
+                ),
+            };
+            let key = clave_types::live_key(store.order, millis, r.commit_ord);
+            clave_types::LiveRow {
+                group,
+                key,
+                tiebreak: i,
+                row: r,
+            }
+        })
+        .collect();
+    clave_types::sort_live_block(&mut rows);
+    rows.into_iter().map(|e| e.row).collect()
+}
+
+/// The rows launch actually bakes, and how a bad cwd is treated on each path.
+///
+/// Every baked cwd is guarded (`add::validate_cwd`) — a `"` or a control
+/// character emits malformed KDL and the whole session fails to create. The
+/// two paths fail differently ON PURPOSE. With one eager row a bad cwd is the
+/// only thing the launch was going to bake, so it stays fatal and loud. Across
+/// a restored set one bad row must not take the other ten down, so it is
+/// dropped, reported, and the rest still come back.
+///
+/// An emptied restored set falls through to the eager row. Checking the set
+/// for emptiness BEFORE the filter (as this did until the swarm review of
+/// #261) bakes a session with a bar and no agent at all on the day every
+/// restored cwd is rejected — strictly worse than the cold start it replaced.
+///
+/// Returns the rows and the lines to report, rather than reporting them
+/// itself: that keeps the decision pure, and the decision is the part worth
+/// testing. It lives here, beside `restore_rows` and `eager_row`, because
+/// `launch_session` is excluded from `just mutants` on the stated grounds that
+/// the pieces it orchestrates are each tested directly.
+fn bakeable_rows<'a>(
+    restored: Vec<&'a crate::store::AgentRecord>,
+    eager: Option<&'a crate::store::AgentRecord>,
+    mut check: impl FnMut(&str) -> anyhow::Result<()>,
+) -> anyhow::Result<(Vec<&'a crate::store::AgentRecord>, Vec<String>)> {
+    let mut dropped = Vec::new();
+    let kept: Vec<&crate::store::AgentRecord> = restored
+        .into_iter()
+        .filter(|r| match check(&r.cwd) {
+            Ok(()) => true,
+            Err(e) => {
+                dropped.push(format!("restore dropped {}: {e}", r.uuid));
+                false
+            }
+        })
+        .collect();
+    if !kept.is_empty() {
+        return Ok((kept, dropped));
+    }
+    let eager: Vec<&crate::store::AgentRecord> = eager.into_iter().collect();
+    for r in &eager {
+        check(&r.cwd)?;
+    }
+    Ok((eager, dropped))
+}
+
 /// First-run consent (spec §First run): the plan prints ALWAYS; the prompt
 /// fires only on a TTY — never prompt without one (Homebrew 2026). Pure
 /// over (tty, read line) so the gate is unit-testable.
@@ -1319,15 +1440,21 @@ pub fn launch_session() -> Result<()> {
             }
         }
     }
-    // Compose the launch layout from the store (eager most-recent, §6.8).
+    // Compose the launch layout from the store (§6.8). The previous session's
+    // live set if there is one — `clear_session_order` above has just recorded
+    // it — and the single most-recent row when there is not: a first run, or a
+    // session quit with nothing open, where the useful thing to hand back is
+    // one agent ready to work rather than a bar and no tabs.
     // Harmless when live (attach ignores --layout for an existing session).
     let store = crate::store::read_store(&crate::store::store_paths()?)?;
-    let most_recent = eager_row(&store);
-    // Guard the eager row's cwd before it's baked into the launch layout
-    // (add::validate_cwd) — a `"`/control char would emit malformed KDL and
-    // the whole session would fail to create.
-    if let Some(r) = most_recent {
-        crate::add::validate_cwd(&r.cwd)?;
+    let now_hour = crate::store::unix_hour(crate::store::now_unix());
+    let (rows, dropped) = bakeable_rows(
+        restore_rows(&store, now_hour),
+        eager_row(&store),
+        crate::add::validate_cwd,
+    )?;
+    for line in dropped {
+        crate::evlog::log_event("launch", &line);
     }
     let wasm = wasm_path()?;
     // Bake the environment's clave into the eager tab's spawn: the versioned
@@ -1344,7 +1471,7 @@ pub fn launch_session() -> Result<()> {
     let layout_text = launch_layout_kdl(
         &binary,
         wasm.to_str().context("wasm path")?,
-        most_recent,
+        &rows,
         store.collapsed,
         store.row_height,
     );
@@ -1356,8 +1483,8 @@ pub fn launch_session() -> Result<()> {
     crate::evlog::log_event(
         "launch",
         &format!(
-            "session={session} live={live} eager={:?}",
-            most_recent.map(|r| r.uuid.as_str())
+            "session={session} live={live} baked={:?}",
+            rows.iter().map(|r| r.uuid.as_str()).collect::<Vec<_>>()
         ),
     );
     use std::os::unix::process::CommandExt;
@@ -1507,7 +1634,7 @@ mod tests {
             // The one-shot layout has no template — its bar is in the tab node.
             let cases = [
                 (
-                    launch_layout_kdl("clave", "/w.wasm", None, collapsed, row_height),
+                    launch_layout_kdl("clave", "/w.wasm", &[], collapsed, row_height),
                     "default_tab_template",
                 ),
                 (
@@ -1623,8 +1750,8 @@ mod tests {
         // below covers Double's budgets and Single's legacy pair together.
         let born = |kdl: &str| birth_size(kdl, "default_tab_template");
         let row_height = clave_types::RowHeight::Single;
-        let expanded = launch_layout_kdl("clave", "/w.wasm", None, false, row_height);
-        let collapsed = launch_layout_kdl("clave", "/w.wasm", None, true, row_height);
+        let expanded = launch_layout_kdl("clave", "/w.wasm", &[], false, row_height);
+        let collapsed = launch_layout_kdl("clave", "/w.wasm", &[], true, row_height);
         assert_eq!(
             born(&expanded),
             clave_types::BAR_TARGET_COLS.to_string(),
@@ -1646,29 +1773,24 @@ mod tests {
     #[test]
     fn the_launch_birth_size_follows_the_row_height_mode() {
         // Card (the default): 48 expanded, 16 collapsed.
-        let card_exp = launch_layout_kdl(
-            "clave",
-            "/w.wasm",
-            None,
-            false,
-            clave_types::RowHeight::Card,
-        );
+        let card_exp =
+            launch_layout_kdl("clave", "/w.wasm", &[], false, clave_types::RowHeight::Card);
         let card_col =
-            launch_layout_kdl("clave", "/w.wasm", None, true, clave_types::RowHeight::Card);
+            launch_layout_kdl("clave", "/w.wasm", &[], true, clave_types::RowHeight::Card);
         assert_eq!(birth_size(&card_exp, "default_tab_template"), "48");
         assert_eq!(birth_size(&card_col, "default_tab_template"), "16");
         // Double: the two-line card budgets.
         let expanded = launch_layout_kdl(
             "clave",
             "/w.wasm",
-            None,
+            &[],
             false,
             clave_types::RowHeight::Double,
         );
         let collapsed = launch_layout_kdl(
             "clave",
             "/w.wasm",
-            None,
+            &[],
             true,
             clave_types::RowHeight::Double,
         );
@@ -1678,7 +1800,7 @@ mod tests {
         let legacy = launch_layout_kdl(
             "clave",
             "/w.wasm",
-            None,
+            &[],
             false,
             clave_types::RowHeight::Single,
         );
@@ -1697,7 +1819,7 @@ mod tests {
         let kdl = launch_layout_kdl(
             "clave",
             "/w.wasm",
-            None,
+            &[],
             false,
             clave_types::RowHeight::Single,
         );
@@ -1705,7 +1827,7 @@ mod tests {
         let kdl = launch_layout_kdl(
             "clave",
             "/w.wasm",
-            None,
+            &[],
             false,
             clave_types::RowHeight::Double,
         );
@@ -1736,14 +1858,14 @@ mod tests {
         let expanded = launch_layout_kdl(
             "clave",
             "/w.wasm",
-            None,
+            &[],
             false,
             clave_types::RowHeight::Double,
         );
         let collapsed = launch_layout_kdl(
             "clave",
             "/w.wasm",
-            None,
+            &[],
             true,
             clave_types::RowHeight::Double,
         );
@@ -1758,7 +1880,7 @@ mod tests {
         let kdl = launch_layout_kdl(
             "clave",
             "/w.wasm",
-            None,
+            &[],
             false,
             clave_types::RowHeight::Double,
         );
@@ -1767,10 +1889,102 @@ mod tests {
         assert!(!kdl.contains("\"spawn\""));
     }
 
+    /// A bare record with just the fields a launch layout reads, so the
+    /// multi-row tests below say what they are about instead of restating
+    /// twenty-odd irrelevant defaults.
+    #[cfg(test)]
+    fn layout_row(uuid: &str, label: &str, cwd: &str) -> crate::store::AgentRecord {
+        crate::store::AgentRecord {
+            uuid: uuid.into(),
+            cwd: cwd.into(),
+            repo_root: cwd.into(),
+            branch: "main".into(),
+            label: label.into(),
+            status: clave_types::Status::Idle,
+            last_interacted: 0,
+            commit_ord: 0,
+            last_visited: 0,
+            worktree: None,
+            label_source: crate::store::LabelSource::FirstPrompt,
+            tab_id: None,
+            pane_id: None,
+            stale: false,
+            title: None,
+            summary: String::new(),
+            default_branch: None,
+            context_tokens: None,
+            context_level: None,
+            live_session: None,
+            metered_at: 0,
+            buckets: Default::default(),
+            model: None,
+            provider: None,
+            effort: None,
+            pr_number: None,
+            pr_checked: 0,
+            pr_branch: String::new(),
+            wants: None,
+            subagents: false,
+        }
+    }
+
+    /// The relaunch layout: every row of the previous live set comes back as
+    /// a tab, ranked by the fleet's own frecency (`restore_rows`, which is
+    /// where that rank is decided) — but only the FIRST one runs. The rest are
+    /// created HELD, which costs a tab and a pane and no `claude` process, so
+    /// a relaunch restores the whole fleet's shape at near-zero cost and the
+    /// bar starts each agent when the human navigates to it.
+    ///
+    /// The first tab deliberately runs eagerly rather than being started by
+    /// the bar like the others: it is the tab launch focuses, and running it
+    /// from the layout keeps today's single-eager-row behaviour as the FLOOR
+    /// — if the bar's start-on-focus path ever fails, a relaunch still lands
+    /// the human in a working agent rather than a fleet of dead tabs.
     #[test]
-    fn launch_layout_eager_loads_only_the_most_recent_row() {
-        // §6.8: eagerness of exactly ONE — the most-recent agent resumes
-        // focused at launch; every other row stays dormant in the bar.
+    fn launch_layout_restores_every_row_but_runs_only_the_focused_one() {
+        let rows = [
+            layout_row("u-1", "alpha · main", "/repo/alpha"),
+            layout_row("u-2", "beta · main", "/repo/beta"),
+            layout_row("u-3", "gamma · main", "/repo/gamma"),
+        ];
+        let refs: Vec<&crate::store::AgentRecord> = rows.iter().collect();
+        let kdl = launch_layout_kdl(
+            "clave",
+            "/w.wasm",
+            &refs,
+            false,
+            clave_types::RowHeight::Card,
+        );
+        // One tab per row, in the order given — the order they sat on screen.
+        let tabs: Vec<&str> = kdl
+            .match_indices("tab name=")
+            .map(|(i, _)| &kdl[i..kdl[i..].find('\n').map(|n| i + n).unwrap_or(kdl.len())])
+            .collect();
+        assert_eq!(tabs.len(), 3, "one tab per restored row\n{kdl}");
+        assert!(tabs[0].contains("alpha"), "{tabs:?}");
+        assert!(tabs[1].contains("beta"), "{tabs:?}");
+        assert!(tabs[2].contains("gamma"), "{tabs:?}");
+        // Exactly one focus, on the first — two would leave zellij to pick.
+        assert_eq!(kdl.matches("focus=true").count(), 1, "{kdl}");
+        assert!(tabs[0].contains("focus=true"), "{tabs:?}");
+        // The focused tab runs; every other is held.
+        assert_eq!(
+            kdl.matches("start_suspended true").count(),
+            2,
+            "every tab but the focused one is created held\n{kdl}"
+        );
+        for uuid in ["u-1", "u-2", "u-3"] {
+            assert!(kdl.contains(uuid), "row {uuid} missing from layout\n{kdl}");
+        }
+    }
+
+    #[test]
+    fn launch_layout_with_a_single_row_bakes_one_running_focused_tab() {
+        // §6.8, now the FALLBACK path: with nothing to restore, launch bakes
+        // the most-recent row alone — resumed, focused, and NOT held, every
+        // other row dormant in the bar. This is what a first run and a
+        // quit-with-nothing-open both land on, so it must stay byte-stable
+        // even as the restored-set branch grows beside it.
         let mut r = crate::store::AgentRecord {
             uuid: "u-recent".into(),
             cwd: "/repo/.claude-worktrees/ab".into(), // worktree row: bake ITS cwd
@@ -1806,7 +2020,7 @@ mod tests {
         let kdl = launch_layout_kdl(
             "clave",
             "/w.wasm",
-            Some(&r),
+            &[&r],
             false,
             clave_types::RowHeight::Double,
         );
@@ -1839,8 +2053,11 @@ mod tests {
         // a deleted worktree as most-recent would bake a tab whose spawn dies
         // at canonicalize. Skip it, fall through to the next viable row.
         use crate::store::{AgentRecord, LabelSource, Store};
-        let live_dir = std::env::temp_dir().join(format!("clave-eager-{}", std::process::id()));
-        std::fs::create_dir_all(&live_dir).unwrap();
+        // `tempfile` rather than a pid-keyed path: it is removed on drop, so a
+        // panicking test leaks nothing and a reused pid cannot inherit a stale
+        // directory. Same convention as the store tests.
+        let tmp = tempfile::tempdir().unwrap();
+        let live_dir = tmp.path().to_path_buf();
         let mk = |uuid: &str, cwd: &str, li: u64| AgentRecord {
             uuid: uuid.into(),
             cwd: cwd.into(),
@@ -1887,7 +2104,282 @@ mod tests {
         none.agents
             .insert("gone".into(), mk("gone", "/no/such/clave/eager/dir", 200));
         assert!(eager_row(&none).is_none());
-        let _ = std::fs::remove_dir_all(&live_dir);
+    }
+
+    /// A store row with nothing on it but a uuid and a cwd — every field the
+    /// restore reads is set by the caller, so a test says what it means.
+    fn bare_record(uuid: &str, cwd: &str) -> crate::store::AgentRecord {
+        use crate::store::{AgentRecord, LabelSource};
+        AgentRecord {
+            uuid: uuid.into(),
+            cwd: cwd.into(),
+            repo_root: String::new(),
+            branch: String::new(),
+            label: uuid.into(),
+            status: clave_types::Status::Idle,
+            last_interacted: 0,
+            commit_ord: 0,
+            last_visited: 0,
+            worktree: None,
+            label_source: LabelSource::FirstPrompt,
+            tab_id: None,
+            pane_id: None,
+            stale: false,
+            title: None,
+            summary: String::new(),
+            default_branch: None,
+            context_tokens: None,
+            context_level: None,
+            live_session: None,
+            metered_at: 0,
+            buckets: Default::default(),
+            model: None,
+            provider: None,
+            effort: None,
+            pr_number: None,
+            pr_checked: 0,
+            pr_branch: String::new(),
+            wants: None,
+            subagents: false,
+        }
+    }
+
+    /// Across a restored set, one unbakeable row must not take the rest down.
+    #[test]
+    fn a_bad_cwd_in_a_restored_set_drops_that_row_and_keeps_the_others() {
+        let a = bare_record("u-a", "/good/a");
+        let b = bare_record("u-b", "/bad");
+        let c = bare_record("u-c", "/good/c");
+        let eager = bare_record("u-eager", "/good/e");
+        let (rows, dropped) = bakeable_rows(vec![&a, &b, &c], Some(&eager), |cwd| {
+            if cwd == "/bad" {
+                anyhow::bail!("bad cwd")
+            } else {
+                Ok(())
+            }
+        })
+        .expect("one bad row is not fatal across a set");
+        assert_eq!(
+            rows.iter().map(|r| r.uuid.as_str()).collect::<Vec<_>>(),
+            vec!["u-a", "u-c"]
+        );
+        assert_eq!(dropped.len(), 1, "the drop is reported, not silent");
+        assert!(dropped[0].contains("u-b"));
+    }
+
+    /// A set whose rows are ALL rejected must still launch something. Testing
+    /// the set for emptiness before the filter baked a bar and no agent —
+    /// worse than the cold start the restore replaced.
+    #[test]
+    fn a_restored_set_that_is_entirely_unbakeable_falls_back_to_the_eager_row() {
+        let a = bare_record("u-a", "/bad");
+        let eager = bare_record("u-eager", "/good");
+        let (rows, dropped) = bakeable_rows(vec![&a], Some(&eager), |cwd| {
+            if cwd == "/bad" {
+                anyhow::bail!("bad cwd")
+            } else {
+                Ok(())
+            }
+        })
+        .expect("the eager row is bakeable");
+        assert_eq!(
+            rows.iter().map(|r| r.uuid.as_str()).collect::<Vec<_>>(),
+            vec!["u-eager"],
+            "an emptied restored set falls through to the cold-start row"
+        );
+        assert_eq!(dropped.len(), 1);
+    }
+
+    /// With ONE row to bake, a bad cwd is the whole launch: fatal and loud,
+    /// never a session that silently came up empty.
+    #[test]
+    fn a_bad_cwd_on_the_eager_row_is_fatal() {
+        let eager = bare_record("u-eager", "/bad");
+        assert!(
+            bakeable_rows(vec![], Some(&eager), |_| anyhow::bail!("bad cwd")).is_err(),
+            "the cold-start path stays fatal"
+        );
+    }
+
+    /// A first run: nothing restored, nothing to be eager about, no error.
+    #[test]
+    fn nothing_to_bake_is_not_an_error() {
+        let (rows, dropped) = bakeable_rows(vec![], None, |_| Ok(())).expect("empty is ordinary");
+        assert!(rows.is_empty() && dropped.is_empty());
+    }
+
+    /// The read side of the live-set snapshot: `last_live` is a faithful
+    /// record, so it can name rows that no longer exist (idle-pruned between
+    /// sessions) or whose directory has since gone (a deleted worktree). Both
+    /// are dropped here rather than at write time — the store stays the honest
+    /// record, and only what launch can actually BAKE survives this call. A
+    /// vanished cwd left in would emit a tab whose spawn dies at canonicalize,
+    /// the same trap `eager_row` already guards.
+    #[test]
+    fn restore_rows_drops_pruned_and_vanished_rows() {
+        use crate::store::{AgentRecord, LabelSource, Store};
+        // `tempfile` rather than a pid-keyed path: it is removed on drop, so a
+        // panicking test leaks nothing and a reused pid cannot inherit a stale
+        // directory. Same convention as the store tests.
+        let tmp = tempfile::tempdir().unwrap();
+        let live_dir = tmp.path().to_path_buf();
+        let mk = |uuid: &str, cwd: &str| AgentRecord {
+            uuid: uuid.into(),
+            cwd: cwd.into(),
+            repo_root: String::new(),
+            branch: String::new(),
+            label: uuid.into(),
+            status: clave_types::Status::Idle,
+            last_interacted: 0,
+            commit_ord: 0,
+            last_visited: 0,
+            worktree: None,
+            label_source: LabelSource::FirstPrompt,
+            tab_id: None,
+            pane_id: None,
+            stale: false,
+            title: None,
+            summary: String::new(),
+            default_branch: None,
+            context_tokens: None,
+            context_level: None,
+            live_session: None,
+            metered_at: 0,
+            buckets: Default::default(),
+            model: None,
+            provider: None,
+            effort: None,
+            pr_number: None,
+            pr_checked: 0,
+            pr_branch: String::new(),
+            wants: None,
+            subagents: false,
+        };
+        let here = live_dir.to_str().unwrap();
+        let mut store = Store::default();
+        store.agents.insert("u-b".into(), mk("u-b", here));
+        store.agents.insert("u-a".into(), mk("u-a", here));
+        store
+            .agents
+            .insert("u-gone".into(), mk("u-gone", "/no/such/clave/restore/dir"));
+        store.last_live = vec![
+            "u-pruned".into(), // named in the snapshot, no longer a row
+            "u-b".into(),
+            "u-gone".into(), // row exists, its directory does not
+            "u-a".into(),
+        ];
+        let uuids = |store: &Store| -> Vec<String> {
+            restore_rows(store, 0)
+                .iter()
+                .map(|r| r.uuid.to_string())
+                .collect()
+        };
+        // Nothing separates these two rows, so the set's own order stands.
+        assert_eq!(uuids(&store), vec!["u-b", "u-a"], "viable rows only");
+        assert!(
+            restore_rows(&Store::default(), 0).is_empty(),
+            "no snapshot ⇒ nothing to restore, and launch falls back to the eager row"
+        );
+    }
+
+    /// The set is written in ascending tab id — the order the tabs were
+    /// CREATED in, which is not the order the human saw. The bar sorts rows
+    /// by investment, so a relaunch has to sort them too, or the fleet comes
+    /// back shuffled and, worse, the row launch starts (the first one) is
+    /// whichever tab happened to be leftmost rather than the one at the top.
+    #[test]
+    fn restore_rows_rank_by_the_same_key_the_bar_uses() {
+        use crate::store::Store;
+        // `tempfile` rather than a pid-keyed path: it is removed on drop, so a
+        // panicking test leaks nothing and a reused pid cannot inherit a stale
+        // directory. Same convention as the store tests.
+        let tmp = tempfile::tempdir().unwrap();
+        let live_dir = tmp.path().to_path_buf();
+        let here = live_dir.to_str().unwrap().to_string();
+        let mut store = Store::default();
+        // Tab-id order is a, b, c. Investment says b, then c, then a.
+        for (uuid, count, ord) in [("u-a", 1, 9), ("u-b", 5, 1), ("u-c", 3, 2)] {
+            let mut r = bare_record(uuid, &here);
+            r.buckets.insert(0, count);
+            r.commit_ord = ord;
+            store.agents.insert(uuid.into(), r);
+            store.last_live.push(uuid.into());
+        }
+        let uuids = |store: &Store| -> Vec<String> {
+            restore_rows(store, 0)
+                .iter()
+                .map(|r| r.uuid.to_string())
+                .collect()
+        };
+        assert_eq!(uuids(&store), vec!["u-b", "u-c", "u-a"], "frecency");
+        // `commit_ord` is the fallback, and a fleet with no buckets at all —
+        // upgrade day — must still come back in a meaningful order rather
+        // than collapsing to the tab strip.
+        for r in store.agents.values_mut() {
+            r.buckets.clear();
+        }
+        assert_eq!(uuids(&store), vec!["u-a", "u-c", "u-b"], "ordinal fallback");
+        // Recency mode has no dial: the ordinal is the whole key, so the
+        // buckets above must not have been ranking it.
+        store.order = clave_types::OrderMode::Recency;
+        for (uuid, count) in [("u-a", 1), ("u-b", 5), ("u-c", 3)] {
+            store.agents.get_mut(uuid).unwrap().buckets.insert(0, count);
+        }
+        assert_eq!(uuids(&store), vec!["u-a", "u-c", "u-b"], "recency mode");
+    }
+
+    /// The layer ABOVE the row key (CodeRabbit, PR #261). The bar clusters
+    /// live rows by repo and ranks the CLUSTERS by their summed score, so a
+    /// repo holding several middling rows outranks another repo's single
+    /// better one. Ranking each row on its own crossed that: the bar showed
+    /// `a1` on top and the relaunch focused — and therefore STARTED — `b1`.
+    ///
+    /// Both sides now call `clave_types::sort_live_block`, so this asserts the
+    /// shared rule reaches the host, not a second copy of it.
+    #[test]
+    fn restore_rows_rank_repo_clusters_the_way_the_bar_does() {
+        use crate::store::Store;
+        // `tempfile` rather than a pid-keyed path: it is removed on drop, so a
+        // panicking test leaks nothing and a reused pid cannot inherit a stale
+        // directory. Same convention as the store tests.
+        let tmp = tempfile::tempdir().unwrap();
+        let live_dir = tmp.path().to_path_buf();
+        let here = live_dir.to_str().unwrap().to_string();
+        let mut store = Store::default();
+        // Flat, b1 wins at 8000. Clustered, repo a wins with Σ 9000.
+        for (uuid, repo, count) in [
+            ("u-b1", "/r/b", 8),
+            ("u-a1", "/r/a", 5),
+            ("u-a2", "/r/a", 4),
+        ] {
+            let mut r = bare_record(uuid, &here);
+            r.repo_root = repo.into();
+            r.buckets.insert(0, count);
+            store.agents.insert(uuid.into(), r);
+            store.last_live.push(uuid.into());
+        }
+        let uuids: Vec<String> = restore_rows(&store, 0)
+            .iter()
+            .map(|r| r.uuid.to_string())
+            .collect();
+        assert_eq!(
+            uuids,
+            vec!["u-a1", "u-a2", "u-b1"],
+            "the cluster's sum outranks a better lone row, and the first row is what starts"
+        );
+        // A worktree row clusters with its PARENT repo, because `repo_root` is
+        // the parent even when `worktree` is set — the same field the bar
+        // groups on, so a worktree cannot split its repo's cluster in two.
+        let wt = store.agents.get_mut("u-a2").unwrap();
+        wt.worktree = Some(format!("{here}/wt"));
+        assert_eq!(
+            restore_rows(&store, 0)
+                .iter()
+                .map(|r| r.uuid.to_string())
+                .collect::<Vec<_>>(),
+            vec!["u-a1", "u-a2", "u-b1"],
+            "a worktree row stays inside its repo's cluster"
+        );
     }
 
     #[test]
@@ -2155,13 +2647,7 @@ mod tests {
             wants: None,
             subagents: false,
         };
-        let lay = launch_layout_kdl(
-            abs,
-            "/w.wasm",
-            Some(&r),
-            false,
-            clave_types::RowHeight::Double,
-        );
+        let lay = launch_layout_kdl(abs, "/w.wasm", &[&r], false, clave_types::RowHeight::Double);
         assert!(lay.contains(&format!("command=\"{abs}\"")));
         assert!(!lay.contains("command=\"clave\""));
     }
@@ -2483,13 +2969,7 @@ mod tests {
         // The launch layout is composed at launch time and takes the eager
         // agent row — synthesize one so the eager-tab's baked `command=`
         // (the version-bearing binary reference) is present to check too.
-        let launch = launch_layout_kdl(
-            binary,
-            wasm,
-            Some(&r),
-            false,
-            clave_types::RowHeight::Double,
-        );
+        let launch = launch_layout_kdl(binary, wasm, &[&r], false, clave_types::RowHeight::Double);
 
         // Check PER ARTIFACT, not over the union (Codex, PR #52): flattening
         // first would let an artifact that lost its versioned reference

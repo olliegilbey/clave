@@ -108,6 +108,7 @@ loudly and stops the run; later phases assume earlier truth.
 | 5c | **Terminal facts (OS side)** | a real `sleep` typed into a plain shell tab, behind a shell allowlist, while that tab is focused; then focus moves to an agent tab with the command still running | leg A: at least one sandbox bar learns the change — the OS-facts pipeline (`get_pane_cwd`/`get_pane_running_command` → `apply_pane_facts` → the terminal row) delivers end to end, which nothing tested before. Leg B MEASURES whether a second instance learns it from another tab, the open question under the store-backed fix, and asserts nothing: the facts are per-instance today, so "every bar agrees" is not yet true and a drive must not go red on a known-open defect | the 2026-09-12 flicker (a terminal row with facts under one tab and none under another), #206, #239 |
 | 6 | Quiescence | idle 60s | evlog and store `seq` flat; zellij log flat after the mark for sandbox-attributable lines only (the shared log is never globally flat with a live maintainer fleet — see Delivery accounting) | P17, B19/B20, drive step 6 |
 | 6b | **Isolation witness** | nothing (reads this run's own evidence) | zero `push-refused` events across the run — no push was aimed at a bar that does not own this store; the ambient zellij identity is STILL the sandbox's at the END of the run, not just at the start; the inherited session's name appears nowhere as a push target | FOOTGUNS #281, the 2026-09-11 incident |
+| 6c | **Relaunch (the second launch)** | quit the sandbox session, then ask the maintainer to `just launch` it again | the restored set comes back the SAME SIZE, and holds the same uuids, after a first session in which only ONE tab was visited; EVERY restored row carries a `tab_id` in the store, and each row except the first carries it BEFORE its agent runs — the first is the eager one, which starts at launch, so the timing half of that assertion applies only to the held rows; a tab closed in session N is absent in session N+1. This is the only phase that reads what the previous session recorded, so it is the only one that can see the live set decay | the relaunch seam (TESTING.md's escape record); #261's decay |
 | 7 | Teardown | nothing | prints the kill pair (the agent may run it once both eyeballs are in) | drive step 9 |
 
 **Why 5b could not catch the 2026-09-14 red-glyph defect.** Its event
@@ -198,6 +199,14 @@ the stable binary (FOOTGUNS, 2026-08-24).
    extras being `pr-sync` writes from the previous run's rows.
 5. Report the per-phase table with measured values; request the two
    eyeballs; hand back the kill pair.
+
+**Phase 6c needs two maintainer launches, and that is the point.** Every other
+phase runs inside one session, which is exactly why the live-set decay (#261)
+reached a shipped branch with all gates green and a full drive behind it. The
+phase is cheap — quit, relaunch, count — and it is the only automated look at
+state that crosses a session boundary. Do not fold it into phase 1 by staging
+a pre-bound fixture: staging the binds is what makes the first launch pass
+without ever proving the first session could have RECORDED them.
 
 ## When it runs
 

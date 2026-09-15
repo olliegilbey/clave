@@ -312,6 +312,33 @@ pub struct Store {
     /// session recreate). `default` keeps pre-field store files loading.
     #[serde(default)]
     pub tab_touched: BTreeMap<usize, u64>,
+    /// The rows that held a tab when the PREVIOUS zellij session died — the
+    /// set a relaunch restores. Written by `clear_session_order`, which is the
+    /// one pass that both runs at every launch and still sees the old binds a
+    /// beat before it clears them; read by `setup::restore_rows`. Nothing else
+    /// writes it.
+    ///
+    /// "Held a tab" means the BIND, and a restored tab binds before its spawn
+    /// runs (the bar's `restored_bind_effects`). Both halves are load-bearing:
+    /// derived from binds written by a running agent alone, the set recorded
+    /// only the tabs the human visited and the restored fleet decayed to a
+    /// single row over a few relaunches.
+    ///
+    /// Deliberately UNRANKED and UNCAPPED. A SET, written in ascending tab id
+    /// only so the file is deterministic: tab id is creation order, and the
+    /// order the human actually saw was the bar's own ranking, which
+    /// `restore_rows` recomputes from these rows' agent-scoped `buckets` and
+    /// `commit_ord`. Any policy about how much of the set comes back hot is
+    /// likewise applied on the read side. Keeping those apart is what lets the
+    /// restore policy be retuned without touching the store's correctness.
+    ///
+    /// Agent-scoped, unlike `tab_order`/`tab_buckets`/`tab_touched` beside it:
+    /// those hold session-scoped tab ids and must die with the session, while
+    /// this holds agent uuids, which outlive it. `default` (empty) keeps
+    /// pre-field store files loading and means "nothing to restore" — the
+    /// single-eager-row path launch already takes.
+    #[serde(default)]
+    pub last_live: Vec<String>,
     /// Which row geometry the NEXT `clave` launch bakes (#232). Read once by
     /// `launch_layout_kdl` at session-create time — never rides the pipe
     /// (unlike `collapsed`/`order`): geometry is launch-baked into fixed pane
@@ -905,6 +932,25 @@ pub fn clear_session_order(paths: &StorePaths) -> Result<()> {
             .values()
             .any(|r| r.tab_id.is_some() || r.pane_id.is_some());
         let mut changed = false;
+        // Record the set a beat BEFORE clearing it: this pass is the last
+        // moment the previous session's binds exist, and `last_live` is what
+        // the next launch rebuilds the layout from. Assigned UNCONDITIONALLY,
+        // not inside the clear below — a session quit with no tabs open must
+        // leave an EMPTY set, and a conditional write would silently restore
+        // the set from two launches ago instead.
+        let live_set: Vec<String> = {
+            let mut by_tab: Vec<(usize, &str)> = s
+                .agents
+                .values()
+                .filter_map(|r| r.tab_id.map(|t| (t, r.uuid.as_str())))
+                .collect();
+            by_tab.sort_unstable(); // ascending tab id: deterministic, NOT a rank
+            by_tab.into_iter().map(|(_, u)| u.to_string()).collect()
+        };
+        if s.last_live != live_set {
+            s.last_live = live_set;
+            changed = true;
+        }
         if !s.tab_order.is_empty() || bound {
             s.tab_order.clear();
             s.tab_buckets.clear();
@@ -1951,6 +1997,94 @@ mod tests {
         assert_eq!(
             before.agents, after.agents,
             "backfill must run exactly once"
+        );
+    }
+
+    /// The launch pass that clears the session-scoped binds RECORDS them
+    /// first: `last_live` is the previous session's live SET, written in
+    /// ascending tab id so the file is deterministic. It is not a rank — the
+    /// relaunch ranks it on the read side (`setup::restore_rows`).
+    /// Without this the knowledge dies on the same pass that clears it, and
+    /// every previously-live row comes back dormant — the relaunch complaint.
+    #[test]
+    fn clear_session_order_records_the_live_set_in_tab_order() {
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            // Inserted out of tab order, and keyed by uuid in a BTreeMap, so a
+            // pass that recorded iteration order rather than TAB order would
+            // pass by luck on a two-row fixture. Here uuid order and tab order
+            // disagree deliberately.
+            for (uuid, tab) in [("u-c", 1usize), ("u-a", 9), ("u-b", 4)] {
+                let mut a = rec(uuid);
+                a.tab_id = Some(tab);
+                s.agents.insert(uuid.into(), a);
+                s.tab_order.insert(tab, 0);
+            }
+            // A dormant row holds no tab and is not part of the live set.
+            s.agents.insert("u-dormant".into(), rec("u-dormant"));
+        })
+        .unwrap();
+        clear_session_order(&p).unwrap();
+        let s = read_store(&p).unwrap();
+        assert_eq!(
+            s.last_live,
+            vec!["u-c".to_string(), "u-b".to_string(), "u-a".to_string()],
+            "ascending tab id (1, 4, 9), not uuid order, and dormant rows excluded"
+        );
+        // The binds themselves still go — recording must not preserve them.
+        assert!(s.agents.values().all(|r| r.tab_id.is_none()));
+    }
+
+    /// A RESTORED row holds a tab without ever running a process, and it must
+    /// still count as live — otherwise the set shrinks to the tabs the human
+    /// happened to visit and the restored fleet decays to one row over a few
+    /// relaunches (measured on this branch: three rows in, one row back). The
+    /// bind arrives from the bar's `restored_bind_effects`, so the discriminator
+    /// here is `tab_id` ALONE: a row with a tab and no registered pane is a
+    /// tab on screen, which is exactly what the set records.
+    #[test]
+    fn clear_session_order_counts_a_restored_row_that_never_ran() {
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            let mut visited = rec("u-visited");
+            visited.tab_id = Some(0);
+            visited.pane_id = Some(7); // ran, registered
+            s.agents.insert("u-visited".into(), visited);
+            let mut waiting = rec("u-waiting");
+            waiting.tab_id = Some(1); // a tab on screen…
+            waiting.pane_id = None; // …whose spawn never ran
+            s.agents.insert("u-waiting".into(), waiting);
+        })
+        .unwrap();
+        clear_session_order(&p).unwrap();
+        assert_eq!(
+            read_store(&p).unwrap().last_live,
+            vec!["u-visited".to_string(), "u-waiting".to_string()],
+            "a restored tab the human never reached is still a tab that was open"
+        );
+    }
+
+    /// Quitting with nothing open must leave an EMPTY set, not the set from
+    /// the launch before. The write is unconditional for exactly this case:
+    /// nothing is bound, so the clear below has nothing to do and does not
+    /// run, and a recording that rode inside it would silently resurrect a
+    /// two-launches-ago layout. Empty is also the signal launch reads to take
+    /// its existing single-eager-row path.
+    #[test]
+    fn clear_session_order_empties_the_live_set_when_nothing_was_bound() {
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            s.last_live = vec!["u-stale".into()];
+            s.agents.insert("u-dormant".into(), rec("u-dormant"));
+        })
+        .unwrap();
+        clear_session_order(&p).unwrap();
+        assert!(
+            read_store(&p).unwrap().last_live.is_empty(),
+            "a launch with nothing bound clears the set rather than keeping it"
         );
     }
 

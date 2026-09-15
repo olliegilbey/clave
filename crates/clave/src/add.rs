@@ -236,13 +236,36 @@ pub fn tab_node(
 /// default_tab_template (the §6.8 launch layout): the template supplies
 /// the bar + vertical split, and this node's pane fills its `children`
 /// slot. Same baked idempotent spawn — only the bar pane differs.
-pub fn tab_node_bare(binary: &str, label: &str, uuid: &str, cwd: &str) -> String {
+///
+/// `eager` names the ONE tab a launch both focuses and runs. It is a single
+/// parameter rather than a `focus`/`held` pair because the pair could express
+/// states that must never be baked: `(false, false)` starts every restored
+/// agent at once — a resumed session measures ~350 MB resident and never gives
+/// it back, so a fleet of them is the gigabyte case this design exists to
+/// avoid — and `(true, true)` focuses a tab that will not run.
+///
+/// Exactly one node in a layout may be focused; with none, or with several,
+/// zellij picks, and the row the human lands on stops being ours to choose.
+/// Every other tab is created WITHOUT running its command (`start_suspended`,
+/// which zellij parses as `hold_on_start`): the tab, its name and its baked
+/// spawn all exist, and no `claude` process does. That is what makes restoring
+/// a whole previous live set cost a layout rather than a gigabyte — a held
+/// pane measures nothing until the bar starts it.
+pub fn tab_node_bare(binary: &str, label: &str, uuid: &str, cwd: &str, eager: bool) -> String {
     // `command` bakes the environment's clave — see tab_node.
+    let focus = if eager { " focus=true" } else { "" };
+    // Inside the pane node, beside `args` — a sibling property of the run
+    // command, not of the tab.
+    let hold = if eager {
+        ""
+    } else {
+        "            start_suspended true\n"
+    };
     format!(
-        r#"    tab name="{label}" focus=true {{
+        r#"    tab name="{label}"{focus} {{
         pane cwd="{cwd}" command="{binary}" {{
             args "spawn" "{uuid}" "--name" "{label}" "--cwd" "{cwd}"
-        }}
+{hold}        }}
     }}
 "#
     )

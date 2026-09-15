@@ -150,9 +150,29 @@ clippy:
 # nobody can afford to run is a gate nobody runs. Which change classes owe a
 # run, and what to do with a survivor, are in docs/dev/TESTING.md.
 #
+# TWO filters, for two different reasons.
+#
 # --in-diff scopes generation to lines the diff touches, so the cost tracks the
 # size of the change rather than the size of the crate. Config (including the
 # load-bearing `test_workspace = true`) is .cargo/mutants.toml.
+#
+# --iterate then skips the mutants an earlier run already caught, because
+# --in-diff alone re-tests the WHOLE branch diff every time and that diff only
+# grows: #261 reached 136 mutants and 17 minutes, of which 123 were already
+# known good. Measured on that branch, a re-run went 17m -> 52s (135 of 136
+# excluded, and the one it ran was the open survivor).
+#
+# KNOW WHAT THE CACHE KEY IS. cargo-mutants names a mutant by file, line,
+# column and description. So it re-tests a mutant when the mutant's IDENTITY
+# moves, not when the line's MEANING changes. Measured 2026-09-15: editing
+# `(ordinal, 0)` to `(ordinal, 7)` in clave_types::live_key produced no new
+# mutant to test. Two limits follow, and only the first one bites:
+#   - It cannot hide a BROKEN test. cargo-mutants runs the unmutated baseline
+#     first and aborts when that is red (measured the same day).
+#   - It CAN hide a WEAKENED one, because a test that asserts less still passes
+#     the baseline, and the mutant it used to catch is skipped.
+# So the cache is dropped whenever the config or the toolchain moves (below),
+# and `just mutants-cold` drops it on demand — run that once before the PR.
 #
 # `--workspace` is the SAME footgun again and there is no config key for it:
 # cargo-mutants GENERATES mutants only for the default packages, and
@@ -166,6 +186,16 @@ mutants base="main" *args:
         echo "cargo-mutants not installed: cargo install cargo-mutants --locked" >&2
         exit 127
     }
+    # The cache is only true for the config and the toolchain that filled it. A
+    # new exclude rule, or a new compiler, can change a verdict that the cache
+    # would then hide. So key it on both, and start cold when the key moves.
+    key="$(cargo mutants --version) $(rustc --version) $(shasum -a 256 .cargo/mutants.toml)"
+    if [ "$(cat target/.mutants-cache-key 2>/dev/null || true)" != "$key" ]; then
+        echo "mutants: config or toolchain moved — the cache is dropped"
+        rm -rf mutants.out mutants.out.old
+        mkdir -p target
+        printf '%s\n' "$key" >target/.mutants-cache-key
+    fi
     diff=$(mktemp)
     trap 'rm -f "$diff"' EXIT
     # --merge-base so a stale local `main` does not report every commit since
@@ -175,7 +205,15 @@ mutants base="main" *args:
         echo "no changed Rust lines vs {{ base }} — nothing to mutate"
         exit 0
     fi
-    cargo mutants --workspace --in-diff "$diff" {{ args }}
+    cargo mutants --workspace --in-diff "$diff" --iterate {{ args }}
+
+# The same run with the cache dropped — the only run that re-tests a mutant an
+# earlier run caught. Run it once before you open the PR, because that is where
+# a test you deleted since would show up.
+# Re-run every mutant vs `main`, ignoring the cache — do this before a PR.
+mutants-cold base="main" *args:
+    rm -rf mutants.out mutants.out.old target/.mutants-cache-key
+    just mutants {{ base }} {{ args }}
 
 # One module, whole. The deliberate deep run: use it when a file is new or has
 # been rewritten, where --in-diff would mutate everything anyway.

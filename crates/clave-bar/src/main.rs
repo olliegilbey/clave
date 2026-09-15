@@ -247,6 +247,12 @@ impl State {
         let bin = self.clave_binary.clone();
         for e in effects {
             match e {
+                Effect::RunHeldPane { pane_id } => {
+                    // The restored tab's agent starts here — `rerun` is
+                    // zellij's one verb for a held command pane, and a pane
+                    // held from birth has simply never run once.
+                    rerun_command_pane(pane_id);
+                }
                 Effect::FocusPane { pane_id } => {
                     // S2-proven nav: focus the terminal pane; Zellij pulls
                     // its tab forward. go_to_tab is a known dead end.
@@ -506,6 +512,15 @@ impl State {
         // out of `identity_effects` also keeps that function's contract what it
         // has always been — the actions to take, nothing else.
         let mut fx: Vec<Effect> = self.model.bind_stall_report().into_iter().collect();
+        // The held-tab binds. Kept beside `identity_effects` rather than
+        // inside it so the two ledgers stay visibly separate — `bind_effects`
+        // clears `bind_sent` for every uuid without a registered pane, which
+        // is this leg's whole population (CodeRabbit, #261). It carries its
+        // OWN election gate and reports for every held tab, not just ours:
+        // zellij sends the tab frame only to the focused tab, so a bar in an
+        // unvisited tab cannot resolve its own tab id at all. The elected bar
+        // can, for all of them — the pane manifest is global.
+        fx.extend(self.model.restored_bind_effects());
         fx.extend(self.model.identity_effects());
         if !fx.is_empty() {
             self.run_effects(fx);
@@ -976,6 +991,7 @@ impl ZellijPlugin for State {
                             is_focused: p.is_focused,
                             is_floating: p.is_floating,
                             terminal_command: p.terminal_command.clone(),
+                            is_held: p.is_held,
                             exited: p.exited,
                             exit_status: p.exit_status,
                         });

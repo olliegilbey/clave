@@ -239,6 +239,111 @@ pub fn frecency_millis(
     (sum * 1000.0) as u64
 }
 
+/// One row of the LIVE block, before it is sorted.
+pub struct LiveRow<T> {
+    /// The repo cluster this row belongs to. `None` is a group of one: a row
+    /// with no repo, a terminal outside every checkout, and every row in
+    /// `Recency` mode, which has no repo layer at all.
+    pub group: Option<String>,
+    /// The row's own ranking key: the score, then the ordinal a row with no
+    /// score falls back to. Any scoring row outranks every unscored one,
+    /// which is why the fallback is the SECOND element and not merged into
+    /// the first.
+    pub key: (u64, u64),
+    /// The determinism tiebreak, ASCENDING, for rows the key cannot separate.
+    pub tiebreak: usize,
+    pub row: T,
+}
+
+/// Is `bin` one of OUR binaries — bare `clave`, or a versioned copy
+/// `clave-vN…`? Matches on the file name, so an absolute path answers the
+/// same as a bare name.
+///
+/// The `clave-v` arm requires a DIGIT immediately after the prefix rather than
+/// a bare `starts_with`: a foreign `clave-vault` or `clave-verify` on someone's
+/// PATH shares the textual prefix and is not ours, and must never be absorbed,
+/// rewritten, or started.
+///
+/// ONE function across the workspace. The host asks it of a hook command and
+/// of the baked layout; the bar asks it of a held pane's launch command before
+/// it will start that pane. Those callers parse different shapes — quoted KDL
+/// tokens against a space-joined command line — and the matcher was all they
+/// had in common, so it was copied, and the copy in the bar was covered by no
+/// test at all. A release install is the ONLY environment that bakes the
+/// versioned form (a sandbox shims a bare `clave`), so the copy that mattered
+/// was the one nothing exercised.
+pub fn is_clave_binary(bin: &str) -> bool {
+    matches!(
+        std::path::Path::new(bin).file_name().and_then(|n| n.to_str()),
+        Some(name) if name == "clave"
+            || name
+                .strip_prefix("clave-v")
+                .is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit()))
+    )
+}
+
+/// One row's ranking key, for every surface that ranks clave rows.
+///
+/// ONE function, for the reason [`sort_live_block`] beneath it is one: the
+/// cluster layer found a single home after PR #261 and the key it clusters did
+/// not follow, so the same rule still lived in the bar (live rows and dormant
+/// rows) and in the host (the set a relaunch bakes). Retune the policy on one
+/// side and a relaunch again starts a row that is not the bar's top — the #261
+/// defect, one level down.
+///
+/// `millis` is the caller's own decayed score, because that part genuinely
+/// differs: the bar can max-merge a tab-scoped bucket the host cannot see.
+/// What must NOT differ is this — in `Frecency`, a scoring row beats every
+/// unscored one, so the ordinal is the SECOND element and never merged into
+/// the first. `Recency` has no score and no repo layer, so the ordinal is the
+/// whole key.
+pub fn live_key(order: OrderMode, millis: u64, ordinal: u64) -> (u64, u64) {
+    match order {
+        OrderMode::Recency => (ordinal, 0),
+        OrderMode::Frecency { .. } if millis > 0 => (millis, 0),
+        OrderMode::Frecency { .. } => (0, ordinal),
+    }
+}
+
+/// Sort the live block (double-layer frecency, ratified 2026-08-26): rows
+/// cluster by group, clusters rank by (Σ member score, best member key), and
+/// members keep the row rule within their cluster.
+///
+/// ONE function, for the same reason [`frecency_millis`] is one. The bar sorts
+/// the rows it renders; the host sorts the rows a relaunch bakes, and the
+/// FIRST of those is the only agent a relaunch starts. Two copies of the rule
+/// disagreed as soon as a repo held several rows — a cluster can outrank a
+/// higher-scoring lone row — so a relaunch focused and started an agent that
+/// was not the one at the top of the bar (CodeRabbit, PR #261).
+///
+/// A group-of-one's cluster key is its own key restated, so ungrouped rows
+/// sort exactly as the flat rule would, and `Recency` mode is unaffected. The
+/// group-identity tiebreak keeps two clusters that tie exactly (same sum AND
+/// same best) contiguous rather than interleaved. Zero-sum clusters hold on
+/// their best member's ordinal fallback, so a fully-decayed fleet keeps its
+/// clusters instead of de-grouping at midnight.
+pub fn sort_live_block<T>(rows: &mut [LiveRow<T>]) {
+    let mut clusters: std::collections::BTreeMap<String, (u64, (u64, u64))> = Default::default();
+    for r in rows.iter() {
+        if let Some(g) = &r.group {
+            let c = clusters.entry(g.clone()).or_default();
+            c.0 += r.key.0;
+            c.1 = c.1.max(r.key);
+        }
+    }
+    let primary = |r: &LiveRow<T>| match &r.group {
+        Some(g) => clusters[g.as_str()],
+        None => (r.key.0, r.key),
+    };
+    rows.sort_by(|a, b| {
+        primary(b)
+            .cmp(&primary(a))
+            .then_with(|| a.group.cmp(&b.group))
+            .then_with(|| b.key.cmp(&a.key))
+            .then_with(|| a.tiebreak.cmp(&b.tiebreak))
+    });
+}
+
 /// One agent row as the plugin renders it. Mirrors the store record's
 /// display-relevant fields (spec §5); the plugin never sees the store, only
 /// this snapshot.
@@ -758,6 +863,69 @@ const _: () = assert!(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The release install is the only environment that bakes the versioned
+    /// form, so this arm is the one no sandbox drive can reach. `clave-vault`
+    /// is the near-miss the digit check exists for.
+    #[test]
+    fn our_binary_is_the_bare_name_or_a_versioned_copy_and_never_a_look_alike() {
+        for ours in [
+            "clave",
+            "/Users/x/.local/share/clave/bin/clave-v0.4.0",
+            "clave-v1.10.3",
+        ] {
+            assert!(is_clave_binary(ours), "{ours} is ours");
+        }
+        for theirs in [
+            "clave-vault",
+            "clave-verify",
+            "/usr/bin/clave-vault",
+            "claved",
+            "cargo",
+            "",
+        ] {
+            assert!(!is_clave_binary(theirs), "{theirs} is not ours");
+        }
+    }
+
+    /// The policy both surfaces now share. It is asserted HERE rather than in
+    /// either consumer, because the defect it guards is the two consumers
+    /// disagreeing: the bar renders the rank and the host bakes it, and only
+    /// the FIRST baked row gets an agent started.
+    #[test]
+    fn a_scoring_row_outranks_every_unscored_one_whatever_their_ordinals() {
+        let hl = OrderMode::Frecency {
+            half_life_hours: 72,
+        };
+        let scored = live_key(hl, 1, 0); // the weakest possible score…
+        let unscored = live_key(hl, 0, u64::MAX); // …against the best ordinal
+        assert!(
+            scored > unscored,
+            "the ordinal is the fallback, never a rival to a real score"
+        );
+    }
+
+    /// Unscored rows hold their commitment order, so an unbucketed fleet —
+    /// upgrade day, cold dormants — keeps the shipped order instead of
+    /// collapsing into one undifferentiated block.
+    #[test]
+    fn unscored_rows_fall_back_to_the_ordinal_in_both_modes() {
+        let hl = OrderMode::Frecency {
+            half_life_hours: 72,
+        };
+        assert!(live_key(hl, 0, 9) > live_key(hl, 0, 4));
+        assert!(live_key(OrderMode::Recency, 0, 9) > live_key(OrderMode::Recency, 0, 4));
+    }
+
+    /// Recency has no score to read, so a score offered in that mode must not
+    /// change the answer — the modes are not two dials on one rule.
+    #[test]
+    fn recency_ranks_on_the_ordinal_alone_and_ignores_any_score() {
+        assert_eq!(
+            live_key(OrderMode::Recency, 5_000, 7),
+            live_key(OrderMode::Recency, 0, 7)
+        );
+    }
 
     /// The two targets, and the property that is not local to either: their
     /// separation, 24 columns since D19. Fail here if it changes.
