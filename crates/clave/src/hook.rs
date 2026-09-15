@@ -299,7 +299,8 @@ pub fn summary_from_tail(tail: &str) -> Option<String> {
 /// session that moves AFTER it is opened — a `cd` into a worktree, most often —
 /// therefore leaves its row describing the old checkout for ever, and both the
 /// branch cell and `pr-sync`'s `gh` question are asked of the wrong one.
-/// Measured 2026-09-15: 75 of 350 transcripts change cwd mid-session, 21%.
+/// Measured 2026-09-15: 76 of 1219 transcripts change cwd mid-session, 6% of the whole
+/// corpus and 30% of those over 1 MiB — a long conversation is where it happens.
 ///
 /// The transcript answers it for free — 350 of 350 carry both fields inside
 /// the 64 KiB window this hook already parses — and it is the source that
@@ -388,6 +389,22 @@ fn take_checkout(rec: &mut AgentRecord, facts: Option<(String, Option<String>)>)
         .is_some_and(|w| !std::path::Path::new(&cwd).starts_with(w))
     {
         rec.worktree = None;
+    }
+    // The cached PR number was asked from the OLD directory, and
+    // `pr::pr_is_stale` keys on the TTL and the branch — neither of which
+    // notices the move. Two repos both on `main` therefore leave repo A's
+    // number beside repo B's checkout for up to `PR_TTL_SECS`. Measured
+    // 2026-09-15: 11 of the 76 cwd-changing transcripts cross a git toplevel,
+    // and the common shape is a session walking between sibling repos that are
+    // all on their default branch.
+    //
+    // Zeroing the stamp is the whole fix: `pr_checked == 0` is already the
+    // "never looked" case, so the next event re-asks from the new cwd. The
+    // NUMBER is deliberately left in place — clearing it would blank the cell
+    // on every `cd` into a subdirectory of the same repo, which is the common
+    // move by far, and the answer that comes back is the same number.
+    if rec.cwd != cwd {
+        rec.pr_checked = 0;
     }
     rec.cwd = cwd;
     rec.branch = branch;
@@ -3205,6 +3222,13 @@ mod tests {
     fn four_signal_tail() -> String {
         [
             r#"{"type":"assistant","effort":"high","message":{"model":"claude-opus-5","usage":{"input_tokens":1200,"cache_read_input_tokens":800}}}"#,
+            // The checkout pair belongs in this fixture or the yield guard
+            // below cannot see the cell it is guarding: with no `cwd` record
+            // `checkout_from_tail` answers None in BOTH arms, so the assertion
+            // compares two values that could not have differed. Found
+            // 2026-09-15 by moving the checkout read behind the yield and
+            // watching all 410 tests stay green.
+            r#"{"type":"user","cwd":"/repo/moved","gitBranch":"moved","message":{"role":"user"}}"#,
         ]
         .join("\n")
             + "\n"
@@ -3636,6 +3660,65 @@ mod tests {
             checkout_from_tail(&line("/repo/a b/dir"))
         ));
         assert_eq!(rec.cwd, "/repo/a b/dir");
+    }
+
+    /// A cached PR number must not outlive the checkout it was asked about.
+    ///
+    /// Blind review 2026-09-15 (minor, a regression this branch introduced).
+    /// `pr::pr_is_stale` keys on the TTL and the branch, and a session moving
+    /// between two repos that are BOTH on `main` changes neither — so repo A's
+    /// number sat beside repo B's checkout for up to five minutes. Measured:
+    /// 11 of the 76 cwd-changing transcripts cross a git toplevel, and the
+    /// common shape is a session walking between sibling repos on their default
+    /// branches. `pr::checkout_dir` fixed where the QUESTION is asked; this
+    /// fixes how long the old ANSWER is believed.
+    #[test]
+    fn a_pr_number_stops_being_believed_when_the_checkout_moves() {
+        let line = |cwd: &str, branch: &str| {
+            serde_json::json!({
+                "type": "user",
+                "cwd": cwd,
+                "gitBranch": branch,
+                "message": { "role": "user" },
+            })
+            .to_string()
+        };
+        let mut rec = rec("u1");
+        rec.cwd = "/repos/a".into();
+        rec.branch = "main".into();
+        rec.pr_number = Some(260);
+        rec.pr_branch = "main".into();
+        rec.pr_checked = 1_000;
+
+        // Same branch name, different repository: the branch test cannot see
+        // this move, so the stamp is what has to.
+        assert!(take_checkout(
+            &mut rec,
+            checkout_from_tail(&line("/repos/b", "main"))
+        ));
+        assert_eq!(rec.pr_checked, 0, "the answer was asked somewhere else");
+        assert!(
+            crate::pr::pr_is_stale(&rec, 1_001),
+            "and the next event must re-ask, inside the TTL or not"
+        );
+        assert_eq!(
+            rec.pr_number,
+            Some(260),
+            "the number is left alone on purpose: clearing it would blank the \
+             cell on every cd inside one repo, which is the common move"
+        );
+
+        // A branch change with no move still restales, as it always did.
+        rec.pr_checked = 2_000;
+        assert!(take_checkout(
+            &mut rec,
+            checkout_from_tail(&line("/repos/b", "feature"))
+        ));
+        assert_eq!(rec.pr_checked, 2_000, "no move, so the stamp stands");
+        assert!(
+            crate::pr::pr_is_stale(&rec, 2_001),
+            "the branch term already covers this one"
+        );
     }
 
     /// A move must not rewrite a fact only git could settle.

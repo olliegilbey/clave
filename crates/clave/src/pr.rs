@@ -88,8 +88,9 @@ pub fn spawn_pr_sync(uuid: &str) {
 /// `gh` resolves the repository from its own working directory, so asking from
 /// the row's `cwd` keeps the repository and the branch consistent BY
 /// CONSTRUCTION. That is what makes the pairing safe as a session moves, and
-/// sessions do move: `hook::take_checkout` follows them, and 75 of 350
-/// transcripts change cwd mid-session. Asking from a recorded ROOT instead can
+/// sessions do move: `hook::take_checkout` follows them, and 76 of 1219
+/// transcripts change cwd mid-session (2026-09-15) — 6% of the corpus, and 30%
+/// of the conversations over 1 MiB. Asking from a recorded ROOT instead can
 /// pair the old repository with the new branch, and a branch name both repos
 /// carry then answers with another project's PR number — a wrong number on the
 /// card, which is worse than a blank one.

@@ -375,9 +375,10 @@ fn worktree_holding<'a>(
 /// seed-only. An EMPTY root is not asked about either, because `git -C ""` is
 /// NOT a no-op: git resolves it against the process's own directory, so the
 /// answer would describe whatever repo `clave` was launched from and could
-/// stamp an unrelated tree onto the row. No writer mints an empty root today
-/// (`add` falls back to the picked path for a non-repo dir), so this is a guard
-/// against the state, not a handler for one we create — measured with
+/// stamp an unrelated tree onto the row. No writer mints an empty root today —
+/// `add` falls back to the picked path for a non-repo dir, and the hook writes
+/// no root at all — so this is a guard against the state, not a handler for one
+/// we create. Measured with
 /// `git -C "" rev-parse --show-toplevel` from a scratch repo, which prints that
 /// repo and exits 0.
 fn roots_to_ask<'a>(
