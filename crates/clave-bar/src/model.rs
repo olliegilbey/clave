@@ -1025,8 +1025,10 @@ impl BarModel {
     /// upgrade day, cold dormants, the whole pre-frecency test suite — keeps
     /// the shipped S1 order instead of collapsing to tab position.
     fn live_key(&self, t: &TabMeta) -> (u64, u64) {
-        match self.order {
-            OrderMode::Recency => (self.live_ord(t), 0),
+        // The max-merge is the bar's own: only it can see the tab-scoped twin.
+        // The rule that turns a score into a key is shared (`live_key`).
+        let millis = match self.order {
+            OrderMode::Recency => 0,
             OrderMode::Frecency { half_life_hours } => {
                 let tab = self
                     .tab_buckets
@@ -1035,14 +1037,10 @@ impl BarModel {
                 let agent = self.agent_in_tab(t.tab_id).map_or(0, |a| {
                     frecency_millis(&a.buckets, self.now_hour, half_life_hours)
                 });
-                let millis = tab.max(agent);
-                if millis > 0 {
-                    (millis, 0)
-                } else {
-                    (0, self.live_ord(t))
-                }
+                tab.max(agent)
             }
-        }
+        };
+        clave_types::live_key(self.order, millis, self.live_ord(t))
     }
 
     /// The repo layer's grouping key for a LIVE row (double-layer frecency,
@@ -1072,22 +1070,18 @@ impl BarModel {
     /// Same rule read from the dormant side — one rule for both row classes,
     /// or closing a tab would change a row's rank (R2).
     fn dormant_key(&self, a: &Agent) -> (u64, u64) {
-        match self.order {
-            OrderMode::Recency => (self.dormant_ord(a), 0),
+        let millis = match self.order {
+            OrderMode::Recency => 0,
             OrderMode::Frecency { half_life_hours } => {
                 let own = frecency_millis(&a.buckets, self.now_hour, half_life_hours);
                 let carried = a
                     .tab_id
                     .and_then(|id| self.tab_buckets.get(&id))
                     .map_or(0, |b| frecency_millis(b, self.now_hour, half_life_hours));
-                let millis = own.max(carried);
-                if millis > 0 {
-                    (millis, 0)
-                } else {
-                    (0, self.dormant_ord(a))
-                }
+                own.max(carried)
             }
-        }
+        };
+        clave_types::live_key(self.order, millis, self.dormant_ord(a))
     }
 
     /// #178 instrumentation. Reports the bind leg's state, and ONLY when it

@@ -1234,19 +1234,14 @@ pub fn restore_rows(store: &crate::store::Store, now_hour: u32) -> Vec<&crate::s
         .filter(|r| std::path::Path::new(&r.cwd).is_dir())
         .enumerate()
         .map(|(i, r)| {
-            let (group, key) = match store.order {
-                clave_types::OrderMode::Recency => (None, (0, r.commit_ord)),
-                clave_types::OrderMode::Frecency { half_life_hours } => {
-                    let millis =
-                        clave_types::frecency_millis(&r.buckets, now_hour, half_life_hours);
-                    let key = if millis > 0 {
-                        (millis, 0)
-                    } else {
-                        (0, r.commit_ord)
-                    };
-                    (Some(r.repo_root.clone()).filter(|s| !s.is_empty()), key)
-                }
+            let (group, millis) = match store.order {
+                clave_types::OrderMode::Recency => (None, 0),
+                clave_types::OrderMode::Frecency { half_life_hours } => (
+                    Some(r.repo_root.clone()).filter(|s| !s.is_empty()),
+                    clave_types::frecency_millis(&r.buckets, now_hour, half_life_hours),
+                ),
             };
+            let key = clave_types::live_key(store.order, millis, r.commit_ord);
             clave_types::LiveRow {
                 group,
                 key,

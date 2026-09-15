@@ -255,6 +255,29 @@ pub struct LiveRow<T> {
     pub row: T,
 }
 
+/// One row's ranking key, for every surface that ranks clave rows.
+///
+/// ONE function, for the reason [`sort_live_block`] beneath it is one: the
+/// cluster layer found a single home after PR #261 and the key it clusters did
+/// not follow, so the same rule still lived in the bar (live rows and dormant
+/// rows) and in the host (the set a relaunch bakes). Retune the policy on one
+/// side and a relaunch again starts a row that is not the bar's top — the #261
+/// defect, one level down.
+///
+/// `millis` is the caller's own decayed score, because that part genuinely
+/// differs: the bar can max-merge a tab-scoped bucket the host cannot see.
+/// What must NOT differ is this — in `Frecency`, a scoring row beats every
+/// unscored one, so the ordinal is the SECOND element and never merged into
+/// the first. `Recency` has no score and no repo layer, so the ordinal is the
+/// whole key.
+pub fn live_key(order: OrderMode, millis: u64, ordinal: u64) -> (u64, u64) {
+    match order {
+        OrderMode::Recency => (ordinal, 0),
+        OrderMode::Frecency { .. } if millis > 0 => (millis, 0),
+        OrderMode::Frecency { .. } => (0, ordinal),
+    }
+}
+
 /// Sort the live block (double-layer frecency, ratified 2026-08-26): rows
 /// cluster by group, clusters rank by (Σ member score, best member key), and
 /// members keep the row rule within their cluster.
@@ -808,6 +831,45 @@ const _: () = assert!(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The policy both surfaces now share. It is asserted HERE rather than in
+    /// either consumer, because the defect it guards is the two consumers
+    /// disagreeing: the bar renders the rank and the host bakes it, and only
+    /// the FIRST baked row gets an agent started.
+    #[test]
+    fn a_scoring_row_outranks_every_unscored_one_whatever_their_ordinals() {
+        let hl = OrderMode::Frecency {
+            half_life_hours: 72,
+        };
+        let scored = live_key(hl, 1, 0); // the weakest possible score…
+        let unscored = live_key(hl, 0, u64::MAX); // …against the best ordinal
+        assert!(
+            scored > unscored,
+            "the ordinal is the fallback, never a rival to a real score"
+        );
+    }
+
+    /// Unscored rows hold their commitment order, so an unbucketed fleet —
+    /// upgrade day, cold dormants — keeps the shipped order instead of
+    /// collapsing into one undifferentiated block.
+    #[test]
+    fn unscored_rows_fall_back_to_the_ordinal_in_both_modes() {
+        let hl = OrderMode::Frecency {
+            half_life_hours: 72,
+        };
+        assert!(live_key(hl, 0, 9) > live_key(hl, 0, 4));
+        assert!(live_key(OrderMode::Recency, 0, 9) > live_key(OrderMode::Recency, 0, 4));
+    }
+
+    /// Recency has no score to read, so a score offered in that mode must not
+    /// change the answer — the modes are not two dials on one rule.
+    #[test]
+    fn recency_ranks_on_the_ordinal_alone_and_ignores_any_score() {
+        assert_eq!(
+            live_key(OrderMode::Recency, 5_000, 7),
+            live_key(OrderMode::Recency, 0, 7)
+        );
+    }
 
     /// The two targets, and the property that is not local to either: their
     /// separation, 24 columns since D19. Fail here if it changes.
