@@ -2163,6 +2163,7 @@ else
   note 'the PR cache never settled, so every event still spawns a `pr-sync` whose write lands off-schedule — the budget is not attributable here and is recorded above, not asserted'
 fi
 note 'this phase edited a scenario transcript — `clave dev scenario %s` re-seeds it' "$SCENARIO"
+note 'this phase leaves two launches open in that transcript, so it is NOT idempotent within the six-hour age bound — re-run it through `just qa`, which re-seeds, not by calling this script again'
 
 # ===========================================================================
 # Phase 5c — the terminal row's facts (the OS-facts witness)

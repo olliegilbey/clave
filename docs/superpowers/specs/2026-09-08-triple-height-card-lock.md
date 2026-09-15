@@ -289,9 +289,11 @@ same line. Measured 2026-09-14: 4 of 1196 transcripts end their window on
 exactly that, 5 to 26 days stale. Six hours is where the bound stops being
 free: replayed against ground truth over the 40 sessions that hold fan-outs,
 the missed-mark time is 1.99 hours at no bound, at 24 hours, at 12 and at 6 —
-identical — then 3.67 at 2 hours and 5.28 at 1. The run lengths agree (723
-runs, median 2.7 minutes, p99 81.9); the two that passed six hours lose their
-mark.
+identical — then 3.67 at 2 hours and 5.28 at 1. The run lengths agree (889
+runs, median 2.5 minutes, p99 82.0); the three that passed six hours lose their
+mark. The bound is evaluated when a hook fires, so it rescues a RESUMED
+session; a row whose session was killed speaks again only when it is resumed or
+pruned.
 
 **A wrong-off is the safer error, and the one that remains.** A launch can
 outrun the window, and then a live agent loses its mark: 2.0 hours over those

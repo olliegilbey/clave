@@ -305,10 +305,20 @@ const AGENT_TOOL: &str = "Agent";
 /// 1.99 h at no bound, at 24 h, at 12 h and at 6 h — identical — then 3.67 h at
 /// 2 h and 5.28 h at 1 h. Six is the tightest bound that costs nothing
 /// measurable, and tighter is what makes a crashed launch clear sooner. The
-/// run lengths agree (723 agent runs: median 2.7 minutes, p90 10.4, p99 81.9);
-/// the two runs that passed six hours lose their mark, which is the wrong-off
+/// run lengths agree (889 paired runs: median 2.5 minutes, p90 9.8, p99 82.0);
+/// the three that passed six hours lose their mark, which is the wrong-off
 /// §4.6 already calls the safer error.
+///
+/// **It is evaluated only when a hook fires.** A row whose session was killed
+/// fires nothing again, so its stale mark sits in the store until the row is
+/// resumed or pruned. The bound fixes the resume, which is what re-armed the
+/// mark for ever; it does not reach a row nothing will speak for again.
 pub const LAUNCH_MAX_AGE_SECS: u64 = 6 * 60 * 60;
+
+/// How far ahead of the clock a launch may be stamped and still be believed.
+/// Past this it is undatable, not young — see `live_launch_ids`. Five minutes
+/// is ordinary jitter between a synced pair of machines; hours are not.
+pub const LAUNCH_FUTURE_SLACK_SECS: u64 = 5 * 60;
 
 /// Whether this row has fanned out — the card's subagent mark (lock §4.6). A
 /// BOOLEAN, not a count: "this row has agents under it" is the whole signal,
@@ -357,10 +367,10 @@ pub fn subagents_from_tail(tail: &str, now: u64) -> bool {
         // window, not one of them a record.
         //
         // Two independent `if`s, not an `if`/`else if`. Chaining them would
-        // say a line carrying the launch marker can never be a notification —
-        // true of every real record (of 3374 notification lines in the corpus
-        // exactly one also carries the marker, and it is an `attachment`), but
-        // it is a claim the records do not owe us, and it buys nothing.
+        // say a line carrying the launch marker can never also carry the
+        // notification tag, and that is false: a prompt QUOTING the tag puts
+        // both on one real launch record, which is how this very file was
+        // reviewed. Rare (2 lines in 1187 transcripts) and free to allow.
         if line.contains(marker.as_str()) {
             launched.extend(live_launch_ids(line, now));
         }
@@ -412,7 +422,16 @@ fn live_launch_ids(line: &str, now: u64) -> Vec<String> {
     else {
         return Vec::new();
     };
-    if now.saturating_sub(at) > LAUNCH_MAX_AGE_SECS {
+    // Undatable in EITHER direction is undatable. `saturating_sub` alone reads
+    // any stamp ahead of the clock as zero seconds old — live for ever, until
+    // the clock catches up — which is the never-clearing mark this bound
+    // exists to remove, back again under skew. It is reachable: a `~/.claude`
+    // synced between two machines, a backward NTP step, or `now_unix()`
+    // returning 0 on a failed clock, which would otherwise hold the mark on
+    // every row at once. A few minutes of slack absorbs ordinary jitter.
+    if at > now.saturating_add(LAUNCH_FUTURE_SLACK_SECS)
+        || now.saturating_sub(at) > LAUNCH_MAX_AGE_SECS
+    {
         return Vec::new();
     }
     v.get("message")
@@ -435,13 +454,23 @@ fn live_launch_ids(line: &str, now: u64) -> Vec<String> {
 ///
 /// Hand-written because the workspace carries no date crate, and this needs
 /// six integers and no formatting, no zones and no locale. The shape is not
-/// assumed: measured 2026-09-14 over 1196 transcripts, all 753 launch records
-/// carry a `timestamp`, and every one is this exact shape and UTC. Anything
-/// else returns `None`, and the caller reads that as "cannot date it".
+/// assumed: measured 2026-09-15 over 1187 transcripts, all 741 launch records
+/// carry a `timestamp`, and every one matches
+/// `\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z` — no exceptions. UTC is the
+/// premise, and byte 19 is checked so a stamp carrying an OFFSET is refused
+/// rather than silently read as UTC, which would misdate it by hours.
+///
+/// It validates the SHAPE and each field's range, not the calendar: 2026-02-31
+/// converts to 2026-03-03 rather than returning `None`. Two days of slack
+/// cannot reach a six-hour bound, and a month-length table to buy it would be
+/// more code than the conversion.
 ///
 /// The day count is Howard Hinnant's `days_from_civil` (`chrono` and `time`
-/// both use it), shifted so 1970-01-01 is day 0. It is exact for every civil
-/// date, and it needs no table.
+/// both use it), shifted so 1970-01-01 is day 0. Verified exhaustively against
+/// Python's proleptic Gregorian calendar over every civil date from 0001-01-01
+/// to 9999-12-31 — 3,652,059 stamps, zero mismatches — and fuzzed for panics
+/// over 421,875 structured mutations with debug assertions on. Pre-epoch dates
+/// return `None`: the day count goes negative and no hour can lift it back.
 fn unix_from_iso8601(ts: &str) -> Option<u64> {
     let b = ts.as_bytes();
     if b.len() < 20
@@ -453,13 +482,38 @@ fn unix_from_iso8601(ts: &str) -> Option<u64> {
     {
         return None;
     }
-    // `get` over a range, not a slice: a bad offset returns None here where a
-    // slice would panic. The digits are also checked — `parse` rejects a sign
-    // or a space, which the separators above would otherwise let through.
+    // Byte 19 closes the time. `Z` ends the stamp and `.` opens the fraction;
+    // anything else is an OFFSET (`+09:00`), and reading one as UTC would be
+    // wrong by up to fourteen hours with nothing to show for it.
+    if !matches!(b[19], b'.' | b'Z') {
+        return None;
+    }
+    // Every field position is an ASCII digit, checked here rather than left to
+    // `parse`, which accepts a leading `+`: without this `2026-+9-14T…` reads
+    // as September. It also settles the multi-byte case — `2026-09-14T15:17:4é`
+    // passes all six checks above, and `é`'s lead byte is not a digit.
+    if [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18]
+        .iter()
+        .any(|&i| !b[i].is_ascii_digit())
+    {
+        return None;
+    }
+    // `get` over a range, not a slice. Unreachable behind the digit check —
+    // every byte read below is now ASCII, so no range end can land inside a
+    // character — and kept because slicing a `str` at an arithmetic offset is
+    // a panic, while this is a `None`.
     let at = |r: std::ops::Range<usize>| ts.get(r).and_then(|s| s.parse::<i64>().ok());
     let (year, month, day) = (at(0..4)?, at(5..7)?, at(8..10)?);
     let (hour, minute, second) = (at(11..13)?, at(14..16)?, at(17..19)?);
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    // Every field bounded. Without this `T99:99:99` converts happily, and it
+    // lands 3.6 days in the FUTURE — the one direction the age bound cannot
+    // recover from. 60 seconds is allowed: it is a leap second, not an error.
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || !(0..=23).contains(&hour)
+        || !(0..=59).contains(&minute)
+        || !(0..=60).contains(&second)
+    {
         return None;
     }
     // March-first years: February's length then falls at the end, and the
@@ -494,8 +548,10 @@ fn notified_tool_use_id(line: &str) -> Option<String> {
     // The split runs on the PARSED content, and the reason is the record type
     // above, not the id. An id is `toolu_` and base62, and its tags carry no
     // character JSON needs to escape, so splitting the raw line would return
-    // the same string — measured identical on all 1835 notifications in the
-    // corpus, and worth about 40 µs a window. What the raw route cannot do is
+    // the same string — measured identical on all 1816 `queue-operation`
+    // records carrying an id, and worth about 40 µs a window. (That is a
+    // smaller set than the ~3400 lines that merely CONTAIN the tag: a prompt
+    // quoting it is not a notification.) What the raw route cannot do is
     // tell a `queue-operation` from any other line that mentions the tag, and
     // that discrimination is the whole point.
     Some(
@@ -802,10 +858,11 @@ pub const PARSED_TAIL_BYTES: usize = 64 * 1024;
 ///
 /// Cost, same sweep: the scan alone is 76 µs median, 463 µs p90, 2.0 ms worst;
 /// read and scan together 502 µs median, 1.3 ms p90, 2.9 ms worst, against a
-/// hook that already takes ~29 ms. The 134 windows that fill the whole 2 MiB
-/// are the expensive ones (1.4 ms median). Under a tenth of the hook at its
-/// worst, and the byte filter is what keeps it there — take the filter away
-/// and every one of those lines is parsed.
+/// hook that already takes ~29 ms. Those are WARM-CACHE figures; the 134
+/// windows over 1.5 MiB are the expensive ones (1.4 ms median warm), and a
+/// cold read of one measures ~26 ms. Under a tenth of the hook warm, about one
+/// hook cold, and the byte filter is what keeps it there — take the filter
+/// away and every one of those lines is parsed.
 ///
 /// Sized by measurement (2026-09-14, 40 live transcripts). A launch outside
 /// the window costs the mark; the missed time is 6.9 h at 512 KiB, 5.4 h at
@@ -2843,14 +2900,14 @@ mod tests {
             "Stop",
             &p,
             Some(&launch("toolu_a")),
-            1000,
+            JUST_AFTER,
             true,
         );
         assert!(s.agents["u1"].subagents);
 
         // `None` is the event gate in `run_hook` — Notification and SessionEnd
         // read no transcript at all. Nothing was measured, so nothing moves.
-        apply_hook_event(&mut s, "u1", "Notification", &p, None, 1001, true);
+        apply_hook_event(&mut s, "u1", "Notification", &p, None, JUST_AFTER + 1, true);
         assert!(
             s.agents["u1"].subagents,
             "an event that read no transcript cannot contradict the store"
@@ -2858,7 +2915,7 @@ mod tests {
 
         // A window we DID read, carrying no agent traffic, is a measurement.
         let quiet = r#"{"type":"assistant","message":{"model":"claude-opus-5"}}"#;
-        apply_hook_event(&mut s, "u1", "Stop", &p, Some(quiet), 1002, true);
+        apply_hook_event(&mut s, "u1", "Stop", &p, Some(quiet), JUST_AFTER + 2, true);
         assert!(
             !s.agents["u1"].subagents,
             "a window with no agent traffic in it is an empty fleet, not a hold"
@@ -2867,10 +2924,26 @@ mod tests {
         // And the agent's own closing notification clears it directly, which
         // is the path that runs when the launch is still inside the window.
         let fanned = format!("{}\n{}", launch("toolu_a"), launch("toolu_b"));
-        apply_hook_event(&mut s, "u1", "Stop", &p, Some(&fanned), 1003, true);
+        apply_hook_event(
+            &mut s,
+            "u1",
+            "Stop",
+            &p,
+            Some(&fanned),
+            JUST_AFTER + 3,
+            true,
+        );
         assert!(s.agents["u1"].subagents);
         let closed = format!("{fanned}\n{}\n{}", finish("toolu_a"), finish("toolu_b"));
-        apply_hook_event(&mut s, "u1", "Stop", &p, Some(&closed), 1004, true);
+        apply_hook_event(
+            &mut s,
+            "u1",
+            "Stop",
+            &p,
+            Some(&closed),
+            JUST_AFTER + 4,
+            true,
+        );
         assert!(!s.agents["u1"].subagents);
     }
 
@@ -2891,21 +2964,37 @@ mod tests {
 
         // Settle every other field first, so the mark is the only thing left
         // that could move.
-        apply_hook_event(&mut s, "u1", "Stop", &p, Some(&quiet), 1000, true);
+        apply_hook_event(&mut s, "u1", "Stop", &p, Some(&quiet), JUST_AFTER, true);
         assert!(
-            !apply_hook_event(&mut s, "u1", "Stop", &p, Some(&quiet), 1001, true),
+            !apply_hook_event(&mut s, "u1", "Stop", &p, Some(&quiet), JUST_AFTER + 1, true),
             "a fleet where nothing moved must not mint an ord"
         );
         assert!(
-            apply_hook_event(&mut s, "u1", "Stop", &p, Some(&fanned), 1002, true),
+            apply_hook_event(
+                &mut s,
+                "u1",
+                "Stop",
+                &p,
+                Some(&fanned),
+                JUST_AFTER + 2,
+                true
+            ),
             "the mark lighting up is a change the bar has to be told about"
         );
         assert!(
-            !apply_hook_event(&mut s, "u1", "Stop", &p, Some(&fanned), 1003, true),
+            !apply_hook_event(
+                &mut s,
+                "u1",
+                "Stop",
+                &p,
+                Some(&fanned),
+                JUST_AFTER + 3,
+                true
+            ),
             "and staying lit is not"
         );
         assert!(
-            apply_hook_event(&mut s, "u1", "Stop", &p, Some(&quiet), 1004, true),
+            apply_hook_event(&mut s, "u1", "Stop", &p, Some(&quiet), JUST_AFTER + 4, true),
             "going out is a change too"
         );
     }
@@ -3034,8 +3123,11 @@ mod tests {
         assert_eq!(
             s.agents["u1"].context_tokens,
             Some(2000),
-            "the parsed readings still land from the cut buffer — the split must not \
-             leave them a truncated first line"
+            "the parsed readings still land — the split did not break the narrow \
+             window. NOT a check that the cut is whole-lined: these take the LAST \
+             record of their kind, so a broken first line cannot reach them. \
+             `the_parsed_window_is_cut_back_to_its_own_size_on_a_line_boundary` \
+             is what holds that"
         );
     }
 
@@ -3056,7 +3148,7 @@ mod tests {
         // the meter silent, `hook_yields` false, and this bug invisible.
         let mut s = Store::default();
         let mut r = rec("u1");
-        r.metered_at = 900;
+        r.metered_at = JUST_AFTER - 100;
         s.agents.insert("u1".into(), r);
         let p = HookPayload {
             session_id: Some("u1".into()),
@@ -3064,7 +3156,7 @@ mod tests {
         };
 
         assert!(
-            crate::statusline::hook_yields(&s.agents["u1"], 1000),
+            crate::statusline::hook_yields(&s.agents["u1"], JUST_AFTER),
             "the fixture must have the meter actually speaking, or this proves nothing"
         );
         apply_hook_event(
@@ -3073,7 +3165,7 @@ mod tests {
             "Stop",
             &p,
             Some(&four_signal_tail()),
-            1000,
+            JUST_AFTER,
             true,
         );
         assert!(
@@ -3268,6 +3360,11 @@ mod tests {
              Replayed over 40 live sessions the missed-mark time is 1.99 h at 6 h \
              and at no bound alike, 3.67 h at 2 h. Move it with new numbers"
         );
+        assert_eq!(
+            LAUNCH_FUTURE_SLACK_SECS, 300,
+            "five minutes — jitter between a synced pair of machines, not a way \
+             to believe a stamp hours ahead of the clock"
+        );
         let orphan = launch("toolu_dead");
         // Inside the bound the mark stands: a long agent is still an agent.
         assert!(subagents_from_tail(
@@ -3294,10 +3391,24 @@ mod tests {
         // A launch no clock can date is read as closed, for the same reason:
         // a line that cannot age is a line that could hold the mark for ever.
         assert!(!mark(&launch("toolu_a").replace(LAUNCHED_AT, "not a date")));
-        // A clock BEHIND the transcript must not age anything out. Saturating,
-        // not wrapping — an unsigned subtraction the other way round would
-        // read every launch as ancient and blank every mark on the fleet.
-        assert!(subagents_from_tail(&orphan, LAUNCHED_UNIX - 3600));
+        // A clock slightly BEHIND the transcript is ordinary jitter, and the
+        // launch is still believed. Saturating, not wrapping — an unsigned
+        // subtraction the other way round would read every launch as ancient
+        // and blank every mark on the fleet at once.
+        assert!(subagents_from_tail(
+            &orphan,
+            LAUNCHED_UNIX - LAUNCH_FUTURE_SLACK_SECS
+        ));
+        // Further behind than that, and the stamp is UNDATABLE, not young. A
+        // launch in the future ages at zero seconds for ever, which is exactly
+        // the mark this bound exists to stop.
+        assert!(!subagents_from_tail(
+            &orphan,
+            LAUNCHED_UNIX - LAUNCH_FUTURE_SLACK_SECS - 1
+        ));
+        // The worst case of that: `now_unix` returns 0 when the clock fails,
+        // and a zero clock must not hold the mark up on every row at once.
+        assert!(!subagents_from_tail(&orphan, 0));
     }
 
     /// The timestamp reader, against dates computed outside this crate.
@@ -3310,15 +3421,29 @@ mod tests {
         // `date -u -j -f %Y-%m-%dT%H:%M:%S <stamp> +%s` on each of these.
         for (stamp, want) in [
             ("1970-01-01T00:00:00.000Z", 0),
-            ("2026-09-14T15:17:24.123Z", 1_789_399_044),
+            ("1970-01-02T00:00:01.000Z", 86_401), // the first day rolls over
+            // The fixtures' own clock, so the two constants cannot drift
+            // apart. If they did, `JUST_AFTER` would fall BEFORE the launch
+            // and the age bound would go inert in every ledger test at once,
+            // with all of them still passing.
+            (LAUNCHED_AT, LAUNCHED_UNIX),
             ("2026-01-01T00:00:00.000Z", 1_767_225_600),
+            ("1999-12-31T23:59:59.000Z", 946_684_799), // the last second of 1999
+            ("2001-01-01T00:00:00.000Z", 978_307_200),
             ("2024-02-29T12:00:00.000Z", 1_709_208_000), // leap day, leap year
             ("2000-02-29T00:00:00.000Z", 951_782_400),   // the 400-year rule
             ("2100-03-01T00:00:00.000Z", 4_107_542_400), // the 100-year rule
             ("2026-12-31T23:59:59.999Z", 1_798_761_599),
+            ("2038-01-19T03:14:08.000Z", 2_147_483_648), // past a signed 32-bit
+            ("9999-12-31T23:59:59.000Z", 253_402_300_799), // the last it reads
         ] {
             assert_eq!(unix_from_iso8601(stamp), Some(want), "{stamp}");
         }
+        // A leap second is a real stamp, not an error, and reads as the next.
+        assert_eq!(
+            unix_from_iso8601("2023-02-28T23:59:60.000Z"),
+            Some(1_677_628_800)
+        );
         // Milliseconds are not read, so a stamp without them still converts.
         assert_eq!(
             unix_from_iso8601("2026-09-14T15:17:24Z"),
@@ -3331,16 +3456,33 @@ mod tests {
         for bad in [
             "",
             "2026-09-14",
-            "2026x09-14T15:17:24Z",  // b[4]
-            "2026-09x14T15:17:24Z",  // b[7]
-            "2026-09-14 15:17:24Z",  // b[10] — a space for the T
-            "2026-09-14T15x17:24Z",  // b[13]
-            "2026-09-14T15:17x24Z",  // b[16]
-            "2026-13-14T15:17:24Z",  // no thirteenth month
-            "2026-09-32T15:17:24Z",  // no thirty-second day
-            "2026-09-00T15:17:24Z",  // no zeroth day
-            "2026-00-14T15:17:24Z",  // no zeroth month
-            "2026-09-1４T15:17:24Z", // a multi-byte digit must not panic
+            "2026x09-14T15:17:24Z", // b[4]
+            "2026-09x14T15:17:24Z", // b[7]
+            "2026-09-14 15:17:24Z", // b[10] — a space for the T
+            "2026-09-14T15x17:24Z", // b[13]
+            "2026-09-14T15:17x24Z", // b[16]
+            "2026-13-14T15:17:24Z", // no thirteenth month
+            "2026-09-32T15:17:24Z", // no thirty-second day
+            "2026-09-00T15:17:24Z", // no zeroth day
+            "2026-00-14T15:17:24Z", // no zeroth month
+            // Every time field is bounded too. `T99:99:99` converts happily
+            // without the check, and lands 3.6 days in the FUTURE — the one
+            // direction the age bound cannot recover from.
+            "2026-09-14T24:17:24Z",
+            "2026-09-14T15:60:24Z",
+            "2026-09-14T15:17:61Z",
+            // Byte 19 closes the time. An OFFSET read as UTC is wrong by hours
+            // and looks perfectly well-formed.
+            "2026-09-14T15:17:24-05:00",
+            "2026-09-14T15:17:24+09:00",
+            // `parse` accepts a leading `+`, so the digits are checked at their
+            // own positions. Without that this reads as September.
+            "2026-+9-14T15:17:24Z",
+            // The range END lands inside a character here — all five
+            // separators are right and byte 19 is `Z`. This is the case the
+            // digit check settles and `get`-over-slice would otherwise carry.
+            "2026-09-14T15:17:4é",
+            "2026-09-1４T15:17:24Z", // a multi-byte digit shifts the separators
         ] {
             assert_eq!(unix_from_iso8601(bad), None, "{bad:?}");
         }
