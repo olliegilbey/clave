@@ -2520,11 +2520,11 @@ impl BarModel {
                 Status::NeedsYou => RowStatus::NeedsYou,
                 Status::Done => RowStatus::Done,
                 Status::Failed => RowStatus::Failed,
-                // Unreachable in practice: an exited row holds no process, so
-                // `is_dormant` catches it in the tier above and it renders
-                // with the dormant affordance. Mapped here rather than merged
-                // into `Idle` so that if the two ever disagree, the row still
-                // reads "nothing is running" instead of "alive and idle".
+                // The agent quit but its pane is still on screen, held and
+                // empty, so `is_dormant` above leaves it in the live block.
+                // Drawn hollow there: the row keeps its place in the fleet,
+                // and says plainly that nothing is running behind it. Never
+                // `Idle`, which on a live row means "ready and waiting".
                 Status::Exited => RowStatus::Dormant,
             }
         };

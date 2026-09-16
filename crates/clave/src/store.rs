@@ -977,6 +977,19 @@ pub fn clear_session_order(paths: &StorePaths) -> Result<()> {
             });
             changed = true;
         }
+        // No agent runs at a launch, so a status carried over from the session
+        // before is a claim about a process that is gone. A restored tab came
+        // back wearing the mark of an agent that had stopped, which reads as an
+        // empty tab beside the live ones (#261, QA run 18). The first hook of
+        // the new session states the truth; the launch only stops asserting the
+        // old one. Binds above and status here go on the same pass, because
+        // they die of the same cause.
+        for r in s.agents.values_mut() {
+            if r.status != Status::Idle {
+                r.status = Status::Idle;
+                changed = true;
+            }
+        }
         // Session create is the one locked pass that runs at every launch,
         // so it is where the one-shot backfill rides (#69). Accepted cost: a
         // MID-session upgrade leaves dormant rows blank until the next
@@ -2151,6 +2164,56 @@ mod tests {
             vec!["u-a".to_string(), "u-b".to_string()],
             "a launch that bound nothing is a re-run over an already-cleared \
              store, not a quit with nothing open"
+        );
+    }
+
+    /// A launch begins with no agent running anywhere, so every status a row
+    /// carries is a claim about a process from the session BEFORE. Left alone,
+    /// a restored tab comes back wearing the spinner of work that stopped at
+    /// the quit; on this branch it came back wearing `Exited`, which draws the
+    /// hollow "nothing here" mark on a tab that is about to start its agent —
+    /// two opposite rows rendered the same (#261, seen on QA run 18).
+    ///
+    /// The first hook event of the new session states the truth, so the launch
+    /// only has to stop asserting the old one.
+    #[test]
+    fn clear_session_order_drops_the_status_left_by_the_previous_session() {
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            for (uuid, st) in [
+                ("u-restored", Status::Exited),
+                ("u-mid-turn", Status::Working),
+                ("u-waiting", Status::NeedsYou),
+                ("u-dormant", Status::Failed),
+            ] {
+                let mut a = rec(uuid);
+                a.status = st;
+                s.agents.insert(uuid.into(), a);
+            }
+        })
+        .unwrap();
+        apply_bind(&p, "u-restored", 0).unwrap();
+        apply_bind(&p, "u-mid-turn", 1).unwrap();
+        apply_bind(&p, "u-waiting", 2).unwrap();
+        clear_session_order(&p).unwrap();
+        let s = read_store(&p).unwrap();
+        for uuid in ["u-restored", "u-mid-turn", "u-waiting", "u-dormant"] {
+            assert_eq!(
+                s.agents[uuid].status,
+                Status::Idle,
+                "{uuid} must make no claim about a process the new session has not started"
+            );
+        }
+        // The rows themselves are untouched, and the live set is still recorded
+        // from the binds — resetting the status must not cost the restore.
+        assert_eq!(
+            s.last_live,
+            vec![
+                "u-restored".to_string(),
+                "u-mid-turn".to_string(),
+                "u-waiting".to_string()
+            ],
         );
     }
 

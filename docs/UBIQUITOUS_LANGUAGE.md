@@ -208,7 +208,7 @@ These three are constantly confused. They are not interchangeable.
 | **live set** | The rows that held a tab when the previous session died; what a relaunch brings back. See §3.1. |
 | **unread** | Finished while you were not looking — `done && !visited`. |
 | **stale** | `clave open` found the row's cwd missing. A row flag, **not** a status. |
-| **exited row** | An agent session that ENDED while its tab stayed open. It holds a tab and runs nothing, so it counts in the live set (the tab comes back) but reads DORMANT in the bar (there is nothing to return to). `Status::Exited`, written by the `SessionEnd` hook. Do not say "idle" about it: idle means alive with nothing to say. |
+| **exited row** | An agent session that ENDED while its tab stayed open. It holds a tab and runs nothing, so it counts in the live set (the tab comes back) but reads DORMANT in the bar (there is nothing to return to). `Status::Exited`, written by the `SessionEnd` hook. Do not say "idle" about it: idle means alive with nothing to say. It lasts one session only — a launch clears every status, because no agent runs at a launch. |
 
 `Status` — the enum — has exactly six variants and they are spelled this way:
 **Idle, Working, NeedsYou, Done, Failed, Exited**.
