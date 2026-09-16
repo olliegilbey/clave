@@ -221,6 +221,14 @@ could undo without any test noticing:
   to go RED. A comparison only two maintainer launches could try is a
   comparison nobody tries — which is the shape of the defect the phase exists
   for.
+- **It closes its own tab, right before the ask.** The "a closed tab stays
+  closed" half needs a row that was unbound at the quit. Naming the tab phase
+  3 closed does not give one: phase 4 wakes the top wakeable dormant row, and
+  that is the row phase 3 just made dormant, so the drive re-opened its own
+  closed row and then demanded the restore leave it out (run 13, 2026-09-16).
+  Nothing runs between this close and the quit, so nothing can wake the row.
+  The phase checks the prune landed BEFORE it records the set; if it has not,
+  the run stops there rather than asking for a launch it cannot read.
 - **The readings are non-vacuous because a launch CLEARS the binds** before it
   bakes the layout, and records the set it cleared into `last_live` on the
   same pass (`setup.rs` `clear_session_order`). So every tab id read after the

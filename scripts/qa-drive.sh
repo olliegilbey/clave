@@ -2374,6 +2374,57 @@ fi
 # flat, so the set read here is still the set at the moment of the kill.
 phase "P6c-relaunch"
 
+# A closed tab must STAY closed, and this phase closes one ITSELF rather than
+# carrying phase 3's closure down here.
+#
+# The carried version was written first and it is unsound. Phase 4 wakes the
+# first WAKEABLE row of the dormant block, and the row phase 3 just closed is
+# what sits at the top of that block — so the drive re-opened its own closed
+# row four minutes before the quit, then demanded the restore leave it out.
+# Measured on run 13 (2026-09-16), the first run that ever reached this check:
+# `clave.log` carries the drive's own `open` for that uuid at 13:51:16 against
+# a quit at 13:55. The restore was right and the assertion was stale.
+#
+# Closing HERE removes the gap. Nothing runs between this close and the quit
+# except the wait for the maintainer, so nothing can wake the row, and the
+# check no longer depends on what any earlier phase chose to do.
+P6C_CLOSE_STATUS="$(dev_status)"
+P6C_CLOSE_TAB="$(jq -r '
+  [.store.agents[] | .tab_id | select(. != null)] | sort | .[0] // empty' \
+  <<<"$P6C_CLOSE_STATUS" 2>/dev/null)"
+P6C_CLOSED=""
+if [[ -n "$P6C_CLOSE_TAB" ]]; then
+  P6C_CLOSED="$(jq -r --argjson t "$P6C_CLOSE_TAB" \
+    '.store.agents | to_entries[] | select(.value.tab_id == $t) | .key' \
+    <<<"$P6C_CLOSE_STATUS" 2>/dev/null | head -n1)"
+fi
+if [[ -n "$P6C_CLOSED" ]]; then
+  measure "the tab this phase closes, so the restore has one to refuse" \
+    "tab=${P6C_CLOSE_TAB} uuid=${P6C_CLOSED:0:13}"
+  focus_tab_checked "$P6C_CLOSE_TAB" "the tab to close:"
+  "$CT" close-tab
+  P6C_CLOSE_RC=$?
+  check "the close was accepted" \
+    "$([[ $P6C_CLOSE_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+  # The prune has to LAND before the set is recorded. If it has not, the row
+  # is still bound at the quit, `last_live` holds it legitimately, and the
+  # verdict after the relaunch would go red for a reason that is not about
+  # the restore at all.
+  P6C_UNBOUND="no"
+  for _ in $(seq 1 15); do
+    if [[ "$(jq -r --arg u "$P6C_CLOSED" \
+      '(.store.agents[$u].tab_id | tostring) // "null"' \
+      < <(dev_status) 2>/dev/null)" == "null" ]]; then
+      P6C_UNBOUND="yes"
+      break
+    fi
+    sleep 1
+  done
+  check "the closed tab's row unbound before the quit" "$P6C_UNBOUND" "yes"
+else
+  note 'no BOUND tab to close, so the "a closed tab stays closed" half of this phase is vacuous this run'
+fi
+
 P6C_BEFORE_STATUS="$(dev_status)"
 P6C_SET_BEFORE="$(bound_uuids "$P6C_BEFORE_STATUS")"
 P6C_N_BEFORE="$(uuid_count "$P6C_SET_BEFORE")"
@@ -2385,15 +2436,13 @@ measure "the live set this session is holding" "n=${P6C_N_BEFORE} $(uuid_line "$
 # nothing about the set coming back.
 check_min "the live set is big enough for a restore to mean anything" "$P6C_N_BEFORE" 3
 
-# The tab phase 3 closed, carried down here. A closed tab must not come back:
-# its row left the set when the tab went, so `last_live` must never have held
-# it. This is the half of the assertion that catches a restore which is too
-# GENEROUS rather than too thin.
-P6C_CLOSED="${A_UUID:-}"
+# The row this phase unbound above must not be in the set the quit records.
+# That is the half of the assertion catching a restore which is too GENEROUS
+# rather than too thin, and it is checked here as well as after the relaunch:
+# a set that already holds the row makes the later verdict say nothing.
 if [[ -n "$P6C_CLOSED" ]]; then
-  measure "the row whose tab phase 3 closed" "${P6C_CLOSED:0:13}"
-else
-  note 'phase 3 closed no BOUND tab, so the "a closed tab stays closed" half of this phase is vacuous this run'
+  check "the closed row is out of the set before the quit" \
+    "$(grep -c -- "$P6C_CLOSED" <<<"$P6C_SET_BEFORE")" "0"
 fi
 
 # Half an hour for each half, measured rather than guessed: the first live run

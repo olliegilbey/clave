@@ -258,9 +258,15 @@ uuid_line() { printf '%s' "${1:-}" | tr '\n' ' '; }
 
 # The relaunch verdict (phase 6c): does the fleet the second session holds
 # match the one the first session left? Takes the set measured before the
-# quit, the `dev status` read after the relaunch, and the row whose tab phase
-# 3 closed. Every reading comes from one snapshot, so no two verdicts below
-# can disagree about which moment they are describing.
+# quit, the `dev status` read after the relaunch, and the row whose tab the
+# phase closed on its way to the quit. Every reading comes from one snapshot,
+# so no two verdicts below can disagree about which moment they are
+# describing.
+#
+# `closed` must be a row that was unbound AT THE QUIT, which is why the phase
+# closes its own tab rather than naming one an earlier phase closed: phase 4
+# wakes the top wakeable dormant row, and that is exactly the row phase 3
+# leaves behind (run 13, 2026-09-16).
 #
 # Here rather than in the drive because the phase costs two maintainer
 # launches, and a verdict that can only be tried by spending them is a verdict
