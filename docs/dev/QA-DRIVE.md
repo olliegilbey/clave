@@ -171,7 +171,12 @@ the stable binary (FOOTGUNS, 2026-08-24).
    phases 0–6b green, and 6c went red on its first complete run, on a real
    defect — the live set lost the one row whose agent was genuinely running
    (see the handoff for the mechanism). That is the phase doing its job on
-   the first attempt at a class nothing else could see. Runs 1–3 each went red on one real finding (all
+   the first attempt at a class nothing else could see. **Run 16, 2026-09-16,
+   is the first ALL TWELVE green**, with the `SessionEnd` fix in and phase 6c
+   closing its own tab. Runs 13–15 sit between them and are worth reading as
+   a set: 13 proved the fix and went red on a stale assertion, 14 and 15 each
+   went green-adjacent on a fleet with no witness in it — the phase now
+   asserts the witness is there, which is what ended that. Runs 1–3 each went red on one real finding (all
    fixed and recorded in FOOTGUNS.md); the script header's ledger records
    how each once-pending assumption settled. Still awaiting a first live
    run: the CONCURRENT burst shape (ledger (6) — runs 1–4 drove the burst
