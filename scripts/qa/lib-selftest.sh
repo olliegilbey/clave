@@ -287,27 +287,31 @@ want "and the verdict names the closed row" \
 (relaunch_checks "" "$(relaunch_status '[]' '[]')" "" >/dev/null 2>&1)
 want "two empty sets are refused, not passed" "$?" "1"
 
-# Which tab phase 6c closes. The preference is the whole point: closing the
-# one row whose agent RAN leaves the phase measuring the population the #261
-# defect cannot reach (run 14, 2026-09-16). Tab ids are deliberately out of
-# uuid order, so a pick that returned the first row it saw would pass by luck.
+# Which tab phase 6c closes. Sparing the MINTED row is the whole point: it is
+# the only row whose claude gets past the trust prompt, so closing it leaves
+# the phase measuring the population the #261 defect cannot reach (runs 14 and
+# 15, 2026-09-16). The minted row deliberately holds the LOWEST tab id, which
+# is what the first attempt at this rule picked.
 CLOSE_PICK='{"store":{"agents":{
-  "u-ran":{"tab_id":1,"pane_id":7},
-  "u-held-a":{"tab_id":4,"pane_id":null},
-  "u-held-b":{"tab_id":2,"pane_id":null},
+  "u-minted":{"tab_id":1,"pane_id":7},
+  "u-seeded-a":{"tab_id":4,"pane_id":5},
+  "u-seeded-b":{"tab_id":2,"pane_id":6},
   "u-dormant":{"tab_id":null,"pane_id":null}}}}'
-want "the closed tab is one whose agent never started" \
-  "$(close_candidate_tab "$CLOSE_PICK")" "2"
-# A fleet where every agent ran still gets the closed-tab half.
-want "and falls back to a running row when there is no other" \
+want "the closed tab is not the minted row's" \
+  "$(close_candidate_tab "$CLOSE_PICK" "u-minted")" "2"
+# No spare named: the rule degrades to the lowest bound tab rather than
+# refusing to pick at all.
+want "and picks the lowest bound tab when no row is spared" \
+  "$(close_candidate_tab "$CLOSE_PICK")" "1"
+# A one-row fleet still gets the closed-tab half.
+want "and falls back to the spare when it is the only bound row" \
   "$(close_candidate_tab '{"store":{"agents":{
-     "u-a":{"tab_id":5,"pane_id":3},
-     "u-b":{"tab_id":3,"pane_id":9}}}}')" "3"
+     "u-minted":{"tab_id":3,"pane_id":9}}}}' "u-minted")" "3"
 # Nothing bound: the phase notes the half is vacuous rather than closing a
 # tab it did not choose.
 want "and picks nothing when no row is bound" \
   "$(close_candidate_tab '{"store":{"agents":{
-     "u-a":{"tab_id":null,"pane_id":null}}}}')" ""
+     "u-a":{"tab_id":null,"pane_id":null}}}}' "u-minted")" ""
 
 printf '\n%s\n' "== qa/lib selftest: $FAILURES failure(s) =="
 [[ "$FAILURES" -eq 0 ]]

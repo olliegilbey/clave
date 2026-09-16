@@ -242,24 +242,31 @@ held_bound_uuids() {
 }
 
 # Which tab phase 6c should close on its way to the quit, so the restore has
-# one it must refuse. Empty when no row is bound.
+# one it must refuse. Takes the `dev status` document and the uuid to SPARE.
+# Empty when no row is bound.
 #
-# Prefers a row whose agent NEVER STARTED — a tab and no pane. A row whose
-# agent really ran is the only population the #261 `SessionEnd` unbind could
-# reach, and the 2026-09-15 verification read green over a broken restore
-# precisely because it held none of them. Closing the one such row would hand
-# the rest of the phase the easy case. Measured on run 14 (2026-09-16): the
-# naive "lowest bound tab id" took the minted row, and every row left to
-# restore had sat at claude's trust prompt.
+# The spare is the row the drive MINTED (`clave add`, phase 2 rung 1), and it
+# must survive into the restored set. It is the only row in this sandbox whose
+# claude gets past the "trust this folder" prompt, so it is the only row that
+# ever starts a session, fires a hook, or can reach the #261 `SessionEnd`
+# unbind at all. Every seeded row sits at that prompt forever. Close the
+# minted row and the phase measures the one population the defect cannot
+# touch — which is exactly how the 2026-09-15 verification read green over a
+# broken restore.
 #
-# Falls back to any bound row, so a fleet where every agent ran still gets the
-# closed-tab half. The phase records which case it got, because the fallback
-# cannot be asserted away.
+# Two earlier rules failed here and are worth not repeating. "Lowest bound tab
+# id" takes the minted row, because it is created first (run 14, 2026-09-16).
+# "A tab and no pane" never matches in the FIRST session: that signature
+# belongs to a RESTORED row, and every row this drive opens registers a pane
+# (run 15, same day — the measure line read `was running`).
+#
+# Falls back to the spare when it is the only bound row, so a one-row fleet
+# still gets the closed-tab half rather than silently skipping it.
 close_candidate_tab() {
-  jq -r '
-    [.store.agents[] | select(.tab_id != null)] as $bound
-    | (([$bound[] | select(.pane_id == null) | .tab_id] | sort)
-       + ([$bound[] | .tab_id] | sort))
+  jq -r --arg spare "${2:-}" '
+    [.store.agents | to_entries[] | select(.value.tab_id != null)] as $bound
+    | (([$bound[] | select(.key != $spare) | .value.tab_id] | sort)
+       + ([$bound[] | .value.tab_id] | sort))
     | .[0] // empty' <<<"$1" 2>/dev/null
 }
 

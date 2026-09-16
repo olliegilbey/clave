@@ -2392,7 +2392,7 @@ phase "P6c-relaunch"
 # WHICH tab is closed matters as much as that one is, and the rule lives in
 # `close_candidate_tab` (qa/lib.sh) where the selftest reaches it.
 P6C_CLOSE_STATUS="$(dev_status)"
-P6C_CLOSE_TAB="$(close_candidate_tab "$P6C_CLOSE_STATUS")"
+P6C_CLOSE_TAB="$(close_candidate_tab "$P6C_CLOSE_STATUS" "${CREATE_UUID:-}")"
 P6C_CLOSED=""
 if [[ -n "$P6C_CLOSE_TAB" ]]; then
   P6C_CLOSED="$(jq -r --argjson t "$P6C_CLOSE_TAB" \
@@ -2400,13 +2400,14 @@ if [[ -n "$P6C_CLOSE_TAB" ]]; then
     <<<"$P6C_CLOSE_STATUS" 2>/dev/null | head -n1)"
 fi
 if [[ -n "$P6C_CLOSED" ]]; then
-  # The pane state is recorded, not asserted: a fleet where every agent ran
-  # leaves no never-started row to prefer, and the phase is still worth
-  # driving — but the reader has to be able to see which case this run got.
+  # Whether the minted row was spared is RECORDED, not asserted: the fallback
+  # is legitimate on a one-row fleet. But it is the difference between this
+  # phase measuring the defect and measuring the case the defect cannot
+  # reach, so a reader must be able to see which one a run got.
   measure "the tab this phase closes, so the restore has one to refuse" \
-    "tab=${P6C_CLOSE_TAB} uuid=${P6C_CLOSED:0:13} agent=$(jq -r --arg u "$P6C_CLOSED" \
-      'if .store.agents[$u].pane_id == null then "never started" else "was running" end' \
-      <<<"$P6C_CLOSE_STATUS" 2>/dev/null)"
+    "tab=${P6C_CLOSE_TAB} uuid=${P6C_CLOSED:0:13} minted_row_spared=$(
+      [[ -n "${CREATE_UUID:-}" && "$P6C_CLOSED" != "${CREATE_UUID:-}" ]] &&
+        echo yes || echo no)"
   focus_tab_checked "$P6C_CLOSE_TAB" "the tab to close:"
   "$CT" close-tab
   P6C_CLOSE_RC=$?
@@ -2449,6 +2450,16 @@ check_min "the live set is big enough for a restore to mean anything" "$P6C_N_BE
 if [[ -n "$P6C_CLOSED" ]]; then
   check "the closed row is out of the set before the quit" \
     "$(grep -c -- "$P6C_CLOSED" <<<"$P6C_SET_BEFORE")" "0"
+fi
+
+# And the set still holds the row whose agent REALLY RAN. Without this the
+# phase can pass on a fleet of rows that never started a session, which is the
+# one population the #261 `SessionEnd` unbind cannot reach — so every verdict
+# below it would be green on a broken restore. Runs 14 and 15 (2026-09-16)
+# both reached the relaunch in exactly that state and nothing said so.
+if [[ -n "${CREATE_UUID:-}" ]]; then
+  check "the row whose agent really ran is in the set to restore" \
+    "$(grep -c -- "$CREATE_UUID" <<<"$P6C_SET_BEFORE")" "1"
 fi
 
 # Half an hour for each half, measured rather than guessed: the first live run
