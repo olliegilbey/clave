@@ -39,7 +39,9 @@ resume — a re-drive is a full re-drive.
 
 ## Current State
 
-Tree CLEAN. **13 commits ahead of origin, NOT PUSHED.** Gates green, 786 tests.
+Tree CLEAN. **15 commits ahead of `origin/worktree-live-set-restore`, NOT
+PUSHED** (48 ahead of `main` — that is the whole PR, most of it already
+pushed). Gates green, 786 tests.
 
 This session added, newest first:
 - `3c2ce0d` phase 5b expects exited
