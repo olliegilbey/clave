@@ -23,7 +23,19 @@ the earlier fixes. This file does not repeat them.
   that identified the bug. | **Checked** — do not propose it again.
 - **The fix is committed and UNPROVEN live.** | `0c6e286`: the launch bakes one
   tab, the bar opens the rest one at a time. 790 tests green, gates green. |
-  **Open** — no live run has exercised it. This is the next thing to do.
+  **Open** — no live run has exercised it.
+- **BLOCKER, found after that commit: the staggered restore STARTS every
+  agent, and it must not.** | The baked layout creates every tab but the
+  focused one HELD — `start_suspended true`, no process
+  (`crates/clave/src/setup.rs:2005-2010`). The new queue opens rows through
+  `Effect::OpenAgent` → `clave open`, which is the `Alt+Enter` path and RESUMES
+  the conversation, so a twenty-row fleet would start twenty agents unasked, at
+  roughly 350 MB each. | **Open, and fix this BEFORE driving.** The drive
+  already catches it: phase 6c's `check_min "restored rows were bound before
+  their agent ran (tab, no pane)"` will go red, and `scripts/qa/lib-selftest.sh`
+  has the case ("a fleet that came back already running fails"). The restore
+  needs a HELD open — a new effect, or a flag on `clave open` — so a restored
+  tab matches a baked one and `run_held_effect` starts it when the human lands.
 - **The restore needs no timer, and deliberately has none.** | Opening a row
   binds it, binding writes the store, the store pushes the next snapshot. The
   chain paces itself at one tab per store advance. | **Checked** — the wire is
@@ -95,9 +107,14 @@ expect it to be unreliable and ask if refused.
 - **`relaunch_checks` in `scripts/qa/lib.sh`** is the home for relaunch
   verdicts, and every check in it has a selftest case that makes it go red.
   Copy that shape. The fixture must carry every field the check reads.
-- **`Effect::OpenAgent`** is the one open path, shared by `Alt+Enter` and the
-  restore. `clave open` is a no-op on a live row, which is why two bars cannot
-  double-open the same tab.
+- **`Effect::OpenAgent`** is a proven open path and `clave open` is a no-op on a
+  live row, which is why two bars cannot double-open the same tab. Keep that
+  property when you add the held variant — it is what removes the need for any
+  coordination between the human and the sequencer.
+- **`run_held_effect` already starts a held tab's agent when the human lands on
+  it**, and only when the pane never ran (`!exited`). That is the other half of
+  the held design, and it is tested — the restore should lean on it rather than
+  starting anything itself.
 - **The one-line wire at the end of `apply_snapshot`** is the whole sequencer.
   Keep it there; a timer is the thing to avoid.
 
@@ -136,7 +153,14 @@ you add another field.
 
 ## Next Steps
 
-1. **Drive `0c6e286`.** Stage with `./scripts/sandbox-setup.sh qa-fleet`, then
+0. **FIRST: make the restore open tabs HELD, not running** (see the blocker in
+   Orientation). Driving before this wastes two maintainer launches on a red
+   phase whose cause is already known. Red-first: `lib-selftest.sh`'s
+   `all-running` case and phase 6c's held floor both already fail on it, so the
+   test exists — what is missing is a held open path. Check whether
+   `run_held_effect` then starts the restored tab on arrival, which is the
+   behaviour the baked tabs already have and the whole reason held is right.
+1. **Drive the result.** Stage with `./scripts/sandbox-setup.sh qa-fleet`, then
    the maintainer launches. Start `scripts/qa/fd-sampler.sh
    clave-test-live-set-459d` first — the peak handle count is the evidence the
    fix works, and it should now stay near one tab's worth.
@@ -194,6 +218,15 @@ self-pacing and needed no timer. Tell him this; he has not seen it run.
 **Harness friction.** The worktree isolation classifier refuses compound bash
 with runtime values, heredocs feeding python, and `sed` with computed programs.
 Use the Write tool for scripts, then run them as a single plain command.
+
+**Two smaller things left loose.** `BarModel::restore_pending` is public and
+called only from tests — either the shell needs it (it does not, now the store
+advance is the clock) or it should go, because dead code is not annotated
+around here. And the drive has no assertion that the restored fleet arrives
+COMPLETE: the checks compare the recorded set against the bound set after a
+settle poll, so a queue that stalls halfway fails on size — but nothing names
+the stall, and the message would send the next person looking at the wrong
+thing.
 
 ## Restart Hint
 
