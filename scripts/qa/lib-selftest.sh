@@ -210,6 +210,31 @@ want "a failing check_nonempty exits non-zero" "$?" "1"
 want "the failure prints the summary on its way out" \
   "$(check "d" "1" "2" 2>&1 | grep -c 'QA drive summary'; true)" "1"
 
+# A phase that could not RUN is not a phase that failed, and it is certainly
+# not one that passed. Phase 6c waits on a human, and the first live run
+# (2026-09-16) timed out and threw away ten green phases with it. The run
+# continues; the summary says NOT RUN, so nobody can read the gap as a pass.
+phase "skipping"
+SKIPPED="$(skip_phase 'nobody relaunched' 2>&1)"
+want "a skip does not stop the run" "$?" "0"
+want "a skip says why, where the reader is looking" \
+  "$(grep -c 'NOT RUN: nobody relaunched' <<<"$SKIPPED")" "1"
+# Again in THIS shell: the line above ran in a substitution, and a verdict
+# recorded only in a subshell never reaches the summary the human reads.
+skip_phase 'nobody relaunched' >/dev/null
+want "and the summary carries it as its own verdict" \
+  "${PHASE_RESULTS[$((${#PHASE_RESULTS[@]} - 1))]}" "NOT RUN"
+
+# The exit code must not say green when a phase is missing. Whoever started
+# the drive — a release runbook, an agent, a person who walked away — reads
+# the status long before they read the summary.
+(exit_on_incomplete >/dev/null 2>&1)
+want "a run with a phase that did not run exits non-zero" "$?" "1"
+want "and says which phase is missing" \
+  "$(exit_on_incomplete 2>&1 | grep -c 'INCOMPLETE: skipping')" "1"
+(PHASE_RESULTS=("PASS" "PASS") exit_on_incomplete >/dev/null 2>&1)
+want "a run with every phase measured exits zero" "$?" "0"
+
 # --- the relaunch verdict (phase 6c) ---------------------------------------
 # The phase costs two maintainer launches to run, so its verdict is the one
 # thing in the drive that must NOT wait for a live session to be tried. A

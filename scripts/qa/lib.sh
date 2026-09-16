@@ -517,3 +517,32 @@ fail_phase() {
   print_summary
   exit 1
 }
+
+# Mark the current phase NOT RUN and carry on. A phase that could not run is
+# not a phase that failed: it measured nothing, so it has no verdict to give,
+# and calling it red hides which phases are actually red.
+#
+# For the case where the run did not get a PRECONDITION it cannot supply
+# itself — phase 6c waits on a maintainer, and the first live run (2026-09-16)
+# timed out and took ten green phases down with it. Never for a reading that
+# came back wrong; that is `check`'s job and it stops the run.
+skip_phase() {
+  local why="$1"
+  local last=$((${#PHASE_RESULTS[@]} - 1))
+  PHASE_RESULTS[last]="NOT RUN"
+  printf '[%s %s] NOT RUN: %s\n' "$CURRENT_PHASE" "$(ts)" "$why"
+}
+
+# The drive's last act. A run that skipped a phase is not a green run, and the
+# exit code is what a release runbook, an agent, or a person scrolling back
+# actually reads. The summary prints first — those readings are still worth
+# having — and then the status tells the truth about what is missing.
+exit_on_incomplete() {
+  local i missing=()
+  for i in "${!PHASE_RESULTS[@]}"; do
+    [[ "${PHASE_RESULTS[$i]}" == "NOT RUN" ]] && missing+=("${PHASE_NAMES[$i]}")
+  done
+  ((${#missing[@]} == 0)) && return 0
+  printf '\nINCOMPLETE: %s did not run. The drive is not green until it does.\n' "${missing[*]}"
+  exit 1
+}

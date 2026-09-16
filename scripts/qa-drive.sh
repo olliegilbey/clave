@@ -2396,7 +2396,12 @@ else
   note 'phase 3 closed no BOUND tab, so the "a closed tab stays closed" half of this phase is vacuous this run'
 fi
 
-P6C_WAIT="${QA_RELAUNCH_WAIT:-600}"
+# Half an hour for each half, measured rather than guessed: the first live run
+# (2026-09-16) asked for the quit at ten minutes, the maintainer had stepped
+# away, and the window closed. Ten green phases went with it. The ask sits at
+# the END of a twelve-minute drive, so whoever started it has stopped watching
+# by the time it arrives — the budget has to fit somebody coming back to it.
+P6C_WAIT="${QA_RELAUNCH_WAIT:-1800}"
 cat <<EOF
 
 ==> PHASE 6c needs a SECOND launch from you, and that is the whole point.
@@ -2425,53 +2430,61 @@ while [[ "$SESSION_LIVE" == "true" && "$P6C_DOWN" -lt "$P6C_WAIT" ]]; do
   P6C_DOWN=$((P6C_DOWN + 2))
   read_liveness
 done
+P6C_RAN="yes"
 if [[ "$SESSION_LIVE" == "true" ]]; then
-  printf '[%s %s] REFUSING: %s was still live after %ss. Phase 6c did NOT run — nothing about the relaunch seam was measured, and no earlier phase covers it.\n' \
-    "$CURRENT_PHASE" "$(ts)" "$SESSION" "$P6C_WAIT"
-  fail_phase
+  # NOT RUN, not FAILED. The seam is unmeasured either way, but a phase that
+  # never got its precondition has no verdict to give, and calling it red
+  # would hide which phases are actually red. The run carries on to the
+  # hand-back so the ten phases above it survive a maintainer who stepped out.
+  skip_phase "$(printf '%s was still live after %ss — nobody quit it. The relaunch seam is UNMEASURED this run, and no other phase covers it.' "$SESSION" "$P6C_WAIT")"
+  P6C_RAN="no"
 fi
-measure "the first session is down" "after ${P6C_DOWN}s"
+if [[ "$P6C_RAN" == "yes" ]]; then
+  measure "the first session is down" "after ${P6C_DOWN}s"
 
-P6C_UP=0
-while [[ "$SESSION_LIVE" != "true" && "$P6C_UP" -lt "$P6C_WAIT" ]]; do
-  sleep 2
-  P6C_UP=$((P6C_UP + 2))
-  read_liveness
-done
-if [[ "$SESSION_LIVE" != "true" ]]; then
-  printf '[%s %s] REFUSING: %s did not come back within %ss. Phase 6c did NOT run — this is a missing launch, not a finding about the restore.\n' \
-    "$CURRENT_PHASE" "$(ts)" "$SESSION" "$P6C_WAIT"
-  fail_phase
+  P6C_UP=0
+  while [[ "$SESSION_LIVE" != "true" && "$P6C_UP" -lt "$P6C_WAIT" ]]; do
+    sleep 2
+    P6C_UP=$((P6C_UP + 2))
+    read_liveness
+  done
+  if [[ "$SESSION_LIVE" != "true" ]]; then
+    skip_phase "$(printf '%s did not come back within %ss. This is a missing launch, not a finding about the restore — but the seam is UNMEASURED, and the sandbox is DOWN, so the eyeball checkpoints below have nothing to look at either.' "$SESSION" "$P6C_WAIT")"
+    P6C_RAN="no"
+  fi
 fi
-measure "the second session is up" "after ${P6C_UP}s"
 
-# The settle window. Bounded polling rather than a fixed sleep, and it polls
-# for the SIZE the store itself recorded — not for the number read before the
-# kill, which would make the expectation this phase's own memory instead of
-# the product's. A poll that never reaches it still falls through to the
-# checks below, so a short restore fails loudly rather than waiting forever.
-# The store is read once per turn of this loop and ALWAYS at least once, so
-# the verdict below can never run on an unset reading.
-P6C_SETTLE="${QA_RELAUNCH_SETTLE:-30}"
-P6C_SETTLED=0
-while :; do
-  P6C_AFTER_STATUS="$(dev_status)"
-  P6C_RECORDED="$(last_live_uuids "$P6C_AFTER_STATUS")"
-  P6C_SET_AFTER="$(bound_uuids "$P6C_AFTER_STATUS")"
-  [[ -n "$P6C_RECORDED" && "$(uuid_count "$P6C_SET_AFTER")" == "$(uuid_count "$P6C_RECORDED")" ]] && break
-  ((P6C_SETTLED >= P6C_SETTLE)) && break
-  sleep 2
-  P6C_SETTLED=$((P6C_SETTLED + 2))
-done
-measure "the restored fleet settled" "after ${P6C_SETTLED}s (nothing was driven, focused or typed)"
-measure "store seq across the relaunch" \
-  "before=${P6C_SEQ_BEFORE} after=$(jq -r '.store.seq' <<<"$P6C_AFTER_STATUS" 2>/dev/null)"
+if [[ "$P6C_RAN" == "yes" ]]; then
+  measure "the second session is up" "after ${P6C_UP}s"
 
-# The verdict lives in qa/lib.sh, where the selftest runs it against a store
-# that decayed and requires it to go red. A comparison written the wrong way
-# round here would pass on every run, and the next person to learn otherwise
-# would be a maintainer launching twice — the loop this phase replaces.
-relaunch_checks "$P6C_SET_BEFORE" "$P6C_AFTER_STATUS" "$P6C_CLOSED"
+  # The settle window. Bounded polling rather than a fixed sleep, and it polls
+  # for the SIZE the store itself recorded — not for the number read before the
+  # kill, which would make the expectation this phase's own memory instead of
+  # the product's. A poll that never reaches it still falls through to the
+  # checks below, so a short restore fails loudly rather than waiting forever.
+  # The store is read once per turn of this loop and ALWAYS at least once, so
+  # the verdict below can never run on an unset reading.
+  P6C_SETTLE="${QA_RELAUNCH_SETTLE:-30}"
+  P6C_SETTLED=0
+  while :; do
+    P6C_AFTER_STATUS="$(dev_status)"
+    P6C_RECORDED="$(last_live_uuids "$P6C_AFTER_STATUS")"
+    P6C_SET_AFTER="$(bound_uuids "$P6C_AFTER_STATUS")"
+    [[ -n "$P6C_RECORDED" && "$(uuid_count "$P6C_SET_AFTER")" == "$(uuid_count "$P6C_RECORDED")" ]] && break
+    ((P6C_SETTLED >= P6C_SETTLE)) && break
+    sleep 2
+    P6C_SETTLED=$((P6C_SETTLED + 2))
+  done
+  measure "the restored fleet settled" "after ${P6C_SETTLED}s (nothing was driven, focused or typed)"
+  measure "store seq across the relaunch" \
+    "before=${P6C_SEQ_BEFORE} after=$(jq -r '.store.seq' <<<"$P6C_AFTER_STATUS" 2>/dev/null)"
+
+  # The verdict lives in qa/lib.sh, where the selftest runs it against a store
+  # that decayed and requires it to go red. A comparison written the wrong way
+  # round here would pass on every run, and the next person to learn otherwise
+  # would be a maintainer launching twice — the loop this phase replaces.
+  relaunch_checks "$P6C_SET_BEFORE" "$P6C_AFTER_STATUS" "$P6C_CLOSED"
+fi
 
 # ===========================================================================
 # Phase 7 — teardown (the hand-back)
@@ -2482,11 +2495,17 @@ relaunch_checks "$P6C_SET_BEFORE" "$P6C_AFTER_STATUS" "$P6C_CLOSED"
 phase "P7-teardown"
 
 measure "sandbox left as driven; store, evlog and drive log preserved for forensics" "$STATE_DIR"
+if [[ "${P6C_RAN:-no}" == "yes" ]]; then
+  cat <<EOF
+
+The session in front of you is the SECOND one, restored by phase 6c, so
+checkpoint 1 below reads the RESTORED fleet — the harder case and the better
+look.
+EOF
+fi
 cat <<EOF
 
-The two eyeball checkpoints (human, one message each — QA-DRIVE). The session
-in front of you is the SECOND one, restored by phase 6c, so checkpoint 1 now
-reads the restored fleet — which is the harder case and the better look:
+The two eyeball checkpoints (human, one message each — QA-DRIVE):
   1. one bar per tab; woken rows show agent chips, not terminal glyphs
   2. every tab a strip (or every tab wide) — no width outliers
 
@@ -2496,3 +2515,5 @@ Teardown, when done (human, or the agent that asked for this sandbox once both e
 EOF
 
 print_summary
+# The readings first, then the truth about what is missing from them.
+exit_on_incomplete
