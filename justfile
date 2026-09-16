@@ -263,8 +263,9 @@ launch:
 
 # Stage + wait for the human's launch + drive phases 0-7, in one command.
 #
-# It asks for a SECOND launch part way through: phase 6c quits the sandbox and
-# launches it again, because the live set can only decay across a session
+# It asks for a SECOND launch part way through: phase 6c asks the maintainer to
+# quit the sandbox and launch it again, because the live set can only decay
+# across a session
 # boundary and no other phase crosses one. The drive prints both commands and
 # waits; `wait` is the budget for EACH ask.
 #

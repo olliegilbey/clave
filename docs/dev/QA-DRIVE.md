@@ -160,7 +160,7 @@ the stable binary (FOOTGUNS, 2026-08-24).
       5c, 6b and 6c in between); stop on first failure.
    **The run needs the maintainer TWICE**: once for the first launch, and
    again at phase 6c, which asks for a quit and a relaunch and waits for
-   both (`QA_RELAUNCH_WAIT`, default 600s each half). Tell him that when you
+   both (`QA_RELAUNCH_WAIT`, default 1800s each half). Tell him that when you
    hand over the first launch line, so the second ask is expected rather
    than a surprise mid-run.
    **Full 0–7 driven live green: run 4, 2026-08-17**, both eyeball

@@ -29,10 +29,10 @@ human's.
 **Preconditions:** a clave session with agent tabs, killed and resurrected — IF serialization were on. Also note zellij serializes the deepest child, so with MCP servers the replayed command might not even be `claude` (Z10/Z11).
 **Reproduce:** `Repro unknown — detection only:` the class is designed out rather than guarded at runtime; reproducing it would require hand-enabling serialization. Detection that the guard holds:
 1. `grep 'session_serialization false' "$(clave dev instance --field data)/config.kdl"` → exactly one hit.
-2. Cold-start the `c8-cold-start` scenario: kill+relaunch (human), then confirm the most-recent agent resumes focused with history and dormant rows sit `○` — resurrection is clave-owned and lazy, not zellij-replayed.
+2. Cold-start the `c8-cold-start` scenario: kill+relaunch (human), then confirm the most-recent agent resumes focused with history and dormant rows sit `○` — resurrection is clave-owned and lazy, not zellij-replayed. Note since #261: rows that held a TAB come back as restored tabs, which are live rows carrying no process until you arrive at them. Only rows that were CLOSED come back dormant. A driver who expects one process per returning row will miscount and read the restore as a regression.
 **Healthy:** config carries `session_serialization false`; cold start resumes via `clave spawn` → `claude --resume`.
 **Broken:** a resurrected pane re-runs a serialized `claude --session-id` and fails against its own transcript.
-**Drive assertion:** the config grep above (== 1), plus post-relaunch `ps` shows `--resume`, never `--session-id`, on resurrected panes.
+**Drive assertion:** the config grep above (== 1), plus post-relaunch `ps` shows `--resume`, never `--session-id`, on resurrected panes. Since #261 that is the eager row plus any tab you have visited — the rest hold an unrun `clave spawn` and no process at all, so they are outside this assertion rather than failing it.
 **Guard today:** serialization OFF in every generated config (setup.rs:183), pinned by `config_disables_session_serialization` (setup.rs:1136); lazy clave-owned resurrection (C8 redesign, 2026-07-17).
 **Refs:** SUBSYSTEM-VALIDATION.md C8 (redesign preamble + serialization findings); `crates/clave/src/setup.rs:183`, `:1136`; FOOTGUNS.md "zellij serializes the LIVE discovered pane process".
 

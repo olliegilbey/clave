@@ -93,7 +93,7 @@ instance (\`clave dev instance\`). Never launches or kills a zellij session.
 
 Phase 6c asks you to quit the sandbox and launch it again, then reads what
 came back. It prints the commands and waits up to QA_RELAUNCH_WAIT seconds
-(default 600) for each half.
+(default 1800) for each half.
 
 USUALLY YOU WANT: \`just qa <scenario>\` — it stages, prints the launch line,
 waits for the human to run it, and then calls this script. One command for the
