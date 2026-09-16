@@ -167,7 +167,11 @@ the stable binary (FOOTGUNS, 2026-08-24).
    checkpoints confirmed; and **run 11, 2026-09-11**, the ten labels that
    existed then (5b and 6b were the new ones), on the first run of the
    one-command loop. The drive carries **twelve** now: 5c joined on
-   2026-09-12 and 6c on 2026-09-16; neither has been driven live yet. Runs 1–3 each went red on one real finding (all
+   2026-09-12 and 6c on 2026-09-16. **Run 12, 2026-09-16** drove all twelve:
+   phases 0–6b green, and 6c went red on its first complete run, on a real
+   defect — the live set lost the one row whose agent was genuinely running
+   (see the handoff for the mechanism). That is the phase doing its job on
+   the first attempt at a class nothing else could see. Runs 1–3 each went red on one real finding (all
    fixed and recorded in FOOTGUNS.md); the script header's ledger records
    how each once-pending assumption settled. Still awaiting a first live
    run: the CONCURRENT burst shape (ledger (6) — runs 1–4 drove the burst

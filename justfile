@@ -266,7 +266,12 @@ launch:
 # It asks for a SECOND launch part way through: phase 6c quits the sandbox and
 # launches it again, because the live set can only decay across a session
 # boundary and no other phase crosses one. The drive prints both commands and
-# waits; `wait` is the budget for each half.
-qa scenario="qa-fleet" wait="600":
+# waits; `wait` is the budget for EACH ask.
+#
+# Half an hour, measured: ten minutes closed on both asks on 2026-09-16, and
+# each closed window costs a re-stage. The drive is asking a person to walk to
+# another window, so the budget is set for somebody who came back to it rather
+# than somebody watching it.
+qa scenario="qa-fleet" wait="1800":
     ./scripts/sandbox-setup.sh {{scenario}}
     QA_WAIT_SECS={{wait}} QA_RELAUNCH_WAIT={{wait}} ./scripts/qa-drive.sh {{scenario}}
