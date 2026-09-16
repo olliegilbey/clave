@@ -331,6 +331,27 @@ pub struct Store {
     /// single-eager-row path launch already takes.
     #[serde(default)]
     pub last_live: Vec<String>,
+    /// Did any row bind a tab since the last launch? (#261)
+    ///
+    /// `clear_session_order` records `last_live` and then nulls every bind, so
+    /// the store cannot tell two very different sessions apart afterwards: one
+    /// that opened tabs and closed them all (the set must go EMPTY), and one
+    /// that came up and never bound at all — a bar that failed to load, or a
+    /// human who quit within the first seconds (the set must SURVIVE). Both
+    /// reach the next launch with no binds and no tab order.
+    ///
+    /// This is the one fact that separates them, and only a live session can
+    /// supply it. Armed false by `clear_session_order`, set true by the first
+    /// `apply_bind`. Found by swarm review 2026-09-16, which also measured
+    /// that gating on `tab_order` instead does NOT work: the quit-with-nothing
+    /// -open case clears it on the same pass.
+    ///
+    /// `default` (false) keeps pre-field store files loading. The cost of that
+    /// default is one launch: the first launch after the upgrade reads false
+    /// and keeps a set it could have replaced. Self-limiting, and the set it
+    /// keeps is the right one anyway.
+    #[serde(default)]
+    pub bound_since_launch: bool,
     /// Which row geometry the NEXT `clave` launch bakes (#232). Read once by
     /// `launch_layout_kdl` at session-create time — never rides the pipe
     /// (unlike `collapsed`/`order`): geometry is launch-baked into fixed pane
@@ -671,6 +692,12 @@ pub fn apply_bind(paths: &StorePaths, uuid: &str, tab_id: usize) -> Result<Optio
         if let Some(r) = s.agents.get_mut(uuid) {
             r.tab_id = Some(tab_id);
         }
+        // This session has now bound at least one row, so the NEXT
+        // `clear_session_order` may trust its reading (#261). Set on the
+        // changing path only: a re-report returns above and stays free, and
+        // the first bind of any session is always a change, because the
+        // launch nulled every bind a beat earlier.
+        s.bound_since_launch = true;
         // An agent-bound tab's twin never holds inherited buckets (maintainer
         // ruling, 2026-08-19 post-drive): the row must rank on the agent's own
         // decayed score. Insert EMPTY rather than remove — an occupied key is
@@ -925,8 +952,19 @@ pub fn clear_session_order(paths: &StorePaths) -> Result<()> {
             by_tab.sort_unstable(); // ascending tab id: deterministic, NOT a rank
             by_tab.into_iter().map(|(_, u)| u.to_string()).collect()
         };
-        if s.last_live != live_set {
+        // Gated on a bind having happened (#261). An unconditional write
+        // looks right — a quit with nothing open must leave an EMPTY set, and
+        // a conditional write would resurrect the layout from two launches
+        // ago — but it also lets a launch that DIED before binding anything
+        // erase the real set on the launch after. `bound_since_launch` is the
+        // fact that tells the two apart.
+        if s.bound_since_launch && s.last_live != live_set {
             s.last_live = live_set;
+            changed = true;
+        }
+        // Arm for the session this launch is about to start.
+        if s.bound_since_launch {
+            s.bound_since_launch = false;
             changed = true;
         }
         if !s.tab_order.is_empty() || bound {
@@ -1952,16 +1990,24 @@ mod tests {
             // pass that recorded iteration order rather than TAB order would
             // pass by luck on a two-row fixture. Here uuid order and tab order
             // disagree deliberately.
-            for (uuid, tab) in [("u-c", 1usize), ("u-a", 9), ("u-b", 4)] {
-                let mut a = rec(uuid);
-                a.tab_id = Some(tab);
-                s.agents.insert(uuid.into(), a);
-                s.tab_order.insert(tab, 0);
+            for uuid in ["u-c", "u-a", "u-b"] {
+                s.agents.insert(uuid.into(), rec(uuid));
             }
             // A dormant row holds no tab and is not part of the live set.
             s.agents.insert("u-dormant".into(), rec("u-dormant"));
         })
         .unwrap();
+        // Bound through `apply_bind`, the one writer a live session uses:
+        // hand-set binds skip `bound_since_launch` and would leave this
+        // fixture describing a session that never came up (FOOTGUNS: build the
+        // fixture from what the shell delivers).
+        for (uuid, tab) in [("u-c", 1usize), ("u-a", 9), ("u-b", 4)] {
+            apply_bind(&p, uuid, tab).unwrap();
+            with_store_mut(&p, |s| {
+                s.tab_order.insert(tab, 0);
+            })
+            .unwrap();
+        }
         clear_session_order(&p).unwrap();
         let s = read_store(&p).unwrap();
         assert_eq!(
@@ -1985,14 +2031,15 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let p = tmp_paths(d.path());
         with_store_mut(&p, |s| {
-            let mut visited = rec("u-visited");
-            visited.tab_id = Some(0);
-            visited.pane_id = Some(7); // ran, registered
-            s.agents.insert("u-visited".into(), visited);
-            let mut waiting = rec("u-waiting");
-            waiting.tab_id = Some(1); // a tab on screen…
-            waiting.pane_id = None; // …whose spawn never ran
-            s.agents.insert("u-waiting".into(), waiting);
+            s.agents.insert("u-visited".into(), rec("u-visited"));
+            s.agents.insert("u-waiting".into(), rec("u-waiting"));
+        })
+        .unwrap();
+        apply_bind(&p, "u-visited", 0).unwrap();
+        apply_bind(&p, "u-waiting", 1).unwrap(); // a tab on screen…
+        with_store_mut(&p, |s| {
+            s.agents.get_mut("u-visited").unwrap().pane_id = Some(7); // ran
+            s.agents.get_mut("u-waiting").unwrap().pane_id = None; // never ran
         })
         .unwrap();
         clear_session_order(&p).unwrap();
@@ -2017,13 +2064,14 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let p = tmp_paths(d.path());
         with_store_mut(&p, |s| {
-            let mut worked_in = rec("u-worked-in");
-            worked_in.tab_id = Some(0);
-            worked_in.pane_id = Some(7); // its claude ran, and owns the pane
-            s.agents.insert("u-worked-in".into(), worked_in);
-            let mut untouched = rec("u-untouched");
-            untouched.tab_id = Some(1); // a tab on screen, spawn never run
-            s.agents.insert("u-untouched".into(), untouched);
+            s.agents.insert("u-worked-in".into(), rec("u-worked-in"));
+            s.agents.insert("u-untouched".into(), rec("u-untouched"));
+        })
+        .unwrap();
+        apply_bind(&p, "u-worked-in", 0).unwrap();
+        apply_bind(&p, "u-untouched", 1).unwrap(); // a tab on screen, spawn never run
+        with_store_mut(&p, |s| {
+            s.agents.get_mut("u-worked-in").unwrap().pane_id = Some(7); // owns the pane
             // The claude in tab 0 exits. The tab stays open.
             crate::hook::apply_hook_pane(s, "u-worked-in", "SessionEnd", Some(7));
         })
@@ -2037,13 +2085,18 @@ mod tests {
     }
 
     /// Quitting with nothing open must leave an EMPTY set, not the set from
-    /// the launch before. The write is unconditional for exactly this case:
-    /// nothing is bound, so the clear below has nothing to do and does not
-    /// run, and a recording that rode inside it would silently resurrect a
-    /// two-launches-ago layout. Empty is also the signal launch reads to take
-    /// its existing single-eager-row path.
+    /// the launch before, or the relaunch resurrects a two-launches-ago
+    /// layout. Empty is also the signal launch reads to take its existing
+    /// single-eager-row path.
+    ///
+    /// The session here OPENED a tab and then closed it. That is what makes
+    /// the empty reading trustworthy, and it is the whole difference from
+    /// `clear_session_order_keeps_the_live_set_when_the_last_launch_never_bound`
+    /// beside it, where the session never bound anything and the set must
+    /// survive. Both reach this pass with no binds and no tab order; only
+    /// `bound_since_launch` separates them (#261).
     #[test]
-    fn clear_session_order_empties_the_live_set_when_nothing_was_bound() {
+    fn clear_session_order_empties_the_live_set_when_the_session_quit_with_nothing_open() {
         let d = tempfile::tempdir().unwrap();
         let p = tmp_paths(d.path());
         with_store_mut(&p, |s| {
@@ -2051,10 +2104,53 @@ mod tests {
             s.agents.insert("u-dormant".into(), rec("u-dormant"));
         })
         .unwrap();
+        apply_bind(&p, "u-dormant", 0).unwrap();
+        with_store_mut(&p, |s| {
+            // The human closes the tab. `apply_prune_tabs` unbinds the row,
+            // and the session then quits with nothing open.
+            s.agents.get_mut("u-dormant").unwrap().tab_id = None;
+        })
+        .unwrap();
         clear_session_order(&p).unwrap();
         assert!(
             read_store(&p).unwrap().last_live.is_empty(),
-            "a launch with nothing bound clears the set rather than keeping it"
+            "a session that closed its tabs clears the set rather than keeping it"
+        );
+    }
+
+    /// A launch that never bound anything must LEAVE the set alone (#261).
+    /// `clear_session_order` records the set and then nulls every bind, so a
+    /// session that comes up and binds nothing — a bar that fails to load, or
+    /// a human who quits within the first seconds — reaches the next launch
+    /// with an empty store and would overwrite the real set with nothing.
+    /// That is the very failure this feature exists to prevent, arriving by
+    /// another door. Found by swarm review, 2026-09-16.
+    #[test]
+    fn clear_session_order_keeps_the_live_set_when_the_last_launch_never_bound() {
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            s.agents.insert("u-a".into(), rec("u-a"));
+            s.agents.insert("u-b".into(), rec("u-b"));
+        })
+        .unwrap();
+        apply_bind(&p, "u-a", 0).unwrap();
+        apply_bind(&p, "u-b", 1).unwrap();
+        // The session quits: the set is recorded and every bind is nulled.
+        clear_session_order(&p).unwrap();
+        assert_eq!(
+            read_store(&p).unwrap().last_live,
+            vec!["u-a".to_string(), "u-b".to_string()],
+            "the quit records what was open"
+        );
+        // The next launch dies before any row binds, so the one after it
+        // finds nothing. The set it must restore is still the same two rows.
+        clear_session_order(&p).unwrap();
+        assert_eq!(
+            read_store(&p).unwrap().last_live,
+            vec!["u-a".to_string(), "u-b".to_string()],
+            "a launch that bound nothing is a re-run over an already-cleared \
+             store, not a quit with nothing open"
         );
     }
 
