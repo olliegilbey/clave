@@ -1673,9 +1673,16 @@ mod tests {
                     "default_tab_template",
                 ),
                 (
-                    crate::add::tab_layout(
-                        "clave", "/w.wasm", "l", "u", "/c", collapsed, row_height,
-                    ),
+                    crate::add::tab_layout(&crate::add::TabSpec {
+                        binary: "clave",
+                        wasm: "/w.wasm",
+                        label: "l",
+                        uuid: "u",
+                        cwd: "/c",
+                        collapsed,
+                        row_height,
+                        start: crate::add::TabStart::Running,
+                    }),
                     "tab name=",
                 ),
             ];

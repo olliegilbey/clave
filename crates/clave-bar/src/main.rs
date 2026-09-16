@@ -462,7 +462,7 @@ impl State {
                         ),
                     );
                 }
-                Effect::OpenAgent { uuid } => {
+                Effect::OpenAgent { uuid, restore_to } => {
                     // Collapse mode rides along for D36's reason: the new tab
                     // must be born in the mode the fleet is in. The width
                     // needs no measuring — the layout `clave open` writes is
@@ -470,6 +470,13 @@ impl State {
                     let mut argv = vec![bin.as_str(), "open", &uuid];
                     if self.model.collapsed {
                         argv.push("--collapsed");
+                    }
+                    // #261: held, and hand the focus back to this tab. The
+                    // model decided both — see `Effect::OpenAgent`.
+                    let home = restore_to.map(|t| t.to_string());
+                    if let Some(home) = home.as_deref() {
+                        argv.push("--restore-to");
+                        argv.push(home);
                     }
                     run_command(&argv, BTreeMap::new());
                 }

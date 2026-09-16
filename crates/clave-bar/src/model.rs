@@ -344,10 +344,22 @@ pub enum Effect {
     /// (→ the bar's `initial_cwd`) when neither is known. Decided here so
     /// tests reach it; main.rs only translates `None`.
     ShellSpawn { cwd: Option<String> },
-    /// run_command(["clave","open",uuid]) — §6.3. Fired ONLY by the Alt+Enter
-    /// commit (#100 dwell-commit: selection and launch are separate acts);
-    /// the model has already marked the uuid in-flight (↻).
-    OpenAgent { uuid: String },
+    /// run_command(["clave","open",uuid]) — §6.3. Two callers, told apart by
+    /// `restore_to`:
+    ///
+    /// - `None` — the Alt+Enter commit (#100 dwell-commit: selection and
+    ///   launch are separate acts). The human asked for this conversation, so
+    ///   the tab runs it and keeps the focus it takes.
+    /// - `Some(tab_id)` — the staggered restore (#261). The tab comes back
+    ///   with its agent HELD, and the focus goes back to `tab_id` — the
+    ///   sequencer's own tab, which is where the human is standing. Both halves
+    ///   ride one field because neither is correct alone: see `open::run_open`.
+    ///
+    /// In both cases the model has already marked the uuid in-flight (↻).
+    OpenAgent {
+        uuid: String,
+        restore_to: Option<usize>,
+    },
     /// run_command(["clave","touch",tab_id]) — the once-EVER birth stamp for a
     /// tab the store's tab order has never seen. Was an inline `run_command` in
     /// the adapter, which put it out of reach of every test (`main.rs` is
@@ -758,6 +770,27 @@ pub struct BarModel {
     /// the human CLOSES re-enters — so the bar would reopen the tab they just
     /// shut, and keep doing it. The restore owes each row exactly one open.
     restore_sent: BTreeSet<String>,
+    /// The beacon has named two different tabs in this instance's lifetime —
+    /// i.e. the focus has moved at least once since this bar was born (#261).
+    /// See [`BarModel::beacon`] for what it is worth, and `run_held_effect`
+    /// for who reads it.
+    beacon_moved: bool,
+    /// This bar sent a restore open and owes its own tab a re-anchor (#261).
+    ///
+    /// A tab made by `zellij action new-tab` always takes the focus, so the
+    /// restore hands it straight back (`open::run_open`). The bar born in the
+    /// new tab may have announced itself first, which would leave the beacon
+    /// naming a tab nobody is standing in: nav dies (FOOTGUNS — "a beacon
+    /// naming a tab the user is NOT looking at reads as dead nav") and the
+    /// queue stalls, because `restore_next` runs on the beacon's bar alone.
+    ///
+    /// Its OWN flag rather than `organic_pending`, which [`BarModel::beacon`]
+    /// clears on the grounds that an arriving beacon is truth — right for
+    /// Alt+o, and exactly backwards here, where the arriving beacon IS the
+    /// thing to undo. Paid on the next tab frame, which is the frame the
+    /// returning focus delivers, so the re-anchor is sent after the birth
+    /// announce it answers rather than racing it.
+    restore_reanchor_owed: bool,
     /// Last bind-leg state we reported (#178). Only a CHANGE is worth a line;
     /// see `Effect::BindStall`.
     bind_stall: Option<BindStallState>,
@@ -936,7 +969,7 @@ impl BarModel {
     /// it elects the nav executor; it never reorders (§6.6: focus is not a
     /// commitment).
     pub fn beacon(&mut self, tab_id: usize) {
-        self.current_tab = Some(tab_id);
+        self.set_beacon(tab_id);
         self.organic_pending = false; // truth arrived; leftover flags are poison
         // A new beacon re-anchors the election, so whatever an earlier tab
         // frame proved about the OLD beacon is spent, debt included (#162):
@@ -951,6 +984,28 @@ impl BarModel {
         // no clave-nav. The dormant nav branch sets `cursor` AFTER its (no)
         // beacon call, so clearing here never races a fresh dormant landing.
         self.cursor = None;
+    }
+
+    /// Move the beacon, and record whether that was a MOVE.
+    ///
+    /// The one place `current_tab` is written, so the distinction cannot be
+    /// lost by a caller: `None → x` is a bar learning where the focus is,
+    /// `x → y` is the focus going somewhere. Only the second means a human
+    /// walked, and `run_held_effect` is allowed to start an agent on the
+    /// second alone (#261).
+    ///
+    /// The case that forces it: `zellij action new-tab` focuses the tab it
+    /// makes whatever the layout asks
+    /// (`zellij-utils-0.44.3/src/input/actions.rs:1611-1625`), so a tab the
+    /// staggered restore brings back is born focused and its newborn bar
+    /// announces itself. That announce is a `None → own` for that instance.
+    /// Read as an arrival it starts the agent the hold exists to keep asleep —
+    /// on every row of the fleet, ~350 MB each.
+    fn set_beacon(&mut self, tab_id: usize) {
+        if self.current_tab.is_some_and(|prev| prev != tab_id) {
+            self.beacon_moved = true;
+        }
+        self.current_tab = Some(tab_id);
     }
 
     /// The `clave-visited` pipe entry: beacon, plus peek-on-nav — a
@@ -1400,6 +1455,17 @@ impl BarModel {
         if !self.own_tab_focused() {
             return None;
         }
+        // The focus must have MOVED to get here, not simply started here.
+        // `zellij action new-tab` focuses the tab it makes whatever the layout
+        // asks (`zellij-utils-0.44.3/src/input/actions.rs:1611-1625`), so the
+        // staggered restore's own tabs are born focused and announce
+        // themselves — a beacon that names us with nothing before it is that
+        // birth, not an arrival. Starting on it resumes the whole fleet, which
+        // is the cost the hold exists to avoid. A real arrival always moves the
+        // beacon off some other tab first.
+        if !self.beacon_moved {
+            return None;
+        }
         let own = self.own_tab_position()?;
         self.panes
             .iter()
@@ -1766,19 +1832,32 @@ impl BarModel {
         let Some(uuid) = self.restore_next().map(str::to_string) else {
             return Vec::new();
         };
+        // Where the focus goes back to. `restore_next` already refused every
+        // instance but the beacon's, so this is the tab the human is standing
+        // in — and it resolves, because that same gate went through `own_tab`.
+        let Some(home) = self.own_tab() else {
+            return Vec::new();
+        };
         // Marked before the open goes out, so the next tick advances instead of
         // re-sending a row whose tab has not appeared yet.
         self.restore_sent.insert(uuid.clone());
-        self.open_effects(&uuid)
+        // The new tab will take the focus and `clave open` will hand it back.
+        // Whatever the bar born there says about itself in between, this tab is
+        // where the human is — see `restore_reanchor_owed`.
+        self.restore_reanchor_owed = true;
+        self.open_effects(&uuid, Some(home))
     }
 
-    fn open_effects(&mut self, uuid: &str) -> Vec<Effect> {
+    /// The open itself, shared by the pick and the restore. `restore_to` is
+    /// what separates them — see [`Effect::OpenAgent`].
+    fn open_effects(&mut self, uuid: &str, restore_to: Option<usize>) -> Vec<Effect> {
         if self.opening.contains(uuid) {
             return Vec::new();
         }
         self.opening.insert(uuid.to_string());
         vec![Effect::OpenAgent {
             uuid: uuid.to_string(),
+            restore_to,
         }]
     }
 
@@ -2116,6 +2195,10 @@ impl BarModel {
         // arrives.
         let birth = !self.birth_announced;
         let organic = self.organic_pending;
+        // #261's third trigger. Same shape as `organic`: a bounded, one-shot
+        // claim spent only when it emits. It answers a beacon this bar's OWN
+        // restore open caused — see `restore_reanchor_owed`.
+        let restore_home = self.restore_reanchor_owed;
         if let Some(active_id) = self.tabs.iter().find(|t| t.active).map(|t| t.tab_id) {
             if self.current_tab == Some(active_id) {
                 // The beacon ALREADY names the active tab: both claims are
@@ -2124,17 +2207,19 @@ impl BarModel {
                 // later burst — the round-11 storm shape.
                 self.birth_announced = true;
                 self.organic_pending = false;
+                self.restore_reanchor_owed = false;
             } else if birth {
                 // UNGATED (live-validated): a newborn must announce its own
                 // tab before its first PaneUpdate can satisfy any gate. The
                 // birth announce carries everything an armed organic wanted.
                 self.birth_announced = true;
                 self.organic_pending = false;
-                self.current_tab = Some(active_id);
+                self.set_beacon(active_id);
                 effects.push(Effect::AnnounceVisit { tab_id: active_id });
-            } else if (organic || stranded) && self.elects_presumed() {
+            } else if (organic || stranded || restore_home) && self.elects_presumed() {
                 self.organic_pending = false;
-                self.current_tab = Some(active_id);
+                self.restore_reanchor_owed = false;
+                self.set_beacon(active_id);
                 effects.push(Effect::ReanchorVisit { tab_id: active_id });
             }
         } else if stranded && let Some(own) = self.own_tab() {
@@ -2148,7 +2233,7 @@ impl BarModel {
             // reach here — their frozen frame flags their own tab active, so
             // the `find(active)` arm above takes them.
             self.organic_pending = false;
-            self.current_tab = Some(own);
+            self.set_beacon(own);
             effects.push(Effect::ReanchorVisit { tab_id: own });
         }
         // The debt `apply_panes` pays (#162). Re-derived rather than copied
@@ -2338,7 +2423,7 @@ impl BarModel {
             // Answered by the send, like every other trigger since #162 — an
             // Alt+o still pending wanted exactly this announce.
             self.organic_pending = false;
-            self.current_tab = Some(own);
+            self.set_beacon(own);
             return vec![Effect::ReanchorVisit { tab_id: own }];
         }
         Vec::new()
@@ -3132,7 +3217,9 @@ impl BarModel {
             if !committable {
                 return Vec::new();
             }
-            return self.open_effects(&uuid);
+            // The pick keeps the focus its tab takes: the human just asked to
+            // go there.
+            return self.open_effects(&uuid, None);
         }
         let rows = self.rows();
         let line = if let Some(n) = v.get("row").and_then(|n| n.as_u64()) {
@@ -3640,7 +3727,17 @@ mod tests {
     fn opens(fx: &[Effect]) -> Vec<String> {
         fx.iter()
             .filter_map(|e| match e {
-                Effect::OpenAgent { uuid } => Some(uuid.clone()),
+                Effect::OpenAgent { uuid, .. } => Some(uuid.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The `restore_to` each open carries, in order — `None` for a pick.
+    fn open_homes(fx: &[Effect]) -> Vec<Option<usize>> {
+        fx.iter()
+            .filter_map(|e| match e {
+                Effect::OpenAgent { restore_to, .. } => Some(*restore_to),
                 _ => None,
             })
             .collect()
@@ -4932,6 +5029,25 @@ mod tests {
     /// `fleet_bar_with_held_neighbours` for the restored fleet as it really
     /// arrives; this one is only the landed-on case.
     fn fleet_bar_with_held_own_pane(cmd: Option<&str>, exited: bool) -> BarModel {
+        let mut m = born_in_a_held_tab(cmd, exited);
+        // The human WALKS here: the beacon was on another tab, and this frame
+        // is it arriving. Without this the fixture models the restore's own
+        // birth instead — the bar comes up already focused and announces
+        // itself — which is the one case that must NOT start the agent
+        // (`set_beacon`). The old fixture did exactly that and read as an
+        // arrival, so every test of this arm passed on the wrong input.
+        //
+        // The real sequence, in two beacons: the restore hands the focus back
+        // to the tab it came from (10), and later the human walks here (11).
+        m.beacon(10);
+        m.beacon(11);
+        m
+    }
+
+    /// The same bar as the restore makes it: born into a tab that already has
+    /// the focus, with nothing before it. Used by the fixture above and by the
+    /// test that this state starts nothing.
+    fn born_in_a_held_tab(cmd: Option<&str>, exited: bool) -> BarModel {
         let mut m = BarModel::default();
         m.set_own_pane(101);
         let mut panes = panes_at(&FLEET_PANES);
@@ -4996,6 +5112,40 @@ mod tests {
             m.identity_effects()
                 .contains(&Effect::RunHeldPane { pane_id: 6 }),
             "the instance that just became active starts its own held pane"
+        );
+    }
+
+    /// The restore's own tab must start NOTHING, and this is the state it
+    /// really arrives in: `zellij action new-tab` focuses the tab it makes
+    /// whatever the layout asks
+    /// (`zellij-utils-0.44.3/src/input/actions.rs:1611-1625`), so the bar is
+    /// born already focused and announces itself. Read as an arrival that
+    /// resumes the agent this tab was brought back asleep to avoid — once per
+    /// row, so a twelve-row fleet is gigabytes of `claude` nobody asked for.
+    ///
+    /// `clave open --restore-to` hands the focus straight back, and this is
+    /// the guard for the window before it lands.
+    #[test]
+    fn a_tab_born_focused_never_starts_its_own_held_spawn() {
+        let mut m = born_in_a_held_tab(Some("clave spawn u-restored --name x --cwd /r"), false);
+        assert!(
+            m.own_tab_focused(),
+            "premise: the newborn's own announce has put the beacon on itself"
+        );
+        assert!(
+            !m.identity_effects()
+                .iter()
+                .any(|e| matches!(e, Effect::RunHeldPane { .. })),
+            "a birth is not an arrival — the agent stays asleep"
+        );
+        // And the focus coming back, then the human walking here later, does
+        // start it: the guard delays the start, it does not cancel it.
+        m.beacon(10);
+        m.beacon(11);
+        assert!(
+            m.identity_effects()
+                .contains(&Effect::RunHeldPane { pane_id: 6 }),
+            "the human arriving still starts it"
         );
     }
 
@@ -9389,7 +9539,10 @@ mod tests {
         select_dormant(&mut m);
         assert_eq!(
             m.nav("{\"commit\":true}", Some(1)),
-            vec![Effect::OpenAgent { uuid: "u-d".into() }]
+            vec![Effect::OpenAgent {
+                uuid: "u-d".into(),
+                restore_to: None,
+            }]
         );
         assert!(
             m.nav("{\"commit\":true}", Some(1)).is_empty(),
@@ -9419,7 +9572,10 @@ mod tests {
         select_dormant(&mut m);
         assert_eq!(
             m.nav("{\"commit\":true}", Some(1)),
-            vec![Effect::OpenAgent { uuid: "u-d".into() }]
+            vec![Effect::OpenAgent {
+                uuid: "u-d".into(),
+                restore_to: None,
+            }]
         );
         // A push lands while the open is still in flight: an unrelated agent
         // binds into the live tab. `u-d` is still dormant and still not stale.
@@ -9500,7 +9656,10 @@ mod tests {
         // separate acts on every input path.
         assert_eq!(
             m.nav("{\"commit\":true}", Some(1)),
-            vec![Effect::OpenAgent { uuid: "u-d".into() }]
+            vec![Effect::OpenAgent {
+                uuid: "u-d".into(),
+                restore_to: None,
+            }]
         );
     }
 
@@ -11183,6 +11342,124 @@ mod tests {
             "the head of the queue that is not already back"
         );
         assert!(m.restore_pending(), "u-c is still owed");
+    }
+
+    /// The restore brings a tab back WITHOUT starting its agent, and gives the
+    /// focus straight back to the tab the human is standing in.
+    ///
+    /// Both halves are one assertion because neither is correct alone. A tab
+    /// made by `zellij action new-tab` always takes the focus, whatever the
+    /// layout asks for (`zellij-utils-0.44.3/src/input/actions.rs:1611-1625`),
+    /// and the bar that owns a focused tab starts its held agent at once
+    /// (`run_held_effect`) — so a hold with no focus return still resumes every
+    /// row in the fleet, ~350 MB each, which is the whole cost this design
+    /// exists to avoid.
+    #[test]
+    fn the_restore_opens_held_and_hands_the_focus_back() {
+        let mut m = focused_bar();
+        let fx = m.apply_snapshot(snap_live(
+            9,
+            vec![
+                agent("u-a", Status::Idle, Some(11)),
+                agent("u-b", Status::Idle, None),
+            ],
+            &["u-a", "u-b"],
+        ));
+        assert_eq!(
+            open_homes(&fx),
+            vec![Some(11)],
+            "the restore's open returns the focus to the sequencer's own tab"
+        );
+    }
+
+    /// The restored tab steals the beacon, and the sequencer takes it back.
+    ///
+    /// The new tab is born focused and its bar announces itself, so the beacon
+    /// ends up naming a tab nobody is standing in. Left there it costs both
+    /// halves of the feature: nav reads as dead (FOOTGUNS — a beacon on an
+    /// unwatched tab answers every press with a no-op), and the queue stops,
+    /// because only the beacon's bar opens the next row.
+    #[test]
+    fn the_sequencer_takes_the_beacon_back_from_the_tab_it_just_made() {
+        let mut m = focused_bar();
+        let fx = m.apply_snapshot(snap_live(
+            9,
+            vec![
+                agent("u-a", Status::Idle, Some(11)),
+                agent("u-b", Status::Idle, None),
+            ],
+            &["u-a", "u-b"],
+        ));
+        assert_eq!(
+            opens(&fx),
+            vec!["u-b".to_string()],
+            "premise: one open sent"
+        );
+        // The tab arrives, takes the focus, and its newborn bar announces it.
+        m.beacon(12);
+        assert!(!m.own_tab_focused(), "premise: the beacon has left us");
+        // `clave open` hands the focus back, so our tab frame arrives again.
+        let fx = m.apply_tabs(vec![
+            tab(10, 0, "a", false),
+            tab(11, 1, "b", true),
+            tab(12, 2, "c", false),
+        ]);
+        assert!(
+            fx.contains(&Effect::ReanchorVisit { tab_id: 11 }),
+            "the sequencer re-anchors the beacon on itself: {fx:?}"
+        );
+        assert!(m.own_tab_focused(), "and the queue can advance again");
+    }
+
+    /// One re-anchor per open, spent when it emits — the same bound every
+    /// other beacon trigger keeps. An unbounded claim is the round-11 pipe
+    /// storm, and a CLI pipe blocks the zellij router for about a second.
+    #[test]
+    fn the_restores_reanchor_is_spent_once() {
+        let mut m = focused_bar();
+        m.apply_snapshot(snap_live(
+            9,
+            vec![
+                agent("u-a", Status::Idle, Some(11)),
+                agent("u-b", Status::Idle, None),
+            ],
+            &["u-a", "u-b"],
+        ));
+        m.beacon(12);
+        let first = m.apply_tabs(vec![
+            tab(10, 0, "a", false),
+            tab(11, 1, "b", true),
+            tab(12, 2, "c", false),
+        ]);
+        assert!(first.contains(&Effect::ReanchorVisit { tab_id: 11 }));
+        // The beacon is ours again, so a later frame that finds it elsewhere
+        // is somebody else's business, not this open's.
+        m.beacon(12);
+        let second = m.apply_tabs(vec![
+            tab(10, 0, "a", false),
+            tab(11, 1, "b", true),
+            tab(12, 2, "c", false),
+        ]);
+        assert!(
+            !second
+                .iter()
+                .any(|e| matches!(e, Effect::ReanchorVisit { .. })),
+            "the claim was spent on the frame that paid it: {second:?}"
+        );
+    }
+
+    /// The pick is the opposite case, and the same field says so: Alt+Enter
+    /// asked to GO to that conversation, so its tab runs and keeps the focus.
+    #[test]
+    fn a_picked_row_opens_running_and_keeps_the_focus() {
+        let mut m = live_plus_dormant();
+        m.beacon(1);
+        select_dormant(&mut m);
+        assert_eq!(
+            open_homes(&m.nav("{\"commit\":true}", Some(1))),
+            vec![None],
+            "a pick is not a restore"
+        );
     }
 
     /// One per tick, never the whole fleet — the entire point of the change.

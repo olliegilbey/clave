@@ -240,6 +240,10 @@ enum Command {
         /// (LEDGER D36, applied to the open path).
         #[arg(long)]
         collapsed: bool,
+        /// The staggered restore's open (#261): create the tab with its agent
+        /// HELD, then put the focus back on this tab id. See `run_open`.
+        #[arg(long, value_name = "TAB_ID")]
+        restore_to: Option<usize>,
     },
 
     /// Live-validation harness (§6.9): seed sandboxed scenarios, dump status,
@@ -695,7 +699,11 @@ fn main() -> Result<()> {
         Some(Command::Setup) => setup::run_setup(),
         Some(Command::Doctor { json }) => clave::doctor::run_doctor(json),
         Some(Command::Backfill) => clave::backfill::run_backfill(),
-        Some(Command::Open { uuid, collapsed }) => open::run_open(&uuid, collapsed),
+        Some(Command::Open {
+            uuid,
+            collapsed,
+            restore_to,
+        }) => open::run_open(&uuid, collapsed, restore_to),
         Some(Command::Dev { action }) => match action {
             DevAction::Scenario { name } => dev::run_scenario(&name),
             DevAction::Launch => dev::run_launch(),
@@ -798,9 +806,14 @@ mod tests {
     fn open_cli_parses_the_birth_mode() {
         let bare = Cli::try_parse_from(["clave", "open", "u-1"]).expect("must parse");
         match bare.command {
-            Some(Command::Open { uuid, collapsed }) => {
+            Some(Command::Open {
+                uuid,
+                collapsed,
+                restore_to,
+            }) => {
                 assert_eq!(uuid, "u-1");
                 assert!(!collapsed);
+                assert_eq!(restore_to, None);
             }
             _ => panic!("parsed into the wrong command"),
         }
@@ -808,6 +821,13 @@ mod tests {
             Cli::try_parse_from(["clave", "open", "u-1", "--collapsed"]).expect("must parse");
         match full.command {
             Some(Command::Open { collapsed, .. }) => assert!(collapsed),
+            _ => panic!("parsed into the wrong command"),
+        }
+        // #261: the restore's open carries the tab the focus goes back to.
+        let restore =
+            Cli::try_parse_from(["clave", "open", "u-1", "--restore-to", "7"]).expect("must parse");
+        match restore.command {
+            Some(Command::Open { restore_to, .. }) => assert_eq!(restore_to, Some(7)),
             _ => panic!("parsed into the wrong command"),
         }
     }

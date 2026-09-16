@@ -62,7 +62,14 @@ pub fn open_decision(_row: &AgentRecord, is_live: bool, cwd_exists: bool) -> Ope
 /// `collapsed` comes from the BAR (D36): the new tab must be born in the mode
 /// the fleet is in, or it flashes wide and then snaps. A hand-run `clave open`
 /// passes nothing and is born expanded.
-pub fn run_open(uuid: &str, collapsed: bool) -> Result<()> {
+///
+/// `restore_to` turns this into the staggered restore's open (#261) and carries
+/// the tab id the focus belongs to. ONE option rather than a held flag and a
+/// focus target, because the two are never separable: a held tab the human is
+/// left standing on is started at once by the bar that owns it
+/// (`run_held_effect`), so a hold without a focus return is a hold that does
+/// not hold. See `add::TabStart` for why the focus cannot simply stay put.
+pub fn run_open(uuid: &str, collapsed: bool, restore_to: Option<usize>) -> Result<()> {
     let paths = crate::store::store_paths()?;
     let store = crate::store::read_store(&paths)?;
     let Some(row) = store.agents.get(uuid) else {
@@ -144,15 +151,19 @@ pub fn run_open(uuid: &str, collapsed: bool) -> Result<()> {
             // launch, so a tab minted now must match the plugin identity the
             // running config.kdl's keybinds already address.
             let row_height = crate::setup::session_row_height(&crate::setup::data_dir()?);
-            let layout = crate::add::tab_layout(
-                &binary,
-                wasm.to_str().context("wasm path")?,
-                &label,
+            let layout = crate::add::tab_layout(&crate::add::TabSpec {
+                binary: &binary,
+                wasm: wasm.to_str().context("wasm path")?,
+                label: &label,
                 uuid,
-                open_cwd,
+                cwd: open_cwd,
                 collapsed,
                 row_height,
-            );
+                start: match restore_to {
+                    Some(_) => crate::add::TabStart::Held,
+                    None => crate::add::TabStart::Running,
+                },
+            });
             let tmp = std::env::temp_dir().join(format!("clave-open-{uuid}.kdl"));
             std::fs::write(&tmp, layout)?;
             let status = std::process::Command::new(&zellij)
@@ -166,6 +177,33 @@ pub fn run_open(uuid: &str, collapsed: bool) -> Result<()> {
                 .status()?;
             let _ = std::fs::remove_file(&tmp);
             anyhow::ensure!(status.success(), "zellij action new-tab failed");
+            // Put the human back where he was standing. Sent from HERE, and
+            // not as a second effect from the bar, because only this process
+            // knows the tab exists — `run_command` gives the bar no completion
+            // to sequence against, so a bar-side return would race the create
+            // it is meant to follow.
+            //
+            // Addressed by STABLE ID (`go-to-tab-by-id`, `zellij-utils-0.44.3/
+            // src/cli.rs:1214`), never by position: FOOTGUNS records a
+            // position-addressed jump wedging nav permanently when the aim
+            // went past the real tab list, and a restore is exactly when the
+            // tab list is changing under us.
+            if let Some(tab_id) = restore_to {
+                let back = std::process::Command::new(&zellij)
+                    .env("ZELLIJ_SESSION_NAME", &session)
+                    .args(["action", "go-to-tab-by-id", &tab_id.to_string()])
+                    .status();
+                // Loud in the log, not fatal: the tab IS restored, and the
+                // only loss is where the cursor sits. Bailing here would halt
+                // the whole queue over a cosmetic failure.
+                match back {
+                    Ok(s) if s.success() => {}
+                    other => crate::evlog::log_event(
+                        "open",
+                        &format!("{uuid}: focus return to tab {tab_id} failed: {other:?}"),
+                    ),
+                }
+            }
             crate::evlog::log_event("open", &format!("{uuid}: tab created (resume via spawn)"));
             // A previously-stale row that opens fine heals (§5).
             if let Some(snap) = crate::store::apply_open_result(&paths, uuid, false)? {
