@@ -2003,6 +2003,39 @@ mod tests {
         );
     }
 
+    /// The tab a human was WORKING in must survive the quit. QA run 12
+    /// (2026-09-16) bound six tabs and got five back: the one row whose claude
+    /// had really started was missing, because its `SessionEnd` unbound the
+    /// row from a tab that was still on screen, and `clear_session_order`
+    /// records only rows that still hold a tab.
+    ///
+    /// An agent EXITING and a tab CLOSING are different events. Only the
+    /// second may remove the row from the next launch's set; that one is
+    /// `apply_prune_tabs`, pinned separately.
+    #[test]
+    fn clear_session_order_keeps_a_row_whose_agent_exited_in_its_open_tab() {
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            let mut worked_in = rec("u-worked-in");
+            worked_in.tab_id = Some(0);
+            worked_in.pane_id = Some(7); // its claude ran, and owns the pane
+            s.agents.insert("u-worked-in".into(), worked_in);
+            let mut untouched = rec("u-untouched");
+            untouched.tab_id = Some(1); // a tab on screen, spawn never run
+            s.agents.insert("u-untouched".into(), untouched);
+            // The claude in tab 0 exits. The tab stays open.
+            crate::hook::apply_hook_pane(s, "u-worked-in", "SessionEnd", Some(7));
+        })
+        .unwrap();
+        clear_session_order(&p).unwrap();
+        assert_eq!(
+            read_store(&p).unwrap().last_live,
+            vec!["u-worked-in".to_string(), "u-untouched".to_string()],
+            "an agent exiting does not close its tab, so the row is still restored"
+        );
+    }
+
     /// Quitting with nothing open must leave an EMPTY set, not the set from
     /// the launch before. The write is unconditional for exactly this case:
     /// nothing is bound, so the clear below has nothing to do and does not

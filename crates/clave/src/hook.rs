@@ -1259,14 +1259,26 @@ pub fn apply_hook_pane(s: &mut Store, uuid: &str, event: &str, pane: Option<u32>
         return false; // raced a prune — fine
     };
     if event == "SessionEnd" {
-        // Exit reverts the tab to a terminal tab — but only the pane the row
-        // OWNS may say so. A `/clear` needs no carve-out here: its SessionEnd
-        // unbinds and the successor session's mint re-claims the tab.
+        // The agent exited. The TAB did not close — and only the pane the row
+        // OWNS may report even that much.
+        //
+        // So `pane_id` goes and `tab_id` STAYS. `pane_id` answers "where does
+        // this row's process run"; `tab_id` answers "where does this row
+        // live". Clearing both conflated the two, and `clear_session_order`
+        // builds the next launch's restore set from `tab_id`: QA run 12
+        // (2026-09-16) quit six bound tabs and got five back, missing exactly
+        // the one whose claude had really started. The event that means a tab
+        // is gone is `clave prune-tabs`, and it unbinds on its own.
+        //
+        // The row is left holding a tab and no pane — the same state a
+        // RESTORED row sits in, which the bar already renders and re-adopts
+        // (`spawn_binds`), so this mints no new state. A `/clear` still needs
+        // no carve-out: the successor session's bind evicts this one
+        // (`store::apply_bind`).
         if rec.pane_id != Some(pane) {
             return false;
         }
         rec.pane_id = None;
-        rec.tab_id = None;
         s.seq += 1; // monotonic pipe contract (§5)
         return true;
     }
@@ -1561,7 +1573,8 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
             now_unix(),
             env_uuid.as_deref() == Some(uuid.as_str()),
         );
-        // The pane half (#226): register on any event, revert on SessionEnd —
+        // The pane half (#226): register on any event, DEregister on
+        // SessionEnd (the tab bind is not a pane fact, and survives) —
         // pane-verified, change-gated, and the bar renders from it. A fresh
         // mint always lands here too (row pane None → Some), so an adoption
         // pushes even when the event itself moved nothing.
@@ -3784,13 +3797,15 @@ mod tests {
     }
 
     /// #226 live adoption, revert half: exiting claude drops the pane to its
-    /// shell, so a `SessionEnd` from the pane the row OWNS clears the register
-    /// and the bind — the tab renders as a terminal tab again, the row goes
-    /// dormant, and a later `claude --resume` in that shell re-adopts (the
-    /// closed loop). Pane-match is the test: any other pane's `SessionEnd`
-    /// (or one with no verified pane) must not strip a live association.
+    /// shell, so a `SessionEnd` from the pane the row OWNS clears the
+    /// REGISTER. The BIND survives, because the tab is still on screen and the
+    /// row still lives in it — a later `claude --resume` in that shell
+    /// re-adopts into the same tab (the closed loop), and the quit that
+    /// follows records the tab in the restore set. Pane-match is the test: any
+    /// other pane's `SessionEnd` (or one with no verified pane) must not strip
+    /// a live association.
     #[test]
-    fn session_end_from_the_owning_pane_reverts_the_tab_to_terminal() {
+    fn session_end_from_the_owning_pane_clears_the_register_and_keeps_the_tab() {
         let mut s = Store::default();
         let mut r = rec("u1");
         r.pane_id = Some(7);
@@ -3803,11 +3818,15 @@ mod tests {
         // No verified pane: also nothing.
         assert!(!apply_hook_pane(&mut s, "u1", "SessionEnd", None));
         assert_eq!(s.agents["u1"].tab_id, Some(3));
-        // The owning pane's SessionEnd reverts — both halves, one seq bump.
+        // The owning pane's SessionEnd drops the register, one seq bump.
         let before = s.seq;
         assert!(apply_hook_pane(&mut s, "u1", "SessionEnd", Some(7)));
         assert_eq!(s.agents["u1"].pane_id, None);
-        assert_eq!(s.agents["u1"].tab_id, None);
+        assert_eq!(
+            s.agents["u1"].tab_id,
+            Some(3),
+            "the agent exited; the tab it lives in did not close"
+        );
         assert_eq!(s.seq, before + 1);
         // Idempotent: a second SessionEnd finds nothing to clear.
         assert!(!apply_hook_pane(&mut s, "u1", "SessionEnd", Some(7)));

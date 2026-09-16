@@ -4988,6 +4988,25 @@ mod tests {
         );
     }
 
+    /// A spawn pane that already RAN AND QUIT is not a restored tab. Its
+    /// command still reads `clave spawn <uuid>` — a launch command is static —
+    /// so the uuid test alone admits it, and the bind would claim a tab for a
+    /// row that has nothing living in it. `exited` is the only discriminator
+    /// between "waiting to run" and "finished", and it carries the same
+    /// meaning here as in `run_held_effect`. (Mutation survivor, 2026-09-16:
+    /// the three-way skip was uncovered on its `exited` leg.)
+    #[test]
+    fn a_held_spawn_pane_that_already_exited_is_not_a_restored_tab() {
+        let mut m =
+            fleet_bar_with_held_own_pane(Some("clave spawn u-restored --name x --cwd /r"), true);
+        m.apply_snapshot(snap(1, vec![agent("u-restored", Status::Working, None)]));
+        assert_eq!(
+            m.restored_bind_effects(),
+            Vec::<Effect>::new(),
+            "the command ran and quit, so no tab is waiting to be started"
+        );
+    }
+
     /// One report per episode, the same rule the ordinary bind leg follows:
     /// the guard is the last SEND, never the store echo, because an
     /// echo-gated guard storms (C5 rd 4).
