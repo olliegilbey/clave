@@ -253,6 +253,8 @@ exactly what it came to see.
    real finding first (nav wedge, newborn-bind prune, jq `//` vs `false` —
    see FOOTGUNS).**
 4. Runbook/TESTING integration line + retire the duplicated manual steps.
-5. Phase 6c (the relaunch). LANDED (2026-09-16, #261). Not yet driven live —
-   its first run is the one that says whether the settle window is long
-   enough for a fleet bigger than the three tabs the seam was proved on.
+5. Phase 6c (the relaunch). LANDED (2026-09-16, #261). Driven live on run 12
+   the same day: the settle window held for a six-tab fleet, and the phase
+   went RED on a real defect — `SessionEnd` unbound the row from a tab that
+   was still open, so the restore set lost every tab whose agent had really
+   been running (fixed on this branch; FOOTGUNS records the shape).
