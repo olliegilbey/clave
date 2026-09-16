@@ -176,7 +176,15 @@ the stable binary (FOOTGUNS, 2026-08-24).
    closing its own tab. Runs 13–15 sit between them and are worth reading as
    a set: 13 proved the fix and went red on a stale assertion, 14 and 15 each
    went green-adjacent on a fleet with no witness in it — the phase now
-   asserts the witness is there, which is what ended that. Runs 1–3 each went red on one real finding (all
+   asserts the witness is there, which is what ended that.
+   **Runs 17 and 18, 2026-09-16**, followed the second swarm review. 17 went
+   red at phase 5b on the DRIVE, not the product: the phase ends a session two
+   lines above the check and then asserted `idle`, which since `Status::Exited`
+   is the reading for an agent that is still alive. 18 is green in all twelve,
+   and is the run that proves both swarm-review blocker fixes live — five rows
+   recorded, five rebound by the bar with nothing driven, focused or typed,
+   four of them bound before their agent ran, and the tab closed in the first
+   session absent from the second. Runs 1–3 each went red on one real finding (all
    fixed and recorded in FOOTGUNS.md); the script header's ledger records
    how each once-pending assumption settled. Still awaiting a first live
    run: the CONCURRENT burst shape (ledger (6) — runs 1–4 drove the burst

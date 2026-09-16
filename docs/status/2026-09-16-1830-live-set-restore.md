@@ -24,7 +24,11 @@ merges.
   phase fires `SessionEnd` two lines above, then asserted `idle`. Since the
   fix that reads `exited`. | **Fixed** in `3c2ce0d`. The check still asserts
   its real point: nothing left Working into phase 6.
-- **The drive cannot cover blocker 1.** | No phase exits an agent and then
+- **Run 18 is GREEN in all twelve phases, and it proves both blocker fixes
+  live.** | Five rows recorded, five rebound by the bar with nothing driven,
+  focused or typed; four bound before their agent ran; the closed tab absent.
+  | **Checked** — `docs/dev/QA-DRIVE.md` ledger.
+- **The drive cannot cover blocker 1's restart path.** | No phase exits an agent and then
   restarts it from the bar. | **Open** — this is an EYEBALL check for Ollie:
   quit an agent, leave its tab open, the row must read hollow not dim, and
   `Alt+Enter` must bring it back; walking past must NOT restart it.
@@ -46,13 +50,12 @@ This session added, newest first:
 
 ## Next Steps
 
-1. **The sandbox must be killed by OLLIE before a re-stage.** The safety
-   classifier blocks the kill for the agent, even by explicit name. Hand him:
-   `zellij kill-session clave-test-live-set-459d && zellij delete-session --force clave-test-live-set-459d`
-2. **Re-stage and re-drive**: `./scripts/sandbox-setup.sh qa-fleet`, then
-   `QA_WAIT_SECS=1800 QA_RELAUNCH_WAIT=1800 ./scripts/qa-drive.sh qa-fleet`.
-   Phase 6c asks him a SECOND time, for a quit and a relaunch.
-3. **Ask for the eyeball check** on the exited row (above).
+1. **The drive is DONE — run 18, all twelve green.** No further drive is
+   needed unless the code changes again.
+2. **Ask for the eyeball check** on the exited row (above). It is the last
+   open item before merge. The sandbox from run 18 is still up, so he can do
+   it now; killing it needs HIM (the classifier blocks the agent, even by
+   explicit name).
 4. **The PR body is rewritten and WAITING at `/tmp/clave-pr-body.md`.** It is
    not pushed. If that file is gone, rebuild it: the stale things were the
    test count (786 now), the drive count (runs 4, 11-16), the defect count
