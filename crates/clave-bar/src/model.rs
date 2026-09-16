@@ -748,6 +748,16 @@ pub struct BarModel {
     /// claude that has just begun to boot. Dropped when the pane leaves the
     /// manifest, so a genuinely re-held pane can be started again.
     held_run_sent: BTreeSet<u32>,
+    /// The previous session's live set, straight off the snapshot (#261).
+    /// The launch bakes only the head of it as a tab; everything else in here
+    /// is a row this bar has to open itself.
+    last_live: Vec<String>,
+    /// Rows the restore has already opened, for the life of this instance.
+    ///
+    /// Without it the queue is "named in the set, holds no tab", which a tab
+    /// the human CLOSES re-enters — so the bar would reopen the tab they just
+    /// shut, and keep doing it. The restore owes each row exactly one open.
+    restore_sent: BTreeSet<String>,
     /// Last bind-leg state we reported (#178). Only a CHANGE is worth a line;
     /// see `Effect::BindStall`.
     bind_stall: Option<BindStallState>,
@@ -1712,6 +1722,56 @@ impl BarModel {
     /// The `opening` guard is double-fire protection #1 (clave open's
     /// liveness no-op is #2). The caller has already refused stale rows —
     /// ✗ offers no launch, and a dead row is #112's retirement business.
+    /// The next row the staggered restore owes, or `None` when it is finished.
+    ///
+    /// The queue is derived, never stored: a row is owed if the previous
+    /// session held it, this bar has not opened it yet, and it holds no tab
+    /// now. That last clause is what makes the human and the sequencer need no
+    /// coordination — reaching a row first binds it, and a bound row is simply
+    /// not owed. A row named in the set but missing from the store was pruned
+    /// between sessions, and is stepped over rather than waited for.
+    fn restore_next(&self) -> Option<&str> {
+        // Every instance reads the same store and would reach this conclusion
+        // at the same moment, so N bars would open the same row N times. Same
+        // election as the other arms that are dangerous in duplicate.
+        if !self.own_tab_focused() {
+            return None;
+        }
+        self.last_live
+            .iter()
+            .find(|uuid| {
+                !self.restore_sent.contains(*uuid)
+                    && self
+                        .agents
+                        .iter()
+                        .any(|a| &a.uuid == *uuid && a.tab_id.is_none())
+            })
+            .map(|s| s.as_str())
+    }
+
+    /// Is the restore still owed a row? The shell re-arms its timer on this.
+    pub fn restore_pending(&self) -> bool {
+        self.restore_next().is_some()
+    }
+
+    /// Open the next owed row, and ONLY the next one (#261).
+    ///
+    /// Building a tab costs a burst of about fifty file handles, opened in the
+    /// same instant and drained a second later (measured 2026-09-16: four tabs
+    /// peaked at 252 against macOS's default ceiling of 256, five crashed the
+    /// zellij server with "Too many open files"). Returning the whole queue
+    /// here would rebuild the layout's simultaneous restore one call later and
+    /// fail identically, so the one-row limit is the fix, not a detail of it.
+    pub fn restore_effects(&mut self) -> Vec<Effect> {
+        let Some(uuid) = self.restore_next().map(str::to_string) else {
+            return Vec::new();
+        };
+        // Marked before the open goes out, so the next tick advances instead of
+        // re-sending a row whose tab has not appeared yet.
+        self.restore_sent.insert(uuid.clone());
+        self.open_effects(&uuid)
+    }
+
     fn open_effects(&mut self, uuid: &str) -> Vec<Effect> {
         if self.opening.contains(uuid) {
             return Vec::new();
@@ -1837,6 +1897,10 @@ impl BarModel {
         // The mode below is now authoritative, so a switch may be booked (D37).
         self.awaiting_hydration = false;
         self.agents = snap.agents;
+        // The restore queue (#261). REPLACED like the rest of the snapshot:
+        // the set is the store's, and the bar's own progress through it lives
+        // in `restore_sent`, which a snapshot must never reset.
+        self.last_live = snap.last_live;
         // Hydrate the pane mapping from the snapshot (#178). `clave-register`
         // is a broadcast, so it reaches only the instances alive when it fires
         // — a tab born by a wake never hears about its OWN pane, while the
@@ -1963,6 +2027,15 @@ impl BarModel {
             }
         }
         self.prune_opening(); // stale=true clears ↻ → ✗; new binds clear it
+        // The staggered restore rides the store advance, and needs no timer
+        // for it (#261). Opening a row binds it, binding writes the store, and
+        // the store pushes the next snapshot — so the chain paces ITSELF at
+        // one tab per advance, which is strictly safer than a fixed delay: a
+        // slow machine waits longer by construction. `restore_effects` takes
+        // the head of the queue and nothing else, which is what keeps the
+        // file-handle burst to a single tab's worth (measured: four tabs at
+        // once peaked at 252 against a ceiling of 256, five crashed zellij).
+        effects.extend(self.restore_effects());
         effects
     }
 
@@ -3551,6 +3624,7 @@ mod tests {
 
     fn snap(seq: u64, agents: Vec<Agent>) -> AgentSnapshot {
         AgentSnapshot {
+            last_live: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -3562,10 +3636,30 @@ mod tests {
         }
     }
 
+    /// The uuids an effect list asks to open, in order.
+    fn opens(fx: &[Effect]) -> Vec<String> {
+        fx.iter()
+            .filter_map(|e| match e {
+                Effect::OpenAgent { uuid } => Some(uuid.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A snapshot that also carries the previous session's live set — what the
+    /// launch left for the bar to bring back.
+    fn snap_live(seq: u64, agents: Vec<Agent>, last_live: &[&str]) -> AgentSnapshot {
+        AgentSnapshot {
+            last_live: last_live.iter().map(|s| s.to_string()).collect(),
+            ..snap(seq, agents)
+        }
+    }
+
     /// Snapshot carrying only a tab order (the §6.6 store tab order): pairs of
     /// (tab_id, commitment ordinal).
     fn snap_t(seq: u64, ords: &[(usize, u64)]) -> AgentSnapshot {
         AgentSnapshot {
+            last_live: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -3980,6 +4074,7 @@ mod tests {
         let mut a = agent("u-d", Status::Idle, None);
         a.commit_ord = 999;
         m.apply_snapshot(AgentSnapshot {
+            last_live: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -4032,6 +4127,7 @@ mod tests {
             })
             .collect();
         m.apply_snapshot(AgentSnapshot {
+            last_live: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -4739,6 +4835,7 @@ mod tests {
     /// binds alone.
     fn snap_full(seq: u64, agents: Vec<Agent>, ords: &[(usize, u64)]) -> AgentSnapshot {
         AgentSnapshot {
+            last_live: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -8663,6 +8760,7 @@ mod tests {
         let mut a = agent("u-dormant", Status::Idle, None);
         a.last_interacted = 500;
         m.apply_snapshot(AgentSnapshot {
+            last_live: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -8717,6 +8815,7 @@ mod tests {
         new.commit_ord = 900;
         new.last_interacted = 100;
         m.apply_snapshot(AgentSnapshot {
+            last_live: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -8946,6 +9045,7 @@ mod tests {
         let mut m = BarModel::default();
         m.apply_tabs(vec![tab(7, 0, "agent-tab", true)]);
         m.apply_snapshot(AgentSnapshot {
+            last_live: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -8962,6 +9062,7 @@ mod tests {
         m.register("u2".into(), 42);
         m.apply_panes(vec![pane(0, 42, false, true)]);
         m.apply_snapshot(AgentSnapshot {
+            last_live: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -8989,6 +9090,7 @@ mod tests {
         let mut m = BarModel::default();
         m.apply_tabs(vec![tab(7, 0, "agent-tab", true)]);
         m.apply_snapshot(AgentSnapshot {
+            last_live: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -9009,6 +9111,7 @@ mod tests {
         let mut m = BarModel::default();
         m.apply_tabs(vec![tab(7, 0, "agent-tab", true)]);
         m.apply_snapshot(AgentSnapshot {
+            last_live: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -9037,6 +9140,7 @@ mod tests {
             agents.push(a);
         }
         m.apply_snapshot(AgentSnapshot {
+            last_live: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -9140,6 +9244,7 @@ mod tests {
         // u-d comes up as a tab of its own; the cursor still names it.
         m.apply_tabs(vec![tab(1, 0, "live", false), tab(2, 1, "u-d", true)]);
         m.apply_snapshot(AgentSnapshot {
+            last_live: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -9190,6 +9295,7 @@ mod tests {
             agents.push(a);
         }
         m.apply_snapshot(AgentSnapshot {
+            last_live: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -9649,6 +9755,7 @@ mod tests {
         let mut a = agent("u-d", Status::Idle, None);
         a.commit_ord = 999;
         m.apply_snapshot(AgentSnapshot {
+            last_live: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -9725,6 +9832,7 @@ mod tests {
         a.stale = true;
         m.opening.insert("u1".into());
         m.apply_snapshot(AgentSnapshot {
+            last_live: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -9739,6 +9847,7 @@ mod tests {
         // In-flight (no stale): ↻.
         let mut m = BarModel::default();
         m.apply_snapshot(AgentSnapshot {
+            last_live: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -9790,6 +9899,7 @@ mod tests {
         // "u-d" but it no longer renders dormant.
         m.apply_tabs(vec![tab(1, 0, "live", false), tab(2, 1, "u-d", true)]);
         m.apply_snapshot(AgentSnapshot {
+            last_live: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -9827,6 +9937,7 @@ mod tests {
         // dormant block, below the two live rows.
         a.commit_ord = 999;
         m.apply_snapshot(AgentSnapshot {
+            last_live: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -9899,6 +10010,7 @@ mod tests {
         a.commit_ord = 999;
         a.stale = true;
         m.apply_snapshot(AgentSnapshot {
+            last_live: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -10004,6 +10116,7 @@ mod tests {
     /// behaviour these tests see is the collapse ledger's alone.
     fn collapse_snap(seq: u64, collapsed: bool) -> AgentSnapshot {
         AgentSnapshot {
+            last_live: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -10148,7 +10261,7 @@ mod tests {
                                         .enumerate()
                                         .map(|(i, &id)| (id, timeline[i]))
                                         .collect();
-                                    m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 1, agents: vec![], tab_order: tl, order: OrderMode::default(), now_hour: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
+                                    m.apply_snapshot(AgentSnapshot { last_live: Default::default(), collapsed: false, seq: 1, agents: vec![], tab_order: tl, order: OrderMode::default(), now_hour: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
                                     m
                                 };
                                 let baseline: Vec<RowKey> =
@@ -10176,6 +10289,7 @@ mod tests {
                                     .enumerate()
                                 {
                                     m.apply_snapshot(AgentSnapshot {
+                last_live: Default::default(),
                 order: OrderMode::default(),
                 now_hour: 0,
                 tab_buckets: Default::default(),
@@ -10250,7 +10364,7 @@ mod tests {
                                     .enumerate()
                                     .map(|(i, &id)| (id, tl_vals[i]))
                                     .collect();
-                                m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 1, agents, tab_order: timeline.clone(), order: OrderMode::default(), now_hour: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
+                                m.apply_snapshot(AgentSnapshot { last_live: Default::default(), collapsed: false, seq: 1, agents, tab_order: timeline.clone(), order: OrderMode::default(), now_hour: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
 
                                 // Determinism: identical inputs → identical rows.
                                 prop_assert_eq!(m.rows(), m.rows());
@@ -10301,6 +10415,7 @@ mod tests {
                                 let mut m = BarModel::default();
                                 m.apply_tabs(vec![tab(0, 0, "a", true), tab(1, 1, "b", false)]);
                                 m.apply_snapshot(AgentSnapshot {
+                last_live: Default::default(),
                 order: OrderMode::default(),
                 now_hour: 0,
                 tab_buckets: Default::default(),
@@ -10313,6 +10428,7 @@ mod tests {
                                 let rows0 = m.rows();
                                 let timeline0 = m.tab_order.clone();
                                 m.apply_snapshot(AgentSnapshot {
+                last_live: Default::default(),
                 order: OrderMode::default(),
                 now_hour: 0,
                 tab_buckets: Default::default(),
@@ -10336,8 +10452,9 @@ mod tests {
                                 tl1 in prop::collection::btree_map(0usize..8, 0u64..500, 0..5),
                             ) {
                                 let mut m = BarModel::default();
-                                m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 1, agents: vec![], tab_order: tl0, order: OrderMode::default(), now_hour: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
+                                m.apply_snapshot(AgentSnapshot { last_live: Default::default(), collapsed: false, seq: 1, agents: vec![], tab_order: tl0, order: OrderMode::default(), now_hour: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
                                 m.apply_snapshot(AgentSnapshot {
+                last_live: Default::default(),
                 order: OrderMode::default(),
                 now_hour: 0,
                 tab_buckets: Default::default(),
@@ -10385,6 +10502,7 @@ mod tests {
                                 let timeline: std::collections::BTreeMap<usize, u64> =
                                     ids.iter().enumerate().map(|(i, &id)| (id, tl_vals[i])).collect();
                                 m.apply_snapshot(AgentSnapshot {
+                last_live: Default::default(),
                 order: OrderMode::default(),
                 now_hour: 0,
                 tab_buckets: Default::default(),
@@ -10492,6 +10610,7 @@ mod tests {
                                         .collect(),
                                 );
                                 m.apply_snapshot(AgentSnapshot {
+                last_live: Default::default(),
                 order: OrderMode::default(),
                 now_hour: 0,
                 tab_buckets: Default::default(),
@@ -10547,7 +10666,7 @@ mod tests {
                                         .collect();
                                     let mut tl = timeline.clone();
                                     tl.remove(&victim_id);
-                                    m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 2, agents, tab_order: tl, order: OrderMode::default(), now_hour: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
+                                    m.apply_snapshot(AgentSnapshot { last_live: Default::default(), collapsed: false, seq: 2, agents, tab_order: tl, order: OrderMode::default(), now_hour: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
                                 }
 
                                 let closed = RowKey::Dormant(format!("u{victim_id}"));
@@ -10624,6 +10743,7 @@ mod tests {
                                         Some(flag) => {
                                             seq += 1;
                                             m.apply_snapshot(AgentSnapshot {
+                last_live: Default::default(),
                 order: OrderMode::default(),
                 now_hour: 0,
                 tab_buckets: Default::default(),
@@ -10660,6 +10780,7 @@ mod tests {
                                         // carrying the OPPOSITE flag must change nothing —
                                         // not even the pending ledger.
                                         m.apply_snapshot(AgentSnapshot {
+                last_live: Default::default(),
                 order: OrderMode::default(),
                 now_hour: 0,
                 tab_buckets: Default::default(),
@@ -10712,6 +10833,7 @@ mod tests {
                                     agents.push(a);
                                 }
                                 m.apply_snapshot(AgentSnapshot {
+                last_live: Default::default(),
                 order: OrderMode::default(),
                 now_hour: 0,
                 tab_buckets: Default::default(),
@@ -10938,6 +11060,7 @@ mod tests {
                         self.seq += 1;
                         self.u1_holds = !self.u1_holds; // the eviction flip
                         self.m.apply_snapshot(AgentSnapshot {
+                            last_live: Default::default(),
                             order: OrderMode::default(),
                             now_hour: 0,
                             tab_buckets: Default::default(),
@@ -11031,5 +11154,165 @@ mod tests {
                 Ok(())
             }
         }
+    }
+    // --- the staggered restore (#261) ---------------------------------------
+
+    /// The launch builds ONE tab and the bar brings the rest back itself, one
+    /// at a time. Measured 2026-09-16: building a tab costs a burst of about
+    /// fifty file handles opened in the same instant, so four tabs peaked at
+    /// 252 against macOS's default ceiling of 256 and five crashed the zellij
+    /// server outright. One at a time keeps the burst at one tab's worth
+    /// however big the fleet is.
+    #[test]
+    fn the_restore_opens_the_next_row_that_is_not_back_yet() {
+        let mut m = focused_bar();
+        // u-a is the baked tab. u-b and u-c were live last session and hold no
+        // tab yet, so they are the queue, in the order the launch ranked them.
+        let fx = m.apply_snapshot(snap_live(
+            9,
+            vec![
+                agent("u-a", Status::Idle, Some(11)),
+                agent("u-b", Status::Idle, None),
+                agent("u-c", Status::Idle, None),
+            ],
+            &["u-a", "u-b", "u-c"],
+        ));
+        assert_eq!(
+            opens(&fx),
+            vec!["u-b".to_string()],
+            "the head of the queue that is not already back"
+        );
+        assert!(m.restore_pending(), "u-c is still owed");
+    }
+
+    /// One per tick, never the whole fleet — the entire point of the change.
+    /// A pass that returned every owed row would restore exactly as the layout
+    /// used to, one call later, and crash identically.
+    #[test]
+    fn the_restore_opens_one_row_per_tick_not_the_whole_queue() {
+        let mut m = focused_bar();
+        let fx = m.apply_snapshot(snap_live(
+            9,
+            vec![
+                agent("u-a", Status::Idle, Some(11)),
+                agent("u-b", Status::Idle, None),
+                agent("u-c", Status::Idle, None),
+                agent("u-d", Status::Idle, None),
+            ],
+            &["u-a", "u-b", "u-c", "u-d"],
+        ));
+        assert_eq!(opens(&fx), vec!["u-b".to_string()], "one row, not three");
+        // The next advance moves on rather than repeating itself, even though
+        // the store has not yet reported u-b as bound.
+        assert_eq!(
+            opens(&m.restore_effects()),
+            vec!["u-c".to_string()],
+            "the queue advances instead of re-sending the row in flight"
+        );
+    }
+
+    /// A row the human reached first is already back, so the queue skips it.
+    /// This is what makes "land on it and it comes alive" need no coordination
+    /// with the sequencer: the store is the shared fact, and a bound row is
+    /// simply not owed.
+    #[test]
+    fn a_row_the_human_opened_first_is_not_opened_again() {
+        let mut m = focused_bar();
+        let fx = m.apply_snapshot(snap_live(
+            9,
+            vec![
+                agent("u-a", Status::Idle, Some(11)),
+                agent("u-b", Status::Idle, Some(12)), // the human got here first
+                agent("u-c", Status::Idle, None),
+            ],
+            &["u-a", "u-b", "u-c"],
+        ));
+        assert_eq!(
+            opens(&fx),
+            vec!["u-c".to_string()],
+            "u-b holds a tab already; only u-c is owed"
+        );
+    }
+
+    /// A tab the human CLOSES during the restore must stay closed. Without the
+    /// latch the row loses its tab, rejoins the queue, and the bar reopens the
+    /// tab the human just shut — the worst failure available here, because it
+    /// overrides a deliberate act and repeats.
+    #[test]
+    fn the_restore_never_reopens_a_tab_the_human_closed() {
+        let mut m = focused_bar();
+        let fx = m.apply_snapshot(snap_live(
+            9,
+            vec![
+                agent("u-a", Status::Idle, Some(11)),
+                agent("u-b", Status::Idle, None),
+            ],
+            &["u-a", "u-b"],
+        ));
+        assert_eq!(opens(&fx), vec!["u-b".to_string()], "u-b is opened once");
+        // It comes back, and the human closes it again.
+        let _back = m.apply_snapshot(snap_live(
+            10,
+            vec![
+                agent("u-a", Status::Idle, Some(11)),
+                agent("u-b", Status::Idle, Some(12)),
+            ],
+            &["u-a", "u-b"],
+        ));
+        let reopened = m.apply_snapshot(snap_live(
+            11,
+            vec![
+                agent("u-a", Status::Idle, Some(11)),
+                agent("u-b", Status::Idle, None),
+            ],
+            &["u-a", "u-b"],
+        ));
+        assert!(
+            opens(&reopened).is_empty(),
+            "the restore owes each row exactly one open, for the life of the session"
+        );
+        assert!(!m.restore_pending());
+    }
+
+    /// Only the bar on the tab being looked at drives the sequence. Every
+    /// instance reads the same store and would otherwise reach the same
+    /// conclusion at the same moment, so N bars would open the same row N
+    /// times. Same election as the other dangerous-in-duplicate arms.
+    #[test]
+    fn a_background_bar_never_drives_the_restore() {
+        let mut m = background_bar();
+        let fx = m.apply_snapshot(snap_live(
+            9,
+            vec![
+                agent("u-a", Status::Idle, Some(11)),
+                agent("u-b", Status::Idle, None),
+            ],
+            &["u-a", "u-b"],
+        ));
+        assert!(
+            opens(&fx).is_empty(),
+            "a bar nobody is looking at leaves the sequencing to the one that is"
+        );
+    }
+
+    /// A row named in the set but gone from the store — idle-pruned between
+    /// sessions — is not a row to open. `last_live` is a faithful record, so
+    /// it can outlive its rows.
+    #[test]
+    fn the_restore_skips_a_row_that_no_longer_exists() {
+        let mut m = focused_bar();
+        let fx = m.apply_snapshot(snap_live(
+            9,
+            vec![
+                agent("u-a", Status::Idle, Some(11)),
+                agent("u-c", Status::Idle, None),
+            ],
+            &["u-a", "u-gone", "u-c"],
+        ));
+        assert_eq!(
+            opens(&fx),
+            vec!["u-c".to_string()],
+            "the vanished row is stepped over, not waited for"
+        );
     }
 }

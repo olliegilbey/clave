@@ -1265,13 +1265,31 @@ pub fn restore_rows(store: &crate::store::Store, now_hour: u32) -> Vec<&crate::s
 /// testing. It lives here, beside `restore_rows` and `eager_row`, because
 /// `launch_session` is excluded from `just mutants` on the stated grounds that
 /// the pieces it orchestrates are each tested directly.
+/// Splits the restored set three ways: the ONE row the launch bakes, the rows
+/// the sidebar opens afterwards, and the rows that cannot be restored at all.
+///
+/// The one-row limit is a resource bound, measured 2026-09-16. Building a tab
+/// costs a burst of roughly fifty file handles, opened in the same instant and
+/// drained a second later; four tabs peaked at 252 against macOS's default
+/// ceiling of 256, and five crashed the zellij server with "Too many open
+/// files" (twice, reproduced). Baking the whole fleet therefore fails on
+/// exactly the fleets the restore exists to serve, and a crashed launch loses
+/// tabs permanently. Sequencing keeps the burst at one tab's worth whatever
+/// the size of the fleet.
+///
+/// DEFERRED IS NOT DROPPED. A deferred row comes back; it just comes back a
+/// few seconds later. A dropped row does not come back at all, and says why.
 fn bakeable_rows<'a>(
     restored: Vec<&'a crate::store::AgentRecord>,
     eager: Option<&'a crate::store::AgentRecord>,
     mut check: impl FnMut(&str) -> anyhow::Result<()>,
-) -> anyhow::Result<(Vec<&'a crate::store::AgentRecord>, Vec<String>)> {
+) -> anyhow::Result<(
+    Vec<&'a crate::store::AgentRecord>,
+    Vec<&'a crate::store::AgentRecord>,
+    Vec<String>,
+)> {
     let mut dropped = Vec::new();
-    let kept: Vec<&crate::store::AgentRecord> = restored
+    let mut kept: Vec<&crate::store::AgentRecord> = restored
         .into_iter()
         .filter(|r| match check(&r.cwd) {
             Ok(()) => true,
@@ -1282,13 +1300,19 @@ fn bakeable_rows<'a>(
         })
         .collect();
     if !kept.is_empty() {
-        return Ok((kept, dropped));
+        // `split_off(1)` rather than a truncate-and-clone: the head keeps its
+        // place and the tail keeps the restore ranking, which is the order the
+        // sidebar walks down.
+        let deferred = kept.split_off(1);
+        return Ok((kept, deferred, dropped));
     }
+    // Nothing restorable. The eager row is the cold-start path and is already
+    // one row, so there is nothing to defer behind it.
     let eager: Vec<&crate::store::AgentRecord> = eager.into_iter().collect();
     for r in &eager {
         check(&r.cwd)?;
     }
-    Ok((eager, dropped))
+    Ok((eager, Vec::new(), dropped))
 }
 
 /// First-run consent (spec §First run): the plan prints ALWAYS; the prompt
@@ -1443,13 +1467,29 @@ pub fn launch_session() -> Result<()> {
     // Harmless when live (attach ignores --layout for an existing session).
     let store = crate::store::read_store(&crate::store::store_paths()?)?;
     let now_hour = crate::store::unix_hour(crate::store::now_unix());
-    let (rows, dropped) = bakeable_rows(
+    let (rows, deferred, dropped) = bakeable_rows(
         restore_rows(&store, now_hour),
         eager_row(&store),
         crate::add::validate_cwd,
     )?;
     for line in dropped {
         crate::evlog::log_event("launch", &line);
+    }
+    // Recorded so a restore that never finishes is diagnosable from the log
+    // alone: the launch states what it handed to the sidebar, and the sidebar
+    // logs each row as it opens it.
+    if !deferred.is_empty() {
+        crate::evlog::log_event(
+            "launch",
+            &format!(
+                "deferred to the bar: {}",
+                deferred
+                    .iter()
+                    .map(|r| r.uuid.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        );
     }
     let wasm = wasm_path()?;
     // Bake the environment's clave into the eager tab's spawn: the versioned
@@ -2139,6 +2179,40 @@ mod tests {
         }
     }
 
+    /// The launch builds ONE tab, however big the restored fleet is.
+    ///
+    /// Measured 2026-09-16: zellij opens a burst of about fifty file handles
+    /// per tab while it builds a session, all in the same instant, and drains
+    /// them a second later. Four tabs peaked at 252 handles against macOS's
+    /// default ceiling of 256; five crashed the server outright with "Too many
+    /// open files", twice, and a crashed launch loses tabs for good. A fleet
+    /// of any real size could never start.
+    ///
+    /// So the launch bakes the row the human lands on anyway, and the rest are
+    /// DEFERRED — the sidebar opens them one at a time, seconds apart, which
+    /// keeps the burst to a single tab's worth however many are coming back.
+    /// Deferring is not dropping: every deferred row is still restored.
+    #[test]
+    fn the_launch_bakes_one_tab_and_defers_the_rest_to_the_sidebar() {
+        let a = bare_record("u-a", "/good/a");
+        let b = bare_record("u-b", "/good/b");
+        let c = bare_record("u-c", "/good/c");
+        let eager = bare_record("u-eager", "/good/e");
+        let (baked, deferred, dropped) =
+            bakeable_rows(vec![&a, &b, &c], Some(&eager), |_| Ok(())).expect("all good");
+        assert_eq!(
+            baked.iter().map(|r| r.uuid.as_str()).collect::<Vec<_>>(),
+            vec!["u-a"],
+            "the head of the restore ranking is the tab the human lands on"
+        );
+        assert_eq!(
+            deferred.iter().map(|r| r.uuid.as_str()).collect::<Vec<_>>(),
+            vec!["u-b", "u-c"],
+            "the rest are the sidebar's queue, in the same order"
+        );
+        assert!(dropped.is_empty());
+    }
+
     /// Across a restored set, one unbakeable row must not take the rest down.
     #[test]
     fn a_bad_cwd_in_a_restored_set_drops_that_row_and_keeps_the_others() {
@@ -2146,7 +2220,7 @@ mod tests {
         let b = bare_record("u-b", "/bad");
         let c = bare_record("u-c", "/good/c");
         let eager = bare_record("u-eager", "/good/e");
-        let (rows, dropped) = bakeable_rows(vec![&a, &b, &c], Some(&eager), |cwd| {
+        let (rows, deferred, dropped) = bakeable_rows(vec![&a, &b, &c], Some(&eager), |cwd| {
             if cwd == "/bad" {
                 anyhow::bail!("bad cwd")
             } else {
@@ -2154,9 +2228,16 @@ mod tests {
             }
         })
         .expect("one bad row is not fatal across a set");
+        // The survivors keep their order across the split: u-a is baked, u-c
+        // is still restored, just by the sidebar a few seconds later.
         assert_eq!(
             rows.iter().map(|r| r.uuid.as_str()).collect::<Vec<_>>(),
-            vec!["u-a", "u-c"]
+            vec!["u-a"]
+        );
+        assert_eq!(
+            deferred.iter().map(|r| r.uuid.as_str()).collect::<Vec<_>>(),
+            vec!["u-c"],
+            "the good row behind the bad one is deferred, NOT lost with it"
         );
         assert_eq!(dropped.len(), 1, "the drop is reported, not silent");
         assert!(dropped[0].contains("u-b"));
@@ -2169,7 +2250,7 @@ mod tests {
     fn a_restored_set_that_is_entirely_unbakeable_falls_back_to_the_eager_row() {
         let a = bare_record("u-a", "/bad");
         let eager = bare_record("u-eager", "/good");
-        let (rows, dropped) = bakeable_rows(vec![&a], Some(&eager), |cwd| {
+        let (rows, _deferred, dropped) = bakeable_rows(vec![&a], Some(&eager), |cwd| {
             if cwd == "/bad" {
                 anyhow::bail!("bad cwd")
             } else {
@@ -2199,8 +2280,9 @@ mod tests {
     /// A first run: nothing restored, nothing to be eager about, no error.
     #[test]
     fn nothing_to_bake_is_not_an_error() {
-        let (rows, dropped) = bakeable_rows(vec![], None, |_| Ok(())).expect("empty is ordinary");
-        assert!(rows.is_empty() && dropped.is_empty());
+        let (rows, deferred, dropped) =
+            bakeable_rows(vec![], None, |_| Ok(())).expect("empty is ordinary");
+        assert!(rows.is_empty() && deferred.is_empty() && dropped.is_empty());
     }
 
     /// The read side of the live-set snapshot: `last_live` is a faithful

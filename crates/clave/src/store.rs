@@ -502,6 +502,7 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
     AgentSnapshot {
         seq: store.seq,
         tab_order: store.tab_order.clone(),
+        last_live: store.last_live.clone(),
         collapsed: store.collapsed,
         tab_buckets: store.tab_buckets.clone(),
         order: store.order,

@@ -545,6 +545,17 @@ pub struct AgentSnapshot {
     /// can never leak into the ordinal space and outrank every real ordinal.
     #[serde(default)]
     pub tab_order: std::collections::BTreeMap<usize, u64>,
+    /// The set the PREVIOUS session was holding, in the order the launch
+    /// ranked it. The launch bakes only the head of this list as a tab; the
+    /// bar opens the rest itself, one at a time.
+    ///
+    /// It rides the snapshot rather than being passed at load, because a bar
+    /// born in a tab the RESTORE created must reach the same conclusion as the
+    /// bar in the baked tab, and the store is the only thing both can read.
+    /// Rows that hold a tab are already back, so the queue is what remains.
+    /// `default` keeps pre-field payloads parseable (§5).
+    #[serde(default)]
+    pub last_live: Vec<String>,
     /// Bar collapse mode (issue #5, C8 parity-desync family): per-instance
     /// memory synced only by the `clave-toggle` broadcast desynced live — a
     /// tab born after a toggle, a plugin reload, or one missed pipe flips an
@@ -1108,6 +1119,7 @@ mod tests {
     #[test]
     fn snapshot_roundtrips() {
         let snap = AgentSnapshot {
+            last_live: Default::default(),
             seq: 7,
             tab_order: Default::default(),
             collapsed: false,
@@ -1341,6 +1353,7 @@ mod tests {
         // full-state replace, the one channel that never diverged (C5 rd 5:
         // fire-and-forget pipe deltas diverged per instance).
         let snap = AgentSnapshot {
+            last_live: Default::default(),
             seq: 1,
             agents: vec![],
             tab_order: std::collections::BTreeMap::from([(4usize, 12u64)]),
@@ -1420,6 +1433,7 @@ mod tests {
         // payload without the field must parse as expanded (false) — the
         // born-expanded default — for old-CLI/new-plugin interop.
         let snap = AgentSnapshot {
+            last_live: Default::default(),
             seq: 2,
             agents: vec![],
             tab_order: Default::default(),
