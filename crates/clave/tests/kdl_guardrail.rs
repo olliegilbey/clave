@@ -236,12 +236,12 @@ fn config_kdl_parses_through_real_zellij_parser() {
     );
 }
 
-/// The theme passthrough (#145): `write_generated` appends the user's
-/// `theme`/`themes`/`theme_dir` nodes to config.kdl, and an appended slice
-/// that zellij's parser refuses would kill SESSION LAUNCH — exactly the
-/// failure class this suite exists to catch. So the concatenated artifact
-/// goes through the real parser, and the selection/definitions must come out
-/// the other side as config values, not merely parse.
+/// The config passthrough (#145): `write_generated` appends the user's
+/// carved-out nodes to config.kdl, and an appended slice that zellij's parser
+/// refuses would kill SESSION LAUNCH — exactly the failure class this suite
+/// exists to catch. So the concatenated artifact goes through the real
+/// parser, and the selection/definitions must come out the other side as
+/// config values, not merely parse.
 #[test]
 fn config_with_theme_slice_parses_and_carries_the_selection() {
     // A realistic user config: built-in selection, an inline definition in
@@ -264,7 +264,7 @@ fn config_with_theme_slice_parses_and_carries_the_selection() {
     let cfg = format!(
         "{}{}",
         setup::config_kdl("clave", WASM, clave_types::RowHeight::Double),
-        setup::theme_slice_from(user)
+        setup::passthrough_slice_from(user)
     );
     let parsed = match Config::from_kdl(&cfg, None) {
         Ok(c) => c,
@@ -283,6 +283,37 @@ fn config_with_theme_slice_parses_and_carries_the_selection() {
         parsed.options.theme_dir.as_deref(),
         Some(std::path::Path::new("/tmp/does-not-need-to-exist")),
         "theme_dir must survive the round-trip:\n{cfg}"
+    );
+}
+
+/// The frame half of the passthrough (#262), and the one claim in it that is
+/// a VERSION claim rather than a parse claim.
+///
+/// `pane_frame_style` does not exist in zellij 0.44.3 — it arrived in 0.45.0.
+/// The slice copies it anyway, because the user's config is shared across a
+/// fleet where some machines run each. That is only safe if the pinned 0.44.3
+/// parser treats the unknown node as inert rather than as an error, and an
+/// error here is a DEAD SESSION on every 0.44.x machine, not a cosmetic miss.
+/// Asserted, never assumed. When the zellij pin moves to 0.45.x this test
+/// keeps its meaning and gains one: `pane_frame_style` becomes readable from
+/// `parsed.options` and the assertion can tighten from "inert" to "carried".
+#[test]
+fn config_with_the_frame_slice_parses_and_carries_pane_frames() {
+    let user = "pane_frames true\n\
+                pane_frame_style \"full\"\n";
+    let cfg = format!(
+        "{}{}",
+        setup::config_kdl("clave", WASM, clave_types::RowHeight::Double),
+        setup::passthrough_slice_from(user)
+    );
+    let parsed = match Config::from_kdl(&cfg, None) {
+        Ok(c) => c,
+        Err(e) => panic!("config.kdl + frame slice failed zellij's parser: {e:?}\n---\n{cfg}"),
+    };
+    assert_eq!(
+        parsed.options.pane_frames,
+        Some(true),
+        "the user's pane_frames must survive the round-trip:\n{cfg}"
     );
 }
 

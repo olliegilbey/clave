@@ -25,10 +25,10 @@ stable, `$(clave dev instance --field data)` for your sandbox.
 **Refs:** #5, PR #13; `crates/clave/src/main.rs:156-161`, `:610`; TESTING.md escape record; FOOTGUNS.md "clap-derive turns a bare `bool`".
 
 ### K2 — `--config` discards the user's zellij config (#122) [FIELD, hidden months]
-**Seam:** zellij's config resolution — `Config::try_from` early-returns on `opts.config`, merging clave's file over BUILT-IN defaults and never reading `~/.config/zellij/config.kdl`; the user's keybinds, `default_mode`, `pane_frames`, `ui` all vanish inside every clave session.
+**Seam:** zellij's config resolution — `Config::try_from` early-returns on `opts.config`, merging clave's file over BUILT-IN defaults and never reading `~/.config/zellij/config.kdl`; the user's keybinds, `default_mode` and `ui` all vanish inside every clave session. `pane_frames`/`pane_frame_style` no longer do — #262 added them to the named passthrough list alongside the theme nodes (#145) — so the frame is the wrong probe for this seam now; use a keybind.
 **Preconditions:** a user with any non-default zellij config; any clave session. A terminal-level colourscheme masks the theme loss, which is why this hid for months and cost #110 pt2 a misdiagnosis ("user error").
 **Reproduce:**
-1. Note a distinctive setting in `~/.config/zellij/config.kdl` (e.g. a custom bind, `pane_frames false`).
+1. Note a distinctive setting in `~/.config/zellij/config.kdl` — a custom bind or `default_mode`. NOT `pane_frames`: since #262 it passes through, so it would show this seam as fixed when it is not.
 2. Launch any clave session (human); exercise the setting.
 **Healthy (target state, NOT current):** the setting survives — clave's overlay rides as root nodes of the layout file and the user config loads normally.
 **Broken (CURRENT SHIPPED STATE):** the setting is inert; the session behaves like stock zellij plus clave's binds. `launch_session` still passes `--config` (setup.rs:857) — the layout-channel ruling (C1, 2026-08-01) is verified but #114 is OPEN and unimplemented, and the "7/7 hostile-config asserts" were a deleted scratch probe: the guardrail assertion is owed, not present. The inventory's "Guard today" column overstates this one.
