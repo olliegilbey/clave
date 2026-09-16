@@ -2388,10 +2388,22 @@ phase "P6c-relaunch"
 # Closing HERE removes the gap. Nothing runs between this close and the quit
 # except the wait for the maintainer, so nothing can wake the row, and the
 # check no longer depends on what any earlier phase chose to do.
+#
+# WHICH tab is closed matters as much as that one is. Prefer a row whose agent
+# never STARTED — a tab and no pane. A row whose agent really ran is the only
+# population the #261 `SessionEnd` unbind could reach, and the 2026-09-15
+# verification read green precisely because it held none of them. Closing the
+# one such row would hand the rest of this phase the easy case and hide the
+# defect it exists to catch. Measured on run 14 (2026-09-16): the naive "lowest
+# bound tab id" took the minted row, and the five rows left to restore had all
+# sat at claude's trust prompt. Falls back to any bound row, so a fleet where
+# every agent ran still gets the closed-tab half.
 P6C_CLOSE_STATUS="$(dev_status)"
 P6C_CLOSE_TAB="$(jq -r '
-  [.store.agents[] | .tab_id | select(. != null)] | sort | .[0] // empty' \
-  <<<"$P6C_CLOSE_STATUS" 2>/dev/null)"
+  [.store.agents[] | select(.tab_id != null)] as $bound
+  | (([$bound[] | select(.pane_id == null) | .tab_id] | sort)
+     + ([$bound[] | .tab_id] | sort))
+  | .[0] // empty' <<<"$P6C_CLOSE_STATUS" 2>/dev/null)"
 P6C_CLOSED=""
 if [[ -n "$P6C_CLOSE_TAB" ]]; then
   P6C_CLOSED="$(jq -r --argjson t "$P6C_CLOSE_TAB" \
@@ -2399,8 +2411,13 @@ if [[ -n "$P6C_CLOSE_TAB" ]]; then
     <<<"$P6C_CLOSE_STATUS" 2>/dev/null | head -n1)"
 fi
 if [[ -n "$P6C_CLOSED" ]]; then
+  # The pane state is recorded, not asserted: a fleet where every agent ran
+  # leaves no never-started row to prefer, and the phase is still worth
+  # driving — but the reader has to be able to see which case this run got.
   measure "the tab this phase closes, so the restore has one to refuse" \
-    "tab=${P6C_CLOSE_TAB} uuid=${P6C_CLOSED:0:13}"
+    "tab=${P6C_CLOSE_TAB} uuid=${P6C_CLOSED:0:13} agent=$(jq -r --arg u "$P6C_CLOSED" \
+      'if .store.agents[$u].pane_id == null then "never started" else "was running" end' \
+      <<<"$P6C_CLOSE_STATUS" 2>/dev/null)"
   focus_tab_checked "$P6C_CLOSE_TAB" "the tab to close:"
   "$CT" close-tab
   P6C_CLOSE_RC=$?
