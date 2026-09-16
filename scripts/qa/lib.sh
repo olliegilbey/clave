@@ -241,6 +241,28 @@ held_bound_uuids() {
          | select(.value.tab_id != null and .value.pane_id == null) | .key' <<<"$1" 2>/dev/null | sort
 }
 
+# Which tab phase 6c should close on its way to the quit, so the restore has
+# one it must refuse. Empty when no row is bound.
+#
+# Prefers a row whose agent NEVER STARTED — a tab and no pane. A row whose
+# agent really ran is the only population the #261 `SessionEnd` unbind could
+# reach, and the 2026-09-15 verification read green over a broken restore
+# precisely because it held none of them. Closing the one such row would hand
+# the rest of the phase the easy case. Measured on run 14 (2026-09-16): the
+# naive "lowest bound tab id" took the minted row, and every row left to
+# restore had sat at claude's trust prompt.
+#
+# Falls back to any bound row, so a fleet where every agent ran still gets the
+# closed-tab half. The phase records which case it got, because the fallback
+# cannot be asserted away.
+close_candidate_tab() {
+  jq -r '
+    [.store.agents[] | select(.tab_id != null)] as $bound
+    | (([$bound[] | select(.pane_id == null) | .tab_id] | sort)
+       + ([$bound[] | .tab_id] | sort))
+    | .[0] // empty' <<<"$1" 2>/dev/null
+}
+
 # What the PREVIOUS session left. Written at launch, from the binds standing
 # when the session died (setup.rs `clear_session_order`), which is also the
 # pass that clears them — so this is the only surviving record of the fleet,

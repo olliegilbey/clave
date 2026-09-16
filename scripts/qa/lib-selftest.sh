@@ -287,5 +287,27 @@ want "and the verdict names the closed row" \
 (relaunch_checks "" "$(relaunch_status '[]' '[]')" "" >/dev/null 2>&1)
 want "two empty sets are refused, not passed" "$?" "1"
 
+# Which tab phase 6c closes. The preference is the whole point: closing the
+# one row whose agent RAN leaves the phase measuring the population the #261
+# defect cannot reach (run 14, 2026-09-16). Tab ids are deliberately out of
+# uuid order, so a pick that returned the first row it saw would pass by luck.
+CLOSE_PICK='{"store":{"agents":{
+  "u-ran":{"tab_id":1,"pane_id":7},
+  "u-held-a":{"tab_id":4,"pane_id":null},
+  "u-held-b":{"tab_id":2,"pane_id":null},
+  "u-dormant":{"tab_id":null,"pane_id":null}}}}'
+want "the closed tab is one whose agent never started" \
+  "$(close_candidate_tab "$CLOSE_PICK")" "2"
+# A fleet where every agent ran still gets the closed-tab half.
+want "and falls back to a running row when there is no other" \
+  "$(close_candidate_tab '{"store":{"agents":{
+     "u-a":{"tab_id":5,"pane_id":3},
+     "u-b":{"tab_id":3,"pane_id":9}}}}')" "3"
+# Nothing bound: the phase notes the half is vacuous rather than closing a
+# tab it did not choose.
+want "and picks nothing when no row is bound" \
+  "$(close_candidate_tab '{"store":{"agents":{
+     "u-a":{"tab_id":null,"pane_id":null}}}}')" ""
+
 printf '\n%s\n' "== qa/lib selftest: $FAILURES failure(s) =="
 [[ "$FAILURES" -eq 0 ]]

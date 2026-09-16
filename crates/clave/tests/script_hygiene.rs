@@ -410,6 +410,7 @@ fn the_relaunch_phase_reads_the_set_through_the_tested_readers() {
         "bound_uuids",
         "last_live_uuids",
         "held_bound_uuids",
+        "close_candidate_tab",
         "relaunch_checks",
     ] {
         assert!(

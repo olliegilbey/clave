@@ -2389,21 +2389,10 @@ phase "P6c-relaunch"
 # except the wait for the maintainer, so nothing can wake the row, and the
 # check no longer depends on what any earlier phase chose to do.
 #
-# WHICH tab is closed matters as much as that one is. Prefer a row whose agent
-# never STARTED — a tab and no pane. A row whose agent really ran is the only
-# population the #261 `SessionEnd` unbind could reach, and the 2026-09-15
-# verification read green precisely because it held none of them. Closing the
-# one such row would hand the rest of this phase the easy case and hide the
-# defect it exists to catch. Measured on run 14 (2026-09-16): the naive "lowest
-# bound tab id" took the minted row, and the five rows left to restore had all
-# sat at claude's trust prompt. Falls back to any bound row, so a fleet where
-# every agent ran still gets the closed-tab half.
+# WHICH tab is closed matters as much as that one is, and the rule lives in
+# `close_candidate_tab` (qa/lib.sh) where the selftest reaches it.
 P6C_CLOSE_STATUS="$(dev_status)"
-P6C_CLOSE_TAB="$(jq -r '
-  [.store.agents[] | select(.tab_id != null)] as $bound
-  | (([$bound[] | select(.pane_id == null) | .tab_id] | sort)
-     + ([$bound[] | .tab_id] | sort))
-  | .[0] // empty' <<<"$P6C_CLOSE_STATUS" 2>/dev/null)"
+P6C_CLOSE_TAB="$(close_candidate_tab "$P6C_CLOSE_STATUS")"
 P6C_CLOSED=""
 if [[ -n "$P6C_CLOSE_TAB" ]]; then
   P6C_CLOSED="$(jq -r --argjson t "$P6C_CLOSE_TAB" \
