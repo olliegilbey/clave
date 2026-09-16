@@ -274,6 +274,17 @@ close_candidate_tab() {
 # when the session died (setup.rs `clear_session_order`), which is also the
 # pass that clears them — so this is the only surviving record of the fleet,
 # and the expectation the rebound set is measured against.
+# Restored rows that still carry a status from the session BEFORE. Read over
+# the HELD signature only (a tab, no pane): those rows have run nothing in this
+# session, so any status on them is a claim about a process that is gone. The
+# eager row is excluded by construction — its agent really did start — so this
+# can never go red on legitimate state. (#261)
+stale_status_uuids() {
+  jq -r '.store.agents | to_entries[]
+         | select(.value.tab_id != null and .value.pane_id == null
+                  and .value.status != "idle") | .key' <<<"$1" 2>/dev/null | sort
+}
+
 last_live_uuids() {
   jq -r '.store.last_live[]?' <<<"$1" 2>/dev/null | sort
 }
@@ -337,6 +348,16 @@ relaunch_checks() {
   # the set.
   check_min "restored rows were bound before their agent ran (tab, no pane)" \
     "$n_held" "$((n_before - 1))"
+
+  # A status is scoped to a zellij session, so a restored row must carry none
+  # (#261). The branch's `Exited` made the cost visible: a tab about to start
+  # its agent came back wearing the hollow "nothing here" mark, beside rows in
+  # exactly the same state drawn as live. `Working` had the same shape before
+  # it, spinning over a turn that stopped at the quit.
+  local stale
+  stale="$(stale_status_uuids "$status")"
+  check "restored rows carry no status from the session before" \
+    "$(uuid_line "$stale")" ""
 
   # A closed tab stays closed. Not covered by the three above: a row still
   # bound when its tab went (a prune that did not happen, phase 3's family)

@@ -246,14 +246,20 @@ relaunch_status() {
   # $1: the uuids bound after the relaunch, as a jq array
   # $2: the uuids the launch recorded to restore, as a jq array
   # $3: "all-running" gives EVERY row a pane, for the case where the bar did
-  #     not restore the fleet but started all of it.
+  #     not restore the fleet but started all of it. "stale-status" leaves the
+  #     restored rows wearing the status the session before wrote.
   # Bound rows carry a tab and no pane — the held signature — except the
-  # eager row, which spawns at launch and takes a pane straight away.
+  # eager row, which spawns at launch and takes a pane straight away. Every
+  # row carries a `status`, because a real store always writes one: a fixture
+  # that omitted it would make the stale-status check fire on every case and
+  # so prove nothing.
   jq -nc --argjson bound "$1" --argjson recorded "$2" --arg mode "${3:-}" '
     { store:
       { seq: 12, last_live: $recorded,
         agents: ( [ $bound[] | { key: ., value:
                       { uuid: ., tab_id: 1,
+                        status: (if $mode == "stale-status" and . != "u-eager"
+                                 then "working" else "idle" end),
                         pane_id: (if $mode == "all-running" or . == "u-eager"
                                   then 5 else null end) } } ]
                   | from_entries ) } }'
@@ -297,6 +303,19 @@ ALL_RUNNING="$(relaunch_checks "$RESTORED_BEFORE" \
 want "a fleet that came back already running fails" "$?" "1"
 want "and the verdict names the held floor" \
   "$(grep -c 'restored rows were bound before their agent ran' <<<"$ALL_RUNNING")" "1"
+
+# A restored row wearing the status of the session before. Every other check
+# passes — the fleet came back whole and held — but the bar draws those rows
+# from a claim about processes that are gone: spinning over a turn that
+# stopped at the quit, or hollow on a tab that is about to start. (#261, seen
+# on QA run 18.)
+STALE_STATUS="$(relaunch_checks "$RESTORED_BEFORE" \
+  "$(relaunch_status '["u-eager","u-held-a","u-held-b"]' \
+     '["u-eager","u-held-a","u-held-b"]' stale-status)" "u-closed" 2>&1)"
+want "a fleet that came back wearing the last session's status fails" "$?" "1"
+want "and the verdict names the rows" \
+  "$(grep -c 'carry no status from the session before: measured=u-held-a u-held-b' \
+     <<<"$STALE_STATUS")" "1"
 
 # Both sides empty compare EQUAL. A dead `dev status` must not read as a
 # perfect restore.
