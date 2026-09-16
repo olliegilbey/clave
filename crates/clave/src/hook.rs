@@ -73,7 +73,11 @@ pub fn status_for_event(event: &str, message: Option<&str>, current: Status) -> 
         "UserPromptSubmit" => Some(Status::Working),
         "Stop" => Some(Status::Done),
         "StopFailure" => Some(Status::Failed),
-        "SessionEnd" => Some(Status::Idle),
+        // Not `Idle` (#261): the row keeps its tab now, so "the agent is
+        // gone" and "the agent is alive with nothing to say" would otherwise
+        // render the same. `Exited` is what makes the dead tab visible and
+        // what lets the bar offer a restart on it.
+        "SessionEnd" => Some(Status::Exited),
         "PermissionRequest" => Some(Status::NeedsYou),
         "Notification" => {
             // §4: match the notification MESSAGE TEXT. Substrings chosen from
@@ -2311,7 +2315,7 @@ mod tests {
             ("StopFailure", &p, Status::Failed),
             ("PermissionRequest", &p, Status::NeedsYou),
             ("Notification", &perm, Status::NeedsYou),
-            ("SessionEnd", &p, Status::Idle),
+            ("SessionEnd", &p, Status::Exited),
         ] {
             apply_hook_event(&mut s, "u1", event, payload, None, 9999, true);
             assert_eq!(
@@ -2530,7 +2534,7 @@ mod tests {
         );
         assert_eq!(
             status_for_event("SessionEnd", None, Status::Done),
-            Some(Status::Idle)
+            Some(Status::Exited)
         );
         assert_eq!(
             status_for_event("PermissionRequest", None, Status::Working),
@@ -3830,6 +3834,26 @@ mod tests {
         assert_eq!(s.seq, before + 1);
         // Idempotent: a second SessionEnd finds nothing to clear.
         assert!(!apply_hook_pane(&mut s, "u1", "SessionEnd", Some(7)));
+    }
+
+    /// An agent that exits must be DISTINGUISHABLE from one that is merely
+    /// idle (#261). Both hold a tab and neither is running, so mapping the
+    /// exit onto `Idle` made the two states one: the bar drew the same dim
+    /// dot for "waiting on you" and for "gone, start it again". Swarm review,
+    /// 2026-09-16, rated that the branch's own cost.
+    #[test]
+    fn a_session_that_ends_leaves_a_state_of_its_own_not_plain_idle() {
+        assert_eq!(
+            status_for_event("SessionEnd", None, Status::Working),
+            Some(Status::Exited),
+            "the agent exited; it is not idle, and the row must say so"
+        );
+        // And an agent that comes back overwrites it with no carve-out.
+        assert_eq!(
+            status_for_event("UserPromptSubmit", None, Status::Exited),
+            Some(Status::Working),
+            "a restarted agent leaves the exited state on its own"
+        );
     }
 
     /// #226 live adoption, mint half: a session clave has never seen, speaking

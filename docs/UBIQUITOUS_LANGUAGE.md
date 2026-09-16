@@ -95,7 +95,8 @@ column target, was deleted at #181; the term survives only in the ledger.)
 
 - **live row** — an agent session with a zellij tab open. The tab is what makes
   it live, not the process: a **restored** row is live before its agent runs.
-- **dormant row** — an agent session with no tab open.
+- **dormant row** — an agent session with nothing running to return to. Usually
+  no tab open; also an **exited** row, whose tab outlived its agent.
 - **terminal tab** — a zellij tab with no agent session bound to it.
 
 **Held tab** — a tab whose baked `clave spawn` has not run yet. zellij creates
@@ -207,9 +208,10 @@ These three are constantly confused. They are not interchangeable.
 | **live set** | The rows that held a tab when the previous session died; what a relaunch brings back. See §3.1. |
 | **unread** | Finished while you were not looking — `done && !visited`. |
 | **stale** | `clave open` found the row's cwd missing. A row flag, **not** a status. |
+| **exited row** | An agent session that ENDED while its tab stayed open. It holds a tab and runs nothing, so it counts in the live set (the tab comes back) but reads DORMANT in the bar (there is nothing to return to). `Status::Exited`, written by the `SessionEnd` hook. Do not say "idle" about it: idle means alive with nothing to say. |
 
-`Status` — the enum — has exactly five variants and they are spelled this way:
-**Idle, Working, NeedsYou, Done, Failed**.
+`Status` — the enum — has exactly six variants and they are spelled this way:
+**Idle, Working, NeedsYou, Done, Failed, Exited**.
 
 ---
 

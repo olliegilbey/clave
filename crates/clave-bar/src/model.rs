@@ -1710,7 +1710,17 @@ impl BarModel {
     /// divergence only flickers a dormant row briefly (harmless) — but it
     /// suppresses the duplicate row in the pre-bind beat after a tab spawns.
     fn is_dormant(&self, a: &Agent) -> bool {
-        let tab_live = self.store_tab_live(a);
+        // `tab_id` says where the row LIVES, not that something runs there
+        // (#261). An exited agent keeps its tab so the next launch restores
+        // it, so the bind alone can no longer stand for liveness — without
+        // this the row draws a live agent's dot over a tab holding nothing,
+        // and the commit path refuses the restart.
+        //
+        // Only the TAB leg is suppressed. The two legs below still answer for
+        // themselves, which matters for a restored tab whose agent had exited
+        // before the quit: its baked spawn is waiting to run, `spawn_live`
+        // holds it live, and it must not also appear as a dormant row.
+        let tab_live = self.store_tab_live(a) && a.status != Status::Exited;
         let pane_live = self
             .uuid_to_pane
             .get(&a.uuid)
@@ -2487,6 +2497,12 @@ impl BarModel {
                 Status::NeedsYou => RowStatus::NeedsYou,
                 Status::Done => RowStatus::Done,
                 Status::Failed => RowStatus::Failed,
+                // Unreachable in practice: an exited row holds no process, so
+                // `is_dormant` catches it in the tier above and it renders
+                // with the dormant affordance. Mapped here rather than merged
+                // into `Idle` so that if the two ever disagree, the row still
+                // reads "nothing is running" instead of "alive and idle".
+                Status::Exited => RowStatus::Dormant,
             }
         };
         let provenance = provenance_of(a);
@@ -8872,6 +8888,56 @@ mod tests {
             tab_order: Default::default(),
         });
         assert!(!keys(&m).contains(&RowKey::Dormant("u2".into())));
+    }
+
+    /// An agent that EXITED still holds its tab (#261), and that bind is what
+    /// brings the tab back on the next launch. It must not also make the row
+    /// read as alive: the tab is on screen and nothing runs in it.
+    ///
+    /// Before this, such a row was not dormant, so it drew the same dim dot as
+    /// a live idle agent AND the commit path refused it — the human could see
+    /// no difference and had no way back. Walking past the tab starts nothing
+    /// either, deliberately (`run_held_effect` guards on `!exited`, so a tab
+    /// you quit is not resurrected because you passed it). That leaves the
+    /// deliberate restart as the only way home, so it has to work.
+    #[test]
+    fn an_agent_that_exited_is_dormant_although_its_tab_is_still_open() {
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(7, 0, "agent-tab", true)]);
+        m.apply_snapshot(AgentSnapshot {
+            order: OrderMode::default(),
+            now_hour: 0,
+            tab_buckets: Default::default(),
+            tab_touched: Default::default(),
+            collapsed: false,
+            seq: 1,
+            // Bound to a tab that exists, no registered pane: the shape
+            // `apply_hook_pane`'s SessionEnd arm leaves behind.
+            agents: vec![agent("u1", Status::Exited, Some(7))],
+            tab_order: Default::default(),
+        });
+        assert!(
+            keys(&m).contains(&RowKey::Dormant("u1".into())),
+            "the tab is open and nothing runs in it, so the row is dormant"
+        );
+        // A live idle agent in the same tab is NOT dormant — the two states
+        // this test exists to keep apart.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(7, 0, "agent-tab", true)]);
+        m.apply_snapshot(AgentSnapshot {
+            order: OrderMode::default(),
+            now_hour: 0,
+            tab_buckets: Default::default(),
+            tab_touched: Default::default(),
+            collapsed: false,
+            seq: 1,
+            agents: vec![agent("u1", Status::Idle, Some(7))],
+            tab_order: Default::default(),
+        });
+        assert!(
+            !keys(&m).contains(&RowKey::Dormant("u1".into())),
+            "an idle agent is still running; only an exited one is dormant"
+        );
     }
 
     /// Two live tabs and three dormant rows, the dormant ones deliberately

@@ -144,6 +144,21 @@ pub enum Status {
     NeedsYou,
     Done,
     Failed,
+    /// The agent's session ended, but its TAB is still open (#261).
+    ///
+    /// A row in this state owns a tab and runs nothing. Before the restore
+    /// work it could not arise: `SessionEnd` unbound the row, so the row went
+    /// dormant and the tab became an ordinary terminal. Keeping the bind is
+    /// what makes the tab come back on the next launch, and it is also what
+    /// makes this state reachable — so the state has to be nameable, or it
+    /// renders as `Idle` and the human cannot tell a dead tab from a live
+    /// agent waiting on them.
+    ///
+    /// An older binary reading this store falls back to `Idle` by the lenient
+    /// default above, which is exactly the behaviour it had before. Any later
+    /// hook event overwrites it, so a restarted agent leaves the state on its
+    /// own.
+    Exited,
 }
 
 impl Status {
@@ -157,6 +172,11 @@ impl Status {
             Status::Done => ('●', 32),     // green: finished & unread
             Status::Idle => ('●', 90),     // dim: read / no session
             Status::Failed => ('✖', 31),   // red cross: turn failed
+            // Hollow, not filled: the fleet's existing shorthand for "a row
+            // with no process behind it". Dim like `Idle`, because an exited
+            // agent is not asking for anything — but hollow, because the
+            // difference the human must see is that nothing is running.
+            Status::Exited => ('○', 90),
         }
     }
 }

@@ -38,10 +38,13 @@ pub enum OpenDecision {
 /// function was written to prevent. `add::live_uuid_union` is the same
 /// translation for the picker.
 pub fn open_is_live(store: &crate::store::Store, row: &AgentRecord, dump_layout: &str) -> bool {
-    // `pane_id` counts too (#226): an adopted session is registered by its
-    // first hook and bound only when the owning bar's join lands — keying on
-    // the bind alone would read the row dead inside that window.
-    row.tab_id.is_some()
+    // An EXITED agent keeps its tab (#261) so the next launch restores it,
+    // but nothing runs there. Reading that bind as liveness turns both the
+    // dwell-open and the bar's restart into a jump onto an empty tab.
+    (row.tab_id.is_some() && row.status != clave_types::Status::Exited)
+        // `pane_id` counts too (#226): an adopted session is registered by its
+        // first hook and bound only when the owning bar's join lands — keying
+        // on the bind alone would read the row dead inside that window.
         || row.pane_id.is_some()
         || crate::add::resolved_scan_uuids(store, dump_layout).contains(&row.uuid)
 }
@@ -213,6 +216,32 @@ mod tests {
             wants: None,
             subagents: false,
         }
+    }
+
+    /// A row whose agent EXITED keeps its tab (#261), so the bind alone can
+    /// no longer answer "is this live". Read literally it says the row is
+    /// already live, and `clave open` becomes a jump to a tab with nothing in
+    /// it — which is also what the bar's restart runs, so the human would
+    /// press the key and watch nothing happen.
+    #[test]
+    fn a_row_whose_agent_exited_is_not_live_even_though_it_holds_a_tab() {
+        let mut s = crate::store::Store::default();
+        let mut gone = rec("u1");
+        gone.tab_id = Some(3); // the tab is still on screen…
+        gone.pane_id = None; // …and its claude is gone
+        gone.status = clave_types::Status::Exited;
+        s.agents.insert("u1".into(), gone.clone());
+        let live = open_is_live(&s, &gone, "layout { tab { pane } }");
+        assert!(
+            !live,
+            "nothing runs in that tab, so opening the row must resume it"
+        );
+        assert_eq!(open_decision(&gone, live, true), OpenDecision::Open);
+        // A row still bound with a live agent in it is untouched.
+        let mut alive = rec("u2");
+        alive.tab_id = Some(4);
+        s.agents.insert("u2".into(), alive.clone());
+        assert!(open_is_live(&s, &alive, "layout { tab { pane } }"));
     }
 
     #[test]

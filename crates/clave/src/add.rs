@@ -110,7 +110,11 @@ pub fn bound_live_uuids(store: &Store) -> Vec<String> {
     store
         .agents
         .values()
-        .filter(|r| r.tab_id.is_some())
+        // An EXITED agent keeps its tab (#261), and that bind is what restores
+        // the tab on the next launch — it is not a running session. Offering
+        // it as live would make the pick a jump onto an empty tab, with no way
+        // back to the conversation from here.
+        .filter(|r| r.tab_id.is_some() && r.status != clave_types::Status::Exited)
         .map(|r| r.uuid.clone())
         .collect()
 }
@@ -1544,6 +1548,28 @@ mod tests {
         s.agents.insert("u-live".into(), bound);
         s.agents.insert("u-dormant".into(), rec("u-dormant")); // tab_id None
         assert_eq!(bound_live_uuids(&s), vec!["u-live".to_string()]);
+    }
+
+    /// A row whose agent EXITED keeps its tab (#261). The picker must still
+    /// offer it as a RESUME: treating the leftover bind as liveness makes the
+    /// pick a jump onto a tab with nothing running in it, and there is then no
+    /// way to bring the conversation back from the picker at all.
+    #[test]
+    fn an_exited_agents_leftover_bind_is_not_liveness_for_the_picker() {
+        let mut s = Store::default();
+        let mut gone = rec("u-gone");
+        gone.tab_id = Some(7); // the tab is still on screen…
+        gone.pane_id = None; // …and its claude is gone
+        gone.status = clave_types::Status::Exited;
+        s.agents.insert("u-gone".into(), gone);
+        let mut alive = rec("u-live");
+        alive.tab_id = Some(8);
+        s.agents.insert("u-live".into(), alive);
+        assert_eq!(
+            bound_live_uuids(&s),
+            vec!["u-live".to_string()],
+            "only the row with something running in its tab is live"
+        );
     }
 
     #[test]
