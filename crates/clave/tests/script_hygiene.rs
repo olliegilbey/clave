@@ -320,12 +320,23 @@ fn a_keystroke_only_reaches_a_pane_the_drive_proved_is_a_shell() {
 /// ends a zellij session. Read as tokens, like `is_keystroke`, so a different
 /// quoting of the same command cannot slip past.
 fn is_session_lifecycle(line: &str) -> bool {
-    const LIFECYCLE: [&str; 4] = [
+    // Measured from the vendored source, zellij-utils-0.44.3/src/cli.rs:361-397:
+    // every one of these carries a visible_alias, and a denylist of the long
+    // names alone let `zellij ka` — kill EVERY session on the machine,
+    // including the maintainer's working fleet — through a green gate.
+    // `delete-all-sessions` was missing under both names (swarm review,
+    // 2026-09-16).
+    const LIFECYCLE: [&str; 5] = [
         "kill-session",
         "delete-session",
         "kill-all-sessions",
+        "delete-all-sessions",
         "new-session",
     ];
+    // The one-letter aliases are matched ONLY in the position after a zellij
+    // invocation. As a bare denylist they would trip on ordinary shell — `d`,
+    // `a` and `k` are common words and variable names.
+    const LIFECYCLE_ALIAS: [&str; 5] = ["k", "d", "ka", "da", "a"];
     let flat = line.replace(['"', '\''], "");
     let tokens: Vec<&str> = flat.split_whitespace().collect();
     // A launch is the same class from the other end: `dev launch` and `just
@@ -334,7 +345,10 @@ fn is_session_lifecycle(line: &str) -> bool {
     let launches = tokens
         .windows(2)
         .any(|w| matches!((w[0], w[1]), ("dev", "launch") | ("just", "launch")));
-    launches || tokens.iter().any(|t| LIFECYCLE.contains(t))
+    let aliased = tokens.windows(2).any(|w| {
+        w[0].rsplit('/').next().is_some_and(|c| c == "zellij") && LIFECYCLE_ALIAS.contains(&w[1])
+    });
+    launches || aliased || tokens.iter().any(|t| LIFECYCLE.contains(t))
 }
 
 #[test]
@@ -366,6 +380,29 @@ fn the_drive_never_starts_or_ends_a_session_itself() {
     assert!(
         !is_session_lifecycle(r#"P6C_SESSION_GONE="no""#),
         "a variable named for the session is not a lifecycle command"
+    );
+    // The SHORT spellings. zellij gives every lifecycle subcommand a visible
+    // alias, so a denylist of long names has no teeth: `zellij ka` kills every
+    // session on the machine. Measured against
+    // zellij-utils-0.44.3/src/cli.rs:361-397 (swarm review, 2026-09-16).
+    for short in ["zellij ka", "zellij k mysession", "zellij da", "zellij d x"] {
+        assert!(
+            is_session_lifecycle(short),
+            "the detector must catch the short spelling: {short}"
+        );
+    }
+    assert!(
+        is_session_lifecycle("zellij delete-all-sessions"),
+        "delete-all-sessions is a lifecycle command under its long name too"
+    );
+    // …and only after a zellij invocation. These letters are ordinary shell.
+    assert!(
+        !is_session_lifecycle("ls -d /tmp"),
+        "a bare one-letter token is not a zellij subcommand"
+    );
+    assert!(
+        !is_session_lifecycle(r#"jq -r .a <<<"$STATUS""#),
+        "an argument that happens to read `a` is not a lifecycle command"
     );
 
     let offenders: Vec<_> = DRIVE_SOURCES

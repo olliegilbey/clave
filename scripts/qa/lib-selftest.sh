@@ -115,9 +115,9 @@ STATUS_FIXTURE='{
     "seq": 41,
     "last_live": ["u-held-b", "u-eager", "u-held-a"],
     "agents": {
+      "u-held-b":  {"uuid": "u-held-b",  "tab_id": 3,    "pane_id": null},
       "u-eager":   {"uuid": "u-eager",   "tab_id": 1,    "pane_id": 5},
       "u-held-a":  {"uuid": "u-held-a",  "tab_id": 2,    "pane_id": null},
-      "u-held-b":  {"uuid": "u-held-b",  "tab_id": 3,    "pane_id": null},
       "u-dormant": {"uuid": "u-dormant", "tab_id": null, "pane_id": null},
       "u-stray":   {"uuid": "u-stray",   "tab_id": null, "pane_id": 9}
     }
@@ -245,14 +245,17 @@ want "a run with every phase measured exits zero" "$?" "0"
 relaunch_status() {
   # $1: the uuids bound after the relaunch, as a jq array
   # $2: the uuids the launch recorded to restore, as a jq array
+  # $3: "all-running" gives EVERY row a pane, for the case where the bar did
+  #     not restore the fleet but started all of it.
   # Bound rows carry a tab and no pane — the held signature — except the
   # eager row, which spawns at launch and takes a pane straight away.
-  jq -nc --argjson bound "$1" --argjson recorded "$2" '
+  jq -nc --argjson bound "$1" --argjson recorded "$2" --arg mode "${3:-}" '
     { store:
       { seq: 12, last_live: $recorded,
         agents: ( [ $bound[] | { key: ., value:
                       { uuid: ., tab_id: 1,
-                        pane_id: (if . == "u-eager" then 5 else null end) } } ]
+                        pane_id: (if $mode == "all-running" or . == "u-eager"
+                                  then 5 else null end) } } ]
                   | from_entries ) } }'
 }
 RESTORED_BEFORE="$(printf 'u-eager\nu-held-a\nu-held-b')"
@@ -281,6 +284,19 @@ STALE="$(relaunch_checks "$(printf 'u-closed\nu-eager\nu-held-a')" \
 want "a closed tab that came back fails" "$?" "1"
 want "and the verdict names the closed row" \
   "$(grep -c 'closed in the first session is absent' <<<"$STALE")" "1"
+
+# Every restored row already running its agent. The size and uuid checks all
+# pass — the fleet IS back — but it was not RESTORED: each row started its own
+# agent unasked, which on a real fleet is ~350 MB apiece. The held floor is the
+# only check that can see it, and nothing made that floor go red until this
+# case (measured: set the floor to 0 and every other case stayed green, swarm
+# review 2026-09-16).
+ALL_RUNNING="$(relaunch_checks "$RESTORED_BEFORE" \
+  "$(relaunch_status '["u-eager","u-held-a","u-held-b"]' \
+     '["u-eager","u-held-a","u-held-b"]' all-running)" "u-closed" 2>&1)"
+want "a fleet that came back already running fails" "$?" "1"
+want "and the verdict names the held floor" \
+  "$(grep -c 'restored rows were bound before their agent ran' <<<"$ALL_RUNNING")" "1"
 
 # Both sides empty compare EQUAL. A dead `dev status` must not read as a
 # perfect restore.

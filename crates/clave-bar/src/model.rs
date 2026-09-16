@@ -739,6 +739,15 @@ pub struct BarModel {
     /// held tab, so one uncapped episode is one subprocess per restored tab
     /// per store advance, not one.
     restored_bind_sent: BTreeMap<String, RestoredBindSent>,
+    /// Held panes this instance has already told zellij to run (#261).
+    ///
+    /// The start arm re-enters on every store snapshot, and a snapshot is
+    /// broadcast by any agent's hook in the fleet. Between the rerun going out
+    /// and zellij's next `PaneUpdate`, the manifest still reports the pane
+    /// held and not exited, so without this the arm fires again and restarts a
+    /// claude that has just begun to boot. Dropped when the pane leaves the
+    /// manifest, so a genuinely re-held pane can be started again.
+    held_run_sent: BTreeSet<u32>,
     /// Last bind-leg state we reported (#178). Only a CHANGE is worth a line;
     /// see `Effect::BindStall`.
     bind_stall: Option<BindStallState>,
@@ -1368,10 +1377,16 @@ impl BarModel {
     ///   because the human navigated near it is clave reaching outside its own
     ///   fleet. `spawn_uuid` is the whole test: our binary, our subcommand.
     ///
-    /// Self-limiting rather than latched: running the pane clears its held
-    /// flag, so the next manifest has nothing to offer and no bookkeeping is
-    /// needed to stop this firing twice.
-    fn run_held_effect(&self) -> Option<Effect> {
+    /// Latched on pane id ([`BarModel::held_run_sent`]). Running the pane does
+    /// clear its held flag, but only in the NEXT manifest, and this pass
+    /// re-enters on every store snapshot — one broadcast by any agent's hook
+    /// anywhere in the fleet. In that window the pane still reads held and not
+    /// exited, so an unlatched arm restarts a claude that has just begun to
+    /// boot. The old rationale here rested on zellij ignoring a duplicate
+    /// rerun, which this repo cannot check: `zellij-server` is not vendored,
+    /// and `zellij-tile-0.44.3/src/shim.rs:1744` says only "Re-run command in
+    /// pane". Latching is cheaper than measuring it. (#261)
+    fn run_held_effect(&mut self) -> Option<Effect> {
         if !self.own_tab_focused() {
             return None;
         }
@@ -1385,7 +1400,9 @@ impl BarModel {
                     && !p.is_plugin
                     && p.terminal_command.as_deref().and_then(spawn_uuid).is_some()
             })
-            .map(|p| Effect::RunHeldPane { pane_id: p.pane_id })
+            .map(|p| p.pane_id)
+            .filter(|id| self.held_run_sent.insert(*id))
+            .map(|pane_id| Effect::RunHeldPane { pane_id })
     }
 
     /// Rebuild [`Self::spawn_binds`] from the two delivered frames.
@@ -2211,6 +2228,12 @@ impl BarModel {
             .map(|p| p.pane_id)
             .collect();
         self.pane_facts.retain(|id, _| live.contains(id));
+        // Same lifetime, same reason: the start latch is keyed on pane id, so
+        // it must not outlive the pane or a reborn id inherits a stand-down
+        // and never starts. A pane still in the manifest keeps its latch until
+        // zellij reports it no longer held, which is the frame that proves the
+        // run landed.
+        self.held_run_sent.retain(|id| live.contains(id));
         // Stand-downs decay here, not on a clock: the manifest is what
         // re-arms a probe pass, so a delivered manifest is the one honest
         // unit of "retry skipped" (FOOTGUNS — the running-latch probe
@@ -4879,6 +4902,57 @@ mod tests {
         );
     }
 
+    /// It starts ITS OWN tab's held pane, never a neighbour's. A relaunch puts
+    /// a waiting spawn in most tabs at once, so without the tab guard the
+    /// elected bar would start whichever held pane the manifest lists first —
+    /// resuming an agent in a tab nobody has opened. That is the ~350 MB
+    /// resident that is never given back, and it does not self-heal.
+    ///
+    /// Every other test of this arm uses a fixture whose only held pane IS
+    /// ours, so all of them stayed green with the guard deleted (measured,
+    /// swarm review 2026-09-16). This is the one that does not.
+    #[test]
+    fn landing_on_our_tab_never_starts_a_neighbours_held_spawn() {
+        let mut m = fleet_bar_with_held_neighbours();
+        assert!(
+            !m.identity_effects()
+                .iter()
+                .any(|e| matches!(e, Effect::RunHeldPane { .. })),
+            "our own pane is running; the held panes in tabs 10 and 12 are not ours to start"
+        );
+    }
+
+    /// The start arm re-enters on EVERY store snapshot, and a snapshot is
+    /// broadcast by any agent's hook anywhere in the fleet. Between the rerun
+    /// going out and zellij's next `PaneUpdate`, the manifest still reports
+    /// the pane held and not exited, so the arm would fire again — restarting
+    /// a claude that has just begun to boot.
+    ///
+    /// The arm used to call itself self-limiting, on the grounds that running
+    /// the pane clears its held flag. That is true only AFTER the next frame
+    /// arrives, and it rested on a claim that zellij ignores a duplicate
+    /// rerun, which cannot be checked: `zellij-server` is not vendored, and
+    /// `zellij-tile-0.44.3/src/shim.rs:1744` documents `rerun_command_pane`
+    /// as no more than "Re-run command in pane". Latching is cheaper than
+    /// measuring it. (#261, swarm review 2026-09-16.)
+    #[test]
+    fn the_held_spawn_is_started_once_per_pane_not_once_per_snapshot() {
+        let mut m =
+            fleet_bar_with_held_own_pane(Some("clave spawn u-restored --name x --cwd /r"), false);
+        assert!(
+            m.identity_effects()
+                .contains(&Effect::RunHeldPane { pane_id: 6 }),
+            "the first pass starts it"
+        );
+        // No new PaneUpdate: the pane still reads held and not exited.
+        assert!(
+            !m.identity_effects()
+                .iter()
+                .any(|e| matches!(e, Effect::RunHeldPane { .. })),
+            "a second snapshot in the same frame must not start it again"
+        );
+    }
+
     /// The start arm rides the BEACON, not this instance's own opinion of
     /// which tab is active. FOOTGUNS: "every hidden instance's stale tab set
     /// claims its own tab is active, so anything gated on self-diagnosed 'am
@@ -5218,12 +5292,12 @@ mod tests {
             (Some("cargo test --workspace"), false),
             (None, false),
         ] {
+            // The fixture already leaves OUR tab active, which is what
+            // `elects_confirmed` needs. An override that activated another tab
+            // used to sit here, and it made every case return at the election
+            // gate instead of at the guards under test: a VALID waiting spawn
+            // asserted green through it too. (#261, swarm review 2026-09-16.)
             let mut m = fleet_bar_with_held_own_pane(cmd, exited);
-            m.apply_tabs(vec![
-                tab(10, 0, "a", true),
-                tab(11, 1, "b", false),
-                tab(12, 2, "c", false),
-            ]);
             m.apply_snapshot(snap(1, vec![agent("u-restored", Status::Working, None)]));
             assert_eq!(
                 m.restored_bind_effects(),
@@ -5231,6 +5305,16 @@ mod tests {
                 "{cmd:?} exited={exited} is not a restored row of ours"
             );
         }
+        // …and the SAME fixture does bind a valid waiting spawn. Without this
+        // the three cases above could all be passing at the election gate and
+        // never reach the guards they name.
+        let mut m =
+            fleet_bar_with_held_own_pane(Some("clave spawn u-restored --name x --cwd /r"), false);
+        m.apply_snapshot(snap(1, vec![agent("u-restored", Status::Working, None)]));
+        assert!(
+            !m.restored_bind_effects().is_empty(),
+            "the fixture must be able to produce a bind, or the cases above prove nothing"
+        );
     }
 
     /// A restored fleet on screen: one tab per row, each carrying a launch
