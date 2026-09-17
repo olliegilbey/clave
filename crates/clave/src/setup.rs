@@ -1496,7 +1496,13 @@ pub fn launch_session() -> Result<()> {
         // the one `clave open` hands the focus back to. A bar born in a tab
         // the restore MADE must not sequence; it cannot tell from the focus,
         // because taking the focus is what a new tab does, so it is told.
-        if let Some(home) = rows.first() {
+        // Only a CREATE arms it. A second `clave` from another terminal is an
+        // attach: the layout is ignored, no tab is baked, and nothing is
+        // deferred — but re-arming the owner here would put a running bar back
+        // in charge of a queue that has already been served. It is a no-op
+        // until that bar reloads, and then every tab the human deliberately
+        // closed is owed again, because closing a tab unbinds its row.
+        if !live && let Some(home) = rows.first() {
             crate::store::with_store_mut(&crate::store::store_paths()?, |s| {
                 s.restore_owner = Some(home.uuid.clone());
             })?;

@@ -1229,7 +1229,7 @@ pub fn run_scenario(name: &str) -> Result<()> {
         let will_restore = store.agents.values().filter(|r| r.tab_id.is_some()).count();
         anyhow::ensure!(
             store.bound_since_launch && will_restore == staged,
-            "scenario `{name}` seeded {staged} bound rows but the store would restore              {will_restore} (bound_since_launch={}). The next launch would stage no              restore at all.",
+            "scenario `{name}` seeded {staged} bound rows but the store would restore {will_restore} (bound_since_launch={}). The next launch would stage no restore at all.",
             store.bound_since_launch
         );
         println!(
