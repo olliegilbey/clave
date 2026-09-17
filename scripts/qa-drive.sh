@@ -15,8 +15,11 @@
 # `scripts/qa/lib-selftest.sh` (gated: `crates/clave/tests/qa_lib.rs`).
 #
 # ALL PHASES DRIVEN LIVE GREEN — run 4, 2026-08-17, full 0-7 pass plus both
-# human eyeball checkpoints; and run 11, 2026-09-11, all TEN phases (0-7 with
-# 5b card-cells and 6b isolation-witness), first run of the `just qa` loop. The list below was the FIRST LIVE RUN PENDING
+# human eyeball checkpoints; run 11, 2026-09-11, all TEN phases (0-7 with
+# 5b card-cells and 6b isolation-witness), first run of the `just qa` loop;
+# and run 22, 2026-09-17, all TWELVE phases, 237 checks, first run in which
+# 6c's "restored rows were bound before their agent ran" passed — 4 of 4,
+# where run 21 measured 2 and the run before that killed the zellij server. The list below was the FIRST LIVE RUN PENDING
 # ledger; it is kept because each entry records an assumption a live run had
 # to settle, and how the first runs settled them: runs 1-3 each went red on a
 # real finding first (the stale-executor nav wedge, the starved-bar prune of

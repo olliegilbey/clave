@@ -6,6 +6,25 @@ escape has lived at a seam — process, env, event ordering, screen — so the
 drive tests seams, not logic. Unit tests keep owning the model; this drive
 owns everything they structurally cannot reach._
 
+## Run ledger — the useful recent history
+
+- **run 22, 2026-09-17 — TWELVE phases green, 237 checks, 0 failures.** The
+  first fully green drive on `worktree-live-set-restore` (#261), and the first
+  in which `restored rows were bound before their agent ran (tab, no pane)`
+  passed: 4 of 4. Runs 19-21 found three separate live defects the unit suite
+  could not see, all one shape — one sidebar runs per tab, and every guard had
+  been tested against a single model. Run 19 killed the zellij server with
+  "Too many open files". Run 21 measured 2 of 4 awake. The fix was to stop
+  inferring which tab drives the restore and have the launch name it.
+- **Two phase-6c runs timed out** waiting 30 minutes for the second launch,
+  costing a pair of launches each. `scripts/qa/relaunch-verdict.sh` exists for
+  exactly that: it runs 6c's verdict on its own against a sandbox still in the
+  pre-quit state. Capture the bound set BEFORE asking for the quit.
+- **A fixture that stages nothing passes.** `dev scenario relaunch-restore`
+  had been silently staging no restore at all since `bound_since_launch`
+  landed. `clave dev scenario` now prints how many rows the next launch will
+  bring back, and refuses a relaunch fixture whose answer is wrong.
+
 ## Shape
 
 One script, `scripts/qa-drive.sh <scenario>` — plus the instrument it reads
