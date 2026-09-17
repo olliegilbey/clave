@@ -64,11 +64,17 @@ PUSHED.** Newest first: `2ff35ce` re-anchor claim, `00ec60a` scenario seeder,
 `b078b86` the owner election, `cf8590d` pace on the tab, `c196b64` drive build
 tag.
 
-**A twelve-phase drive was RUNNING at handoff time**, sandbox
-`clave-test-live-set-459d`, log `/tmp/clave-qa-run.log`. Phases 0-6b PASSED,
-218 checks, 0 failures. It was waiting at P6c for the maintainer's second
-launch; he quit at 20:25:30 and the relaunch leg has a fresh 1800s. Read the
-tail of that log FIRST.
+**THE DRIVE PASSED — ALL TWELVE PHASES, 237 checks, 0 failures**
+(run 22, 2026-09-17, log `/tmp/clave-qa-run.log`, recorded in
+`docs/dev/QA-DRIVE.md` and the `scripts/qa-drive.sh` header). P6c's
+`restored rows were bound before their agent ran (tab, no pane)` measured
+**4 of 4**, the check that measured 2 on the run before and has never passed
+until now. Nothing was driven, focused or typed: the sidebar did it alone.
+
+**THREE REVIEW SUBAGENTS WERE RUNNING AT HANDOFF TIME**, at the maintainer's
+request, before any push — one on `crates/clave-bar/src/model.rs`, one on the
+host crate and types, one on tests-and-prose. If their findings are not in this
+file, they did not land; re-run them.
 
 Pre-quit bound set saved at `/tmp/qa-before-set.txt` (5 rows). If P6c times out
 again, DO NOT re-drive: run
@@ -86,13 +92,17 @@ body and merge.
 
 ## Next Steps
 
-1. **Read `/tmp/clave-qa-run.log`.** The drive may have finished either way.
-2. **Confirm the first Alt+Up now works** after a restore — that is `2ff35ce`
-   and it has only been checked in tests.
-3. **Record the run** in `docs/dev/QA-DRIVE.md`.
-4. **Rewrite the PR body.** It describes a design that has changed twice.
-5. **On his go only:** push, PR body, merge. Then the crash-shrinks-the-fleet
-   issue.
+1. **Act on the three reviews** (see above). That was the last thing asked
+   for and it gates the push.
+2. **Rewrite the PR body** with `.github/PULL_REQUEST_TEMPLATE.md` and
+   `--body-file`. The current one describes a design that has changed twice.
+   Gate numbers: `cargo test --workspace` = 807 passed over 11 suites, 0
+   failed; wasm build and clippy clean. The subagent review fills the
+   "Independent adversarial reviewer" lane.
+3. **Confirm the first Alt+Up works** after a restore — `2ff35ce` is proved in
+   tests only. One press in a restored fleet settles it.
+4. **On his go only:** push, then merge. Then the crash-shrinks-the-fleet
+   issue, which he agreed is probably its own.
 
 ## Context for the Work
 
