@@ -81,6 +81,14 @@ pub struct ScenarioAgent {
     pub wants: Option<&'static str>,
     /// Agents still running under this one. A flag, not a count.
     pub subagents: bool,
+    /// The tab this row held when the PREVIOUS zellij session died — the one
+    /// piece of state a killed session leaves behind, and the only input the
+    /// live-set restore needs. Seeding it is what lets a relaunch scenario be
+    /// driven in ONE launch instead of two: `clear_session_order` records
+    /// these rows as `last_live` at session create, exactly as it would after
+    /// a real kill, and the layout is composed from that. `None` is a dormant
+    /// row, which is every agent in every other scenario.
+    pub bound_tab: Option<usize>,
 }
 
 impl ScenarioAgent {
@@ -107,6 +115,7 @@ impl ScenarioAgent {
         pr_number: None,
         wants: None,
         subagents: false,
+        bound_tab: None,
     };
 }
 
@@ -552,6 +561,83 @@ pub const SCENARIOS: &[Scenario] = &[
     // human's launch line names (see docs/dev/QA-DRIVE.md), not seeded
     // here — seeding a fake "live" row would just be a second dormant row
     // wearing a different status.
+    // The relaunch fixture: four rows that were LIVE when the previous
+    // session died, plus two that were not. It stages the one state a kill
+    // leaves behind — rows still holding their dead session's tab binds — so
+    // a single launch exercises the whole path: `clear_session_order` records
+    // the live set, `restore_rows` ranks it, the layout bakes a tab per row,
+    // and only the first one runs.
+    //
+    // The tab numbers are deliberately NOT 0,1,2,3: the set must survive both
+    // the store's uuid-keyed iteration and the gaps a real session accumulates
+    // as tabs close, and a contiguous run would pass by luck.
+    //
+    // RECENCY DISAGREES WITH TAB ORDER, also deliberately. Tab order is
+    // a, b, c, d; `clear_session_order` backfills ordinals from
+    // `last_interacted`, so the RANK is d, b, c, a. Staging them in agreement
+    // would let a relaunch that simply baked the tab strip pass. So the
+    // expectations are: rows read `restored-d, restored-b, restored-c,
+    // restored-a`, and the ONE row that starts is `restored-d` — which is
+    // also the rotated row, so the launch resumes the rotated conversation
+    // rather than the minted one.
+    //
+    // Four, not eleven: a resume costs ~350 MB resident whatever the
+    // transcript weighs, and the point of the drive is the one-runs-rest-held
+    // assertion, which four proves as well as eleven and leaves the machine
+    // room to be worked on while it runs.
+    Scenario {
+        name: "relaunch-restore",
+        agents: &[
+            ScenarioAgent {
+                slug: "restored-a",
+                ago_secs: 900,
+                bound_tab: Some(0),
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "restored-b",
+                ago_secs: 300,
+                bound_tab: Some(3),
+                ..ScenarioAgent::DEFAULT
+            },
+            // A worktree row: its OWN cwd is baked, not the repo root, and a
+            // restored set must keep that right for every row rather than
+            // only for the one eager row that used to be baked.
+            ScenarioAgent {
+                slug: "restored-c",
+                ago_secs: 600,
+                worktree: true,
+                repo: Some("relaunch-shared"),
+                bound_tab: Some(4),
+                ..ScenarioAgent::DEFAULT
+            },
+            // Rotated: the restored tab must resume the ROTATED conversation,
+            // not the frozen minted one (#99). The held pane bakes
+            // `clave spawn <uuid>`, and the resume choice happens inside
+            // `spawn.rs::resume_target` when the human lands on it — which is
+            // now a LATER moment than it used to be, so it is worth watching.
+            ScenarioAgent {
+                slug: "restored-d",
+                ago_secs: 120,
+                rotated: true,
+                bound_tab: Some(9),
+                ..ScenarioAgent::DEFAULT
+            },
+            // Dormant: in the store, never in the layout. If either of these
+            // grows a tab, `last_live` is being derived from something other
+            // than the binds.
+            ScenarioAgent {
+                slug: "dormant-e",
+                ago_secs: 60, // MORE recent than every restored row
+                ..ScenarioAgent::DEFAULT
+            },
+            ScenarioAgent {
+                slug: "dormant-f",
+                ago_secs: 5_400,
+                ..ScenarioAgent::DEFAULT
+            },
+        ],
+    },
     Scenario {
         name: "qa-fleet",
         agents: &[
@@ -1107,15 +1193,48 @@ pub fn run_scenario(name: &str) -> Result<()> {
             seed_transcript(&cwd, &cwd_str, &scenario_rotated_uuid(n), a.slug)?;
         }
         crate::store::with_store_mut(&paths, |s| {
-            s.agents.insert(
-                uuid.clone(),
-                agent_record(name, a, n, &uuid, &cwd_str, &repo.to_string_lossy(), now),
-            );
+            let mut record =
+                agent_record(name, a, n, &uuid, &cwd_str, &repo.to_string_lossy(), now);
+            // A bind left over from a session that was killed rather than
+            // closed down tab by tab. The next launch's `clear_session_order`
+            // reads exactly these and records them as the live set to restore.
+            record.tab_id = a.bound_tab;
+            // A seeded bind is a claim that a session came up and bound rows,
+            // so the flag that says so has to be seeded with it (#261). Without
+            // it `clear_session_order` reads the stage as a launch that died
+            // before binding anything, refuses to record the live set, and the
+            // relaunch scenario silently stages NO restore at all — one row
+            // baked, nothing deferred, which is what it looked like on
+            // 2026-09-17 and cost a maintainer launch to find.
+            if a.bound_tab.is_some() {
+                s.bound_since_launch = true;
+            }
+            s.agents.insert(uuid.clone(), record);
             s.seq += 1;
         })?;
         if a.delete_cwd_after {
             std::fs::remove_dir_all(&cwd)?; // the §6.3 staleness fixture
         }
+    }
+    // Say what the next launch will bring back, and REFUSE to hand over a
+    // relaunch fixture that would bring back nothing (#261). A scenario with
+    // seeded binds exists only to stage a restore; if the store does not agree
+    // that a session bound them, the launch quietly bakes one row, defers
+    // none, and the whole point of the fixture is gone. That happened on
+    // 2026-09-17 and cost a maintainer launch to notice — from the outside it
+    // looks exactly like a working session.
+    let staged = sc.agents.iter().filter(|a| a.bound_tab.is_some()).count();
+    if staged > 0 {
+        let store = crate::store::read_store(&crate::store::store_paths()?)?;
+        let will_restore = store.agents.values().filter(|r| r.tab_id.is_some()).count();
+        anyhow::ensure!(
+            store.bound_since_launch && will_restore == staged,
+            "scenario `{name}` seeded {staged} bound rows but the store would restore {will_restore} (bound_since_launch={}). The next launch would stage no restore at all.",
+            store.bound_since_launch
+        );
+        println!(
+            "\n  the next launch restores {will_restore} rows: one baked, the rest deferred to the bar"
+        );
     }
     crate::evlog::log_event("dev", &format!("scenario {name} seeded"));
     println!(
@@ -1697,6 +1816,29 @@ mod tests {
         }
     }
 
+    /// An unknown scenario name REFUSES, and says what it has.
+    ///
+    /// The only part of `run_scenario` a unit test can reach: everything after
+    /// the lookup resolves a real sandbox and writes to disk. It earns its
+    /// place twice over. A mistyped name reaching `just qa` must stop the run
+    /// rather than stage nothing and leave the maintainer waiting at a launch
+    /// prompt for a session that will never make sense — and it is the sole
+    /// assertion standing between the drive's whole entry point and
+    /// `Ok(())`, which is the mutant that survived every run on #261.
+    #[test]
+    fn an_unknown_scenario_refuses_and_names_the_ones_it_has() {
+        let err = run_scenario("no-such-scenario").expect_err("must not succeed silently");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("no-such-scenario"),
+            "the refusal repeats the name the human typed: {msg}"
+        );
+        assert!(
+            msg.contains(SCENARIOS[0].name),
+            "and lists what is available: {msg}"
+        );
+    }
+
     #[test]
     fn scenario_table_covers_the_c8_checklist() {
         // Names map 1:1 to the C8 validation steps, plus ux-gate1 (the
@@ -1713,9 +1855,120 @@ mod tests {
                 "c8-stale",
                 "ux-gate1",
                 "tall",
+                // The relaunch fixture: rows still holding a dead session's
+                // tab binds, which is the only state the live-set restore
+                // reads.
+                "relaunch-restore",
                 "qa-fleet",
                 "showcase"
             ]
+        );
+        // relaunch-restore: the drive's whole premise is the SHAPE of this
+        // table, and nothing else reads it, so assert the shape here.
+        let rr = SCENARIOS
+            .iter()
+            .find(|s| s.name == "relaunch-restore")
+            .expect("the relaunch fixture");
+        let bound: Vec<(usize, &str)> = rr
+            .agents
+            .iter()
+            .filter_map(|a| a.bound_tab.map(|t| (t, a.slug)))
+            .collect();
+        // Asserted as PROPERTIES, not as a copy of the table: restating the
+        // literal makes the test fail whenever the fixture is retuned, which
+        // trains the next reader to re-paste it rather than ask what broke.
+        assert_eq!(bound.len(), 4, "four rows come back as tabs");
+        assert!(
+            bound.windows(2).all(|w| w[0].0 < w[1].0),
+            "staged in ascending tab id, which is what a dead session leaves"
+        );
+        // Gaps on purpose: screen order is the ascending tab id, and a
+        // contiguous 0,1,2,3 would pass on table order alone.
+        assert!(
+            bound.windows(2).any(|w| w[1].0 > w[0].0 + 1),
+            "the bound tabs must not be contiguous"
+        );
+        // And the RANK must disagree with the tab order, or a relaunch that
+        // simply baked the tab strip would pass this fixture. Ordinals are
+        // backfilled from `last_interacted` at launch, so rank is recency.
+        let mut by_rank: Vec<&str> = bound.iter().map(|&(_, slug)| slug).collect();
+        let age = |slug: &str| rr.agents.iter().find(|a| a.slug == slug).unwrap().ago_secs;
+        by_rank.sort_by_key(|slug| age(slug));
+        assert_eq!(
+            by_rank,
+            vec!["restored-d", "restored-b", "restored-c", "restored-a"],
+            "the order the fleet comes back in"
+        );
+        assert_ne!(
+            by_rank,
+            bound.iter().map(|&(_, slug)| slug).collect::<Vec<_>>(),
+            "rank must not agree with tab order"
+        );
+        // The top of that rank is the one row a relaunch actually starts, and
+        // it is the ROTATED row: the launch resumes the rotated conversation,
+        // not the minted one (#99), which used to happen only on navigation.
+        assert!(
+            rr.agents
+                .iter()
+                .find(|a| a.slug == by_rank[0])
+                .is_some_and(|a| a.rotated),
+            "the row that starts is the rotated one"
+        );
+        let dormant: Vec<&str> = rr
+            .agents
+            .iter()
+            .filter(|a| a.bound_tab.is_none())
+            .map(|a| a.slug)
+            .collect();
+        assert_eq!(dormant, vec!["dormant-e", "dormant-f"]);
+        // dormant-e is MORE recent than every bound row. A restore that reads
+        // recency instead of the binds gives it a tab, and the drive sees it.
+        let newest_bound = rr
+            .agents
+            .iter()
+            .filter(|a| a.bound_tab.is_some())
+            .map(|a| a.ago_secs)
+            .min()
+            .expect("bound rows");
+        let e = rr.agents.iter().find(|a| a.slug == "dormant-e").unwrap();
+        assert!(
+            e.ago_secs < newest_bound,
+            "dormant-e must be the newest row"
+        );
+        // One worktree row and one rotated row, both bound: a restored set
+        // must bake the worktree's own cwd and resume the rotated
+        // conversation, for every row rather than only the first.
+        assert!(
+            rr.agents
+                .iter()
+                .any(|a| a.worktree && a.bound_tab.is_some())
+        );
+        assert!(rr.agents.iter().any(|a| a.rotated && a.bound_tab.is_some()));
+        // The worktree row also names a SHARED repo directory, so the
+        // restored set carries at least one repo ink two rows could wear.
+        assert!(rr.agents.iter().any(|a| a.worktree && a.repo.is_some()));
+        // Every row's recency is distinct. Recency decides the dormant order
+        // and must not decide the restored one, and two rows that tie make
+        // either verdict unreadable.
+        let mut ages: Vec<u64> = rr.agents.iter().map(|a| a.ago_secs).collect();
+        ages.sort_unstable();
+        ages.dedup();
+        assert_eq!(ages.len(), rr.agents.len(), "recency must stagger");
+        // And every one of them is a real age. Zero is "this second", which
+        // is both untrue of a staged row and unreadable as a verdict.
+        assert!(rr.agents.iter().all(|a| a.ago_secs > 0));
+        // dormant-f is the oldest row in the fixture: the bottom of the list
+        // is as much a staged expectation as the top of it.
+        let f = rr.agents.iter().find(|a| a.slug == "dormant-f").unwrap();
+        assert_eq!(f.ago_secs, *ages.last().unwrap(), "dormant-f is the oldest");
+        // Every other scenario stages dormant rows only — a stray bind would
+        // change what those reviewed validation paths come up holding.
+        assert!(
+            SCENARIOS
+                .iter()
+                .filter(|s| s.name != "relaunch-restore")
+                .all(|s| s.agents.iter().all(|a| a.bound_tab.is_none())),
+            "only the relaunch fixture binds tabs"
         );
         // cold-start: 3 agents, staggered recency, none worktree.
         let cs = &SCENARIOS[0];

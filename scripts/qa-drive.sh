@@ -3,16 +3,23 @@
 #
 # What this is: preflight, baseline join, the dormant-row bind ladder, tab
 # churn, the nav ring walk, the collapse burst, the card cells, the terminal
-# facts, quiescence, the isolation witness and the teardown hand-back,
-# scripted against THIS checkout's per-worktree sandbox instance.
+# facts, quiescence, the isolation witness, the relaunch and the teardown
+# hand-back, scripted against THIS checkout's per-worktree sandbox instance.
+#
+# ONE phase asks the maintainer for a second thing: 6c wants the sandbox quit
+# and launched again, and waits for both. Everything else runs unattended once
+# the first launch is up.
 #
 # The instrument it reads with — tracing, assertions, and the zellij log read
 # per BAR INSTANCE — is `scripts/qa/lib.sh`, tested offline by
 # `scripts/qa/lib-selftest.sh` (gated: `crates/clave/tests/qa_lib.rs`).
 #
 # ALL PHASES DRIVEN LIVE GREEN — run 4, 2026-08-17, full 0-7 pass plus both
-# human eyeball checkpoints; and run 11, 2026-09-11, all TEN phases (0-7 with
-# 5b card-cells and 6b isolation-witness), first run of the `just qa` loop. The list below was the FIRST LIVE RUN PENDING
+# human eyeball checkpoints; run 11, 2026-09-11, all TEN phases (0-7 with
+# 5b card-cells and 6b isolation-witness), first run of the `just qa` loop;
+# and run 22, 2026-09-17, all TWELVE phases, 237 checks, first run in which
+# 6c's "restored rows were bound before their agent ran" passed — 4 of 4,
+# where run 21 measured 2 and the run before that killed the zellij server. The list below was the FIRST LIVE RUN PENDING
 # ledger; it is kept because each entry records an assumption a live run had
 # to settle, and how the first runs settled them: runs 1-3 each went red on a
 # real finding first (the stale-executor nav wedge, the starved-bar prune of
@@ -84,8 +91,12 @@ usage: $0 <scenario>
 
 Drives QA-DRIVE phases 0-7 (preflight, baseline join, bind ladder, tab churn,
 ring walk, collapse burst, card cells, terminal facts, quiescence, isolation
-witness, teardown hand-back) against THIS checkout's per-worktree sandbox instance
-(\`clave dev instance\`). Never launches or kills a zellij session.
+witness, relaunch, teardown hand-back) against THIS checkout's per-worktree sandbox
+instance (\`clave dev instance\`). Never launches or kills a zellij session.
+
+Phase 6c asks you to quit the sandbox and launch it again, then reads what
+came back. It prints the commands and waits up to QA_RELAUNCH_WAIT seconds
+(default 1800) for each half.
 
 USUALLY YOU WANT: \`just qa <scenario>\` — it stages, prints the launch line,
 waits for the human to run it, and then calls this script. One command for the
@@ -325,7 +336,14 @@ ZLOG="${TMP%/}/zellij-$(id -u)/zellij-log/zellij.log"
 # The build tag `just sandbox` baked (sandbox-setup.sh derives it from
 # `git rev-parse --short HEAD` in the checkout that staged it — same
 # derivation here, from THIS checkout).
-BUILD_TAG="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo dev)"
+#
+# HEAD_TAG is what THIS checkout is at now; BUILD_TAG is what the RUNNING
+# wasm says it is. They start equal, and P0 below reconciles BUILD_TAG down
+# to the loaded tag when HEAD has moved on host/docs only. Everything that
+# greps the zellij log for a bar instance (scripts/qa/lib.sh) must use
+# BUILD_TAG, or it looks for a tag no bar ever printed.
+HEAD_TAG="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo dev)"
+BUILD_TAG="$HEAD_TAG"
 
 # The instrument: tracing, assertions, and the zellij log read per bar
 # instance (scripts/qa/lib.sh — see its header for what it expects set, all
@@ -370,7 +388,7 @@ phase "P0-preflight"
 LOADED_LINES="$(grep -F 'clave-bar: loaded' "$ZLOG" 2>/dev/null || true)"
 LOADED_TAIL="$(printf '%s\n' "$LOADED_LINES" | tail -5)"
 measure "loaded-tail (last 5)" "$LOADED_TAIL"
-TAIL_MATCH="$(printf '%s\n' "$LOADED_TAIL" | grep -F "build=$BUILD_TAG" | tail -1)"
+TAIL_MATCH="$(printf '%s\n' "$LOADED_TAIL" | grep -F "build=$HEAD_TAG" | tail -1)"
 
 # An EXACT tag match is the happy path and the only one that needs no
 # argument. But the property this check exists for is "the bar now running
@@ -392,7 +410,7 @@ if [[ -n "$TAIL_MATCH" ]]; then
 else
   # Which build DID load, per the newest loaded line we can see.
   LOADED_BUILD="$(printf '%s\n' "$LOADED_TAIL" | grep -o 'build=[0-9a-f]\{7,\}' | tail -1 | cut -d= -f2)"
-  measure "loaded build tag (differs from HEAD ${BUILD_TAG})" "${LOADED_BUILD:-empty}"
+  measure "loaded build tag (differs from HEAD ${HEAD_TAG})" "${LOADED_BUILD:-empty}"
   if [[ -n "$LOADED_BUILD" ]]; then
     SAME_SOURCE="yes"
     for crate in crates/clave-bar crates/clave-types; do
@@ -409,7 +427,12 @@ else
     fi
     if [[ "$SAME_SOURCE" == "yes" ]]; then
       TAG_VERDICT="present"
-      note 'the loaded bar is build=%s, not HEAD (%s), but the bar and types trees are IDENTICAL at both — the running wasm is the source under test, and HEAD moved on host/docs only' "$LOADED_BUILD" "$BUILD_TAG"
+      # The running wasm is the source under test, so it is the tag every
+      # later phase must grep for. Without this, phase 3's "a new tab's bar
+      # LOADED" counts lines carrying a tag no bar ever printed, and reports
+      # a product defect that is only a commit made mid-drive.
+      BUILD_TAG="$LOADED_BUILD"
+      note 'the loaded bar is build=%s, not HEAD (%s), but the bar and types trees are IDENTICAL at both — the running wasm is the source under test, and HEAD moved on host/docs only' "$LOADED_BUILD" "$HEAD_TAG"
     fi
   fi
 fi
@@ -2142,9 +2165,15 @@ hook_fire Stop
 check "the mark is up when the session dies, or SessionEnd proves nothing" \
   "$(wait_field subagents true)" "true"
 hook_fire SessionEnd
+# Main's wording: the mark is asserted DOWN, not "cleared" — SessionEnd forces
+# it down whatever it was, so the check must not read as a transition.
 check "SessionEnd leaves the subagent mark down" "$(wait_field subagents false)" "false"
-check "and the row goes idle (nothing left Working into phase 6)" \
-  "$(wait_field status idle)" "idle"
+# `exited`, not `idle` (#261). The session above really ended, and a row whose
+# agent ended is no longer the same state as a row whose agent is alive with
+# nothing to say: it holds a tab and runs nothing. What this check is for is
+# unchanged — nothing may be left Working going into phase 6.
+check "and the row reads exited, with nothing left Working into phase 6" \
+  "$(wait_field status exited)" "exited"
 
 P5B_SEQ_END="$(jq -r '.store.seq' < <(dev_status) 2>/dev/null)"
 check_numeric "phase-5b end store seq readable" "$P5B_SEQ_END"
@@ -2382,6 +2411,219 @@ else
 fi
 
 # ===========================================================================
+# Phase 6c — the relaunch (the second launch)
+# ===========================================================================
+# Every phase above runs inside ONE session. That is exactly why the live set
+# could decay all the way to a shipped branch (#261) with four gates green, a
+# swarm review behind it, and a full drive: nothing any of them ran ever
+# crossed a session boundary, and the decay only exists on the far side of
+# one. A maintainer launching twice by hand was the only instrument that
+# could see it.
+#
+# This phase is that instrument, automated. It is cheap — read the set, ask
+# for a quit and a relaunch, read it again — and it is the only phase that
+# reads what the PREVIOUS session recorded.
+#
+# It never kills and never launches. Session lifecycle stays the human's
+# (AGENTS.md), and `script_hygiene.rs` fails the build if any line here starts
+# or ends a session. The phase prints the pair and waits, the same shape the
+# first launch already uses at the top of this script.
+#
+# Two things make the readings non-vacuous, and both were measured in the
+# source rather than assumed:
+#
+#   1. A launch CLEARS every tab_id and pane_id before it bakes the layout
+#      (setup.rs `clear_session_order`, called from `launch_session` when the
+#      session is not live). So every bind read after the relaunch was made by
+#      the second session. A stale bind cannot pass this phase for it.
+#   2. The same pass records the set it is about to clear into `last_live`,
+#      which is what the next launch bakes the layout from. So the store
+#      carries its own expectation, and this phase does not have to trust the
+#      number it read before the kill — it checks the two against each other.
+#
+# The phase leans on phase 6 above: quiescence has just proved the store is
+# flat, so the set read here is still the set at the moment of the kill.
+phase "P6c-relaunch"
+
+# A closed tab must STAY closed, and this phase closes one ITSELF rather than
+# carrying phase 3's closure down here.
+#
+# The carried version was written first and it is unsound. Phase 4 wakes the
+# first WAKEABLE row of the dormant block, and the row phase 3 just closed is
+# what sits at the top of that block — so the drive re-opened its own closed
+# row four minutes before the quit, then demanded the restore leave it out.
+# Measured on run 13 (2026-09-16), the first run that ever reached this check:
+# `clave.log` carries the drive's own `open` for that uuid at 13:51:16 against
+# a quit at 13:55. The restore was right and the assertion was stale.
+#
+# Closing HERE removes the gap. Nothing runs between this close and the quit
+# except the wait for the maintainer, so nothing can wake the row, and the
+# check no longer depends on what any earlier phase chose to do.
+#
+# WHICH tab is closed matters as much as that one is, and the rule lives in
+# `close_candidate_tab` (qa/lib.sh) where the selftest reaches it.
+P6C_CLOSE_STATUS="$(dev_status)"
+P6C_CLOSE_TAB="$(close_candidate_tab "$P6C_CLOSE_STATUS" "${CREATE_UUID:-}")"
+P6C_CLOSED=""
+if [[ -n "$P6C_CLOSE_TAB" ]]; then
+  P6C_CLOSED="$(jq -r --argjson t "$P6C_CLOSE_TAB" \
+    '.store.agents | to_entries[] | select(.value.tab_id == $t) | .key' \
+    <<<"$P6C_CLOSE_STATUS" 2>/dev/null | head -n1)"
+fi
+if [[ -n "$P6C_CLOSED" ]]; then
+  # Whether the minted row was spared is RECORDED, not asserted: the fallback
+  # is legitimate on a one-row fleet. But it is the difference between this
+  # phase measuring the defect and measuring the case the defect cannot
+  # reach, so a reader must be able to see which one a run got.
+  measure "the tab this phase closes, so the restore has one to refuse" \
+    "tab=${P6C_CLOSE_TAB} uuid=${P6C_CLOSED:0:13} minted_row_spared=$(
+      [[ -n "${CREATE_UUID:-}" && "$P6C_CLOSED" != "${CREATE_UUID:-}" ]] &&
+        echo yes || echo no)"
+  focus_tab_checked "$P6C_CLOSE_TAB" "the tab to close:"
+  "$CT" close-tab
+  P6C_CLOSE_RC=$?
+  check "the close was accepted" \
+    "$([[ $P6C_CLOSE_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+  # The prune has to LAND before the set is recorded. If it has not, the row
+  # is still bound at the quit, `last_live` holds it legitimately, and the
+  # verdict after the relaunch would go red for a reason that is not about
+  # the restore at all.
+  P6C_UNBOUND="no"
+  for _ in $(seq 1 15); do
+    if [[ "$(jq -r --arg u "$P6C_CLOSED" \
+      '(.store.agents[$u].tab_id | tostring) // "null"' \
+      < <(dev_status) 2>/dev/null)" == "null" ]]; then
+      P6C_UNBOUND="yes"
+      break
+    fi
+    sleep 1
+  done
+  check "the closed tab's row unbound before the quit" "$P6C_UNBOUND" "yes"
+else
+  note 'no BOUND tab to close, so the "a closed tab stays closed" half of this phase is vacuous this run'
+fi
+
+P6C_BEFORE_STATUS="$(dev_status)"
+P6C_SET_BEFORE="$(bound_uuids "$P6C_BEFORE_STATUS")"
+P6C_N_BEFORE="$(uuid_count "$P6C_SET_BEFORE")"
+P6C_SEQ_BEFORE="$(jq -r '.store.seq' <<<"$P6C_BEFORE_STATUS" 2>/dev/null)"
+check_numeric "the live set is readable before the quit" "$P6C_N_BEFORE"
+measure "the live set this session is holding" "n=${P6C_N_BEFORE} $(uuid_line "$P6C_SET_BEFORE")"
+# Three is the floor for the property, not a convenience: a restore of one row
+# is the eager launch path, which runs on an empty store too and proves
+# nothing about the set coming back.
+check_min "the live set is big enough for a restore to mean anything" "$P6C_N_BEFORE" 3
+
+# The row this phase unbound above must not be in the set the quit records.
+# That is the half of the assertion catching a restore which is too GENEROUS
+# rather than too thin, and it is checked here as well as after the relaunch:
+# a set that already holds the row makes the later verdict say nothing.
+if [[ -n "$P6C_CLOSED" ]]; then
+  check "the closed row is out of the set before the quit" \
+    "$(grep -c -- "$P6C_CLOSED" <<<"$P6C_SET_BEFORE")" "0"
+fi
+
+# And the set still holds the row whose agent REALLY RAN. Without this the
+# phase can pass on a fleet of rows that never started a session, which is the
+# one population the #261 `SessionEnd` unbind cannot reach — so every verdict
+# below it would be green on a broken restore. Runs 14 and 15 (2026-09-16)
+# both reached the relaunch in exactly that state and nothing said so.
+if [[ -n "${CREATE_UUID:-}" ]]; then
+  check "the row whose agent really ran is in the set to restore" \
+    "$(grep -c -- "$CREATE_UUID" <<<"$P6C_SET_BEFORE")" "1"
+fi
+
+# Half an hour for each half, measured rather than guessed: the first live run
+# (2026-09-16) asked for the quit at ten minutes, the maintainer had stepped
+# away, and the window closed. Ten green phases went with it. The ask sits at
+# the END of a twelve-minute drive, so whoever started it has stopped watching
+# by the time it arrives — the budget has to fit somebody coming back to it.
+P6C_WAIT="${QA_RELAUNCH_WAIT:-1800}"
+cat <<EOF
+
+==> PHASE 6c needs a SECOND launch from you, and that is the whole point.
+
+    Quit the sandbox, then launch it again. Change NOTHING in between, and
+    touch nothing after — the phase reads the fleet the bar restores by
+    itself, which is the case that broke:
+
+    zellij kill-session ${SESSION}
+    zellij delete-session --force ${SESSION}
+    cd ${ROOT}
+    just launch
+
+    The drive waits up to ${P6C_WAIT}s for the session to go down and come
+    back, then reads the store. It kills nothing itself.
+
+EOF
+
+# Each leg gets the FULL budget. They are two separate human actions with a
+# pause between them, and sharing one countdown would spend the relaunch's
+# patience on however long the quit took.
+P6C_DOWN=0
+read_liveness
+while [[ "$SESSION_LIVE" == "true" && "$P6C_DOWN" -lt "$P6C_WAIT" ]]; do
+  sleep 2
+  P6C_DOWN=$((P6C_DOWN + 2))
+  read_liveness
+done
+P6C_RAN="yes"
+if [[ "$SESSION_LIVE" == "true" ]]; then
+  # NOT RUN, not FAILED. The seam is unmeasured either way, but a phase that
+  # never got its precondition has no verdict to give, and calling it red
+  # would hide which phases are actually red. The run carries on to the
+  # hand-back so the ten phases above it survive a maintainer who stepped out.
+  skip_phase "$(printf '%s was still live after %ss — nobody quit it. The relaunch seam is UNMEASURED this run, and no other phase covers it.' "$SESSION" "$P6C_WAIT")"
+  P6C_RAN="no"
+fi
+if [[ "$P6C_RAN" == "yes" ]]; then
+  measure "the first session is down" "after ${P6C_DOWN}s"
+
+  P6C_UP=0
+  while [[ "$SESSION_LIVE" != "true" && "$P6C_UP" -lt "$P6C_WAIT" ]]; do
+    sleep 2
+    P6C_UP=$((P6C_UP + 2))
+    read_liveness
+  done
+  if [[ "$SESSION_LIVE" != "true" ]]; then
+    skip_phase "$(printf '%s did not come back within %ss. This is a missing launch, not a finding about the restore — but the seam is UNMEASURED, and the sandbox is DOWN, so the eyeball checkpoints below have nothing to look at either.' "$SESSION" "$P6C_WAIT")"
+    P6C_RAN="no"
+  fi
+fi
+
+if [[ "$P6C_RAN" == "yes" ]]; then
+  measure "the second session is up" "after ${P6C_UP}s"
+
+  # The settle window. Bounded polling rather than a fixed sleep, and it polls
+  # for the SIZE the store itself recorded — not for the number read before the
+  # kill, which would make the expectation this phase's own memory instead of
+  # the product's. A poll that never reaches it still falls through to the
+  # checks below, so a short restore fails loudly rather than waiting forever.
+  # The store is read once per turn of this loop and ALWAYS at least once, so
+  # the verdict below can never run on an unset reading.
+  P6C_SETTLE="${QA_RELAUNCH_SETTLE:-30}"
+  P6C_SETTLED=0
+  while :; do
+    P6C_AFTER_STATUS="$(dev_status)"
+    P6C_RECORDED="$(last_live_uuids "$P6C_AFTER_STATUS")"
+    P6C_SET_AFTER="$(bound_uuids "$P6C_AFTER_STATUS")"
+    [[ -n "$P6C_RECORDED" && "$(uuid_count "$P6C_SET_AFTER")" == "$(uuid_count "$P6C_RECORDED")" ]] && break
+    ((P6C_SETTLED >= P6C_SETTLE)) && break
+    sleep 2
+    P6C_SETTLED=$((P6C_SETTLED + 2))
+  done
+  measure "the restored fleet settled" "after ${P6C_SETTLED}s (nothing was driven, focused or typed)"
+  measure "store seq across the relaunch" \
+    "before=${P6C_SEQ_BEFORE} after=$(jq -r '.store.seq' <<<"$P6C_AFTER_STATUS" 2>/dev/null)"
+
+  # The verdict lives in qa/lib.sh, where the selftest runs it against a store
+  # that decayed and requires it to go red. A comparison written the wrong way
+  # round here would pass on every run, and the next person to learn otherwise
+  # would be a maintainer launching twice — the loop this phase replaces.
+  relaunch_checks "$P6C_SET_BEFORE" "$P6C_AFTER_STATUS" "$P6C_CLOSED"
+fi
+
+# ===========================================================================
 # Phase 7 — teardown (the hand-back)
 # ===========================================================================
 # Asserts nothing, launches nothing, kills nothing: session lifecycle is the
@@ -2390,6 +2632,14 @@ fi
 phase "P7-teardown"
 
 measure "sandbox left as driven; store, evlog and drive log preserved for forensics" "$STATE_DIR"
+if [[ "${P6C_RAN:-no}" == "yes" ]]; then
+  cat <<EOF
+
+The session in front of you is the SECOND one, restored by phase 6c, so
+checkpoint 1 below reads the RESTORED fleet — the harder case and the better
+look.
+EOF
+fi
 cat <<EOF
 
 The two eyeball checkpoints (human, one message each — QA-DRIVE):
@@ -2402,3 +2652,5 @@ Teardown, when done (human, or the agent that asked for this sandbox once both e
 EOF
 
 print_summary
+# The readings first, then the truth about what is missing from them.
+exit_on_incomplete

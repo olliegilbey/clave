@@ -6,6 +6,25 @@ escape has lived at a seam — process, env, event ordering, screen — so the
 drive tests seams, not logic. Unit tests keep owning the model; this drive
 owns everything they structurally cannot reach._
 
+## Run ledger — the useful recent history
+
+- **run 22, 2026-09-17 — TWELVE phases green, 237 checks, 0 failures.** The
+  first fully green drive on `worktree-live-set-restore` (#261), and the first
+  in which `restored rows were bound before their agent ran (tab, no pane)`
+  passed: 4 of 4. Runs 19-21 found three separate live defects the unit suite
+  could not see, all one shape — one sidebar runs per tab, and every guard had
+  been tested against a single model. Run 19 killed the zellij server with
+  "Too many open files". Run 21 measured 2 of 4 awake. The fix was to stop
+  inferring which tab drives the restore and have the launch name it.
+- **Two phase-6c runs timed out** waiting 30 minutes for the second launch,
+  costing a pair of launches each. `scripts/qa/relaunch-verdict.sh` exists for
+  exactly that: it runs 6c's verdict on its own against a sandbox still in the
+  pre-quit state. Capture the bound set BEFORE asking for the quit.
+- **A fixture that stages nothing passes.** `dev scenario relaunch-restore`
+  had been silently staging no restore at all since `bound_since_launch`
+  landed. `clave dev scenario` now prints how many rows the next launch will
+  bring back, and refuses a relaunch fixture whose answer is wrong.
+
 ## Shape
 
 One script, `scripts/qa-drive.sh <scenario>` — plus the instrument it reads
@@ -108,6 +127,7 @@ loudly and stops the run; later phases assume earlier truth.
 | 5c | **Terminal facts (OS side)** | a real `sleep` typed into a plain shell tab, behind a shell allowlist, while that tab is focused; then focus moves to an agent tab with the command still running | leg A: at least one sandbox bar learns the change — the OS-facts pipeline (`get_pane_cwd`/`get_pane_running_command` → `apply_pane_facts` → the terminal row) delivers end to end, which nothing tested before. Leg B MEASURES whether a second instance learns it from another tab, the open question under the store-backed fix, and asserts nothing: the facts are per-instance today, so "every bar agrees" is not yet true and a drive must not go red on a known-open defect | the 2026-09-12 flicker (a terminal row with facts under one tab and none under another), #206, #239 |
 | 6 | Quiescence | idle 60s | evlog and store `seq` flat; zellij log flat after the mark for sandbox-attributable lines only (the shared log is never globally flat with a live maintainer fleet — see Delivery accounting) | P17, B19/B20, drive step 6 |
 | 6b | **Isolation witness** | nothing (reads this run's own evidence) | zero `push-refused` events across the run — no push was aimed at a bar that does not own this store; the ambient zellij identity is STILL the sandbox's at the END of the run, not just at the start; the inherited session's name appears nowhere as a push target | FOOTGUNS #281, the 2026-09-11 incident |
+| 6c | **Relaunch (the second launch)** | quit the sandbox session, then ask the maintainer to `just launch` it again | the restored set comes back the SAME SIZE, and holds the same uuids, after a first session in which only ONE tab was visited; EVERY restored row carries a `tab_id` in the store, and each row except the first carries it BEFORE its agent runs — the first is the eager one, which starts at launch, so the timing half of that assertion applies only to the held rows; a tab closed in session N is absent in session N+1. This is the only phase that reads what the previous session recorded, so it is the only one that can see the live set decay | the relaunch seam (TESTING.md's escape record); #261's decay |
 | 7 | Teardown | nothing | prints the kill pair (the agent may run it once both eyeballs are in) | drive step 9 |
 
 **Why 5b could not catch the 2026-09-14 red-glyph defect.** Its event
@@ -164,12 +184,34 @@ the stable binary (FOOTGUNS, 2026-08-24).
       wait. The agent CANNOT do this: `clave dev launch` refuses when
       `ZELLIJ` is set, and an agent is always inside a session.
    3. `scripts/qa-drive.sh qa-fleet` — the full spine, phases 0–7 (with 5b,
-      5c and 6b in between); stop on first failure.
+      5c, 6b and 6c in between); stop on first failure.
+   **The run needs the maintainer TWICE**: once for the first launch, and
+   again at phase 6c, which asks for a quit and a relaunch and waits for
+   both (`QA_RELAUNCH_WAIT`, default 1800s each half). Tell him that when you
+   hand over the first launch line, so the second ask is expected rather
+   than a surprise mid-run.
    **Full 0–7 driven live green: run 4, 2026-08-17**, both eyeball
    checkpoints confirmed; and **run 11, 2026-09-11**, the ten labels that
    existed then (5b and 6b were the new ones), on the first run of the
-   one-command loop. The drive carries **eleven** now: 5c joined on
-   2026-09-12 and has not been driven live yet. Runs 1–3 each went red on one real finding (all
+   one-command loop. The drive carries **twelve** now: 5c joined on
+   2026-09-12 and 6c on 2026-09-16. **Run 12, 2026-09-16** drove all twelve:
+   phases 0–6b green, and 6c went red on its first complete run, on a real
+   defect — the live set lost the one row whose agent was genuinely running
+   (see the handoff for the mechanism). That is the phase doing its job on
+   the first attempt at a class nothing else could see. **Run 16, 2026-09-16,
+   is the first ALL TWELVE green**, with the `SessionEnd` fix in and phase 6c
+   closing its own tab. Runs 13–15 sit between them and are worth reading as
+   a set: 13 proved the fix and went red on a stale assertion, 14 and 15 each
+   went green-adjacent on a fleet with no witness in it — the phase now
+   asserts the witness is there, which is what ended that.
+   **Runs 17 and 18, 2026-09-16**, followed the second swarm review. 17 went
+   red at phase 5b on the DRIVE, not the product: the phase ends a session two
+   lines above the check and then asserted `idle`, which since `Status::Exited`
+   is the reading for an agent that is still alive. 18 is green in all twelve,
+   and is the run that proves both swarm-review blocker fixes live — five rows
+   recorded, five rebound by the bar with nothing driven, focused or typed,
+   four of them bound before their agent ran, and the tab closed in the first
+   session absent from the second. Runs 1–3 each went red on one real finding (all
    fixed and recorded in FOOTGUNS.md); the script header's ledger records
    how each once-pending assumption settled. Still awaiting a first live
    run: the CONCURRENT burst shape (ledger (6) — runs 1–4 drove the burst
@@ -199,6 +241,46 @@ the stable binary (FOOTGUNS, 2026-08-24).
 5. Report the per-phase table with measured values; request the two
    eyeballs; hand back the kill pair.
 
+**Phase 6c needs two maintainer launches, and that is the point.** Every other
+phase runs inside one session, which is exactly why the live-set decay (#261)
+reached a shipped branch with all gates green and a full drive behind it. The
+phase is cheap — quit, relaunch, count — and it is the only automated look at
+state that crosses a session boundary. Do not fold it into phase 1 by staging
+a pre-bound fixture: staging the binds is what makes the first launch pass
+without ever proving the first session could have RECORDED them.
+
+Three things about how it is built (2026-09-16), each of which a later edit
+could undo without any test noticing:
+
+- **It kills nothing and launches nothing.** It prints the pair and waits for
+  liveness to drop and return. Session lifecycle stays the maintainer's, and
+  `script_hygiene.rs` now fails the build for any line in the drive that
+  starts or ends a session.
+- **The verdict lives in `scripts/qa/lib.sh` (`relaunch_checks`), not in the
+  phase.** The selftest runs it against a store that decayed and requires it
+  to go RED. A comparison only two maintainer launches could try is a
+  comparison nobody tries — which is the shape of the defect the phase exists
+  for.
+- **It closes its own tab, right before the ask.** The "a closed tab stays
+  closed" half needs a row that was unbound at the quit. Naming the tab phase
+  3 closed does not give one: phase 4 wakes the top wakeable dormant row, and
+  that is the row phase 3 just made dormant, so the drive re-opened its own
+  closed row and then demanded the restore leave it out (run 13, 2026-09-16).
+  Nothing runs between this close and the quit, so nothing can wake the row.
+  The phase checks the prune landed BEFORE it records the set; if it has not,
+  the run stops there rather than asking for a launch it cannot read.
+- **The readings are non-vacuous because a launch CLEARS the binds** before it
+  bakes the layout, and records the set it cleared into `last_live` on the
+  same pass (`setup.rs` `clear_session_order`). So every tab id read after the
+  relaunch was made by the second session, and the store carries its own
+  expectation. Neither fact is incidental; if either changes, this phase is
+  measuring nothing.
+
+**Nothing is driven between the relaunch and the reading** — no focus, no nav,
+no keystroke. The whole defect was that a restored row bound only when the
+maintainer landed on its tab, so a drive that touched a tab first would hide
+exactly what it came to see.
+
 ## When it runs
 
 - Before every release cut — the runbook's QA-drive gate, which sits after
@@ -219,3 +301,8 @@ the stable binary (FOOTGUNS, 2026-08-24).
    real finding first (nav wedge, newborn-bind prune, jq `//` vs `false` —
    see FOOTGUNS).**
 4. Runbook/TESTING integration line + retire the duplicated manual steps.
+5. Phase 6c (the relaunch). LANDED (2026-09-16, #261). Driven live on run 12
+   the same day: the settle window held for a six-tab fleet, and the phase
+   went RED on a real defect — `SessionEnd` unbound the row from a tab that
+   was still open, so the restore set lost every tab whose agent had really
+   been running (fixed on this branch; FOOTGUNS records the shape).

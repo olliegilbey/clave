@@ -93,9 +93,31 @@ column target, was deleted at #181; the term survives only in the ledger.)
 
 **Row** — one entry of the fleet as the bar draws it. Three kinds:
 
-- **live row** — an agent session with a zellij tab open.
-- **dormant row** — an agent session with no tab open.
+- **live row** — an agent session with a zellij tab open. The tab is what makes
+  it live, not the process: a **restored** row is live before its agent runs.
+- **dormant row** — an agent session with nothing running to return to. Usually
+  no tab open; also an **exited** row, whose tab outlived its agent.
 - **terminal tab** — a zellij tab with no agent session bound to it.
+
+**Held tab** — a tab whose baked `clave spawn` has not run yet. zellij creates
+the pane suspended (`start_suspended`, which it parses as `hold_on_start`), so
+the tab, its name and its command all exist and no agent process does. A held
+tab costs a pane; a running agent costs ~350 MB resident that is never given
+back. The bar starts the agent when the human arrives at the tab.
+
+Do not read zellij's held flag as "waiting to start". It covers two states: a
+command that has not run, and a command that ran and EXITED and offers to run
+again. Only the first is ours to start.
+
+**Restored tab** — a held tab that a relaunch baked from the **live set**. It
+holds its row from the moment the session starts, and reports that row to the
+store immediately, so the set survives the next quit.
+
+**Live set** — the rows that held a tab when the previous zellij session died
+(`Store::last_live`). Written at every launch by the pass that clears the
+session-scoped binds, a beat before it clears them. It is a SET, not an order:
+the rank is recomputed on the read side, because the order the human saw was
+the bar's ranking and not the zellij tab strip.
 
 **Row is the data-side word — a row is what gets rendered, never the shape it is
 rendered in.** The shape is the **row height**, and there are three:
@@ -180,12 +202,17 @@ These three are constantly confused. They are not interchangeable.
 | Term | Means |
 |---|---|
 | **selected** | The row for the currently focused tab. Exactly one. |
-| **live** / **dormant** | Has a tab open / does not. See §3.1. |
+| **live** / **dormant** | Has a tab open / does not — the tab decides it, not the process. A restored tab is live before its agent runs. See §3.1. |
+| **held tab** | OURS: a baked tab whose `clave spawn` has not run yet. See §3.1. |
+| **zellij held flag** | THEIRS: `PaneInfo.is_held`, which is also set for a command that ran and EXITED. A held tab is the subset with `!exited`. Never say "held" alone about a pane. |
+| **live set** | The rows that held a tab when the previous session died; what a relaunch brings back. See §3.1. |
+| **restore owner** | The one row whose TAB brings the live set back, one tab at a time. The launch names it — it is the row the launch bakes — and writes it to the store, so every sidebar agrees without talking. Say "owner" only about the restore; it is not a word about who uses an agent. A tab the restore MADE is never the owner, whatever the focus says. |
 | **unread** | Finished while you were not looking — `done && !visited`. |
 | **stale** | `clave open` found the row's cwd missing. A row flag, **not** a status. |
+| **exited row** | An agent session that ENDED while its tab stayed open. It holds a tab and runs nothing, so it counts in the live set (the tab comes back) but reads DORMANT in the bar (there is nothing to return to). `Status::Exited`, written by the `SessionEnd` hook. Do not say "idle" about it: idle means alive with nothing to say. It lasts one session only — a launch clears every status, because no agent runs at a launch. |
 
-`Status` — the enum — has exactly five variants and they are spelled this way:
-**Idle, Working, NeedsYou, Done, Failed**.
+`Status` — the enum — has exactly six variants and they are spelled this way:
+**Idle, Working, NeedsYou, Done, Failed, Exited**.
 
 ---
 

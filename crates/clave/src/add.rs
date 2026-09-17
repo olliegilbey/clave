@@ -110,7 +110,11 @@ pub fn bound_live_uuids(store: &Store) -> Vec<String> {
     store
         .agents
         .values()
-        .filter(|r| r.tab_id.is_some())
+        // An EXITED agent keeps its tab (#261), and that bind is what restores
+        // the tab on the next launch — it is not a running session. Offering
+        // it as live would make the pick a jump onto an empty tab, with no way
+        // back to the conversation from here.
+        .filter(|r| r.tab_id.is_some() && r.status != clave_types::Status::Exited)
         .map(|r| r.uuid.clone())
         .collect()
 }
@@ -182,13 +186,29 @@ pub fn sanitize_label(s: &str) -> String {
         .join(" ")
 }
 
-/// The agent-tab KDL node WITH its own bar pane — for one-shot
-/// `zellij action new-tab --layout` files ONLY, which do NOT pass through
-/// the session's default_tab_template. A layout that HAS the template must
-/// use `tab_node_bare` instead: zellij wraps explicit tab nodes with the
-/// template too, so a bar-carrying node there renders a DOUBLE bar (live
-/// finding, c8-cold-start 2026-07-18 — the eager tab loaded two plugin
-/// instances in the same second and broke executor election).
+/// How a one-shot tab's baked `clave spawn` starts.
+///
+/// The pair `(focus, runs)` is deliberately NOT expressible: every tab made by
+/// `zellij action new-tab` takes the focus whatever the layout says
+/// (`zellij-utils-0.44.3/src/input/actions.rs:1611-1625` — the tab node's
+/// `focus` property becomes the layout's `focused_tab_index`, and the
+/// new-tab path reads the ROOT PANE's `focus`, which a tab node never sets, so
+/// the first tab always gets `should_change_focus_to_new_tab = true`). Focus is
+/// therefore not an input here; only the command is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabStart {
+    /// The spawn runs at once — the Alt+Enter pick, where the human asked for
+    /// this conversation and is about to land on it.
+    Running,
+    /// The spawn is created HELD (`start_suspended`, which zellij parses as
+    /// `hold_on_start`): the tab, its name and its baked command all exist, and
+    /// no `claude` process does. The staggered restore (#261) uses this so a
+    /// fleet costs a layout instead of ~350 MB per row; the bar starts the
+    /// command when the human lands on the tab (`run_held_effect`).
+    Held,
+}
+
+/// Everything a one-shot tab is made of, named rather than positional.
 ///
 /// `collapsed` is the mode the tab must be born in (LEDGER D36, task 7b′): a
 /// tab born expanded into a collapsed fleet flashes wide and then snaps. The
@@ -196,15 +216,38 @@ pub fn sanitize_label(s: &str) -> String {
 /// count taken from `row_height.target_cols` (#232; formerly the single-mode
 /// `target_cols_for`), which zellij applies exactly whatever the window is,
 /// so nothing here needs to know the display.
-pub fn tab_node(
-    binary: &str,
-    wasm: &str,
-    label: &str,
-    uuid: &str,
-    cwd: &str,
-    collapsed: bool,
-    row_height: clave_types::RowHeight,
-) -> String {
+pub struct TabSpec<'a> {
+    /// The clave to bake into the pane command (§2 binary split): the
+    /// versioned copy's absolute path in a stable session, bare `clave` in
+    /// dev/sandbox — so the resurrected pane re-execs the SAME binary.
+    pub binary: &'a str,
+    pub wasm: &'a str,
+    pub label: &'a str,
+    pub uuid: &'a str,
+    pub cwd: &'a str,
+    pub collapsed: bool,
+    pub row_height: clave_types::RowHeight,
+    pub start: TabStart,
+}
+
+/// The agent-tab KDL node WITH its own bar pane — for one-shot
+/// `zellij action new-tab --layout` files ONLY, which do NOT pass through
+/// the session's default_tab_template. A layout that HAS the template must
+/// use `tab_node_bare` instead: zellij wraps explicit tab nodes with the
+/// template too, so a bar-carrying node there renders a DOUBLE bar (live
+/// finding, c8-cold-start 2026-07-18 — the eager tab loaded two plugin
+/// instances in the same second and broke executor election).
+pub fn tab_node(spec: &TabSpec) -> String {
+    let TabSpec {
+        binary,
+        wasm,
+        label,
+        uuid,
+        cwd,
+        collapsed,
+        row_height,
+        start,
+    } = *spec;
     // split_direction="vertical" is REQUIRED for a LEFT bar: zellij stacks
     // sibling panes horizontally (rows) by default (Task 9 C1 finding; same
     // wrapper as setup::layout_kdl and the S2 spike layout). The bar pane
@@ -213,12 +256,19 @@ pub fn tab_node(
     // `command` bakes the environment's clave (§2 binary split): the
     // versioned copy's absolute path in a stable session, bare `clave` in
     // dev/sandbox — so the resurrected pane re-execs the SAME binary.
+    // Inside the pane node, beside `args` — a sibling property of the run
+    // command, not of the tab. Same syntax `tab_node_bare` bakes for the
+    // launch layout's unfocused tabs.
+    let hold = match start {
+        TabStart::Running => "",
+        TabStart::Held => "                start_suspended true\n",
+    };
     format!(
         r#"    tab name="{label}" focus=true {{
         pane split_direction="vertical" {{
 {pane}            pane cwd="{cwd}" command="{binary}" {{
                 args "spawn" "{uuid}" "--name" "{label}" "--cwd" "{cwd}"
-            }}
+{hold}            }}
         }}
     }}
 "#,
@@ -236,6 +286,17 @@ pub fn tab_node(
 /// default_tab_template (the §6.8 launch layout): the template supplies
 /// the bar + vertical split, and this node's pane fills its `children`
 /// slot. Same baked idempotent spawn — only the bar pane differs.
+///
+/// The node is always focused and always runs, because a launch bakes at most
+/// ONE tab (#261). It took a `held` variant when the launch baked the whole
+/// restored set, and that design is gone: a layout of held tabs made zellij
+/// build them all inside one second, and the handle burst killed the server
+/// with "Too many open files" (measured 2026-09-17). The fleet now comes back
+/// one tab at a time, paced by the bar, through `add::tab_layout` with
+/// `TabStart::Held` — which is where `start_suspended` lives now.
+///
+/// Exactly one node in a layout may be focused; with none, or with several,
+/// zellij picks, and the row the human lands on stops being ours to choose.
 pub fn tab_node_bare(binary: &str, label: &str, uuid: &str, cwd: &str) -> String {
     // `command` bakes the environment's clave — see tab_node.
     format!(
@@ -272,15 +333,7 @@ pub fn validate_cwd(cwd: &str) -> Result<()> {
 /// `zellij action new-tab --layout`, then deleted. Baking the command in
 /// makes tab creation IDEMPOTENT — resurrection is clave's job, not
 /// zellij's (§6.8, C8 redesign 2026-07-17).
-pub fn tab_layout(
-    binary: &str,
-    wasm: &str,
-    label: &str,
-    uuid: &str,
-    cwd: &str,
-    collapsed: bool,
-    row_height: clave_types::RowHeight,
-) -> String {
+pub fn tab_layout(spec: &TabSpec) -> String {
     // #181: the new tab carries the same two swap geometries every other tab
     // has, so Alt+c works in a dwell-opened tab exactly as it does in a
     // template-born one. This file has NO default_tab_template (that is the
@@ -288,8 +341,9 @@ pub fn tab_layout(
     // verbatim and the swap layouts sit alongside it.
     format!(
         "layout {{\n{swaps}{tab}}}\n",
-        swaps = crate::setup::swap_layouts_kdl(binary, wasm, collapsed, row_height),
-        tab = tab_node(binary, wasm, label, uuid, cwd, collapsed, row_height)
+        swaps =
+            crate::setup::swap_layouts_kdl(spec.binary, spec.wasm, spec.collapsed, spec.row_height),
+        tab = tab_node(spec)
     )
 }
 
@@ -1469,9 +1523,17 @@ pub fn run_add(worktree: bool) -> Result<()> {
     // a tab whose bar registers under a configuration no keybind matches
     // (a deaf bar; second-bar if every launch-era tab has since closed).
     let row_height = session_row_height(&data_dir()?);
-    let layout = tab_layout(
-        &binary, &wasm, &label, &uuid, &agent_cwd, collapsed, row_height,
-    );
+    // The picker is an explicit ask for THIS conversation, so it runs.
+    let layout = tab_layout(&TabSpec {
+        binary: &binary,
+        wasm: &wasm,
+        label: &label,
+        uuid: &uuid,
+        cwd: &agent_cwd,
+        collapsed,
+        row_height,
+        start: TabStart::Running,
+    });
     let tmp = std::env::temp_dir().join(format!("clave-{uuid}.kdl"));
     std::fs::write(&tmp, layout)?;
     let status = Command::new(&zellij) // discovered above (Fix 2)
@@ -1720,6 +1782,28 @@ mod tests {
         assert_eq!(bound_live_uuids(&s), vec!["u-live".to_string()]);
     }
 
+    /// A row whose agent EXITED keeps its tab (#261). The picker must still
+    /// offer it as a RESUME: treating the leftover bind as liveness makes the
+    /// pick a jump onto a tab with nothing running in it, and there is then no
+    /// way to bring the conversation back from the picker at all.
+    #[test]
+    fn an_exited_agents_leftover_bind_is_not_liveness_for_the_picker() {
+        let mut s = Store::default();
+        let mut gone = rec("u-gone");
+        gone.tab_id = Some(7); // the tab is still on screen…
+        gone.pane_id = None; // …and its claude is gone
+        gone.status = clave_types::Status::Exited;
+        s.agents.insert("u-gone".into(), gone);
+        let mut alive = rec("u-live");
+        alive.tab_id = Some(8);
+        s.agents.insert("u-live".into(), alive);
+        assert_eq!(
+            bound_live_uuids(&s),
+            vec!["u-live".to_string()],
+            "only the row with something running in its tab is live"
+        );
+    }
+
     #[test]
     fn live_uuids_finds_baked_spawn_commands() {
         // Shape of `zellij action dump-layout` output for an agent pane —
@@ -1857,15 +1941,7 @@ mod tests {
 
     #[test]
     fn tab_layout_bakes_the_idempotent_spawn() {
-        let kdl = tab_layout(
-            "clave",
-            "/data/clave-bar.wasm",
-            "x · main",
-            "u-1",
-            "/x",
-            false,
-            clave_types::RowHeight::Double,
-        );
+        let kdl = tab_layout(&spec("clave", "/data/clave-bar.wasm", TabStart::Running));
         // The bar pane, the baked spawn (idempotent resurrection, §6.3/S4),
         // and the cwd all present:
         assert!(kdl.contains("location=\"file:/data/clave-bar.wasm\""));
@@ -1877,17 +1953,59 @@ mod tests {
         // §2 binary split: the pane command is the passed binary. A stable
         // session bakes the versioned copy's absolute path instead of bare.
         assert!(kdl.contains("command=\"clave\""));
-        let abs = tab_layout(
+        let abs = tab_layout(&spec(
             "/data/clave/bin/clave-v0.1.0",
             "/w",
-            "l",
-            "u",
-            "/x",
-            false,
-            clave_types::RowHeight::Double,
-        );
+            TabStart::Running,
+        ));
         assert!(abs.contains("command=\"/data/clave/bin/clave-v0.1.0\""));
         assert!(!abs.contains("command=\"clave\""));
+    }
+
+    /// One tab, two binaries, two start modes — everything else fixed, so a
+    /// test names only what it is actually about.
+    fn spec<'a>(binary: &'a str, wasm: &'a str, start: TabStart) -> TabSpec<'a> {
+        TabSpec {
+            binary,
+            wasm,
+            label: "x · main",
+            uuid: "u-1",
+            cwd: "/x",
+            collapsed: false,
+            row_height: clave_types::RowHeight::Double,
+            start,
+        }
+    }
+
+    /// #261: the staggered restore brings a tab back WITHOUT starting its
+    /// agent. The layout must be identical to the running one but for the
+    /// hold, because everything else about the tab — its bar, its swap
+    /// geometries, its baked spawn — is what makes it a real clave tab the
+    /// moment the human lands on it.
+    #[test]
+    fn a_held_tab_layout_bakes_the_same_spawn_suspended() {
+        let running = tab_layout(&spec("clave", "/data/clave-bar.wasm", TabStart::Running));
+        let held = tab_layout(&spec("clave", "/data/clave-bar.wasm", TabStart::Held));
+        assert!(
+            !running.contains("start_suspended"),
+            "the pick path must still run its agent\n{running}"
+        );
+        // `hold_on_start` is what zellij calls this property internally; the
+        // KDL spelling is the one the launch layout already bakes.
+        assert_eq!(
+            held.matches("start_suspended true").count(),
+            1,
+            "exactly the agent pane is held — not the bar\n{held}"
+        );
+        assert!(
+            held.contains("\"spawn\" \"u-1\""),
+            "the held tab keeps the idempotent spawn\n{held}"
+        );
+        assert_eq!(
+            held.replace("                start_suspended true\n", ""),
+            running,
+            "held differs from running by the hold and nothing else"
+        );
     }
 
     #[test]
@@ -2619,15 +2737,16 @@ garbage that should be ignored
         }];
         let c = resume_candidates(&Store::default(), "/repo", &dirs, &[]);
         let picked = &c[0];
-        let kdl = tab_layout(
-            "clave",
-            "/w.wasm",
-            &picked.label,
-            &picked.uuid,
-            &picked.cwd,
-            false,
-            clave_types::RowHeight::Double,
-        );
+        let kdl = tab_layout(&TabSpec {
+            binary: "clave",
+            wasm: "/w.wasm",
+            label: &picked.label,
+            uuid: &picked.uuid,
+            cwd: &picked.cwd,
+            collapsed: false,
+            row_height: clave_types::RowHeight::Double,
+            start: TabStart::Running,
+        });
         assert!(kdl.contains("cwd=\"/repo/.claude/worktrees/wt\""));
         assert!(!kdl.contains("cwd=\"/repo\"")); // NOT the picker/root dir
         assert!(kdl.contains("\"--cwd\" \"/repo/.claude/worktrees/wt\""));

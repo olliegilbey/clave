@@ -46,9 +46,12 @@ A bare `cargo test` exits 0 while skipping every one of the 63 model tests. Use
 `just test`.
 
 **Mutation testing is Tier 1 but deliberately not a gate.** `just mutants` runs
-`cargo-mutants` over the lines this branch changed; it is a considered act, not
-something every PR pays for. Which change classes owe a run is in the taxonomy
-below, and the reasoning is in *Six shapes of green-and-worthless test*.
+`cargo-mutants` over the lines this branch changed, and skips the mutants an
+earlier run already killed; it is a considered act, not something every PR pays
+for. Which change classes owe a run is in the taxonomy below, the reasoning is
+in *Six shapes of green-and-worthless test*, and what the cache is allowed to
+forget — plus when to reach for `just mutants-cold` — is under *Mutation
+testing* in Tier 1.
 
 Two ways this list has bitten:
 
@@ -140,6 +143,7 @@ before you ask for a merge.
 | **External-format parsing** | jsonl tail scanners, hook payloads | + a captured (not invented) fixture, and a dated measurement that the shape still exists in the field | — |
 | **CLI surface** | new subcommand or flag | + `Cli::try_parse_from` pin + one sandboxed end-to-end run in a **debug** build (clap's `debug_assert` only fires there) | — |
 | **Cross-process / IPC** | pipes, plugin shellouts, multi-writer store paths | + written argument for ordering/idempotency in the PR dossier; adversarial reviewer must attack it; tier-2 coverage once #47 lands | — |
+| **Across a relaunch** | anything one launch writes and the next launch reads — `last_live`, the baked layout, session-scoped state that is cleared at launch | + name every field the change reads and say whether it is session-scoped or agent-scoped; + a unit test for the SECOND launch (what does this record when the first session did nothing with it?); + a drive that quits and relaunches, or a stated hand-check that it did. **One launch cannot test this class** | `needs-live-validation` |
 | **Install / environment** | release mechanics, dev-install, `PATH`, doctor | + fresh-environment reasoning; assume nothing about the maintainer's machine | `needs-live-validation` |
 | **Visual / UX** | glyphs, colours, widths, fonts | human judgement only | `host-untestable` |
 
@@ -201,10 +205,45 @@ reached `main` or the field.
 | `Alt+w` close stranded Alt-↑/↓ nav until a mouse click (#23) | live sessions only | the beacon/anchor relationship only exists once real tabs open and close | `Effect::ReanchorVisit`, executor-gated; tier 2 will assert it (#47 first scenarios) |
 | `CliPipe did not complete within 1s` + empty-payload deliveries (#45) | present since the log's first line, v0.1.0 era; buried the real evidence during the v0.1.1 incident | no tier reads the zellij log; nothing asserts on pipe delivery | nothing yet — it is filed. Observability discipline (below) is the only detector |
 | `clave-organic` dead on arrival: the empty-payload guard special-cased only `clave-toggle`, so the payload-less organic pipe never reached its named match arm (#128) | live only: the Alt+o beacon never announced, so a departed bar kept `cursor` and `current_tab == own` **indefinitely** — an `Alt+Enter` 18 s after the switch still opened the pre-switch selection; the #100 commit-race fix keyed off this dead arm and was dead with it | the model test called `set_organic_pending` directly (green); `main.rs` is `test = false`, so nothing routes a real payload-less `PipeMessage` — the adapter seam is unmodelled, the classic pattern of this table | the payload-less branch now matches names (toggle AND organic); caught by the sandbox drive loop's re-validation of the very fix that depended on it — the checklist §5 beacon-gap item is the standing detector |
+| Restored tabs rendered as TERMINAL rows, each agent shown a second time as dormant (#261) | the first live launch of the relaunch feature | every row-to-tab question read the store's bind, and a restored tab is by definition the state where the spawn exists and has not run, so no bind can exist. Green suite, because no fixture held a tab whose command had not run | `model::spawn_binds` joins on the pane's launch command; fixtures now hold cold tabs. Found by the maintainer looking at a screenshot |
+| A relaunch started the wrong agent (#261) | same launch | `last_live` is written in ascending tab id, i.e. creation order; the layout baked it in that order and focused the first. The fixture staged recency IN AGREEMENT with tab order, so a bake that ignored the rank passed | `setup::restore_rows` ranks before baking; the fixture now stages recency AGAINST tab order. Found by the maintainer asking whether the order was right |
+| The restore ranking reproduced only the inner layer of double-layer frecency (#261) | would have started the wrong agent whenever one repo held several middling rows | the rule had two homes. Both were tested, separately, and each was self-consistent | `clave_types::sort_live_block`, one home. Found by CodeRabbit |
+| **The restored set decayed on every relaunch** (#261) | ten rows restored, two visited, quit → two rows back, then one | `last_live` is derived from tab binds, and a bind is a side effect of a spawn RUNNING. A restored tab contributes nothing, and nothing is indistinguishable from absent. **No tier and no drive covers a SECOND launch**, which is the only place the defect is observable | a restored tab reports its row at once (`model::restored_bind_effects`). Found by the swarm review; the gap that hid it is the relaunch seam below |
+| The held-pane START rode the self-diagnosed active flag (#261) | a starved bar could resume an agent in a tab nobody was looking at — ~350 MB, never returned, no self-heal | the identity election was already documented as poisoned (FOOTGUNS), and the sibling arms that share it are idempotent, so the precedent read as safe | `own_tab_focused`, the beacon. Found by the swarm review |
+| The bar's binary matcher had no test for the versioned form (#261) | a release install only; every restored tab would render as a terminal row and never start | the sandbox shims a bare `clave` and a release bakes the versioned absolute path, so **the arm that mattered was the one no drive could reach**. Its doc comment claimed tests kept it in step; they did not exist | `clave_types::is_clave_binary`, asserted against the release form and the `clave-vault` near-miss. Found by two swarm lanes independently |
 
 Read the pattern before you argue with the taxonomy: **the pure state machine has
 never been the problem.** Everything that escaped lived at a seam — process,
 environment, event ordering, or the screen.
+
+**The relaunch seam, added 2026-09-15.** Six of the rows above come from one
+change, and the worst of them was invisible to every tier for a reason none of
+the other seams names: **each tier stops at one session.** Preflight through
+teardown, then kill. State that is written by session N and read by session
+N+1 has no tier at all, so a defect there looks exactly like a feature working.
+
+Three rules follow, and they are cheap:
+
+1. **A change that writes state one launch and reads it the next needs a
+   relaunch phase, not just a launch phase.** Quit, relaunch, assert the thing
+   came back unchanged. One phase catches this whole class.
+2. **A fixture must include the shape only a RELEASE produces**, wherever
+   dev and release differ — the binary name is the standing example, and it has
+   now escaped three times (#43, #44, #261). A sandbox drive cannot cover it by
+   construction, so a unit fixture must.
+3. **Drive every leg the SHELL runs on one pass, not one leg alone.** #261's
+   restored bind had a retry cap and two tests pinning it, and the cap did
+   nothing: `settle_identity` calls `restored_bind_effects` and then
+   `identity_effects`, and `bind_effects` inside the second one clears the
+   shared ledger for exactly the uuids the first one writes. Both tests passed
+   because each called one function. Measured at 12 subprocesses against a
+   budget of 4. **When a test calls one model function, ask what the shell
+   calls on the next line** — and if the answer touches the same state, the
+   test proves less than its name claims.
+
+And the rule the duplicated-rule rows teach, which is not a testing rule at
+all: **do not build a checker that two copies agree — delete one of them.** A
+gate over a single expression is free.
 
 ## Six shapes of green-and-worthless test
 
@@ -422,8 +461,57 @@ other instrument reports.
 ```bash
 just mutants              # mutants in the lines this branch changed vs `main`
 just mutants HEAD~3       # ...vs any other base
+just mutants-cold         # the same, cache dropped — run this once before a PR
 just mutants-file crates/clave-bar/src/render.rs   # one module, deliberately
 ```
+
+#### The cache, and what it is allowed to forget
+
+`just mutants` carries two filters, and they do different jobs. `--in-diff`
+skips code this branch never touched. `--iterate` skips mutants an earlier run
+already killed. The second one exists because the first is not enough on a
+long-lived branch: the diff vs `main` only grows, so every re-run re-tested the
+whole branch. #261 reached 136 mutants and 17 minutes, of which 123 were
+already known good. **Measured 2026-09-15 on that branch: a re-run went 17m to
+52s, excluding 135 of 136, and the one mutant it did run was the open
+survivor.** Most of the 52s is the unmutated baseline build, which is the floor.
+
+The cache is a heuristic and the recipe treats it as one. Three invalidation
+layers, in the order they catch things:
+
+1. **The mutant's identity.** cargo-mutants names a mutant by file, line,
+   column and description. Edit an operator or a literal and the description
+   changes; insert a line and every mutant below it in that file moves. Either
+   way it leaves the cache and is re-tested.
+2. **Config and toolchain.** The recipe keys the cache on `cargo-mutants
+   --version`, `rustc --version` and a hash of `.cargo/mutants.toml`, in
+   `target/.mutants-cache-key`. A new `exclude_re` or a new compiler can flip a
+   verdict that a stale cache would then hide, so a moved key wipes
+   `mutants.out` and starts cold.
+3. **`just mutants-cold`.** The manual drop, for what layers 1 and 2 cannot see.
+
+**Know what layer 1 does NOT cover**, because the name misleads: it re-tests on
+identity, not on meaning. Measured the same day — changing `(ordinal, 0)` to
+`(ordinal, 7)` inside `clave_types::live_key` produced no new mutant to test,
+because no mutant's file, line, column or description moved. cargo-mutants'
+own book states the assumption plainly: your later edits never REMOVE coverage.
+
+That assumption fails in exactly one way here, and it is narrower than it
+sounds:
+
+- It cannot hide a **broken** test. cargo-mutants runs the unmutated baseline
+  before any mutant and aborts when it is red — measured, by breaking
+  `live_key` and watching the run refuse.
+- It can hide a **weakened** one. A test that asserts less still passes the
+  baseline, and the mutant it used to catch stays skipped.
+
+`just mutants-cold` is the answer to that second case, and the reason to run it
+is a change to a TEST, not a change to code. This is affordable only because
+mutation testing is advisory here and not a gate; a gate could not take a
+heuristic cache.
+
+`just mutants-file` is deliberately **not** cached. It is the deep run you
+reach for when a file is new or rewritten, and a cache would defeat its point.
 
 Configured in [`.cargo/mutants.toml`](../../.cargo/mutants.toml). Three things
 are load-bearing, and two of them are `--workspace` wearing different hats:

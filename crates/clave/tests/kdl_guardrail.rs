@@ -525,6 +525,23 @@ fn launch_layout_kdl_parses_in_both_branches() {
     );
 }
 
+/// The first command pane anywhere in a tab's tree, in declaration order.
+///
+/// Recursive because the tab template is `[clave-bar (fixed) | pane]`, so the
+/// agent's command is a CHILD of the tab node and never the tab's own `run`.
+/// A non-recursive read returns `None` for every tab and the held assertions
+/// below then pass on an empty comparison.
+fn run_of(tab: &TiledPaneLayout) -> Option<&Run> {
+    if tab
+        .run
+        .as_ref()
+        .is_some_and(|r| matches!(r, Run::Command(_)))
+    {
+        return tab.run.as_ref();
+    }
+    tab.children.iter().find_map(run_of)
+}
+
 /// #181, the whole width mechanism in one assertion. Every layout clave emits
 /// must declare BOTH geometries as swap layouts, sized as the two FIXED column
 /// constants (fixed panes refuse every resize, which is what makes the bar
@@ -610,15 +627,13 @@ fn every_layout_declares_both_swap_geometries_birth_width_first() {
             born_collapsed,
         );
         check(
-            &add::tab_layout(
-                BIN_ABS,
-                WASM,
+            &add::tab_layout(&spec(
                 "row",
-                "u-1",
                 "/tmp",
                 born_collapsed,
                 clave_types::RowHeight::Single,
-            ),
+                add::TabStart::Running,
+            )),
             "one-shot tab layout",
             born_collapsed,
         );
@@ -634,16 +649,66 @@ fn add_tab_layout_parses_through_real_zellij_parser() {
     let label = add::sanitize_label("fix \"auth\"\nflow · main");
     let cwd = "/home/o/code/clave/.claude-worktrees/ab12cd34";
     add::validate_cwd(cwd).expect("test cwd must pass validate_cwd");
-    let kdl = add::tab_layout(
-        BIN_ABS,
-        WASM,
+    let kdl = add::tab_layout(&spec(
         &label,
-        "u-1",
         cwd,
         false,
         clave_types::RowHeight::Double,
-    );
+        add::TabStart::Running,
+    ));
     assert_layout_ok(&kdl, "add/open one-shot tab layout");
+}
+
+/// #261: the staggered restore's layout is the one the human never sees being
+/// written, so a KDL slip in it is only found by a relaunch. `start_suspended`
+/// sits INSIDE the pane node beside `args`, which is the one place zellij
+/// accepts it — as a tab property it parses and does nothing.
+#[test]
+fn held_one_shot_tab_layout_parses() {
+    let kdl = add::tab_layout(&spec(
+        "row · main",
+        "/tmp",
+        false,
+        clave_types::RowHeight::Double,
+        add::TabStart::Held,
+    ));
+    assert_layout_ok(&kdl, "held one-shot tab layout");
+    let layout = Layout::from_str(&kdl, "guardrail:held-one-shot".into(), None, None)
+        .expect("held layout must parse");
+    // The premise the whole hold rests on: zellij read the property and kept
+    // it. Asserted through the PARSED layout, not the text we just wrote.
+    let held: Vec<bool> = layout
+        .tabs()
+        .iter()
+        .filter_map(|(_, t, _)| run_of(t))
+        .map(|run| match run {
+            Run::Command(c) => c.hold_on_start,
+            _ => false,
+        })
+        .collect();
+    assert_eq!(held, vec![true], "the restored tab's spawn is held\n{kdl}");
+
+    // The same layout without the hold must NOT parse as held — otherwise the
+    // assertion above would pass on a property zellij ignores.
+    let running = add::tab_layout(&spec(
+        "row · main",
+        "/tmp",
+        false,
+        clave_types::RowHeight::Double,
+        add::TabStart::Running,
+    ));
+    let running = Layout::from_str(&running, "guardrail:running-one-shot".into(), None, None)
+        .expect("running layout must parse");
+    let running_held: Vec<bool> = running
+        .tabs()
+        .iter()
+        .filter_map(|(_, t, _)| run_of(t))
+        .map(|run| match run {
+            Run::Command(c) => c.hold_on_start,
+            _ => false,
+        })
+        .collect();
+    assert_eq!(running_held, vec![false], "the pick path still runs");
 }
 
 #[test]
@@ -731,30 +796,26 @@ fn backslash_label_is_guarded_through_real_parser() {
     // introducer — `\d` is not a valid escape, so a raw backslash in a label
     // must FAIL zellij's parser. Tripwire premise first: if a future zellij
     // kdl accepts it, this assert flips and the guard can be reconsidered.
-    let raw = add::tab_layout(
-        BIN_ABS,
-        WASM,
+    let raw = add::tab_layout(&spec(
         r"fix the \d regex",
-        "u-1",
         "/home/o/x",
         false,
         clave_types::RowHeight::Double,
-    );
+        add::TabStart::Running,
+    ));
     assert!(
         Layout::from_str(&raw, "guardrail:raw-backslash".into(), None, None).is_err(),
         "premise broken: zellij's KDL parser now ACCEPTS a raw backslash — re-vet the guard\n---\n{raw}"
     );
     // The guard: the same label THROUGH sanitize_label must parse clean.
     let label = add::sanitize_label(r"fix the \d regex");
-    let kdl = add::tab_layout(
-        BIN_ABS,
-        WASM,
+    let kdl = add::tab_layout(&spec(
         &label,
-        "u-1",
         "/home/o/x",
         false,
         clave_types::RowHeight::Double,
-    );
+        add::TabStart::Running,
+    ));
     assert_layout_ok(&kdl, "add/open tab layout (backslash-bearing label)");
     // And a backslash-bearing cwd must be REFUSED, not baked.
     assert!(add::validate_cwd(r"/home/o/we\ird").is_err());
@@ -831,15 +892,13 @@ fn keybind_and_layout_plugin_configurations_match() {
     );
     let launch_empty =
         setup::launch_layout_kdl(BIN_ABS, WASM, None, false, clave_types::RowHeight::Double);
-    let one_shot = add::tab_layout(
-        BIN_ABS,
-        WASM,
+    let one_shot = add::tab_layout(&spec(
         "lbl",
-        "u-1",
         "/home/o/x",
         false,
         clave_types::RowHeight::Double,
-    );
+        add::TabStart::Running,
+    ));
     let layout_kdl_text = setup::layout_kdl(BIN_ABS, WASM, clave_types::RowHeight::Double);
 
     for (what, text) in [
@@ -941,5 +1000,26 @@ fn rows_write_then_regenerate_keeps_config_and_layout_in_sync() {
              config.kdl and layout.kdl (#232 finding 1):\nlayout={p:?}\nkeybind={:?}",
             kb[0]
         );
+    }
+}
+
+/// A one-shot tab spec with the fields these tests never vary, so each call
+/// names only what it is about.
+fn spec<'a>(
+    label: &'a str,
+    cwd: &'a str,
+    collapsed: bool,
+    row_height: clave_types::RowHeight,
+    start: add::TabStart,
+) -> add::TabSpec<'a> {
+    add::TabSpec {
+        binary: BIN_ABS,
+        wasm: WASM,
+        label,
+        uuid: "u-1",
+        cwd,
+        collapsed,
+        row_height,
+        start,
     }
 }

@@ -218,6 +218,157 @@ instance_count_logging() {
 
 dev_status() { "$CLAVE_BIN" dev status 2>/dev/null; }
 
+# The three readings phase 6c compares across a session boundary. Each takes
+# a `dev_status` document as its argument rather than reading one itself, so
+# the two sides of the comparison are the SAME snapshot shape and can be
+# tested offline (qa/lib-selftest.sh) — this branch's whole lesson is that a
+# relaunch assertion nobody can run without a launched session is one nobody
+# runs. Sorted, because every use is a set comparison. Empty on an unreadable
+# document, never an error: the phase asserts the sets are non-empty itself.
+
+# A row is BOUND when it holds a tab id. The bind is the tab_id and nothing
+# else (store.rs §6.6) — a pane with no tab is a row mid-spawn, not a member
+# of the live set.
+bound_uuids() {
+  jq -r '.store.agents | to_entries[] | select(.value.tab_id != null) | .key' <<<"$1" 2>/dev/null | sort
+}
+
+# The HELD signature: a tab and no pane. A restored row wears this from the
+# moment the bar binds it until its agent is woken, so it is the reading that
+# separates a fleet the bar rebound by itself from tabs a human landed on.
+held_bound_uuids() {
+  jq -r '.store.agents | to_entries[]
+         | select(.value.tab_id != null and .value.pane_id == null) | .key' <<<"$1" 2>/dev/null | sort
+}
+
+# Which tab phase 6c should close on its way to the quit, so the restore has
+# one it must refuse. Takes the `dev status` document and the uuid to SPARE.
+# Empty when no row is bound.
+#
+# The spare is the row the drive MINTED (`clave add`, phase 2 rung 1), and it
+# must survive into the restored set. It is the only row in this sandbox whose
+# claude gets past the "trust this folder" prompt, so it is the only row that
+# ever starts a session, fires a hook, or can reach the #261 `SessionEnd`
+# unbind at all. Every seeded row sits at that prompt forever. Close the
+# minted row and the phase measures the one population the defect cannot
+# touch — which is exactly how the 2026-09-15 verification read green over a
+# broken restore.
+#
+# Two earlier rules failed here and are worth not repeating. "Lowest bound tab
+# id" takes the minted row, because it is created first (run 14, 2026-09-16).
+# "A tab and no pane" never matches in the FIRST session: that signature
+# belongs to a RESTORED row, and every row this drive opens registers a pane
+# (run 15, same day — the measure line read `was running`).
+#
+# Falls back to the spare when it is the only bound row, so a one-row fleet
+# still gets the closed-tab half rather than silently skipping it.
+close_candidate_tab() {
+  jq -r --arg spare "${2:-}" '
+    [.store.agents | to_entries[] | select(.value.tab_id != null)] as $bound
+    | (([$bound[] | select(.key != $spare) | .value.tab_id] | sort)
+       + ([$bound[] | .value.tab_id] | sort))
+    | .[0] // empty' <<<"$1" 2>/dev/null
+}
+
+# What the PREVIOUS session left. Written at launch, from the binds standing
+# when the session died (setup.rs `clear_session_order`), which is also the
+# Restored rows that still carry a status from the session BEFORE. Read over
+# the HELD signature only (a tab, no pane): those rows have run nothing in this
+# session, so any status on them is a claim about a process that is gone. The
+# eager row is excluded by construction — its agent really did start — so this
+# can never go red on legitimate state. (#261)
+stale_status_uuids() {
+  jq -r '.store.agents | to_entries[]
+         | select(.value.tab_id != null and .value.pane_id == null
+                  and .value.status != "idle") | .key' <<<"$1" 2>/dev/null | sort
+}
+
+# pass that clears them — so this is the only surviving record of the fleet,
+# and the expectation the rebound set is measured against.
+last_live_uuids() {
+  jq -r '.store.last_live[]?' <<<"$1" 2>/dev/null | sort
+}
+
+# How many rows a set holds, and the set on one line for a verdict a human
+# reads. Non-empty lines only: two empty sets compare EQUAL, so a set
+# comparison built on a dead read reports a perfect restore. The count is
+# what the phase refuses on before it compares anything.
+uuid_count() { printf '%s' "${1:-}" | grep -c .; }
+uuid_line() { printf '%s' "${1:-}" | tr '\n' ' '; }
+
+# The relaunch verdict (phase 6c): does the fleet the second session holds
+# match the one the first session left? Takes the set measured before the
+# quit, the `dev status` read after the relaunch, and the row whose tab the
+# phase closed on its way to the quit. Every reading comes from one snapshot,
+# so no two verdicts below can disagree about which moment they are
+# describing.
+#
+# `closed` must be a row that was unbound AT THE QUIT, which is why the phase
+# closes its own tab rather than naming one an earlier phase closed: phase 4
+# wakes the top wakeable dormant row, and that is exactly the row phase 3
+# leaves behind (run 13, 2026-09-16).
+#
+# Here rather than in the drive because the phase costs two maintainer
+# launches, and a verdict that can only be tried by spending them is a verdict
+# nobody tries. The selftest runs it against a decayed store, where it must go
+# red.
+relaunch_checks() {
+  local before="$1" status="$2" closed="${3:-}"
+  local recorded set_after held n_before n_after n_recorded n_held
+  recorded="$(last_live_uuids "$status")"
+  set_after="$(bound_uuids "$status")"
+  held="$(held_bound_uuids "$status")"
+  n_before="$(uuid_count "$before")"
+  n_after="$(uuid_count "$set_after")"
+  n_recorded="$(uuid_count "$recorded")"
+  n_held="$(uuid_count "$held")"
+  measure "the set the launch recorded to restore" "n=${n_recorded} $(uuid_line "$recorded")"
+  measure "the set the second session rebound" "n=${n_after} $(uuid_line "$set_after")"
+
+  # First, that anything was read at all. Two empty sets compare equal, so
+  # every verdict under this one would pass on a dead store.
+  check_min "the quit recorded a set to restore" "$n_recorded" 1
+
+  # The first session RECORDED what it was holding. A restore that bakes the
+  # right tabs from a set two launches old passes everything below it.
+  check "the quit recorded the set the first session was holding" \
+    "$(uuid_line "$recorded")" "$(uuid_line "$before")"
+
+  # The decay assertion (#261). The defect bound only the tab the maintainer
+  # was looking at, so this number read 1 against a fleet of four.
+  check "the live set comes back the SAME SIZE" "$n_after" "$n_before"
+
+  # And it is the same fleet, not the same COUNT of something else.
+  check "and holds the same uuids" \
+    "$(uuid_line "$set_after")" "$(uuid_line "$recorded")"
+
+  # A tab id with no pane id is the restored leg's signature: the bar bound
+  # the row while the tab still held nothing. Every row but the eager one
+  # wears it — the eager row spawns at launch — so the floor is one less than
+  # the set.
+  check_min "restored rows were bound before their agent ran (tab, no pane)" \
+    "$n_held" "$((n_before - 1))"
+
+  # A status is scoped to a zellij session, so a restored row must carry none
+  # (#261). The branch's `Exited` made the cost visible: a tab about to start
+  # its agent came back wearing the hollow "nothing here" mark, beside rows in
+  # exactly the same state drawn as live. `Working` had the same shape before
+  # it, spinning over a turn that stopped at the quit.
+  local stale
+  stale="$(stale_status_uuids "$status")"
+  check "restored rows carry no status from the session before" \
+    "$(uuid_line "$stale")" ""
+
+  # A closed tab stays closed. Not covered by the three above: a row still
+  # bound when its tab went (a prune that did not happen, phase 3's family)
+  # is in every set, so all of them match and the fleet still comes back one
+  # tab too wide.
+  if [[ -n "$closed" ]]; then
+    check "the tab closed in the first session is absent from the second" \
+      "$(grep -c -- "$closed" <<<"$set_after")" "0"
+  fi
+}
+
 # Guarded list-panes read. Never the bare env-var form (TESTING.md, "the
 # sandbox drive loop" step — a dead/absent session hangs `zellij action`
 # forever; ct.sh bounds it). Returns "[]" and a non-zero status on any
@@ -416,9 +567,52 @@ print_summary() {
 # Mark the current phase FAILED, print the summary, and stop the run. The
 # log and sandbox are left exactly as they are — forensics, not a re-run.
 fail_phase() {
+  # A caller that opened no phase still gets a FAILING exit. Without this the
+  # arithmetic below is `PHASE_RESULTS[-1]`, which aborts the function under
+  # `set -u` with `bad array subscript` — killing the `exit 1` two lines down
+  # and returning 0. Measured in review: `relaunch-verdict.sh` printed a red
+  # verdict and exited 0, and it is the documented recovery for a timed-out
+  # phase 6c. A check that cannot fail the run is not a check.
+  if (( ${#PHASE_RESULTS[@]} == 0 )); then
+    printf '\nFAILED (no phase open)\n'
+    exit 1
+  fi
   local last=$((${#PHASE_RESULTS[@]} - 1))
   PHASE_RESULTS[last]="FAIL"
   printf '\nPHASE %s FAILED\n' "$CURRENT_PHASE"
   print_summary
+  exit 1
+}
+
+# Mark the current phase NOT RUN and carry on. A phase that could not run is
+# not a phase that failed: it measured nothing, so it has no verdict to give,
+# and calling it red hides which phases are actually red.
+#
+# For the case where the run did not get a PRECONDITION it cannot supply
+# itself — phase 6c waits on a maintainer, and the first live run (2026-09-16)
+# timed out and took ten green phases down with it. Never for a reading that
+# came back wrong; that is `check`'s job and it stops the run.
+skip_phase() {
+  local why="$1"
+  if (( ${#PHASE_RESULTS[@]} == 0 )); then
+    printf 'NOT RUN: %s\n' "$why"
+    return
+  fi
+  local last=$((${#PHASE_RESULTS[@]} - 1))
+  PHASE_RESULTS[last]="NOT RUN"
+  printf '[%s %s] NOT RUN: %s\n' "$CURRENT_PHASE" "$(ts)" "$why"
+}
+
+# The drive's last act. A run that skipped a phase is not a green run, and the
+# exit code is what a release runbook, an agent, or a person scrolling back
+# actually reads. The summary prints first — those readings are still worth
+# having — and then the status tells the truth about what is missing.
+exit_on_incomplete() {
+  local i missing=()
+  for i in "${!PHASE_RESULTS[@]}"; do
+    [[ "${PHASE_RESULTS[$i]}" == "NOT RUN" ]] && missing+=("${PHASE_NAMES[$i]}")
+  done
+  ((${#missing[@]} == 0)) && return 0
+  printf '\nINCOMPLETE: %s did not run. The drive is not green until it does.\n' "${missing[*]}"
   exit 1
 }

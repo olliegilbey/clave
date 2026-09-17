@@ -834,12 +834,19 @@ long-dead store rows: deferred.
   `launch_session()` (1) best-effort `zellij delete-session --force clave` — an
   EXITED session with stale serialized state would be *resurrected* by
   `attach --create`, ignoring `--layout`; (2) composes the launch layout
-  **dynamically**: the bar-only template, plus — if the store is non-empty —
-  ONE tab for the most-recent row (`last_interacted`), pane command baked
-  `clave spawn <uuid> …` (resumes via the jsonl check), written to a temp file
-  and passed via `--layout`. Every other store row appears as a dormant bar row
-  (§6.6). Empty store → today's behavior unchanged. Tab-timeline/bind clearing
-  on create is unchanged (§5).
+  **dynamically**: the bar-only template, plus one tab per row of the previous
+  **live set** — pane command baked `clave spawn <uuid> …` (resumes via the
+  jsonl check), written to the stable `setup::launch_layout_path` under the
+  data dir — NOT a temp file — and passed via `--layout`. Every other store row
+  appears as a dormant bar row (§6.6). Tab-timeline/bind clearing on create is
+  unchanged (§5).
+
+  **Revised twice since this was written.** 2026-09-15: the single-eager-row
+  launch is now only the fallback taken when the live set is empty — a first
+  run, or a session quit with nothing open. 2026-09-17: the launch bakes ONE
+  tab again, and the sidebar opens the rest one at a time, because building a
+  tab costs a burst of file handles and baking a whole fleet at once exhausted
+  the macOS ceiling (#261).
 - The session layout defines a **tab template** (`[clave-bar (fixed width) | pane]`)
   so *natively* created tabs get the bar too; `clave add` tabs use the one-shot temp
   layout (§6.3). If `default_tab_template` proves parse-fragile (S1 note), fallback

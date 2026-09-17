@@ -21,15 +21,23 @@ const DRIVE: &str = include_str!("../../../scripts/qa-drive.sh");
 const CT: &str = include_str!("../../../scripts/ct.sh");
 const LIB: &str = include_str!("../../../scripts/qa/lib.sh");
 const SELFTEST: &str = include_str!("../../../scripts/qa/lib-selftest.sh");
+const VERDICT: &str = include_str!("../../../scripts/qa/relaunch-verdict.sh");
+const SAMPLER: &str = include_str!("../../../scripts/qa/fd-sampler.sh");
 
 /// Every script the drive is made of. The hook rule is about the WHOLE drive,
 /// not about one file of it: the instrument was split out of qa-drive.sh on
 /// 2026-09-12, and a rule that only read the file it was written against
 /// would have stopped covering anything that moved.
-const DRIVE_SOURCES: [(&str, &str); 3] = [
+const DRIVE_SOURCES: [(&str, &str); 5] = [
     ("scripts/qa-drive.sh", DRIVE),
     ("scripts/qa/lib.sh", LIB),
     ("scripts/qa/lib-selftest.sh", SELFTEST),
+    // The two tools #261 added. They were outside every rule here until review
+    // pointed it out, which is the failure mode the paragraph above describes
+    // happening a second time: the list is a list, so growing the drive does
+    // not grow the guard. Anything new under scripts/qa/ belongs here.
+    ("scripts/qa/relaunch-verdict.sh", VERDICT),
+    ("scripts/qa/fd-sampler.sh", SAMPLER),
 ];
 
 /// Lines that actually run something — comments, blanks and heredoc bodies
@@ -313,5 +321,180 @@ fn a_keystroke_only_reaches_a_pane_the_drive_proved_is_a_shell() {
         DRIVE.contains("P5c-term-facts"),
         "the terminal-facts witness phase must exist — it is the only \
          automated evidence that the OS-facts pipeline delivers at all"
+    );
+}
+
+/// Whether this line runs a session lifecycle command — one that starts or
+/// ends a zellij session. Read as tokens, like `is_keystroke`, so a different
+/// quoting of the same command cannot slip past.
+fn is_session_lifecycle(line: &str) -> bool {
+    // The first four are measured from the vendored source,
+    // zellij-utils-0.44.3/src/cli.rs:361-397, and each carries a
+    // visible_alias: k, d, ka, da. A denylist of the long names alone let
+    // `zellij ka` — kill EVERY session on the machine, including the
+    // maintainer's working fleet — through a green gate, and
+    // `delete-all-sessions` was missing under both names (swarm review,
+    // 2026-09-16).
+    //
+    // `new-session` and `a` are DELIBERATELY WIDER than that range, and were
+    // mis-described as part of it until review (2026-09-17). `a` is `attach`
+    // (cli.rs:306), which neither starts nor ends a session but does put a
+    // drive inside one it does not own. `new-session` matches no zellij
+    // subcommand at all; it is kept because the denylist costs nothing when it
+    // matches nothing, and a spelling that appears later should trip. The
+    // session-CREATING spellings this cannot see — bare `zellij`, `zellij
+    // --session <name>`, `zellij attach -c` — are caught from the other end by
+    // the `dev launch`/`just launch` window below, which is the path a drive
+    // would realistically take.
+    const LIFECYCLE: [&str; 5] = [
+        "kill-session",
+        "delete-session",
+        "kill-all-sessions",
+        "delete-all-sessions",
+        "new-session",
+    ];
+    // The one-letter aliases are matched ONLY in the position after a zellij
+    // invocation. As a bare denylist they would trip on ordinary shell — `d`,
+    // `a` and `k` are common words and variable names.
+    const LIFECYCLE_ALIAS: [&str; 5] = ["k", "d", "ka", "da", "a"];
+    let flat = line.replace(['"', '\''], "");
+    let tokens: Vec<&str> = flat.split_whitespace().collect();
+    // A launch is the same class from the other end: `dev launch` and `just
+    // launch` both create the session, and the refusal that keeps them the
+    // maintainer's lives in the binary, not here.
+    let launches = tokens
+        .windows(2)
+        .any(|w| matches!((w[0], w[1]), ("dev", "launch") | ("just", "launch")));
+    let aliased = tokens.windows(2).any(|w| {
+        w[0].rsplit('/').next().is_some_and(|c| c == "zellij") && LIFECYCLE_ALIAS.contains(&w[1])
+    });
+    launches || aliased || tokens.iter().any(|t| LIFECYCLE.contains(t))
+}
+
+#[test]
+fn the_drive_never_starts_or_ends_a_session_itself() {
+    // Phase 6c is the first phase that NEEDS a session boundary crossed, so it
+    // is the first place where killing the sandbox from inside the drive looks
+    // reasonable. It is not: session lifecycle is the maintainer's (AGENTS.md),
+    // and a drive that can kill by name is one variable substitution away from
+    // killing the wrong one. The phase prints the pair and waits instead.
+    //
+    // The detector is checked against a line that must trip it, because a
+    // guard that matches nothing passes on every source including a broken
+    // one — the failure mode this whole file exists to close.
+    assert!(
+        is_session_lifecycle(r#"zellij kill-session "$SESSION""#),
+        "the detector must catch a kill"
+    );
+    assert!(
+        is_session_lifecycle("just launch"),
+        "the detector must catch a launch"
+    );
+    // Tokens, not substrings: a new TAB is the drive's ordinary business, and
+    // a variable named for the session is not a command. Narration is not
+    // tested here — `is_reporting` filters it below, as it does for hooks.
+    assert!(
+        !is_session_lifecycle(r#""$CT" new-tab"#),
+        "a new tab is not a new session"
+    );
+    assert!(
+        !is_session_lifecycle(r#"P6C_SESSION_GONE="no""#),
+        "a variable named for the session is not a lifecycle command"
+    );
+    // The SHORT spellings. zellij gives every lifecycle subcommand a visible
+    // alias, so a denylist of long names has no teeth: `zellij ka` kills every
+    // session on the machine. Measured against
+    // zellij-utils-0.44.3/src/cli.rs:361-397 (swarm review, 2026-09-16).
+    for short in ["zellij ka", "zellij k mysession", "zellij da", "zellij d x"] {
+        assert!(
+            is_session_lifecycle(short),
+            "the detector must catch the short spelling: {short}"
+        );
+    }
+    assert!(
+        is_session_lifecycle("zellij delete-all-sessions"),
+        "delete-all-sessions is a lifecycle command under its long name too"
+    );
+    // …and only after a zellij invocation. These letters are ordinary shell.
+    assert!(
+        !is_session_lifecycle("ls -d /tmp"),
+        "a bare one-letter token is not a zellij subcommand"
+    );
+    assert!(
+        !is_session_lifecycle(r#"jq -r .a <<<"$STATUS""#),
+        "an argument that happens to read `a` is not a lifecycle command"
+    );
+
+    let offenders: Vec<_> = DRIVE_SOURCES
+        .iter()
+        .flat_map(|(name, src)| {
+            code_lines(src)
+                .into_iter()
+                .map(move |(n, l)| (format!("{name}:{n}"), l))
+        })
+        .filter(|(_, l)| !is_reporting(l))
+        .filter(|(_, l)| is_session_lifecycle(l))
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "the drive started or ended a session itself. It prints the command \
+         and waits for the human — that is what makes phase 6c's two launches \
+         safe.\n{offenders:#?}"
+    );
+}
+
+#[test]
+fn the_relaunch_phase_reads_the_set_through_the_tested_readers() {
+    // Phase 6c is the only phase that reads what the PREVIOUS session
+    // recorded, so it is the only one that can see the live set decay (#261) —
+    // a defect that reached a shipped branch with every gate green because no
+    // test launches twice.
+    assert!(
+        DRIVE.contains("P6c-relaunch"),
+        "the relaunch phase must exist — without it nothing but a human \
+         launching twice can catch the live set decaying"
+    );
+    // The verdict itself lives in qa/lib.sh and is exercised offline, against
+    // a store that decayed. The phase costs two maintainer launches, so a
+    // comparison only that pair of launches can try is one nobody tries —
+    // and the defect this phase exists for is exactly a leg that no test ran.
+    assert!(
+        DRIVE.contains("relaunch_checks"),
+        "phase 6c must reach its verdict through `relaunch_checks`, not a \
+         comparison written inline where nothing can run it"
+    );
+    for reader in [
+        "bound_uuids",
+        "last_live_uuids",
+        "held_bound_uuids",
+        "stale_status_uuids",
+        "close_candidate_tab",
+        "relaunch_checks",
+    ] {
+        assert!(
+            LIB.contains(&format!("{reader}()")),
+            "`{reader}` must live in qa/lib.sh, where the selftest reaches it"
+        );
+        assert!(
+            SELFTEST.contains(reader),
+            "`{reader}` must be covered by the offline selftest"
+        );
+    }
+    let witness = DRIVE
+        .find(r#"phase "P6b-isolation-witness""#)
+        .expect("the isolation witness must exist");
+    let relaunch = DRIVE
+        .find(r#"phase "P6c-relaunch""#)
+        .expect("the relaunch phase must exist");
+    let teardown = DRIVE
+        .find(r#"phase "P7-teardown""#)
+        .expect("the teardown must exist");
+    // Order is the property: the relaunch ends the session every earlier phase
+    // reads from, and the teardown hands back the session the human is looking
+    // at — which after 6c is the SECOND one.
+    assert!(
+        witness < relaunch && relaunch < teardown,
+        "the relaunch must sit between the isolation witness and the teardown \
+         (witness {witness}, relaunch {relaunch}, teardown {teardown})"
     );
 }
