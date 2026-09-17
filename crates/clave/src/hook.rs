@@ -415,6 +415,73 @@ fn take_checkout(rec: &mut AgentRecord, facts: Option<(String, Option<String>)>)
     true
 }
 
+/// Which linked worktree the session is in, off the LAST `worktree-state`
+/// record in `tail`. Three answers, and the outer `Option` is the one that
+/// matters: `None` is no record in the window — HOLD; `Some(None)` is a record
+/// saying the session has left its worktree — CLEAR; `Some(Some(path))` is a
+/// record naming one — SET.
+///
+/// Claude Code writes this record when a session enters or exits a worktree
+/// through its own worktree tool, and re-stamps it every few turns like
+/// `custom-title`. An exit writes `"worktreeSession":null` rather than
+/// omitting the record, which is what makes the clear readable: measured
+/// 2026-09-18 over the local corpus, 28 transcripts carry the record and 10 of
+/// them end on the null form.
+///
+/// **Why a third writer.** `clave add` asks git at mint time, and
+/// `add::heal_worktrees` asks git at setup and release time. Neither runs on
+/// the hook path, so a row whose session entered a worktree AFTER it was
+/// opened followed the move in `cwd` and `branch` (`take_checkout`) and wore
+/// the BRANCH mark until the next setup. Reported from the live fleet
+/// 2026-09-18: a card reading `clave` with no tree, whose session had been in
+/// `.claude/worktrees/term-chip-green` for an hour. The transcript names the
+/// path for free, on the tail this hook already parses, and it is the source
+/// that out-ranks the store (AGENTS.md).
+fn worktree_from_tail(tail: &str) -> Option<Option<String>> {
+    tail.lines().rev().find_map(|line| {
+        // Byte pre-filter before the parse, same discipline as the mark above.
+        if !line.contains(r#""type":"worktree-state""#) {
+            return None;
+        }
+        let v: serde_json::Value = serde_json::from_str(line).ok()?;
+        if v.get("type")?.as_str()? != "worktree-state" {
+            return None;
+        }
+        match v.get("worktreeSession")? {
+            serde_json::Value::Null => Some(None),
+            session => {
+                let path = session.get("worktreePath")?.as_str()?.trim();
+                (!path.is_empty()).then(|| Some(path.to_owned()))
+            }
+        }
+    })
+}
+
+/// Write, hold or clear `rec.worktree` against the transcript's reading.
+///
+/// A path is taken only when the row's `cwd` is inside it, component-wise —
+/// the same containment `take_checkout` uses to DROP the mark. The two must
+/// agree, or a `worktree-state` record older than a later `cwd` move would
+/// re-mark a row that has just left the tree. The cwd is the newer fact on
+/// every line; the worktree record is re-stamped by turns.
+///
+/// Returns whether the value moved, so a push happens only when a pixel would.
+fn take_worktree(rec: &mut AgentRecord, reading: Option<Option<String>>) -> bool {
+    let next = match reading {
+        None => return false,
+        Some(None) => None,
+        Some(Some(path)) => {
+            if !std::path::Path::new(&rec.cwd).starts_with(&path) {
+                return false;
+            }
+            Some(path)
+        }
+    };
+    let moved = rec.worktree != next;
+    rec.worktree = next;
+    moved
+}
+
 /// The tool name a fan-out arrives under. Measured 2026-09-14 over 1196
 /// transcripts reaching back to 2026-08-12: every launch on record is written
 /// `Agent`, and the older `Task` spelling appears in none of them. It was
@@ -1625,6 +1692,9 @@ pub fn apply_hook_event(
     // branch change itself, so the next hook spawns `pr-sync` for the new
     // question without waiting the 5 minutes out.
     changed |= take_checkout(rec, parsed.and_then(checkout_from_tail));
+    // The tree mark, from the same tail, AFTER the cwd has moved: the taker
+    // judges containment against the cwd the row now holds.
+    changed |= take_worktree(rec, parsed.and_then(worktree_from_tail));
     let level_moved = restamp_level(rec, smart_zone());
     // BOTH fields gate the push, not just the level. The glyph only moves once
     // per tenth of the zone, but #105 renders the raw count as text — gating on
@@ -3627,6 +3697,114 @@ mod tests {
         // coherent root for that reason: with `/x` it silently ran the
         // repo-clearing branch too, and asserted nothing about it.
         assert_eq!(rec.repo_root, "/repo", "the repo is still the repo");
+    }
+
+    /// A session that enters a worktree AFTER its row was minted earns the
+    /// tree mark from the transcript, without git and without waiting for the
+    /// next setup. Reported from the live fleet 2026-09-18: the row had
+    /// followed the cwd and branch (the test above this one) and still wore
+    /// the branch mark, because nothing on the hook path ever SET `worktree`.
+    #[test]
+    fn entering_a_worktree_mid_session_sets_the_mark_from_the_transcript() {
+        let entered = r#"{"type":"worktree-state","worktreeSession":{"originalCwd":"/repo","worktreePath":"/repo/.claude/worktrees/wt","worktreeName":"wt","worktreeBranch":"worktree-wt","originalBranch":"main"},"sessionId":"u1"}"#;
+        let left = r#"{"type":"worktree-state","worktreeSession":null,"sessionId":"u1"}"#;
+
+        assert_eq!(
+            worktree_from_tail(entered),
+            Some(Some("/repo/.claude/worktrees/wt".to_string()))
+        );
+        assert_eq!(
+            worktree_from_tail(left),
+            Some(None),
+            "an exit is a reading, not silence"
+        );
+        assert_eq!(
+            worktree_from_tail(r#"{"type":"user","cwd":"/repo/.claude/worktrees/wt"}"#),
+            None,
+            "no record in the window is a hold"
+        );
+        // The NEWEST record wins.
+        assert_eq!(
+            worktree_from_tail(&format!("{entered}\n{left}")),
+            Some(None)
+        );
+        assert_eq!(
+            worktree_from_tail(&format!("{left}\n{entered}")),
+            Some(Some("/repo/.claude/worktrees/wt".to_string()))
+        );
+
+        let mut rec = rec("u1");
+        rec.cwd = "/repo/.claude/worktrees/wt".into();
+        rec.branch = "worktree-wt".into();
+        rec.worktree = None;
+        assert!(take_worktree(&mut rec, worktree_from_tail(entered)));
+        assert_eq!(rec.worktree.as_deref(), Some("/repo/.claude/worktrees/wt"));
+        assert!(
+            !take_worktree(&mut rec, worktree_from_tail(entered)),
+            "idempotent"
+        );
+        assert!(!take_worktree(&mut rec, None), "silence holds");
+        assert_eq!(rec.worktree.as_deref(), Some("/repo/.claude/worktrees/wt"));
+
+        // An exit record clears the mark.
+        assert!(take_worktree(&mut rec, worktree_from_tail(left)));
+        assert_eq!(rec.worktree, None);
+        assert!(
+            !take_worktree(&mut rec, worktree_from_tail(left)),
+            "idempotent"
+        );
+    }
+
+    /// The record is believed only where the cwd agrees with it. A cwd line is
+    /// written on every turn; the worktree record is re-stamped less often, so
+    /// after a move OUT of the tree the newest worktree record can still name
+    /// it. Taking it would re-mark the row `take_checkout` just unmarked.
+    /// Component-wise, so `/repo/wt` cannot claim `/repo/wt2`.
+    #[test]
+    fn the_tree_mark_is_taken_only_where_the_cwd_is_inside_it() {
+        let named = |path: &str| Some(Some(path.to_string()));
+        let mut rec = rec("u1");
+        rec.cwd = "/repo".into();
+        rec.worktree = None;
+        assert!(!take_worktree(&mut rec, named("/repo/wt")));
+        assert_eq!(rec.worktree, None, "the cwd is outside the named tree");
+
+        rec.cwd = "/repo/wt2/src".into();
+        assert!(!take_worktree(&mut rec, named("/repo/wt")));
+        assert_eq!(
+            rec.worktree, None,
+            "a prefix of the name is not containment"
+        );
+
+        rec.cwd = "/repo/wt/src".into();
+        assert!(take_worktree(&mut rec, named("/repo/wt")));
+        assert_eq!(
+            rec.worktree.as_deref(),
+            Some("/repo/wt"),
+            "a subdirectory is inside"
+        );
+    }
+
+    /// End to end through the hook's own taker order: the cwd moves first,
+    /// then the mark is judged against the moved cwd. One tail, both records,
+    /// the row ends up marked. This is the shape the 2026-09-18 transcript had.
+    #[test]
+    fn one_stop_tail_moves_the_row_into_the_worktree_and_marks_it() {
+        let tail = concat!(
+            r#"{"type":"worktree-state","worktreeSession":{"originalCwd":"/repo","worktreePath":"/repo/.claude/worktrees/wt","worktreeName":"wt","worktreeBranch":"worktree-wt","originalBranch":"main"},"sessionId":"u1"}"#,
+            "\n",
+            r#"{"type":"user","cwd":"/repo/.claude/worktrees/wt","gitBranch":"worktree-wt","message":{"role":"user","content":"hi"}}"#,
+        );
+        let mut rec = rec("u1");
+        rec.cwd = "/repo".into();
+        rec.branch = "main".into();
+        rec.worktree = None;
+        let mut changed = take_checkout(&mut rec, checkout_from_tail(tail));
+        changed |= take_worktree(&mut rec, worktree_from_tail(tail));
+        assert!(changed);
+        assert_eq!(rec.cwd, "/repo/.claude/worktrees/wt");
+        assert_eq!(rec.branch, "worktree-wt");
+        assert_eq!(rec.worktree.as_deref(), Some("/repo/.claude/worktrees/wt"));
     }
 
     /// A checkout the layout generator cannot bake must not reach the store.
