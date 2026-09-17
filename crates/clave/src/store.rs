@@ -996,15 +996,26 @@ pub fn clear_session_order(paths: &StorePaths) -> Result<()> {
             });
             changed = true;
         }
-        // No agent runs at a launch, so a status carried over from the session
-        // before is a claim about a process that is gone. A restored tab came
+        // No agent runs at a launch, so a status that describes a RUNNING
+        // PROCESS is a claim about something that is gone. A restored tab came
         // back wearing the mark of an agent that had stopped, which reads as an
         // empty tab beside the live ones (#261, QA run 18). The first hook of
         // the new session states the truth; the launch only stops asserting the
         // old one. Binds above and status here go on the same pass, because
         // they die of the same cause.
+        //
+        // `Done` and `Failed` survive, and the distinction is the whole point
+        // of this loop (found in review). They describe a finished TURN, not a
+        // live process: the agent said its piece and stopped, and the mark is
+        // the human's "I have not read this yet". Nothing re-derives it —
+        // `backfill_summaries` restores summaries, not statuses — so clearing
+        // it destroyed an unread result on every relaunch, and dimmed every
+        // seeded demo fleet the moment the maintainer launched it.
         for r in s.agents.values_mut() {
-            if r.status != Status::Idle {
+            if matches!(
+                r.status,
+                Status::Working | Status::NeedsYou | Status::Exited
+            ) {
                 r.status = Status::Idle;
                 changed = true;
             }
@@ -2215,15 +2226,21 @@ mod tests {
         );
     }
 
-    /// A launch begins with no agent running anywhere, so every status a row
-    /// carries is a claim about a process from the session BEFORE. Left alone,
-    /// a restored tab comes back wearing the spinner of work that stopped at
-    /// the quit; on this branch it came back wearing `Exited`, which draws the
+    /// A launch begins with no agent running anywhere, so a status that names
+    /// a RUNNING PROCESS is a claim about the session BEFORE. Left alone, a
+    /// restored tab comes back wearing the spinner of work that stopped at the
+    /// quit; on this branch it came back wearing `Exited`, which draws the
     /// hollow "nothing here" mark on a tab that is about to start its agent —
     /// two opposite rows rendered the same (#261, seen on QA run 18).
     ///
     /// The first hook event of the new session states the truth, so the launch
     /// only has to stop asserting the old one.
+    ///
+    /// `Done` and `Failed` are the other half of the same rule, and this test
+    /// pins both halves together because either alone is wrong. They describe
+    /// a finished TURN, and the mark is the human's "I have not read this
+    /// yet". Nothing re-derives it, so clearing it threw away an unread result
+    /// on every relaunch (found in review).
     #[test]
     fn clear_session_order_drops_the_status_left_by_the_previous_session() {
         let d = tempfile::tempdir().unwrap();
@@ -2246,13 +2263,18 @@ mod tests {
         apply_bind(&p, "u-waiting", 2).unwrap();
         clear_session_order(&p).unwrap();
         let s = read_store(&p).unwrap();
-        for uuid in ["u-restored", "u-mid-turn", "u-waiting", "u-dormant"] {
+        for uuid in ["u-restored", "u-mid-turn", "u-waiting"] {
             assert_eq!(
                 s.agents[uuid].status,
                 Status::Idle,
                 "{uuid} must make no claim about a process the new session has not started"
             );
         }
+        assert_eq!(
+            s.agents["u-dormant"].status,
+            Status::Failed,
+            "a finished turn is not a running process — the result is still unread"
+        );
         // The rows themselves are untouched, and the live set is still recorded
         // from the binds — resetting the status must not cost the restore.
         assert_eq!(
