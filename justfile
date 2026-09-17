@@ -122,10 +122,21 @@ dev-install:
 # though the log line exists precisely to catch two builds of the same version
 # (FOOTGUNS.md). Both artifacts now carry the same tag, matching the pattern
 # `dev-install` already uses.
+# CLAVE_BAR_WASM is what makes the installed binary a RELEASE binary, not
+# merely a binary a release installed. `run_setup` (setup.rs) tells the two
+# environments apart by `release::embedded_wasm()`, and without the embed a
+# locally cut launcher answers "dev build" about itself: its own `clave setup`
+# takes the dev branch, meets the guard that protects a release install from a
+# dev binary, and refuses. `clave rows` regenerates through that same function,
+# so on 2026-09-14 it wrote the store, failed, and left config.kdl describing
+# the old geometry — two plugin identities, a second sidebar, dead navigation.
+# Every cut from v0.1.0 to v0.5.0 shipped without the embed. The embed also
+# makes a local cut the same KIND of artifact cargo-dist ships, which is what
+# `dist-build` claims parity with one recipe above.
 # Gate on a clean, vX.Y.Z-tagged HEAD, then install versioned artifacts (§2).
 release:
     CLAVE_BUILD_TAG=$(git describe --tags --exact-match HEAD 2>/dev/null || echo untagged) cargo build -p clave-bar --release --target wasm32-wasip1
-    CLAVE_BUILD_TAG=$(git describe --tags --exact-match HEAD 2>/dev/null || echo untagged) cargo build --release -p clave
+    CLAVE_BAR_WASM=$(pwd)/target/wasm32-wasip1/release/clave-bar.wasm CLAVE_BUILD_TAG=$(git describe --tags --exact-match HEAD 2>/dev/null || echo untagged) cargo build --release -p clave
     ./target/release/clave release \
         --wasm-src target/wasm32-wasip1/release/clave-bar.wasm \
         --cli-src target/release/clave

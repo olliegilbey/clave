@@ -171,8 +171,21 @@ What the two readings genuinely differ in is **resolution and meaning**:
 | | while `Working` | once the turn is over |
 |---|---|---|
 | ink | crystalBlue `#7E9CD8` | dimmed meta |
-| grain | seconds under a minute (`3s`, `59s`) | minutes and up (`5m`, `2h`) |
+| grain | seconds under a minute (`3s`, `59s`), then minutes AND seconds from `1m 0s` to `9m59s`, then minutes only from `10m` | minutes and up (`5m`, `2h`) |
 | means | how long this turn has run | how stale this row is |
+
+**Amended 2026-09-14 — the seconds run to ten minutes, not to one.** Driving
+the cut, the card fell from `59s` straight to `1m` and then said nothing new
+for a whole minute. The seconds earn their cells for as long as a turn is
+worth waiting out, so the live reading now has THREE bands: seconds under the
+minute, minutes and seconds up to ten, and the staleness ladder above that.
+Ten is where a turn stops being in progress and starts being long; past it a
+digit changing every second is noise.
+
+The middle band is five cells wide, always — the minutes digit cannot reach
+two before the band ends, so the seconds right-align into their own pair and
+the number never shifts under the eye. That widened the clock cell from three
+to five, and §5.3's gap paid for it.
 
 The drive is what settled it: the card read `0m` for the whole of a turn Claude
 Code's own footer was calling `3s`. Staleness in seconds would be noise; a turn
@@ -255,6 +268,40 @@ is the third structural glyph, stacked under status and provenance.
 **A count was tried and dropped.** "This row has fanned out" is the whole
 signal; the digit beside it was noise.
 
+**Amended 2026-09-14: the mark is a LEDGER, not a reading.** It was read off
+`pendingBackgroundAgentCount` on the turn's own closing record. Claude Code
+writes that record AFTER the Stop hook runs, so clave always read the PREVIOUS
+turn's, and the glyph outlived its agents by half an hour at a time. Measured
+over 40 live transcripts: 22.5 hours of the glyph sitting on rows with nothing
+under them. Widening the window made it worse, because a wider window only
+reaches a staler record.
+
+The mark is now every fan-out the window holds, minus every fan-out the window
+has seen finish — both written at the moment the thing happens, so the mark
+rises at the first hook event after a launch and falls at the first one after
+the last agent stops. Same 40 transcripts, 0.0 hours of a stuck glyph.
+
+**A launch is also bounded by AGE — six hours.** The ledger inherits one
+failure from the rule it replaced if it is not: a session killed with `kill -9`
+writes no closing record and fires no `SessionEnd`, so its last launch holds the
+mark for as long as the window holds the line, and a resume re-arms it from the
+same line. Measured 2026-09-14: 4 of 1196 transcripts end their window on
+exactly that, 5 to 26 days stale. Six hours is where the bound stops being
+free: replayed against ground truth over the 40 sessions that hold fan-outs,
+the missed-mark time is 1.99 hours at no bound, at 24 hours, at 12 and at 6 —
+identical — then 3.67 at 2 hours and 5.28 at 1. The run lengths agree (889
+runs, median 2.5 minutes, p99 82.0); the three that passed six hours lose their
+mark. The bound is evaluated when a hook fires, so it rescues a RESUMED
+session; a row whose session was killed speaks again only when it is resumed or
+pruned.
+
+**A wrong-off is the safer error, and the one that remains.** A launch can
+outrun the window, and then a live agent loses its mark: 2.0 hours over those
+sessions, against a floor of 0.7 that no window beats, because the mark can
+only move when a hook fires. The age bound and the undatable-launch rule choose
+the same way. Under-claiming depth beats sending the user to look at a row
+where nothing is running.
+
 ### 4.7 `wants` — the flexing cell, and the reason for the change
 
 What this agent is blocked on, in its own words, in `NEEDS_YOU_INK`. It claims
@@ -286,6 +333,12 @@ is right — an older Claude Code never wrote the field — but nothing ended th
 hold. A `SessionEnd` now clears it (`take_subagents`): a session that has
 exited can have nothing pending under it, and a held mark would sit on a
 dormant row claiming depth the user cannot go and look at.
+
+*Superseded four days later.* The hold is gone, not patched: §4.6's amendment
+of 2026-09-14 reads a window with no fan-out traffic in it as an empty fleet.
+A hold whose only clearing signal is one specific event is the defect shape, not
+the fix. `SessionEnd` still forces the mark down, because that event reads no
+transcript at all and so has no window to judge.
 
 Its sources, cheapest first:
 
@@ -326,16 +379,25 @@ figure is a different question, asked less often, and it would cost columns the
 | subs    | 3 (` X `)   | the subagent mark, boolean (§4.6)      | `#9CABCA`              |
 | rail    | 2 (`│ `)    | the spine                              | the repo's ink         |
 | tokens  | **4**       | thousands of tokens (`211k`, `1.1m`)   | the battery ramp band  |
-| gap     | **3**       | —                                      | —                      |
-| clock   | **3**, right-aligned | ONE cell, two resolutions (§4.4) | crystalBlue while `Working`, else meta ink |
+| gap     | **1**       | — (was 3; see below)                   | —                      |
+| clock   | **5**, right-aligned | ONE cell, three resolutions (§4.4) | crystalBlue while `Working`, else meta ink |
 | wants   | 1 + flex    | §4.7 — expanded only                   | needs-you ink          |
 | margin  | 1           | —                                      | —                      |
 
-**The token gap is three cells, not one.** At one, `211k 20m` reads as a single
-figure — the same failure that kept the two clocks apart. Two was the ruling
-until the card was driven; three is what actually puts the expanded clock in the
-columns the COLLAPSED card holds it in, and the collapsed position is the ruled
-one (§5.3). The number is load-bearing, not taste.
+**The token gap is not a free choice.** It is whatever the collapsed profile
+has left once the chrome, the token field and the clock have taken theirs,
+because the clock must occupy the SAME columns in both profiles and only one
+gap does that. The collapsed position is the ruled one (§5.3).
+
+**Amended 2026-09-14 — one cell, and the trade is recorded.** Three was the
+number while the clock was three cells wide. §4.4's middle band took two of
+them. At one cell `130k 9m59s` can read as a single figure, which is the exact
+failure that once kept the two clocks apart, and Ollie made the call with that
+named: the seconds are the reading someone is waiting on, and the two numbers
+carry different inks while a turn is live. **If the pair ever does read as one
+number, the fix is two more columns on the collapsed card, not a narrower
+clock.** Sixteen was chosen when the clock was three wide; it is the constraint
+here, not the gap.
 
 **Collapsed locks the clock to the right edge**, one cell in, computed from what
 the line has already spent rather than from a second margin constant. With one
@@ -453,7 +515,7 @@ The three cells, and what wiring each one taught:
 | Cell     | Wired from                                                           |
 | -------- | -------------------------------------------------------------------- |
 | clock    | **no new field.** `last_interacted` already was the turn start, because `UserPromptSubmit` both moves it and is the only event that sets `Working`. The store timestamp §4.4 asked for was never needed. |
-| subs     | `pendingBackgroundAgentCount`, from the turn's own closing record. A closing record that names NO count is a zero, not a silence — held the mark lit forever until fixed. And it must read the raw tail, not the statusLine-suppressed one: the meter has no subagent reading to yield to, and gated on it the mark never lands in a released install. |
+| subs     | Fan-out launches minus the notifications that closed them, over a 2 MiB window — the declared count on the turn's closing record was unreachable in time, and §4.6's 2026-09-14 amendment has the measurements. Two wiring rules survive that change. It reads a WIDER window than every other cell, which is affordable only because it byte-filters before it parses. And it reads the raw tail, not the statusLine-suppressed one: the meter has no subagent reading to yield to, and gated on it the mark never lands in a released install. |
 | `wants`  | tier 1 — the permission tool name `hook.rs` was discarding. Tier 2, the scribe, is still deferred. |
 
 Blank stayed the meaning throughout, so each landed independently and the card

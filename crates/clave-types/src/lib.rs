@@ -431,10 +431,15 @@ pub struct Agent {
     /// payloads parseable.
     #[serde(default)]
     pub summary: String,
-    /// Worktree path if `clave add --worktree` created one, else None — the
-    /// input to S6's provenance glyph (#61). Held on `AgentRecord` since
-    /// §6.3 and simply never projected until now. `Option<String>` not
-    /// `bool`: #24 wants the worktree DIRECTORY NAME, which needs the path.
+    /// The LINKED worktree this agent runs in, else None — the input to S6's
+    /// provenance glyph (#61). Held on `AgentRecord` since §6.3 and simply
+    /// never projected until now. `Option<String>` not `bool`: #24 wants the
+    /// worktree DIRECTORY NAME, which needs the path.
+    ///
+    /// Widened 2026-09-14: it used to mean "clave created this worktree", so
+    /// worktrees made any other way drew the branch mark instead of the tree.
+    /// The host decides it now (`add::worktree_of`), from git rather than
+    /// from the shape of the path.
     /// `default` keeps pre-field payloads parseable.
     #[serde(default)]
     pub worktree: Option<String>,
