@@ -135,10 +135,55 @@ with a python script written to `/tmp` via a heredoc, then run it plainly.
 `cargo build -p clave-bar` cannot link (wasm-only bin) — use `cargo test -p
 clave-bar --lib`. Run `cargo fmt --all` before every `just gates`.
 
+## Subagent review (2026-09-17, after the green drive)
+
+Three reviewers, unbriefed on each other: the host CLI, the tests and prose,
+and the bar model. Twenty-one findings. All are resolved in `9f170aa`,
+`a698020`, `334fe57` and `b0c61df`, except the two below.
+
+Four were real product defects, each a state a person reaches in ordinary use,
+and none of them visible to the tests we had:
+
+1. **Close one restored tab and no held agent ever wakes again.** The wake
+   guard asked a per-instance counter a question about the whole fleet. Only
+   the elected owner writes that counter, and the bar a person is standing in
+   is by definition not the owner.
+2. **A row whose folder is gone had the same effect**, from the first moment of
+   the session, because it can never come back and so the queue never once read
+   empty.
+3. **An agent that exited could not be restarted.** Its tab still carries the
+   original command text after the process quits, and that held the row out of
+   the dormant block, which is the only place the restart is offered.
+4. **Two tabs naming one agent** bound it twice every pass, forever.
+
+Plus: the relaunch verdict tool could not fail. It is the documented recovery
+when the drive times out waiting for a launch, and it printed a red verdict and
+exited 0. Fixed at both ends, and its selftest now runs the script rather than
+the function inside it.
+
+Every new guard was proved load-bearing by disabling it and watching the named
+test go red. Ten new tests; the bar's are two-model, per the FOOTGUNS rule.
+
+**Still open, both needing Ollie's call:**
+- **The launch's status reset is too broad.** It clears `Done` and `Failed`,
+  which describe a finished turn rather than a running process, so an unread
+  green result is destroyed by a relaunch. It also flattens every seeded demo
+  fleet. Narrowing it to the statuses that describe a live process is small.
+  **This branch, or a follow-up?**
+- **A restore that does not finish permanently shrinks the fleet.** Pre-existing
+  and agreed to be its own issue; needs his go to file.
+
+Declined: the duplicated `just --list` line on `mutants-cold` is the house
+pattern, not a defect.
+
+**Not yet re-driven.** The four bar fixes above changed product behaviour, so
+drive run 22's green is against the previous wasm. The exited-agent restart is
+the one worth an eyeball: quit an agent, then press Alt+Enter on its row.
+
 ## Restart Hint
 
-Tree clean, gates green, 32 commits unpushed. A drive is mid-flight at P6c —
-read `/tmp/clave-qa-run.log` before anything else.
+Tree clean, gates green, 810 tests passing, 35 commits unpushed. The review is
+complete; the two open questions above gate the push.
 
 ## Suggested Skills
 
