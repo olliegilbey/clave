@@ -60,19 +60,17 @@ pub struct PaneMeta {
 
 /// The agent uuid a pane's command would spawn, if that command is one of
 /// OURS. `None` for everything else, which is the point: it is the whole test
-/// separating a restored clave tab from any other held command pane a human
-/// might have, and `run_held_effect` will start what it admits.
+/// separating a restored clave tab from any other held command pane, and
+/// `run_held_effect` starts what it admits.
 ///
-/// The baked binary is either the bare `clave` of a dev/sandbox session or the
-/// absolute path of a versioned copy in a release install (§2's binary split),
-/// so ownership is decided by `clave_types::is_clave_binary` — the same
-/// function the host matches its own hook commands with.
+/// The baked binary is a bare `clave` in a sandbox and a versioned absolute
+/// path in a release install (§2's binary split), so ownership is decided by
+/// `clave_types::is_clave_binary`.
 ///
-/// zellij hands the launch command back as one space-joined string, so the
-/// binary is found by locating the `spawn` SUBCOMMAND and reading the token in
-/// front of it, not by taking the first token. An install path that contains a
-/// space would otherwise split into a first token that is not a binary at all,
-/// and every restored tab under it would come back as a terminal row.
+/// zellij returns the command as one space-joined string, so the binary is
+/// found by locating the `spawn` SUBCOMMAND and reading the token before it,
+/// not by taking the first token: an install path containing a space would
+/// otherwise make every restored tab under it come back as a terminal row.
 fn spawn_uuid(cmd: &str) -> Option<&str> {
     let tokens: Vec<&str> = cmd.split_whitespace().collect();
     let sub = tokens.iter().position(|t| *t == "spawn")?;
@@ -362,11 +360,9 @@ pub enum Effect {
     ///   launch are separate acts). The human asked for this conversation, so
     ///   the tab runs it and keeps the focus it takes.
     /// - `Some(tab_id)` — the staggered restore (#261). The tab comes back
-    ///   with its agent HELD, and the focus goes back to `tab_id` — the
-    ///   sequencer's own tab. That is the tab the LAUNCH baked, which need not
-    ///   be the tab the human is in; the point is that the focus does not stay
-    ///   on a tab nobody asked for. Both halves ride one field because neither
-    ///   is correct alone: see `open::run_open`.
+    ///   with its agent HELD and the focus returns to `tab_id`, the
+    ///   sequencer's own tab, so it never settles on a tab nobody asked for.
+    ///   Both halves ride one field because neither is correct alone.
     ///
     /// In both cases the model has already marked the uuid in-flight (↻).
     OpenAgent {
@@ -807,20 +803,15 @@ pub struct BarModel {
     /// This bar sent a restore open and owes its own tab a re-anchor (#261).
     ///
     /// A tab made by `zellij action new-tab` always takes the focus, so the
-    /// restore hands it straight back (`open::run_open`). The bar born in the
-    /// new tab may have announced itself first, which would leave the beacon
-    /// naming a tab nobody is standing in, and nav dies (FOOTGUNS — "a beacon
-    /// naming a tab the user is NOT looking at reads as dead nav"). The queue
-    /// itself no longer depends on the beacon — `restore_next` elects off
-    /// `restore_owner` — which is exactly why it survived long enough for the
-    /// stranded beacon to be found by hand instead of by a stalled restore.
+    /// restore hands it straight back. The bar born in the new tab may have
+    /// announced itself first, stranding the beacon on a tab nobody stands in
+    /// — dead nav, per FOOTGUNS.
     ///
     /// Its OWN flag rather than `organic_pending`, which [`BarModel::beacon`]
-    /// clears on the grounds that an arriving beacon is truth — right for
-    /// Alt+o, and exactly backwards here, where the arriving beacon IS the
-    /// thing to undo. Paid on the next tab frame, which is the frame the
-    /// returning focus delivers, so the re-anchor is sent after the birth
-    /// announce it answers rather than racing it.
+    /// clears on the grounds that an arriving beacon is truth: right for
+    /// Alt+o, backwards here, where the arriving beacon IS the thing to undo.
+    /// Paid on the next tab frame — the frame the returning focus delivers —
+    /// so the re-anchor follows the birth announce instead of racing it.
     restore_reanchor_owed: bool,
     /// Last bind-leg state we reported (#178). Only a CHANGE is worth a line;
     /// see `Effect::BindStall`.
@@ -1027,11 +1018,10 @@ impl BarModel {
     ///
     /// The case that forces it: `zellij action new-tab` focuses the tab it
     /// makes whatever the layout asks
-    /// (`zellij-utils-0.44.3/src/input/actions.rs:1611-1625`), so a tab the
-    /// staggered restore brings back is born focused and its newborn bar
-    /// announces itself. That announce is a `None → own` for that instance.
-    /// Read as an arrival it starts the agent the hold exists to keep asleep —
-    /// on every row of the fleet, ~350 MB each.
+    /// (`zellij-utils-0.44.3/src/input/actions.rs:1611-1625`), so a restored
+    /// tab is born focused and its newborn bar announces itself — a
+    /// `None → own`. Read as an arrival, that starts the agent the hold exists
+    /// to keep asleep, on every row of the fleet.
     fn set_beacon(&mut self, tab_id: usize) {
         if self.current_tab.is_some_and(|prev| prev != tab_id) {
             self.beacon_moved = true;
@@ -1443,49 +1433,32 @@ impl BarModel {
         fx
     }
 
-    /// Start this tab's restored agent, if it has one waiting.
+    /// Start this tab's restored agent, if it has one waiting (#261).
     ///
-    /// A relaunch brings the previous live set back as tabs whose `clave spawn`
-    /// is created HELD (`add::tab_layout` with `TabStart::Held`, one tab at a
-    /// time through `restore_effects`), so the fleet's shape returns for the
-    /// cost of a layout instead of ~350 MB per row. The human landing on a tab
-    /// is what converts it into a running agent, and this is where that
-    /// happens.
+    /// Starting one costs ~350 MB resident and is never returned, so every
+    /// gate here exists to stop a start nobody asked for.
     ///
-    /// Gated on the BEACON (`own_tab_focused`), not on the election
-    /// `identity_effects` already applied. That election reads our own tab
-    /// frame's active flag, and FOOTGUNS records why that is not a visibility
-    /// gate: "every hidden instance's stale tab set claims its own tab is
-    /// active, so anything gated on self-diagnosed 'am I active' is poisoned
-    /// during event bursts". A store snapshot re-enters this pass on EVERY
-    /// instance, so a starved bar could start an agent in a tab nobody is
-    /// looking at — ~350 MB resident, never returned, and no self-heal. The
-    /// bind and prune arms beside it survive the weaker gate because they are
-    /// idempotent; `shell_toggle` takes this same stronger one for this same
-    /// reason ("only the spawn arm is dangerous in duplicate").
+    /// - **The beacon, not the election.** `identity_effects`' election reads
+    ///   our own tab frame, which FOOTGUNS records as poisoned during bursts.
+    ///   This pass re-enters on every store snapshot, on every instance, so a
+    ///   starved bar would start an agent in a tab nobody is looking at. The
+    ///   bind and prune arms survive the weaker gate because they are
+    ///   idempotent; this one and `shell_toggle` are not.
+    /// - **`!exited`.** zellij's held flag also means "this RAN, press ENTER
+    ///   to run it again" — starting that resurrects an agent the human
+    ///   deliberately quit.
+    /// - **The command must be ours.** Any `zellij run` pane waiting to re-run
+    ///   reports held too. `spawn_uuid` is the test: our binary, our subcommand.
+    /// - **The fleet is settled.** Nothing starts while the restore queue is
+    ///   still running — the `restore_settled` gate in the body.
     ///
-    /// Two guards on the PANE, both load-bearing, neither about our own panes:
-    ///
-    /// - **`!exited`.** zellij's held flag also means "this command RAN, it
-    ///   finished, press ENTER to run it again". Starting that would resurrect
-    ///   an agent the human deliberately quit, just for walking past its tab.
-    /// - **The command must be ours.** Any `zellij run` command pane waiting to
-    ///   be re-run reports held as well, and re-running a stranger's command
-    ///   because the human navigated near it is clave reaching outside its own
-    ///   fleet. `spawn_uuid` is the whole test: our binary, our subcommand.
-    ///
-    /// And one on the FLEET: nothing starts while the restore queue is still
-    /// running — see the `restore_settled` gate in the body.
-    ///
-    /// Latched on pane id ([`BarModel::held_run_sent`]). Running the pane does
-    /// clear its held flag, but only in the NEXT manifest, and this pass
-    /// re-enters on every store snapshot — one broadcast by any agent's hook
-    /// anywhere in the fleet. In that window the pane still reads held and not
-    /// exited, so an unlatched arm restarts a claude that has just begun to
-    /// boot. The old rationale here rested on zellij ignoring a duplicate
-    /// rerun, which this repo cannot check: `zellij-server` is not vendored,
-    /// and `zellij-tile-0.44.3/src/shim.rs:1744` says only "Re-run command in
-    /// pane". Latching is cheaper than measuring it. (#261)
+    /// Latched on pane id ([`BarModel::held_run_sent`]) because running a pane
+    /// clears its held flag only in the NEXT manifest, and this pass re-enters
+    /// on any hook anywhere in the fleet. In that window an unlatched arm
+    /// restarts a claude that has just begun to boot. Whether zellij ignores
+    /// the duplicate is unknowable here: `zellij-server` is not vendored, and
+    /// `zellij-tile-0.44.3/src/shim.rs:1744` says only "Re-run command in
+    /// pane".
     fn run_held_effect(&mut self) -> Option<Effect> {
         if !self.own_tab_focused() {
             return None;
@@ -1501,19 +1474,16 @@ impl BarModel {
         if !self.beacon_moved {
             return None;
         }
-        // And the restore must be OVER. While the queue is running, the
-        // beacon is not evidence of anything: every tab it builds takes the
-        // focus on the way in and gives it back a moment later, so `beacon`
-        // named four different tabs eight times in 800 ms on the 2026-09-17
-        // run and two restored agents woke with nobody near them. `beacon_moved`
-        // cannot tell that churn from an arrival, because as a sequence of
-        // beacons it IS an arrival. The queue draining is what makes the
-        // signal mean something again.
+        // And the restore must be OVER. While the queue runs, every tab it
+        // builds takes the focus and gives it back, so the beacon is not
+        // evidence of anything: measured 2026-09-17, four tabs named eight
+        // times in 800 ms, and two agents woke with nobody near them.
+        // `beacon_moved` cannot tell that churn from an arrival — as a
+        // sequence of beacons it IS one.
         //
-        // The cost is small and one-sided: walk onto a restored tab while the
-        // rest are still coming back and it stays asleep until you step away
-        // and return. Waking an agent nobody asked for is the expensive
-        // mistake (~350 MB), and this arm exists to prevent it.
+        // The cost is one-sided: arrive while the rest are coming back and the
+        // tab stays asleep until you step away and return. Waking an agent
+        // nobody asked for is the expensive mistake (~350 MB).
         if !self.restore_settled && self.restore_pending() {
             return None;
         }
@@ -1534,17 +1504,15 @@ impl BarModel {
 
     /// Rebuild [`Self::spawn_binds`] from the two delivered frames.
     ///
-    /// Deliberately NOT gated on `is_held`. A command pane's launch command is
-    /// static — it still reads `clave spawn …` after the process has execed —
-    /// so the same join holds through the beat between the human starting a
-    /// restored tab and the store's bind landing, which is exactly where a
-    /// flicker would show. `is_held` and `exited` gate the ACTION
-    /// ([`Self::run_held_effect`]), where starting something is at stake; here
-    /// nothing starts and the only question is which row owns the tab.
+    /// Deliberately NOT gated on `is_held`. A command pane keeps its launch
+    /// command after the process execs, so the same join holds through the
+    /// beat between a restored tab starting and the store's bind landing —
+    /// exactly where a flicker would show. `is_held`/`exited` gate the ACTION
+    /// ([`Self::run_held_effect`]); here nothing starts.
     ///
-    /// The two frames are joined on tab POSITION, so an incoherent pair can
-    /// name the wrong tab for a beat. That is the same exposure `is_dormant`
-    /// already accepts on its pane leg, and it costs a flicker, not a write.
+    /// The two frames join on tab POSITION, so an incoherent pair can name the
+    /// wrong tab for a beat — the exposure `is_dormant` already accepts on its
+    /// pane leg. It costs a flicker, not a write.
     fn rebuild_spawn_binds(&mut self) {
         let mut claimed: Vec<String> = Vec::new();
         // ASCENDING TAB ID, which is NOT the order zellij hands tabs over —
@@ -1552,7 +1520,7 @@ impl BarModel {
         // `restored_bind_effects` resolves the same contention by lowest tab
         // id, so iterating in the given order let the two disagree: the bind
         // lands on one tab while the row draws under another, which is the
-        // blink this branch already paid for once (CodeRabbit, #261).
+        // blink (CodeRabbit, #261).
         let mut by_tab_id: Vec<&TabMeta> = self.tabs.iter().collect();
         by_tab_id.sort_by_key(|t| t.tab_id);
         self.spawn_binds = by_tab_id
@@ -1563,11 +1531,10 @@ impl BarModel {
                     .iter()
                     .filter(|p| p.tab_position == t.position && !p.is_plugin)
                     .find_map(|p| p.terminal_command.as_deref().and_then(spawn_uuid))?;
-                // ONE tab per agent, LOWEST TAB ID wins. Two tabs can carry a held
-                // pane for one uuid — this branch made that state live before
-                // the launch named the restore's owner — and the pair then
-                // renders the agent twice and emits two `clave bind` calls for
-                // it per pass, against a ledger keyed by uuid alone. Rejecting
+                // ONE tab per agent, LOWEST TAB ID wins. Two tabs can carry a
+                // held pane for one uuid, and the pair then renders the agent
+                // twice and emits two `clave bind` calls per pass against a
+                // ledger keyed by uuid alone. Rejecting
                 // the second claim here is also what bounds the bind budget:
                 // `restored_bind_sent` refunds its tries when the target tab
                 // changes, so two tabs that alternate never spend it.
@@ -1600,18 +1567,15 @@ impl BarModel {
             a.uuid == uuid
                 && !self.store_tab_live(a)
                 // Nor when the pane that names it has EXITED. A command pane
-                // keeps its launch command after the process quits, so the
-                // name-join outlives the agent — and by then `is_dormant` is
-                // true, so the dormant block draws the row too and the bar
-                // lists one agent TWICE, top and bottom, with only the lower
-                // copy restartable. Seen on screen 2026-09-17.
+                // keeps its launch command after the process quits, so this
+                // join outlives the agent — and `is_dormant` is true by then,
+                // so both blocks draw the row and one agent is listed twice.
                 //
-                // `exited` and not `is_dormant`: in the beat between a restored
-                // tab's spawn starting and the store's bind landing the row is
-                // dormant as well, and there the claim must HOLD or the tab
-                // blinks back to a terminal. Running-but-unbound and ran-and-
-                // quit are the two states, and `exited` is what tells them
-                // apart. (#261)
+                // `exited`, not `is_dormant`: between a restored tab's spawn
+                // starting and its bind landing the row is dormant too, and
+                // there the claim must HOLD or the tab blinks back to a
+                // terminal. `exited` is what separates running-but-unbound
+                // from ran-and-quit. (#261)
                 && !self.spawn_pane_exited(tab_id, uuid)
         })
     }
@@ -1649,10 +1613,8 @@ impl BarModel {
             // drawn here as well. The store's bind outlives the agent on
             // purpose — that is what brings the tab back at the next launch —
             // so an agent that ran and quit still points at a tab while
-            // `is_dormant` calls it dormant, and the bar then listed the SAME
-            // agent twice, top and bottom, with only the lower copy
-            // restartable. Seen on screen 2026-09-17. The tab is an ordinary
-            // terminal now. (#261)
+            // `is_dormant` calls it dormant, and both blocks draw it. The tab
+            // it left behind is an ordinary terminal. (#261)
             .find(|a| a.tab_id == Some(tab_id) && !self.is_dormant(a))
             .or_else(|| self.spawn_bound_agent(tab_id))
     }
@@ -1797,40 +1759,26 @@ impl BarModel {
 
     /// Record the row EVERY held tab is holding, before the human reaches it.
     ///
-    /// `Store::last_live` — the set the next relaunch brings back — is built
-    /// from the store's tab binds. A restored tab shows its row from the
-    /// moment the session starts, but writes no bind until its `clave spawn`
-    /// runs, so a fleet the human only partly visited recorded only the
-    /// visited part and the restored set shrank on every relaunch. This is
-    /// the leg that makes a cold tab a real bound row, which is what it
-    /// already is on screen.
+    /// `Store::last_live` is built from the store's tab binds, and a restored
+    /// tab writes no bind until its spawn RUNS. So a fleet the human only
+    /// partly visited recorded only the visited part, and the restored set
+    /// shrank on every relaunch (#261). This leg makes a cold tab the bound
+    /// row it already is on screen.
     ///
     /// **Runs from the ELECTED instance, over every tab — not from each tab
-    /// for itself.** The first version did the latter and could never fire:
-    /// a bar resolves its own tab id through `own_tab`, which needs the tab
-    /// frame, and zellij delivers that frame ONLY to the focused tab
-    /// (`main.rs`'s beacon exists for exactly this reason). So the one
-    /// instance that could act was the one tab the human was already looking
-    /// at, and the unvisited tabs this leg exists for stayed silent. Measured
-    /// on a live relaunch, 2026-09-15: four restored tabs, one bind.
-    ///
-    /// The elected bar has what the others lack. `PaneUpdate` is a GLOBAL
-    /// manifest, so it sees every tab's held pane and the uuid baked into its
-    /// command; `TabUpdate` gives it the whole tab list, so it can turn each
-    /// pane's position into a tab id. Only that last step crosses frames, and
-    /// `frames_coherent` — which `elects_confirmed` already requires — is the
-    /// guard for exactly that: the uuid and the position come from the SAME
-    /// frame, so a stale pairing cannot bind a row to another row's tab.
-    ///
-    /// Emits the ordinary [`Effect::Bind`], because being elected is what the
-    /// shell's own gate on that effect tests. The earlier ungated
-    /// `BindRestored` existed only to escape an election this leg now rides.
+    /// for itself.** A bar resolves its own tab id from the tab frame, which
+    /// zellij delivers only to the FOCUSED tab, so a per-tab version can act
+    /// only where the human already is and the unvisited tabs stay silent.
+    /// Measured on a live relaunch, 2026-09-15: four restored tabs, one bind.
+    /// The elected bar has what the others lack — `PaneUpdate` is a global
+    /// manifest, `TabUpdate` the whole tab list — and `frames_coherent`, which
+    /// `elects_confirmed` already requires, is what stops a stale pairing
+    /// binding a row to another row's tab.
     ///
     /// Disjoint from [`Self::bind_effects`] in what it EMITS: that leg needs a
-    /// REGISTERED pane (`uuid_to_pane`), which only a spawn that has run
-    /// produces, and this one takes only panes still waiting to run. It is NOT
-    /// disjoint in what that leg CLEARS, which is why the ledger is separate —
-    /// see [`BarModel::restored_bind_sent`].
+    /// REGISTERED pane, which only a spawn that has run produces, and this one
+    /// takes only panes still waiting to run. It is NOT disjoint in what that
+    /// leg CLEARS — see [`BarModel::restored_bind_sent`].
     pub fn restored_bind_effects(&mut self) -> Vec<Effect> {
         if !self.elects_confirmed() {
             return Vec::new();
@@ -1858,10 +1806,9 @@ impl BarModel {
                 continue;
             };
             // ONE tab per agent, the lowest tab id wins. Two tabs can hold a
-            // held pane for one uuid — this branch made that state live before
-            // the launch named the restore's owner — and without this rule the
-            // pair writes two `clave bind` calls for one agent in one pass,
-            // against a ledger keyed by uuid alone. The rule is also what
+            // held pane for one uuid, and without this rule the pair writes
+            // two `clave bind` calls for one agent in one pass, against a
+            // ledger keyed by uuid alone. The rule is also what
             // BOUNDS the budget below: `restored_bind_sent` refunds its tries
             // whenever the target tab changes, so two tabs that take turns
             // never spend it and the bar runs a subprocess per store advance
@@ -1922,52 +1869,39 @@ impl BarModel {
             .retain(|uuid, _| known.contains(uuid.as_str()));
         out
     }
-    /// The commit path (Alt+Enter, #100): mark in-flight and emit the run.
-    /// The `opening` guard is double-fire protection #1 (clave open's
-    /// liveness no-op is #2). The caller has already refused stale rows —
-    /// ✗ offers no launch, and a dead row is #112's retirement business.
+
     /// The next row the staggered restore owes, or `None` when it is finished.
     ///
     /// The queue is derived, never stored: a row is owed if the previous
-    /// session held it, this bar has not opened it yet, and it holds no tab
-    /// now. That last clause is what makes the human and the sequencer need no
-    /// coordination — reaching a row first binds it, and a bound row is simply
-    /// not owed. A row named in the set but missing from the store was pruned
+    /// session held it, this bar has not opened it, and it holds no tab now.
+    /// That last clause is why the human and the sequencer need no
+    /// coordination — reaching a row first binds it, and a bound row is not
+    /// owed. A row named in the set but missing from the store was pruned
     /// between sessions, and is stepped over rather than waited for.
     fn restore_next(&self) -> Option<&str> {
         // Every instance reads the same store and would reach this conclusion
         // at the same moment, so N bars would open the same row N times.
         //
-        // The election is the LAUNCH'S NAME, not the focus. Focus was the
-        // first design and it cannot work here: `zellij action new-tab` always
-        // takes the focus (FOOTGUNS), so every tab the restore makes is born
-        // believing it is the one the human is in, and starts the queue over
-        // from the top. Measured 2026-09-17 — the beacon named four different
-        // tabs eight times in 800 ms, five tabs were built in that window, and
-        // the run before it killed the zellij server with "Too many open
-        // files". A sequencer cannot be elected by a signal its own work
-        // destroys.
+        // The election is the LAUNCH'S NAME, not the focus. `zellij action
+        // new-tab` always takes the focus (FOOTGUNS), so every tab the restore
+        // makes is born believing it is the one the human is in and starts the
+        // queue again from the top. A sequencer cannot be elected by a signal
+        // its own work destroys.
         if !self.owns_the_restore() {
             return None;
         }
         // Wait for the TAB, not for the next store advance. `restore_sent` is
-        // set the instant an open goes out, so on its own it paces the queue
-        // at one row per SNAPSHOT — and a launch pushes a flurry of those. The
-        // first live relaunch (2026-09-17) sent three tabs inside one second
-        // and killed the zellij server with "Too many open files": the handle
-        // burst belongs to zellij BUILDING the tab, which runs long after the
-        // row is marked sent. `opening` holds a row from the open until its
-        // tab exists, and `prune_opening` releases it on a bind, a stale row,
-        // or a row that left the store.
+        // set the instant an open goes out, which paces the queue at one row
+        // per SNAPSHOT — and a launch pushes a flurry. Measured 2026-09-17:
+        // three tabs inside one second killed the zellij server with "Too many
+        // open files", because the handle burst belongs to zellij BUILDING the
+        // tab, long after the row is marked sent.
         //
-        // Those three cover every open that FINISHES, including the two that
-        // fail loudly (a missing cwd is stale; an already-live row releases on
-        // its own liveness). An open that dies without pushing a snapshot —
-        // zellij refusing `new-tab`, or `dump-layout` bailing — holds the mark
-        // with nothing left to clear it, and the rest of the queue never
-        // comes back. There is no timeout on purpose: relaunching is the
-        // repair, and it is the same repair the fleet already needs after a
-        // restore that does not finish (known-open, its own issue).
+        // `prune_opening` releases a row on a bind, a stale row, or a row that
+        // left the store — every open that FINISHES. An open that dies without
+        // pushing a snapshot holds the mark forever and the queue stops. No
+        // timeout, on purpose: relaunching is the repair, and it is the repair
+        // that shrunken-fleet case already needs (known-open, its own issue).
         if !self.opening.is_empty() {
             return None;
         }

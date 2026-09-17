@@ -325,18 +325,14 @@ pub struct Store {
     /// single row over a few relaunches.
     ///
     /// Deliberately UNRANKED and UNCAPPED. A SET, written in ascending tab id
-    /// only so the file is deterministic: tab id is creation order, and the
-    /// order the human actually saw was the bar's own ranking, which
-    /// `restore_rows` recomputes from these rows' agent-scoped `buckets` and
-    /// `commit_ord`. Any policy about how much of the set comes back hot is
-    /// likewise applied on the read side. Keeping those apart is what lets the
-    /// restore policy be retuned without touching the store's correctness.
+    /// only so the file is deterministic; the order the human saw was the
+    /// bar's ranking, which `restore_rows` recomputes. Every policy about how
+    /// much comes back hot lives on the read side, so it can be retuned
+    /// without touching the store's correctness.
     ///
     /// Agent-scoped, unlike `tab_order`/`tab_buckets`/`tab_touched` beside it:
-    /// those hold session-scoped tab ids and must die with the session, while
-    /// this holds agent uuids, which outlive it. `default` (empty) keeps
-    /// pre-field store files loading and means "nothing to restore" — the
-    /// single-eager-row path launch already takes.
+    /// those hold session-scoped tab ids and must die with the session. An
+    /// empty default means "nothing to restore" — the single-eager-row path.
     #[serde(default)]
     pub last_live: Vec<String>,
     /// Which row's tab drives the staggered restore (#261).
@@ -350,18 +346,14 @@ pub struct Store {
     pub restore_owner: Option<String>,
     /// Did any row bind a tab since the last launch? (#261)
     ///
-    /// `clear_session_order` records `last_live` and then nulls every bind, so
-    /// the store cannot tell two very different sessions apart afterwards: one
-    /// that opened tabs and closed them all (the set must go EMPTY), and one
-    /// that came up and never bound at all — a bar that failed to load, or a
-    /// human who quit within the first seconds (the set must SURVIVE). Both
-    /// reach the next launch with no binds and no tab order.
-    ///
-    /// This is the one fact that separates them, and only a live session can
-    /// supply it. Armed false by `clear_session_order`, set true by the first
-    /// `apply_bind`. Found by swarm review 2026-09-16, which also measured
-    /// that gating on `tab_order` instead does NOT work: the quit-with-nothing
-    /// -open case clears it on the same pass.
+    /// Two very different sessions reach the next launch with no binds and no
+    /// tab order: one that opened tabs and closed them all (the set must go
+    /// EMPTY), and one that never bound at all — a bar that failed to load, a
+    /// human who quit in the first seconds (the set must SURVIVE). This flag
+    /// is the one fact separating them, and only a live session supplies it.
+    /// Armed false by `clear_session_order`, set true by the first
+    /// `apply_bind`. Gating on `tab_order` instead does NOT work: the
+    /// quit-with-nothing-open case clears it on the same pass.
     ///
     /// The default is TRUE, and only a store the PREVIOUS clave wrote can
     /// reach it — every launch from this version on writes the field. So the

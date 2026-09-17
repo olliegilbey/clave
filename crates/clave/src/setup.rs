@@ -1210,24 +1210,20 @@ pub fn eager_row(store: &crate::store::Store) -> Option<&crate::store::AgentReco
 /// set (`Store::last_live`, written by `clear_session_order`), resolved to
 /// records and RANKED the way the bar ranks them.
 ///
-/// `last_live` is a SET, not an order. It is written in ascending tab id,
-/// which is the order the tabs were created in — never the order the human
-/// saw, because the bar sorts its rows by investment and the zellij tab strip
-/// is not the interface (Alt+1..9 indexes rendered ROWS, `model::nav`). So
-/// the rank is computed here from the agent record, which is exactly what
-/// makes it possible: `buckets` and `commit_ord` are agent-scoped and survive
-/// the session, while every tab-scoped twin the bar would otherwise use dies
-/// with it.
+/// `last_live` is a SET, not an order — written in ascending tab id, which is
+/// creation order and never the order the human saw (the bar ranks by
+/// investment, and Alt+1..9 indexes rendered ROWS, not the tab strip). The
+/// rank is therefore computed here from the agent record, which only works
+/// because `buckets` and `commit_ord` are agent-scoped and survive the
+/// session, while every tab-scoped twin dies with it.
 ///
-/// The order decides one visible thing beyond the tab strip: launch focuses
-/// the FIRST row, so the first row is the one that starts. The top of the
-/// fleet is the row worth paying ~350 MB for.
+/// Launch focuses the FIRST row, so the first row is the one that starts: the
+/// top of the fleet is the row worth paying ~350 MB for.
 ///
 /// Two kinds of entry are dropped, because the snapshot is a faithful record
 /// rather than a filtered one: a uuid naming no row (idle-pruned between
-/// sessions), and a row whose cwd has vanished (a deleted worktree) — the
-/// latter is `eager_row`'s existing guard, and for the same reason. Baking a
-/// tab for either emits a spawn that dies at canonicalize.
+/// sessions), and a row whose cwd has vanished. Baking a tab for either emits
+/// a spawn that dies at canonicalize.
 ///
 /// Empty is the ordinary cold-start answer, not an error: a first run, or a
 /// session quit with nothing open. Launch falls back to the single eager row.
@@ -1284,27 +1280,24 @@ pub fn restore_rows(store: &crate::store::Store, now_hour: u32) -> Vec<&crate::s
 /// dropped, reported, and the rest still come back.
 ///
 /// An emptied restored set falls through to the eager row. Checking the set
-/// for emptiness BEFORE the filter (as this did until the swarm review of
-/// #261) bakes a session with a bar and no agent at all on the day every
-/// restored cwd is rejected — strictly worse than the cold start it replaced.
+/// for emptiness BEFORE the filter bakes a session with a bar and no agent at
+/// all on the day every restored cwd is rejected — strictly worse than the
+/// cold start it replaced.
 ///
-/// Returns the rows and the lines to report, rather than reporting them
-/// itself: that keeps the decision pure, and the decision is the part worth
-/// testing. It lives here, beside `restore_rows` and `eager_row`, because
-/// `launch_session` is excluded from `just mutants` on the stated grounds that
-/// the pieces it orchestrates are each tested directly.
+/// Returns the rows and the lines to report rather than reporting them, which
+/// keeps the decision pure and testable. It sits beside `restore_rows` and
+/// `eager_row` because `launch_session` is excluded from `just mutants` on the
+/// grounds that the pieces it orchestrates are each tested directly.
 ///
-/// The one-row limit is a resource bound, measured 2026-09-16. Building a tab
-/// costs a burst of roughly fifty file handles, opened in the same instant and
-/// drained a second later; four tabs peaked at 252 against macOS's default
-/// ceiling of 256, and five crashed the zellij server with "Too many open
-/// files" (twice, reproduced). Baking the whole fleet therefore fails on
-/// exactly the fleets the restore exists to serve, and a crashed launch loses
-/// tabs permanently. Sequencing keeps the burst at one tab's worth whatever
-/// the size of the fleet.
+/// The one-row limit is a resource bound, measured 2026-09-16: building a tab
+/// costs a burst of about fifty file handles, four tabs peaked at 252 against
+/// macOS's ceiling of 256, and five crashed the zellij server with "Too many
+/// open files" (reproduced twice). Baking the whole fleet fails on exactly the
+/// fleets the restore exists to serve, and a crashed launch loses tabs for
+/// good. Sequencing holds the burst at one tab whatever the fleet size.
 ///
-/// DEFERRED IS NOT DROPPED. A deferred row comes back; it just comes back a
-/// few seconds later. A dropped row does not come back at all, and says why.
+/// DEFERRED IS NOT DROPPED. A deferred row comes back a few seconds later. A
+/// dropped row does not come back at all, and says why.
 fn bakeable_rows<'a>(
     restored: Vec<&'a crate::store::AgentRecord>,
     eager: Option<&'a crate::store::AgentRecord>,
@@ -1502,12 +1495,10 @@ pub fn launch_session() -> Result<()> {
     // prints `baked=[…]` with the row simply absent, which reads as the
     // restore losing it rather than the disk having lost it (found in review).
     //
-    // A CREATE only, like the owner write below. An attach bakes no tab and
-    // defers nothing — `clear_session_order` did not even run, so `last_live`
-    // still describes the session BEFORE the live one. Logging here would
-    // announce a restore that is not happening, over a set that is already
-    // two sessions old, into the same log a person reads to find out why a
-    // restore went wrong (CodeRabbit, #261).
+    // A CREATE only. An attach bakes no tab and defers nothing, and
+    // `clear_session_order` did not run, so `last_live` still describes the
+    // session before the live one: logging here would announce a restore that
+    // is not happening, over a two-session-old set (#261).
     if !live {
         for uuid in &store.last_live {
             if !restorable.iter().any(|r| &r.uuid == uuid) {
