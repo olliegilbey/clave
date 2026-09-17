@@ -11,9 +11,10 @@
 //!   follow the user's theme.
 //! - **[`Theme`]** — what DOES follow the user's zellij theme: the backgrounds,
 //!   the default ink (rule, summary, dormant glyph), the chip text, the
-//!   untinted grey and the eight repo inks. `Theme::default()` is the curated
-//!   kanagawa design the lock ratified, byte-identical to the pre-#145
-//!   constants, so every golden and the README assets pin the default;
+//!   terminal green, the untinted grey and the eight repo inks.
+//!   `Theme::default()` is the curated kanagawa design the lock ratified,
+//!   byte-identical to the pre-#145 constants, so every golden and the README
+//!   assets pin the default;
 //!   [`Theme::from_styling`] maps a live zellij theme onto the same fields.
 //!
 //! zellij-tile DATA types only (`Styling` et al. are re-exported
@@ -84,6 +85,12 @@ pub const DEFAULT_INK: Rgb = Rgb(0xDC, 0xD7, 0xBA);
 /// sumiInk0 — text ON a title chip. Public because the preview draws the same
 /// chip in its palette swatches (lock §4).
 pub const CHIP_INK: Rgb = Rgb(0x16, 0x16, 0x1D);
+
+/// springGreen — the tab name ON a terminal chip. The black block says "no
+/// agent ink claimed this row", which only tells the reader what the row is
+/// NOT; green on black says terminal outright, and it is the one association a
+/// terminal user cannot misread. Themed, not fixed: see [`Theme::term_ink`].
+pub const TERM_INK: Rgb = Rgb(0x98, 0xBB, 0x6C);
 
 /// The ink a row falls back to when it has no palette entry yet. Reachable:
 /// allocation is store-backed iterate-and-wrap (lock §4) and a row can render
@@ -156,15 +163,6 @@ pub const TURN_INK: Rgb = Rgb(0x7E, 0x9C, 0xD8);
 /// rendering.
 pub const SUBS_INK: Rgb = Rgb(0x9C, 0xAB, 0xCA);
 pub const SUBS_MARK: char = '\u{f171a}';
-
-/// The tab name ON a terminal chip — kanagawa springGreen over the chip's
-/// theme black. The black block says "no agent ink claimed this row", which
-/// only tells the reader what the row is NOT; green on black says terminal
-/// outright, and it is the one association a terminal user cannot misread.
-/// Fixed under every theme for the same reason the status inks are: the
-/// meaning is in the hue, so a green that arrived only under kanagawa would be
-/// a legend the reader has to relearn per theme.
-pub const TERM_INK: Rgb = Rgb(0x98, 0xBB, 0x6C); // springGreen
 
 /// The status-mark inks (LEDGER D10's table). Fixed under every theme (#145):
 /// the COLOUR is the state, and a red that meant "failed" only under kanagawa
@@ -313,6 +311,8 @@ pub struct Theme {
     pub default_ink: Rgb,
     /// Dark text ON a title chip; the background OF a terminal row's name chip.
     pub chip_ink: Rgb,
+    /// The tab name ON a terminal row's name chip — the theme's own green.
+    pub term_ink: Rgb,
     /// The Idle mark and the absent/out-of-range ink fallback.
     pub untinted: Rgb,
     /// The repo inks (lock §4). Always [`PALETTE_LEN`] long — see the const.
@@ -329,6 +329,7 @@ impl Default for Theme {
             sel_bg: SEL_BG,
             default_ink: DEFAULT_INK,
             chip_ink: CHIP_INK,
+            term_ink: TERM_INK,
             untinted: UNTINTED,
             palette: core::array::from_fn(|i| PALETTE[i].0),
         }
@@ -388,6 +389,13 @@ impl Theme {
     /// - `chip_ink` ← `base` darkened 30% toward black: "darker than the bar",
     ///   which is the relationship sumiInk0 has to sumiInk3 in the curated
     ///   design, preserved as a relationship rather than a colour.
+    /// - `term_ink` ← `exit_code_success.base`, through [`readable`]. "Success"
+    ///   is the one slot a theme is almost certain to paint green: it is green
+    ///   in 34 of the 41 themes vendored with zellij 0.44.3 (measured over
+    ///   `zellij-utils-0.44.3/assets/themes/*.kdl`), olive in gruvbox and
+    ///   atelier, and blue in only three — ao and the two icebergs. Those three
+    ///   still get a colour that MEANS success in their own language, which is
+    ///   the honest reading of a themed role.
     /// - `untinted` ← `default_ink` mixed 65% toward `base`: legible-but-quiet,
     ///   the relationship sumiInk4 has to the kanagawa pair.
     /// - `palette` ← [`harvest`].
@@ -403,6 +411,7 @@ impl Theme {
         }
         let base = rgb(s.text_unselected.background);
         let default_ink = rgb(s.text_unselected.base);
+        let chip_ink = base.mix(Rgb(0, 0, 0), 0.3);
         Theme {
             base,
             sel_bg: clamp_sel(
@@ -411,10 +420,26 @@ impl Theme {
                 rgb(s.text_unselected.emphasis_1),
             ),
             default_ink,
-            chip_ink: base.mix(Rgb(0, 0, 0), 0.3),
+            chip_ink,
+            term_ink: readable(rgb(s.exit_code_success.base), chip_ink, default_ink),
             untinted: default_ink.mix(base, 0.65),
             palette: harvest(s, base, default_ink),
         }
+    }
+}
+
+/// Text over a chip, or the fallback if it cannot be read there. A theme is
+/// free to paint "success" almost the same black as the chip it would sit on —
+/// molokai's success is `#008C00` and a near-black theme would swallow it — and
+/// an unreadable chip is worse than a chip with no green in it at all. The
+/// floor is [`MIN_INK_LUMA_DIST`], the same distance the repo inks must clear
+/// from the bar background, because it is the same question: can this text be
+/// read off this ground.
+fn readable(ink: Rgb, ground: Rgb, fallback: Rgb) -> Rgb {
+    if (luma(ink) - luma(ground)).abs() >= MIN_INK_LUMA_DIST {
+        ink
+    } else {
+        fallback
     }
 }
 
@@ -750,6 +775,28 @@ mod tests {
         // springBlue — at the curated selection weight instead.
         assert_eq!(t.sel_bg, Rgb(52, 67, 78), "selection = springBlue tint");
         assert_eq!(t.chip_ink, Rgb(15, 15, 20), "chip text = base toward black");
+        // autumnGreen — zellij kanagawa's own `exit_code_success`, and NOT the
+        // curated springGreen: the role follows the theme, so the terminal
+        // chip wears the green this theme calls success.
+        assert_eq!(t.term_ink, Rgb(118, 148, 106), "terminal name = success");
+    }
+
+    /// The terminal green is the one themed ink that sits on the chip's black
+    /// rather than on the bar, so it is gated against the chip. A theme whose
+    /// success colour is nearly the chip's own black keeps a readable name
+    /// instead of a green one — an unreadable chip is worse than a chip with
+    /// no green in it.
+    #[test]
+    fn a_success_colour_too_dark_for_the_chip_falls_back_to_the_default_ink() {
+        let mut s = zellij_kanagawa();
+        let chip = Theme::from_styling(&s).chip_ink;
+        s.exit_code_success.base = PaletteColor::Rgb((chip.0, chip.1, chip.2));
+        let t = Theme::from_styling(&s);
+        assert_eq!(t.term_ink, t.default_ink, "swallowed green reads as text");
+        // The floor is a floor, not a fence: a dark green that clears it is
+        // kept. molokai-dark's success is this colour.
+        s.exit_code_success.base = PaletteColor::Rgb((0, 140, 0));
+        assert_eq!(Theme::from_styling(&s).term_ink, Rgb(0, 140, 0));
     }
 
     /// The harvest, pinned over the real kanagawa slots. The legible theme

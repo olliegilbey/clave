@@ -181,7 +181,7 @@ pub use crate::theme::{
 };
 use crate::theme::{
     DONE_INK, ELLIPSIS, FAILED_INK, LCAP, NEEDS_YOU_INK, OPENING_INK, RCAP, RULE, TERM_GLYPH,
-    TERM_INK, TERM_MARK, WORKING_INK,
+    TERM_MARK, WORKING_INK,
 };
 
 // ── the row ─────────────────────────────────────────────────────────────────
@@ -987,7 +987,7 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool, theme:
             // labelling mechanism; the default `Tab #N` wears the chip too.
             // The block keeps its black on the selected row (ratified).
             out.push_str(&theme.chip_ink.mix(theme.base, fade).bg());
-            out.push_str(&TERM_INK.fg());
+            out.push_str(&theme.term_ink.fg());
             out.push_str(&clamp(name, widths.title));
             out.push_str(RESET);
             out.push_str(&o);

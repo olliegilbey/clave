@@ -39,8 +39,7 @@ use crate::render::{Row, RowContent, cell_slice, clip_to_cells, display_cells, h
 use crate::theme::{
     BATTERY, BRACKET_A, BRACKET_B, BRANCH_INK, CARD_BOT, CARD_TOP, CLAUDE_GLYPH, CLAUDE_INK,
     CONSOLE, DORMANT_FADE, ELLIPSIS, FADE, LCAP, META_INK, NEEDS_YOU_INK, OPENAI_GLYPH, OPENAI_INK,
-    PR_INK, RCAP, RESET, RULE, Rgb, SUBS_INK, SUBS_MARK, TERM_INK, TERM_MARK, TURN_INK, Theme,
-    WORKTREE_INK,
+    PR_INK, RCAP, RESET, RULE, Rgb, SUBS_INK, SUBS_MARK, TERM_MARK, TURN_INK, Theme, WORKTREE_INK,
 };
 
 // ── the budgets (the example's fixed cells) ─────────────────────────────────
@@ -396,7 +395,7 @@ pub(crate) fn render_double_card(
             l1.push_str(&format!(
                 "{}{}{}{RESET}",
                 theme.chip_ink.bg(),
-                ink(TERM_INK).fg(),
+                ink(theme.term_ink).fg(),
                 pad(label, CHIP_W)
             ));
             l1.push_str(&seg(ink(theme.chip_ink), &RCAP.to_string()));
@@ -571,7 +570,7 @@ pub(crate) fn render_card(
             l1.push_str(&format!(
                 "{}{}{}{RESET}",
                 theme.chip_ink.bg(),
-                ink(TERM_INK).fg(),
+                ink(theme.term_ink).fg(),
                 pad(label, CHIP_W)
             ));
             l1.push_str(&seg(ink(theme.chip_ink), &RCAP.to_string()));
@@ -2155,7 +2154,7 @@ mod tests {
     fn a_terminal_pill_writes_its_name_in_green_and_an_agent_pill_does_not() {
         let theme = Theme::default();
         let f = fleet();
-        let pill = format!("{}{}", theme.chip_ink.bg(), TERM_INK.fg());
+        let pill = format!("{}{}", theme.chip_ink.bg(), theme.term_ink.fg());
         for (i, want) in [(6, true), (4, false)] {
             let mut lines =
                 vec![render_double_card(&f[i], CARD_EXPANDED_COLS, false, false, &theme).0];
