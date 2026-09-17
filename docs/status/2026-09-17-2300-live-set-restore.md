@@ -1,6 +1,6 @@
 # Handoff — #261 live set restore, after the subagent review
 
-2026-09-17 23:00. Branch `worktree-live-set-restore`, 39 commits unpushed,
+2026-09-17 23:00. Branch `worktree-live-set-restore`, 41 commits unpushed,
 gates green, 810+ tests passing. Supersedes `2026-09-17-2030-*`.
 
 ## Where this is
@@ -30,34 +30,31 @@ fix proved live).
 PASS, from Ollie's second screenshot: the duplicate row is gone. The tab of an
 agent that quit now draws as TERM, and the agent appears once, dormant.
 
-**OPEN — the current task.** Ollie's `Alt+a` row `dc13c31f-e298-4d78-a884-
-72d8b0007ff1` (cwd `.../repos/relaunch-restore-restored-d`) went dormant
-correctly and the restart FIRED — so the restart path works — but `clave spawn`
-then refused:
+FIXED, from Ollie's third screenshot. Two more defects, both from the same
+family — `Status::Exited` is new on this branch, and two places read it as
+something it does not mean.
 
-> no transcript found for session dc13c31f-… anywhere under
-> ~/.claude/projects: this row has already conversed, so starting a FRESH
-> session would silently shadow the real one
+`5e85025` — an agent you quit before it ever conversed could not be
+restarted. `spawn` read every non-idle status as proof a conversation had
+happened, and refused to shadow a transcript that was never written. That is
+the exact dead end the restart exists to open.
 
-The row has `session_id: None` in the store, yet the sidebar renders it
-`opus` / `hi` / `0m` — a summary that can only come FROM a transcript. So
-either the transcript exists and the lookup cannot find it, or the "has
-already conversed" judgement is made from something other than `session_id`
-and is wrong.
+`d55bc4c` — a restarted agent kept the mark of the one that quit. The hook
+table has no SessionStart leg, so the row said "stopped" until its next
+prompt: drawn dim, and offered to the picker as a resume, which attaches a
+second client to a live session. The pane registration now takes the mark
+off, because that is the moment we know the row runs again.
 
-**Next step:** look for the jsonl under
-`~/.claude/projects/*clave-dev-live-set-459d*repos-relaunch-restore-restored-d*/`
-and find what `clave spawn` uses to decide "already conversed" (grep the
-refusal string in `crates/clave/src/spawn.rs`). Decide whether this is a #261
-regression or pre-existing — it is NOT one of the review findings, and it may
-predate the branch. If pre-existing, it is a separate issue, not a blocker.
+**NEXT:** restage the sandbox and confirm both on screen — quit an agent,
+restart it, and watch the row come back live rather than dim. Then ask for
+the go to push.
 
 Note the fixture keeps putting `Alt+a` rows in a directory a seeded row
 already owns, so two rows share a label. That is the fixture, not a defect.
 
 ## Still needs Ollie
 
-- His go to push (39 commits), then the PR body rewrite
+- His go to push (41 commits), then the PR body rewrite
   (`.github/PULL_REQUEST_TEMPLATE.md`, `--body-file`).
 - His go to file: a restore that does not finish permanently shrinks the
   fleet. Pre-existing, agreed to be its own issue.
