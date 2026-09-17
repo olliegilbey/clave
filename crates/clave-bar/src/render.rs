@@ -181,7 +181,7 @@ pub use crate::theme::{
 };
 use crate::theme::{
     DONE_INK, ELLIPSIS, FAILED_INK, LCAP, NEEDS_YOU_INK, OPENING_INK, RCAP, RULE, TERM_GLYPH,
-    TERM_MARK, WORKING_INK,
+    TERM_INK, TERM_MARK, WORKING_INK,
 };
 
 // ── the row ─────────────────────────────────────────────────────────────────
@@ -979,14 +979,15 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool, theme:
             command,
             ..
         } => {
-            // The tab NAME becomes the chip (#206): fujiWhite text on
+            // The tab NAME becomes the chip (#206): springGreen text on
             // theme-black — the inversion of an agent chip (dark text on an
             // allocated colour), which is exactly the semantics: a block no
-            // agent ink has claimed. `zellij action rename-tab` is the
+            // agent ink has claimed. Green on black then says WHAT the block
+            // is, not only what it is not. `zellij action rename-tab` is the
             // labelling mechanism; the default `Tab #N` wears the chip too.
             // The block keeps its black on the selected row (ratified).
             out.push_str(&theme.chip_ink.mix(theme.base, fade).bg());
-            out.push_str(&theme.default_ink.fg());
+            out.push_str(&TERM_INK.fg());
             out.push_str(&clamp(name, widths.title));
             out.push_str(RESET);
             out.push_str(&o);
@@ -1929,8 +1930,9 @@ mod tests {
     ///   before D19.)
     /// - Row 1 has no title, so cols 13–21 are blank; `clave` is padded to 7 at
     ///   cols 23–29. Row 3 is a terminal (#206): the console mark in the status
-    ///   cell, `TERM` in the battery cell, the tab name as a chip on sumiInk0,
-    ///   and a blank repo/summary — nothing is known about its pane yet.
+    ///   cell, `TERM` in the battery cell, the tab name as a springGreen chip
+    ///   on sumiInk0, and a blank repo/summary — nothing is known about its
+    ///   pane yet.
     /// - The battery cell is cols 6–9, right-aligned: `105k`, seven tenths of the
     ///   default smart zone, in the ramp's yellow band (#105).
     /// - The hues are crystalBlue `#7E9CD8`, waveRed `#E46876`, carpYellow
@@ -1970,7 +1972,7 @@ mod tests {
         let expected = [
             " \u{1b}[38;2;179;86;98m\u{25cf} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;180;154;109m105k             \u{1b}[38;2;102;125;172mclave   \u{1b}[38;2;173;169;150mI just passed the spe\u{2026} \u{1b}[0m ",
             "\u{1b}[38;2;45;79;103m\u{e0b6}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m\u{1b}[38;2;255;158;59m\u{25cf}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;220;215;186m\u{2502}\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;230;195;132m105k\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;126;156;216m\u{f1bb}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;122;168;159m\u{1b}[38;2;22;22;29mS6-GUT   \u{1b}[0m\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;126;156;216mclave  \u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m picking the gutter set\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[0m\u{1b}[38;2;45;79;103m\u{e0b4}\u{1b}[0m",
-            " \u{1b}[38;2;173;169;150m\u{f018d} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;173;169;150mTERM   \u{1b}[48;2;24;24;32m\u{1b}[38;2;220;215;186mTab #16  \u{1b}[0m \u{1b}[38;2;173;169;150m        \u{1b}[38;2;173;169;150m                       \u{1b}[0m ",
+            " \u{1b}[38;2;173;169;150m\u{f018d} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;173;169;150mTERM   \u{1b}[48;2;24;24;32m\u{1b}[38;2;152;187;108mTab #16  \u{1b}[0m \u{1b}[38;2;173;169;150m        \u{1b}[38;2;173;169;150m                       \u{1b}[0m ",
         ];
         assert_eq!(render_all(&rows, DESIGN_COLS, Widths::EXPANDED), expected);
         // The same derived self-checks the COLLAPSED golden carries. A golden
@@ -2067,7 +2069,7 @@ mod tests {
         let expected = [
             " \u{1b}[38;2;179;86;98m\u{25cf} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;180;154;109m\u{f007c}           \u{1b}[38;2;102;125;172mcla \u{1b}[38;2;173;169;150mI just\u{2026} \u{1b}[0m ",
             "\u{1b}[38;2;45;79;103m\u{e0b6}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m\u{1b}[38;2;255;158;59m\u{25cf}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;220;215;186m\u{2502}\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;230;195;132m\u{f007c}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;126;156;216m\u{f1bb}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;122;168;159m\u{1b}[38;2;22;22;29mS6-GUT \u{1b}[0m\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;126;156;216mcla\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m pickin\u{2026}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[0m\u{1b}[38;2;45;79;103m\u{e0b4}\u{1b}[0m",
-            " \u{1b}[38;2;173;169;150m\u{f018d} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;173;169;150m\u{f120}   \u{1b}[48;2;24;24;32m\u{1b}[38;2;220;215;186mTab #16\u{1b}[0m \u{1b}[38;2;173;169;150m    \u{1b}[38;2;173;169;150m        \u{1b}[0m ",
+            " \u{1b}[38;2;173;169;150m\u{f018d} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;173;169;150m\u{f120}   \u{1b}[48;2;24;24;32m\u{1b}[38;2;152;187;108mTab #16\u{1b}[0m \u{1b}[38;2;173;169;150m    \u{1b}[38;2;173;169;150m        \u{1b}[0m ",
         ];
         assert_eq!(
             render_all(&rows, COLLAPSED_DESIGN_COLS, Widths::COLLAPSED),

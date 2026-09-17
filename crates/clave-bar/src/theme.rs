@@ -157,6 +157,15 @@ pub const TURN_INK: Rgb = Rgb(0x7E, 0x9C, 0xD8);
 pub const SUBS_INK: Rgb = Rgb(0x9C, 0xAB, 0xCA);
 pub const SUBS_MARK: char = '\u{f171a}';
 
+/// The tab name ON a terminal chip — kanagawa springGreen over the chip's
+/// theme black. The black block says "no agent ink claimed this row", which
+/// only tells the reader what the row is NOT; green on black says terminal
+/// outright, and it is the one association a terminal user cannot misread.
+/// Fixed under every theme for the same reason the status inks are: the
+/// meaning is in the hue, so a green that arrived only under kanagawa would be
+/// a legend the reader has to relearn per theme.
+pub const TERM_INK: Rgb = Rgb(0x98, 0xBB, 0x6C); // springGreen
+
 /// The status-mark inks (LEDGER D10's table). Fixed under every theme (#145):
 /// the COLOUR is the state, and a red that meant "failed" only under kanagawa
 /// would be a legend the reader has to relearn per theme.

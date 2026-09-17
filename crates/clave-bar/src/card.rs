@@ -39,7 +39,8 @@ use crate::render::{Row, RowContent, cell_slice, clip_to_cells, display_cells, h
 use crate::theme::{
     BATTERY, BRACKET_A, BRACKET_B, BRANCH_INK, CARD_BOT, CARD_TOP, CLAUDE_GLYPH, CLAUDE_INK,
     CONSOLE, DORMANT_FADE, ELLIPSIS, FADE, LCAP, META_INK, NEEDS_YOU_INK, OPENAI_GLYPH, OPENAI_INK,
-    PR_INK, RCAP, RESET, RULE, Rgb, SUBS_INK, SUBS_MARK, TERM_MARK, TURN_INK, Theme, WORKTREE_INK,
+    PR_INK, RCAP, RESET, RULE, Rgb, SUBS_INK, SUBS_MARK, TERM_INK, TERM_MARK, TURN_INK, Theme,
+    WORKTREE_INK,
 };
 
 // ── the budgets (the example's fixed cells) ─────────────────────────────────
@@ -388,13 +389,14 @@ pub(crate) fn render_double_card(
             l1.push_str(&seg(chip_bg, &RCAP.to_string()));
         }
         // The TERM pill: the title chip's shape with theme black instead of a
-        // palette colour — a block no agent ink has claimed (round 8).
+        // palette colour — a block no agent ink has claimed (round 8) — and
+        // the name in `TERM_INK`, green on black for terminal.
         Some((label, None)) => {
             l1.push_str(&seg(ink(theme.chip_ink), &LCAP.to_string()));
             l1.push_str(&format!(
                 "{}{}{}{RESET}",
                 theme.chip_ink.bg(),
-                ink(theme.default_ink).fg(),
+                ink(TERM_INK).fg(),
                 pad(label, CHIP_W)
             ));
             l1.push_str(&seg(ink(theme.chip_ink), &RCAP.to_string()));
@@ -563,13 +565,13 @@ pub(crate) fn render_card(
             ));
             l1.push_str(&seg(chip_bg, &RCAP.to_string()));
         }
-        // The TERM pill: the title chip's shape in theme black.
+        // The TERM pill: the title chip's shape in theme black, green name.
         Some((label, None)) => {
             l1.push_str(&seg(ink(theme.chip_ink), &LCAP.to_string()));
             l1.push_str(&format!(
                 "{}{}{}{RESET}",
                 theme.chip_ink.bg(),
-                ink(theme.default_ink).fg(),
+                ink(TERM_INK).fg(),
                 pad(label, CHIP_W)
             ));
             l1.push_str(&seg(ink(theme.chip_ink), &RCAP.to_string()));
@@ -2141,6 +2143,27 @@ mod tests {
             pin(&f[12], 48).1,
             " \u{f1bb} \u{2570}  resumaker resume-fix                   1h "
         );
+    }
+
+    /// Green on black is what says "terminal" (Ollie, 2026-09-18). The pill
+    /// keeps the black block, and the NAME carries `TERM_INK`, so the pill
+    /// says what the row IS and not only which ink it lacks. The pair is
+    /// asserted as one string — black background then green text — because
+    /// springGreen is also the PR ink, and a card that shows a PR number would
+    /// pass a test that only looked for the hue.
+    #[test]
+    fn a_terminal_pill_writes_its_name_in_green_and_an_agent_pill_does_not() {
+        let theme = Theme::default();
+        let f = fleet();
+        let pill = format!("{}{}", theme.chip_ink.bg(), TERM_INK.fg());
+        for (i, want) in [(6, true), (4, false)] {
+            let mut lines =
+                vec![render_double_card(&f[i], CARD_EXPANDED_COLS, false, false, &theme).0];
+            lines.push(render_card(&f[i], CARD_EXPANDED_COLS, false, 0, &theme)[0].clone());
+            for l1 in lines {
+                assert_eq!(l1.contains(&pill), want, "row {i}: {l1:?}");
+            }
+        }
     }
 
     #[test]
