@@ -1578,9 +1578,45 @@ impl BarModel {
             .iter()
             .find(|(_, id)| *id == tab_id)
             .map(|(u, _)| u.as_str())?;
-        self.agents
+        self.agents.iter().find(|a| {
+            a.uuid == uuid
+                && !self.store_tab_live(a)
+                // Nor when the pane that names it has EXITED. A command pane
+                // keeps its launch command after the process quits, so the
+                // name-join outlives the agent — and by then `is_dormant` is
+                // true, so the dormant block draws the row too and the bar
+                // lists one agent TWICE, top and bottom, with only the lower
+                // copy restartable. Seen on screen 2026-09-17.
+                //
+                // `exited` and not `is_dormant`: in the beat between a restored
+                // tab's spawn starting and the store's bind landing the row is
+                // dormant as well, and there the claim must HOLD or the tab
+                // blinks back to a terminal. Running-but-unbound and ran-and-
+                // quit are the two states, and `exited` is what tells them
+                // apart. (#261)
+                && !self.spawn_pane_exited(tab_id, uuid)
+        })
+    }
+
+    /// Has the pane that bakes this agent's spawn in this tab RUN AND QUIT?
+    ///
+    /// The tab is then an ordinary terminal holding a finished command, and the
+    /// way back to the agent is the deliberate restart on its dormant row.
+    fn spawn_pane_exited(&self, tab_id: usize, uuid: &str) -> bool {
+        let Some(pos) = self
+            .tabs
             .iter()
-            .find(|a| a.uuid == uuid && !self.store_tab_live(a))
+            .find(|t| t.tab_id == tab_id)
+            .map(|t| t.position)
+        else {
+            return false;
+        };
+        self.panes.iter().any(|p| {
+            p.tab_position == pos
+                && !p.is_plugin
+                && p.exited
+                && p.terminal_command.as_deref().and_then(spawn_uuid) == Some(uuid)
+        })
     }
 
     /// The agent bound to this tab, per the SNAPSHOT (§6.6 Design B) — the
@@ -1591,7 +1627,15 @@ impl BarModel {
     fn agent_in_tab(&self, tab_id: usize) -> Option<&Agent> {
         self.agents
             .iter()
-            .find(|a| a.tab_id == Some(tab_id))
+            // A DORMANT agent is drawn in the dormant block, and must not be
+            // drawn here as well. The store's bind outlives the agent on
+            // purpose — that is what brings the tab back at the next launch —
+            // so an agent that ran and quit still points at a tab while
+            // `is_dormant` calls it dormant, and the bar then listed the SAME
+            // agent twice, top and bottom, with only the lower copy
+            // restartable. Seen on screen 2026-09-17. The tab is an ordinary
+            // terminal now. (#261)
+            .find(|a| a.tab_id == Some(tab_id) && !self.is_dormant(a))
             .or_else(|| self.spawn_bound_agent(tab_id))
     }
 
@@ -9714,6 +9758,16 @@ mod tests {
         assert!(
             k.contains(&RowKey::Dormant("u1".into())),
             "an exited agent has no way home unless it is dormant: {k:?}"
+        );
+        // ONE row for one agent, counted across BOTH blocks. Counting only the
+        // dormant block is what let this ship: the row went dormant correctly
+        // AND its tab went on claiming it, so the bar drew the same agent
+        // twice — top and bottom — with only one of them restartable. Seen on
+        // screen 2026-09-17, after this test was green.
+        assert!(
+            m.agent_in_tab(7).is_none() && m.spawn_bound_agent(7).is_none(),
+            "the tab of an exited agent is an ordinary terminal, not a second \
+             copy of the row"
         );
         assert_eq!(
             k.iter()
