@@ -767,6 +767,17 @@ pub struct BarModel {
     /// Which row's tab drives the restore, straight off the snapshot (#261).
     /// The launch names it, so every instance agrees without talking.
     restore_owner: Option<String>,
+    /// This instance has SEEN the restore queue empty, once (#261).
+    ///
+    /// A latch, and it must be one. `restore_pending` is built from
+    /// `restore_sent`, which is per-instance and only the owner ever writes —
+    /// so on every OTHER bar a row that holds no tab reads as "still owed"
+    /// forever, and a tab the human closes puts one there permanently. Read
+    /// raw by `run_held_effect`, that means: close one restored tab and no
+    /// held tab ever wakes again for the rest of the session. The guard is
+    /// about the storm of focus changes while the fleet arrives, and the storm
+    /// happens once; the latch is what makes the guard end with it.
+    restore_settled: bool,
     /// Rows the restore has already opened, for the life of this instance.
     ///
     /// Without it the queue is "named in the set, holds no tab", which a tab
@@ -1482,7 +1493,7 @@ impl BarModel {
         // rest are still coming back and it stays asleep until you step away
         // and return. Waking an agent nobody asked for is the expensive
         // mistake (~350 MB), and this arm exists to prevent it.
-        if self.restore_pending() {
+        if !self.restore_settled && self.restore_pending() {
             return None;
         }
         let own = self.own_tab_position()?;
@@ -1514,6 +1525,7 @@ impl BarModel {
     /// name the wrong tab for a beat. That is the same exposure `is_dormant`
     /// already accepts on its pane leg, and it costs a flicker, not a write.
     fn rebuild_spawn_binds(&mut self) {
+        let mut claimed: Vec<String> = Vec::new();
         self.spawn_binds = self
             .tabs
             .iter()
@@ -1523,6 +1535,18 @@ impl BarModel {
                     .iter()
                     .filter(|p| p.tab_position == t.position && !p.is_plugin)
                     .find_map(|p| p.terminal_command.as_deref().and_then(spawn_uuid))?;
+                // ONE tab per agent, first tab wins. Two tabs can carry a held
+                // pane for one uuid — this branch made that state live before
+                // the launch named the restore's owner — and the pair then
+                // renders the agent twice and emits two `clave bind` calls for
+                // it per pass, against a ledger keyed by uuid alone. Rejecting
+                // the second claim here is also what bounds the bind budget:
+                // `restored_bind_sent` refunds its tries when the target tab
+                // changes, so two tabs that alternate never spend it.
+                if claimed.iter().any(|u| u == uuid) {
+                    return None;
+                }
+                claimed.push(uuid.to_string());
                 Some((uuid.to_string(), t.tab_id))
             })
             .collect();
@@ -1761,6 +1785,29 @@ impl BarModel {
             else {
                 continue;
             };
+            // ONE tab per agent, the lowest tab id wins. Two tabs can hold a
+            // held pane for one uuid — this branch made that state live before
+            // the launch named the restore's owner — and without this rule the
+            // pair writes two `clave bind` calls for one agent in one pass,
+            // against a ledger keyed by uuid alone. The rule is also what
+            // BOUNDS the budget below: `restored_bind_sent` refunds its tries
+            // whenever the target tab changes, so two tabs that take turns
+            // never spend it and the bar runs a subprocess per store advance
+            // for the life of the session. Picking by tab id and not by frame
+            // order is the point — the choice must not move between frames.
+            if self.panes.iter().any(|o| {
+                !o.is_plugin
+                    && o.is_held
+                    && !o.exited
+                    && o.terminal_command.as_deref().and_then(spawn_uuid) == Some(uuid)
+                    && self
+                        .tabs
+                        .iter()
+                        .find(|t| t.position == o.tab_position)
+                        .is_some_and(|t| t.tab_id < tab_id)
+            }) {
+                continue;
+            }
             if self
                 .agents
                 .iter()
@@ -1839,8 +1886,16 @@ impl BarModel {
         // burst belongs to zellij BUILDING the tab, which runs long after the
         // row is marked sent. `opening` holds a row from the open until its
         // tab exists, and `prune_opening` releases it on a bind, a stale row,
-        // or a row that left the store — so a failed open cannot wedge the
-        // queue forever.
+        // or a row that left the store.
+        //
+        // Those three cover every open that FINISHES, including the two that
+        // fail loudly (a missing cwd is stale; an already-live row releases on
+        // its own liveness). An open that dies without pushing a snapshot —
+        // zellij refusing `new-tab`, or `dump-layout` bailing — holds the mark
+        // with nothing left to clear it, and the rest of the queue never
+        // comes back. There is no timeout on purpose: relaunching is the
+        // repair, and it is the same repair the fleet already needs after a
+        // restore that does not finish (known-open, its own issue).
         if !self.opening.is_empty() {
             return None;
         }
@@ -1877,7 +1932,12 @@ impl BarModel {
                     && self
                         .agents
                         .iter()
-                        .any(|a| &a.uuid == *uuid && a.tab_id.is_none())
+                        // A STALE row can never arrive: `clave open` found its
+                        // cwd gone and refused it, and no later frame can put
+                        // a tab on it. It must not count as owed, or the queue
+                        // never once reads empty — and a deleted worktree in
+                        // the previous live set is an ordinary thing to have.
+                        .any(|a| &a.uuid == *uuid && a.tab_id.is_none() && !a.stale)
             })
             .map(|s| s.as_str())
     }
@@ -1948,10 +2008,22 @@ impl BarModel {
             .uuid_to_pane
             .get(&a.uuid)
             .is_some_and(|p| self.tab_position_of_pane(*p).is_some());
-        // A restored tab holds this agent's `clave spawn` and has not run it.
+        // A restored tab holds this agent's `clave spawn` and HAS NOT RUN IT.
         // The agent has a tab on screen, so it is not dormant — without this
         // leg it lists a second time under the tab that already shows it.
-        let spawn_live = self.spawn_binds.iter().any(|(u, _)| *u == a.uuid);
+        //
+        // Asked of the PANE, not of `spawn_binds`. A command pane keeps its
+        // launch command after the process exits, so the bare name-join also
+        // matches an agent that ran and quit — and that agent must stay
+        // dormant, because the deliberate restart is the only way home from an
+        // exited row. `is_held && !exited` is the same pair `run_held_effect`
+        // uses, and it is what "waiting to run" means.
+        let spawn_live = self.panes.iter().any(|p| {
+            !p.is_plugin
+                && p.is_held
+                && !p.exited
+                && p.terminal_command.as_deref().and_then(spawn_uuid) == Some(a.uuid.as_str())
+        });
         !tab_live && !pane_live && !spawn_live
     }
 
@@ -2048,6 +2120,11 @@ impl BarModel {
         // in `restore_sent`, which a snapshot must never reset.
         self.last_live = snap.last_live;
         self.restore_owner = snap.restore_owner;
+        // Latched, never cleared: see `restore_settled`. The queue draining is
+        // a fact about the fleet arriving, not about the current row set.
+        if !self.restore_pending() {
+            self.restore_settled = true;
+        }
         // Hydrate the pane mapping from the snapshot (#178). `clave-register`
         // is a broadcast, so it reaches only the instances alive when it fires
         // — a tab born by a wake never hears about its OWN pane, while the
@@ -5207,6 +5284,95 @@ mod tests {
         assert!(
             done.iter().any(|e| matches!(e, Effect::RunHeldPane { .. })),
             "the human is standing here and the restore is over: {done:?}"
+        );
+    }
+
+    /// A row that can never come back must not hold the queue open.
+    ///
+    /// Found in review. `clave open` refuses a row whose cwd is gone and marks
+    /// it stale, and no later frame can put a tab on it. Counted as owed, it
+    /// makes the queue read "still arriving" from the first snapshot to the
+    /// last — so the owner never finishes, and on every other bar the wake arm
+    /// stays shut for the rest of the session. A deleted worktree in the
+    /// previous live set is an ordinary thing to have.
+    #[test]
+    fn a_row_whose_cwd_is_gone_does_not_hold_the_restore_open() {
+        let mut m =
+            fleet_bar_with_held_own_pane(Some("clave spawn u-restored --name x --cwd /r"), false);
+        let mut gone = agent("u-c", Status::Idle, None);
+        gone.stale = true;
+        m.apply_snapshot(snap_owned(
+            9,
+            vec![
+                agent("u-a", Status::Idle, Some(10)),
+                agent("u-b", Status::Idle, Some(11)),
+                gone,
+            ],
+            &["u-a", "u-b", "u-c"],
+            Some("u-a"),
+        ));
+        assert!(
+            !m.restore_pending(),
+            "a row that cannot arrive was counted as still arriving"
+        );
+        let fx = m.identity_effects();
+        assert!(
+            fx.iter().any(|e| matches!(e, Effect::RunHeldPane { .. })),
+            "one dead row left the whole fleet unable to wake: {fx:?}"
+        );
+    }
+
+    /// Closing one restored tab must not stop every OTHER held tab waking.
+    ///
+    /// Found in review. The wake guard asks `restore_pending`, which is built
+    /// from `restore_sent` — per-instance, and only the OWNER ever writes it.
+    /// `run_held_effect` runs on the bar the human is standing in, which is by
+    /// definition not the owner, so on that bar a row with no tab reads as
+    /// "still owed" forever. Close one restored tab and the fleet goes deaf.
+    ///
+    /// Two models on one snapshot, per the FOOTGUNS rule: the owner and the
+    /// bar the human is actually on disagree about what is owed, and the guard
+    /// has to survive that disagreement.
+    #[test]
+    fn a_closed_restored_tab_does_not_deafen_the_rest_of_the_fleet() {
+        let mut m =
+            fleet_bar_with_held_own_pane(Some("clave spawn u-restored --name x --cwd /r"), false);
+        // The fleet is all back. This bar has never sent an open — it is not
+        // the owner — so everything it knows comes off the snapshot.
+        let all_back = |seq| {
+            snap_owned(
+                seq,
+                vec![
+                    agent("u-a", Status::Idle, Some(10)),
+                    agent("u-b", Status::Idle, Some(11)),
+                    agent("u-c", Status::Idle, Some(12)),
+                ],
+                &["u-a", "u-b", "u-c"],
+                Some("u-a"),
+            )
+        };
+        m.apply_snapshot(all_back(9));
+        assert!(!m.restore_pending(), "premise: nothing is owed");
+
+        // The human closes the tab that held u-c. Its row unbinds.
+        m.apply_snapshot(snap_owned(
+            10,
+            vec![
+                agent("u-a", Status::Idle, Some(10)),
+                agent("u-b", Status::Idle, Some(11)),
+                agent("u-c", Status::Idle, None),
+            ],
+            &["u-a", "u-b", "u-c"],
+            Some("u-a"),
+        ));
+        assert!(
+            m.restore_pending(),
+            "premise: this bar cannot tell a closed tab from an unrestored one"
+        );
+        let fx = m.identity_effects();
+        assert!(
+            fx.iter().any(|e| matches!(e, Effect::RunHeldPane { .. })),
+            "a closed tab elsewhere left this one unable to wake: {fx:?}"
         );
     }
 
@@ -9446,6 +9612,103 @@ mod tests {
         assert!(
             !keys(&m).contains(&RowKey::Dormant("u1".into())),
             "an idle agent is still running; only an exited one is dormant"
+        );
+    }
+
+    /// One agent claims one tab, whatever the pane frame carries.
+    ///
+    /// Found in review. Two tabs can hold a `clave spawn` pane for the same
+    /// uuid — this branch made that state live, before the launch named the
+    /// restore's owner. Without a uniqueness rule the pair writes two `clave
+    /// bind` calls for one agent in one pass, against a ledger keyed by uuid
+    /// alone; and because the ledger refunds its tries whenever the target tab
+    /// changes, the two tabs take turns and the budget never bites — one
+    /// subprocess per store advance, for the life of the session.
+    #[test]
+    fn two_tabs_that_name_one_agent_bind_it_once() {
+        let mut m = BarModel::default();
+        m.set_own_pane(101);
+        let mut panes = panes_at(&FLEET_PANES);
+        for p in &mut panes {
+            // Panes 5 and 7 sit in tabs 10 and 12, and both name u-twin.
+            if p.pane_id == 5 || p.pane_id == 7 {
+                p.is_held = true;
+                p.terminal_command = Some("clave spawn u-twin --name x --cwd /r".into());
+            }
+        }
+        m.apply_panes(panes);
+        m.apply_tabs(vec![
+            tab(10, 0, "a", false),
+            tab(11, 1, "b", true),
+            tab(12, 2, "c", false),
+        ]);
+        m.apply_snapshot(snap(1, vec![agent("u-twin", Status::Working, None)]));
+        let binds: Vec<_> = m
+            .restored_bind_effects()
+            .into_iter()
+            .filter(|e| matches!(e, Effect::Bind { uuid, .. } if uuid == "u-twin"))
+            .collect();
+        assert_eq!(
+            binds,
+            vec![Effect::Bind {
+                uuid: "u-twin".into(),
+                tab_id: 10,
+            }],
+            "one agent, one bind, and the SAME one every frame"
+        );
+        // And it is drawn under one tab, not two — the same rule, on the
+        // render side, where the pair would list the agent twice.
+        assert_eq!(
+            [10, 11, 12]
+                .into_iter()
+                .filter(|t| m.spawn_bound_agent(*t).is_some_and(|a| a.uuid == "u-twin"))
+                .count(),
+            1,
+            "one agent cannot own two tabs"
+        );
+    }
+
+    /// The pane frame must not keep an exited agent out of the dormant block.
+    ///
+    /// Found in review. A command pane keeps its launch command after the
+    /// process exits (FOOTGUNS; `zellij-utils-0.44.3/src/data.rs:2331`), so the
+    /// pane of an agent that ran and quit still reads `clave spawn <uuid>`.
+    /// Joined on the string alone, that says "a baked spawn is waiting to
+    /// run", and the row leaves the dormant block — which is the one place the
+    /// deliberate restart is offered, and the only way home from an exited
+    /// row. The test above misses it because it delivers no panes.
+    #[test]
+    fn an_exited_agents_own_pane_does_not_hold_it_out_of_the_dormant_block() {
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(7, 0, "agent-tab", true)]);
+        let mut ran = pane(0, 3, false, true);
+        ran.terminal_command = Some("clave spawn u1 --name x --cwd /r".into());
+        // It ran, so it is not held any more, and the process is gone.
+        ran.exited = true;
+        m.apply_panes(vec![ran]);
+        m.apply_snapshot(AgentSnapshot {
+            last_live: Default::default(),
+            restore_owner: None,
+            order: OrderMode::default(),
+            now_hour: 0,
+            tab_buckets: Default::default(),
+            tab_touched: Default::default(),
+            collapsed: false,
+            seq: 1,
+            agents: vec![agent("u1", Status::Exited, Some(7))],
+            tab_order: Default::default(),
+        });
+        let k = keys(&m);
+        assert!(
+            k.contains(&RowKey::Dormant("u1".into())),
+            "an exited agent has no way home unless it is dormant: {k:?}"
+        );
+        assert_eq!(
+            k.iter()
+                .filter(|r| matches!(r, RowKey::Dormant(u) if u == "u1"))
+                .count(),
+            1,
+            "and it must appear once, not once per leg: {k:?}"
         );
     }
 

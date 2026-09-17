@@ -705,6 +705,15 @@ impl State {
                         self.pending_peeks += 1;
                         set_timeout(PEEK_SINK_SECS); // user-tuned: 1.0 felt a touch long
                     }
+                    // The beacon is a join input, like the two frames (#261).
+                    // Waking a held agent needs the beacon AND this instance's
+                    // own tab, and the two arrive by different routes: on a nav
+                    // landing the target bar gets its `TabUpdate` while the
+                    // beacon still names the tab the human left, so the wake
+                    // arm refuses — and without this line nothing re-enters
+                    // when the beacon catches up. Fail-closed and idempotent,
+                    // so settling on the losing order costs nothing.
+                    self.settle_identity();
                     true // active-row highlight may move
                 }
                 Err(e) => {
