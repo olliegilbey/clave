@@ -1536,16 +1536,23 @@ impl BarModel {
     /// already accepts on its pane leg, and it costs a flicker, not a write.
     fn rebuild_spawn_binds(&mut self) {
         let mut claimed: Vec<String> = Vec::new();
-        self.spawn_binds = self
-            .tabs
-            .iter()
+        // ASCENDING TAB ID, which is NOT the order zellij hands tabs over —
+        // that is display position, and a moved tab separates the two.
+        // `restored_bind_effects` resolves the same contention by lowest tab
+        // id, so iterating in the given order let the two disagree: the bind
+        // lands on one tab while the row draws under another, which is the
+        // blink this branch already paid for once (CodeRabbit, #261).
+        let mut by_tab_id: Vec<&TabMeta> = self.tabs.iter().collect();
+        by_tab_id.sort_by_key(|t| t.tab_id);
+        self.spawn_binds = by_tab_id
+            .into_iter()
             .filter_map(|t| {
                 let uuid = self
                     .panes
                     .iter()
                     .filter(|p| p.tab_position == t.position && !p.is_plugin)
                     .find_map(|p| p.terminal_command.as_deref().and_then(spawn_uuid))?;
-                // ONE tab per agent, first tab wins. Two tabs can carry a held
+                // ONE tab per agent, LOWEST TAB ID wins. Two tabs can carry a held
                 // pane for one uuid — this branch made that state live before
                 // the launch named the restore's owner — and the pair then
                 // renders the agent twice and emits two `clave bind` calls for

@@ -47,7 +47,10 @@ PEAK_BREAKDOWN=""
 # what was climbing just BEFORE it is what names the cause.
 while kill -0 "$PID" 2>/dev/null; do
   SNAP="$(lsof -n -P -p "$PID" 2>/dev/null)"
-  N="$(printf '%s\n' "$SNAP" | grep -c .)"
+  # NR>1 drops lsof's header row, exactly as the breakdown below does. Counted
+  # in, every sample read one handle high against the 256 ceiling this script
+  # exists to watch (CodeRabbit).
+  N="$(printf '%s\n' "$SNAP" | awk 'NR>1' | grep -c .)"
   BREAK="$(printf '%s\n' "$SNAP" | awk 'NR>1 {print $5}' | sort | uniq -c | sort -rn | tr '\n' ' ')"
   printf '%s n=%s %s\n' "$(date +%H:%M:%S)" "$N" "$BREAK" >>"$OUT"
   if [[ "$N" -gt "$PEAK" ]]; then

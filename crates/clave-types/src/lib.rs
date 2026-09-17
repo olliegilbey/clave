@@ -1010,26 +1010,56 @@ mod tests {
         assert_eq!(s, Status::NeedsYou);
     }
 
+    /// Every status, as the two tests below must see it: its wire spelling and
+    /// its glyph.
+    ///
+    /// A MATCH, not a list. Both tests said "every variant" and listed five of
+    /// six for the whole life of `Exited` (#261) — a list cannot notice what is
+    /// missing from it, and the one that went missing is the one that rides a
+    /// persisted store across an upgrade. Adding a status without adding it
+    /// here is now a compile error. `ALL` still has to grow by hand, so the
+    /// count assertion below is what catches that half.
+    fn wire_and_glyph(v: Status) -> (&'static str, (char, u8)) {
+        match v {
+            Status::Idle => ("\"idle\"", ('●', 90)), // dim: read / no session
+            Status::Working => ("\"working\"", ('●', 33)), // amber: running
+            Status::NeedsYou => ("\"needs_you\"", ('●', 31)), // red: waiting on you
+            Status::Done => ("\"done\"", ('●', 32)), // green: finished & unread
+            Status::Failed => ("\"failed\"", ('✖', 31)), // red cross
+            // Hollow and dim: nothing is running, and it asks for nothing.
+            Status::Exited => ("\"exited\"", ('○', 90)),
+        }
+    }
+
+    const ALL: [Status; 6] = [
+        Status::Idle,
+        Status::Working,
+        Status::NeedsYou,
+        Status::Done,
+        Status::Failed,
+        Status::Exited,
+    ];
+
     #[test]
     fn status_glyph_encodes_state_colour() {
         // Spec §6.5 glyph table — single source shared by the bar and `clave ls`.
-        assert_eq!(Status::NeedsYou.glyph(), ('●', 31)); // red
-        assert_eq!(Status::Working.glyph(), ('●', 33)); // amber
-        assert_eq!(Status::Done.glyph(), ('●', 32)); // green (done & unread)
-        assert_eq!(Status::Idle.glyph(), ('●', 90)); // dim
-        assert_eq!(Status::Failed.glyph(), ('✖', 31)); // red cross
+        for v in ALL {
+            assert_eq!(v.glyph(), wire_and_glyph(v).1, "glyph for {v:?}");
+        }
+        // Two statuses a person cannot tell apart are one status: the bar is
+        // read at a glance, so every pair must differ in glyph or in colour.
+        for (i, a) in ALL.iter().enumerate() {
+            for b in &ALL[i + 1..] {
+                assert_ne!(a.glyph(), b.glyph(), "{a:?} and {b:?} draw the same");
+            }
+        }
     }
 
     #[test]
     fn status_roundtrips_every_variant() {
         // Exhaustive BOTH ways (the old deserialize test only covered needs_you).
-        for (v, s) in [
-            (Status::Idle, "\"idle\""),
-            (Status::Working, "\"working\""),
-            (Status::NeedsYou, "\"needs_you\""),
-            (Status::Done, "\"done\""),
-            (Status::Failed, "\"failed\""),
-        ] {
+        for v in ALL {
+            let s = wire_and_glyph(v).0;
             assert_eq!(serde_json::to_string(&v).unwrap(), s);
             assert_eq!(serde_json::from_str::<Status>(s).unwrap(), v);
         }

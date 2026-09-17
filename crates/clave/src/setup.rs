@@ -1473,24 +1473,35 @@ pub fn launch_session() -> Result<()> {
     // never baked is gone from the set for good. Without this the launch log
     // prints `baked=[…]` with the row simply absent, which reads as the
     // restore losing it rather than the disk having lost it (found in review).
-    for uuid in &store.last_live {
-        if !restorable.iter().any(|r| &r.uuid == uuid) {
-            let why = match store.agents.get(uuid) {
-                None => "no row (pruned between sessions)".to_string(),
-                Some(r) => format!("cwd is gone: {}", r.cwd),
-            };
-            crate::evlog::log_event("launch", &format!("restore dropped {uuid}: {why}"));
+    //
+    // A CREATE only, like the owner write below. An attach bakes no tab and
+    // defers nothing — `clear_session_order` did not even run, so `last_live`
+    // still describes the session BEFORE the live one. Logging here would
+    // announce a restore that is not happening, over a set that is already
+    // two sessions old, into the same log a person reads to find out why a
+    // restore went wrong (CodeRabbit, #261).
+    if !live {
+        for uuid in &store.last_live {
+            if !restorable.iter().any(|r| &r.uuid == uuid) {
+                let why = match store.agents.get(uuid) {
+                    None => "no row (pruned between sessions)".to_string(),
+                    Some(r) => format!("cwd is gone: {}", r.cwd),
+                };
+                crate::evlog::log_event("launch", &format!("restore dropped {uuid}: {why}"));
+            }
         }
     }
     let (rows, deferred, dropped) =
         bakeable_rows(restorable, eager_row(&store), crate::add::validate_cwd)?;
-    for line in dropped {
-        crate::evlog::log_event("launch", &line);
+    if !live {
+        for line in dropped {
+            crate::evlog::log_event("launch", &line);
+        }
     }
     // Recorded so a restore that never finishes is diagnosable from the log
     // alone: the launch states what it handed to the sidebar, and the sidebar
     // logs each row as it opens it.
-    if !deferred.is_empty() {
+    if !live && !deferred.is_empty() {
         crate::evlog::log_event(
             "launch",
             &format!(
@@ -1514,7 +1525,7 @@ pub fn launch_session() -> Result<()> {
         // in charge of a queue that has already been served. It is a no-op
         // until that bar reloads, and then every tab the human deliberately
         // closed is owed again, because closing a tab unbinds its row.
-        if !live && let Some(home) = rows.first() {
+        if let Some(home) = rows.first() {
             crate::store::with_store_mut(&crate::store::store_paths()?, |s| {
                 s.restore_owner = Some(home.uuid.clone());
             })?;
