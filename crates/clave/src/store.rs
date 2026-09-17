@@ -331,6 +331,15 @@ pub struct Store {
     /// single-eager-row path launch already takes.
     #[serde(default)]
     pub last_live: Vec<String>,
+    /// Which row's tab drives the staggered restore (#261).
+    ///
+    /// Session-scoped, like the binds beside it: written by `setup::launch`
+    /// once it has picked the row to bake, cleared by `clear_session_order`
+    /// on the way into the next session. `None` means no restore is owed.
+    /// See the field of the same name on `AgentSnapshot` for why the launch
+    /// has to say this out loud rather than let the bars work it out.
+    #[serde(default)]
+    pub restore_owner: Option<String>,
     /// Did any row bind a tab since the last launch? (#261)
     ///
     /// `clear_session_order` records `last_live` and then nulls every bind, so
@@ -503,6 +512,7 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
         seq: store.seq,
         tab_order: store.tab_order.clone(),
         last_live: store.last_live.clone(),
+        restore_owner: store.restore_owner.clone(),
         collapsed: store.collapsed,
         tab_buckets: store.tab_buckets.clone(),
         order: store.order,
@@ -966,6 +976,14 @@ pub fn clear_session_order(paths: &StorePaths) -> Result<()> {
         // Arm for the session this launch is about to start.
         if s.bound_since_launch {
             s.bound_since_launch = false;
+            changed = true;
+        }
+        // Session-scoped, exactly like the binds below: the owner names a row
+        // whose TAB sequences one session's restore. The launch that follows
+        // this pass names the new one, and names nothing when it defers
+        // nothing, so a stale owner cannot make a bar sequence an empty queue.
+        if s.restore_owner.is_some() {
+            s.restore_owner = None;
             changed = true;
         }
         if !s.tab_order.is_empty() || bound {
@@ -1990,6 +2008,35 @@ mod tests {
     }
 
     /// The launch pass that clears the session-scoped binds RECORDS them
+    /// The restore's owner is SESSION-scoped, like the binds it sits beside.
+    ///
+    /// It names a row whose TAB sequences one session's restore, so carrying
+    /// it into the next session would put a bar in charge of a queue that no
+    /// longer exists. The launch names the new one on its way up, and names
+    /// nothing at all when it defers nothing. (#261)
+    #[test]
+    fn the_restores_owner_does_not_outlive_its_session() {
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            s.agents.insert("u-a".into(), rec("u-a"));
+            s.restore_owner = Some("u-a".into());
+        })
+        .unwrap();
+        apply_bind(&p, "u-a", 1).unwrap();
+        assert_eq!(
+            read_store(&p).unwrap().restore_owner.as_deref(),
+            Some("u-a"),
+            "premise: the session came up with an owner"
+        );
+        clear_session_order(&p).unwrap();
+        assert_eq!(
+            read_store(&p).unwrap().restore_owner,
+            None,
+            "a stale owner would make a bar sequence the previous session's queue"
+        );
+    }
+
     /// first: `last_live` is the previous session's live SET, written in
     /// ascending tab id so the file is deterministic. It is not a rank — the
     /// relaunch ranks it on the read side (`setup::restore_rows`).

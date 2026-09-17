@@ -1490,6 +1490,17 @@ pub fn launch_session() -> Result<()> {
                     .join(", ")
             ),
         );
+        // Name the tab that will drive the queue, in the store, where every
+        // bar reads it (#261). The head of `rows` is the row this launch
+        // bakes, so it is the tab that exists before the restore starts and
+        // the one `clave open` hands the focus back to. A bar born in a tab
+        // the restore MADE must not sequence; it cannot tell from the focus,
+        // because taking the focus is what a new tab does, so it is told.
+        if let Some(home) = rows.first() {
+            crate::store::with_store_mut(&crate::store::store_paths()?, |s| {
+                s.restore_owner = Some(home.uuid.clone());
+            })?;
+        }
     }
     let wasm = wasm_path()?;
     // Bake the environment's clave into the eager tab's spawn: the versioned

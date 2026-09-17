@@ -206,6 +206,7 @@ These three are constantly confused. They are not interchangeable.
 | **held tab** | OURS: a baked tab whose `clave spawn` has not run yet. See §3.1. |
 | **zellij held flag** | THEIRS: `PaneInfo.is_held`, which is also set for a command that ran and EXITED. A held tab is the subset with `!exited`. Never say "held" alone about a pane. |
 | **live set** | The rows that held a tab when the previous session died; what a relaunch brings back. See §3.1. |
+| **restore owner** | The one row whose TAB brings the live set back, one tab at a time. The launch names it — it is the row the launch bakes — and writes it to the store, so every sidebar agrees without talking. Say "owner" only about the restore; it is not a word about who uses an agent. A tab the restore MADE is never the owner, whatever the focus says. |
 | **unread** | Finished while you were not looking — `done && !visited`. |
 | **stale** | `clave open` found the row's cwd missing. A row flag, **not** a status. |
 | **exited row** | An agent session that ENDED while its tab stayed open. It holds a tab and runs nothing, so it counts in the live set (the tab comes back) but reads DORMANT in the bar (there is nothing to return to). `Status::Exited`, written by the `SessionEnd` hook. Do not say "idle" about it: idle means alive with nothing to say. It lasts one session only — a launch clears every status, because no agent runs at a launch. |

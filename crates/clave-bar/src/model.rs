@@ -764,6 +764,9 @@ pub struct BarModel {
     /// The launch bakes only the head of it as a tab; everything else in here
     /// is a row this bar has to open itself.
     last_live: Vec<String>,
+    /// Which row's tab drives the restore, straight off the snapshot (#261).
+    /// The launch names it, so every instance agrees without talking.
+    restore_owner: Option<String>,
     /// Rows the restore has already opened, for the life of this instance.
     ///
     /// Without it the queue is "named in the set, holds no tab", which a tab
@@ -1466,6 +1469,22 @@ impl BarModel {
         if !self.beacon_moved {
             return None;
         }
+        // And the restore must be OVER. While the queue is running, the
+        // beacon is not evidence of anything: every tab it builds takes the
+        // focus on the way in and gives it back a moment later, so `beacon`
+        // named four different tabs eight times in 800 ms on the 2026-09-17
+        // run and two restored agents woke with nobody near them. `beacon_moved`
+        // cannot tell that churn from an arrival, because as a sequence of
+        // beacons it IS an arrival. The queue draining is what makes the
+        // signal mean something again.
+        //
+        // The cost is small and one-sided: walk onto a restored tab while the
+        // rest are still coming back and it stays asleep until you step away
+        // and return. Waking an agent nobody asked for is the expensive
+        // mistake (~350 MB), and this arm exists to prevent it.
+        if self.restore_pending() {
+            return None;
+        }
         let own = self.own_tab_position()?;
         self.panes
             .iter()
@@ -1798,9 +1817,18 @@ impl BarModel {
     /// between sessions, and is stepped over rather than waited for.
     fn restore_next(&self) -> Option<&str> {
         // Every instance reads the same store and would reach this conclusion
-        // at the same moment, so N bars would open the same row N times. Same
-        // election as the other arms that are dangerous in duplicate.
-        if !self.own_tab_focused() {
+        // at the same moment, so N bars would open the same row N times.
+        //
+        // The election is the LAUNCH'S NAME, not the focus. Focus was the
+        // first design and it cannot work here: `zellij action new-tab` always
+        // takes the focus (FOOTGUNS), so every tab the restore makes is born
+        // believing it is the one the human is in, and starts the queue over
+        // from the top. Measured 2026-09-17 — the beacon named four different
+        // tabs eight times in 800 ms, five tabs were built in that window, and
+        // the run before it killed the zellij server with "Too many open
+        // files". A sequencer cannot be elected by a signal its own work
+        // destroys.
+        if !self.owns_the_restore() {
             return None;
         }
         // Wait for the TAB, not for the next store advance. `restore_sent` is
@@ -1817,6 +1845,24 @@ impl BarModel {
             return None;
         }
         self.next_owed()
+    }
+
+    /// Is THIS instance the one the launch put in charge of the restore?
+    ///
+    /// True for the bar in the tab the launch baked, and for no other, however
+    /// the focus moves while tabs are being built. `own_tab` still has to
+    /// resolve — a bar that cannot say which tab it is in cannot claim to be
+    /// this one — but the claim itself comes from the store.
+    fn owns_the_restore(&self) -> bool {
+        let Some(owner) = self.restore_owner.as_deref() else {
+            return false;
+        };
+        let Some(own) = self.own_tab() else {
+            return false;
+        };
+        self.agents
+            .iter()
+            .any(|a| a.uuid == owner && a.tab_id == Some(own))
     }
 
     /// The head of the queue, whether or not this instant is a good time to
@@ -2001,6 +2047,7 @@ impl BarModel {
         // the set is the store's, and the bar's own progress through it lives
         // in `restore_sent`, which a snapshot must never reset.
         self.last_live = snap.last_live;
+        self.restore_owner = snap.restore_owner;
         // Hydrate the pane mapping from the snapshot (#178). `clave-register`
         // is a broadcast, so it reaches only the instances alive when it fires
         // — a tab born by a wake never hears about its OWN pane, while the
@@ -3733,6 +3780,7 @@ mod tests {
     fn snap(seq: u64, agents: Vec<Agent>) -> AgentSnapshot {
         AgentSnapshot {
             last_live: Default::default(),
+            restore_owner: None,
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -3767,9 +3815,38 @@ mod tests {
     /// A snapshot that also carries the previous session's live set — what the
     /// launch left for the bar to bring back.
     fn snap_live(seq: u64, agents: Vec<Agent>, last_live: &[&str]) -> AgentSnapshot {
+        let base = snap(seq, agents);
+        // The launch names the row it BAKED as the restore's owner, and the
+        // baked row is the one that already holds a tab. Deriving it the same
+        // way here keeps the fixture honest about what the host really writes.
+        // `snap_owned` is for the case this cannot express: a bar that is NOT
+        // the owner.
+        let owner = last_live
+            .iter()
+            .find(|u| {
+                base.agents
+                    .iter()
+                    .any(|a| &a.uuid == *u && a.tab_id.is_some())
+            })
+            .map(|u| u.to_string());
         AgentSnapshot {
             last_live: last_live.iter().map(|s| s.to_string()).collect(),
-            ..snap(seq, agents)
+            restore_owner: owner,
+            ..base
+        }
+    }
+
+    /// `snap_live` with the owner said out loud — for the tests that need a
+    /// bar which is NOT in charge of the restore.
+    fn snap_owned(
+        seq: u64,
+        agents: Vec<Agent>,
+        last_live: &[&str],
+        owner: Option<&str>,
+    ) -> AgentSnapshot {
+        AgentSnapshot {
+            restore_owner: owner.map(str::to_string),
+            ..snap_live(seq, agents, last_live)
         }
     }
 
@@ -3778,6 +3855,7 @@ mod tests {
     fn snap_t(seq: u64, ords: &[(usize, u64)]) -> AgentSnapshot {
         AgentSnapshot {
             last_live: Default::default(),
+            restore_owner: None,
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -4193,6 +4271,7 @@ mod tests {
         a.commit_ord = 999;
         m.apply_snapshot(AgentSnapshot {
             last_live: Default::default(),
+            restore_owner: None,
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -4246,6 +4325,7 @@ mod tests {
             .collect();
         m.apply_snapshot(AgentSnapshot {
             last_live: Default::default(),
+            restore_owner: None,
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -4954,6 +5034,7 @@ mod tests {
     fn snap_full(seq: u64, agents: Vec<Agent>, ords: &[(usize, u64)]) -> AgentSnapshot {
         AgentSnapshot {
             last_live: Default::default(),
+            restore_owner: None,
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -5063,6 +5144,61 @@ mod tests {
         m.beacon(10);
         m.beacon(11);
         m
+    }
+
+    /// Nothing wakes while the restore is still running, however the beacon
+    /// moves.
+    ///
+    /// Measured 2026-09-17: the queue's own tabs each take the focus on the
+    /// way in and give it back a moment later, so the beacon named four tabs
+    /// eight times in 800 ms. As a sequence of beacons that is indistinguish-
+    /// able from a human walking around, and two restored agents woke with
+    /// nobody near them. The queue draining is what makes an arrival mean
+    /// something again.
+    #[test]
+    fn a_restored_tab_stays_asleep_while_the_rest_are_still_coming_back() {
+        let mut m =
+            fleet_bar_with_held_own_pane(Some("clave spawn u-restored --name x --cwd /r"), false);
+        // One row is still owed, and this bar is not the one bringing it back.
+        let owed = m.apply_snapshot(snap_owned(
+            9,
+            vec![
+                agent("u-a", Status::Idle, Some(10)),
+                agent("u-b", Status::Idle, Some(11)),
+                agent("u-c", Status::Idle, None),
+            ],
+            &["u-a", "u-b", "u-c"],
+            Some("u-a"),
+        ));
+        assert!(m.restore_pending(), "premise: u-c is still owed");
+        assert!(
+            !owed.iter().any(|e| matches!(e, Effect::RunHeldPane { .. })),
+            "woke an agent while the fleet was still arriving: {owed:?}"
+        );
+        assert!(
+            !m.identity_effects()
+                .iter()
+                .any(|e| matches!(e, Effect::RunHeldPane { .. })),
+            "and does not wake on the next pass either"
+        );
+
+        // The queue drains. The beacon means what it says again.
+        m.apply_snapshot(snap_owned(
+            10,
+            vec![
+                agent("u-a", Status::Idle, Some(10)),
+                agent("u-b", Status::Idle, Some(11)),
+                agent("u-c", Status::Idle, Some(12)),
+            ],
+            &["u-a", "u-b", "u-c"],
+            Some("u-a"),
+        ));
+        assert!(!m.restore_pending(), "premise: the fleet is all back");
+        let done = m.identity_effects();
+        assert!(
+            done.iter().any(|e| matches!(e, Effect::RunHeldPane { .. })),
+            "the human is standing here and the restore is over: {done:?}"
+        );
     }
 
     /// The same bar as the restore makes it: born into a tab that already has
@@ -8932,6 +9068,7 @@ mod tests {
         a.last_interacted = 500;
         m.apply_snapshot(AgentSnapshot {
             last_live: Default::default(),
+            restore_owner: None,
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -8987,6 +9124,7 @@ mod tests {
         new.last_interacted = 100;
         m.apply_snapshot(AgentSnapshot {
             last_live: Default::default(),
+            restore_owner: None,
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -9217,6 +9355,7 @@ mod tests {
         m.apply_tabs(vec![tab(7, 0, "agent-tab", true)]);
         m.apply_snapshot(AgentSnapshot {
             last_live: Default::default(),
+            restore_owner: None,
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -9234,6 +9373,7 @@ mod tests {
         m.apply_panes(vec![pane(0, 42, false, true)]);
         m.apply_snapshot(AgentSnapshot {
             last_live: Default::default(),
+            restore_owner: None,
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -9262,6 +9402,7 @@ mod tests {
         m.apply_tabs(vec![tab(7, 0, "agent-tab", true)]);
         m.apply_snapshot(AgentSnapshot {
             last_live: Default::default(),
+            restore_owner: None,
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -9283,6 +9424,7 @@ mod tests {
         m.apply_tabs(vec![tab(7, 0, "agent-tab", true)]);
         m.apply_snapshot(AgentSnapshot {
             last_live: Default::default(),
+            restore_owner: None,
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -9312,6 +9454,7 @@ mod tests {
         }
         m.apply_snapshot(AgentSnapshot {
             last_live: Default::default(),
+            restore_owner: None,
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -9416,6 +9559,7 @@ mod tests {
         m.apply_tabs(vec![tab(1, 0, "live", false), tab(2, 1, "u-d", true)]);
         m.apply_snapshot(AgentSnapshot {
             last_live: Default::default(),
+            restore_owner: None,
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -9467,6 +9611,7 @@ mod tests {
         }
         m.apply_snapshot(AgentSnapshot {
             last_live: Default::default(),
+            restore_owner: None,
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -9936,6 +10081,7 @@ mod tests {
         a.commit_ord = 999;
         m.apply_snapshot(AgentSnapshot {
             last_live: Default::default(),
+            restore_owner: None,
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -10013,6 +10159,7 @@ mod tests {
         m.opening.insert("u1".into());
         m.apply_snapshot(AgentSnapshot {
             last_live: Default::default(),
+            restore_owner: None,
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -10028,6 +10175,7 @@ mod tests {
         let mut m = BarModel::default();
         m.apply_snapshot(AgentSnapshot {
             last_live: Default::default(),
+            restore_owner: None,
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -10080,6 +10228,7 @@ mod tests {
         m.apply_tabs(vec![tab(1, 0, "live", false), tab(2, 1, "u-d", true)]);
         m.apply_snapshot(AgentSnapshot {
             last_live: Default::default(),
+            restore_owner: None,
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -10118,6 +10267,7 @@ mod tests {
         a.commit_ord = 999;
         m.apply_snapshot(AgentSnapshot {
             last_live: Default::default(),
+            restore_owner: None,
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -10191,6 +10341,7 @@ mod tests {
         a.stale = true;
         m.apply_snapshot(AgentSnapshot {
             last_live: Default::default(),
+            restore_owner: None,
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -10297,6 +10448,7 @@ mod tests {
     fn collapse_snap(seq: u64, collapsed: bool) -> AgentSnapshot {
         AgentSnapshot {
             last_live: Default::default(),
+            restore_owner: None,
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -10441,7 +10593,7 @@ mod tests {
                                         .enumerate()
                                         .map(|(i, &id)| (id, timeline[i]))
                                         .collect();
-                                    m.apply_snapshot(AgentSnapshot { last_live: Default::default(), collapsed: false, seq: 1, agents: vec![], tab_order: tl, order: OrderMode::default(), now_hour: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
+                                    m.apply_snapshot(AgentSnapshot { last_live: Default::default(), restore_owner: None, collapsed: false, seq: 1, agents: vec![], tab_order: tl, order: OrderMode::default(), now_hour: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
                                     m
                                 };
                                 let baseline: Vec<RowKey> =
@@ -10470,6 +10622,7 @@ mod tests {
                                 {
                                     m.apply_snapshot(AgentSnapshot {
                 last_live: Default::default(),
+                restore_owner: None,
                 order: OrderMode::default(),
                 now_hour: 0,
                 tab_buckets: Default::default(),
@@ -10544,7 +10697,7 @@ mod tests {
                                     .enumerate()
                                     .map(|(i, &id)| (id, tl_vals[i]))
                                     .collect();
-                                m.apply_snapshot(AgentSnapshot { last_live: Default::default(), collapsed: false, seq: 1, agents, tab_order: timeline.clone(), order: OrderMode::default(), now_hour: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
+                                m.apply_snapshot(AgentSnapshot { last_live: Default::default(), restore_owner: None, collapsed: false, seq: 1, agents, tab_order: timeline.clone(), order: OrderMode::default(), now_hour: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
 
                                 // Determinism: identical inputs → identical rows.
                                 prop_assert_eq!(m.rows(), m.rows());
@@ -10596,6 +10749,7 @@ mod tests {
                                 m.apply_tabs(vec![tab(0, 0, "a", true), tab(1, 1, "b", false)]);
                                 m.apply_snapshot(AgentSnapshot {
                 last_live: Default::default(),
+                restore_owner: None,
                 order: OrderMode::default(),
                 now_hour: 0,
                 tab_buckets: Default::default(),
@@ -10609,6 +10763,7 @@ mod tests {
                                 let timeline0 = m.tab_order.clone();
                                 m.apply_snapshot(AgentSnapshot {
                 last_live: Default::default(),
+                restore_owner: None,
                 order: OrderMode::default(),
                 now_hour: 0,
                 tab_buckets: Default::default(),
@@ -10632,9 +10787,10 @@ mod tests {
                                 tl1 in prop::collection::btree_map(0usize..8, 0u64..500, 0..5),
                             ) {
                                 let mut m = BarModel::default();
-                                m.apply_snapshot(AgentSnapshot { last_live: Default::default(), collapsed: false, seq: 1, agents: vec![], tab_order: tl0, order: OrderMode::default(), now_hour: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
+                                m.apply_snapshot(AgentSnapshot { last_live: Default::default(), restore_owner: None, collapsed: false, seq: 1, agents: vec![], tab_order: tl0, order: OrderMode::default(), now_hour: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
                                 m.apply_snapshot(AgentSnapshot {
                 last_live: Default::default(),
+                restore_owner: None,
                 order: OrderMode::default(),
                 now_hour: 0,
                 tab_buckets: Default::default(),
@@ -10683,6 +10839,7 @@ mod tests {
                                     ids.iter().enumerate().map(|(i, &id)| (id, tl_vals[i])).collect();
                                 m.apply_snapshot(AgentSnapshot {
                 last_live: Default::default(),
+                restore_owner: None,
                 order: OrderMode::default(),
                 now_hour: 0,
                 tab_buckets: Default::default(),
@@ -10791,6 +10948,7 @@ mod tests {
                                 );
                                 m.apply_snapshot(AgentSnapshot {
                 last_live: Default::default(),
+                restore_owner: None,
                 order: OrderMode::default(),
                 now_hour: 0,
                 tab_buckets: Default::default(),
@@ -10846,7 +11004,7 @@ mod tests {
                                         .collect();
                                     let mut tl = timeline.clone();
                                     tl.remove(&victim_id);
-                                    m.apply_snapshot(AgentSnapshot { last_live: Default::default(), collapsed: false, seq: 2, agents, tab_order: tl, order: OrderMode::default(), now_hour: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
+                                    m.apply_snapshot(AgentSnapshot { last_live: Default::default(), restore_owner: None, collapsed: false, seq: 2, agents, tab_order: tl, order: OrderMode::default(), now_hour: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
                                 }
 
                                 let closed = RowKey::Dormant(format!("u{victim_id}"));
@@ -10924,6 +11082,7 @@ mod tests {
                                             seq += 1;
                                             m.apply_snapshot(AgentSnapshot {
                 last_live: Default::default(),
+                restore_owner: None,
                 order: OrderMode::default(),
                 now_hour: 0,
                 tab_buckets: Default::default(),
@@ -10961,6 +11120,7 @@ mod tests {
                                         // not even the pending ledger.
                                         m.apply_snapshot(AgentSnapshot {
                 last_live: Default::default(),
+                restore_owner: None,
                 order: OrderMode::default(),
                 now_hour: 0,
                 tab_buckets: Default::default(),
@@ -11014,6 +11174,7 @@ mod tests {
                                 }
                                 m.apply_snapshot(AgentSnapshot {
                 last_live: Default::default(),
+                restore_owner: None,
                 order: OrderMode::default(),
                 now_hour: 0,
                 tab_buckets: Default::default(),
@@ -11241,6 +11402,7 @@ mod tests {
                         self.u1_holds = !self.u1_holds; // the eviction flip
                         self.m.apply_snapshot(AgentSnapshot {
                             last_live: Default::default(),
+                            restore_owner: None,
                             order: OrderMode::default(),
                             now_hour: 0,
                             tab_buckets: Default::default(),
@@ -11626,13 +11788,48 @@ mod tests {
         assert!(!m.restore_pending());
     }
 
-    /// Only the bar on the tab being looked at drives the sequence. Every
-    /// instance reads the same store and would otherwise reach the same
-    /// conclusion at the same moment, so N bars would open the same row N
-    /// times. Same election as the other dangerous-in-duplicate arms.
+    /// A tab the restore MADE never drives the restore, even while it holds
+    /// the focus — and it always holds the focus for a moment, because
+    /// `zellij action new-tab` gives it away and the layout cannot refuse
+    /// (FOOTGUNS).
+    ///
+    /// This is the case that broke live on 2026-09-17. The election used to be
+    /// "am I the focused tab", so every tab the queue built believed it was in
+    /// charge and started the queue again from the top: the beacon named four
+    /// different tabs eight times in 800 ms, five tabs were built in that
+    /// window, and the run before it killed the zellij server outright. The
+    /// launch names the owner now, so a newborn has nothing to claim.
     #[test]
-    fn a_background_bar_never_drives_the_restore() {
-        let mut m = background_bar();
+    fn a_tab_the_restore_made_never_drives_the_restore() {
+        // Tab 12 is the tab the queue has just built, and it is focused.
+        let mut m = fleet_bar(12, 12);
+        m.beacon(12);
+        frame(&mut m, 12);
+        assert!(m.own_tab_focused(), "premise: the newborn holds the focus");
+        let fx = m.apply_snapshot(snap_owned(
+            9,
+            vec![
+                agent("u-a", Status::Idle, Some(11)), // the baked tab: the owner
+                agent("u-b", Status::Idle, Some(12)), // this tab, just built
+                agent("u-c", Status::Idle, None),     // still owed
+            ],
+            &["u-a", "u-b", "u-c"],
+            Some("u-a"),
+        ));
+        assert!(
+            opens(&fx).is_empty(),
+            "a tab the restore built started the queue over: {fx:?}"
+        );
+    }
+
+    /// The owner keeps driving after the human walks away.
+    ///
+    /// The old focus election stalled the queue here, and that was the other
+    /// half of the same mistake: the restore is the launch's business, not a
+    /// reaction to where somebody is standing.
+    #[test]
+    fn the_owner_drives_the_restore_from_a_tab_nobody_is_watching() {
+        let mut m = background_bar(); // own tab 11, the human is on tab 10
         let fx = m.apply_snapshot(snap_live(
             9,
             vec![
@@ -11641,9 +11838,45 @@ mod tests {
             ],
             &["u-a", "u-b"],
         ));
-        assert!(
-            opens(&fx).is_empty(),
-            "a bar nobody is looking at leaves the sequencing to the one that is"
+        assert_eq!(
+            opens(&fx),
+            vec!["u-b".to_string()],
+            "the queue stopped because the human looked elsewhere"
+        );
+    }
+
+    /// Two bars, one queue. The whole point of naming the owner is that the
+    /// instances need no conversation to agree, so this test runs them side by
+    /// side on the SAME snapshot — the shape every earlier guard on this
+    /// branch was never tested in, and the shape all three live defects took.
+    #[test]
+    fn two_bars_on_one_snapshot_send_one_open_between_them() {
+        let snap = |seq| {
+            snap_owned(
+                seq,
+                vec![
+                    agent("u-a", Status::Idle, Some(11)),
+                    agent("u-b", Status::Idle, Some(12)),
+                    agent("u-c", Status::Idle, None),
+                ],
+                &["u-a", "u-b", "u-c"],
+                Some("u-a"),
+            )
+        };
+        let mut owner = focused_bar(); // own tab 11
+        let mut newborn = fleet_bar(12, 12); // own tab 12, born focused
+        newborn.beacon(12);
+        frame(&mut newborn, 12);
+
+        let from_owner = owner.apply_snapshot(snap(9));
+        let from_newborn = newborn.apply_snapshot(snap(9));
+        let mut sent = opens(&from_owner);
+        sent.extend(opens(&from_newborn));
+        assert_eq!(
+            sent,
+            vec!["u-c".to_string()],
+            "the two bars sent {} opens for one row",
+            sent.len()
         );
     }
 

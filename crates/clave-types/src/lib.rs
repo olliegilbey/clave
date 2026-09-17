@@ -556,6 +556,22 @@ pub struct AgentSnapshot {
     /// `default` keeps pre-field payloads parseable (§5).
     #[serde(default)]
     pub last_live: Vec<String>,
+    /// Which row's tab drives the staggered restore (#261).
+    ///
+    /// Named by the launch, because the launch is the only party that knows:
+    /// it picks one row to bake as a tab and hands the rest to the bar. Every
+    /// instance reads the same name, so exactly one of them sequences the
+    /// queue however the focus moves.
+    ///
+    /// Inferring this from the focus instead cost three live runs. A tab made
+    /// by `zellij action new-tab` always takes the focus (FOOTGUNS), so each
+    /// restored tab's bar briefly saw itself as the focused one and started
+    /// the queue again from the top: five tabs in 800 ms, and once a dead
+    /// zellij server. The sequencer cannot be elected by a signal the
+    /// sequencer's own work destroys. `default` (None) means "nothing to
+    /// sequence" and keeps pre-field payloads parseable (§5).
+    #[serde(default)]
+    pub restore_owner: Option<String>,
     /// Bar collapse mode (issue #5, C8 parity-desync family): per-instance
     /// memory synced only by the `clave-toggle` broadcast desynced live — a
     /// tab born after a toggle, a plugin reload, or one missed pipe flips an
@@ -1120,6 +1136,7 @@ mod tests {
     fn snapshot_roundtrips() {
         let snap = AgentSnapshot {
             last_live: Default::default(),
+            restore_owner: None,
             seq: 7,
             tab_order: Default::default(),
             collapsed: false,
@@ -1354,6 +1371,7 @@ mod tests {
         // fire-and-forget pipe deltas diverged per instance).
         let snap = AgentSnapshot {
             last_live: Default::default(),
+            restore_owner: None,
             seq: 1,
             agents: vec![],
             tab_order: std::collections::BTreeMap::from([(4usize, 12u64)]),
@@ -1434,6 +1452,7 @@ mod tests {
         // born-expanded default — for old-CLI/new-plugin interop.
         let snap = AgentSnapshot {
             last_live: Default::default(),
+            restore_owner: None,
             seq: 2,
             agents: vec![],
             tab_order: Default::default(),
