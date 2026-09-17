@@ -355,11 +355,15 @@ pub struct Store {
     /// that gating on `tab_order` instead does NOT work: the quit-with-nothing
     /// -open case clears it on the same pass.
     ///
-    /// `default` (false) keeps pre-field store files loading. The cost of that
-    /// default is one launch: the first launch after the upgrade reads false
-    /// and keeps a set it could have replaced. Self-limiting, and the set it
-    /// keeps is the right one anyway.
-    #[serde(default)]
+    /// The default is TRUE, and only a store the PREVIOUS clave wrote can
+    /// reach it — every launch from this version on writes the field. So the
+    /// default answers one question: may the first launch after an upgrade
+    /// trust the binds it can see? It may. The crash this flag guards against
+    /// leaves the flag behind set to false; it cannot leave the flag missing.
+    /// Defaulting to false instead cost one cold start for every person who
+    /// upgrades — their agents came back from the launch AFTER next, which
+    /// reads as the feature not working.
+    #[serde(default = "trust_binds_from_before_the_upgrade")]
     pub bound_since_launch: bool,
     /// Which row geometry the NEXT `clave` launch bakes (#232). Read once by
     /// `launch_layout_kdl` at session-create time — never rides the pipe
@@ -460,6 +464,13 @@ pub fn store_paths() -> Result<StorePaths> {
 /// Lock-free read. Safe without the lock because writers replace the file by
 /// atomic rename — a reader opens either the old whole file or the new whole
 /// file, never a torn write. Missing file = empty store (first run).
+/// See `Store::bound_since_launch`. A store with no such field was written by
+/// a clave that had no live-set restore, so its binds describe a real fleet
+/// and the launch reading them is the first one able to bring it back.
+fn trust_binds_from_before_the_upgrade() -> bool {
+    true
+}
+
 pub fn read_store(paths: &StorePaths) -> Result<Store> {
     match fs::read(&paths.data) {
         Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
@@ -1727,6 +1738,45 @@ mod tests {
         // Session recreate clears it alongside tab_id.
         clear_session_order(&p).unwrap();
         assert_eq!(read_store(&p).unwrap().agents["u1"].pane_id, None);
+    }
+
+    #[test]
+    fn the_first_launch_after_an_upgrade_brings_the_old_fleet_back() {
+        // The live-set restore reads a list this launch writes from the binds
+        // the last session left. That write is gated on a flag added WITH the
+        // feature, so a store the previous clave wrote has no such flag —
+        // and reading its absence as "do not trust the binds" starts the
+        // upgrader cold, with their agents returning only from the launch
+        // AFTER next. The binds in that store are real; nothing else could
+        // have written them.
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            let mut r = rec("u1");
+            r.tab_id = Some(2);
+            s.agents.insert("u1".into(), r);
+            Some(())
+        })
+        .unwrap();
+        // Age the file into what the previous version wrote: the bind stays,
+        // the flag was never a field.
+        let mut raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p.data).unwrap()).unwrap();
+        assert!(
+            raw.as_object_mut()
+                .unwrap()
+                .remove("bound_since_launch")
+                .is_some(),
+            "the field must be there to remove, or this test ages nothing"
+        );
+        std::fs::write(&p.data, serde_json::to_string(&raw).unwrap()).unwrap();
+
+        clear_session_order(&p).unwrap();
+        assert_eq!(
+            read_store(&p).unwrap().last_live,
+            vec!["u1".to_string()],
+            "the upgrader's fleet comes back on the FIRST launch"
+        );
     }
 
     #[test]
