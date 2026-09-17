@@ -1465,11 +1465,25 @@ pub fn launch_session() -> Result<()> {
     // Harmless when live (attach ignores --layout for an existing session).
     let store = crate::store::read_store(&crate::store::store_paths()?)?;
     let now_hour = crate::store::unix_hour(crate::store::now_unix());
-    let (rows, deferred, dropped) = bakeable_rows(
-        restore_rows(&store, now_hour),
-        eager_row(&store),
-        crate::add::validate_cwd,
-    )?;
+    let restorable = restore_rows(&store, now_hour);
+    // Say why a row is not coming back. `restore_rows` silently drops a uuid
+    // naming no record (idle-pruned between sessions) and a row whose cwd has
+    // gone (a deleted worktree), and the drop is PERMANENT — the next
+    // `clear_session_order` rebuilds `last_live` from binds, so a row that was
+    // never baked is gone from the set for good. Without this the launch log
+    // prints `baked=[…]` with the row simply absent, which reads as the
+    // restore losing it rather than the disk having lost it (found in review).
+    for uuid in &store.last_live {
+        if !restorable.iter().any(|r| &r.uuid == uuid) {
+            let why = match store.agents.get(uuid) {
+                None => "no row (pruned between sessions)".to_string(),
+                Some(r) => format!("cwd is gone: {}", r.cwd),
+            };
+            crate::evlog::log_event("launch", &format!("restore dropped {uuid}: {why}"));
+        }
+    }
+    let (rows, deferred, dropped) =
+        bakeable_rows(restorable, eager_row(&store), crate::add::validate_cwd)?;
     for line in dropped {
         crate::evlog::log_event("launch", &line);
     }

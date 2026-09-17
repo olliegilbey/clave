@@ -950,10 +950,10 @@ pub fn clear_session_order(paths: &StorePaths) -> Result<()> {
         let mut changed = false;
         // Record the set a beat BEFORE clearing it: this pass is the last
         // moment the previous session's binds exist, and `last_live` is what
-        // the next launch rebuilds the layout from. Assigned UNCONDITIONALLY,
-        // not inside the clear below — a session quit with no tabs open must
-        // leave an EMPTY set, and a conditional write would silently restore
-        // the set from two launches ago instead.
+        // the next launch rebuilds the layout from. COMPUTED here and written
+        // below under one condition — see the gate. It used to be written
+        // unconditionally, and the paragraph on that gate says why that was
+        // nearly right and still wrong.
         let live_set: Vec<String> = {
             let mut by_tab: Vec<(usize, &str)> = s
                 .agents
