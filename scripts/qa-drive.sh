@@ -333,7 +333,14 @@ ZLOG="${TMP%/}/zellij-$(id -u)/zellij-log/zellij.log"
 # The build tag `just sandbox` baked (sandbox-setup.sh derives it from
 # `git rev-parse --short HEAD` in the checkout that staged it — same
 # derivation here, from THIS checkout).
-BUILD_TAG="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo dev)"
+#
+# HEAD_TAG is what THIS checkout is at now; BUILD_TAG is what the RUNNING
+# wasm says it is. They start equal, and P0 below reconciles BUILD_TAG down
+# to the loaded tag when HEAD has moved on host/docs only. Everything that
+# greps the zellij log for a bar instance (scripts/qa/lib.sh) must use
+# BUILD_TAG, or it looks for a tag no bar ever printed.
+HEAD_TAG="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo dev)"
+BUILD_TAG="$HEAD_TAG"
 
 # The instrument: tracing, assertions, and the zellij log read per bar
 # instance (scripts/qa/lib.sh — see its header for what it expects set, all
@@ -378,7 +385,7 @@ phase "P0-preflight"
 LOADED_LINES="$(grep -F 'clave-bar: loaded' "$ZLOG" 2>/dev/null || true)"
 LOADED_TAIL="$(printf '%s\n' "$LOADED_LINES" | tail -5)"
 measure "loaded-tail (last 5)" "$LOADED_TAIL"
-TAIL_MATCH="$(printf '%s\n' "$LOADED_TAIL" | grep -F "build=$BUILD_TAG" | tail -1)"
+TAIL_MATCH="$(printf '%s\n' "$LOADED_TAIL" | grep -F "build=$HEAD_TAG" | tail -1)"
 
 # An EXACT tag match is the happy path and the only one that needs no
 # argument. But the property this check exists for is "the bar now running
@@ -400,7 +407,7 @@ if [[ -n "$TAIL_MATCH" ]]; then
 else
   # Which build DID load, per the newest loaded line we can see.
   LOADED_BUILD="$(printf '%s\n' "$LOADED_TAIL" | grep -o 'build=[0-9a-f]\{7,\}' | tail -1 | cut -d= -f2)"
-  measure "loaded build tag (differs from HEAD ${BUILD_TAG})" "${LOADED_BUILD:-empty}"
+  measure "loaded build tag (differs from HEAD ${HEAD_TAG})" "${LOADED_BUILD:-empty}"
   if [[ -n "$LOADED_BUILD" ]]; then
     SAME_SOURCE="yes"
     for crate in crates/clave-bar crates/clave-types; do
@@ -417,7 +424,12 @@ else
     fi
     if [[ "$SAME_SOURCE" == "yes" ]]; then
       TAG_VERDICT="present"
-      note 'the loaded bar is build=%s, not HEAD (%s), but the bar and types trees are IDENTICAL at both — the running wasm is the source under test, and HEAD moved on host/docs only' "$LOADED_BUILD" "$BUILD_TAG"
+      # The running wasm is the source under test, so it is the tag every
+      # later phase must grep for. Without this, phase 3's "a new tab's bar
+      # LOADED" counts lines carrying a tag no bar ever printed, and reports
+      # a product defect that is only a commit made mid-drive.
+      BUILD_TAG="$LOADED_BUILD"
+      note 'the loaded bar is build=%s, not HEAD (%s), but the bar and types trees are IDENTICAL at both — the running wasm is the source under test, and HEAD moved on host/docs only' "$LOADED_BUILD" "$HEAD_TAG"
     fi
   fi
 fi
