@@ -389,7 +389,7 @@ pub(crate) fn render_double_card(
         }
         // The TERM pill: the title chip's shape with theme black instead of a
         // palette colour — a block no agent ink has claimed (round 8) — and
-        // the name in `TERM_INK`, green on black for terminal.
+        // the name in the theme's own green, green on black for terminal.
         Some((label, None)) => {
             l1.push_str(&seg(ink(theme.chip_ink), &LCAP.to_string()));
             l1.push_str(&format!(
@@ -2145,23 +2145,31 @@ mod tests {
     }
 
     /// Green on black is what says "terminal" (Ollie, 2026-09-18). The pill
-    /// keeps the black block, and the NAME carries `TERM_INK`, so the pill
-    /// says what the row IS and not only which ink it lacks. The pair is
-    /// asserted as one string — black background then green text — because
-    /// springGreen is also the PR ink, and a card that shows a PR number would
-    /// pass a test that only looked for the hue.
+    /// keeps the black block, and the NAME carries `theme.term_ink`, so the
+    /// pill says what the row IS and not only which ink it lacks. The agent
+    /// pill keeps the inversion: dark text on an allocated hue.
+    ///
+    /// Read through `ink_before`, never `contains` — the curated green is also
+    /// `PR_INK`, and a card with a PR open carries it four columns away
+    /// (FOOTGUNS § Text, glyphs, rendering).
+    ///
+    /// The theme is DELIBERATELY not the default one. Under `Theme::default()`
+    /// the field and the `TERM_INK` const hold the same bytes, so a renderer
+    /// that ignored the theme entirely would pass (review finding,
+    /// 2026-09-18). A theme whose green is its own catches that.
     #[test]
     fn a_terminal_pill_writes_its_name_in_green_and_an_agent_pill_does_not() {
-        let theme = Theme::default();
+        let theme = Theme {
+            term_ink: Rgb(118, 148, 106), // zellij kanagawa's own success
+            ..Theme::default()
+        };
         let f = fleet();
-        let pill = format!("{}{}", theme.chip_ink.bg(), theme.term_ink.fg());
-        for (i, want) in [(6, true), (4, false)] {
-            let mut lines =
-                vec![render_double_card(&f[i], CARD_EXPANDED_COLS, false, false, &theme).0];
-            lines.push(render_card(&f[i], CARD_EXPANDED_COLS, false, 0, &theme)[0].clone());
-            for l1 in lines {
-                assert_eq!(l1.contains(&pill), want, "row {i}: {l1:?}");
-            }
+        // Row 6 is the `Tab #12` terminal; row 4 is an agent with a PR number.
+        for (i, name, want) in [(6, "Tab #12", theme.term_ink), (4, "CLV-3", theme.chip_ink)] {
+            let l1 = render_double_card(&f[i], CARD_EXPANDED_COLS, false, false, &theme).0;
+            assert_eq!(ink_before(&l1, name), want.fg(), "two-line row {i}");
+            let l1 = &render_card(&f[i], CARD_EXPANDED_COLS, false, 0, &theme)[0];
+            assert_eq!(ink_before(l1, name), want.fg(), "four-line row {i}");
         }
     }
 

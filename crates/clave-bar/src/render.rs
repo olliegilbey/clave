@@ -979,15 +979,21 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool, theme:
             command,
             ..
         } => {
-            // The tab NAME becomes the chip (#206): springGreen text on
+            // The tab NAME becomes the chip (#206): the theme's green on
             // theme-black — the inversion of an agent chip (dark text on an
             // allocated colour), which is exactly the semantics: a block no
             // agent ink has claimed. Green on black then says WHAT the block
             // is, not only what it is not. `zellij action rename-tab` is the
             // labelling mechanism; the default `Tab #N` wears the chip too.
             // The block keeps its black on the selected row (ratified).
+            //
+            // The NAME fades with the row like every other cell. It did not
+            // while it was fujiWhite — a brightness step nobody saw — and a
+            // chromatic green made the miss loud: an unselected terminal row
+            // wore the most saturated cell on the bar, which is the inverse of
+            // lock §6's recession (review finding, 2026-09-18).
             out.push_str(&theme.chip_ink.mix(theme.base, fade).bg());
-            out.push_str(&theme.term_ink.fg());
+            out.push_str(&ink(theme.term_ink));
             out.push_str(&clamp(name, widths.title));
             out.push_str(RESET);
             out.push_str(&o);
@@ -1932,7 +1938,8 @@ mod tests {
     ///   cols 23–29. Row 3 is a terminal (#206): the console mark in the status
     ///   cell, `TERM` in the battery cell, the tab name as a springGreen chip
     ///   on sumiInk0, and a blank repo/summary — nothing is known about its
-    ///   pane yet.
+    ///   pane yet. The chip's green fades with its row like every other ink:
+    ///   springGreen `#98BB6C` at 25% toward sumiInk3 is `122;148;91`.
     /// - The battery cell is cols 6–9, right-aligned: `105k`, seven tenths of the
     ///   default smart zone, in the ramp's yellow band (#105).
     /// - The hues are crystalBlue `#7E9CD8`, waveRed `#E46876`, carpYellow
@@ -1972,7 +1979,7 @@ mod tests {
         let expected = [
             " \u{1b}[38;2;179;86;98m\u{25cf} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;180;154;109m105k             \u{1b}[38;2;102;125;172mclave   \u{1b}[38;2;173;169;150mI just passed the spe\u{2026} \u{1b}[0m ",
             "\u{1b}[38;2;45;79;103m\u{e0b6}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m\u{1b}[38;2;255;158;59m\u{25cf}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;220;215;186m\u{2502}\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;230;195;132m105k\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;126;156;216m\u{f1bb}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;122;168;159m\u{1b}[38;2;22;22;29mS6-GUT   \u{1b}[0m\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;126;156;216mclave  \u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m picking the gutter set\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[0m\u{1b}[38;2;45;79;103m\u{e0b4}\u{1b}[0m",
-            " \u{1b}[38;2;173;169;150m\u{f018d} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;173;169;150mTERM   \u{1b}[48;2;24;24;32m\u{1b}[38;2;152;187;108mTab #16  \u{1b}[0m \u{1b}[38;2;173;169;150m        \u{1b}[38;2;173;169;150m                       \u{1b}[0m ",
+            " \u{1b}[38;2;173;169;150m\u{f018d} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;173;169;150mTERM   \u{1b}[48;2;24;24;32m\u{1b}[38;2;122;148;91mTab #16  \u{1b}[0m \u{1b}[38;2;173;169;150m        \u{1b}[38;2;173;169;150m                       \u{1b}[0m ",
         ];
         assert_eq!(render_all(&rows, DESIGN_COLS, Widths::EXPANDED), expected);
         // The same derived self-checks the COLLAPSED golden carries. A golden
@@ -2069,7 +2076,7 @@ mod tests {
         let expected = [
             " \u{1b}[38;2;179;86;98m\u{25cf} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;180;154;109m\u{f007c}           \u{1b}[38;2;102;125;172mcla \u{1b}[38;2;173;169;150mI just\u{2026} \u{1b}[0m ",
             "\u{1b}[38;2;45;79;103m\u{e0b6}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m\u{1b}[38;2;255;158;59m\u{25cf}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;220;215;186m\u{2502}\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;230;195;132m\u{f007c}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;126;156;216m\u{f1bb}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;122;168;159m\u{1b}[38;2;22;22;29mS6-GUT \u{1b}[0m\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;126;156;216mcla\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m pickin\u{2026}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[0m\u{1b}[38;2;45;79;103m\u{e0b4}\u{1b}[0m",
-            " \u{1b}[38;2;173;169;150m\u{f018d} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;173;169;150m\u{f120}   \u{1b}[48;2;24;24;32m\u{1b}[38;2;152;187;108mTab #16\u{1b}[0m \u{1b}[38;2;173;169;150m    \u{1b}[38;2;173;169;150m        \u{1b}[0m ",
+            " \u{1b}[38;2;173;169;150m\u{f018d} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;173;169;150m\u{f120}   \u{1b}[48;2;24;24;32m\u{1b}[38;2;122;148;91mTab #16\u{1b}[0m \u{1b}[38;2;173;169;150m    \u{1b}[38;2;173;169;150m        \u{1b}[0m ",
         ];
         assert_eq!(
             render_all(&rows, COLLAPSED_DESIGN_COLS, Widths::COLLAPSED),
@@ -2116,6 +2123,47 @@ mod tests {
         // springGreen at full strength, then faded 25% toward sumiInk3.
         assert!(unfocused.contains("\u{1b}[38;2;152;187;108m"));
         assert!(faded.contains("\u{1b}[38;2;122;148;91m"));
+    }
+
+    /// The single-height row reads the THEME's green, not the curated const,
+    /// and the name recedes with its row like every other cell (lock §6).
+    ///
+    /// The theme here is deliberately not the default: under `Theme::default()`
+    /// the field and the `TERM_INK` const are the same bytes, so a row that
+    /// ignored the theme would pass (review finding, 2026-09-18).
+    #[test]
+    fn a_terminal_name_wears_the_themed_green_and_recedes_with_its_row() {
+        let green = Rgb(118, 148, 106); // zellij kanagawa's own success
+        let theme = Theme {
+            term_ink: green,
+            ..Theme::default()
+        };
+        let row = Row {
+            content: RowContent::terminal("Tab #1"),
+            selected: false,
+            dormant: false,
+        };
+        let mut other = agent(RowStatus::Idle, Provenance::Main, None, "s");
+        other.selected = true;
+        let paint = |rows: &[Row]| {
+            render_rows(
+                rows,
+                DESIGN_COLS,
+                rows.len(),
+                Widths::EXPANDED,
+                &theme,
+                RowHeight::Single,
+                0,
+            )
+            .remove(0)
+        };
+        assert!(
+            paint(std::slice::from_ref(&row)).contains(&green.fg()),
+            "nothing selected: the themed green at full strength"
+        );
+        let faded = paint(&[row, other]);
+        assert!(!faded.contains(&green.fg()), "the name must recede");
+        assert!(faded.contains(&green.mix(theme.base, FADE).fg()));
     }
 
     /// A dormant row's fade is ABSOLUTE (#206): deep toward the bar background

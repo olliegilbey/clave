@@ -515,10 +515,11 @@ Grilled and ratified with Ollie. The bar's colour language splits in two, and
 (#145 half one — "tailwind for the bar"):
 
 - **Theme-following** (`Theme`, from `ModeUpdate`'s `Styling`): the bar
-  background, selected-row background, default ink, chip ink, untinted grey,
-  and the eight repo inks. Mapping is semantic — `text_unselected` for
-  base/ink, `list_selected.background` for selection (the bar IS a list) —
-  because zellij's theme format has no palette, only per-component slots.
+  background, selected-row background, default ink, chip ink, the terminal
+  green, untinted grey, and the eight repo inks. Mapping is semantic —
+  `text_unselected` for base/ink, `list_selected.background` for selection (the
+  bar IS a list) — because zellij's theme format has no palette, only
+  per-component slots.
 - **Fixed semantic** (consts): the status marks (D10's table) and the battery
   risk bands. Red means failed under every theme.
 
@@ -552,6 +553,18 @@ Consequences, all accepted at the grill:
 - Rejected: reading the terminal's (ghostty's) palette — the bar is truecolor
   by D8 and fades can't `mix` indexed colours; for a zellij plugin the zellij
   theme IS the passthrough layer.
+- **Amended 2026-09-18, ruled by Ollie:** the terminal chip's NAME is green —
+  green on black, classic terminal significance — and the green FOLLOWS the
+  theme rather than joining the fixed tier. It reads `exit_code_success.base`,
+  the slot most likely to be green: over the 41 themes vendored with zellij
+  0.44.3, 31 are green (hue 70–175°, saturation ≥ 0.12), six are olive-yellow,
+  three blue and one teal. The trade was put plainly and accepted — under those
+  ten themes the name is not green. It differs from a status mark because a
+  terminal row is already identified by its black chip and its console mark, so
+  the hue is an accent there and the whole signal on a status mark. One guard:
+  the green must clear WCAG AA (4.5) against the chip it sits on or the row
+  falls back to the default ink; a luma-distance gate was tried first and
+  shipped a 1.94-contrast chip under dayfox.
 
 ### D41 — Snap-back is a contract; the drag arm restores it with one remembered width (2026-08-15)
 
