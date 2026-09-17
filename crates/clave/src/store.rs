@@ -740,10 +740,23 @@ pub fn apply_register(
 ) -> Result<Option<AgentSnapshot>> {
     with_store_mut(paths, |s| {
         let r = s.agents.get_mut(uuid)?;
-        if r.pane_id == Some(pane_id) {
+        // A registration is the agent announcing itself one line before the
+        // exec into claude, so it is the moment we KNOW the row runs again.
+        // An `Exited` mark from the last session is wrong from here on, and
+        // nothing else clears it: `status_for_event` has no SessionStart leg,
+        // so the mark survives until the first prompt — which can be never.
+        // A restarted row that keeps it draws dim (`Status::Exited` → '○'),
+        // and `bound_live_uuids` offers it to the picker as a RESUME instead
+        // of a jump, which double-attaches the session (#261).
+        let stale_exit = r.status == Status::Exited;
+        if r.pane_id == Some(pane_id) && !stale_exit {
             return None; // re-registration of the same pane: no push
         }
         r.pane_id = Some(pane_id);
+        if stale_exit {
+            // Idle, not Working: the process is up, the turn is the user's.
+            r.status = Status::Idle;
+        }
         s.seq += 1; // monotonic pipe contract (§5)
         Some(snapshot_from(s))
     })
@@ -1714,6 +1727,47 @@ mod tests {
         // Session recreate clears it alongside tab_id.
         clear_session_order(&p).unwrap();
         assert_eq!(read_store(&p).unwrap().agents["u1"].pane_id, None);
+    }
+
+    #[test]
+    fn a_restarted_agent_stops_wearing_the_mark_of_the_one_that_quit() {
+        // Seen on screen 2026-09-17. An agent that quit was restarted, came up
+        // and ran — and its row kept `Exited`. Nothing else takes that mark
+        // off: the hook table has no SessionStart leg, so the row lied until
+        // the next prompt, drawing dim and offering itself to the picker as a
+        // resume, which double-attaches the session (#261).
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            let mut r = rec("u1");
+            r.status = Status::Exited;
+            r.pane_id = Some(42);
+            s.agents.insert("u1".into(), r);
+        })
+        .unwrap();
+        // The restart lands on a FRESH pane, the ordinary case.
+        let snap = apply_register(&p, "u1", 43).unwrap().expect("registered");
+        assert_eq!(snap.agents[0].status, Status::Idle, "it runs again");
+        // And on the SAME pane id, which the change gate would otherwise drop
+        // on the floor — the mark has to come off there too.
+        with_store_mut(&p, |s| {
+            s.agents.get_mut("u1").unwrap().status = Status::Exited;
+            Some(())
+        })
+        .unwrap();
+        let snap = apply_register(&p, "u1", 43)
+            .unwrap()
+            .expect("same pane, but the status changed");
+        assert_eq!(snap.agents[0].status, Status::Idle);
+        // A row that never quit keeps whatever it was doing: registering is
+        // not a status write, it is the removal of one wrong mark.
+        with_store_mut(&p, |s| {
+            s.agents.get_mut("u1").unwrap().status = Status::Working;
+            Some(())
+        })
+        .unwrap();
+        apply_register(&p, "u1", 44).unwrap().expect("registered");
+        assert_eq!(read_store(&p).unwrap().agents["u1"].status, Status::Working);
     }
 
     #[test]
