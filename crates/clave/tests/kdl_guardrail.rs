@@ -475,7 +475,7 @@ fn layout_kdl_parses_through_real_zellij_parser() {
 fn launch_layout_kdl_parses_in_both_branches() {
     // Empty store → bar-only (template + one plain `clave` tab).
     assert_layout_ok(
-        &setup::launch_layout_kdl("clave", WASM, &[], false, clave_types::RowHeight::Double),
+        &setup::launch_layout_kdl("clave", WASM, None, false, clave_types::RowHeight::Double),
         "launch.kdl (empty store, bar-only)",
     );
     // Non-empty store → the eager most-recent branch, which composes in
@@ -483,54 +483,14 @@ fn launch_layout_kdl_parses_in_both_branches() {
     // that the empty branch never touches.
     let r = eager_record();
     assert_layout_ok(
-        &setup::launch_layout_kdl(BIN_ABS, WASM, &[&r], false, clave_types::RowHeight::Double),
+        &setup::launch_layout_kdl(
+            BIN_ABS,
+            WASM,
+            Some(&r),
+            false,
+            clave_types::RowHeight::Double,
+        ),
         "launch.kdl (eager most-recent tab)",
-    );
-}
-
-/// The relaunch branch: several restored tabs, all but the first created
-/// HELD. `start_suspended` is syntax clave never emitted before, and it sits
-/// INSIDE the pane node as a sibling of `args` — a property of the run
-/// command, not of the tab. Misplace it and the substring tests still pass
-/// while the real parser rejects the file, which surfaces as a session that
-/// will not start: the worst possible place to learn, and exactly what this
-/// suite exists to catch.
-///
-/// The parse is asserted THROUGH zellij's own reader rather than by string
-/// shape, so this also pins that 0.44.3 still honours the key at all — if a
-/// future bump renames or drops it, a relaunch would silently start every
-/// restored agent at once, which on a real fleet is gigabytes of `claude`
-/// arriving in one breath.
-#[test]
-fn launch_layout_kdl_parses_a_restored_set_with_held_tabs() {
-    let rows: Vec<_> = ["u-1", "u-2", "u-3"]
-        .iter()
-        .map(|u| {
-            let mut r = eager_record();
-            r.uuid = (*u).into();
-            r
-        })
-        .collect();
-    let refs: Vec<&AgentRecord> = rows.iter().collect();
-    let kdl = setup::launch_layout_kdl(BIN_ABS, WASM, &refs, false, clave_types::RowHeight::Card);
-    assert_layout_ok(&kdl, "launch.kdl (restored live set, held tabs)");
-
-    // And zellij's parser must agree about WHICH panes hold: the parsed
-    // layout carries `hold_on_start` on exactly the two non-focused tabs.
-    let layout = Layout::from_str(&kdl, "guardrail:held".into(), None, None).expect("parsed above");
-    let held: Vec<bool> = layout
-        .tabs()
-        .iter()
-        .filter_map(|(_, t, _)| run_of(t))
-        .map(|run| match run {
-            Run::Command(c) => c.hold_on_start,
-            _ => false,
-        })
-        .collect();
-    assert_eq!(
-        held,
-        vec![false, true, true],
-        "the focused tab runs; the rest are held\n{kdl}"
     );
 }
 
@@ -538,8 +498,8 @@ fn launch_layout_kdl_parses_a_restored_set_with_held_tabs() {
 ///
 /// Recursive because the tab template is `[clave-bar (fixed) | pane]`, so the
 /// agent's command is a CHILD of the tab node and never the tab's own `run`.
-/// A non-recursive read returns `None` for every tab and the held assertion
-/// above then passes on an empty comparison.
+/// A non-recursive read returns `None` for every tab and the held assertions
+/// below then pass on an empty comparison.
 fn run_of(tab: &TiledPaneLayout) -> Option<&Run> {
     if tab
         .run
@@ -628,7 +588,7 @@ fn every_layout_declares_both_swap_geometries_birth_width_first() {
             &setup::launch_layout_kdl(
                 "clave",
                 WASM,
-                &[],
+                None,
                 born_collapsed,
                 clave_types::RowHeight::Single,
             ),
@@ -892,10 +852,15 @@ fn keybind_and_layout_plugin_configurations_match() {
     // this test is that the two sides AGREE, so both must be baked from one
     // value, exactly as `write_generated` baked them from one `read_store`.
     let r = eager_record();
-    let launch_eager =
-        setup::launch_layout_kdl(BIN_ABS, WASM, &[&r], false, clave_types::RowHeight::Double);
+    let launch_eager = setup::launch_layout_kdl(
+        BIN_ABS,
+        WASM,
+        Some(&r),
+        false,
+        clave_types::RowHeight::Double,
+    );
     let launch_empty =
-        setup::launch_layout_kdl(BIN_ABS, WASM, &[], false, clave_types::RowHeight::Double);
+        setup::launch_layout_kdl(BIN_ABS, WASM, None, false, clave_types::RowHeight::Double);
     let one_shot = add::tab_layout(&spec(
         "lbl",
         "/home/o/x",

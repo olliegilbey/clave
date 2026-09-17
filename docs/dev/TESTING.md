@@ -205,7 +205,6 @@ reached `main` or the field.
 | `Alt+w` close stranded Alt-↑/↓ nav until a mouse click (#23) | live sessions only | the beacon/anchor relationship only exists once real tabs open and close | `Effect::ReanchorVisit`, executor-gated; tier 2 will assert it (#47 first scenarios) |
 | `CliPipe did not complete within 1s` + empty-payload deliveries (#45) | present since the log's first line, v0.1.0 era; buried the real evidence during the v0.1.1 incident | no tier reads the zellij log; nothing asserts on pipe delivery | nothing yet — it is filed. Observability discipline (below) is the only detector |
 | `clave-organic` dead on arrival: the empty-payload guard special-cased only `clave-toggle`, so the payload-less organic pipe never reached its named match arm (#128) | live only: the Alt+o beacon never announced, so a departed bar kept `cursor` and `current_tab == own` **indefinitely** — an `Alt+Enter` 18 s after the switch still opened the pre-switch selection; the #100 commit-race fix keyed off this dead arm and was dead with it | the model test called `set_organic_pending` directly (green); `main.rs` is `test = false`, so nothing routes a real payload-less `PipeMessage` — the adapter seam is unmodelled, the classic pattern of this table | the payload-less branch now matches names (toggle AND organic); caught by the sandbox drive loop's re-validation of the very fix that depended on it — the checklist §5 beacon-gap item is the standing detector |
-
 | Restored tabs rendered as TERMINAL rows, each agent shown a second time as dormant (#261) | the first live launch of the relaunch feature | every row-to-tab question read the store's bind, and a restored tab is by definition the state where the spawn exists and has not run, so no bind can exist. Green suite, because no fixture held a tab whose command had not run | `model::spawn_binds` joins on the pane's launch command; fixtures now hold cold tabs. Found by the maintainer looking at a screenshot |
 | A relaunch started the wrong agent (#261) | same launch | `last_live` is written in ascending tab id, i.e. creation order; the layout baked it in that order and focused the first. The fixture staged recency IN AGREEMENT with tab order, so a bake that ignored the rank passed | `setup::restore_rows` ranks before baking; the fixture now stages recency AGAINST tab order. Found by the maintainer asking whether the order was right |
 | The restore ranking reproduced only the inner layer of double-layer frecency (#261) | would have started the wrong agent whenever one repo held several middling rows | the rule had two homes. Both were tested, separately, and each was self-consistent | `clave_types::sort_live_block`, one home. Found by CodeRabbit |
@@ -217,13 +216,13 @@ Read the pattern before you argue with the taxonomy: **the pure state machine ha
 never been the problem.** Everything that escaped lived at a seam — process,
 environment, event ordering, or the screen.
 
-**The relaunch seam, added 2026-09-15.** Four of the rows above come from one
+**The relaunch seam, added 2026-09-15.** Six of the rows above come from one
 change, and the worst of them was invisible to every tier for a reason none of
 the other seams names: **each tier stops at one session.** Preflight through
 teardown, then kill. State that is written by session N and read by session
 N+1 has no tier at all, so a defect there looks exactly like a feature working.
 
-Two rules follow, and they are cheap:
+Three rules follow, and they are cheap:
 
 1. **A change that writes state one launch and reads it the next needs a
    relaunch phase, not just a launch phase.** Quit, relaunch, assert the thing

@@ -2007,7 +2007,6 @@ mod tests {
         );
     }
 
-    /// The launch pass that clears the session-scoped binds RECORDS them
     /// The restore's owner is SESSION-scoped, like the binds it sits beside.
     ///
     /// It names a row whose TAB sequences one session's restore, so carrying
@@ -2037,6 +2036,7 @@ mod tests {
         );
     }
 
+    /// The launch pass that clears the session-scoped binds RECORDS them
     /// first: `last_live` is the previous session's live SET, written in
     /// ascending tab id so the file is deterministic. It is not a rank — the
     /// relaunch ranks it on the read side (`setup::restore_rows`).

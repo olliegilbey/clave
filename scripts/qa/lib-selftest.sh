@@ -348,5 +348,36 @@ want "and picks nothing when no row is bound" \
   "$(close_candidate_tab '{"store":{"agents":{
      "u-a":{"tab_id":null,"pane_id":null}}}}' "u-minted")" ""
 
+# The VERDICT TOOL, end to end — not `relaunch_checks`, the script the
+# maintainer is told to run when phase 6c times out. Found in review: it
+# printed a red verdict and exited 0, because it never opened a phase, so
+# `fail_phase` indexed an empty array, aborted under `set -u`, and took its
+# own `exit 1` with it. Every case above passes `phase` first, which is
+# exactly why none of them saw it — the one context the tool really runs in
+# was the one context nothing covered.
+STUB_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qa-verdict-stub.XXXXXX")"
+trap 'rm -f "$FIXTURE"; rm -rf "$STUB_DIR"' EXIT
+verdict_exit() {
+  # $1: the jq array of uuids bound AFTER the relaunch. $2: before the quit.
+  cat >"$STUB_DIR/clave" <<STUB
+#!/usr/bin/env bash
+[[ "\$*" == "dev status" ]] || exit 1
+cat <<'JSON'
+$(relaunch_status "$1" "$2")
+JSON
+STUB
+  chmod +x "$STUB_DIR/clave"
+  printf '%s\n' "${BEFORE_SET[@]}" >"$STUB_DIR/before"
+  CLAVE_BIN="$STUB_DIR/clave" "$SCRIPT_DIR/relaunch-verdict.sh" \
+    "$STUB_DIR/before" >/dev/null 2>&1
+  echo "$?"
+}
+BEFORE_SET=(u-eager u-held-a u-held-b)
+want "a shrunken fleet makes the verdict tool EXIT NON-ZERO" \
+  "$(verdict_exit '["u-eager"]' '["u-eager","u-held-a","u-held-b"]')" "1"
+want "and a fleet that came back whole exits zero" \
+  "$(verdict_exit '["u-eager","u-held-a","u-held-b"]' \
+     '["u-eager","u-held-a","u-held-b"]')" "0"
+
 printf '\n%s\n' "== qa/lib selftest: $FAILURES failure(s) =="
 [[ "$FAILURES" -eq 0 ]]

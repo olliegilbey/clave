@@ -287,35 +287,23 @@ pub fn tab_node(spec: &TabSpec) -> String {
 /// the bar + vertical split, and this node's pane fills its `children`
 /// slot. Same baked idempotent spawn — only the bar pane differs.
 ///
-/// `eager` names the ONE tab a launch both focuses and runs. It is a single
-/// parameter rather than a `focus`/`held` pair because the pair could express
-/// states that must never be baked: `(false, false)` starts every restored
-/// agent at once — a resumed session measures ~350 MB resident and never gives
-/// it back, so a fleet of them is the gigabyte case this design exists to
-/// avoid — and `(true, true)` focuses a tab that will not run.
+/// The node is always focused and always runs, because a launch bakes at most
+/// ONE tab (#261). It took a `held` variant when the launch baked the whole
+/// restored set, and that design is gone: a layout of held tabs made zellij
+/// build them all inside one second, and the handle burst killed the server
+/// with "Too many open files" (measured 2026-09-17). The fleet now comes back
+/// one tab at a time, paced by the bar, through `add::tab_layout` with
+/// `TabStart::Held` — which is where `start_suspended` lives now.
 ///
 /// Exactly one node in a layout may be focused; with none, or with several,
 /// zellij picks, and the row the human lands on stops being ours to choose.
-/// Every other tab is created WITHOUT running its command (`start_suspended`,
-/// which zellij parses as `hold_on_start`): the tab, its name and its baked
-/// spawn all exist, and no `claude` process does. That is what makes restoring
-/// a whole previous live set cost a layout rather than a gigabyte — a held
-/// pane measures nothing until the bar starts it.
-pub fn tab_node_bare(binary: &str, label: &str, uuid: &str, cwd: &str, eager: bool) -> String {
+pub fn tab_node_bare(binary: &str, label: &str, uuid: &str, cwd: &str) -> String {
     // `command` bakes the environment's clave — see tab_node.
-    let focus = if eager { " focus=true" } else { "" };
-    // Inside the pane node, beside `args` — a sibling property of the run
-    // command, not of the tab.
-    let hold = if eager {
-        ""
-    } else {
-        "            start_suspended true\n"
-    };
     format!(
-        r#"    tab name="{label}"{focus} {{
+        r#"    tab name="{label}" focus=true {{
         pane cwd="{cwd}" command="{binary}" {{
             args "spawn" "{uuid}" "--name" "{label}" "--cwd" "{cwd}"
-{hold}        }}
+        }}
     }}
 "#
     )

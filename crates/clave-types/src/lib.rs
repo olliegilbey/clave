@@ -545,9 +545,11 @@ pub struct AgentSnapshot {
     /// can never leak into the ordinal space and outrank every real ordinal.
     #[serde(default)]
     pub tab_order: std::collections::BTreeMap<usize, u64>,
-    /// The set the PREVIOUS session was holding, in the order the launch
-    /// ranked it. The launch bakes only the head of this list as a tab; the
-    /// bar opens the rest itself, one at a time.
+    /// The set the PREVIOUS session was holding, in ASCENDING TAB ID — the
+    /// order those tabs were created, which is not a rank (`store.rs`,
+    /// `clear_session_order`). The launch ranks a copy of it to choose the one
+    /// row it bakes, and never writes that rank back, so the bar opens the
+    /// rest in the previous session's tab order, one at a time.
     ///
     /// It rides the snapshot rather than being passed at load, because a bar
     /// born in a tab the RESTORE created must reach the same conclusion as the

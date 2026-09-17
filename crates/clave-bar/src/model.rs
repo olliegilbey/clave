@@ -352,8 +352,10 @@ pub enum Effect {
     ///   the tab runs it and keeps the focus it takes.
     /// - `Some(tab_id)` — the staggered restore (#261). The tab comes back
     ///   with its agent HELD, and the focus goes back to `tab_id` — the
-    ///   sequencer's own tab, which is where the human is standing. Both halves
-    ///   ride one field because neither is correct alone: see `open::run_open`.
+    ///   sequencer's own tab. That is the tab the LAUNCH baked, which need not
+    ///   be the tab the human is in; the point is that the focus does not stay
+    ///   on a tab nobody asked for. Both halves ride one field because neither
+    ///   is correct alone: see `open::run_open`.
     ///
     /// In both cases the model has already marked the uuid in-flight (↻).
     OpenAgent {
@@ -760,9 +762,11 @@ pub struct BarModel {
     /// claude that has just begun to boot. Dropped when the pane leaves the
     /// manifest, so a genuinely re-held pane can be started again.
     held_run_sent: BTreeSet<u32>,
-    /// The previous session's live set, straight off the snapshot (#261).
-    /// The launch bakes only the head of it as a tab; everything else in here
-    /// is a row this bar has to open itself.
+    /// The previous session's live set, straight off the snapshot (#261), in
+    /// ascending tab id — the order those tabs were created, not a rank. The
+    /// launch ranks a copy to pick the one row it bakes; everything else in
+    /// here is a row this bar has to open itself, and it opens them in the
+    /// order they arrive in here.
     last_live: Vec<String>,
     /// Which row's tab drives the restore, straight off the snapshot (#261).
     /// The launch names it, so every instance agrees without talking.
@@ -794,9 +798,11 @@ pub struct BarModel {
     /// A tab made by `zellij action new-tab` always takes the focus, so the
     /// restore hands it straight back (`open::run_open`). The bar born in the
     /// new tab may have announced itself first, which would leave the beacon
-    /// naming a tab nobody is standing in: nav dies (FOOTGUNS — "a beacon
-    /// naming a tab the user is NOT looking at reads as dead nav") and the
-    /// queue stalls, because `restore_next` runs on the beacon's bar alone.
+    /// naming a tab nobody is standing in, and nav dies (FOOTGUNS — "a beacon
+    /// naming a tab the user is NOT looking at reads as dead nav"). The queue
+    /// itself no longer depends on the beacon — `restore_next` elects off
+    /// `restore_owner` — which is exactly why it survived long enough for the
+    /// stranded beacon to be found by hand instead of by a stalled restore.
     ///
     /// Its OWN flag rather than `organic_pending`, which [`BarModel::beacon`]
     /// clears on the grounds that an arriving beacon is truth — right for
@@ -1428,11 +1434,12 @@ impl BarModel {
 
     /// Start this tab's restored agent, if it has one waiting.
     ///
-    /// A relaunch bakes the previous live set as tabs whose `clave spawn` is
-    /// created HELD (`setup::launch_layout_kdl`), so the fleet's shape returns
-    /// for the cost of a layout instead of ~350 MB per row. The human landing
-    /// on a tab is what converts it into a running agent, and this is where
-    /// that happens.
+    /// A relaunch brings the previous live set back as tabs whose `clave spawn`
+    /// is created HELD (`add::tab_layout` with `TabStart::Held`, one tab at a
+    /// time through `restore_effects`), so the fleet's shape returns for the
+    /// cost of a layout instead of ~350 MB per row. The human landing on a tab
+    /// is what converts it into a running agent, and this is where that
+    /// happens.
     ///
     /// Gated on the BEACON (`own_tab_focused`), not on the election
     /// `identity_effects` already applied. That election reads our own tab
@@ -1446,7 +1453,7 @@ impl BarModel {
     /// idempotent; `shell_toggle` takes this same stronger one for this same
     /// reason ("only the spawn arm is dangerous in duplicate").
     ///
-    /// Three guards, all load-bearing, none about our own panes:
+    /// Two guards on the PANE, both load-bearing, neither about our own panes:
     ///
     /// - **`!exited`.** zellij's held flag also means "this command RAN, it
     ///   finished, press ENTER to run it again". Starting that would resurrect
@@ -1455,6 +1462,9 @@ impl BarModel {
     ///   be re-run reports held as well, and re-running a stranger's command
     ///   because the human navigated near it is clave reaching outside its own
     ///   fleet. `spawn_uuid` is the whole test: our binary, our subcommand.
+    ///
+    /// And one on the FLEET: nothing starts while the restore queue is still
+    /// running — see the `restore_settled` gate in the body.
     ///
     /// Latched on pane id ([`BarModel::held_run_sent`]). Running the pane does
     /// clear its held flag, but only in the NEXT manifest, and this pass
@@ -1959,9 +1969,11 @@ impl BarModel {
         let Some(uuid) = self.restore_next().map(str::to_string) else {
             return Vec::new();
         };
-        // Where the focus goes back to. `restore_next` already refused every
-        // instance but the beacon's, so this is the tab the human is standing
-        // in — and it resolves, because that same gate went through `own_tab`.
+        // Where the focus goes back to: the OWNER'S own tab, the one the
+        // launch baked. `restore_next` refused every other instance, and it
+        // resolves because that same gate went through `own_tab`. Not
+        // necessarily the tab the human is in — the owner is named by the
+        // launch, not by the focus, and that is the whole point (#261).
         let Some(home) = self.own_tab() else {
             return Vec::new();
         };
@@ -1969,8 +1981,8 @@ impl BarModel {
         // re-sending a row whose tab has not appeared yet.
         self.restore_sent.insert(uuid.clone());
         // The new tab will take the focus and `clave open` will hand it back.
-        // Whatever the bar born there says about itself in between, this tab is
-        // where the human is — see `restore_reanchor_owed`.
+        // Whatever the bar born there says about itself in between, the beacon
+        // belongs on this tab — see `restore_reanchor_owed`.
         self.restore_reanchor_owed = true;
         self.open_effects(&uuid, Some(home))
     }
@@ -11843,7 +11855,7 @@ mod tests {
     }
 
     /// The restore brings a tab back WITHOUT starting its agent, and gives the
-    /// focus straight back to the tab the human is standing in.
+    /// focus straight back to the sequencer's own tab.
     ///
     /// Both halves are one assertion because neither is correct alone. A tab
     /// made by `zellij action new-tab` always takes the focus, whatever the
@@ -11928,8 +11940,9 @@ mod tests {
     /// The new tab is born focused and its bar announces itself, so the beacon
     /// ends up naming a tab nobody is standing in. Left there it costs both
     /// halves of the feature: nav reads as dead (FOOTGUNS — a beacon on an
-    /// unwatched tab answers every press with a no-op), and the queue stops,
-    /// because only the beacon's bar opens the next row.
+    /// unwatched tab answers every press with a no-op). The queue survives it
+    /// — the owner is named by the launch, not by the beacon — so nav is the
+    /// whole cost, and it is the half a person notices.
     #[test]
     fn the_sequencer_takes_the_beacon_back_from_the_tab_it_just_made() {
         let mut m = focused_bar();

@@ -516,24 +516,28 @@ pub fn layout_kdl(binary: &str, wasm: &str, row_height: clave_types::RowHeight) 
 }
 
 /// §6.8 (C8): the launch layout, composed DYNAMICALLY at session-create
-/// time. Base = the bar template; `rows` is the set to bake tabs for, ranked
-/// — the previous session's live set (`restore_rows`), or the single
-/// most-recent row when there is nothing to restore. Every row gets a tab
-/// with its baked `clave spawn` (which resumes via the jsonl check);
-/// everything else surfaces as dormant bar rows (§6.6).
+/// time. Base = the bar template; `row` is the ONE row to bake a tab for —
+/// the top of the previous live set's rank (`restore_rows`), or the single
+/// most-recent row when there is nothing to restore, or none at all on a
+/// first run. Every other row surfaces as a dormant bar row (§6.6), and the
+/// bar opens the deferred ones one tab at a time.
 ///
-/// Only the FIRST row runs. The rest are created HELD — tab, name and baked
-/// spawn present, no `claude` process — and the bar starts each one when the
-/// human navigates to it. The asymmetry is deliberate: the first row is the
-/// one launch focuses, and running it straight from the layout keeps the
-/// single-eager-row behaviour as the floor, so a relaunch lands in a working
-/// agent even if the bar's start-on-focus path is broken. `restore_rows`
-/// ranks its output for exactly this reason — the row that runs is the top
-/// of the fleet, not whichever tab happened to be leftmost.
+/// One tab, because a layout of held tabs made zellij build the whole fleet
+/// inside one second and the handle burst killed the server (#261, measured
+/// 2026-09-17). The baked row also runs straight from the layout, which keeps
+/// the single-eager-row behaviour as the floor: a relaunch lands in a working
+/// agent even if the bar's restore path is broken. `restore_rows` ranks its
+/// output for exactly this reason — the row that runs is the top of the
+/// fleet, not whichever tab happened to be leftmost.
 pub fn launch_layout_kdl(
     binary: &str,
     wasm: &str,
-    rows: &[&crate::store::AgentRecord],
+    // ONE row, or none — not a slice (#261). The launch bakes exactly the top
+    // of the rank and the bar brings the rest back one at a time, so a slice
+    // let this signature express the fleet-in-one-layout shape that killed the
+    // zellij server. `bakeable_rows` already returns at most one; saying so in
+    // the type is what stops a later caller re-inventing the crash.
+    row: Option<&crate::store::AgentRecord>,
     collapsed: bool,
     row_height: clave_types::RowHeight,
 ) -> String {
@@ -542,21 +546,14 @@ pub fn launch_layout_kdl(
     // BARE nodes (no bar pane): default_tab_template wraps explicit tab
     // nodes too, so a bar-carrying node here rendered a DOUBLE bar in
     // the eager tab (live finding, c8-cold-start 2026-07-18).
-    let tab = if rows.is_empty() {
-        "    tab name=\"clave\" focus=true\n".to_string()
-    } else {
-        rows.iter()
-            .enumerate()
-            .map(|(i, r)| {
-                crate::add::tab_node_bare(
-                    binary,
-                    &crate::add::sanitize_label(&r.label),
-                    &r.uuid,
-                    &r.cwd,
-                    i == 0, // the top of the rank is the one row a relaunch starts
-                )
-            })
-            .collect()
+    let tab = match row {
+        None => "    tab name=\"clave\" focus=true\n".to_string(),
+        Some(r) => crate::add::tab_node_bare(
+            binary,
+            &crate::add::sanitize_label(&r.label),
+            &r.uuid,
+            &r.cwd,
+        ),
     };
     // Fixed-cols bar pane and `clave_binary` identity: see bar_pane_kdl. The
     // template is what every Alt+t tab inherits, so one correct pane here
@@ -1248,6 +1245,9 @@ pub fn restore_rows(store: &crate::store::Store, now_hour: u32) -> Vec<&crate::s
 
 /// The rows launch actually bakes, and how a bad cwd is treated on each path.
 ///
+/// Splits the restored set three ways: the ONE row the launch bakes, the rows
+/// the sidebar opens afterwards, and the rows that cannot be restored at all.
+///
 /// Every baked cwd is guarded (`add::validate_cwd`) — a `"` or a control
 /// character emits malformed KDL and the whole session fails to create. The
 /// two paths fail differently ON PURPOSE. With one eager row a bad cwd is the
@@ -1265,8 +1265,6 @@ pub fn restore_rows(store: &crate::store::Store, now_hour: u32) -> Vec<&crate::s
 /// testing. It lives here, beside `restore_rows` and `eager_row`, because
 /// `launch_session` is excluded from `just mutants` on the stated grounds that
 /// the pieces it orchestrates are each tested directly.
-/// Splits the restored set three ways: the ONE row the launch bakes, the rows
-/// the sidebar opens afterwards, and the rows that cannot be restored at all.
 ///
 /// The one-row limit is a resource bound, measured 2026-09-16. Building a tab
 /// costs a burst of roughly fifty file handles, opened in the same instant and
@@ -1523,7 +1521,7 @@ pub fn launch_session() -> Result<()> {
     let layout_text = launch_layout_kdl(
         &binary,
         wasm.to_str().context("wasm path")?,
-        &rows,
+        rows.first().copied(),
         store.collapsed,
         store.row_height,
     );
@@ -1686,7 +1684,7 @@ mod tests {
             // The one-shot layout has no template — its bar is in the tab node.
             let cases = [
                 (
-                    launch_layout_kdl("clave", "/w.wasm", &[], collapsed, row_height),
+                    launch_layout_kdl("clave", "/w.wasm", None, collapsed, row_height),
                     "default_tab_template",
                 ),
                 (
@@ -1809,8 +1807,8 @@ mod tests {
         // below covers Double's budgets and Single's legacy pair together.
         let born = |kdl: &str| birth_size(kdl, "default_tab_template");
         let row_height = clave_types::RowHeight::Single;
-        let expanded = launch_layout_kdl("clave", "/w.wasm", &[], false, row_height);
-        let collapsed = launch_layout_kdl("clave", "/w.wasm", &[], true, row_height);
+        let expanded = launch_layout_kdl("clave", "/w.wasm", None, false, row_height);
+        let collapsed = launch_layout_kdl("clave", "/w.wasm", None, true, row_height);
         assert_eq!(
             born(&expanded),
             clave_types::BAR_TARGET_COLS.to_string(),
@@ -1832,24 +1830,29 @@ mod tests {
     #[test]
     fn the_launch_birth_size_follows_the_row_height_mode() {
         // Card (the default): 48 expanded, 16 collapsed.
-        let card_exp =
-            launch_layout_kdl("clave", "/w.wasm", &[], false, clave_types::RowHeight::Card);
+        let card_exp = launch_layout_kdl(
+            "clave",
+            "/w.wasm",
+            None,
+            false,
+            clave_types::RowHeight::Card,
+        );
         let card_col =
-            launch_layout_kdl("clave", "/w.wasm", &[], true, clave_types::RowHeight::Card);
+            launch_layout_kdl("clave", "/w.wasm", None, true, clave_types::RowHeight::Card);
         assert_eq!(birth_size(&card_exp, "default_tab_template"), "48");
         assert_eq!(birth_size(&card_col, "default_tab_template"), "16");
         // Double: the two-line card budgets.
         let expanded = launch_layout_kdl(
             "clave",
             "/w.wasm",
-            &[],
+            None,
             false,
             clave_types::RowHeight::Double,
         );
         let collapsed = launch_layout_kdl(
             "clave",
             "/w.wasm",
-            &[],
+            None,
             true,
             clave_types::RowHeight::Double,
         );
@@ -1859,7 +1862,7 @@ mod tests {
         let legacy = launch_layout_kdl(
             "clave",
             "/w.wasm",
-            &[],
+            None,
             false,
             clave_types::RowHeight::Single,
         );
@@ -1878,7 +1881,7 @@ mod tests {
         let kdl = launch_layout_kdl(
             "clave",
             "/w.wasm",
-            &[],
+            None,
             false,
             clave_types::RowHeight::Single,
         );
@@ -1886,7 +1889,7 @@ mod tests {
         let kdl = launch_layout_kdl(
             "clave",
             "/w.wasm",
-            &[],
+            None,
             false,
             clave_types::RowHeight::Double,
         );
@@ -1917,14 +1920,14 @@ mod tests {
         let expanded = launch_layout_kdl(
             "clave",
             "/w.wasm",
-            &[],
+            None,
             false,
             clave_types::RowHeight::Double,
         );
         let collapsed = launch_layout_kdl(
             "clave",
             "/w.wasm",
-            &[],
+            None,
             true,
             clave_types::RowHeight::Double,
         );
@@ -1939,7 +1942,7 @@ mod tests {
         let kdl = launch_layout_kdl(
             "clave",
             "/w.wasm",
-            &[],
+            None,
             false,
             clave_types::RowHeight::Double,
         );
@@ -1999,42 +2002,37 @@ mod tests {
     /// from the layout keeps today's single-eager-row behaviour as the FLOOR
     /// — if the bar's start-on-focus path ever fails, a relaunch still lands
     /// the human in a working agent rather than a fleet of dead tabs.
+    /// The launch bakes ONE tab, and the type will not let it bake two.
+    ///
+    /// This test used to build three rows and assert two held tabs. That
+    /// layout has not been emitted since the restore became staggered (#261):
+    /// `bakeable_rows` keeps the head of the rank and defers the rest to the
+    /// bar, because zellij building a fleet of tabs in one breath exhausts the
+    /// process file-handle ceiling and kills the server. `launch_layout_kdl`
+    /// now takes one row or none, so the old shape is unspellable — and the
+    /// held path that IS live is `add::tab_layout` with `TabStart::Held`,
+    /// covered in `kdl_guardrail.rs`.
     #[test]
-    fn launch_layout_restores_every_row_but_runs_only_the_focused_one() {
-        let rows = [
-            layout_row("u-1", "alpha · main", "/repo/alpha"),
-            layout_row("u-2", "beta · main", "/repo/beta"),
-            layout_row("u-3", "gamma · main", "/repo/gamma"),
-        ];
-        let refs: Vec<&crate::store::AgentRecord> = rows.iter().collect();
+    fn the_launch_bakes_one_running_tab_and_never_a_held_one() {
+        let row = layout_row("u-1", "alpha · main", "/repo/alpha");
         let kdl = launch_layout_kdl(
             "clave",
             "/w.wasm",
-            &refs,
+            Some(&row),
             false,
             clave_types::RowHeight::Card,
         );
-        // One tab per row, in the order given — the order they sat on screen.
-        let tabs: Vec<&str> = kdl
-            .match_indices("tab name=")
-            .map(|(i, _)| &kdl[i..kdl[i..].find('\n').map(|n| i + n).unwrap_or(kdl.len())])
-            .collect();
-        assert_eq!(tabs.len(), 3, "one tab per restored row\n{kdl}");
-        assert!(tabs[0].contains("alpha"), "{tabs:?}");
-        assert!(tabs[1].contains("beta"), "{tabs:?}");
-        assert!(tabs[2].contains("gamma"), "{tabs:?}");
-        // Exactly one focus, on the first — two would leave zellij to pick.
-        assert_eq!(kdl.matches("focus=true").count(), 1, "{kdl}");
-        assert!(tabs[0].contains("focus=true"), "{tabs:?}");
-        // The focused tab runs; every other is held.
         assert_eq!(
-            kdl.matches("start_suspended true").count(),
-            2,
-            "every tab but the focused one is created held\n{kdl}"
+            kdl.matches("tab name=").count(),
+            1,
+            "a launch bakes exactly one tab\n{kdl}"
         );
-        for uuid in ["u-1", "u-2", "u-3"] {
-            assert!(kdl.contains(uuid), "row {uuid} missing from layout\n{kdl}");
-        }
+        assert_eq!(kdl.matches("focus=true").count(), 1, "{kdl}");
+        assert!(
+            !kdl.contains("start_suspended"),
+            "the launch holds nothing; the bar paces the rest\n{kdl}"
+        );
+        assert!(kdl.contains("alpha"), "{kdl}");
     }
 
     #[test]
@@ -2079,7 +2077,7 @@ mod tests {
         let kdl = launch_layout_kdl(
             "clave",
             "/w.wasm",
-            &[&r],
+            Some(&r),
             false,
             clave_types::RowHeight::Double,
         );
@@ -2748,7 +2746,13 @@ mod tests {
             wants: None,
             subagents: false,
         };
-        let lay = launch_layout_kdl(abs, "/w.wasm", &[&r], false, clave_types::RowHeight::Double);
+        let lay = launch_layout_kdl(
+            abs,
+            "/w.wasm",
+            Some(&r),
+            false,
+            clave_types::RowHeight::Double,
+        );
         assert!(lay.contains(&format!("command=\"{abs}\"")));
         assert!(!lay.contains("command=\"clave\""));
     }
@@ -3070,7 +3074,13 @@ mod tests {
         // The launch layout is composed at launch time and takes the eager
         // agent row — synthesize one so the eager-tab's baked `command=`
         // (the version-bearing binary reference) is present to check too.
-        let launch = launch_layout_kdl(binary, wasm, &[&r], false, clave_types::RowHeight::Double);
+        let launch = launch_layout_kdl(
+            binary,
+            wasm,
+            Some(&r),
+            false,
+            clave_types::RowHeight::Double,
+        );
 
         // Check PER ARTIFACT, not over the union (Codex, PR #52): flattening
         // first would let an artifact that lost its versioned reference

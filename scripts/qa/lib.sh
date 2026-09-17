@@ -567,6 +567,16 @@ print_summary() {
 # Mark the current phase FAILED, print the summary, and stop the run. The
 # log and sandbox are left exactly as they are — forensics, not a re-run.
 fail_phase() {
+  # A caller that opened no phase still gets a FAILING exit. Without this the
+  # arithmetic below is `PHASE_RESULTS[-1]`, which aborts the function under
+  # `set -u` with `bad array subscript` — killing the `exit 1` two lines down
+  # and returning 0. Measured in review: `relaunch-verdict.sh` printed a red
+  # verdict and exited 0, and it is the documented recovery for a timed-out
+  # phase 6c. A check that cannot fail the run is not a check.
+  if (( ${#PHASE_RESULTS[@]} == 0 )); then
+    printf '\nFAILED (no phase open)\n'
+    exit 1
+  fi
   local last=$((${#PHASE_RESULTS[@]} - 1))
   PHASE_RESULTS[last]="FAIL"
   printf '\nPHASE %s FAILED\n' "$CURRENT_PHASE"
@@ -584,6 +594,10 @@ fail_phase() {
 # came back wrong; that is `check`'s job and it stops the run.
 skip_phase() {
   local why="$1"
+  if (( ${#PHASE_RESULTS[@]} == 0 )); then
+    printf 'NOT RUN: %s\n' "$why"
+    return
+  fi
   local last=$((${#PHASE_RESULTS[@]} - 1))
   PHASE_RESULTS[last]="NOT RUN"
   printf '[%s %s] NOT RUN: %s\n' "$CURRENT_PHASE" "$(ts)" "$why"

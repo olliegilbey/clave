@@ -21,15 +21,23 @@ const DRIVE: &str = include_str!("../../../scripts/qa-drive.sh");
 const CT: &str = include_str!("../../../scripts/ct.sh");
 const LIB: &str = include_str!("../../../scripts/qa/lib.sh");
 const SELFTEST: &str = include_str!("../../../scripts/qa/lib-selftest.sh");
+const VERDICT: &str = include_str!("../../../scripts/qa/relaunch-verdict.sh");
+const SAMPLER: &str = include_str!("../../../scripts/qa/fd-sampler.sh");
 
 /// Every script the drive is made of. The hook rule is about the WHOLE drive,
 /// not about one file of it: the instrument was split out of qa-drive.sh on
 /// 2026-09-12, and a rule that only read the file it was written against
 /// would have stopped covering anything that moved.
-const DRIVE_SOURCES: [(&str, &str); 3] = [
+const DRIVE_SOURCES: [(&str, &str); 5] = [
     ("scripts/qa-drive.sh", DRIVE),
     ("scripts/qa/lib.sh", LIB),
     ("scripts/qa/lib-selftest.sh", SELFTEST),
+    // The two tools #261 added. They were outside every rule here until review
+    // pointed it out, which is the failure mode the paragraph above describes
+    // happening a second time: the list is a list, so growing the drive does
+    // not grow the guard. Anything new under scripts/qa/ belongs here.
+    ("scripts/qa/relaunch-verdict.sh", VERDICT),
+    ("scripts/qa/fd-sampler.sh", SAMPLER),
 ];
 
 /// Lines that actually run something — comments, blanks and heredoc bodies
@@ -320,12 +328,24 @@ fn a_keystroke_only_reaches_a_pane_the_drive_proved_is_a_shell() {
 /// ends a zellij session. Read as tokens, like `is_keystroke`, so a different
 /// quoting of the same command cannot slip past.
 fn is_session_lifecycle(line: &str) -> bool {
-    // Measured from the vendored source, zellij-utils-0.44.3/src/cli.rs:361-397:
-    // every one of these carries a visible_alias, and a denylist of the long
-    // names alone let `zellij ka` — kill EVERY session on the machine,
-    // including the maintainer's working fleet — through a green gate.
+    // The first four are measured from the vendored source,
+    // zellij-utils-0.44.3/src/cli.rs:361-397, and each carries a
+    // visible_alias: k, d, ka, da. A denylist of the long names alone let
+    // `zellij ka` — kill EVERY session on the machine, including the
+    // maintainer's working fleet — through a green gate, and
     // `delete-all-sessions` was missing under both names (swarm review,
     // 2026-09-16).
+    //
+    // `new-session` and `a` are DELIBERATELY WIDER than that range, and were
+    // mis-described as part of it until review (2026-09-17). `a` is `attach`
+    // (cli.rs:306), which neither starts nor ends a session but does put a
+    // drive inside one it does not own. `new-session` matches no zellij
+    // subcommand at all; it is kept because the denylist costs nothing when it
+    // matches nothing, and a spelling that appears later should trip. The
+    // session-CREATING spellings this cannot see — bare `zellij`, `zellij
+    // --session <name>`, `zellij attach -c` — are caught from the other end by
+    // the `dev launch`/`just launch` window below, which is the path a drive
+    // would realistically take.
     const LIFECYCLE: [&str; 5] = [
         "kill-session",
         "delete-session",
