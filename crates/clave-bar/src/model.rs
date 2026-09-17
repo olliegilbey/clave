@@ -2275,7 +2275,16 @@ impl BarModel {
                 // later burst — the round-11 storm shape.
                 self.birth_announced = true;
                 self.organic_pending = false;
-                self.restore_reanchor_owed = false;
+                // The restore's claim is the exception, and only while an open
+                // is in flight: the tab it will steal the beacon with does not
+                // exist yet, so a frame saying "you still hold the beacon" is
+                // evidence about nothing. Spending it here left the beacon on
+                // the last tab the restore built while the human sat on the
+                // baked one — the first Alt+Up did nothing, the second worked
+                // (measured live 2026-09-17).
+                if self.opening.is_empty() {
+                    self.restore_reanchor_owed = false;
+                }
             } else if birth {
                 // UNGATED (live-validated): a newborn must announce its own
                 // tab before its first PaneUpdate can satisfy any gate. The
@@ -11596,6 +11605,59 @@ mod tests {
             vec![Some(11)],
             "the restore's open returns the focus to the sequencer's own tab"
         );
+    }
+
+    /// The claim survives a frame that arrives BEFORE the tab it made.
+    ///
+    /// Measured live 2026-09-17. The owner sends an open, and a tab frame
+    /// lands while the beacon still names the owner — the newborn has not
+    /// announced itself yet, so nothing looks wrong. That frame used to spend
+    /// the re-anchor claim. Then the tab arrived, took the beacon, and there
+    /// was nothing left owed to take it back: the beacon sat on the last tab
+    /// the restore built while the human sat on the baked one. The first
+    /// Alt+Up did nothing (the stranded instance handled it and re-anchored),
+    /// and the second worked.
+    ///
+    /// A frame saying "you still hold the beacon" is not evidence about a tab
+    /// that does not exist yet.
+    #[test]
+    fn the_reanchor_claim_outlives_a_frame_that_beats_the_new_tab() {
+        let mut m = focused_bar();
+        let fx = m.apply_snapshot(snap_live(
+            9,
+            vec![
+                agent("u-a", Status::Idle, Some(11)),
+                agent("u-b", Status::Idle, None),
+            ],
+            &["u-a", "u-b"],
+        ));
+        assert_eq!(
+            opens(&fx),
+            vec!["u-b".to_string()],
+            "premise: one open sent"
+        );
+
+        // A frame arrives first. The tab is still being built, so the beacon
+        // still names us and this frame proves nothing about it.
+        m.apply_tabs(vec![
+            tab(10, 0, "a", false),
+            tab(11, 1, "b", true),
+            tab(12, 2, "c", false),
+        ]);
+
+        // NOW the tab arrives and takes the beacon, and the focus comes back.
+        m.beacon(12);
+        assert!(!m.own_tab_focused(), "premise: the beacon has left us");
+        let fx = m.apply_tabs(vec![
+            tab(10, 0, "a", false),
+            tab(11, 1, "b", true),
+            tab(12, 2, "c", false),
+        ]);
+        assert!(
+            fx.contains(&Effect::ReanchorVisit { tab_id: 11 }),
+            "the claim was spent on the frame that beat the tab: {fx:?}"
+        );
+        assert!(m.own_tab_focused(), "and nav answers the FIRST press again");
     }
 
     /// The restored tab steals the beacon, and the sequencer takes it back.
