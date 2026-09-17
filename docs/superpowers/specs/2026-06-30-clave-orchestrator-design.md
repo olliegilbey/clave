@@ -835,15 +835,18 @@ long-dead store rows: deferred.
   EXITED session with stale serialized state would be *resurrected* by
   `attach --create`, ignoring `--layout`; (2) composes the launch layout
   **dynamically**: the bar-only template, plus one tab per row of the previous
-  **live set**, ranked (`setup::restore_rows`) — pane command baked
-  `clave spawn <uuid> …` (resumes via the jsonl check), written to the stable
-  `setup::launch_layout_path` under the data dir — NOT a temp file — and
-  passed via `--layout`. Only the first tab runs; the rest are held. Every
-  other store row appears as a dormant bar row (§6.6). **Superseded as
-  written, 2026-09-15:** this paragraph described the single-eager-row launch,
-  which is now only the fallback taken when the live set is empty — a first
-  run, or a session quit with nothing open. Tab-timeline/bind clearing
-  on create is unchanged (§5).
+  **live set** — pane command baked `clave spawn <uuid> …` (resumes via the
+  jsonl check), written to the stable `setup::launch_layout_path` under the
+  data dir — NOT a temp file — and passed via `--layout`. Every other store row
+  appears as a dormant bar row (§6.6). Tab-timeline/bind clearing on create is
+  unchanged (§5).
+
+  **Revised twice since this was written.** 2026-09-15: the single-eager-row
+  launch is now only the fallback taken when the live set is empty — a first
+  run, or a session quit with nothing open. 2026-09-17: the launch bakes ONE
+  tab again, and the sidebar opens the rest one at a time, because building a
+  tab costs a burst of file handles and baking a whole fleet at once exhausted
+  the macOS ceiling (#261).
 - The session layout defines a **tab template** (`[clave-bar (fixed width) | pane]`)
   so *natively* created tabs get the bar too; `clave add` tabs use the one-shot temp
   layout (§6.3). If `default_tab_template` proves parse-fragile (S1 note), fallback

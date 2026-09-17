@@ -189,7 +189,19 @@ mutants base="main" *args:
     # The cache is only true for the config and the toolchain that filled it. A
     # new exclude rule, or a new compiler, can change a verdict that the cache
     # would then hide. So key it on both, and start cold when the key moves.
-    key="$(cargo mutants --version) $(rustc --version) $(shasum -a 256 .cargo/mutants.toml)"
+    # Linux is a first-class target and ships `sha256sum`, not `shasum`;
+    # macOS ships `shasum`. Neither is a documented prerequisite, and under
+    # `set -euo pipefail` a missing one kills the recipe before it generates a
+    # single mutant. Try both, then say which to install. (CodeRabbit, #261)
+    if command -v sha256sum >/dev/null; then
+        cfg="$(sha256sum .cargo/mutants.toml)"
+    elif command -v shasum >/dev/null; then
+        cfg="$(shasum -a 256 .cargo/mutants.toml)"
+    else
+        echo "a SHA-256 command is required: install sha256sum or shasum" >&2
+        exit 127
+    fi
+    key="$(cargo mutants --version) $(rustc --version) $cfg"
     if [ "$(cat target/.mutants-cache-key 2>/dev/null || true)" != "$key" ]; then
         echo "mutants: config or toolchain moved — the cache is dropped"
         rm -rf mutants.out mutants.out.old

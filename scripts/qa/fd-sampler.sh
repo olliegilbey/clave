@@ -19,6 +19,16 @@
 # Usage: fd-sampler.sh <session-name> [seconds-to-wait-for-the-server]
 set -uo pipefail
 
+# `lsof` is both the reading and the PACING of the sampling loop, which has no
+# sleep on purpose. Missing, it fails through `2>/dev/null` into an empty
+# snapshot: the loop then spins at full CPU for the life of the server and
+# writes `n=0` every turn, so the log says "no handles" rather than "no tool".
+# (CodeRabbit, #261)
+command -v lsof >/dev/null || {
+  echo "lsof is required: it is both the reading and the pacing of the sampling loop" >&2
+  exit 127
+}
+
 SESSION="${1:?pass the sandbox session name}"
 DURATION="${2:-900}"
 OUT="${FD_SAMPLE_OUT:-/tmp/fd-sample-$SESSION.log}"

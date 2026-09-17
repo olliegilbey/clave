@@ -317,6 +317,20 @@ want "and the verdict names the rows" \
   "$(grep -c 'carry no status from the session before: measured=u-held-a u-held-b' \
      <<<"$STALE_STATUS")" "1"
 
+# The stale-status READER on its own, not through the verdict. Naming it here
+# is what makes `script_hygiene` able to require it stay in lib.sh: exercised
+# only through `relaunch_checks`, an inline replacement would pass every test
+# above while bypassing the contract. (CodeRabbit, #261)
+STALE_READ="$(stale_status_uuids "$(relaunch_status \
+  '["u-eager","u-held-a","u-held-b"]' '["u-eager","u-held-a","u-held-b"]' stale-status)")"
+want "stale_status_uuids names the held rows wearing a stale status" \
+  "$(tr '\n' ' ' <<<"$STALE_READ")" "u-held-a u-held-b "
+# And says nothing about a fleet that came back clean — the eager row runs, so
+# its status is a claim about a process that really is there.
+want "stale_status_uuids is silent on a clean fleet" \
+  "$(stale_status_uuids "$(relaunch_status \
+     '["u-eager","u-held-a","u-held-b"]' '["u-eager","u-held-a","u-held-b"]')")" ""
+
 # Both sides empty compare EQUAL. A dead `dev status` must not read as a
 # perfect restore.
 (relaunch_checks "" "$(relaunch_status '[]' '[]')" "" >/dev/null 2>&1)

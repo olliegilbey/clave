@@ -272,8 +272,6 @@ close_candidate_tab() {
 
 # What the PREVIOUS session left. Written at launch, from the binds standing
 # when the session died (setup.rs `clear_session_order`), which is also the
-# pass that clears them — so this is the only surviving record of the fleet,
-# and the expectation the rebound set is measured against.
 # Restored rows that still carry a status from the session BEFORE. Read over
 # the HELD signature only (a tab, no pane): those rows have run nothing in this
 # session, so any status on them is a claim about a process that is gone. The
@@ -285,6 +283,8 @@ stale_status_uuids() {
                   and .value.status != "idle") | .key' <<<"$1" 2>/dev/null | sort
 }
 
+# pass that clears them — so this is the only surviving record of the fleet,
+# and the expectation the rebound set is measured against.
 last_live_uuids() {
   jq -r '.store.last_live[]?' <<<"$1" 2>/dev/null | sort
 }
