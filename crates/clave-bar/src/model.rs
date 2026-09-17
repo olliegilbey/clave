@@ -1803,6 +1803,27 @@ impl BarModel {
         if !self.own_tab_focused() {
             return None;
         }
+        // Wait for the TAB, not for the next store advance. `restore_sent` is
+        // set the instant an open goes out, so on its own it paces the queue
+        // at one row per SNAPSHOT — and a launch pushes a flurry of those. The
+        // first live relaunch (2026-09-17) sent three tabs inside one second
+        // and killed the zellij server with "Too many open files": the handle
+        // burst belongs to zellij BUILDING the tab, which runs long after the
+        // row is marked sent. `opening` holds a row from the open until its
+        // tab exists, and `prune_opening` releases it on a bind, a stale row,
+        // or a row that left the store — so a failed open cannot wedge the
+        // queue forever.
+        if !self.opening.is_empty() {
+            return None;
+        }
+        self.next_owed()
+    }
+
+    /// The head of the queue, whether or not this instant is a good time to
+    /// send it. Kept apart from `restore_next` because "a row is still owed"
+    /// and "send a row now" are different questions: the pacing gate makes the
+    /// second one false for a while without making the first one false at all.
+    fn next_owed(&self) -> Option<&str> {
         self.last_live
             .iter()
             .find(|uuid| {
@@ -1815,9 +1836,9 @@ impl BarModel {
             .map(|s| s.as_str())
     }
 
-    /// Is the restore still owed a row? The shell re-arms its timer on this.
+    /// Is the restore still owed a row?
     pub fn restore_pending(&self) -> bool {
-        self.restore_next().is_some()
+        self.next_owed().is_some()
     }
 
     /// Open the next owed row, and ONLY the next one (#261).
@@ -11344,6 +11365,49 @@ mod tests {
         assert!(m.restore_pending(), "u-c is still owed");
     }
 
+    /// The queue waits for the TAB, not for the next store advance.
+    ///
+    /// Measured 2026-09-17, the first live relaunch on this branch: three tabs
+    /// went out inside one second and the zellij server died with "Too many
+    /// open files" at 194 handles and climbing, 150 of them PIPE. `restore_sent`
+    /// alone let the head of the queue advance on ANY snapshot, and a launch
+    /// pushes a flurry of them — so the chain outran the thing it was pacing.
+    /// The handle burst belongs to zellij BUILDING the tab, which is still
+    /// going long after the row is marked sent, so the tab appearing is the
+    /// only honest clock. `opening` carries that claim and `prune_opening`
+    /// already releases it on a bind, a stale row, or a row that went away.
+    #[test]
+    fn the_restore_sends_nothing_while_the_last_tab_is_still_being_built() {
+        let mut m = focused_bar();
+        let rows = |b_tab: Option<usize>| {
+            vec![
+                agent("u-a", Status::Idle, Some(11)),
+                agent("u-b", Status::Idle, b_tab),
+                agent("u-c", Status::Idle, None),
+            ]
+        };
+        let fx = m.apply_snapshot(snap_live(9, rows(None), &["u-a", "u-b", "u-c"]));
+        assert_eq!(opens(&fx), vec!["u-b".to_string()], "premise: u-b went out");
+
+        // The store advances again — a hook, a status, anything — and u-b's
+        // tab is STILL not there. Sending u-c now stacks a second tab build on
+        // the first, which is the crash.
+        let fx = m.apply_snapshot(snap_live(10, rows(None), &["u-a", "u-b", "u-c"]));
+        assert!(
+            opens(&fx).is_empty(),
+            "sent a second row while u-b had no tab yet: {fx:?}"
+        );
+        assert!(m.restore_pending(), "u-c is still owed, just not yet");
+
+        // u-b's tab is up. The burst is over and the queue may move.
+        let fx = m.apply_snapshot(snap_live(11, rows(Some(12)), &["u-a", "u-b", "u-c"]));
+        assert_eq!(
+            opens(&fx),
+            vec!["u-c".to_string()],
+            "the queue resumes once the tab it was waiting for exists"
+        );
+    }
+
     /// The restore brings a tab back WITHOUT starting its agent, and gives the
     /// focus straight back to the tab the human is standing in.
     ///
@@ -11479,12 +11543,23 @@ mod tests {
             &["u-a", "u-b", "u-c", "u-d"],
         ));
         assert_eq!(opens(&fx), vec!["u-b".to_string()], "one row, not three");
-        // The next advance moves on rather than repeating itself, even though
-        // the store has not yet reported u-b as bound.
+        // u-b's tab arrives. The queue moves ON rather than repeating itself:
+        // `restore_sent` is what stops a bound row being sent twice, and it is
+        // still needed beside the pacing gate, which only says "not yet".
+        let fx = m.apply_snapshot(snap_live(
+            10,
+            vec![
+                agent("u-a", Status::Idle, Some(11)),
+                agent("u-b", Status::Idle, Some(12)),
+                agent("u-c", Status::Idle, None),
+                agent("u-d", Status::Idle, None),
+            ],
+            &["u-a", "u-b", "u-c", "u-d"],
+        ));
         assert_eq!(
-            opens(&m.restore_effects()),
+            opens(&fx),
             vec!["u-c".to_string()],
-            "the queue advances instead of re-sending the row in flight"
+            "the queue advances instead of re-sending the row it already sent"
         );
     }
 
