@@ -1199,12 +1199,42 @@ pub fn run_scenario(name: &str) -> Result<()> {
             // closed down tab by tab. The next launch's `clear_session_order`
             // reads exactly these and records them as the live set to restore.
             record.tab_id = a.bound_tab;
+            // A seeded bind is a claim that a session came up and bound rows,
+            // so the flag that says so has to be seeded with it (#261). Without
+            // it `clear_session_order` reads the stage as a launch that died
+            // before binding anything, refuses to record the live set, and the
+            // relaunch scenario silently stages NO restore at all — one row
+            // baked, nothing deferred, which is what it looked like on
+            // 2026-09-17 and cost a maintainer launch to find.
+            if a.bound_tab.is_some() {
+                s.bound_since_launch = true;
+            }
             s.agents.insert(uuid.clone(), record);
             s.seq += 1;
         })?;
         if a.delete_cwd_after {
             std::fs::remove_dir_all(&cwd)?; // the §6.3 staleness fixture
         }
+    }
+    // Say what the next launch will bring back, and REFUSE to hand over a
+    // relaunch fixture that would bring back nothing (#261). A scenario with
+    // seeded binds exists only to stage a restore; if the store does not agree
+    // that a session bound them, the launch quietly bakes one row, defers
+    // none, and the whole point of the fixture is gone. That happened on
+    // 2026-09-17 and cost a maintainer launch to notice — from the outside it
+    // looks exactly like a working session.
+    let staged = sc.agents.iter().filter(|a| a.bound_tab.is_some()).count();
+    if staged > 0 {
+        let store = crate::store::read_store(&crate::store::store_paths()?)?;
+        let will_restore = store.agents.values().filter(|r| r.tab_id.is_some()).count();
+        anyhow::ensure!(
+            store.bound_since_launch && will_restore == staged,
+            "scenario `{name}` seeded {staged} bound rows but the store would restore              {will_restore} (bound_since_launch={}). The next launch would stage no              restore at all.",
+            store.bound_since_launch
+        );
+        println!(
+            "\n  the next launch restores {will_restore} rows: one baked, the rest deferred to the bar"
+        );
     }
     crate::evlog::log_event("dev", &format!("scenario {name} seeded"));
     println!(
