@@ -11,10 +11,11 @@
 //!   follow the user's theme.
 //! - **[`Theme`]** — what DOES follow the user's zellij theme: the backgrounds,
 //!   the default ink (rule, summary, dormant glyph), the chip text, the
-//!   untinted grey and the eight repo inks. `Theme::default()` is the curated
-//!   kanagawa design the lock ratified, byte-identical to the pre-#145
-//!   constants, so every golden and the README assets pin the default;
-//!   [`Theme::from_styling`] maps a live zellij theme onto the same fields.
+//!   terminal green, the untinted grey and the eight repo inks.
+//!   `Theme::default()` is the curated kanagawa design the lock ratified,
+//!   byte-identical to the pre-#145 constants, so every golden and the README
+//!   assets pin the default; [`Theme::from_styling`] maps a live zellij theme
+//!   onto the same fields.
 //!
 //! zellij-tile DATA types only (`Styling` et al. are re-exported
 //! `zellij-utils::data` — pure serde structs). The lib's no-zellij-tile rule
@@ -84,6 +85,19 @@ pub const DEFAULT_INK: Rgb = Rgb(0xDC, 0xD7, 0xBA);
 /// sumiInk0 — text ON a title chip. Public because the preview draws the same
 /// chip in its palette swatches (lock §4).
 pub const CHIP_INK: Rgb = Rgb(0x16, 0x16, 0x1D);
+
+/// springGreen — the CURATED default for the tab name on a terminal chip. The
+/// black block says "no agent ink claimed this row", which tells the reader
+/// only what the row is NOT; green on black says terminal.
+///
+/// This is a default, not a meaning: the role is themed (see
+/// [`Theme::term_ink`]) and takes the user's own success hue, which is green
+/// in 31 of the 41 vendored themes and olive, blue or teal in the other ten.
+/// The maintainer chose that over a fixed green (2026-09-18, LEDGER D42): a
+/// terminal is identified by its chip and its console mark as well as by the
+/// hue, so the odd theme where the name is not green loses an accent rather
+/// than the meaning — which is NOT true of a red status mark.
+const TERM_INK: Rgb = Rgb(0x98, 0xBB, 0x6C);
 
 /// The ink a row falls back to when it has no palette entry yet. Reachable:
 /// allocation is store-backed iterate-and-wrap (lock §4) and a row can render
@@ -304,6 +318,8 @@ pub struct Theme {
     pub default_ink: Rgb,
     /// Dark text ON a title chip; the background OF a terminal row's name chip.
     pub chip_ink: Rgb,
+    /// The tab name ON a terminal row's name chip — the theme's own green.
+    pub term_ink: Rgb,
     /// The Idle mark and the absent/out-of-range ink fallback.
     pub untinted: Rgb,
     /// The repo inks (lock §4). Always [`PALETTE_LEN`] long — see the const.
@@ -320,6 +336,7 @@ impl Default for Theme {
             sel_bg: SEL_BG,
             default_ink: DEFAULT_INK,
             chip_ink: CHIP_INK,
+            term_ink: TERM_INK,
             untinted: UNTINTED,
             palette: core::array::from_fn(|i| PALETTE[i].0),
         }
@@ -379,6 +396,16 @@ impl Theme {
     /// - `chip_ink` ← `base` darkened 30% toward black: "darker than the bar",
     ///   which is the relationship sumiInk0 has to sumiInk3 in the curated
     ///   design, preserved as a relationship rather than a colour.
+    /// - `term_ink` ← `exit_code_success.base`, through [`legible_on`].
+    ///   "Success" is the slot a theme is most likely to paint green, and no
+    ///   other slot beats it. Measured over the 41 themes vendored with zellij
+    ///   0.44.3 (`zellij-utils-0.44.3/assets/themes/*.kdl`), counting hue
+    ///   70–175° at saturation 0.12 or more as green: 31 of 41 are green. The
+    ///   other ten are six olive-yellows (gruvbox ×2, solarized ×2, atelier,
+    ///   everforest-light), three blues (ao, iceberg ×2) and one teal
+    ///   (terafox). Those ten still wear the colour that MEANS success in
+    ///   their own theme, which is the honest reading of a themed role — and
+    ///   it is the trade the maintainer chose over a fixed green (2026-09-18).
     /// - `untinted` ← `default_ink` mixed 65% toward `base`: legible-but-quiet,
     ///   the relationship sumiInk4 has to the kanagawa pair.
     /// - `palette` ← [`harvest`].
@@ -394,6 +421,7 @@ impl Theme {
         }
         let base = rgb(s.text_unselected.background);
         let default_ink = rgb(s.text_unselected.base);
+        let chip_ink = base.mix(Rgb(0, 0, 0), 0.3);
         Theme {
             base,
             sel_bg: clamp_sel(
@@ -402,11 +430,55 @@ impl Theme {
                 rgb(s.text_unselected.emphasis_1),
             ),
             default_ink,
-            chip_ink: base.mix(Rgb(0, 0, 0), 0.3),
+            chip_ink,
+            term_ink: legible_on(rgb(s.exit_code_success.base), chip_ink).unwrap_or(default_ink),
             untinted: default_ink.mix(base, 0.65),
             palette: harvest(s, base, default_ink),
         }
     }
+}
+
+/// WCAG 2.1 contrast ratio, 1.0 (same colour) to 21.0 (black on white). The
+/// ORDER of the two colours does not matter, which is the point: a text-on-
+/// ground question has no direction, and a signed difference invites a caller
+/// to forget the sign. `luma` above is Rec. 709 in channel units and answers a
+/// different question — how far apart are two hues on the bar — so the two
+/// measures are separate on purpose.
+fn contrast(a: Rgb, b: Rgb) -> f64 {
+    let lum = |c: Rgb| {
+        let ch = |v: u8| {
+            let v = f64::from(v) / 255.0;
+            if v <= 0.03928 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * ch(c.0) + 0.7152 * ch(c.1) + 0.0722 * ch(c.2)
+    };
+    let (a, b) = (lum(a), lum(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// WCAG AA for normal-size text. The chip's name IS normal-size text, so the
+/// standard's own floor is the floor rather than a number tuned here. Measured
+/// over the 41 vendored themes it costs exactly one green: none of the 31
+/// green successes lands between 3.0 and 4.5, and the only slot in that band
+/// is ao's BLUE success at 4.08, which the bar loses nothing by dropping.
+const MIN_CHIP_CONTRAST: f64 = 4.5;
+
+/// `ink` if it can be read off `ground`, else `None`. A theme is free to paint
+/// "success" nearly the colour of the chip it would sit on: dayfox's
+/// `#396847` on its own chip is contrast 1.94, and the previous gate — a luma
+/// distance calibrated against the BAR, not against a chip — passed it by 0.7
+/// units and shipped a chip worse than no green at all (review finding,
+/// 2026-09-18). A caller that falls back to the default ink is still not
+/// guaranteed a legible chip on a LIGHT theme: `default_ink` over `chip_ink` is
+/// under 3.0 on ayu-light, catppuccin-latte, dayfox and everforest-light. That
+/// is the terminal chip's own pre-existing weakness on light themes, not this
+/// gate's, and it is named here so the next reader measures instead of assumes.
+fn legible_on(ink: Rgb, ground: Rgb) -> Option<Rgb> {
+    (contrast(ink, ground) >= MIN_CHIP_CONTRAST).then_some(ink)
 }
 
 /// The themed selection may not shout louder than the curated one. The cap is
@@ -741,6 +813,60 @@ mod tests {
         // springBlue — at the curated selection weight instead.
         assert_eq!(t.sel_bg, Rgb(52, 67, 78), "selection = springBlue tint");
         assert_eq!(t.chip_ink, Rgb(15, 15, 20), "chip text = base toward black");
+        // autumnGreen — zellij kanagawa's own `exit_code_success`, and NOT the
+        // curated springGreen: the role follows the theme, so the terminal
+        // chip wears the green this theme calls success.
+        assert_eq!(t.term_ink, Rgb(118, 148, 106), "terminal name = success");
+    }
+
+    /// The terminal green is the one themed ink that sits on the chip rather
+    /// than on the bar, so it is gated against the chip. A theme whose success
+    /// colour cannot be read there keeps a readable name instead of a green
+    /// one: an unreadable chip is worse than a chip with no green in it.
+    ///
+    /// The two real themes below are the cases a luma-distance gate got wrong
+    /// (review finding, 2026-09-18) — dayfox passed that gate by 0.7 units at
+    /// contrast 1.94, and every LIGHT theme puts its success BELOW the chip in
+    /// luminance, the direction an unsigned distance cannot see.
+    #[test]
+    fn a_success_colour_the_chip_cannot_carry_falls_back_to_the_default_ink() {
+        let mut s = zellij_kanagawa();
+        let chip = Theme::from_styling(&s).chip_ink;
+        s.exit_code_success.base = PaletteColor::Rgb((chip.0, chip.1, chip.2));
+        let t = Theme::from_styling(&s);
+        assert_eq!(t.term_ink, t.default_ink, "swallowed green reads as text");
+        // The floor is strict, and that is the intent: molokai's `#008C00`
+        // reads at 4.75 on molokai's own chip but only 4.32 on kanagawa's
+        // near-black one, so the same green is kept there and dropped here.
+        // The gate answers "on THIS chip", never "is this colour bright".
+        s.exit_code_success.base = PaletteColor::Rgb((0, 140, 0));
+        assert_eq!(Theme::from_styling(&s).term_ink, t.default_ink);
+        // dracula's success, 15.3 on the same chip — kept, obviously.
+        s.exit_code_success.base = PaletteColor::Rgb((80, 250, 123));
+        assert_eq!(Theme::from_styling(&s).term_ink, Rgb(80, 250, 123));
+        // dayfox, whole: a LIGHT bar, so the chip is a light grey rather than
+        // a black, and the theme's forest green cannot be read off it.
+        s.text_unselected.background = PaletteColor::Rgb((211, 199, 187));
+        s.text_unselected.base = PaletteColor::Rgb((100, 63, 97));
+        s.exit_code_success.base = PaletteColor::Rgb((57, 104, 71));
+        let t = Theme::from_styling(&s);
+        assert!(contrast(Rgb(57, 104, 71), t.chip_ink) < MIN_CHIP_CONTRAST);
+        assert_eq!(t.term_ink, Rgb(100, 63, 97), "light theme keeps its ink");
+    }
+
+    /// Contrast has no direction — the same pair either reads or does not,
+    /// whichever way round it is asked. A signed or unsigned DIFFERENCE would
+    /// have to remember which colour is the ground; this cannot.
+    #[test]
+    fn contrast_is_symmetric_and_spans_the_standard_range() {
+        let (black, white) = (Rgb(0, 0, 0), Rgb(255, 255, 255));
+        assert!((contrast(black, white) - 21.0).abs() < 1e-9);
+        assert!((contrast(white, black) - 21.0).abs() < 1e-9);
+        assert!((contrast(white, white) - 1.0).abs() < 1e-9);
+        let (a, b) = (Rgb(57, 104, 71), Rgb(148, 139, 131));
+        assert!((contrast(a, b) - contrast(b, a)).abs() < 1e-9);
+        assert_eq!(legible_on(a, b), None, "dayfox: 1.94 is not readable");
+        assert_eq!(legible_on(black, white), Some(black));
     }
 
     /// The harvest, pinned over the real kanagawa slots. The legible theme

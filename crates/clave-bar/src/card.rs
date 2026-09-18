@@ -388,13 +388,14 @@ pub(crate) fn render_double_card(
             l1.push_str(&seg(chip_bg, &RCAP.to_string()));
         }
         // The TERM pill: the title chip's shape with theme black instead of a
-        // palette colour — a block no agent ink has claimed (round 8).
+        // palette colour — a block no agent ink has claimed (round 8) — and
+        // the name in the theme's own green, green on black for terminal.
         Some((label, None)) => {
             l1.push_str(&seg(ink(theme.chip_ink), &LCAP.to_string()));
             l1.push_str(&format!(
                 "{}{}{}{RESET}",
                 theme.chip_ink.bg(),
-                ink(theme.default_ink).fg(),
+                ink(theme.term_ink).fg(),
                 pad(label, CHIP_W)
             ));
             l1.push_str(&seg(ink(theme.chip_ink), &RCAP.to_string()));
@@ -563,13 +564,13 @@ pub(crate) fn render_card(
             ));
             l1.push_str(&seg(chip_bg, &RCAP.to_string()));
         }
-        // The TERM pill: the title chip's shape in theme black.
+        // The TERM pill: the title chip's shape in theme black, green name.
         Some((label, None)) => {
             l1.push_str(&seg(ink(theme.chip_ink), &LCAP.to_string()));
             l1.push_str(&format!(
                 "{}{}{}{RESET}",
                 theme.chip_ink.bg(),
-                ink(theme.default_ink).fg(),
+                ink(theme.term_ink).fg(),
                 pad(label, CHIP_W)
             ));
             l1.push_str(&seg(ink(theme.chip_ink), &RCAP.to_string()));
@@ -2141,6 +2142,35 @@ mod tests {
             pin(&f[12], 48).1,
             " \u{f1bb} \u{2570}  resumaker resume-fix                   1h "
         );
+    }
+
+    /// Green on black is what says "terminal" (Ollie, 2026-09-18). The pill
+    /// keeps the black block, and the NAME carries `theme.term_ink`, so the
+    /// pill says what the row IS and not only which ink it lacks. The agent
+    /// pill keeps the inversion: dark text on an allocated hue.
+    ///
+    /// Read through `ink_before`, never `contains` — the curated green is also
+    /// `PR_INK`, and a card with a PR open carries it four columns away
+    /// (FOOTGUNS § Text, glyphs, rendering).
+    ///
+    /// The theme is DELIBERATELY not the default one. Under `Theme::default()`
+    /// the field and the `TERM_INK` const hold the same bytes, so a renderer
+    /// that ignored the theme entirely would pass (review finding,
+    /// 2026-09-18). A theme whose green is its own catches that.
+    #[test]
+    fn a_terminal_pill_writes_its_name_in_green_and_an_agent_pill_does_not() {
+        let theme = Theme {
+            term_ink: Rgb(118, 148, 106), // zellij kanagawa's own success
+            ..Theme::default()
+        };
+        let f = fleet();
+        // Row 6 is the `Tab #12` terminal; row 4 is an agent with a PR number.
+        for (i, name, want) in [(6, "Tab #12", theme.term_ink), (4, "CLV-3", theme.chip_ink)] {
+            let l1 = render_double_card(&f[i], CARD_EXPANDED_COLS, false, false, &theme).0;
+            assert_eq!(ink_before(&l1, name), want.fg(), "two-line row {i}");
+            let l1 = &render_card(&f[i], CARD_EXPANDED_COLS, false, 0, &theme)[0];
+            assert_eq!(ink_before(l1, name), want.fg(), "four-line row {i}");
+        }
     }
 
     #[test]
