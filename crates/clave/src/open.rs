@@ -49,6 +49,38 @@ pub fn open_is_live(store: &crate::store::Store, row: &AgentRecord, dump_layout:
         || crate::add::resolved_scan_uuids(store, dump_layout).contains(&row.uuid)
 }
 
+/// Where this row's conversation moved to, if it moved somewhere spawnable
+/// (#143 review) — read against the environment's Claude dir. `None` when
+/// the row's own dir is the one to use.
+pub fn relocated_home(row: &AgentRecord) -> Option<String> {
+    let dir = crate::env::claude_config_dir().ok()?;
+    relocated_home_in(&dir, row)
+}
+
+/// Pure over `claude_dir` so it host-tests: the IO shell above only picks
+/// the dir.
+pub fn relocated_home_in(claude_dir: &std::path::Path, row: &AgentRecord) -> Option<String> {
+    crate::spawn::relocated_cwd(claude_dir, &row.uuid, row.live_session.as_deref())
+}
+
+/// The dir a pane for `row` is BORN in: the relocation target when the
+/// conversation moved, else the row's own cwd. ONE rule, and both writers of
+/// a spawn pane call it — `run_open` and the launch bake (`setup.rs`). They
+/// used to disagree: the launch took `row.cwd` as it stood while open asked
+/// where the transcript lived, so a relaunch died in its first tab on the
+/// same row a click resumed (2026-09-21).
+pub fn pane_cwd(row: &AgentRecord) -> String {
+    let Ok(dir) = crate::env::claude_config_dir() else {
+        return row.cwd.clone();
+    };
+    pane_cwd_in(&dir, row)
+}
+
+/// The rule itself, pure over `claude_dir`.
+pub fn pane_cwd_in(claude_dir: &std::path::Path, row: &AgentRecord) -> String {
+    relocated_home_in(claude_dir, row).unwrap_or_else(|| row.cwd.clone())
+}
+
 pub fn open_decision(_row: &AgentRecord, is_live: bool, cwd_exists: bool) -> OpenDecision {
     if is_live {
         OpenDecision::AlreadyLive
@@ -117,9 +149,7 @@ pub fn run_open(uuid: &str, collapsed: bool, restore_to: Option<usize>) -> Resul
     // wake was otherwise rejected here before spawn's relocation recovery
     // could ever run. Open only decides tab creation; spawn re-runs the
     // search and repoints the row.
-    let relocated = crate::env::claude_config_dir()
-        .ok()
-        .and_then(|d| crate::spawn::relocated_cwd(&d, &row.uuid, row.live_session.as_deref()));
+    let relocated = relocated_home(row);
     let cwd_exists = std::path::Path::new(&row.cwd).is_dir() || relocated.is_some();
     match open_decision(row, is_live, cwd_exists) {
         OpenDecision::AlreadyLive => {
@@ -254,6 +284,54 @@ mod tests {
             wants: None,
             subagents: false,
         }
+    }
+
+    /// The one rule for a spawn pane's dir, as the launch bake and `run_open`
+    /// both read it: a relocated conversation is baked where it went; an
+    /// anchored one (file kept at the birth dir, session walked on) and a
+    /// never-moved one are baked at the row's own cwd. The launch used to
+    /// skip this rule and bake `row.cwd` bare (2026-09-21).
+    #[test]
+    fn a_pane_is_born_where_the_conversation_went_else_at_the_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let claude = tmp.path().join(".claude");
+        let birth = tmp.path().join("birth");
+        let moved_to = tmp.path().join("moved-to");
+        std::fs::create_dir_all(&birth).unwrap();
+        std::fs::create_dir_all(&moved_to).unwrap();
+        let canon = |p: &std::path::Path| {
+            std::fs::canonicalize(p)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        };
+        let (birth, moved_to) = (canon(&birth), canon(&moved_to));
+        let plant = |cwd: &str, stem: &str, lines: &str| {
+            let dir = claude.join("projects").join(crate::munge::munge_cwd(cwd));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(format!("{stem}.jsonl")), lines).unwrap();
+        };
+        // Relocated: filed under moved_to, tail says moved_to, row still at birth.
+        plant(
+            &moved_to,
+            "u-moved",
+            &format!("{{\"cwd\":\"{moved_to}\"}}\n"),
+        );
+        let mut row = rec("u-moved");
+        row.cwd = birth.clone();
+        assert_eq!(pane_cwd_in(&claude, &row), moved_to);
+        // Anchored: filed under birth, tail says moved_to, row follows the tail.
+        plant(
+            &birth,
+            "u-anchored",
+            &format!("{{\"cwd\":\"{birth}\"}}\n{{\"cwd\":\"{moved_to}\"}}\n"),
+        );
+        let mut row = rec("u-anchored");
+        row.cwd = moved_to.clone();
+        assert_eq!(pane_cwd_in(&claude, &row), moved_to);
+        // Never moved, or no transcript at all: the row's cwd, untouched.
+        let row = rec("u-none");
+        assert_eq!(pane_cwd_in(&claude, &row), "/x");
     }
 
     /// A row whose agent EXITED keeps its tab (#261), so the bind alone can

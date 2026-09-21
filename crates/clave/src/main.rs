@@ -374,6 +374,16 @@ fn main() -> Result<()> {
                     );
                     (spawn::SpawnMode::Resume, session, cwd)
                 }
+                spawn::SpawnSite::Anchored { session, cwd } => {
+                    // No store write: the row's cwd is where the agent IS,
+                    // and this is only where Claude keeps its file. The
+                    // hook would move a repointed row straight back.
+                    clave::evlog::log_event(
+                        "spawn",
+                        &format!("{uuid}: transcript anchored at its birth dir {cwd}"),
+                    );
+                    (spawn::SpawnMode::Resume, session, cwd)
+                }
             };
             clave::evlog::log_event("spawn", &format!("{uuid}: {mode:?} {session}"));
             // Register uuid→pane BEFORE exec (this process is about to be

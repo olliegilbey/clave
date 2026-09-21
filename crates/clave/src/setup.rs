@@ -1562,10 +1562,19 @@ pub fn launch_session() -> Result<()> {
     // only ever writes the STORE, never a running bar, so this read is the one
     // place the mode actually takes effect — sizes and the plugin-config line
     // are baked from it together, right here, so they cannot disagree.
+    // The pane's dir by the same rule `clave open` uses (`open::pane_cwd`):
+    // a row whose conversation relocated is baked where it went, not where
+    // the row last stood. One clone of one record, so `launch_layout_kdl`
+    // stays pure over the row it is handed.
+    let home = rows.first().map(|r| {
+        let mut r = (*r).clone();
+        r.cwd = crate::open::pane_cwd(&r);
+        r
+    });
     let layout_text = launch_layout_kdl(
         &binary,
         wasm.to_str().context("wasm path")?,
-        rows.first().copied(),
+        home.as_ref(),
         store.collapsed,
         store.row_height,
     );

@@ -45,6 +45,8 @@ here in the same change.**
 | **fleet** | All agent sessions clave knows about, live and dormant. The thing the sidebar shows. A fleet is **launched, killed, seeded — never collapsed or expanded**: width states belong to the sidebar. |
 | **store** | The on-disk JSON that hooks write and the CLI reads. The single writer of truth *about panes*; the plugin never reads it directly. See the canon rule below. |
 | **transcript** | A conversation's jsonl under Claude's own `projects/` tree. **The canon of conversations** — see the canon rule below. |
+| **relocated transcript** | A transcript Claude MOVED to the project dir of the session's newest cwd (#59/#69). Its tail names the dir it sits under. Spawn resumes there and repoints the row (`SpawnSite::Moved`). |
+| **anchored transcript** | A transcript Claude LEFT under the project dir of the session's first cwd while the session walked on — a worktree entered mid-conversation, or a plain `cd`. Its head names the dir it sits under; its tail does not. Spawn resumes from the birth dir and leaves the row alone (`SpawnSite::Anchored`); the row's cwd is where the agent is. Measured 2026-09-21: every transcript is one or the other, never neither. | a relocation that has not caught up yet |
 | **snapshot** | The full-replace payload the CLI pipes to the plugin. Carries **seq**, a monotonic counter — a consumer applies only strictly-newer seq and discards the rest. |
 | **bind** | Associating an agent session's uuid with a `tab_id`. Done once, by the agent tab's own bar instance. |
 | **hook** | A Claude Code lifecycle callback that writes into the store. The source of status and recency. |
