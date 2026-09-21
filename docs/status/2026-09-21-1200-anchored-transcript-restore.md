@@ -49,6 +49,11 @@ not a rule.
   in TESTING.md.
 
 Review lane 1 (Opus subagent, adversarial): 11 findings, all taken.
+Review lane 2 (CodeRabbit CLI, `--committed --base main`): 2 findings, both
+taken — the home search now stops at the first id that HAS a transcript
+(a live one that refuses no longer falls through to the minted file; test
+`a_live_transcript_that_refuses_hides_the_minted_one`), and the stale
+"leave the row alone" test doc was corrected.
 Declined: none.
 
 Tests red-first: `a_session_that_walked_into_a_new_dir_resumes_where_its_file_is_keyed`,
@@ -59,7 +64,7 @@ Tests red-first: `a_session_that_walked_into_a_new_dir_resumes_where_its_file_is
 
 ## Verified
 
-- `just gates` green: 445 host + 340 bar tests, wasm build, clippy `-D warnings`.
+- `just gates` green: 446 host + 340 bar tests, wasm build, clippy `-D warnings`.
 - A throwaway probe ran `verified_site` on the maintainer's real row and
   transcript: `Anchored { cwd: ~/code/clave }`. Probe deleted.
 - `just mutants` (commit 1): 14 caught, 7 missed, all misses env-reading shells. Rerun after commit 2 pending.

@@ -395,24 +395,28 @@ pub enum Home {
 }
 
 /// The conversation's home, live id first (#99). The search STOPS at the
-/// first id whose transcript resolves: an anchored live conversation must
-/// not fall through to the pre-`/clear` minted file, whose own home may be a
-/// third dir. Before 2026-09-21 that fall-through was how a click on such a
-/// row happened to work. `None` when nothing resolves — the open-time gate
-/// then reads the row's own cwd, and the spawn re-runs the search.
+/// first id that HAS a transcript, whether or not a home is derivable from
+/// it: the live conversation must not fall through to the pre-`/clear`
+/// minted file, whose own home may be a third dir (CodeRabbit, 2026-09-21).
+/// Before 2026-09-21 that fall-through was how a click on such a row
+/// happened to work. `None` when no home is derivable — the open-time gate
+/// then reads the row's own cwd, and the spawn re-runs the search and says
+/// why.
 pub fn conversation_home(
     claude_dir: &Path,
     uuid: &str,
     live_session: Option<&str>,
 ) -> Option<Home> {
     let live = live_session.filter(|l| !l.starts_with('-'));
-    [live, Some(uuid)].into_iter().flatten().find_map(|id| {
-        match locate_transcript(claude_dir, id).map(|t| moved_site(&t, id)) {
-            Some(Ok(SpawnSite::Moved { cwd, .. })) => Some(Home::Moved(cwd)),
-            Some(Ok(SpawnSite::Anchored { cwd, .. })) => Some(Home::Anchored(cwd)),
-            _ => None,
-        }
-    })
+    let (id, transcript) = [live, Some(uuid)]
+        .into_iter()
+        .flatten()
+        .find_map(|id| locate_transcript(claude_dir, id).map(|t| (id, t)))?;
+    match moved_site(&transcript, id) {
+        Ok(SpawnSite::Moved { cwd, .. }) => Some(Home::Moved(cwd)),
+        Ok(SpawnSite::Anchored { cwd, .. }) => Some(Home::Anchored(cwd)),
+        _ => None,
+    }
 }
 
 /// Register this pane with the bar: uuid → $ZELLIJ_PANE_ID (spike S2 verified
@@ -673,6 +677,26 @@ mod tests {
         assert_eq!(conversation_home(&f.claude, "u-lag", None), None);
     }
 
+    /// A live transcript that exists but refuses (keyed on neither cwd) is
+    /// the conversation's answer. The search must NOT fall through to the
+    /// minted file, whose clean move would bake a dir the live conversation
+    /// never saw. (CodeRabbit, 2026-09-21)
+    #[test]
+    fn a_live_transcript_that_refuses_hides_the_minted_one() {
+        let f = reloc_fixture();
+        let minted_home = f.other_cwd("minted-home");
+        f.plant(&minted_home, "minted", &tail_lines(&minted_home, "main"));
+        let old_home = f.other_cwd("old-home");
+        let live_dir = f.other_cwd("live-dir");
+        f.plant(&live_dir, "live", &tail_lines(&old_home, "main"));
+        assert_eq!(conversation_home(&f.claude, "minted", Some("live")), None);
+        // Without the live id the minted move still resolves.
+        assert_eq!(
+            conversation_home(&f.claude, "minted", None),
+            Some(Home::Moved(minted_home))
+        );
+    }
+
     /// The open-time gate: a clean move yields the RELOCATED cwd — the one
     /// `run_open` must bake into the pane — and an unknown session yields
     /// nothing. (#143 review)
@@ -844,8 +868,9 @@ mod tests {
     /// Claude kept the file where the session started. Measured 2026-09-21
     /// over 338 transcripts: 12 are keyed this way, 10 on their last cwd,
     /// none on neither. Resume from the first cwd — that is the only dir
-    /// `claude --resume` will look in — and leave the row alone: its cwd is
-    /// what the agent is doing, and the hook keeps it current.
+    /// `claude --resume` will look in — and repoint the row there at once:
+    /// the agent wakes in the birth dir, and the bar must say so before the
+    /// first hook event does.
     #[test]
     fn a_session_that_walked_into_a_new_dir_resumes_where_its_file_is_keyed() {
         let f = reloc_fixture();
