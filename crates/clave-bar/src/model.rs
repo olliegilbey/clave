@@ -311,8 +311,22 @@ pub enum Effect {
     /// to the active bar). Zellij reuses tab_ids (screen.rs:1617), so this is
     /// correctness, not just hygiene.
     PruneTabs { stale_ids: Vec<usize> },
-    /// `next_swap_layout()` — switch this tab to the OTHER declared bar
-    /// geometry (#181).
+    /// `next_swap_layout()` / `previous_swap_layout()` — switch this tab to
+    /// the OTHER declared bar geometry (#181).
+    ///
+    /// `backwards` is the step direction, and it is what makes every switch
+    /// ONE step. Zellij's swap cycle is three positions long, not two: the
+    /// tab's hidden BIRTH position, then the two declared geometries, and
+    /// the birth position has the same width as the first declared one
+    /// (`setup.rs swap_layouts_kdl`, the order note). Stepping forward from
+    /// birth therefore moves nothing visible, and the away-from-birth switch
+    /// cost two asks with a cooldown between them — the 0.2s collapse lag
+    /// measured on 2026-09-21 (the sandbox log: SwapWidth, tick, SwapWidth,
+    /// then the paint). Stepping BACKWARDS from birth lands on the far
+    /// geometry in one; stepping forward from there returns to birth in one.
+    /// So: away from the birth width, go back; towards it, go forward. The
+    /// birth width is the first width this pane was ever painted at
+    /// (`birth_collapsed`); unknown, the step is forward, as before.
     ///
     /// The two widths are `swap_tiled_layout` nodes in the generated layout, so
     /// zellij resolves the percent against the real window and applies it in one
@@ -321,7 +335,7 @@ pub enum Effect {
     /// old pair of effects asked zellij to step the pane by an amount it would
     /// not disclose, and the bar watched its own renders to find out what had
     /// happened. That loop is what ran the sidebar to 141 columns and to 11.
-    SwapWidth,
+    SwapWidth { backwards: bool },
     /// Arm the shell's fast tick again, without swapping anything — the ask
     /// this expiry belonged to is owed another one (`swap_owed`).
     /// Distinct from `SwapWidth` because it must NOT call `next_swap_layout`:
@@ -856,6 +870,12 @@ pub struct BarModel {
     /// spinner that was driving the ticks stops, which it does the moment the
     /// last turn ends.
     swap_owed: u8,
+    /// The mode whose width this pane was FIRST painted at — the swap
+    /// cycle's hidden birth position (see [`Effect::SwapWidth`]). Recorded
+    /// on the first paint at either declared width, before any ask can have
+    /// moved the pane; a first paint at neither width (a background bar's
+    /// zero-width frame) leaves it unknown and the step forward.
+    birth_collapsed: Option<bool>,
     /// The shell's one fast-band timer is in flight ([`Self::arm_fast_tick`]
     /// says whether to start it, [`Self::fast_tick_fired`] ends it).
     ///
@@ -3617,6 +3637,17 @@ impl BarModel {
     /// writes nothing down: the disagreement is still there when its tab
     /// comes back, and the paint that follows settles it.
     pub fn width_effects(&mut self, own_cols: Option<usize>) -> Vec<Effect> {
+        // The birth width, from the first paint at a declared width. Read
+        // BEFORE the hydration gate: the first paints usually land while the
+        // snapshot is still awaited, and no ask can precede hydration, so
+        // the pane is provably still at birth.
+        if let (None, Some(cols)) = (self.birth_collapsed, own_cols) {
+            for mode in [false, true] {
+                if cols == self.row_height.target_cols(mode) {
+                    self.birth_collapsed = Some(mode);
+                }
+            }
+        }
         // D37: the mode is not known yet, so any switch would be against a
         // guess. The pane is already born at the persisted mode's width.
         if self.awaiting_hydration {
@@ -3664,7 +3695,10 @@ impl BarModel {
         // moment it matters, and answered exactly because the shell keeps
         // exactly one such timer.
         self.swap_owed = if self.fast_tick_in_flight() { 2 } else { 1 };
-        vec![Effect::SwapWidth]
+        // Away from the birth width, step back; towards it, or with the birth
+        // unknown, step forward. See `Effect::SwapWidth`.
+        let backwards = self.birth_collapsed.is_some_and(|birth| birth != want);
+        vec![Effect::SwapWidth { backwards }]
     }
 
     /// How long a claimed fast tick is believed. Two seconds is ten of them:
@@ -7922,14 +7956,78 @@ mod tests {
         let mut m = focused_bar();
         assert_eq!(m.width_effects(Some(EXP_W)), Vec::<Effect>::new());
         m.toggle(); // wants collapsed
-        assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(Some(EXP_W)),
+            vec![Effect::SwapWidth { backwards: true }]
+        );
         assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
         assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
         assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
         m.toggle(); // and back
-        assert_eq!(m.width_effects(Some(COL_W)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(Some(COL_W)),
+            vec![Effect::SwapWidth { backwards: false }]
+        );
         assert_eq!(m.width_effects(Some(EXP_W)), Vec::<Effect>::new());
         assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
+    }
+
+    /// **The step direction** (measured 2026-09-21: the 0.2s collapse lag).
+    /// Away from the birth width the step is BACKWARDS, which lands on the
+    /// far geometry in one; towards it, forward, which returns to birth in
+    /// one. Forward both ways costs the away-switch two asks and a cooldown.
+    #[test]
+    fn a_switch_away_from_the_birth_width_steps_back_and_the_return_steps_forward() {
+        let mut m = focused_bar();
+        assert_eq!(m.width_effects(Some(EXP_W)), Vec::<Effect>::new()); // born expanded
+        m.toggle();
+        assert_eq!(
+            m.width_effects(Some(EXP_W)),
+            vec![Effect::SwapWidth { backwards: true }]
+        );
+        assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
+        assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
+        m.toggle();
+        assert_eq!(
+            m.width_effects(Some(COL_W)),
+            vec![Effect::SwapWidth { backwards: false }]
+        );
+    }
+
+    /// The mirror: a tab born collapsed (a collapsed fleet's newborn, add.rs
+    /// `collapsed`) steps back to expand and forward to collapse again.
+    #[test]
+    fn a_bar_born_collapsed_steps_back_to_expand_and_forward_to_collapse() {
+        let mut m = collapsed_model();
+        assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new()); // born collapsed
+        m.toggle(); // wants expanded
+        assert_eq!(
+            m.width_effects(Some(COL_W)),
+            vec![Effect::SwapWidth { backwards: true }]
+        );
+        assert_eq!(m.width_effects(Some(EXP_W)), Vec::<Effect>::new());
+        assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
+        m.toggle();
+        assert_eq!(
+            m.width_effects(Some(EXP_W)),
+            vec![Effect::SwapWidth { backwards: false }]
+        );
+    }
+
+    /// A first paint at neither width (a background bar's zero-width frame,
+    /// a damaged tab) leaves the birth unknown, and the step is forward — the
+    /// pre-2026-09-21 behaviour, which converges by the walk.
+    #[test]
+    fn an_unknown_birth_width_steps_forward() {
+        let mut m = focused_bar();
+        m.toggle();
+        // The first paint ever is one column short of either width: no
+        // birth is recorded, and the ask still goes out, forward.
+        assert_eq!(
+            m.width_effects(Some(47)),
+            vec![Effect::SwapWidth { backwards: false }]
+        );
+        assert_eq!(m.birth_collapsed, None);
     }
 
     /// **The shared tick.** The card's spinner and the switch deafness run
@@ -7954,7 +8052,10 @@ mod tests {
         let mut m = focused_bar();
         m.arm_fast_tick(); // some row is mid-turn; a frame is in flight
         m.toggle(); // wants collapsed
-        assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(Some(EXP_W)),
+            vec![Effect::SwapWidth { backwards: true }]
+        );
         // The spinner's frame lands first, wearing the cooldown's clothes.
         // It must buy the ask another expiry, not judge in its place.
         assert_eq!(
@@ -7972,7 +8073,10 @@ mod tests {
         assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
         // One ask spent, not two — the walk still has its budget.
         m.toggle();
-        assert_eq!(m.width_effects(Some(COL_W)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(Some(COL_W)),
+            vec![Effect::SwapWidth { backwards: false }]
+        );
     }
 
     /// A tick the host never delivers in its own band must not silence the
@@ -8092,11 +8196,17 @@ mod tests {
         let mut m = focused_bar();
         assert!(!m.fast_tick_armed, "default is quiet");
         m.toggle(); // wants collapsed
-        assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(Some(EXP_W)),
+            vec![Effect::SwapWidth { backwards: true }]
+        );
         // No frame can be in flight, so this expiry is the cooldown's own.
         // Judged here against a pre-swap echo, which asks again.
         assert_eq!(m.width_effects(Some(EXP_W)), Vec::<Effect>::new());
-        assert_eq!(m.width_cooldown_elapsed(), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_cooldown_elapsed(),
+            vec![Effect::SwapWidth { backwards: true }]
+        );
     }
 
     /// The owed expiry cannot STRAND. The spinner stops the moment the last
@@ -8112,7 +8222,10 @@ mod tests {
         let mut m = focused_bar();
         m.arm_fast_tick();
         m.toggle(); // wants collapsed
-        assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(Some(EXP_W)),
+            vec![Effect::SwapWidth { backwards: true }]
+        );
         // The last turn ends here: the frame fires, the shell disarms, and no
         // paint re-arms it. Only the model's own request is left.
         m.fast_tick_fired();
@@ -8120,7 +8233,7 @@ mod tests {
         assert_eq!(m.width_effects(Some(EXP_W)), Vec::<Effect>::new());
         assert_eq!(
             m.width_cooldown_elapsed(),
-            vec![Effect::SwapWidth],
+            vec![Effect::SwapWidth { backwards: true }],
             "the deafness never ended — the machine is stranded"
         );
     }
@@ -8135,10 +8248,13 @@ mod tests {
         let mut m = focused_bar();
         m.arm_fast_tick();
         m.toggle();
-        assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(Some(EXP_W)),
+            vec![Effect::SwapWidth { backwards: true }]
+        );
         let owed = m.width_cooldown_elapsed();
         assert!(
-            !owed.contains(&Effect::SwapWidth),
+            !owed.iter().any(|e| matches!(e, Effect::SwapWidth { .. })),
             "the owed expiry asked zellij to swap again: {owed:?}"
         );
         assert_eq!(owed, vec![Effect::RearmWidthCooldown]);
@@ -8152,12 +8268,18 @@ mod tests {
     fn a_no_move_landing_is_asked_again_from_the_same_width() {
         let mut m = focused_bar();
         m.toggle(); // wants collapsed
-        assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(Some(EXP_W)),
+            vec![Effect::SwapWidth { backwards: true }]
+        );
         // The switch traded one expanded-width position for another
         // (birth → declared expanded): same width, new paint, judged deaf —
         // the expiry spends the second ask.
         assert_eq!(m.width_effects(Some(EXP_W)), Vec::<Effect>::new());
-        assert_eq!(m.width_cooldown_elapsed(), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_cooldown_elapsed(),
+            vec![Effect::SwapWidth { backwards: true }]
+        );
         assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
         assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
     }
@@ -8173,7 +8295,10 @@ mod tests {
     fn the_paint_echo_burst_buys_one_ask_and_the_expiry_ends_the_episode() {
         let mut m = focused_bar();
         m.toggle(); // wants collapsed
-        assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(Some(EXP_W)),
+            vec![Effect::SwapWidth { backwards: true }]
+        );
         // The live trace: five echoes of the pre-swap width, then the true
         // landing, all inside one cooldown. Every one of them judged
         // nothing.
@@ -8216,7 +8341,10 @@ mod tests {
         // Alt+f hides the shell; the TabUpdate repaints and judgement
         // resumes with the full budget.
         frame(&mut m, 11);
-        assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(Some(EXP_W)),
+            vec![Effect::SwapWidth { backwards: true }]
+        );
         assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
         assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
     }
@@ -8230,9 +8358,15 @@ mod tests {
     fn a_width_zellij_cannot_produce_is_asked_thrice_then_rested() {
         let mut m = focused_bar();
         m.toggle(); // wants collapsed; the window can only paint 47
-        assert_eq!(m.width_effects(Some(47)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(Some(47)),
+            vec![Effect::SwapWidth { backwards: false }]
+        );
         for _ in 1..WALK_ASK_CAP {
-            assert_eq!(m.width_cooldown_elapsed(), vec![Effect::SwapWidth]);
+            assert_eq!(
+                m.width_cooldown_elapsed(),
+                vec![Effect::SwapWidth { backwards: false }]
+            );
         }
         assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new(), "rested");
         assert_eq!(m.width_effects(Some(47)), Vec::<Effect>::new(), "still");
@@ -8249,10 +8383,16 @@ mod tests {
         let mut m = collapsed_model();
         assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
         m.toggle(); // wants expanded; the window cannot hold 54
-        assert_eq!(m.width_effects(Some(COL_W)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(Some(COL_W)),
+            vec![Effect::SwapWidth { backwards: true }]
+        );
         for paint in [47, COL_W] {
             assert_eq!(m.width_effects(Some(paint)), Vec::<Effect>::new());
-            assert_eq!(m.width_cooldown_elapsed(), vec![Effect::SwapWidth]);
+            assert_eq!(
+                m.width_cooldown_elapsed(),
+                vec![Effect::SwapWidth { backwards: true }]
+            );
         }
         // Three spent without a landing: the walk rests, moving or not.
         assert_eq!(m.width_effects(Some(47)), Vec::<Effect>::new());
@@ -8270,11 +8410,17 @@ mod tests {
     fn a_stale_paint_after_a_landing_costs_a_flap_and_converges() {
         let mut m = focused_bar();
         m.toggle(); // wants collapsed
-        assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(Some(EXP_W)),
+            vec![Effect::SwapWidth { backwards: true }]
+        );
         assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
         assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new(), "landed");
         // The stale echo, arriving at rest: one ask, fresh budget.
-        assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(Some(EXP_W)),
+            vec![Effect::SwapWidth { backwards: true }]
+        );
         // Its walk goes home again and the expiry rests.
         assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
         assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
@@ -8287,15 +8433,24 @@ mod tests {
     fn a_mode_flip_rearms_the_walk_budget() {
         let mut m = focused_bar();
         m.toggle(); // wants collapsed; the pane never moves
-        assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(Some(EXP_W)),
+            vec![Effect::SwapWidth { backwards: true }]
+        );
         for _ in 1..WALK_ASK_CAP {
-            assert_eq!(m.width_cooldown_elapsed(), vec![Effect::SwapWidth]);
+            assert_eq!(
+                m.width_cooldown_elapsed(),
+                vec![Effect::SwapWidth { backwards: true }]
+            );
         }
         assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
         m.toggle(); // wants expanded again — and the pane is already there
         assert_eq!(m.width_effects(Some(EXP_W)), Vec::<Effect>::new());
         m.toggle(); // wants collapsed: same width, fresh intent
-        assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(Some(EXP_W)),
+            vec![Effect::SwapWidth { backwards: true }]
+        );
     }
 
     /// The walk budget is per INTENT, and the intent guard is the only thing
@@ -8316,9 +8471,15 @@ mod tests {
         const NEITHER: usize = EXP_W - 1;
         let mut m = focused_bar();
         m.toggle(); // wants collapsed
-        assert_eq!(m.width_effects(Some(NEITHER)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(Some(NEITHER)),
+            vec![Effect::SwapWidth { backwards: false }]
+        );
         for _ in 1..WALK_ASK_CAP {
-            assert_eq!(m.width_cooldown_elapsed(), vec![Effect::SwapWidth]);
+            assert_eq!(
+                m.width_cooldown_elapsed(),
+                vec![Effect::SwapWidth { backwards: false }]
+            );
         }
         assert_eq!(
             m.width_cooldown_elapsed(),
@@ -8328,7 +8489,7 @@ mod tests {
         m.toggle(); // wants expanded — a new intent, from the same width
         assert_eq!(
             m.width_effects(Some(NEITHER)),
-            vec![Effect::SwapWidth],
+            vec![Effect::SwapWidth { backwards: false }],
             "the new intent inherited the failed walk's budget and cannot ask"
         );
     }
@@ -8340,7 +8501,10 @@ mod tests {
     fn a_toggle_mid_cooldown_is_served_at_the_expiry() {
         let mut m = focused_bar();
         m.toggle(); // wants collapsed
-        assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(Some(EXP_W)),
+            vec![Effect::SwapWidth { backwards: true }]
+        );
         m.toggle(); // changed their mind before the swap settled
         assert_eq!(m.width_effects(Some(EXP_W)), Vec::<Effect>::new());
         // The expiry judges the latest paint against the CURRENT intent:
@@ -8380,7 +8544,10 @@ mod tests {
         let mut m = focused_bar();
         m.toggle();
         assert_eq!(m.width_effects(None), Vec::<Effect>::new());
-        assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(Some(EXP_W)),
+            vec![Effect::SwapWidth { backwards: true }]
+        );
     }
 
     /// Zellij resolves a plugin's swap-layout request against the FOCUSED
@@ -8405,7 +8572,10 @@ mod tests {
         assert_eq!(m.width_effects(Some(EXP_W)), Vec::<Effect>::new(), "held");
         m.beacon(11);
         frame(&mut m, 11); // the user arrives
-        assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(Some(EXP_W)),
+            vec![Effect::SwapWidth { backwards: true }]
+        );
         assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
     }
 
@@ -8428,7 +8598,10 @@ mod tests {
         m.toggle(); // collapsed
         m.beacon(11);
         frame(&mut m, 11);
-        assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(Some(EXP_W)),
+            vec![Effect::SwapWidth { backwards: true }]
+        );
         assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
         assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
         m.beacon(10); // the user leaves
@@ -8449,7 +8622,10 @@ mod tests {
         // clave-visited pipe) briefly expands the bar; ~1s after the last
         // nav it sinks back to the gutter.
         let mut m = collapsed_model();
-        assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(Some(EXP_W)),
+            vec![Effect::SwapWidth { backwards: true }]
+        );
         assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
         assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
         // The nav lands on THIS bar's own tab — the bar the user is now
@@ -8458,14 +8634,20 @@ mod tests {
         assert_eq!(m.current_tab(), Some(11)); // still a beacon
         // The peek is a geometry switch like any other since #181 — the bar
         // shows the expanded profile and occupies the expanded pane.
-        assert_eq!(m.width_effects(Some(COL_W)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(Some(COL_W)),
+            vec![Effect::SwapWidth { backwards: false }]
+        );
         assert_eq!(m.width_effects(Some(EXP_W)), Vec::<Effect>::new());
         assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
         // A second nav during the peek re-arms (main.rs counts its timers).
         assert!(m.visited(11));
         // Expiry: sink back to the gutter.
         assert!(m.peek_expired());
-        assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(Some(EXP_W)),
+            vec![Effect::SwapWidth { backwards: true }]
+        );
         assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
         assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
     }
@@ -8483,7 +8665,10 @@ mod tests {
     #[test]
     fn toggle_cancels_a_peek_and_a_late_expiry_is_a_noop() {
         let mut m = collapsed_model();
-        assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(Some(EXP_W)),
+            vec![Effect::SwapWidth { backwards: true }]
+        );
         assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
         assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
         assert!(m.visited(11));
@@ -8492,7 +8677,10 @@ mod tests {
         m.toggle();
         assert!(!m.peek_expired(), "late timer after a toggle is a no-op");
         // One switch, to the expanded geometry, unpoisoned by the peek.
-        assert_eq!(m.width_effects(Some(COL_W)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(Some(COL_W)),
+            vec![Effect::SwapWidth { backwards: false }]
+        );
         assert_eq!(m.width_effects(Some(EXP_W)), Vec::<Effect>::new());
     }
 
@@ -8517,7 +8705,10 @@ mod tests {
         );
         // A newborn whose pane predates the flip (reload mid-toggle) is the
         // one that owes a move, and the paint says so.
-        assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(Some(EXP_W)),
+            vec![Effect::SwapWidth { backwards: false }]
+        );
     }
 
     /// An instance that missed the toggle broadcast heals from the next
@@ -8534,7 +8725,7 @@ mod tests {
         missed.apply_snapshot(heal);
         assert_eq!(
             missed.width_effects(Some(EXP_W)),
-            vec![Effect::SwapWidth],
+            vec![Effect::SwapWidth { backwards: true }],
             "a seq-newer contradicting snapshot must move the pane"
         );
 
@@ -8542,7 +8733,10 @@ mod tests {
         synced.apply_snapshot(snap(1, vec![]));
         // The store echo (seq 1, expanded) must NOT overrule the owed press:
         // the pane keeps walking to the collapsed width.
-        assert_eq!(synced.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            synced.width_effects(Some(EXP_W)),
+            vec![Effect::SwapWidth { backwards: true }]
+        );
         assert_eq!(synced.width_effects(Some(COL_W)), Vec::<Effect>::new());
     }
 
@@ -10694,12 +10888,18 @@ mod tests {
         m.apply_snapshot(snapshot);
         // The pane is painted expanded and the store now says collapsed:
         // one switch, and arriving at the collapsed width ends it.
-        assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(Some(EXP_W)),
+            vec![Effect::SwapWidth { backwards: true }]
+        );
         assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new());
         assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
         // A keypress AFTER hydration is a licence, and moves the pane.
         m.toggle();
-        assert_eq!(m.width_effects(Some(COL_W)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(Some(COL_W)),
+            vec![Effect::SwapWidth { backwards: false }]
+        );
     }
 
     /// Finding K (#197 review): the cold-start flash. `clave launch` composes
@@ -10745,7 +10945,10 @@ mod tests {
         m.apply_snapshot(snap(1, vec![])); // collapsed: false
         assert_eq!(m.width_effects(Some(EXP_W)), Vec::<Effect>::new());
         m.toggle();
-        assert_eq!(m.width_effects(Some(EXP_W)), vec![Effect::SwapWidth]);
+        assert_eq!(
+            m.width_effects(Some(EXP_W)),
+            vec![Effect::SwapWidth { backwards: true }]
+        );
     }
 
     // === #137: the collapse-mode repair storm ==============================

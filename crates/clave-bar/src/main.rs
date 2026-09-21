@@ -416,9 +416,11 @@ impl State {
                 // lose — and `main.rs` does not link on the host (Cargo.toml),
                 // so nothing here is reachable by a test. An arm that cannot
                 // be tested should not be duplicated.
-                e @ (Effect::SwapWidth | Effect::RearmWidthCooldown) => {
-                    if matches!(e, Effect::SwapWidth) {
-                        next_swap_layout();
+                e @ (Effect::SwapWidth { .. } | Effect::RearmWidthCooldown) => {
+                    match e {
+                        Effect::SwapWidth { backwards: true } => previous_swap_layout(),
+                        Effect::SwapWidth { backwards: false } => next_swap_layout(),
+                        _ => {}
                     }
                     self.arm_fast_tick();
                 }
