@@ -1334,6 +1334,24 @@ fn bakeable_rows<'a>(
     Ok((eager, Vec::new(), dropped))
 }
 
+/// The record the launch bakes: `row` with its cwd replaced by `pane_cwd`
+/// (`open::pane_cwd`, the one rule) — but only when that value passes the
+/// same KDL guard `bakeable_rows` ran over the row's own cwd. A relocation
+/// target comes from a transcript's tail and has never been validated; raw
+/// into `launch.kdl` a `"` or `\\` in it fails the whole session create
+/// (FOOTGUNS). One clone of one record, so `launch_layout_kdl` stays pure.
+fn baked_home(
+    row: &crate::store::AgentRecord,
+    pane_cwd: String,
+    check: impl FnOnce(&str) -> anyhow::Result<()>,
+) -> crate::store::AgentRecord {
+    let mut r = row.clone();
+    if check(&pane_cwd).is_ok() {
+        r.cwd = pane_cwd;
+    }
+    r
+}
+
 /// First-run consent (spec §First run): the plan prints ALWAYS; the prompt
 /// fires only on a TTY — never prompt without one (Homebrew 2026). Pure
 /// over (tty, read line) so the gate is unit-testable.
@@ -1562,10 +1580,17 @@ pub fn launch_session() -> Result<()> {
     // only ever writes the STORE, never a running bar, so this read is the one
     // place the mode actually takes effect — sizes and the plugin-config line
     // are baked from it together, right here, so they cannot disagree.
+    // The pane's dir by the same rule `clave open` uses (`open::pane_cwd`):
+    // a row whose conversation relocated is baked where it went, not where
+    // the row last stood. One clone of one record, so `launch_layout_kdl`
+    // stays pure over the row it is handed.
+    let home = rows
+        .first()
+        .map(|r| baked_home(r, crate::open::pane_cwd(r), crate::add::validate_cwd));
     let layout_text = launch_layout_kdl(
         &binary,
         wasm.to_str().context("wasm path")?,
-        rows.first().copied(),
+        home.as_ref(),
         store.collapsed,
         store.row_height,
     );
@@ -1797,6 +1822,19 @@ mod tests {
             "{kdl}"
         );
         assert!(!kdl.contains("%\""), "{kdl}");
+    }
+
+    #[test]
+    fn the_launch_bakes_the_pane_cwd_only_when_it_passes_the_kdl_guard() {
+        let row = bare_record("u", "/row");
+        let baked = baked_home(&row, "/moved".into(), |_| Ok(()));
+        assert_eq!(baked.cwd, "/moved");
+        let kept = baked_home(&row, "/bad\"dir".into(), |c| {
+            anyhow::ensure!(!c.contains('"'), "quote");
+            Ok(())
+        });
+        assert_eq!(kept.cwd, "/row");
+        assert_eq!(kept.uuid, "u");
     }
 
     #[test]

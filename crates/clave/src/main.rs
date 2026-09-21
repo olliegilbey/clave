@@ -374,6 +374,30 @@ fn main() -> Result<()> {
                     );
                     (spawn::SpawnMode::Resume, session, cwd)
                 }
+                spawn::SpawnSite::Anchored {
+                    session,
+                    cwd,
+                    branch,
+                } => {
+                    // The agent wakes in the birth dir, so the row says so
+                    // NOW rather than one hook event later (the hook's
+                    // `take_checkout` would move it anyway, and clear the
+                    // tree mark, because that is where the agent is). The
+                    // branch moves with it, else the row keeps the
+                    // worktree's branch and PR (Codex, PR #267).
+                    match clave::store::store_paths().and_then(|p| {
+                        clave::store::apply_relocation(&p, &uuid, &cwd, branch.as_deref())
+                    }) {
+                        Ok(Some(snap)) => clave::hook::push_snapshot(&snap),
+                        Ok(None) => {}
+                        Err(e) => eprintln!("clave spawn: could not repoint row cwd: {e:#}"),
+                    }
+                    clave::evlog::log_event(
+                        "spawn",
+                        &format!("{uuid}: transcript anchored at its birth dir -> {cwd}"),
+                    );
+                    (spawn::SpawnMode::Resume, session, cwd)
+                }
             };
             clave::evlog::log_event("spawn", &format!("{uuid}: {mode:?} {session}"));
             // Register uuid→pane BEFORE exec (this process is about to be
