@@ -375,12 +375,20 @@ fn main() -> Result<()> {
                     (spawn::SpawnMode::Resume, session, cwd)
                 }
                 spawn::SpawnSite::Anchored { session, cwd } => {
-                    // No store write: the row's cwd is where the agent IS,
-                    // and this is only where Claude keeps its file. The
-                    // hook would move a repointed row straight back.
+                    // The agent wakes in the birth dir, so the row says so
+                    // NOW rather than one hook event later (the hook's
+                    // `take_checkout` would move it anyway, and clear the
+                    // tree mark, because that is where the agent is).
+                    match clave::store::store_paths()
+                        .and_then(|p| clave::store::apply_relocation(&p, &uuid, &cwd, None))
+                    {
+                        Ok(Some(snap)) => clave::hook::push_snapshot(&snap),
+                        Ok(None) => {}
+                        Err(e) => eprintln!("clave spawn: could not repoint row cwd: {e:#}"),
+                    }
                     clave::evlog::log_event(
                         "spawn",
-                        &format!("{uuid}: transcript anchored at its birth dir {cwd}"),
+                        &format!("{uuid}: transcript anchored at its birth dir -> {cwd}"),
                     );
                     (spawn::SpawnMode::Resume, session, cwd)
                 }

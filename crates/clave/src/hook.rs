@@ -1139,16 +1139,6 @@ pub fn read_tail(path: &Path, max_bytes: u64) -> Option<String> {
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
-/// First ≤`max_bytes` of `path`, the tail's twin: where the transcript was
-/// born (`spawn::head_cwd`) is on its first lines, and the file is never
-/// read whole for it.
-pub fn read_head(path: &Path, max_bytes: u64) -> Option<String> {
-    let f = std::fs::File::open(path).ok()?;
-    let mut buf = Vec::new();
-    f.take(max_bytes).read_to_end(&mut buf).ok()?;
-    Some(String::from_utf8_lossy(&buf).into_owned())
-}
-
 /// Refresh the row's derived text: `rec.title` and `rec.summary` (design-lock
 /// §7.1) plus the §6.4 `label`. Returns whether ANY of the three changed —
 /// `apply_hook_event` turns that into the single `seq` bump.

@@ -28,30 +28,42 @@ launch (#261) baked that cwd bare. `clave open` asked `relocated_cwd` first
 and, through the OLD minted transcript's tail, baked the repo root — luck,
 not a rule.
 
-## The fix
+## The fix (after the Opus review, commit 2)
 
-- `SpawnSite::Anchored`: `moved_site` now checks the head (`head_cwd`, new
-  `hook::read_head`) when the tail does not key the file. Resume from the
-  birth dir; do NOT repoint the row (the hook would move it straight back).
-- One rule for a spawn pane's dir: `open::pane_cwd` (pure half
-  `pane_cwd_in`), called by `run_open` and by the launch bake in
-  `setup::launch_session`. `launch_layout_kdl` stays pure — the caller
-  clones the one record with the resolved cwd.
-- Docs: FOOTGUNS entry under the relocation one; two vocabulary terms
-  (relocated / anchored transcript); two rows in TESTING.md's
-  "real behaviour nobody pinned".
+- `SpawnSite::Anchored`: `moved_site` checks the tail's cwd RAW against the
+  file's dir first (a relocation whose target vanished keeps its own
+  message), then the head (`head_cwd`, read by line up to 1 MiB — 8 of 339
+  transcripts have their first cwd past 64 KiB). Resume from the birth dir
+  and REPOINT the row there: the agent wakes in the birth dir, not the
+  worktree it left off in, and loses its tree mark. That is the truth, one
+  hook event earlier than the hook would say it. Needs Ollie's ruling.
+- `spawn::conversation_home` (`Home::Moved` / `Home::Anchored`) replaces
+  `relocated_cwd`; the search stops at the live id once it resolves, so an
+  anchored live conversation never falls through to the minted file.
+- One rule for a spawn pane's dir: `open::pane_cwd_from` — relocated →
+  target; else the row's cwd while it exists; else the anchor. Used by
+  `run_open` and the launch bake (`setup::baked_home`, which re-runs
+  `validate_cwd` on the substituted value and keeps the row's own cwd if
+  it fails, so an unvalidated transcript cwd never reaches KDL).
+- Docs: FOOTGUNS entry (limits recorded), two vocabulary terms, two rows
+  in TESTING.md.
+
+Review lane 1 (Opus subagent, adversarial): 11 findings, all taken.
+Declined: none.
 
 Tests red-first: `a_session_that_walked_into_a_new_dir_resumes_where_its_file_is_keyed`,
 `the_anchor_is_the_first_cwd_line_of_the_transcript`,
 `an_anchored_transcript_with_a_vanished_birth_dir_fails_loudly` (spawn.rs),
-`a_pane_is_born_where_the_conversation_went_else_at_the_row` (open.rs).
+`a_pane_is_born_where_the_conversation_went_else_at_the_row` (open.rs),
+`the_launch_bakes_the_pane_cwd_only_when_it_passes_the_kdl_guard` (setup.rs).
 
 ## Verified
 
-- `just gates` green: 444 host + 340 bar tests, wasm build, clippy `-D warnings`.
+- `just gates` green: 445 host + 340 bar tests, wasm build, clippy `-D warnings`.
 - A throwaway probe ran `verified_site` on the maintainer's real row and
   transcript: `Anchored { cwd: ~/code/clave }`. Probe deleted.
-- `just mutants` over the diff: see PR.
+- `just mutants` (commit 1): 14 caught, 7 missed, all misses env-reading shells. Rerun after commit 2 pending.
+- Next: CodeRabbit CLI lane, then push on Ollie's go.
 
 ## Not verified
 

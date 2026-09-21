@@ -49,26 +49,12 @@ pub fn open_is_live(store: &crate::store::Store, row: &AgentRecord, dump_layout:
         || crate::add::resolved_scan_uuids(store, dump_layout).contains(&row.uuid)
 }
 
-/// Where this row's conversation moved to, if it moved somewhere spawnable
-/// (#143 review) — read against the environment's Claude dir. `None` when
-/// the row's own dir is the one to use.
-pub fn relocated_home(row: &AgentRecord) -> Option<String> {
-    let dir = crate::env::claude_config_dir().ok()?;
-    relocated_home_in(&dir, row)
-}
-
-/// Pure over `claude_dir` so it host-tests: the IO shell above only picks
-/// the dir.
-pub fn relocated_home_in(claude_dir: &std::path::Path, row: &AgentRecord) -> Option<String> {
-    crate::spawn::relocated_cwd(claude_dir, &row.uuid, row.live_session.as_deref())
-}
-
-/// The dir a pane for `row` is BORN in: the relocation target when the
-/// conversation moved, else the row's own cwd. ONE rule, and both writers of
-/// a spawn pane call it — `run_open` and the launch bake (`setup.rs`). They
-/// used to disagree: the launch took `row.cwd` as it stood while open asked
-/// where the transcript lived, so a relaunch died in its first tab on the
-/// same row a click resumed (2026-09-21).
+/// The dir a pane for `row` is BORN in. ONE rule, and every writer of a
+/// spawn pane reads it: `run_open`, the launch bake (`setup::baked_home`)
+/// and — through the spawn's own search — `add::run_add`. The launch used
+/// to bake `row.cwd` bare while open asked where the transcript lived, so a
+/// relaunch died in its first tab on the same row a click resumed
+/// (2026-09-21).
 pub fn pane_cwd(row: &AgentRecord) -> String {
     let Ok(dir) = crate::env::claude_config_dir() else {
         return row.cwd.clone();
@@ -76,9 +62,24 @@ pub fn pane_cwd(row: &AgentRecord) -> String {
     pane_cwd_in(&dir, row)
 }
 
-/// The rule itself, pure over `claude_dir`.
+/// The rule, pure over `claude_dir` so it host-tests.
 pub fn pane_cwd_in(claude_dir: &std::path::Path, row: &AgentRecord) -> String {
-    relocated_home_in(claude_dir, row).unwrap_or_else(|| row.cwd.clone())
+    let home = crate::spawn::conversation_home(claude_dir, &row.uuid, row.live_session.as_deref());
+    pane_cwd_from(home.as_ref(), row)
+}
+
+/// Relocated: where it went. Otherwise the row's own dir while it exists;
+/// an anchored conversation's birth dir is the fallback when it does not
+/// (the deleted worktree), and a row with no home at all keeps its cwd so
+/// the open-time gate can call it stale.
+pub fn pane_cwd_from(home: Option<&crate::spawn::Home>, row: &AgentRecord) -> String {
+    match home {
+        Some(crate::spawn::Home::Moved(cwd)) => cwd.clone(),
+        Some(crate::spawn::Home::Anchored(birth)) if !std::path::Path::new(&row.cwd).is_dir() => {
+            birth.clone()
+        }
+        _ => row.cwd.clone(),
+    }
 }
 
 pub fn open_decision(_row: &AgentRecord, is_live: bool, cwd_exists: bool) -> OpenDecision {
@@ -149,8 +150,10 @@ pub fn run_open(uuid: &str, collapsed: bool, restore_to: Option<usize>) -> Resul
     // wake was otherwise rejected here before spawn's relocation recovery
     // could ever run. Open only decides tab creation; spawn re-runs the
     // search and repoints the row.
-    let relocated = relocated_home(row);
-    let cwd_exists = std::path::Path::new(&row.cwd).is_dir() || relocated.is_some();
+    let home = crate::env::claude_config_dir()
+        .ok()
+        .and_then(|d| crate::spawn::conversation_home(&d, &row.uuid, row.live_session.as_deref()));
+    let cwd_exists = std::path::Path::new(&row.cwd).is_dir() || home.is_some();
     match open_decision(row, is_live, cwd_exists) {
         OpenDecision::AlreadyLive => {
             crate::evlog::log_event("open", &format!("{uuid}: already live, no-op"));
@@ -168,7 +171,7 @@ pub fn run_open(uuid: &str, collapsed: bool, restore_to: Option<usize>) -> Resul
             // recovered relocation must not bake the missing row.cwd — the
             // pane would be born in a dead dir before `clave spawn` could
             // ever follow the move.
-            let open_cwd = relocated.as_deref().unwrap_or(&row.cwd);
+            let open_cwd = &pane_cwd_from(home.as_ref(), row);
             // Guard the baked cwd before it reaches KDL (see
             // add::validate_cwd) — a `"`/control char breaks the layout.
             crate::add::validate_cwd(open_cwd)?;
@@ -329,6 +332,9 @@ mod tests {
         let mut row = rec("u-anchored");
         row.cwd = moved_to.clone();
         assert_eq!(pane_cwd_in(&claude, &row), moved_to);
+        // …and when that worktree is GONE, the birth dir is the fallback.
+        row.cwd = format!("{moved_to}/deleted");
+        assert_eq!(pane_cwd_in(&claude, &row), birth);
         // Never moved, or no transcript at all: the row's cwd, untouched.
         let row = rec("u-none");
         assert_eq!(pane_cwd_in(&claude, &row), "/x");

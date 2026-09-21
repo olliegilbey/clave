@@ -114,33 +114,38 @@ pub enum SpawnSite {
     },
     /// The transcript stayed where the session was BORN while the session
     /// walked on — a worktree entered mid-conversation, or a plain change of
-    /// directory. Claude keys the file on the first cwd and never moves it
-    /// (measured 2026-09-21: 12 of 338 transcripts, none carrying a
-    /// `relocated` or `worktree-state` line). Resume from that first cwd,
-    /// the only dir `claude --resume` will look in. The row is NOT
-    /// repointed: its cwd is what the agent is doing, and the hook keeps it
-    /// current — repointing here would only make the two fight.
+    /// directory. The file stays keyed on the first cwd (measured
+    /// 2026-09-21: 12 of 338 transcripts, none carrying a `relocated` or
+    /// `worktree-state` line). Resume from that first cwd, the only dir
+    /// `claude --resume` will look in — so the agent WAKES THERE, not in the
+    /// worktree it left off in, and the row is repointed to say so.
     Anchored { session: String, cwd: String },
 }
 
 /// Tail budget for the relocation read — same 64 KiB the hook reads.
 const RELOC_TAIL_BYTES: u64 = 64 * 1024;
 
-/// Head budget for the anchor read. The first cwd rides the first message
-/// line, a few hundred bytes in; the budget matches the tail's so one
-/// number covers both reads.
-const ANCHOR_HEAD_BYTES: u64 = RELOC_TAIL_BYTES;
+/// Head budget for the anchor read. The first record carrying a `cwd` is
+/// the first user message, and that can be a large paste: measured
+/// 2026-09-21, 8 of 339 transcripts had their first `cwd` past 64 KiB, the
+/// furthest at 786 KiB. Read by LINE up to this many bytes.
+const ANCHOR_HEAD_BYTES: u64 = 1024 * 1024;
 
 /// The dir the session was BORN in: the first top-level non-empty `cwd` in
-/// the transcript's head. Claude keys the file's project dir on this value
-/// and keeps it there for the file's whole life (`SpawnSite::Anchored`).
+/// the transcript. Claude keys the file's project dir on this value; for an
+/// anchored transcript (`SpawnSite::Anchored`) it is the only dir
+/// `claude --resume` will look in.
 fn head_cwd(transcript: &Path) -> Option<String> {
-    let head = crate::hook::read_head(transcript, ANCHOR_HEAD_BYTES)?;
-    head.lines().find_map(|l| {
-        let v: serde_json::Value = serde_json::from_str(l).ok()?;
-        let s = v.get("cwd")?.as_str()?.trim();
-        (!s.is_empty()).then(|| s.to_string())
-    })
+    use std::io::{BufRead, BufReader, Read};
+    let f = std::fs::File::open(transcript).ok()?;
+    BufReader::new(f.take(ANCHOR_HEAD_BYTES))
+        .lines()
+        .map_while(Result::ok)
+        .find_map(|l| {
+            let v: serde_json::Value = serde_json::from_str(&l).ok()?;
+            let s = v.get("cwd")?.as_str()?.trim();
+            (!s.is_empty()).then(|| s.to_string())
+        })
 }
 
 /// The one place `<id>.jsonl` lives under `claude_dir/projects/*/`, by EXACT
@@ -314,60 +319,45 @@ pub fn verified_site(
     }
 }
 
-/// A found-elsewhere transcript → the `Moved` site: its true cwd comes from
-/// its OWN tail (newest wins), canonicalized (S0b) and required to exist —
-/// a vanished target dir is a loud error, never a silent create.
+/// A found-elsewhere transcript → the site Claude keys it on. A file sits
+/// under exactly one of two cwds (measured 2026-09-21, 338 transcripts,
+/// none under neither): its LAST — the relocation, the file moved with the
+/// session (#59/#69) — or its FIRST — the session moved and the file
+/// stayed. The tail decides the first, the head the second, and a file
+/// matching neither is refused: resuming there surfaces as Claude's opaque
+/// "No conversation found" (#143 review). Both are compared CANONICAL, as
+/// the exec cwd will be (S0b).
 fn moved_site(transcript: &Path, session: &str) -> Result<SpawnSite> {
     let tail = crate::hook::read_tail(transcript, RELOC_TAIL_BYTES)
         .ok_or_else(|| anyhow::anyhow!("unreadable transcript {}", transcript.display()))?;
-    let cwd = cwd_from_tail(&tail).ok_or_else(|| {
-        anyhow::anyhow!(
-            "transcript {} carries no cwd in its tail; cannot follow the relocation",
-            transcript.display()
-        )
-    })?;
-    let canon = std::fs::canonicalize(&cwd).map_err(|e| {
-        anyhow::anyhow!(
-            "transcript {} relocated to cwd {cwd}, which no longer exists: {e}",
-            transcript.display()
-        )
-    })?;
-    let cwd = canon
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("non-UTF8 relocated cwd"))?
-        .to_string();
-    // `claude --resume` is project-dir-scoped: it looks under the munged dir
-    // of the cwd it runs in. A file is keyed on exactly one of two cwds
-    // (measured 2026-09-21, 338 transcripts, none keyed on neither): its
-    // LAST — the relocation, the file moved with the session — or its FIRST
-    // — the session moved and the file stayed. The tail decides the first;
-    // the head decides the second; a file matching neither is refused,
-    // because resuming there would surface as Claude's opaque "No
-    // conversation found" (#143 review).
     let found_dir = transcript.parent().and_then(|p| p.file_name());
-    if found_dir == Some(std::ffi::OsStr::new(&munge_cwd(&cwd))) {
+    let keys = |cwd: &str| found_dir == Some(std::ffi::OsStr::new(&munge_cwd(cwd)));
+    // The tail's cwd is checked RAW first: a relocation whose target has since
+    // vanished must still be told apart from an anchored file whose LAST cwd
+    // vanished (the deleted worktree), which the head can still recover.
+    let last = cwd_from_tail(&tail);
+    if let Some(cwd) = last.as_deref().filter(|c| keys(c)) {
+        let cwd = canonical(cwd).map_err(|e| {
+            anyhow::anyhow!(
+                "transcript {} relocated to cwd {cwd}, which no longer exists: {e}",
+                transcript.display()
+            )
+        })?;
         return Ok(SpawnSite::Moved {
             session: session.to_string(),
             cwd,
             branch: branch_from_tail(&tail),
         });
     }
-    let birth = head_cwd(transcript);
-    if let Some(b) = birth
-        .as_deref()
-        .filter(|b| found_dir == Some(std::ffi::OsStr::new(&munge_cwd(b))))
-    {
-        let canon = std::fs::canonicalize(b).map_err(|e| {
+    let first = head_cwd(transcript);
+    if let Some(cwd) = first.as_deref().filter(|c| keys(c)) {
+        let cwd = canonical(cwd).map_err(|e| {
             anyhow::anyhow!(
-                "transcript {} is keyed on its birth dir {b}, which no longer \
+                "transcript {} is keyed on its birth dir {cwd}, which no longer \
                  exists: {e} — nowhere to resume from",
                 transcript.display()
             )
         })?;
-        let cwd = canon
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("non-UTF8 birth cwd"))?
-            .to_string();
         return Ok(SpawnSite::Anchored {
             session: session.to_string(),
             cwd,
@@ -375,29 +365,51 @@ fn moved_site(transcript: &Path, session: &str) -> Result<SpawnSite> {
     }
     anyhow::bail!(
         "transcript {} lives under project dir {:?} but is keyed on neither its \
-         last cwd {cwd} (munged: {}) nor its first {:?} — the tail lags the \
-         move; resume from the transcript's own dir is not derivable (munge is \
-         lossy). Refusing rather than resuming where Claude would find nothing.",
+         last cwd {} nor its first {} — resume from the transcript's own dir is \
+         not derivable (munge is lossy). Refusing rather than resuming where \
+         Claude would find nothing.",
         transcript.display(),
         found_dir.unwrap_or_default(),
-        munge_cwd(&cwd),
-        birth.unwrap_or_default()
+        last.as_deref().unwrap_or("(none in the tail)"),
+        first.as_deref().unwrap_or("(none in the head)")
     )
 }
 
-/// #139 (review): where has this session's conversation moved to, if
-/// anywhere spawnable? `Some(cwd)` when a relocated transcript resolves to
-/// an existing dir — the cwd `run_open` must BAKE into the pane instead of
-/// the missing one, or the opened pane runs from a dead dir (#143 review).
-/// `None` otherwise — an ANCHORED transcript included: the row's own dir
-/// still exists, so the pane is born there and the spawn resolves the
-/// anchor itself. Open-time gate only; the spawn re-runs the search and
-/// repoints the row.
-pub fn relocated_cwd(claude_dir: &Path, uuid: &str, live_session: Option<&str>) -> Option<String> {
+/// Canonical form of a cwd read from a transcript, or why it cannot be.
+fn canonical(cwd: &str) -> Result<String> {
+    let canon = std::fs::canonicalize(cwd)?;
+    canon
+        .to_str()
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("non-UTF8 cwd"))
+}
+
+/// Where a conversation lives when it is not at the row's cwd (#143 review).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Home {
+    /// Relocated: bake and resume here, whatever the row says.
+    Moved(String),
+    /// Anchored at its birth dir: the row's own cwd is the agent's dir when
+    /// it still exists; this is the fallback when it does not.
+    Anchored(String),
+}
+
+/// The conversation's home, live id first (#99). The search STOPS at the
+/// first id whose transcript resolves: an anchored live conversation must
+/// not fall through to the pre-`/clear` minted file, whose own home may be a
+/// third dir. Before 2026-09-21 that fall-through was how a click on such a
+/// row happened to work. `None` when nothing resolves — the open-time gate
+/// then reads the row's own cwd, and the spawn re-runs the search.
+pub fn conversation_home(
+    claude_dir: &Path,
+    uuid: &str,
+    live_session: Option<&str>,
+) -> Option<Home> {
     let live = live_session.filter(|l| !l.starts_with('-'));
     [live, Some(uuid)].into_iter().flatten().find_map(|id| {
         match locate_transcript(claude_dir, id).map(|t| moved_site(&t, id)) {
-            Some(Ok(SpawnSite::Moved { cwd, .. })) => Some(cwd),
+            Some(Ok(SpawnSite::Moved { cwd, .. })) => Some(Home::Moved(cwd)),
+            Some(Ok(SpawnSite::Anchored { cwd, .. })) => Some(Home::Anchored(cwd)),
             _ => None,
         }
     })
@@ -562,6 +574,14 @@ mod tests {
         cwd: String,
     }
 
+    /// The open-time gate's relocation answer alone (a `Moved` home).
+    fn relocated_cwd(claude: &Path, uuid: &str, live: Option<&str>) -> Option<String> {
+        match conversation_home(claude, uuid, live) {
+            Some(Home::Moved(c)) => Some(c),
+            _ => None,
+        }
+    }
+
     fn reloc_fixture() -> Reloc {
         let tmp = tempfile::tempdir().unwrap();
         let claude = tmp.path().join(".claude");
@@ -648,9 +668,9 @@ mod tests {
             .join(munge_cwd(&moved_here))
             .join("u-lag.jsonl");
         let err = moved_site(&transcript, "u-lag").unwrap_err().to_string();
-        assert!(err.contains("lags the move"), "unexpected error: {err}");
+        assert!(err.contains("keyed on neither"), "unexpected error: {err}");
         // And the open-time gate agrees: not recoverable through relocation.
-        assert_eq!(relocated_cwd(&f.claude, "u-lag", None), None);
+        assert_eq!(conversation_home(&f.claude, "u-lag", None), None);
     }
 
     /// The open-time gate: a clean move yields the RELOCATED cwd — the one
@@ -844,8 +864,12 @@ mod tests {
         // died in exactly this shape; a baked cwd that is GONE recovers too.
         let site = verified_site(&f.claude, None, "minted", None, true).unwrap();
         assert!(matches!(site, SpawnSite::Anchored { .. }));
-        // Not a relocation: the row's dir exists, so open bakes it as is.
-        assert_eq!(relocated_cwd(&f.claude, "minted", None), None);
+        // The open-time gate learns the anchor too (a row whose own dir is
+        // gone is baked here).
+        assert_eq!(
+            conversation_home(&f.claude, "minted", None),
+            Some(Home::Anchored(f.cwd.clone()))
+        );
     }
 
     /// The anchor is the FIRST cwd line, not the newest: a head read that
@@ -886,6 +910,10 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("/gone/birth"), "names the dir: {err}");
+        assert!(
+            err.contains("nowhere to resume from"),
+            "the anchor diagnosis, not the generic one: {err}"
+        );
     }
 
     #[test]

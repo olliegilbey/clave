@@ -627,7 +627,7 @@ where it came from:
 |---|---|---|
 | `apply_relocation`'s whole body | a session whose worktree moved keeps the dead path, so the next open goes ✗ stale | `relocation_repoints_the_row_and_only_touches_branch_when_told` |
 | `moved_site`'s anchor branch (head cwd keys the file) | every session that entered a worktree mid-conversation refuses to resume at the next launch — the first tab dies naming the transcript, and the staggered restore waits on it | `a_session_that_walked_into_a_new_dir_resumes_where_its_file_is_keyed` |
-| the launch bake taking `row.cwd` bare | launch and open bake different dirs for the same row, so a relaunch dies where a click resumes | `a_pane_is_born_where_the_conversation_went_else_at_the_row` |
+| the launch bake taking `row.cwd` bare, or an unguarded substitute | launch and open bake different dirs for the same row, so a relaunch dies where a click resumes; a relocation target with a `"` in it fails the session create | `a_pane_is_born_where_the_conversation_went_else_at_the_row`, `the_launch_bakes_the_pane_cwd_only_when_it_passes_the_kdl_guard` |
 | `read_store`'s `NotFound` guard, widened | an unreadable store reads as empty, and `with_store_mut` renames an empty one over it — the fleet is gone | `an_unreadable_store_is_an_error_and_is_never_written_over` |
 | `apply_prune_tabs`' `seq` bump | every bar discards the prune push and re-fires the subprocess forever, while the closed tab's agent still renders live | `prune_tabs_removes_listed_stale_ids_order_safe_and_change_gated` |
 | `merge_resume_record`'s `pane_id` reset | a resumed row carries a dead pane into the new session: a permanent false #178 stall, and a jump that chases a pane that is gone | `merge_resume_preserves_existing_row_and_resets_status` |
