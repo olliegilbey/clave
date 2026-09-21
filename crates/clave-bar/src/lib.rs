@@ -66,6 +66,36 @@ mod shell_text {
         );
     }
 
+    /// The direction rule lives in the model and is tested there, but the
+    /// boolean reaches zellij only through this arm, and `main.rs` does not
+    /// link on the host. Inverting the two host calls passes every test and
+    /// the wasm build, and only an eyeball catches the 0.2s lag coming back
+    /// (blind review of the 2026-09-21 fix). So the mapping is pinned as
+    /// text: backwards is `previous_swap_layout`, forward is `next`.
+    #[test]
+    fn the_swap_direction_maps_backwards_to_previous_and_forward_to_next() {
+        for (arm, call) in [
+            (
+                "Effect::SwapWidth { backwards: true }",
+                "previous_swap_layout()",
+            ),
+            (
+                "Effect::SwapWidth { backwards: false }",
+                "next_swap_layout()",
+            ),
+        ] {
+            assert!(
+                SHELL.contains(&format!("{arm} => {call}")),
+                "the effect arm `{arm}` must call `{call}` in main.rs"
+            );
+        }
+        assert_eq!(
+            SHELL.matches("previous_swap_layout()").count(),
+            1,
+            "previous_swap_layout has exactly one call site, the effect arm"
+        );
+    }
+
     /// The shell holds no copy of "a tick is in flight". It held one until
     /// 2026-09-13, mirrored into the model, and the pair needed a test that
     /// read the two writes as adjacent lines of text to stay together. The

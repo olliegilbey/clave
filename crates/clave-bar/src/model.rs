@@ -3639,12 +3639,18 @@ impl BarModel {
     pub fn width_effects(&mut self, own_cols: Option<usize>) -> Vec<Effect> {
         // The birth width, from the first paint at a declared width. Read
         // BEFORE the hydration gate: the first paints usually land while the
-        // snapshot is still awaited, and no ask can precede hydration, so
-        // the pane is provably still at birth.
+        // snapshot is still awaited, and no ask can precede hydration, so on
+        // a fresh launch the pane is still at birth. A plugin reload is the
+        // exception (FOOTGUNS, "Hot-reload resets plugin state"): the model
+        // restarts while the tab keeps its swap position, so the first paint
+        // may be at declared[1] and the guess wrong. A wrong guess is
+        // bounded: the review of 2026-09-21 walked every case, and the worst
+        // is the old two-step switch, never a loop.
         if let (None, Some(cols)) = (self.birth_collapsed, own_cols) {
             for mode in [false, true] {
                 if cols == self.row_height.target_cols(mode) {
                     self.birth_collapsed = Some(mode);
+                    break;
                 }
             }
         }
