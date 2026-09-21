@@ -118,8 +118,15 @@ pub enum SpawnSite {
     /// 2026-09-21: 12 of 338 transcripts, none carrying a `relocated` or
     /// `worktree-state` line). Resume from that first cwd, the only dir
     /// `claude --resume` will look in — so the agent WAKES THERE, not in the
-    /// worktree it left off in, and the row is repointed to say so.
-    Anchored { session: String, cwd: String },
+    /// worktree it left off in, and the row is repointed to say so. The
+    /// branch rides along for the same reason: the row's branch (and its
+    /// cached PR) still describe the worktree the agent is no longer in
+    /// (Codex, PR #267). `None` when the birth line names no branch.
+    Anchored {
+        session: String,
+        cwd: String,
+        branch: Option<String>,
+    },
 }
 
 /// Tail budget for the relocation read — same 64 KiB the hook reads.
@@ -131,11 +138,11 @@ const RELOC_TAIL_BYTES: u64 = 64 * 1024;
 /// furthest at 786 KiB. Read by LINE up to this many bytes.
 const ANCHOR_HEAD_BYTES: u64 = 1024 * 1024;
 
-/// The dir the session was BORN in: the first top-level non-empty `cwd` in
-/// the transcript. Claude keys the file's project dir on this value; for an
-/// anchored transcript (`SpawnSite::Anchored`) it is the only dir
-/// `claude --resume` will look in.
-fn head_cwd(transcript: &Path) -> Option<String> {
+/// Where the session was BORN: the first top-level non-empty `cwd` in the
+/// transcript, and the `gitBranch` on that same line. Claude keys the file's
+/// project dir on the cwd; for an anchored transcript (`SpawnSite::Anchored`)
+/// it is the only dir `claude --resume` will look in.
+fn head_site(transcript: &Path) -> Option<(String, Option<String>)> {
     use std::io::{BufRead, BufReader, Read};
     let f = std::fs::File::open(transcript).ok()?;
     BufReader::new(f.take(ANCHOR_HEAD_BYTES))
@@ -143,8 +150,17 @@ fn head_cwd(transcript: &Path) -> Option<String> {
         .map_while(Result::ok)
         .find_map(|l| {
             let v: serde_json::Value = serde_json::from_str(&l).ok()?;
-            let s = v.get("cwd")?.as_str()?.trim();
-            (!s.is_empty()).then(|| s.to_string())
+            let cwd = v.get("cwd")?.as_str()?.trim();
+            if cwd.is_empty() {
+                return None;
+            }
+            let branch = v
+                .get("gitBranch")
+                .and_then(|b| b.as_str())
+                .map(str::trim)
+                .filter(|b| !b.is_empty())
+                .map(str::to_string);
+            Some((cwd.to_string(), branch))
         })
 }
 
@@ -349,7 +365,9 @@ fn moved_site(transcript: &Path, session: &str) -> Result<SpawnSite> {
             branch: branch_from_tail(&tail),
         });
     }
-    let first = head_cwd(transcript);
+    let (first, birth_branch) = head_site(transcript)
+        .map(|(c, b)| (Some(c), b))
+        .unwrap_or((None, None));
     if let Some(cwd) = first.as_deref().filter(|c| keys(c)) {
         let cwd = canonical(cwd).map_err(|e| {
             anyhow::anyhow!(
@@ -361,6 +379,7 @@ fn moved_site(transcript: &Path, session: &str) -> Result<SpawnSite> {
         return Ok(SpawnSite::Anchored {
             session: session.to_string(),
             cwd,
+            branch: birth_branch,
         });
     }
     anyhow::bail!(
@@ -883,6 +902,9 @@ mod tests {
             SpawnSite::Anchored {
                 session: "minted".into(),
                 cwd: f.cwd.clone(),
+                // The birth line's branch, not the tail's `feat/wt`: the row
+                // must not keep the worktree's branch once it leaves it.
+                branch: Some("main".into()),
             }
         );
         // The launch (#261) bakes the row's cwd, which is the worktree, and
@@ -913,7 +935,7 @@ mod tests {
             .join("projects")
             .join(munge_cwd(&f.cwd))
             .join("minted.jsonl");
-        assert_eq!(head_cwd(&transcript).as_deref(), Some(f.cwd.as_str()));
+        assert_eq!(head_site(&transcript), Some((f.cwd.clone(), None)));
         match moved_site(&transcript, "minted").unwrap() {
             SpawnSite::Anchored { cwd, .. } => assert_eq!(cwd, f.cwd),
             other => panic!("expected Anchored, got {other:?}"),

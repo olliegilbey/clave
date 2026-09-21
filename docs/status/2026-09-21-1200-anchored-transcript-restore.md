@@ -35,7 +35,8 @@ not a rule.
   message), then the head (`head_cwd`, read by line up to 1 MiB — 8 of 339
   transcripts have their first cwd past 64 KiB). Resume from the birth dir
   and REPOINT the row there: the agent wakes in the birth dir, not the
-  worktree it left off in, and loses its tree mark. That is the truth, one
+  worktree it left off in, takes the birth line's branch (Codex, PR #267),
+  and loses its tree mark. That is the truth, one
   hook event earlier than the hook would say it. Needs Ollie's ruling.
 - `spawn::conversation_home` (`Home::Moved` / `Home::Anchored`) replaces
   `relocated_cwd`; the search stops at the live id once it resolves, so an
@@ -54,6 +55,8 @@ taken — the home search now stops at the first id that HAS a transcript
 (a live one that refuses no longer falls through to the minted file; test
 `a_live_transcript_that_refuses_hides_the_minted_one`), and the stale
 "leave the row alone" test doc was corrected.
+Review lane 3 (Codex on PR #267): 1 finding, taken — the anchored
+resume now carries the birth line's `gitBranch` into the repoint.
 Declined: none.
 
 Tests red-first: `a_session_that_walked_into_a_new_dir_resumes_where_its_file_is_keyed`,
