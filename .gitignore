@@ -10,4 +10,7 @@
 .superpowers/
 
 # Agent worktrees live here; they are ephemeral checkouts, never repo content.
+# Claude Code places them under either path; a live one at the second blocked
+# the v0.5.2 cut (release gate: untracked dirt outside docs/ and .claude/).
 .claude/worktrees/
+.claude-worktrees/
