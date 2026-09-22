@@ -8,6 +8,18 @@ owns everything they structurally cannot reach._
 
 ## Run ledger — the useful recent history
 
+- **run 23, 2026-09-22 — the FIRST REMOTE DRIVE, on the devbox, twelve
+  phases green, 224 checks, 0 failures.** `just remote-qa qa-fleet` from a
+  Mac worktree; the box has `pane_frames false` and zellij 0.45.1, which no
+  Mac sandbox has. The new width assertion held: zero asks at launch, zero
+  across both ring-walk legs over six live tabs, one ask per press in the
+  collapse burst (sixteen for eighteen presses, alternating direction, one
+  instance). The first attempt died in phase 1 because `ct.sh` looked for
+  the sockets under `/tmp`; on Linux they are under `$XDG_RUNTIME_DIR`
+  (FOOTGUNS). The launch must come from a Mac terminal that is NOT a
+  zellij pane: zellij 0.45 detects the outer session through the terminal
+  and offers a nesting dialog instead of the fleet.
+
 - **run 22, 2026-09-17 — TWELVE phases green, 237 checks, 0 failures.** The
   first fully green drive on `worktree-live-set-restore` (#261), and the first
   in which `restored rows were bound before their agent ran (tab, no pane)`

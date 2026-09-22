@@ -21,6 +21,14 @@ You are picking up this work session from a prior agent that cut and rolled out 
 
 **Proof.** `just gates` green in the worktree, and `cargo test -p clave-bar a_painted_width_one_short` passes while it fails with the exact comparison restored.
 
+## The remote loop (added 14:35, same day)
+
+- `just remote-qa <scenario>` pushes HEAD to `devbox:~/code/clave-qa` (a plain repo, `receive.denyCurrentBranch updateInstead`), stages there, and runs the same drive detached; `remote-qa.sh qa-log`, `just remote-log`, `just remote-drive-log` read it back; `just remote-kill` kills the box SANDBOX (`clave-test`) by name. | **Checked** | `sed -n 1,40p scripts/remote-qa.sh`; docs/dev/QA-DRIVE.md "The remote drive"
+- Run 23: the first remote drive, all twelve phases green on the box, 224 checks, this branch's bar, frames off. The width assertion (phase 4, zero asks across the ring walk; `swap_ask_count_since` in lib.sh over the shipped `clave-bar: swap-width` line) passed. | **Checked** | `./scripts/remote-qa.sh drive-log 40`
+- The human's launch line, EXPLICITLY from a Mac terminal window that is not a zellij pane: `ssh -t devbox 'cd ~/code/clave-qa && just launch'`. From a clave tab, zellij 0.45 shows a nesting dialog instead. | **Checked** | this session, 14:08
+- The agent's sandbox permits: ssh reads of files, `git push` to the box, remote `cargo`/`just` runs, and killing the box sandbox by name. It refuses `scp` of binaries and any `zellij` command against the box's live sessions. Work through the wrapper. | **Checked** | the denials in this session
+- NOT yet done: the mutation run (the drive against a bar WITHOUT the fix but WITH the swap-width log line, to watch phase 4 go red); the frames-off scenario needs no special fixture on the box, it is the box's own config. The other four regressions from the list below are untouched. | **Open** | —
+
 ## Task Overview
 
 Make the v0.5.2 rollout hold on both machines, and close the regressions the devbox surfaced. The human's read: "the restore system is the main breakage; locally things feel good." His standing requirement (verbatim): "We need to know about where all these regressions are showing up so that our automated qa testing can pick them up, and be able to test both locally and over ssh. Even if we spin up a local ssh test environment as part of the automated qa system."
