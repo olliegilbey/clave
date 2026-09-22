@@ -616,12 +616,12 @@ pub fn apply_touch(paths: &StorePaths, tab_id: usize) -> Result<AgentSnapshot> {
 }
 
 /// The pure half of [`apply_touch`] — mint and stamp, no I/O. Returns the
-/// ordinal it minted. `mint_ord` bumps `seq` itself, so this IS the pipe
+/// ordinal it minted, or `None` when the tab's agent already ranks it. `mint_ord` bumps `seq` itself, so this IS the pipe
 /// contract's one bump for the write (§5); callers must not bump again.
 /// `now` also stamps `tab_touched` — the wall-clock twin of the ordinal this
 /// function mints, taken as a parameter (rather than read via `now_unix()`
 /// inside) so the total-order proptest below can drive it deterministically.
-pub(crate) fn touch_in(s: &mut Store, tab_id: usize, now: u64) -> u64 {
+pub(crate) fn touch_in(s: &mut Store, tab_id: usize, now: u64) -> Option<u64> {
     // Newborn-inheritance seed (spec): computed BEFORE the mint, and only
     // on vacancy, so a tab already tracking its own buckets is never
     // re-seeded and the newborn's own stamp can't shift the opener it
@@ -644,10 +644,23 @@ pub(crate) fn touch_in(s: &mut Store, tab_id: usize, now: u64) -> u64 {
         };
         s.tab_buckets.insert(tab_id, inherited);
     }
+    // A birth touch that lands after a standby row's bind: the bind gave
+    // the tab the row's own ordinal (`apply_bind`), and a fresh mint here
+    // would lift the row to the top. The equality is the bind's mark. It
+    // also holds on a tab whose agent has prompted since, where the prompt's
+    // ordinal is already the freshest, so nothing is lost there either.
+    if let Some(&held) = s.tab_order.get(&tab_id)
+        && s.agents
+            .values()
+            .any(|r| r.tab_id == Some(tab_id) && r.commit_ord == held)
+    {
+        s.seq += 1; // monotonic pipe contract (§5)
+        return None;
+    }
     let ord = s.mint_ord();
     s.tab_order.insert(tab_id, ord);
     s.tab_touched.insert(tab_id, now);
-    ord
+    Some(ord)
 }
 
 /// `clave bind <uuid> <tab_id>` (§6.6 Design B): persist the uuid→tab join
@@ -697,7 +710,14 @@ pub fn apply_bind(paths: &StorePaths, uuid: &str, tab_id: usize) -> Result<Optio
         }
         if let Some(r) = s.agents.get_mut(uuid) {
             r.tab_id = Some(tab_id);
-            r.standby_stamp = None; // live again: standby has done its job
+            // Live again: standby has done its job. A walk opened this row,
+            // and a walk is not a commitment, so the tab takes the row's own
+            // ordinal and the row keeps its rank (Ollie, 2026-09-23). This
+            // overwrites a birth touch that landed first; `touch_in` keeps
+            // it against one that lands after.
+            if r.standby_stamp.take().is_some() {
+                s.tab_order.insert(tab_id, r.commit_ord);
+            }
         }
         // An agent-bound tab's twin never holds inherited buckets (maintainer
         // ruling, 2026-08-19 post-drive): the row must rank on the agent's own
@@ -951,10 +971,15 @@ pub fn clear_session_order(paths: &StorePaths) -> Result<()> {
         let mut changed = false;
         let now = now_unix();
         if !s.tab_order.is_empty() || bound {
-            s.tab_order.clear();
+            let tab_ords = std::mem::take(&mut s.tab_order);
             s.tab_buckets.clear();
             s.tab_touched.clear();
             s.agents.values_mut().for_each(|r| {
+                // The prune's rule (R2): the row inherits its tab's ordinal
+                // before the bind goes, so a standby row keeps its rank.
+                if let Some(ord) = r.tab_id.and_then(|t| tab_ords.get(&t)) {
+                    r.commit_ord = r.commit_ord.max(*ord);
+                }
                 // Standby, second path. A row still bound here was live at
                 // the quit, and its SessionEnd never reached the store: QA
                 // run 33 saw one hook land of five running agents, on the box
@@ -2196,6 +2221,74 @@ mod tests {
     }
 
     #[test]
+    fn an_opened_standby_row_keeps_its_rank_and_a_woken_dormant_row_does_not() {
+        // Ollie, 2026-09-23: an opened standby row moves to where its
+        // frecency puts it, not to the top. A walk opens it; that is not a
+        // commitment. With no score, the rank is the ordinal, so the new
+        // tab must carry the row's own ordinal, never a fresh top one. The
+        // bar sends the birth touch and the bind together, and they race
+        // for the store lock, so both arrival orders are pinned. A woken
+        // DORMANT row (Alt+Enter) is a commitment and still takes the top.
+        for touch_first in [true, false] {
+            for standby in [true, false] {
+                let d = tempfile::tempdir().unwrap();
+                let p = tmp_paths(d.path());
+                with_store_mut(&p, |s| {
+                    let mut live = rec("u-live");
+                    live.tab_id = Some(1);
+                    live.commit_ord = 9;
+                    s.agents.insert("u-live".into(), live);
+                    s.tab_order.insert(1, 9);
+                    let mut row = rec("u-row");
+                    row.commit_ord = 5;
+                    if standby {
+                        row.standby_stamp = Some(Standby {
+                            since: now_unix(),
+                            tab: None,
+                        });
+                    }
+                    s.agents.insert("u-row".into(), row);
+                    s.seq = 20;
+                })
+                .unwrap();
+                if touch_first {
+                    apply_touch(&p, 2).unwrap();
+                    apply_bind(&p, "u-row", 2).unwrap();
+                } else {
+                    apply_bind(&p, "u-row", 2).unwrap();
+                    apply_touch(&p, 2).unwrap();
+                }
+                let s = read_store(&p).unwrap();
+                let ord = s.tab_order.get(&2).copied().unwrap_or(0);
+                if standby {
+                    assert_eq!(ord, 5, "touch_first={touch_first}: its own rank");
+                } else {
+                    assert!(ord > 20, "touch_first={touch_first}: {ord}, not the top");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_launch_carries_a_bound_rows_tab_rank_into_the_row() {
+        // The prune carries a closed tab's ordinal into its row (R2), so a
+        // close moves nothing. The launch unbinds too, and must carry the
+        // same way, or a standby row comes back ranked by an older prompt.
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            let mut bound = rec("u-bound");
+            bound.tab_id = Some(3);
+            bound.commit_ord = 5;
+            s.agents.insert("u-bound".into(), bound);
+            s.tab_order.insert(3, 12);
+        })
+        .unwrap();
+        clear_session_order(&p).unwrap();
+        assert_eq!(read_store(&p).unwrap().agents["u-bound"].commit_ord, 12);
+    }
+
+    #[test]
     fn clear_session_order_preserves_agent_ordinals() {
         // Tab ids are SESSION-scoped, so the tab order and the binds go. Agent
         // ordinals are AGENT-scoped and must survive: clearing them would
@@ -2791,7 +2884,7 @@ mod tests {
 
         fn run(s: &mut Store, op: &Op, minted: &mut Vec<u64>) {
             match op {
-                Op::Touch(id) => minted.push(touch_in(s, *id, 1000)),
+                Op::Touch(id) => minted.extend(touch_in(s, *id, 1000)),
                 Op::Prune(ids) => {
                     prune_in(s, ids);
                 }

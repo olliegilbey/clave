@@ -378,6 +378,16 @@ arrival_checks() {
   check "and that row was on standby (a dormant row waits for Alt+Enter)" "$was_standby" "yes"
   [[ -n "$opened" ]] && stamp="$(jq -r --arg u "$opened" '.store.agents[$u].standby_stamp' <<<"$status" 2>/dev/null)"
   check "and its bind spent the stamp" "$stamp" "null"
+  # A walk is not a commitment: the new tab ranks by the row's own ordinal,
+  # never a fresh top one (Ollie, 2026-09-23; store.rs `apply_bind`).
+  local rank="unread"
+  [[ -n "$opened" ]] && rank="$(jq -r --arg u "$opened" '
+    .store as $s | $s.agents[$u] as $a
+    | ($s.tab_order // {})[($a.tab_id | tostring)] as $t
+    | if $a.commit_ord == null then "unread"
+      elif $t == $a.commit_ord then "held"
+      else "tab \($t) over row \($a.commit_ord)" end' <<<"$status" 2>/dev/null)"
+  check "and its tab kept the row's own rank" "$rank" "held"
 }
 
 # Guarded list-panes read. Never the bare env-var form (TESTING.md, "the

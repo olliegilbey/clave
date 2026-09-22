@@ -111,7 +111,7 @@ Zellij's keys still belong to Zellij.
 - Each tab is a terminal. As usual. But with extra info shown in the tab text.
 - If the terminal is an agent TUI (like Claude Code), the sidebar is populated with rich information about the agent state.
 - Sidebar state comes from either [Claude Code hooks](https://code.claude.com/docs/en/hooks), or from your `.claude` `jsonl` store that Claude Code already keeps.
-- **Your agents survive restarts.** A relaunch opens one tab for the most recent conversation. The others you had open when you quit come back on standby for a day: they sit under the running tabs, and `Alt+↓` opens each one as you land on it. Every other conversation is a dormant row; `Alt+Enter` opens it. Both resume where they left off. Plain terminal tabs do not come back.
+- **Your agents survive restarts.** A relaunch opens one tab for the most recent conversation. The others you had open when you quit come back on standby for a day: they sit under the running tabs, and `Alt+↓` opens each one as you land on it, in its usual place in the list. Every other conversation is a dormant row; `Alt+Enter` opens it. Both resume where they left off. Plain terminal tabs do not come back.
 - **Running tabs sit above closed ones**, so the agents and terminals you're using are quick to cycle through (with `Alt+↑` `Alt+↓`).
 - **The tab list orders itself by attention.** A modified "frecency" algorithm is used to keep the tabs you're most likely to reuse at the top.
 

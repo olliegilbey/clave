@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc faf29689e3826a8b22ff32b9db136b33ca595d3dfa92f69b92c284016acd01b1 # shrinks to ops = [Event("UserPromptSubmit", 0)]
+cc 5419b7898228a65ab5381fd5a4580332d888def15c8da82bf1402685bff9314f # shrinks to ops = [Event("UserPromptSubmit", 2), Touch(2)]

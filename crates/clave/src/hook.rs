@@ -1819,6 +1819,8 @@ pub fn apply_hook_pane(
     let Some(pane) = pane else {
         return false; // unverified pane: never write, never erase
     };
+    // Read before the row borrow below: the end carries its tab's ordinal.
+    let tab_ords = &s.tab_order;
     let Some(rec) = s.agents.get_mut(uuid) else {
         return false; // raced a prune — fine
     };
@@ -1843,6 +1845,11 @@ pub fn apply_hook_pane(
                 tab: rec.tab_id,
             });
         }
+        // The row inherits its tab's ordinal before the unbind drops the
+        // tab, the prune's own rule (R2): without it, a standby row came back
+        // ranked by an older prompt, not where the quit left it.
+        let carried = rec.tab_id.and_then(|t| tab_ords.get(&t)).copied();
+        rec.commit_ord = rec.commit_ord.max(carried.unwrap_or(0));
         rec.pane_id = None;
         rec.tab_id = None;
         s.seq += 1; // monotonic pipe contract (§5)
@@ -5433,6 +5440,28 @@ mod tests {
     /// later prune of that tab uses to dismiss the stamp. The human's own
     /// endings (`/exit`, `/clear`, `/resume`, `/logout`) stamp nothing, and a
     /// row with no tab was never live.
+    #[test]
+    fn a_session_end_carries_the_tabs_rank_into_the_row() {
+        // The same rule as the prune (R2): the row takes its tab's ordinal
+        // before the unbind drops the tab, so the quit moves nothing.
+        let mut r = rec("u1");
+        r.pane_id = Some(7);
+        r.tab_id = Some(3);
+        r.commit_ord = 5;
+        let mut s = Store::default();
+        s.agents.insert("u1".into(), r);
+        s.tab_order.insert(3, 12);
+        assert!(apply_hook_pane(
+            &mut s,
+            "u1",
+            "SessionEnd",
+            Some(7),
+            Some("other"),
+            1_000
+        ));
+        assert_eq!(s.agents["u1"].commit_ord, 12);
+    }
+
     #[test]
     fn a_session_end_by_quit_stamps_standby_and_the_humans_own_end_does_not() {
         let bound = |pane| {
