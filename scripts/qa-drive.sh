@@ -2638,6 +2638,39 @@ if [[ "$P6C_RAN" == "yes" ]]; then
   # round here would pass on every run, and the next person to learn otherwise
   # would be a maintainer launching twice — the loop this phase replaces.
   relaunch_checks "$P6C_SET_BEFORE" "$P6C_AFTER_STATUS" "$P6C_CLOSED"
+
+  # The beacon after the restore. Every restored tab is born focused and its
+  # newborn bar announces itself, so the replicated beacon ends the restore on
+  # the LAST tab built unless the owner takes it back — while zellij's focus,
+  # and the human, rest on the first. Measured on the devbox 2026-09-22: Alt+c
+  # in the first tab asked nothing (its bar read `unfocused`), the last tab's
+  # bar asked, and zellij applied every ask to the first tab — the "flap".
+  #
+  # NO `anchor_executor` here, on purpose: phase 5 pipes the beacon before it
+  # presses, and that hides exactly this defect. The restore itself must leave
+  # the beacon where the focus is. Two presses, so the phase leaves `collapsed`
+  # where it found it; each must be ONE ask from the bar in the focused tab,
+  # painted by that same bar. A cooldown re-ask (`source=cooldown`) or an ask
+  # naming another tab is the flap.
+  P6C_STAND="$(focused_tab_id)"
+  check_nonempty "post-relaunch standing tab (focus read, nothing driven)" "$P6C_STAND"
+  P6C_TOGGLE_MARK="$(zlog_now)"
+  P6C_TOGGLE_EXPECT="$(jq -r '.store.collapsed // false' <<<"$P6C_AFTER_STATUS" 2>/dev/null)"
+  for i in 1 2; do
+    if [[ "$P6C_TOGGLE_EXPECT" == "true" ]]; then P6C_TOGGLE_EXPECT="false"; else P6C_TOGGLE_EXPECT="true"; fi
+    toggle_pipe
+    P6C_RC=$?
+    check "post-relaunch press ${i}/2 pipe accepted" "$([[ $P6C_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+    check "post-relaunch press ${i}/2 landed (store collapsed flipped)" "$(wait_collapsed "$P6C_TOGGLE_EXPECT")" "$P6C_TOGGLE_EXPECT"
+    sleep 2
+  done
+  check "post-relaunch presses made one width ask each (a cooldown re-ask is an ask that landed on another tab)" \
+    "$(swap_ask_count_since "$P6C_TOGGLE_MARK")" "2"
+  check "post-relaunch asks came from the bar in the standing tab ${P6C_STAND} (the beacon rests where the focus is)" \
+    "$(sandbox_lines_since "$P6C_TOGGLE_MARK" 'clave-bar: swap-width' | grep -c "tab=Some(${P6C_STAND})" || true)" "2"
+  check "post-relaunch paints came from the bar that asked (the swap landed on the tab that asked for it)" \
+    "$(instances_logging_since "$P6C_TOGGLE_MARK" 'clave-bar: painted' | tr '\n' ' ')" \
+    "$(instances_logging_since "$P6C_TOGGLE_MARK" 'clave-bar: swap-width' | tr '\n' ' ')"
 fi
 
 # ===========================================================================
