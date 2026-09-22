@@ -2185,12 +2185,8 @@ hook_fire SessionEnd
 # Main's wording: the mark is asserted DOWN, not "cleared" — SessionEnd forces
 # it down whatever it was, so the check must not read as a transition.
 check "SessionEnd leaves the subagent mark down" "$(wait_field subagents false)" "false"
-# `exited`, not `idle` (#261). The session above really ended, and a row whose
-# agent ended is no longer the same state as a row whose agent is alive with
-# nothing to say: it holds a tab and runs nothing. What this check is for is
-# unchanged — nothing may be left Working going into phase 6.
-check "and the row reads exited, with nothing left Working into phase 6" \
-  "$(wait_field status exited)" "exited"
+check "and the row goes idle (nothing left Working into phase 6)" \
+  "$(wait_field status idle)" "idle"
 
 P5B_SEQ_END="$(jq -r '.store.seq' < <(dev_status) 2>/dev/null)"
 check_numeric "phase-5b end store seq readable" "$P5B_SEQ_END"
