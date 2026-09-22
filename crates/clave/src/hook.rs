@@ -1832,10 +1832,12 @@ pub fn apply_hook_pane(
         // Standby: a zellij quit fires SessionEnd for every running agent,
         // and the unbind below erases the only record that this row was live
         // (QA run 12), so the end itself stamps it. Only `other` (a killed
-        // pane) or no reason counts: /exit, /clear, /resume and /logout are
-        // the human's own endings (reasons: code.claude.com/docs/en/hooks).
-        // A tab close is also `other`; its prune dismisses the stamp by tab.
-        if rec.tab_id.is_some() && matches!(reason, None | Some("other")) {
+        // pane) counts: /exit, /clear, /resume and /logout are the human's
+        // own endings (reasons: code.claude.com/docs/en/hooks). No reason is
+        // not a quit either, because a false stamp spawns an agent on
+        // arrival. A tab close is also `other`; its prune dismisses the
+        // stamp by tab.
+        if rec.tab_id.is_some() && reason == Some("other") {
             rec.standby_stamp = Some(crate::store::Standby {
                 since: now,
                 tab: rec.tab_id,
@@ -5441,7 +5443,35 @@ mod tests {
             s.agents.insert("u1".into(), r);
             s
         };
-        for reason in [Some("other"), None] {
+        {
+            let mut s = bound(7);
+            assert!(apply_hook_pane(
+                &mut s,
+                "u1",
+                "SessionEnd",
+                Some(7),
+                Some("other"),
+                1_000
+            ));
+            assert_eq!(
+                s.agents["u1"].standby_stamp,
+                Some(crate::store::Standby {
+                    since: 1_000,
+                    tab: Some(3)
+                })
+            );
+            assert_eq!(s.agents["u1"].tab_id, None, "the unbind still happens");
+        }
+        // No reason is not a quit either. A standby row opens on arrival, so
+        // a false stamp spawns an agent the human ended; a false dormant row
+        // costs one Alt+Enter. A hand-fired hook (the QA drive) sends none.
+        for reason in [
+            Some("prompt_input_exit"),
+            Some("clear"),
+            Some("resume"),
+            Some("logout"),
+            None,
+        ] {
             let mut s = bound(7);
             assert!(apply_hook_pane(
                 &mut s,
@@ -5451,27 +5481,7 @@ mod tests {
                 reason,
                 1_000
             ));
-            assert_eq!(
-                s.agents["u1"].standby_stamp,
-                Some(crate::store::Standby {
-                    since: 1_000,
-                    tab: Some(3)
-                }),
-                "{reason:?}"
-            );
-            assert_eq!(s.agents["u1"].tab_id, None, "the unbind still happens");
-        }
-        for reason in ["prompt_input_exit", "clear", "resume", "logout"] {
-            let mut s = bound(7);
-            assert!(apply_hook_pane(
-                &mut s,
-                "u1",
-                "SessionEnd",
-                Some(7),
-                Some(reason),
-                1_000
-            ));
-            assert_eq!(s.agents["u1"].standby_stamp, None, "{reason}");
+            assert_eq!(s.agents["u1"].standby_stamp, None, "{reason:?}");
         }
         // No tab bound: the agent was never live in a tab, so nothing to keep.
         let mut s = bound(7);
