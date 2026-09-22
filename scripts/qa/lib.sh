@@ -288,15 +288,16 @@ stale_status_uuids() {
 }
 
 # Rows on standby: a quit stamped them (hook.rs, SessionEnd with reason
-# `other`), and no bind, prune or expiry has spent the stamp since. The
-# store record carries the stamp; the wire's `standby` flag is derived from it.
+# `other`, or the launch for a row still bound, store.rs
+# `clear_session_order`), and no bind, prune or expiry has spent the stamp
+# since. The store record carries the stamp; the wire carries its time.
 standby_uuids() {
   jq -r '.store.agents | to_entries[] | select(.value.standby_stamp != null) | .key' <<<"$1" 2>/dev/null | sort
 }
 
 # The rows a relaunch must bring back on standby. Read from the PRE-QUIT
 # snapshot, like the eager row: every row bound to a tab (its agent is running,
-# so the quit's SessionEnd stamps it) and every row already stamped, minus the
+# so the quit's SessionEnd or the launch stamps it) and every row already stamped, minus the
 # eager row, whose bind at the launch spends its stamp. $2 is that eager row.
 standby_expected_uuids() {
   jq -r --arg eager "${2:-}" '.store.agents | to_entries[]

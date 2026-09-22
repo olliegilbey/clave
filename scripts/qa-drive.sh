@@ -2437,8 +2437,8 @@ fi
 # decision of 2026-09-22, FOOTGUNS "The restore that sequenced tabs through
 # the bar"): it bakes ONE tab, for the most-recent row whose cwd still exists.
 # Nothing is held and nothing is restored. The rows the quit left live come
-# back on STANDBY (decision of 2026-09-22): the quit's SessionEnd stamped each
-# one, and arriving on one opens it. Every other row is dormant, and
+# back on STANDBY (decision of 2026-09-22): the quit's SessionEnd, or the
+# launch when that hook was lost, stamped each one, and arriving on one opens it. Every other row is dormant, and
 # Alt+Enter opens it.
 #
 # It never kills and never launches. Session lifecycle stays the human's
