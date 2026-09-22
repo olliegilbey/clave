@@ -54,7 +54,9 @@ pub enum LabelSource {
 /// When a row's agent ended with the session, and the tab it held then.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Standby {
-    /// unix s of the SessionEnd. Standby lasts [`clave_types::STANDBY_SECS`].
+    /// unix s the row went down: the SessionEnd, or, when that never
+    /// landed, the store's last write before the launch (a lower bound).
+    /// Standby lasts [`clave_types::STANDBY_SECS`].
     pub since: u64,
     /// The tab id in the session that ended. Session-scoped: the launch
     /// clears it, because zellij reuses tab ids.
@@ -135,11 +137,12 @@ pub struct AgentRecord {
     #[serde(default)]
     pub stale: bool,
     /// Set when the agent ENDED with its tab still open and not by the
-    /// human's own hand (`hook::apply_hook_pane`, SessionEnd). A zellij quit
-    /// fires SessionEnd for every running agent and the hook unbinds the tab
-    /// (QA run 12, 2026-09-16), so "was live" must be stamped here, at the
-    /// end: by the next launch the binds are gone. Cleared by a bind, and by a
-    /// prune of the tab it names (the human closed that tab).
+    /// human's own hand. Two writers. The quit's SessionEnd
+    /// (`hook::apply_hook_pane`) stamps and unbinds. But SessionEnd is lossy
+    /// at a kill (QA run 33: one of five landed), so the launch
+    /// (`clear_session_order`) also stamps every row still bound. Cleared by
+    /// a bind, by a prune of the tab it names (the human closed that tab),
+    /// and by expiry at the launch.
     #[serde(default)]
     pub standby_stamp: Option<Standby>,
     /// Claude's session rename, from the transcript's `custom-title` line.
@@ -970,6 +973,17 @@ pub fn clear_session_order(paths: &StorePaths) -> Result<()> {
             .any(|r| r.tab_id.is_some() || r.pane_id.is_some());
         let mut changed = false;
         let now = now_unix();
+        // The quit's time is unknown, so the stamp takes a lower bound: the
+        // store's last write, the last moment the old session is known to
+        // have lived. The launch has not written yet (we hold the lock). A
+        // low bound errs toward dormant, the cheap error: a launch days
+        // after the quit must not open a fresh day of standby (swarm review,
+        // 2026-09-23). The expiry pass below then drops it.
+        let quit = fs::metadata(&paths.data)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map_or(now, |d| d.as_secs().min(now));
         if !s.tab_order.is_empty() || bound {
             let tab_ords = std::mem::take(&mut s.tab_order);
             s.tab_buckets.clear();
@@ -988,7 +1002,7 @@ pub fn clear_session_order(paths: &StorePaths) -> Result<()> {
                 // already wrote keeps its own time.
                 if r.tab_id.is_some() && r.standby_stamp.is_none() {
                     r.standby_stamp = Some(Standby {
-                        since: now,
+                        since: quit,
                         tab: None,
                     });
                 }
@@ -2205,12 +2219,22 @@ mod tests {
             s.agents.insert("u-dormant".into(), rec("u-dormant"));
         })
         .unwrap();
+        // The stamp dates from the store's last write, the last moment the
+        // old session is known to have lived, not from the launch: a launch
+        // days after the quit must not open a fresh day of standby.
+        set_store_mtime(&p, before - 30);
         clear_session_order(&p).unwrap();
         let s = read_store(&p).unwrap();
         let sb = s.agents["u-bound"]
             .standby_stamp
             .expect("still bound at the launch");
-        assert!(sb.since >= before && sb.tab.is_none(), "{sb:?}");
+        assert_eq!(
+            sb,
+            Standby {
+                since: before - 30,
+                tab: None
+            }
+        );
         assert_eq!(s.agents["u-bound"].tab_id, None);
         assert_eq!(
             s.agents["u-stamped"].standby_stamp,
@@ -2313,6 +2337,38 @@ mod tests {
         .unwrap();
         clear_session_order(&p).unwrap();
         assert_eq!(read_store(&p).unwrap().agents["u-bound"].commit_ord, 12);
+    }
+
+    /// Back-date the store file, as a quit that long ago would leave it.
+    fn set_store_mtime(p: &StorePaths, unix: u64) {
+        let t = UNIX_EPOCH + std::time::Duration::from_secs(unix);
+        fs::File::options()
+            .write(true)
+            .open(&p.data)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_launch_a_day_after_the_quit_leaves_the_rows_dormant() {
+        // Verifier, swarm review 2026-09-23: the launch stamped `now`, so a
+        // Monday launch after a Friday quit gave every row whose SessionEnd
+        // was lost (4 of 5 in QA run 33) a fresh day of standby, and each
+        // walk onto one spawned an agent.
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            let mut bound = rec("u-bound");
+            bound.tab_id = Some(3);
+            s.agents.insert("u-bound".into(), bound);
+        })
+        .unwrap();
+        set_store_mtime(&p, now_unix() - clave_types::STANDBY_SECS - 60);
+        clear_session_order(&p).unwrap();
+        let s = read_store(&p).unwrap();
+        assert_eq!(s.agents["u-bound"].standby_stamp, None);
+        assert_eq!(s.agents["u-bound"].tab_id, None);
     }
 
     #[test]
