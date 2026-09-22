@@ -8,6 +8,21 @@ owns everything they structurally cannot reach._
 
 ## Run ledger — the useful recent history
 
+- **runs 31 and 32, 2026-09-22 — the stripped build, green 0-7 on the box
+  and the Mac.** Run 31 went red in 5b on both machines: the drive still
+  expected `exited` after SessionEnd, a status the removal took out, and
+  the build reported `idle`. The check is back to its pre-restore form
+  (`f14d40b`). Run 32: box 242 checks, Mac 243, no failure; 6c bound
+  exactly one row after the relaunch on both, and the two Alt+c presses
+  made one ask each. The Mac's first run 32 attempt went red once in 5:
+  the five rapid presses settled one flip short (store `collapsed=false`,
+  expected `true`); the rerun passed, and the box passed 5 in every run.
+  Open: an intermittent lost press in a rapid burst on the Mac (FOOTGUNS,
+  "Two rapid `clave collapse` writes have no arrival order"). Before the
+  run, the Mac's 5b fixture clash was cleared: a dead sandbox's fixture
+  transcripts under `~/.claude/projects` sorted ahead of this worktree's
+  own; they are moved to `~/.local/state/clave-qa-quarantine`, not deleted.
+
 - **run 30, 2026-09-22 — box, phase 2 green after the add-order fix; 6c red
   again.** Three asks for two presses: the owner bar never emitted the
   re-anchor, so the beacon sat on the last tab built and the first tab's bar
