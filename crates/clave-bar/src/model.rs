@@ -1248,21 +1248,6 @@ impl BarModel {
             .is_some_and(|t| t.active)
     }
 
-    /// Tiled pane count of the tab this instance sits in, from the last
-    /// PaneUpdate. Diagnostic only: a swap layout applies to the FOCUSED
-    /// tab's tiled panes, so a tab whose count the layout cannot map is the
-    /// first suspect when an ask never lands (2026-09-22, the devbox's baked
-    /// first tab). `None` while the frames disagree, like `own_tab`.
-    pub fn own_tab_tiled_pane_count(&self) -> Option<usize> {
-        let pos = self.own_tab_position()?;
-        Some(
-            self.panes
-                .iter()
-                .filter(|p| p.tab_position == pos && !p.is_floating)
-                .count(),
-        )
-    }
-
     /// The tab zellij's last frame says is active — any instance's view.
     pub fn active_tab_id(&self) -> Option<usize> {
         self.tabs.iter().find(|t| t.active).map(|t| t.tab_id)
@@ -3128,39 +3113,6 @@ impl BarModel {
         // unknown, step forward. See `Effect::SwapWidth`.
         let backwards = self.birth_collapsed.is_some_and(|birth| birth != want);
         vec![Effect::SwapWidth { backwards }]
-    }
-
-    /// Why the width machine made NO ask at this paint although the paint
-    /// disagrees with the store's mode — the gate of `width_effects` that
-    /// held it, in that function's order. `None` when the widths agree or
-    /// when an ask would have gone out. Diagnostic only, read-only, and
-    /// pure: a bar that sits at the wrong width in silence is otherwise
-    /// invisible in the log (the devbox's relaunched tabs, 2026-09-22).
-    pub fn width_deaf_reason(&self, cols: usize) -> Option<&'static str> {
-        let want = self.showing_collapsed();
-        if self.row_height.mode_at(cols) == Some(want) {
-            return None;
-        }
-        if self.awaiting_hydration {
-            return Some("hydrating");
-        }
-        if !self.own_tab_focused() {
-            return Some("unfocused");
-        }
-        if self.own_tab_floating_visible() {
-            return Some("floating-visible");
-        }
-        if self.swap_owed > 0 {
-            return Some("owed");
-        }
-        let spent = match self.walk_spent {
-            Some((w, n)) if w == want => n,
-            _ => 0,
-        };
-        if spent >= WALK_ASK_CAP {
-            return Some("capped");
-        }
-        None
     }
 
     /// How long a claimed fast tick is believed. Two seconds is ten of them:
