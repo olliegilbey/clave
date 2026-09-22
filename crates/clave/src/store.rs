@@ -949,11 +949,24 @@ pub fn clear_session_order(paths: &StorePaths) -> Result<()> {
             .values()
             .any(|r| r.tab_id.is_some() || r.pane_id.is_some());
         let mut changed = false;
+        let now = now_unix();
         if !s.tab_order.is_empty() || bound {
             s.tab_order.clear();
             s.tab_buckets.clear();
             s.tab_touched.clear();
             s.agents.values_mut().for_each(|r| {
+                // Standby, second path. A row still bound here was live at
+                // the quit, and its SessionEnd never reached the store: QA
+                // run 33 saw one hook land of five running agents, on the box
+                // and the Mac alike. /exit and a tab close unbind before the
+                // quit, so they never reach this line. A stamp the end
+                // already wrote keeps its own time.
+                if r.tab_id.is_some() && r.standby_stamp.is_none() {
+                    r.standby_stamp = Some(Standby {
+                        since: now,
+                        tab: None,
+                    });
+                }
                 r.tab_id = None;
                 r.pane_id = None;
             });
@@ -984,7 +997,6 @@ pub fn clear_session_order(paths: &StorePaths) -> Result<()> {
         // (zellij reuses ids, so a stale one would let the new session's
         // close of an unrelated tab dismiss the row). A stamp older than a
         // day is dormant for good.
-        let now = now_unix();
         for r in s.agents.values_mut() {
             let kept = r
                 .standby_stamp
@@ -2140,7 +2152,47 @@ mod tests {
             .filter(|a| a.standby)
             .map(|a| a.uuid.as_str())
             .collect();
-        assert_eq!(standby, ["u-fresh", "u-other-tab"]);
+        // u-bind is still bound at the launch, so the launch stamps it anew.
+        assert_eq!(standby, ["u-bind", "u-fresh", "u-other-tab"]);
+    }
+
+    #[test]
+    fn a_launch_puts_every_row_still_bound_on_standby() {
+        // QA run 33, 2026-09-23, box and Mac alike: of five agents running
+        // at a kill-session, ONE SessionEnd reached the store (seq 75 to 80
+        // across the relaunch, no room for more). The other four rows were
+        // still bound when the launch ran. A row the quit left bound was live
+        // at the quit, so the launch stamps it before it clears the bind.
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        let before = now_unix();
+        let early = Standby {
+            since: before - 60,
+            tab: Some(2),
+        };
+        with_store_mut(&p, |s| {
+            let mut bound = rec("u-bound");
+            bound.tab_id = Some(3);
+            s.agents.insert("u-bound".into(), bound);
+            let mut stamped = rec("u-stamped");
+            stamped.standby_stamp = Some(early);
+            s.agents.insert("u-stamped".into(), stamped);
+            s.agents.insert("u-dormant".into(), rec("u-dormant"));
+        })
+        .unwrap();
+        clear_session_order(&p).unwrap();
+        let s = read_store(&p).unwrap();
+        let sb = s.agents["u-bound"]
+            .standby_stamp
+            .expect("still bound at the launch");
+        assert!(sb.since >= before && sb.tab.is_none(), "{sb:?}");
+        assert_eq!(s.agents["u-bound"].tab_id, None);
+        assert_eq!(
+            s.agents["u-stamped"].standby_stamp,
+            Some(Standby { tab: None, ..early }),
+            "an end-of-session stamp keeps its own time"
+        );
+        assert_eq!(s.agents["u-dormant"].standby_stamp, None);
     }
 
     #[test]
