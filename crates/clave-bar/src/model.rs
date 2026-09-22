@@ -814,19 +814,6 @@ pub struct BarModel {
     /// See [`BarModel::beacon`] for what it is worth, and `run_held_effect`
     /// for who reads it.
     beacon_moved: bool,
-    /// This bar sent a restore open and owes its own tab a re-anchor (#261).
-    ///
-    /// A tab made by `zellij action new-tab` always takes the focus, so the
-    /// restore hands it straight back. The bar born in the new tab may have
-    /// announced itself first, stranding the beacon on a tab nobody stands in
-    /// — dead nav, per FOOTGUNS.
-    ///
-    /// Its OWN flag rather than `organic_pending`, which [`BarModel::beacon`]
-    /// clears on the grounds that an arriving beacon is truth: right for
-    /// Alt+o, backwards here, where the arriving beacon IS the thing to undo.
-    /// Paid on the next tab frame — the frame the returning focus delivers —
-    /// so the re-anchor follows the birth announce instead of racing it.
-    restore_reanchor_owed: bool,
     /// Last bind-leg state we reported (#178). Only a CHANGE is worth a line;
     /// see `Effect::BindStall`.
     bind_stall: Option<BindStallState>,
@@ -1962,6 +1949,40 @@ impl BarModel {
             .any(|a| a.uuid == owner && a.tab_id == Some(own))
     }
 
+    /// Does the beacon name a tab this bar's restore built?
+    ///
+    /// A tab made by `zellij action new-tab` is born focused, so its newborn
+    /// bar announces itself and moves every beacon onto it; `clave open` then
+    /// hands the focus back and announces nothing. The owner's next tab frame
+    /// says its own tab is active while the beacon says the newborn: that
+    /// pair is the steal, and `apply_tabs` answers it with a re-anchor.
+    ///
+    /// The announce can land on either side of the bound snapshot, so the
+    /// tab is known two ways: while the open is in flight, any beacon off
+    /// this tab is the newborn's, because only bars pipe the beacon and the
+    /// human is standing here; once the row is bound, the beacon names the
+    /// tab a `restore_sent` row holds.
+    ///
+    /// Derived, not claimed. A one-shot flag set at the open and spent on the
+    /// next frame lost the race twice: spent on a frame that beat the tab
+    /// (2026-09-17), then spent on the frame between the bound snapshot and
+    /// the birth announce (devbox, 2026-09-22, the Alt+c flap). Reading the
+    /// beacon directly has no window to lose. Bounded by the beacon: the
+    /// re-anchor moves it home, and only another bar's pipe can move it back.
+    fn beacon_on_a_restored_tab(&self) -> bool {
+        let Some(current) = self.current_tab else {
+            return false;
+        };
+        if !self.owns_the_restore() || self.own_tab() == Some(current) {
+            return false;
+        }
+        !self.opening.is_empty()
+            || self
+                .agents
+                .iter()
+                .any(|a| a.tab_id == Some(current) && self.restore_sent.contains(&a.uuid))
+    }
+
     /// The head of the queue, whether or not this instant is a good time to
     /// send it. Kept apart from `restore_next` because "a row is still owed"
     /// and "send a row now" are different questions: the pacing gate makes the
@@ -2014,8 +2035,7 @@ impl BarModel {
         self.restore_sent.insert(uuid.clone());
         // The new tab will take the focus and `clave open` will hand it back.
         // Whatever the bar born there says about itself in between, the beacon
-        // belongs on this tab — see `restore_reanchor_owed`.
-        self.restore_reanchor_owed = true;
+        // belongs on this tab — see `beacon_on_a_restored_tab`.
         self.open_effects(&uuid, Some(home))
     }
 
@@ -2384,10 +2404,10 @@ impl BarModel {
         // arrives.
         let birth = !self.birth_announced;
         let organic = self.organic_pending;
-        // #261's third trigger. Same shape as `organic`: a bounded, one-shot
-        // claim spent only when it emits. It answers a beacon this bar's OWN
-        // restore open caused — see `restore_reanchor_owed`.
-        let restore_home = self.restore_reanchor_owed;
+        // #261's third trigger. Not a claim: derived from the beacon itself,
+        // so it cannot be spent early or arrive late — see
+        // `beacon_on_a_restored_tab`.
+        let restore_home = self.beacon_on_a_restored_tab();
         if let Some(active_id) = self.tabs.iter().find(|t| t.active).map(|t| t.tab_id) {
             if self.current_tab == Some(active_id) {
                 // The beacon ALREADY names the active tab: both claims are
@@ -2396,16 +2416,6 @@ impl BarModel {
                 // later burst — the round-11 storm shape.
                 self.birth_announced = true;
                 self.organic_pending = false;
-                // The restore's claim is the exception, and only while an open
-                // is in flight: the tab it will steal the beacon with does not
-                // exist yet, so a frame saying "you still hold the beacon" is
-                // evidence about nothing. Spending it here left the beacon on
-                // the last tab the restore built while the human sat on the
-                // baked one — the first Alt+Up did nothing, the second worked
-                // (measured live 2026-09-17).
-                if self.opening.is_empty() {
-                    self.restore_reanchor_owed = false;
-                }
             } else if birth {
                 // UNGATED (live-validated): a newborn must announce its own
                 // tab before its first PaneUpdate can satisfy any gate. The
@@ -2416,7 +2426,6 @@ impl BarModel {
                 effects.push(Effect::AnnounceVisit { tab_id: active_id });
             } else if (organic || stranded || restore_home) && self.elects_presumed() {
                 self.organic_pending = false;
-                self.restore_reanchor_owed = false;
                 self.set_beacon(active_id);
                 effects.push(Effect::ReanchorVisit { tab_id: active_id });
             }
@@ -12306,11 +12315,12 @@ mod tests {
         assert!(m.own_tab_focused(), "and the queue can advance again");
     }
 
-    /// One re-anchor per open, spent when it emits — the same bound every
-    /// other beacon trigger keeps. An unbounded claim is the round-11 pipe
-    /// storm, and a CLI pipe blocks the zellij router for about a second.
+    /// One re-anchor per stray beacon, and none for a frame that brings no
+    /// new beacon — the bound every other beacon trigger keeps. An unbounded
+    /// trigger is the round-11 pipe storm, and a CLI pipe blocks the zellij
+    /// router for about a second.
     #[test]
-    fn the_restores_reanchor_is_spent_once() {
+    fn the_restores_reanchor_emits_once_per_stray_beacon() {
         let mut m = focused_bar();
         m.apply_snapshot(snap_live(
             9,
@@ -12327,9 +12337,7 @@ mod tests {
             tab(12, 2, "c", false),
         ]);
         assert!(first.contains(&Effect::ReanchorVisit { tab_id: 11 }));
-        // The beacon is ours again, so a later frame that finds it elsewhere
-        // is somebody else's business, not this open's.
-        m.beacon(12);
+        // The beacon is ours again. A frame that says so has nothing to answer.
         let second = m.apply_tabs(vec![
             tab(10, 0, "a", false),
             tab(11, 1, "b", true),
@@ -12339,7 +12347,108 @@ mod tests {
             !second
                 .iter()
                 .any(|e| matches!(e, Effect::ReanchorVisit { .. })),
-            "the claim was spent on the frame that paid it: {second:?}"
+            "a frame with no new beacon re-anchors nothing: {second:?}"
+        );
+        assert!(
+            !m.beacon_on_a_restored_tab(),
+            "the trigger is off while the beacon is home"
+        );
+    }
+
+    /// The measured order on the devbox (2026-09-22, launch 15:46:35): the
+    /// bound snapshot lands, THEN the focus-return frame, THEN the newborn's
+    /// birth announce. The claim was spent on the frame, because no open was
+    /// in flight any more, and the announce that followed it stranded the
+    /// beacon on the last tab the restore built. Alt+c in the first tab then
+    /// asked nothing, while the last tab's bar asked for a swap it could not
+    /// receive.
+    #[test]
+    fn the_reanchor_claim_outlives_a_bound_snapshot_that_beats_the_birth_announce() {
+        let mut m = focused_bar();
+        let fx = m.apply_snapshot(snap_live(
+            9,
+            vec![
+                agent("u-a", Status::Idle, Some(11)),
+                agent("u-b", Status::Idle, None),
+            ],
+            &["u-a", "u-b"],
+        ));
+        assert_eq!(
+            opens(&fx),
+            vec!["u-b".to_string()],
+            "premise: one open sent"
+        );
+        // `clave open` binds the row before the newborn bar has spoken.
+        m.apply_snapshot(snap_live(
+            10,
+            vec![
+                agent("u-a", Status::Idle, Some(11)),
+                agent("u-b", Status::Idle, Some(12)),
+            ],
+            &["u-a", "u-b"],
+        ));
+        // The focus return delivers our frame while the beacon still names us.
+        m.apply_tabs(vec![
+            tab(10, 0, "a", false),
+            tab(11, 1, "b", true),
+            tab(12, 2, "c", false),
+        ]);
+        assert!(
+            m.own_tab_focused(),
+            "premise: nothing has moved the beacon yet"
+        );
+        // NOW the newborn's birth announce arrives.
+        m.beacon(12);
+        assert!(!m.own_tab_focused(), "premise: the beacon has left us");
+        let fx = m.apply_tabs(vec![
+            tab(10, 0, "a", false),
+            tab(11, 1, "b", true),
+            tab(12, 2, "c", false),
+        ]);
+        assert!(
+            fx.contains(&Effect::ReanchorVisit { tab_id: 11 }),
+            "the late announce is still this open's doing: {fx:?}"
+        );
+        assert!(
+            m.own_tab_focused(),
+            "and Alt+c in the first tab asks from the first tab"
+        );
+    }
+
+    /// After the restore is done, the human walks. A beacon on a tab the
+    /// restore never built is a walk, not a steal, and the owner must not
+    /// drag it back: that would be dead nav in the other direction.
+    #[test]
+    fn a_beacon_on_a_tab_the_restore_did_not_build_is_a_walk() {
+        let mut m = focused_bar();
+        m.apply_snapshot(snap_live(
+            9,
+            vec![
+                agent("u-a", Status::Idle, Some(11)),
+                agent("u-b", Status::Idle, None),
+                agent("u-c", Status::Idle, Some(10)),
+            ],
+            &["u-a", "u-b", "u-c"],
+        ));
+        m.apply_snapshot(snap_live(
+            10,
+            vec![
+                agent("u-a", Status::Idle, Some(11)),
+                agent("u-b", Status::Idle, Some(12)),
+                agent("u-c", Status::Idle, Some(10)),
+            ],
+            &["u-a", "u-b", "u-c"],
+        ));
+        assert!(!m.restore_pending(), "premise: the restore is done");
+        m.beacon(10);
+        assert!(
+            !m.beacon_on_a_restored_tab(),
+            "u-c's tab was live before the restore; the beacon there is the human's"
+        );
+        m.beacon(12);
+        assert!(
+            m.beacon_on_a_restored_tab(),
+            "u-b's tab is the one the restore built"
         );
     }
 
