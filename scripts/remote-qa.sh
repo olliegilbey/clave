@@ -95,13 +95,20 @@ case "$CMD" in
     sync_remote
     SCENARIO="${1:-qa-fleet}"
     WAIT="${2:-1800}"
+    # The STAGE runs attached and finishes before the launch line prints.
+    # It used to run inside the detached job, with the launch line printed
+    # first: run 27 (2026-09-22) launched into a half-staged sandbox, the
+    # seed ran eight seconds after the launch, deleted the launch.kdl the
+    # launch had written, and preflight went red on a healthy build. A
+    # launch line the human can act on must mean the sandbox is ready.
+    remote "just sandbox $SCENARIO > $RUN_LOG 2>&1; tail -n 3 $RUN_LOG"
+    # The DRIVE is detached on the remote. It waits up to WAIT seconds for
+    # the human and then drives for twenty minutes more, and an agent's
+    # shell tool caps a foreground call well under that (ten minutes here,
+    # 2026-09-22); an ssh that dies takes an attached remote job with it. So
+    # the remote owns the process, appends to $RUN_LOG, and `qa-log` reads it.
+    remote "nohup setsid env QA_WAIT_SECS=$WAIT QA_RELAUNCH_WAIT=$WAIT ./scripts/qa-drive.sh $SCENARIO >> $RUN_LOG 2>&1 < /dev/null & echo \"drive started on $HOST, log $RUN_LOG\""
     launch_line
-    # DETACHED on the remote. The run waits up to WAIT seconds for a human
-    # and then drives for twenty minutes more, and an agent's shell tool
-    # caps a foreground call well under that (ten minutes here, 2026-09-22);
-    # an ssh that dies takes an attached remote job with it. So the remote
-    # owns the process, writes $RUN_LOG there, and `qa-log` reads it.
-    remote "nohup setsid just qa $SCENARIO $WAIT > $RUN_LOG 2>&1 < /dev/null & echo \"started on $HOST, log $RUN_LOG\""
     ;;
   drive)
     # The drive alone, against a remote sandbox that is ALREADY live — the
