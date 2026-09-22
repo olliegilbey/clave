@@ -17,6 +17,12 @@ The cause is measured and cited. The fix is WRITTEN on branch `fix/bar-separator
 - Third gap, from the Mac: a session whose restore stalled, where the human opened one tab by hand, overwrites the recorded live set with that one tab. The guard in `store::clear_session_order` covers a session that bound NOTHING only. Not started. | **Open** | `sed -n 985,1015p crates/clave/src/store.rs`
 - Fourth, the Mac: a trackpad scroll over the bar panics the plugin inside `register_plugin!` (bar main.rs:142, "NO PAYLOAD"). Unmeasured; likely a mouse event the 0.44.3 tile crate cannot decode from a 0.45.1 host. Not started. | **Open** | screenshot in this conversation only
 
+- Fifth, the devbox: Alt+Up / Alt+Down stopped changing tabs. Evidence: the binds ARE in the box's generated config (`config.kdl:13-14`, `clave-nav` next/prev); `nav landed` lines appear at 11:03 (worked, 0.5.2 release bar) and ONCE at 12:01:46 (`prev`, instance id 7) and never after, so later presses did not reach any bar: the pipe is not arriving, which points at zellij's input mode or the key reaching zellij over ssh, not at the bar's model. Not started. | **Open** | `ssh devbox 'grep "nav landed" /tmp/zellij-1000/zellij-log/zellij.log | tail'`
+
+## The human's standing requirement (2026-09-22)
+
+"We need to know where all these regressions are showing up so that our automated QA testing can pick them up, and be able to test both locally and over ssh. Even if we spin up a local ssh test environment as part of the automated QA system." Concretely, the drive (`docs/dev/QA-DRIVE.md`) must gain scenarios for: a cold restore of six-plus tabs; the width machine with `pane_frames false` in the sandbox config (the devbox shape); the nav keybinds after a restore; a resume whose live session is held by Claude's daemon; and a way to run the same drive against a session reached over ssh (loopback ssh to this machine is enough to exercise the key-encoding and pty seam). Each regression above names the seam it crossed; put the scenario at that seam.
+
 ## Next Steps
 
 1. On `fix/bar-separator-column`: `just gates` green, then commit (`fix(bar): a painted width one short of the target is at the target`), `just mutants` over the diff, TESTING.md row.
