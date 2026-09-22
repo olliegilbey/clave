@@ -93,16 +93,22 @@ column target, was deleted at #181; the term survives only in the ledger.)
 
 ### 3.1 A row
 
-**Row** — one entry of the fleet as the bar draws it. Three kinds:
+**Row** — one entry of the fleet as the bar draws it. Four kinds:
 
 - **live row** — an agent session with a zellij tab open. The tab is what makes
   it live, not the process.
+- **standby row** — a dormant row that was live when the session quit, for 24
+  hours after. It sits between the live and dormant blocks, inside the
+  Alt+Up/Down ring, and **arriving on it opens it** (walk, Alt+N or click).
+  Glyph ◐. The quit's `SessionEnd` (reason `other`) stamps it; a bind, a prune
+  of its tab, or the 24 hours clear the stamp. /exit, /clear and a closed tab
+  leave a plain dormant row. Not "waiting": that word is the NeedsYou state.
 - **dormant row** — an agent session with no tab open. Alt+Enter opens it.
 - **terminal tab** — a zellij tab with no agent session bound to it.
 
 **Eager tab** — the ONE tab a launch bakes into the layout, for the most-recent
-row. A relaunch bakes one eager tab and nothing else: every row that was live
-in the previous session is an ordinary dormant row. Nothing is held, nothing is
+row. A relaunch bakes one eager tab and nothing else: every other row that
+was live in the previous session is a standby row. Nothing is held, nothing is
 sequenced (the live-set restore was removed on 2026-09-22; FOOTGUNS, "The
 restore that sequenced tabs through the bar").
 
@@ -190,12 +196,14 @@ These three are constantly confused. They are not interchangeable.
 |---|---|
 | **selected** | The row for the currently focused tab. Exactly one. |
 | **live** / **dormant** | Has a tab open / does not — the tab decides it, not the process. See §3.1. |
+| **standby** | Dormant, but the quit left it live under a day ago, so arriving on it opens it. See §3.1. |
 | **unread** | Finished while you were not looking — `done && !visited`. |
 | **stale** | `clave open` found the row's cwd missing. A row flag, **not** a status. |
 
 `Status` — the enum — has exactly five variants and they are spelled this way:
 **Idle, Working, NeedsYou, Done, Failed**. A `SessionEnd` hook sets Idle and
-unbinds the tab: the row goes dormant and the tab is a terminal tab.
+unbinds the tab: the row goes dormant (standby, when the reason is `other`) and
+the tab is a terminal tab.
 
 ---
 

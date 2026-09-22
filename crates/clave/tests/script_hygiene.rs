@@ -445,8 +445,9 @@ fn the_drive_never_starts_or_ends_a_session_itself() {
 fn the_relaunch_phase_reads_the_set_through_the_tested_readers() {
     // Phase 6c is the only phase that reads the store on both sides of a
     // session boundary, so it is the only one that can see what a relaunch
-    // does with the store the quit left. It proves one eager tab and every
-    // other row dormant (setup.rs `launch_layout_kdl`, decision of
+    // does with the store the quit left. It proves one eager tab, the rows
+    // the quit left live on standby, and that arriving on one opens it
+    // (setup.rs `launch_layout_kdl`, hook.rs SessionEnd; decisions of
     // 2026-09-22). The live-set restore it replaced (#261) reached a shipped
     // branch with every gate green because no test launches twice.
     assert!(
@@ -468,7 +469,10 @@ fn the_relaunch_phase_reads_the_set_through_the_tested_readers() {
         "bound_uuids",
         "eager_candidate_uuid",
         "stale_status_uuids",
+        "standby_uuids",
+        "standby_expected_uuids",
         "relaunch_checks",
+        "arrival_checks",
     ] {
         assert!(
             LIB.contains(&format!("{reader}()")),

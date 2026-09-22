@@ -2436,8 +2436,10 @@ fi
 # What a relaunch does now (setup.rs `launch_layout_kdl`, `eager_row`;
 # decision of 2026-09-22, FOOTGUNS "The restore that sequenced tabs through
 # the bar"): it bakes ONE tab, for the most-recent row whose cwd still exists.
-# Every other row is an ordinary dormant row, and Alt+Enter opens it. Nothing
-# is held and nothing is restored.
+# Nothing is held and nothing is restored. The rows the quit left live come
+# back on STANDBY (decision of 2026-09-22): the quit's SessionEnd stamped each
+# one, and arriving on one opens it. Every other row is dormant, and
+# Alt+Enter opens it.
 #
 # It never kills and never launches. Session lifecycle stays the human's
 # (AGENTS.md), and `script_hygiene.rs` fails the build if any line here starts
@@ -2473,6 +2475,8 @@ measure "the bound set this session is holding" "n=${P6C_N_BEFORE} $(uuid_line "
 P6C_EXPECTED="$(eager_candidate_uuid "$P6C_BEFORE_STATUS")"
 check_nonempty "the pre-quit snapshot names the row the relaunch will bake" "$P6C_EXPECTED"
 measure "the row the relaunch should bake (most recent, cwd exists)" "$P6C_EXPECTED"
+P6C_STANDBY_EXPECTED="$(standby_expected_uuids "$P6C_BEFORE_STATUS" "$P6C_EXPECTED")"
+measure "the rows the quit should leave on standby" "$(uuid_line "$P6C_STANDBY_EXPECTED")"
 
 # Half an hour for each half, measured rather than guessed: the first live run
 # (2026-09-16) asked for the quit at ten minutes, the maintainer had stepped
@@ -2486,7 +2490,7 @@ cat <<EOF
 
     Quit the sandbox, then launch it again. Change NOTHING in between, and
     touch nothing after — the phase reads the fleet the launch bakes by
-    itself: one tab, and every other row dormant.
+    itself: one tab, the rows you left live on standby, the rest dormant.
 
     zellij kill-session ${SESSION}
     zellij delete-session --force ${SESSION}
@@ -2559,7 +2563,7 @@ if [[ "$P6C_RAN" == "yes" ]]; then
   # each to go red. A comparison written the wrong way round here would pass
   # on every run, and the next person to learn otherwise would be a maintainer
   # launching twice — the loop this phase replaces.
-  relaunch_checks "$P6C_EXPECTED" "$P6C_AFTER_STATUS"
+  relaunch_checks "$P6C_EXPECTED" "$P6C_AFTER_STATUS" "$P6C_STANDBY_EXPECTED"
 
   # The beacon after the relaunch. This is the seam that caught the flap
   # under the old restore (devbox, 2026-09-22): every restored tab was born
@@ -2602,6 +2606,24 @@ if [[ "$P6C_RAN" == "yes" ]]; then
   check "post-relaunch paints came from the bar that asked (the swap landed on the tab that asked for it)" \
     "$(instances_logging_since "$P6C_TOGGLE_MARK" 'clave-bar: painted' | tr '\n' ' ')" \
     "$P6C_ASKERS"
+
+  # The arrival leg. One Alt+Down from the baked tab lands on the top standby
+  # row, and the landing opens it with no Alt+Enter. It runs AFTER the beacon
+  # leg, because a nav press moves the beacon that leg reads. The wait is for
+  # a second bound row, the same bounded shape as the settle above: an open
+  # that never binds falls through to the verdict and fails there.
+  P6C_STANDBY_NOW="$(standby_uuids "$P6C_AFTER_STATUS")"
+  nav_pipe '{"dir":"next"}'
+  P6C_ARRIVAL=0
+  while :; do
+    P6C_ARRIVED_STATUS="$(dev_status)"
+    [[ "$(uuid_count "$(bound_uuids "$P6C_ARRIVED_STATUS")")" -ge 2 ]] && break
+    ((P6C_ARRIVAL >= P6C_SETTLE)) && break
+    sleep 2
+    P6C_ARRIVAL=$((P6C_ARRIVAL + 2))
+  done
+  measure "one Alt+Down from the baked tab settled" "after ${P6C_ARRIVAL}s"
+  arrival_checks "$P6C_EXPECTED" "$P6C_STANDBY_NOW" "$P6C_ARRIVED_STATUS"
 fi
 
 # ===========================================================================
@@ -2617,8 +2639,9 @@ if [[ "${P6C_RAN:-no}" == "yes" ]]; then
   cat <<EOF
 
 The session in front of you is the SECOND one, relaunched by phase 6c, so
-checkpoint 1 below reads the RELAUNCHED fleet: one baked tab, every other row
-dormant.
+checkpoint 1 below reads the RELAUNCHED fleet: the baked tab and the one
+Alt+Down opened, then the standby rows (half-filled circle), then the
+dormant rows (hollow circle).
 EOF
 fi
 cat <<EOF

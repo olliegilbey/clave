@@ -21,7 +21,7 @@ Want it denser? Two shorter row heights fold the card back to two lines, or to t
 ## What the colours and glyphs mean
 
 <table>
-<tr><td><b>status</b></td><td><img alt="" src="docs/assets/glyphs/status-needs-you.svg" width="18"> waiting on you · <img alt="" src="docs/assets/glyphs/status-working.svg" width="18"> working · <img alt="" src="docs/assets/glyphs/status-done.svg" width="18"> finished while you were away · <img alt="" src="docs/assets/glyphs/status-idle.svg" width="18"> idle · <img alt="" src="docs/assets/glyphs/status-failed.svg" width="18"> last turn failed · <img alt="" src="docs/assets/glyphs/status-stale.svg" width="18"> its directory is gone · <img alt="" src="docs/assets/glyphs/status-dormant.svg" width="18"> dormant, half-faded; opens where it left off · <img alt="" src="docs/assets/glyphs/status-opening.svg" width="18"> opening · <img alt="" src="docs/assets/glyphs/term-running.svg" width="18"> a terminal tab (colours mean the same)</td></tr>
+<tr><td><b>status</b></td><td><img alt="" src="docs/assets/glyphs/status-needs-you.svg" width="18"> waiting on you · <img alt="" src="docs/assets/glyphs/status-working.svg" width="18"> working · <img alt="" src="docs/assets/glyphs/status-done.svg" width="18"> finished while you were away · <img alt="" src="docs/assets/glyphs/status-idle.svg" width="18"> idle · <img alt="" src="docs/assets/glyphs/status-failed.svg" width="18"> last turn failed · <img alt="" src="docs/assets/glyphs/status-stale.svg" width="18"> its directory is gone · <img alt="" src="docs/assets/glyphs/status-standby.svg" width="18"> standby, open when you quit; opens as you land on it · <img alt="" src="docs/assets/glyphs/status-dormant.svg" width="18"> dormant, half-faded; opens where it left off · <img alt="" src="docs/assets/glyphs/status-opening.svg" width="18"> opening · <img alt="" src="docs/assets/glyphs/term-running.svg" width="18"> a terminal tab (colours mean the same)</td></tr>
 <tr><td><b>battery</b></td><td><code>105k</code> context spent, in tokens, coloured by how much of your smart zone is gone<br><code>TERM</code>, a terminal tab<br><i>blank</i>, nothing measured yet</td></tr>
 <tr><td><b>mark</b></td><td><i>blank</i>, the repo's ordinary checkout · <img alt="" src="docs/assets/glyphs/mark-branch.svg" width="18"> on a branch · <img alt="" src="docs/assets/glyphs/mark-worktree.svg" width="18"> in its own git worktree</td></tr>
 <tr><td><b>chip</b></td><td>the name you gave the session with <code>/rename</code>; blank until you do<br>on a terminal row, the tab's name</td></tr>
@@ -94,7 +94,7 @@ exec $SHELL
 |                                      |                                                                                                     |
 | ------------------------------------ | --------------------------------------------------------------------------------------------------- |
 | `Alt+a`                              | add an agent: pick a directory, then `new` or `resume`                                              |
-| `Alt+↑` `Alt+↓` (or `Alt+k` `Alt+j`) | walk the running agents                                                                             |
+| `Alt+↑` `Alt+↓` (or `Alt+k` `Alt+j`) | walk the running agents, then the standby ones                                                      |
 | `Alt+1`…`Alt+9`                      | jump straight to a row, running or closed                                                           |
 | `Alt+Enter`                          | wake the selected closed row                                                                        |
 | `Alt+o`                              | back to where you were                                                                              |
@@ -111,7 +111,7 @@ Zellij's keys still belong to Zellij.
 - Each tab is a terminal. As usual. But with extra info shown in the tab text.
 - If the terminal is an agent TUI (like Claude Code), the sidebar is populated with rich information about the agent state.
 - Sidebar state comes from either [Claude Code hooks](https://code.claude.com/docs/en/hooks), or from your `.claude` `jsonl` store that Claude Code already keeps.
-- **Your agents survive restarts.** A relaunch opens one tab for the most recent conversation. Every other conversation is a dormant row; `Alt+Enter` opens it, and it resumes where it left off. Plain terminal tabs do not come back.
+- **Your agents survive restarts.** A relaunch opens one tab for the most recent conversation. The others you had open when you quit come back on standby for a day: they sit under the running tabs, and `Alt+↓` opens each one as you land on it. Every other conversation is a dormant row; `Alt+Enter` opens it. Both resume where they left off. Plain terminal tabs do not come back.
 - **Running tabs sit above closed ones**, so the agents and terminals you're using are quick to cycle through (with `Alt+↑` `Alt+↓`).
 - **The tab list orders itself by attention.** A modified "frecency" algorithm is used to keep the tabs you're most likely to reuse at the top.
 

@@ -269,23 +269,46 @@ want "a run with every phase measured exits zero" "$?" "0"
 relaunch_status() {
   # $1: the uuids bound after the relaunch, as a jq array
   # $2: "stale-status" leaves one dormant row wearing Working.
+  # $3: the uuids carrying a standby stamp, as a jq array (default none).
   # Every row carries a `status`, because a real store always writes one: a
   # fixture that omitted it would make the stale check fire on every case and
   # so prove nothing.
-  jq -nc --argjson bound "$1" --arg mode "${2:-}" '
+  jq -nc --argjson bound "$1" --arg mode "${2:-}" --argjson stamped "${3:-[]}" '
     { store:
       { seq: 12,
         agents: ( [ ("u-eager", "u-a", "u-b") | { key: ., value:
                       { uuid: .,
                         tab_id: (if . as $u | $bound | index($u) then 1 else null end),
                         pane_id: (if . as $u | $bound | index($u) then 5 else null end),
+                        standby_stamp: (if . as $u | $stamped | index($u)
+                                        then { since: 1, tab: null } else null end),
                         status: (if $mode == "stale-status" and . == "u-a"
                                  then "working" else "idle" end) } } ]
                   | from_entries ) } }'
 }
 
-(relaunch_checks "u-eager" "$(relaunch_status '["u-eager"]')" >/dev/null 2>&1)
-want "one baked tab for the most-recent row passes" "$?" "0"
+# The two rows the quit left live, as the drive computes them pre-quit.
+LEFT_LIVE="$(printf 'u-a\nu-b\n')"
+(relaunch_checks "u-eager" "$(relaunch_status '["u-eager"]' "" '["u-a","u-b"]')" "$LEFT_LIVE" >/dev/null 2>&1)
+want "one baked tab for the most-recent row, the rest on standby, passes" "$?" "0"
+
+# The pre-quit expectation: the bound rows and the already-stamped ones,
+# minus the eager row. u-a is bound, u-b is stamped, and u-eager is both.
+PRE_QUIT="$(relaunch_status '["u-eager","u-a"]' "" '["u-b"]')"
+want "standby_expected_uuids takes the bound and the stamped, less the eager row" \
+  "$(uuid_line "$(standby_expected_uuids "$PRE_QUIT" "u-eager")")" "u-a u-b"
+want "standby_uuids reads the stamps" "$(uuid_line "$(standby_uuids "$PRE_QUIT")")" "u-b"
+
+# A row the quit left live came back plain dormant: SessionEnd said something
+# other than `other`, or a bar pruned its tab while the session went down.
+LOST="$(relaunch_checks "u-eager" "$(relaunch_status '["u-eager"]' "" '["u-a"]')" "$LEFT_LIVE" 2>&1)"
+want "a row lost from standby fails" "$?" "1"
+want "and the verdict names both sets" \
+  "$(grep -c 'on standby: measured=u-a  *expected=u-a u-b  *FAIL' <<<"$LOST")" "1"
+(relaunch_checks "u-eager" "$(relaunch_status '["u-eager"]')" "$LEFT_LIVE" >/dev/null 2>&1)
+want "a quit that stamped nothing fails" "$?" "1"
+(relaunch_checks "u-eager" "$(relaunch_status '["u-eager"]')" "" >/dev/null 2>&1)
+want "an empty standby expectation is refused, not passed" "$?" "1"
 
 # Two bound rows: a launch that baked a set. That is the fleet-in-one-layout
 # shape that killed the zellij server (#261, measured 2026-09-17), and it is
@@ -319,6 +342,21 @@ want "and the verdict names the row" \
 want "an empty status is refused, not passed" "$?" "1"
 (relaunch_checks "" "" >/dev/null 2>&1)
 want "a dead read on both sides is refused, not passed" "$?" "1"
+
+# --- the arrival verdict (phase 6c) ----------------------------------------
+# One Alt+Down from the baked tab must open the standby row it lands on.
+# The row it opened is read as the bound row that is not the baked one, so
+# each wrong shape below is a store the drive could really read.
+(arrival_checks "u-eager" "$LEFT_LIVE" "$(relaunch_status '["u-eager","u-a"]' "" '["u-b"]')" >/dev/null 2>&1)
+want "an arrival that opened a standby row and spent its stamp passes" "$?" "0"
+(arrival_checks "u-eager" "$LEFT_LIVE" "$(relaunch_status '["u-eager"]' "" '["u-a","u-b"]')" >/dev/null 2>&1)
+want "an arrival that opened nothing fails" "$?" "1"
+(arrival_checks "u-eager" "u-b" "$(relaunch_status '["u-eager","u-a"]')" >/dev/null 2>&1)
+want "an arrival that opened a row not on standby fails" "$?" "1"
+(arrival_checks "u-eager" "$LEFT_LIVE" "$(relaunch_status '["u-eager","u-a"]' "" '["u-a"]')" >/dev/null 2>&1)
+want "an arrival whose bind kept the stamp fails" "$?" "1"
+(arrival_checks "u-eager" "$LEFT_LIVE" "$(relaunch_status '["u-eager","u-a","u-b"]')" >/dev/null 2>&1)
+want "an arrival that opened two rows fails" "$?" "1"
 
 printf '\n%s\n' "== qa/lib selftest: $FAILURES failure(s) =="
 [[ "$FAILURES" -eq 0 ]]

@@ -253,16 +253,18 @@ fn write_icons(fonts: &[Font], dir: &Path) {
         ("status-idle", RowStatus::Idle),
         ("status-failed", RowStatus::Failed),
         ("status-stale", RowStatus::Stale),
+        ("status-standby", RowStatus::Standby),
         ("status-dormant", RowStatus::Dormant),
         ("status-dormant-selected", RowStatus::DormantSelected),
         ("status-opening", RowStatus::Opening),
     ];
     for (name, s) in status {
         let (ch, mut ink) = s.mark(&Theme::default());
-        // `render_row` fades an unselected dormant row's ink toward BASE
-        // after the mark table; the icon must match the rendered row.
-        // DormantSelected is exempt: selection zeroes the fade in the bar.
-        if s == RowStatus::Dormant {
+        // `render_row` fades an unselected dormant-block row's ink toward
+        // BASE after the mark table; the icon must match the rendered row.
+        // Standby rows sit in that block. DormantSelected is exempt:
+        // selection zeroes the fade in the bar.
+        if matches!(s, RowStatus::Standby | RowStatus::Dormant) {
             ink = ink.mix(BASE, DORMANT_FADE);
         }
         write_file(&dir.join(format!("{name}.svg")), &icon_svg(fonts, ch, ink));
