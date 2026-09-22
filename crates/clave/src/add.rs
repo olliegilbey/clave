@@ -12,8 +12,10 @@ use anyhow::{Context, Result};
 use crate::hook::push_snapshot;
 use crate::setup::{data_dir, session_row_height, wasm_path};
 use crate::store::{
-    AgentRecord, LabelSource, Store, now_unix, snapshot_from, store_paths, with_store_mut,
+    AgentRecord, LabelSource, Store, StorePaths, now_unix, snapshot_from, store_paths,
+    with_store_mut,
 };
+use clave_types::AgentSnapshot;
 
 /// Parse `zellij action dump-layout` for live agent uuids (§6.3 liveness).
 /// Zellij serializes the LIVE pane process, not the baked layout command
@@ -1536,26 +1538,16 @@ pub fn run_add(worktree: bool) -> Result<()> {
     });
     let tmp = std::env::temp_dir().join(format!("clave-{uuid}.kdl"));
     std::fs::write(&tmp, layout)?;
-    let status = Command::new(&zellij) // discovered above (Fix 2)
-        .args([
-            "--session",
-            &session,
-            "action",
-            "new-tab",
-            "--layout",
-            tmp.to_str().context("tmp path")?,
-        ])
-        .status()?;
-    let _ = std::fs::remove_file(&tmp);
-    anyhow::ensure!(status.success(), "zellij action new-tab failed");
 
-    // 7) Record + push (§6.3): the row exists BEFORE the first hook event so
-    //    the hook's untracked fast path doesn't drop this agent's events.
+    // 7) Record + open + push (§6.3): the row exists BEFORE the first hook
+    //    event so the hook's untracked fast path doesn't drop this agent's
+    //    events, and before the tab so the spawn's registration finds it
+    //    (see `record_then_open`).
     //    UPDATE-OR-INSERT, not blind insert (plan-review fix): resuming an
     //    agent with an existing row must preserve it — merge_resume_record
     //    keeps everything and resets only status. The authoritative
-    //    existing-row lookup happens HERE, inside the lock (the step-4 copy
-    //    was lock-free and only derived layout inputs).
+    //    existing-row lookup happens inside the lock (the step-4 copy was
+    //    lock-free and only derived layout inputs).
     // A resumed conversation's own history, read OUTSIDE the store lock (a
     // transcript can be tens of MB; the lock protects the store, not this
     // read). Probes the transcript's possible homes (#139: not always the
@@ -1572,30 +1564,68 @@ pub fn run_add(worktree: bool) -> Result<()> {
             crate::store::unix_hour(now_unix()),
         )
     });
-    let snap = with_store_mut(&paths, |s| {
-        // S1: a new row is a user commitment, so it is minted an ordinal from
-        // this same locked write and enters at the top. Before S1 a new row
-        // inherited no order at all and could sink below every dormant row.
-        // See `mint_record` for the ordinal mint, the newborn's inherited
-        // buckets, and the resume-preserving merge.
-        mint_record(
-            s,
-            FreshRecordInputs {
-                uuid: &uuid,
-                cwd: &agent_cwd,
-                repo_root: resume_root.as_deref().unwrap_or(&repo_root),
-                branch: &agent_branch,
-                label: &label,
-                worktree: worktree_dir.clone(),
-                default_branch: default_branch.clone(),
-                own_buckets: own_buckets.clone(),
-            },
-        );
-        snapshot_from(s)
-    })?;
+    let snap = record_then_open(
+        &paths,
+        FreshRecordInputs {
+            uuid: &uuid,
+            cwd: &agent_cwd,
+            repo_root: resume_root.as_deref().unwrap_or(&repo_root),
+            branch: &agent_branch,
+            label: &label,
+            worktree: worktree_dir.clone(),
+            default_branch: default_branch.clone(),
+            own_buckets,
+        },
+        || {
+            let status = Command::new(&zellij) // discovered above (Fix 2)
+                .args([
+                    "--session",
+                    &session,
+                    "action",
+                    "new-tab",
+                    "--layout",
+                    tmp.to_str().context("tmp path")?,
+                ])
+                .status()?;
+            let _ = std::fs::remove_file(&tmp);
+            anyhow::ensure!(status.success(), "zellij action new-tab failed");
+            Ok(())
+        },
+    )?;
     push_snapshot(&snap);
     crate::evlog::log_event("add", &format!("{uuid}: recorded ({choice})"));
     Ok(())
+}
+
+/// Mint (or merge) the row under the store lock, THEN ask zellij for its tab.
+///
+/// The record is `mint_record` (S1: a new row is a user commitment, so it is
+/// minted an ordinal from this same locked write and enters at the top; the
+/// newborn's inherited buckets and the resume-preserving merge live there
+/// too). The open is the caller's `zellij action new-tab`, kept out of this
+/// function so the sequence host-tests without zellij.
+///
+/// THE ORDER IS THE POINT. The newborn pane runs `clave spawn`, which
+/// persists its pane id into the store one line before it execs
+/// (`spawn.rs` `register_pane`), and `apply_register` answers None for a uuid
+/// it cannot find — silently, by design (a spawn can race a pruned row). Until
+/// 2026-09-22 the tab was created first and the row recorded after, with a
+/// transcript probe of tens of MB between them; on the box (runs 28 and 29)
+/// the spawn won that race every time, `pane_id` stayed null for the life of
+/// the row, and the tab never bound. A row that exists before its tab cannot
+/// lose it. If the open fails the row stays, reopenable from the picker, and
+/// the error is the caller's.
+pub(crate) fn record_then_open(
+    paths: &StorePaths,
+    inputs: FreshRecordInputs<'_>,
+    open: impl FnOnce() -> Result<()>,
+) -> Result<AgentSnapshot> {
+    let snap = with_store_mut(paths, |s| {
+        mint_record(s, inputs);
+        snapshot_from(s)
+    })?;
+    open()?;
+    Ok(snap)
 }
 
 #[cfg(test)]
@@ -1710,6 +1740,47 @@ mod tests {
                 own_buckets: None,
             },
         )
+    }
+
+    /// `clave spawn` in the newborn pane persists its pane id one line before
+    /// it execs (`register_pane`), and `apply_register` answers None for a
+    /// uuid it cannot find. So the row must be in the store BEFORE the tab is
+    /// asked for. Box runs 28 and 29 (2026-09-22): tab first, row second,
+    /// `pane_id` null for the life of the row, and the drive's rung 1 never
+    /// bound. The transcript probe between the two widened the window; the
+    /// order is what closes it.
+    #[test]
+    fn the_row_is_in_the_store_before_the_tab_is_asked_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StorePaths {
+            dir: dir.path().to_path_buf(),
+            data: dir.path().join("agents.json"),
+            lock: dir.path().join("agents.lock"),
+        };
+        let seen = std::cell::Cell::new(false);
+        record_then_open(
+            &paths,
+            FreshRecordInputs {
+                uuid: "u-new",
+                cwd: "/x",
+                repo_root: "/x",
+                branch: "main",
+                label: "x · main",
+                worktree: None,
+                default_branch: None,
+                own_buckets: None,
+            },
+            || {
+                let store = crate::store::read_store(&paths).unwrap();
+                seen.set(store.agents.contains_key("u-new"));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(
+            seen.get(),
+            "the tab was asked for before the row existed: a spawn that registers now finds no row"
+        );
     }
 
     /// Spec: newborn initialisation. A fresh row inherits the opener's
