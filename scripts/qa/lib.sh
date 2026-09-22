@@ -312,8 +312,8 @@ uuid_count() { printf '%s' "${1:-}" | grep -c .; }
 uuid_line() { printf '%s' "${1:-}" | tr '\n' ' '; }
 
 # The relaunch verdict (phase 6c). A relaunch bakes ONE tab, for the row
-# `eager_candidate_uuid` names, and every other row comes back dormant with
-# no running-process status (setup.rs `launch_layout_kdl`, decision of
+# `eager_candidate_uuid` names. The rows the quit left live come back on
+# standby, every other row dormant, and none with a running-process status (setup.rs `launch_layout_kdl`, decision of
 # 2026-09-22). Takes the uuid expected to be bound, computed from the
 # pre-quit snapshot, and the `dev status` read after the relaunch. Every
 # reading below comes from that one snapshot, so no two checks can disagree
@@ -344,7 +344,7 @@ relaunch_checks() {
   # And it is the most-recent row, not whichever the launch happened to pick.
   check "and that row is the most-recent one" "$(uuid_line "$set_after")" "$expected"
 
-  # Every other row came back dormant, and none wears a status from the
+  # Every other row came back unbound, and none wears a status from the
   # session before.
   stale="$(stale_status_uuids "$status")"
   check "no row carries a running-process status from the session before" \

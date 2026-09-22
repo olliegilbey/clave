@@ -265,7 +265,7 @@ pub struct LiveRow<T> {
 /// rewritten, or started.
 ///
 /// ONE function across the workspace. The host asks it of a hook command and
-/// of the baked layout, and a matcher copied per caller drifted once (#261):
+/// of a statusLine command, and a matcher copied per caller drifted once (#261):
 /// the copy that mattered was covered by no test. A release install is the
 /// ONLY environment that bakes the versioned form (a sandbox shims a bare
 /// `clave`), so the shared rule is tested here, once.

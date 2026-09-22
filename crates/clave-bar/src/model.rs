@@ -2486,10 +2486,9 @@ impl BarModel {
         // ONE row comparator, applied twice — giving either block its own
         // ROW rule would be the defect two reviewers caught on PR #135. The
         // live block adds a layer ABOVE that rule, and that layer now lives
-        // in `clave_types::sort_live_block` because the HOST ranks the same
-        // rows when a relaunch bakes them: the bar's copy and a host copy
-        // disagreed the moment a repo held several rows, and a relaunch
-        // started an agent that was not the one on top (CodeRabbit, #261).
+        // in `clave_types::sort_live_block` so a host-side ranking cannot
+        // grow a second copy: a bar copy and a host copy disagreed the moment
+        // a repo held several rows (CodeRabbit, #261).
         // Dormant rows never group (maintainer's caveat): dormancy leaves the
         // repo layer, so the dormant block keeps the flat row rule.
         clave_types::sort_live_block(&mut live);

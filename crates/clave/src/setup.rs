@@ -540,8 +540,9 @@ pub fn layout_kdl(binary: &str, wasm: &str, row_height: clave_types::RowHeight) 
 /// §6.8 (C8): the launch layout, composed DYNAMICALLY at session-create
 /// time. Base = the bar template; `row` is the ONE row to bake a tab for —
 /// the single most-recent row (`eager_row`), or none at all on a first run.
-/// Every other row surfaces as a dormant bar row (§6.6), and Alt+Enter opens
-/// it.
+/// Every other row surfaces unbound in the bar (§6.6): the rows the quit
+/// left live on standby, where arriving opens them, the rest dormant, where
+/// Alt+Enter does.
 ///
 /// One tab, never a set. A layout of many tabs made zellij build the whole
 /// fleet inside one second and the handle burst killed the server (#261,
@@ -1868,7 +1869,7 @@ mod tests {
     #[test]
     fn launch_layout_with_a_single_row_bakes_one_running_focused_tab() {
         // §6.8: launch bakes the most-recent row alone — resumed, focused,
-        // every other row dormant in the bar. Every relaunch lands here, so
+        // every other row unbound in the bar (standby or dormant). Every relaunch lands here, so
         // it must stay byte-stable.
         let mut r = crate::store::AgentRecord {
             uuid: "u-recent".into(),

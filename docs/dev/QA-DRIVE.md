@@ -99,7 +99,8 @@ owns everything they structurally cannot reach._
 - **A fixture that stages nothing passes.** `dev scenario relaunch-restore`
   had been silently staging no restore at all since `bound_since_launch`
   landed. `clave dev scenario` now prints how many rows the next launch will
-  bring back, and refuses a relaunch fixture whose answer is wrong.
+  bring back, and refuses a relaunch fixture whose answer is wrong (removed
+  with the restore, 2026-09-22).
 
 ## Shape
 
@@ -327,10 +328,13 @@ What it asserts (2026-09-22, after the live-set restore was removed, commit
 `9670fbf`): a relaunch bakes ONE tab, for the most-recent row. So after the
 second launch exactly one row is bound, every other row has no `tab_id` and no
 `pane_id`, and no row carries a `Working` or `NeedsYou` from the first
-session. Then two `clave-toggle` presses in that one tab, each answered by
-exactly one width ask from that tab's bar. Both halves read the store and the
-log; nothing is driven between the relaunch and the reading — no focus, no
-nav, no keystroke — so the reading is the launch's own work.
+session. Every row the quit left live (bound before the quit, less the eager
+row) carries a standby stamp. Then two `clave-toggle` presses in that one tab,
+each answered by exactly one width ask from that tab's bar. Those readings
+come first, before anything is driven, so they are the launch's own work.
+Last, the arrival leg: one `{"dir":"next"}` nav binds exactly one more row. It
+was on standby, its bind spent the stamp, and its tab ranks by the row's own
+ordinal.
 
 Two things about how it is built, each of which a later edit could undo
 without any test noticing:

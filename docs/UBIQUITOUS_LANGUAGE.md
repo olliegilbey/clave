@@ -102,7 +102,7 @@ column target, was deleted at #181; the term survives only in the ledger.)
   Alt+Up/Down ring, and **arriving on it opens it** (walk, Alt+N or click).
   An opened standby row keeps its rank: a walk is not a commitment, so it
   joins the live block where its frecency puts it, not at the top.
-  Glyph: a half-filled circle (`nf-fa-adjust`). The quit's `SessionEnd` (reason `other`) stamps it; a bind, a prune
+  Glyph: a half-filled circle (`nf-fa-adjust`). The quit's `SessionEnd` (reason `other`) stamps it, and so does the next launch for a row still bound, because SessionEnd is lossy at a kill; a bind, a prune
   of its tab, or the 24 hours clear the stamp. /exit, /clear and a closed tab
   leave a plain dormant row. Not "waiting": that word is the NeedsYou state.
 - **dormant row** — an agent session with no tab open. Alt+Enter opens it.

@@ -293,7 +293,7 @@ launch:
 #
 # It asks for a SECOND launch part way through: phase 6c asks the maintainer to
 # quit the sandbox and launch it again, because what a relaunch bakes (one
-# eager tab, every other row dormant) can only be seen across a session
+# eager tab, the rows left live on standby, the rest dormant) can only be seen across a session
 # boundary and no other phase crosses one. The drive prints both commands and
 # waits; `wait` is the budget for EACH ask.
 #

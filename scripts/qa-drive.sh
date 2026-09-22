@@ -19,7 +19,7 @@
 # 5b card-cells and 6b isolation-witness), first run of the `just qa` loop;
 # and run 22, 2026-09-17, all TWELVE phases, 237 checks, under the live-set
 # restore that was removed on 2026-09-22 (6c now proves one eager tab and
-# every other row dormant). The list below was the FIRST LIVE RUN PENDING
+# the rows left live on standby, the rest dormant). The list below was the FIRST LIVE RUN PENDING
 # ledger; it is kept because each entry records an assumption a live run had
 # to settle, and how the first runs settled them: runs 1-3 each went red on a
 # real finding first (the stale-executor nav wedge, the starved-bar prune of
