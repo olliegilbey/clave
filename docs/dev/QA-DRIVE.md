@@ -8,14 +8,16 @@ owns everything they structurally cannot reach._
 
 ## Run ledger — the useful recent history
 
-- **runs 33 and 34, 2026-09-23 — standby rows.** Run 33: 0-6b green on box
+- **runs 33 to 35, 2026-09-23 — standby rows.** Run 33: 0-6b green on box
   and Mac; 6c red, one of five rows on standby. The store seq (75 to 80 on
   both) showed one `SessionEnd` write and no prune, so the hook is lossy at a
   kill; fixed by stamping still-bound rows at the launch (`f1a0609`). Run 34
   (`6e4059e`): box 0-7 green, standby 5/5, one Alt+Down opened a standby row.
   Mac: standby 5/5, then 6c red in the beacon leg, 3 width asks for 2 presses,
   all from the one bar (a `source=cooldown` re-ask before a slow paint). Not
-  the multi-bar flap; the width code is unchanged on this branch. Rerun as 35.
+  the multi-bar flap; the width code is unchanged on this branch. Run 35
+  (Mac, `fd72fc9`): 0-7 green, standby 5/5, one width ask per press, one
+  Alt+Down opened a standby row and its bind spent the stamp.
 - **runs 31 and 32, 2026-09-22 — the stripped build, green 0-7 on the box
   and the Mac.** Run 31 went red in 5b on both machines: the drive still
   expected `exited` after SessionEnd, a status the removal took out, and
