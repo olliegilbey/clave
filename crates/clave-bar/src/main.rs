@@ -802,10 +802,18 @@ impl ZellijPlugin for State {
         // start-or-reload-plugin`): stamp the build so the zellij log tells
         // you WHICH wasm produced a trace. Set by the rebuild recipe via
         // CLAVE_BUILD_TAG; "dev" means an untagged local build.
+        // The client id rides along (2026-09-22): zellij routes every
+        // swap-layout ask by the client this instance was loaded under
+        // (zellij-server 0.45.1 plugins/zellij_exports.rs:120-140, then
+        // screen.rs:10372 `active_tab_and_connected_client_id!`), and
+        // ids are the lowest free number (lib.rs:663-672), so a tab minted
+        // by a CLI client inherits an id the next CLI client will reuse.
+        let ids = get_plugin_ids();
         eprintln!(
-            "clave-bar: loaded v{} build={}",
+            "clave-bar: loaded v{} build={} client={}",
             env!("CARGO_PKG_VERSION"),
-            option_env!("CLAVE_BUILD_TAG").unwrap_or("dev")
+            option_env!("CLAVE_BUILD_TAG").unwrap_or("dev"),
+            ids.client_id
         );
         // #44: resolve the CLI from plugin configuration instead of PATH. A
         // stale `clave` on PATH previously served a live session's `clave
@@ -1238,8 +1246,9 @@ impl ZellijPlugin for State {
                 let tab = self.model.own_tab();
                 let active = self.model.active_tab_id();
                 let panes = self.model.own_tab_tiled_pane_count();
+                let client = get_plugin_ids().client_id;
                 eprintln!(
-                    "clave-bar: swap-width backwards={backwards} cols={cols} tab={tab:?} active={active:?} panes={panes:?}"
+                    "clave-bar: swap-width backwards={backwards} cols={cols} tab={tab:?} active={active:?} panes={panes:?} client={client}"
                 );
             }
         }
