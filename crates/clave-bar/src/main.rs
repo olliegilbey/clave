@@ -114,6 +114,9 @@ struct State {
     /// the click map falls back to the pre-viewport identity mapping (line N
     /// selects row N) rather than misbehaving.
     pane_height: usize,
+    /// The last `width-deaf` line written, so a bar held at the wrong width
+    /// logs once per (width, reason) and not once per paint.
+    last_deaf: Option<(usize, &'static str)>,
     /// A term-facts poll timer is in flight (#206) — one at a time, re-armed
     /// on expiry only while `term_poll_wanted()` holds.
     term_poll_armed: bool,
@@ -1251,6 +1254,20 @@ impl ZellijPlugin for State {
                     "clave-bar: swap-width backwards={backwards} cols={cols} tab={tab:?} active={active:?} panes={panes:?} client={client}"
                 );
             }
+        }
+        // The silent case (2026-09-22): a paint at the wrong width with no
+        // ask. One line per (width, reason), so a bar resting wrong for a
+        // minute costs one line, not one per frame.
+        let deaf = self.model.width_deaf_reason(cols).map(|r| (cols, r));
+        if deaf != self.last_deaf {
+            if let Some((_, reason)) = deaf {
+                let tab = self.model.own_tab();
+                let active = self.model.active_tab_id();
+                eprintln!(
+                    "clave-bar: width-deaf cols={cols} reason={reason} tab={tab:?} active={active:?}"
+                );
+            }
+            self.last_deaf = deaf;
         }
         self.run_effects(fx);
         // One line per row, display-ordered. Everything visual — the column

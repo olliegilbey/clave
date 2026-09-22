@@ -3721,6 +3721,39 @@ impl BarModel {
         vec![Effect::SwapWidth { backwards }]
     }
 
+    /// Why the width machine made NO ask at this paint although the paint
+    /// disagrees with the store's mode — the gate of `width_effects` that
+    /// held it, in that function's order. `None` when the widths agree or
+    /// when an ask would have gone out. Diagnostic only, read-only, and
+    /// pure: a bar that sits at the wrong width in silence is otherwise
+    /// invisible in the log (the devbox's restored tabs, 2026-09-22).
+    pub fn width_deaf_reason(&self, cols: usize) -> Option<&'static str> {
+        let want = self.showing_collapsed();
+        if self.row_height.mode_at(cols) == Some(want) {
+            return None;
+        }
+        if self.awaiting_hydration {
+            return Some("hydrating");
+        }
+        if !self.own_tab_focused() {
+            return Some("unfocused");
+        }
+        if self.own_tab_floating_visible() {
+            return Some("floating-visible");
+        }
+        if self.swap_owed > 0 {
+            return Some("owed");
+        }
+        let spent = match self.walk_spent {
+            Some((w, n)) if w == want => n,
+            _ => 0,
+        };
+        if spent >= WALK_ASK_CAP {
+            return Some("capped");
+        }
+        None
+    }
+
     /// How long a claimed fast tick is believed. Two seconds is ten of them:
     /// long enough that a loaded host delivering one late cannot look stranded,
     /// short enough that a person does not read a frozen spinner as a hung
