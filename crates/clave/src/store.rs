@@ -697,6 +697,7 @@ pub fn apply_bind(paths: &StorePaths, uuid: &str, tab_id: usize) -> Result<Optio
         }
         if let Some(r) = s.agents.get_mut(uuid) {
             r.tab_id = Some(tab_id);
+            r.standby_stamp = None; // live again: standby has done its job
         }
         // An agent-bound tab's twin never holds inherited buckets (maintainer
         // ruling, 2026-08-19 post-drive): the row must rank on the agent's own
@@ -802,6 +803,17 @@ pub(crate) fn prune_in(s: &mut Store, stale_ids: &[usize]) -> bool {
             // permanent false episode masking the real ones — and a
             // uuid-directed nav would chase a pane that no longer exists.
             r.pane_id = None;
+            changed = true;
+        }
+    }
+    // A standby stamp names the tab its agent ended in. A prune of that tab
+    // is the human closing it — which the agent's SessionEnd may have reached
+    // the store first and stamped as a quit — so the row goes dormant.
+    for r in s.agents.values_mut() {
+        if r.standby_stamp
+            .is_some_and(|sb| sb.tab.is_some_and(|t| stale_ids.contains(&t)))
+        {
+            r.standby_stamp = None;
             changed = true;
         }
     }
@@ -965,6 +977,21 @@ pub fn clear_session_order(paths: &StorePaths) -> Result<()> {
         for r in s.agents.values_mut() {
             if matches!(r.status, Status::Working | Status::NeedsYou) {
                 r.status = Status::Idle;
+                changed = true;
+            }
+        }
+        // Standby stamps outlive the session, but their tab ids do not
+        // (zellij reuses ids, so a stale one would let the new session's
+        // close of an unrelated tab dismiss the row). A stamp older than a
+        // day is dormant for good.
+        let now = now_unix();
+        for r in s.agents.values_mut() {
+            let kept = r
+                .standby_stamp
+                .filter(|sb| sb.live_at(now))
+                .map(|sb| Standby { tab: None, ..sb });
+            if kept != r.standby_stamp {
+                r.standby_stamp = kept;
                 changed = true;
             }
         }
@@ -2055,6 +2082,56 @@ mod tests {
         );
     }
 
+    /// Standby's three store rules. A bind is the row going live again, so
+    /// the stamp goes. A prune of the stamp's own tab is the human closing it,
+    /// so the row goes dormant (the order-safe twin of the hook's pane check).
+    /// A launch forgets the tab, because zellij reuses ids, and drops a stamp
+    /// older than a day (maintainer ruling, 2026-09-22).
+    #[test]
+    fn a_standby_stamp_clears_on_bind_on_its_tabs_prune_and_on_expiry() {
+        let stamp = |since, tab| Some(Standby { since, tab });
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        let now = now_unix();
+        with_store_mut(&p, |s| {
+            for uuid in ["u-bind", "u-closed", "u-other-tab", "u-fresh", "u-old"] {
+                s.agents.insert(uuid.into(), rec(uuid));
+            }
+            s.agents.get_mut("u-bind").unwrap().standby_stamp = stamp(now, Some(1));
+            s.agents.get_mut("u-closed").unwrap().standby_stamp = stamp(now, Some(4));
+            s.agents.get_mut("u-other-tab").unwrap().standby_stamp = stamp(now, Some(5));
+            s.agents.get_mut("u-fresh").unwrap().standby_stamp = stamp(now - 60, Some(6));
+            s.agents.get_mut("u-old").unwrap().standby_stamp =
+                stamp(now - clave_types::STANDBY_SECS - 1, Some(7));
+        })
+        .unwrap();
+        apply_bind(&p, "u-bind", 9).unwrap();
+        apply_prune_tabs(&p, &[4]).unwrap();
+        let s = read_store(&p).unwrap();
+        assert_eq!(
+            s.agents["u-bind"].standby_stamp, None,
+            "a bind is live again"
+        );
+        assert_eq!(
+            s.agents["u-closed"].standby_stamp, None,
+            "its tab was closed"
+        );
+        assert_eq!(s.agents["u-other-tab"].standby_stamp, stamp(now, Some(5)));
+
+        clear_session_order(&p).unwrap();
+        let s = read_store(&p).unwrap();
+        assert_eq!(s.agents["u-fresh"].standby_stamp, stamp(now - 60, None));
+        assert_eq!(s.agents["u-old"].standby_stamp, None, "a day has passed");
+        let wire = snapshot_from(&s);
+        let standby: Vec<&str> = wire
+            .agents
+            .iter()
+            .filter(|a| a.standby)
+            .map(|a| a.uuid.as_str())
+            .collect();
+        assert_eq!(standby, ["u-fresh", "u-other-tab"]);
+    }
+
     #[test]
     fn clear_session_order_preserves_agent_ordinals() {
         // Tab ids are SESSION-scoped, so the tab order and the binds go. Agent
@@ -2661,6 +2738,7 @@ mod tests {
                         session_id: Some(uuid.clone()),
                         prompt: None,
                         message: Some("needs your permission".into()),
+                        reason: None,
                         transcript_path: None,
                         cwd: None,
                     };
