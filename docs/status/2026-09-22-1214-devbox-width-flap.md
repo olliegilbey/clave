@@ -41,6 +41,7 @@ Committed on `fix/bar-separator-column`:
 - `crates/clave-types/src/lib.rs`: `SEPARATOR_COLS`, `RowHeight::mode_at`.
 - `crates/clave-bar/src/model.rs`: three call sites use `mode_at`; new test `a_painted_width_one_short_of_the_target_is_at_the_target`; four tests moved from 47 to `EXP_W - 2` as their impossible width.
 - `docs/FOOTGUNS.md`: the entry. `docs/status/2026-09-22-1200-devbox-width-flap.md`: the earlier handoff.
+- Review round (later session, same day): the blind Opus lane found the same exact threshold in the card and double-card renderers (`card.rs` `is_expanded`), which would have parked a frames-off bar at full width drawing the collapsed card. Fixed test-first (`the_card_one_column_under_expanded_is_the_expanded_card`, `the_double_card_one_column_under_expanded_keeps_its_branch`). Added a compile-time assert that each mode's two widths sit more than a separator column apart, a types-crate test pinning the tolerance as one-sided, and rewrote the two model.rs doc comments that still called the comparison an equality. CodeRabbit: zero findings on both passes. Declined: dropping `const` from `mode_at` (the assert above now needs it const) and splitting the new model.rs test (it reads as one scenario).
 
 Merged to main today: #267 (restore), #269 (0.5.2 bump), #270 (gitignore). Tag v0.5.2 pushed, release published, installed on the Mac and the box.
 
