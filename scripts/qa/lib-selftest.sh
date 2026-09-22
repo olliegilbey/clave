@@ -50,6 +50,9 @@ DEBUG  |/Users/x/.local| 2026-09-12 13:46:30.640 [id: 5     ] clave-bar: loaded 
 INFO   |zellij_server  | 2026-09-12 13:47:00.000 a line with no instance stamp at all
 DEBUG  |/Users/x/.local| 2026-09-12 13:47:01.000 [id: 2     ] clave-bar: term-facts probe updated
 DEBUG  |/Users/x/.local| 2026-09-12 13:47:02.000 [id: 3     ] clave-bar: term-facts probe updated
+DEBUG  |/Users/x/.local| 2026-09-12 13:47:02.100 [id: 3     ] clave-bar: swap-width backwards=false cols=47
+DEBUG  |/Users/x/.local| 2026-09-12 13:47:02.200 [id: 3     ] clave-bar: swap-width backwards=false cols=47
+DEBUG  |/Users/x/.local| 2026-09-12 13:47:02.300 [id: 2     ] clave-bar: swap-width backwards=false cols=47
 DEBUG  |/Users/x/.local| 2026-09-12 13:47:03.000 [id: 4     ] clave-bar: term-facts command delta pane 7
 DEBUG  |/Users/x/.local| 2026-09-12 13:47:04.000 [id: 5     ] clave-bar: dropped an event at EOF
 LOG
@@ -93,6 +96,18 @@ want "instances_logging_since sees a line after the mark" \
   "$(instance_count_logging_since "$((FIXTURE_LINES - 2))" 'clave-bar: term-facts')" "1"
 
 want "zlog_now counts the lines in the log" "$(zlog_now)" "$FIXTURE_LINES"
+
+# The flap's signature is one instance asking many times. The per-instance
+# reading says 1; only a per-LINE reading says 2 — and the maintainer's
+# instance 2 asked too, and must not be counted.
+want "instances_logging reads a flap as one instance" \
+  "$(instance_count_logging 'clave-bar: swap-width')" "1"
+want "swap_ask_count_since counts every ask our instances made" \
+  "$(swap_ask_count_since 0)" "2"
+want "swap_ask_count_since leaves the maintainer's ask out" \
+  "$(sandbox_lines_since 0 'clave-bar: swap-width' | grep -c 'id: 2')" "0"
+want "swap_ask_count_since honours the mark" \
+  "$(swap_ask_count_since "$((FIXTURE_LINES - 2))")" "0"
 
 # An unreadable log must read as nothing, never as an error or a hang: the
 # drive runs before any bar has logged, and on a machine where zellij's log

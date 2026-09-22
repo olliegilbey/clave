@@ -640,6 +640,13 @@ check "orphan 'zellij pipe' processes (pid in both probes, 2s apart)" "$ORPHANS"
 # ===========================================================================
 phase "P1-baseline-join"
 
+# The launch's width asks, RECORDED: a tab baked in the other mode asks once
+# to correct itself (#89), so a launch is not necessarily silent. The flap's
+# shape is many asks per instance for the width the pane already has; phase
+# 4 asserts the zero, this line is the launch's own reading beside it.
+measure "width asks since the launch mark (sandbox instances, one line per ask)" \
+  "$(swap_ask_count_since "$LOGMARK") over $(sandbox_instance_count) instances"
+
 STATUS_JSON="$(dev_status)"
 measure "dev status (raw)" "$STATUS_JSON"
 
@@ -1715,6 +1722,13 @@ walk_leg() {
 # see two executors walking in lockstep, the evlog can).
 P4_OPEN_BEFORE="$(evlog_count open)"
 P4_SEQ_BEFORE="$(jq -r '.store.seq // empty' <<<"$P4_STATUS" 2>/dev/null)"
+# The width seam. Every focus change resets a bar's walk budget, so a bar
+# that misjudges its painted width asks for a swap on every tab the walk
+# lands in — the devbox flap (2026-09-22, `pane_frames false`: the pane
+# paints one column short and an exact comparison asked sixteen times in
+# four seconds). No tab is toggled during a walk, so the ask count across
+# both legs must be zero on any host, frames on or off.
+P4_SWAP_MARK="$(zlog_now)"
 walk_leg "$P4_FIRST_TAB" "walk 1 (standing in tab ${P4_FIRST_TAB}):"
 
 # A walk is selection only: it writes nothing. Recorded rather than asserted —
@@ -1733,6 +1747,9 @@ measure "store seq across walk 1 (a walk selects; it should write nothing)" \
 # standing, driven by whichever bar is standing there.
 # ---------------------------------------------------------------------------
 walk_leg "$P4_LAST_TAB" "walk 2 (standing in tab ${P4_LAST_TAB}):"
+
+check "the two walks made no width ask (a bar at its painted width asks nothing; the frames-off flap asked on every focus change)" \
+  "$(swap_ask_count_since "$P4_SWAP_MARK")" "0"
 
 # The bracket's midpoint: a walk is selection only, so NO open may have run
 # yet — and pinning zero here is what proves the ==1 after the commit came

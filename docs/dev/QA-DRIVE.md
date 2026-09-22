@@ -281,6 +281,58 @@ no keystroke. The whole defect was that a restored row bound only when the
 maintainer landed on its tab, so a drive that touched a tab first would hide
 exactly what it came to see.
 
+## The remote drive (a second machine, over ssh)
+
+Ratified 2026-09-22, after the v0.5.2 rollout: the devbox showed a fleet of
+regressions the Mac never did — the width flap needed `pane_frames false`,
+which the box has and the Mac does not; the restore defects needed the
+box's Claude Code daemon. Every one was found by the human at the box and
+diagnosed by an agent reading the box's log over ssh. So that is now the
+loop, in one command:
+
+```
+just remote-qa qa-fleet          # push HEAD, stage on the box, wait, drive
+just remote-log 60               # the box's zellij log tail
+just remote-drive-log 60         # the newest drive log on the box
+just remote-kill                 # the box SANDBOX, by exact name
+```
+
+`scripts/remote-qa.sh` is the whole mechanism. It pushes this HEAD to a
+plain git checkout on the remote (`~/code/clave-qa` by default; the repo
+accepts a push onto its checked-out branch), then runs the SAME `just qa`
+there, in the remote's own environment — its zellij config, its frames
+setting, its Claude Code. There is no second drive and no remote-only
+phase: one code path. The remote sandbox is `clave dev instance` on the
+remote, and the remote's live fleet is untouched for the same reasons the
+local one is. `CLAVE_QA_HOST` and `CLAVE_QA_DIR` pick the machine.
+
+The human's one job is unchanged: launch. The line is
+
+```
+ssh -t devbox 'cd ~/code/clave-qa && just launch'
+```
+
+and it works from ANY terminal, inside zellij or not, because ssh forwards
+none of the zellij variables that make `just launch` refuse. Phase 6c's
+second launch is the same line after the quit.
+
+**Reading a remote sandbox is not touching the remote fleet.** The zellij
+log is a file (`/tmp/zellij-<uid>/zellij-log/zellij.log` on Linux), the
+drive log is a file under the remote sandbox state dir, and the store is a
+file. `just remote-log` and `just remote-drive-log` read those and nothing
+else. A `zellij action` typed into an ssh shell on the box aims at whatever
+session that shell sits in — the human's `remote` session — so nothing here
+runs one outside `ct.sh`, which the drive already routes through.
+
+**The frames seam has an assertion now.** The shipped bar logs one line per
+width ask (`clave-bar: swap-width backwards=… cols=…`, main.rs `render`).
+Phase 1 records the launch's ask count per sandbox instance; phase 4 asserts
+ZERO asks across both ring-walk legs, because a walk toggles nothing and a
+bar at its painted width asks nothing — the flap asked on every focus
+change. The reading is per LINE (`swap_ask_count_since`, lib.sh), not per
+instance: a flap is one instance asking sixteen times, and an instance
+count reads that as 1.
+
 ## When it runs
 
 - Before every release cut — the runbook's QA-drive gate, which sits after

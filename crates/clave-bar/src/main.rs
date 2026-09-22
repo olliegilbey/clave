@@ -1224,6 +1224,17 @@ impl ZellijPlugin for State {
         // `width_effects`, which holds the switch until this bar's own tab is
         // the focused one.
         let fx = self.model.width_effects(Some(cols));
+        // One log line per width ask, SHIPPED: it is the only observable
+        // of the flap the devbox had (2026-09-22: sixteen asks in four
+        // seconds, every one for the width the pane already had). The QA
+        // drive counts these lines per sandbox instance; a bar at its width
+        // asks nothing, so any ask during a nav walk is a defect. Cheap:
+        // a healthy bar asks at most once per toggle.
+        for e in &fx {
+            if let Effect::SwapWidth { backwards } = e {
+                eprintln!("clave-bar: swap-width backwards={backwards} cols={cols}");
+            }
+        }
         self.run_effects(fx);
         // One line per row, display-ordered. Everything visual — the column
         // arithmetic, the palette, the fade, the truncation — lives in

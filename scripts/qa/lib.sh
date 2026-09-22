@@ -204,6 +204,32 @@ instance_count_logging() {
   instances_logging "$1" | grep -c . || true
 }
 
+# LINES matching <pattern> since <mark>, from this sandbox's instances only —
+# the per-line count the per-instance forms above deliberately are not. A
+# flap is one instance logging the same ask sixteen times (the devbox,
+# 2026-09-22), and an instance count reads that as 1. Attributed the same
+# way: the line's `[id: N]` must belong to an instance that announced this
+# build.
+sandbox_lines_since() {
+  local mark="$1" pattern="$2" ids
+  ids="$(sandbox_instance_ids | tr '\n' ' ')"
+  zlog_from "$mark" | grep -F "$pattern" | while IFS= read -r line; do
+    id="$(printf '%s\n' "$line" | log_ids)"
+    [[ -n "$id" && " $ids " == *" $id "* ]] && printf '%s\n' "$line"
+  done
+}
+
+sandbox_line_count_since() {
+  sandbox_lines_since "$1" "$2" | grep -c . || true
+}
+
+# The width asks (`clave-bar: swap-width …`, one line per ask the shell
+# forwards to zellij) this sandbox's bars made since <mark>. A bar at its
+# declared width asks nothing, so outside a toggle this is a defect count.
+swap_ask_count_since() {
+  sandbox_line_count_since "$1" 'clave-bar: swap-width'
+}
+
 # ---------------------------------------------------------------------------
 # The session readers: the store, the layout, and focus.
 # ---------------------------------------------------------------------------

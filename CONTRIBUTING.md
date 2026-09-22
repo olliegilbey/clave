@@ -25,6 +25,11 @@ just setup-toolchain     # adds the wasm32-wasip1 target
 just sandbox             # builds, wires an isolated sandbox, verifies it
 ```
 
+The same loop runs against a second machine over ssh — `just remote-qa`,
+`just remote-log` — for the regressions only that machine's environment
+shows (frames off, a different Claude Code). See
+[docs/dev/QA-DRIVE.md](docs/dev/QA-DRIVE.md), "The remote drive".
+
 Then launch it yourself, **in a new terminal, outside zellij** — clave creates
 its own multiplexer session, so launching from inside one nests them:
 
