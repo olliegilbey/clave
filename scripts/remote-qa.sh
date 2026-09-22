@@ -24,8 +24,11 @@
 #
 # Subcommands:
 #   sync              push HEAD to the remote checkout (creates it if absent)
-#   qa [scenario]     sync, then run `just qa <scenario>` on the remote and
-#                     stream it here; prints the launch command first
+#   qa [scenario] [wait]
+#                     sync, then start `just qa <scenario> <wait>` on the
+#                     remote, DETACHED; prints the launch command first
+#   qa-log [n]        the last n lines of the detached run's log
+#   qa-running        "running" while the remote stage or drive is alive
 #   stage [scenario]  sync, then `just sandbox <scenario>` only
 #   log [n]           the last n lines of the remote zellij log (default 40)
 #   drive-log [n]     the last n lines of the newest remote drive log
@@ -38,6 +41,9 @@ set -euo pipefail
 
 HOST="${CLAVE_QA_HOST:-devbox}"
 DIR="${CLAVE_QA_DIR:-code/clave-qa}"
+# The detached run's log on the remote (the drive's own tee'd log lives under
+# the remote sandbox state dir as well; `drive-log` reads that one).
+RUN_LOG="/tmp/clave-remote-qa.log"
 CMD="${1:-qa}"
 [[ $# -gt 0 ]] && shift
 
@@ -90,10 +96,18 @@ case "$CMD" in
     SCENARIO="${1:-qa-fleet}"
     WAIT="${2:-1800}"
     launch_line
-    # The remote drive tees its own log under the remote sandbox state dir;
-    # `drive-log` reads it back. Streaming it here as well means a dropped
-    # ssh loses nothing.
-    remote "just qa $SCENARIO $WAIT"
+    # DETACHED on the remote. The run waits up to WAIT seconds for a human
+    # and then drives for twenty minutes more, and an agent's shell tool
+    # caps a foreground call well under that (ten minutes here, 2026-09-22);
+    # an ssh that dies takes an attached remote job with it. So the remote
+    # owns the process, writes $RUN_LOG there, and `qa-log` reads it.
+    remote "nohup setsid just qa $SCENARIO $WAIT > $RUN_LOG 2>&1 < /dev/null & echo \"started on $HOST, log $RUN_LOG\""
+    ;;
+  qa-log)
+    remote "tail -n ${1:-40} $RUN_LOG 2>/dev/null || echo 'no run log yet'"
+    ;;
+  qa-running)
+    remote "pgrep -f 'qa-drive.sh|sandbox-setup.sh' >/dev/null && echo running || echo finished"
     ;;
   log)
     remote "tail -n ${1:-40} /tmp/zellij-\$(id -u)/zellij-log/zellij.log"
@@ -112,7 +126,7 @@ case "$CMD" in
     remote 's="$(./target/release/clave dev instance --field session)"; zellij kill-session "$s"; zellij delete-session --force "$s"; echo "killed $s"'
     ;;
   *)
-    echo "usage: $0 {sync|stage [scenario]|qa [scenario] [wait]|log [n]|drive-log [n]|instance|kill}" >&2
+    echo "usage: $0 {sync|stage [scenario]|qa [scenario] [wait]|qa-log [n]|qa-running|log [n]|drive-log [n]|instance|kill}" >&2
     exit 2
     ;;
 esac
