@@ -2270,6 +2270,33 @@ mod tests {
     }
 
     #[test]
+    fn a_touch_keeps_the_rank_only_for_the_tabs_own_agent_at_its_own_ordinal() {
+        // The keep needs both halves: the agent is bound to THIS tab, and
+        // the tab holds that agent's own ordinal. A tab id reused before its
+        // prune still carries the dead tab's ordinal, which no agent bound
+        // here holds; and a row elsewhere at that ordinal proves nothing.
+        let mut s = Store::default();
+        let mut here = rec("u-here");
+        here.tab_id = Some(2);
+        here.commit_ord = 3;
+        s.agents.insert("u-here".into(), here);
+        let mut elsewhere = rec("u-elsewhere");
+        elsewhere.commit_ord = 7;
+        s.agents.insert("u-elsewhere".into(), elsewhere);
+        s.tab_order.insert(2, 7);
+        s.seq = 20;
+        assert_eq!(
+            touch_in(&mut s, 2, 1000),
+            Some(21),
+            "not its own rank: mint"
+        );
+        s.tab_order.insert(2, 3);
+        assert_eq!(touch_in(&mut s, 2, 1000), None, "its own rank: keep");
+        assert_eq!(s.tab_order[&2], 3);
+        assert_eq!(s.seq, 22, "the kept touch still bumps seq (§5)");
+    }
+
+    #[test]
     fn a_launch_carries_a_bound_rows_tab_rank_into_the_row() {
         // The prune carries a closed tab's ordinal into its row (R2), so a
         // close moves nothing. The launch unbinds too, and must carry the
