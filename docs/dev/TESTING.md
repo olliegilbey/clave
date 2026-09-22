@@ -143,7 +143,7 @@ before you ask for a merge.
 | **External-format parsing** | jsonl tail scanners, hook payloads | + a captured (not invented) fixture, and a dated measurement that the shape still exists in the field | — |
 | **CLI surface** | new subcommand or flag | + `Cli::try_parse_from` pin + one sandboxed end-to-end run in a **debug** build (clap's `debug_assert` only fires there) | — |
 | **Cross-process / IPC** | pipes, plugin shellouts, multi-writer store paths | + written argument for ordering/idempotency in the PR dossier; adversarial reviewer must attack it; tier-2 coverage once #47 lands | — |
-| **Across a relaunch** | anything one launch writes and the next launch reads — `last_live`, the baked layout, session-scoped state that is cleared at launch | + name every field the change reads and say whether it is session-scoped or agent-scoped; + a unit test for the SECOND launch (what does this record when the first session did nothing with it?); + a drive that quits and relaunches, or a stated hand-check that it did. **One launch cannot test this class** | `needs-live-validation` |
+| **Across a relaunch** | anything one launch writes and the next launch reads — the eager row the launch bakes, the session-scoped state (`tab_id`, `pane_id`, `Working`/`NeedsYou`) that the launch clears | + name every field the change reads and say whether it is session-scoped or agent-scoped; + a unit test for the SECOND launch (what does this record when the first session did nothing with it?); + a drive that quits and relaunches, or a stated hand-check that it did. **One launch cannot test this class** | `needs-live-validation` |
 | **Install / environment** | release mechanics, dev-install, `PATH`, doctor | + fresh-environment reasoning; assume nothing about the maintainer's machine | `needs-live-validation` |
 | **Visual / UX** | glyphs, colours, widths, fonts | human judgement only | `host-untestable` |
 
@@ -205,6 +205,7 @@ reached `main` or the field.
 | `Alt+w` close stranded Alt-↑/↓ nav until a mouse click (#23) | live sessions only | the beacon/anchor relationship only exists once real tabs open and close | `Effect::ReanchorVisit`, executor-gated; tier 2 will assert it (#47 first scenarios) |
 | `CliPipe did not complete within 1s` + empty-payload deliveries (#45) | present since the log's first line, v0.1.0 era; buried the real evidence during the v0.1.1 incident | no tier reads the zellij log; nothing asserts on pipe delivery | nothing yet — it is filed. Observability discipline (below) is the only detector |
 | `clave-organic` dead on arrival: the empty-payload guard special-cased only `clave-toggle`, so the payload-less organic pipe never reached its named match arm (#128) | live only: the Alt+o beacon never announced, so a departed bar kept `cursor` and `current_tab == own` **indefinitely** — an `Alt+Enter` 18 s after the switch still opened the pre-switch selection; the #100 commit-race fix keyed off this dead arm and was dead with it | the model test called `set_organic_pending` directly (green); `main.rs` is `test = false`, so nothing routes a real payload-less `PipeMessage` — the adapter seam is unmodelled, the classic pattern of this table | the payload-less branch now matches names (toggle AND organic); caught by the sandbox drive loop's re-validation of the very fix that depended on it — the checklist §5 beacon-gap item is the standing detector |
+| (The six #261 rows below are history: the live-set restore was removed on 2026-09-22, commit `9670fbf`, FOOTGUNS "The restore that sequenced tabs through the bar". The seam they teach is still real.) | | | |
 | Restored tabs rendered as TERMINAL rows, each agent shown a second time as dormant (#261) | the first live launch of the relaunch feature | every row-to-tab question read the store's bind, and a restored tab is by definition the state where the spawn exists and has not run, so no bind can exist. Green suite, because no fixture held a tab whose command had not run | `model::spawn_binds` joins on the pane's launch command; fixtures now hold cold tabs. Found by the maintainer looking at a screenshot |
 | A relaunch started the wrong agent (#261) | same launch | `last_live` is written in ascending tab id, i.e. creation order; the layout baked it in that order and focused the first. The fixture staged recency IN AGREEMENT with tab order, so a bake that ignored the rank passed | `setup::restore_rows` ranks before baking; the fixture now stages recency AGAINST tab order. Found by the maintainer asking whether the order was right |
 | The restore ranking reproduced only the inner layer of double-layer frecency (#261) | would have started the wrong agent whenever one repo held several middling rows | the rule had two homes. Both were tested, separately, and each was self-consistent | `clave_types::sort_live_block`, one home. Found by CodeRabbit |
@@ -233,9 +234,9 @@ Three rules follow, and they are cheap:
    construction, so a unit fixture must.
 3. **Drive every leg the SHELL runs on one pass, not one leg alone.** #261's
    restored bind had a retry cap and two tests pinning it, and the cap did
-   nothing: `settle_identity` calls `restored_bind_effects` and then
-   `identity_effects`, and `bind_effects` inside the second one clears the
-   shared ledger for exactly the uuids the first one writes. Both tests passed
+   nothing: `settle_identity` called the restore's bind leg and then
+   `identity_effects`, and `bind_effects` inside the second one cleared the
+   shared ledger for exactly the uuids the first one wrote. Both tests passed
    because each called one function. Measured at 12 subprocesses against a
    budget of 4. **When a test calls one model function, ask what the shell
    calls on the next line** — and if the answer touches the same state, the
@@ -626,7 +627,7 @@ where it came from:
 | What could change silently | What that costs in the field | Held by |
 |---|---|---|
 | `apply_relocation`'s whole body | a session whose worktree moved keeps the dead path, so the next open goes ✗ stale | `relocation_repoints_the_row_and_only_touches_branch_when_told` |
-| `moved_site`'s anchor branch (head cwd keys the file) | every session that entered a worktree mid-conversation refuses to resume at the next launch — the first tab dies naming the transcript, and the staggered restore waits on it | `a_session_that_walked_into_a_new_dir_resumes_where_its_file_is_keyed` |
+| `moved_site`'s anchor branch (head cwd keys the file) | every session that entered a worktree mid-conversation refuses to resume at the next launch — the first tab dies naming the transcript | `a_session_that_walked_into_a_new_dir_resumes_where_its_file_is_keyed` |
 | the launch bake taking `row.cwd` bare, or an unguarded substitute | launch and open bake different dirs for the same row, so a relaunch dies where a click resumes; a relocation target with a `"` in it fails the session create | `a_pane_is_born_where_the_conversation_went_else_at_the_row`, `the_launch_bakes_the_pane_cwd_only_when_it_passes_the_kdl_guard` |
 | `read_store`'s `NotFound` guard, widened | an unreadable store reads as empty, and `with_store_mut` renames an empty one over it — the fleet is gone | `an_unreadable_store_is_an_error_and_is_never_written_over` |
 | `apply_prune_tabs`' `seq` bump | every bar discards the prune push and re-fires the subprocess forever, while the closed tab's agent still renders live | `prune_tabs_removes_listed_stale_ids_order_safe_and_change_gated` |
