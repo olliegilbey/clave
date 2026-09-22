@@ -916,6 +916,13 @@ const _: () = assert!(
 mod tests {
     use super::*;
 
+    /// Ollie, 2026-09-22: standby lasts a day. Spelled in seconds here, so a
+    /// slip in the product that builds the constant cannot pass.
+    #[test]
+    fn standby_lasts_one_day() {
+        assert_eq!(STANDBY_SECS, 86_400);
+    }
+
     /// The release install is the only environment that bakes the versioned
     /// form, so this arm is the one no sandbox drive can reach. `clave-vault`
     /// is the near-miss the digit check exists for.

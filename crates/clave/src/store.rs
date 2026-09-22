@@ -2088,6 +2088,17 @@ mod tests {
     /// A launch forgets the tab, because zellij reuses ids, and drops a stamp
     /// older than a day (maintainer ruling, 2026-09-22).
     #[test]
+    fn a_standby_stamp_is_dormant_from_the_24th_hour_on() {
+        // Ollie, 2026-09-22: standby becomes dormant after 24 hours.
+        let sb = Standby {
+            since: 1_000,
+            tab: None,
+        };
+        assert!(sb.live_at(1_000 + clave_types::STANDBY_SECS - 1));
+        assert!(!sb.live_at(1_000 + clave_types::STANDBY_SECS));
+    }
+
+    #[test]
     fn a_standby_stamp_clears_on_bind_on_its_tabs_prune_and_on_expiry() {
         let stamp = |since, tab| Some(Standby { since, tab });
         let d = tempfile::tempdir().unwrap();
