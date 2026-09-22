@@ -2666,11 +2666,19 @@ if [[ "$P6C_RAN" == "yes" ]]; then
   done
   check "post-relaunch presses made one width ask each (a cooldown re-ask is an ask that landed on another tab)" \
     "$(swap_ask_count_since "$P6C_TOGGLE_MARK")" "2"
-  check "post-relaunch asks came from the bar in the standing tab ${P6C_STAND} (the beacon rests where the focus is)" \
+  # The render-path ask names its tab; a cooldown re-ask does not, so the
+  # count above is what sees a cooldown and this line is what sees the WRONG
+  # bar asking.
+  check "post-relaunch asks named the standing tab ${P6C_STAND} as their own (the beacon rests where the focus is)" \
     "$(sandbox_lines_since "$P6C_TOGGLE_MARK" 'clave-bar: swap-width' | grep -c "tab=Some(${P6C_STAND})" || true)" "2"
+  # Both sides are id sets. Two empty sets compare equal, so the asking set is
+  # pinned non-empty first; without that the line could stand alone and pass
+  # on a fleet that logged nothing.
+  P6C_ASKERS="$(instances_logging_since "$P6C_TOGGLE_MARK" 'clave-bar: swap-width' | tr '\n' ' ')"
+  check_nonempty "post-relaunch at least one sandbox instance asked" "$P6C_ASKERS"
   check "post-relaunch paints came from the bar that asked (the swap landed on the tab that asked for it)" \
     "$(instances_logging_since "$P6C_TOGGLE_MARK" 'clave-bar: painted' | tr '\n' ' ')" \
-    "$(instances_logging_since "$P6C_TOGGLE_MARK" 'clave-bar: swap-width' | tr '\n' ' ')"
+    "$P6C_ASKERS"
 fi
 
 # ===========================================================================

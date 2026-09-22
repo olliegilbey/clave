@@ -456,9 +456,13 @@ live_tab_ids() {
 # tab_position ordering — a rank join, deliberately, because it does not care
 # whether zellij counts tab positions from 0 or from 1.
 #
-# FIRST LIVE RUN PENDING (2): the join assumes the dump lists tabs in tab
-# position order. Every caller prints the id it read, so a wrong join shows up
-# as a focus that never matches anything rather than as a silent pass.
+# The join assumes the dump lists tabs in tab position order. SETTLED
+# (runs 24 and 25, 2026-09-22): phase 6c compares this id against the
+# `tab=Some(N)` the bar computes for itself from its own frames, on both
+# hosts, and they agree. Every earlier caller anchored to whatever it read, so
+# a wrong join passed self-consistently; 6c is the first cross-check. If 6c's
+# `tab=Some(N)` line goes red while its ask count is green, suspect this join
+# before the bar.
 focused_tab_id() {
   local dump idx panes
   dump="$(ct_dump_layout)" || return 1

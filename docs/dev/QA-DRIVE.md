@@ -8,6 +8,19 @@ owns everything they structurally cannot reach._
 
 ## Run ledger — the useful recent history
 
+- **runs 24 and 25, 2026-09-22 — the Alt+c flap on a restored fleet, caught
+  by a new 6c check, fixed, green on both machines.** Run 24 on the devbox
+  (232 checks) and run 25 on the Mac (233 checks), 0 failures each. After
+  the relaunch verdict, 6c now presses the toggle twice in the tab the
+  restore left focused, with NO beacon anchor, and asserts one width ask per
+  press from that tab's bar, painted by that bar. Before the fix the beacon
+  ended every restore on the LAST tab built: the first tab's bar asked
+  nothing, the last tab's bar asked, and zellij applied each ask to the
+  first tab. Phase 5 never saw it because it pipes the beacon before it
+  presses. The trace on both hosts: one `swap-width` line per press from
+  the standing tab's instance, its `painted` line about 30 ms later, no
+  other instance asking.
+
 - **run 23, 2026-09-22 — the FIRST REMOTE DRIVE, on the devbox, twelve
   phases green, 224 checks, 0 failures.** `just remote-qa qa-fleet` from a
   Mac worktree; the box has `pane_frames false` and zellij 0.45.1, which no
@@ -139,7 +152,7 @@ loudly and stops the run; later phases assume earlier truth.
 | 5c | **Terminal facts (OS side)** | a real `sleep` typed into a plain shell tab, behind a shell allowlist, while that tab is focused; then focus moves to an agent tab with the command still running | leg A: at least one sandbox bar learns the change — the OS-facts pipeline (`get_pane_cwd`/`get_pane_running_command` → `apply_pane_facts` → the terminal row) delivers end to end, which nothing tested before. Leg B MEASURES whether a second instance learns it from another tab, the open question under the store-backed fix, and asserts nothing: the facts are per-instance today, so "every bar agrees" is not yet true and a drive must not go red on a known-open defect | the 2026-09-12 flicker (a terminal row with facts under one tab and none under another), #206, #239 |
 | 6 | Quiescence | idle 60s | evlog and store `seq` flat; zellij log flat after the mark for sandbox-attributable lines only (the shared log is never globally flat with a live maintainer fleet — see Delivery accounting) | P17, B19/B20, drive step 6 |
 | 6b | **Isolation witness** | nothing (reads this run's own evidence) | zero `push-refused` events across the run — no push was aimed at a bar that does not own this store; the ambient zellij identity is STILL the sandbox's at the END of the run, not just at the start; the inherited session's name appears nowhere as a push target | FOOTGUNS #281, the 2026-09-11 incident |
-| 6c | **Relaunch (the second launch)** | quit the sandbox session, then ask the maintainer to `just launch` it again | the restored set comes back the SAME SIZE, and holds the same uuids, after a first session in which only ONE tab was visited; EVERY restored row carries a `tab_id` in the store, and each row except the first carries it BEFORE its agent runs — the first is the eager one, which starts at launch, so the timing half of that assertion applies only to the held rows; a tab closed in session N is absent in session N+1; then two `clave-toggle` presses in the tab the restore left focused, with NO beacon anchor, each ONE width ask from that tab's bar and painted by it (the restore must leave the beacon where the focus is — the devbox flap of 2026-09-22 left it on the last tab built) | the relaunch seam (TESTING.md's escape record); #261's decay |
+| 6c | **Relaunch (the second launch)** | quit the sandbox session, then ask the maintainer to `just launch` it again | the restored set comes back the SAME SIZE, and holds the same uuids, after a first session in which only ONE tab was visited; EVERY restored row carries a `tab_id` in the store, and each row except the first carries it BEFORE its agent runs — the first is the eager one, which starts at launch, so the timing half of that assertion applies only to the held rows; a tab closed in session N is absent in session N+1. Then the beacon leg: two `clave-toggle` presses in the tab the restore left focused, with NO anchor pipe first. Each press is ONE width ask, from that tab's bar, painted by that bar. The restore must leave the beacon where the focus is; the devbox flap of 2026-09-22 left it on the last tab built | the relaunch seam (TESTING.md's escape record); #261's decay |
 | 7 | Teardown | nothing | prints the kill pair (the agent may run it once both eyeballs are in) | drive step 9 |
 
 **Why 5b could not catch the 2026-09-14 red-glyph defect.** Its event
