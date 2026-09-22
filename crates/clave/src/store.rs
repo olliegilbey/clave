@@ -68,7 +68,7 @@ impl Standby {
     /// Still standby at `now`? A stamp from the future (a clock step back)
     /// counts as fresh rather than panicking on the subtraction.
     pub fn live_at(&self, now: u64) -> bool {
-        now.saturating_sub(self.since) < clave_types::STANDBY_SECS
+        clave_types::standby_live(self.since, now)
     }
 }
 
@@ -513,10 +513,9 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
                 tab_id: r.tab_id,
                 pane_id: r.pane_id,
                 stale: r.stale,
-                // Decided here, against the host clock: the bar has none.
-                // A bound row is live whatever the stamp says.
-                standby: r.tab_id.is_none()
-                    && r.standby_stamp.is_some_and(|sb| sb.live_at(now_unix())),
+                // The bar decides expiry on its own clock, and a bound row
+                // is live whatever the stamp says.
+                standby_since: r.standby_stamp.map(|sb| sb.since),
                 standby_tab: r.standby_stamp.and_then(|sb| sb.tab),
                 title: r.title.clone(),
                 summary: r.summary.clone(),
@@ -2179,6 +2178,11 @@ mod tests {
             "its tab was closed"
         );
         assert_eq!(s.agents["u-other-tab"].standby_stamp, stamp(now, Some(5)));
+        // The wire names the stamp's tab, so a bar prunes it like a bound
+        // tab: dropped here, a tab the human closed came back as standby.
+        let wire = snapshot_from(&s);
+        let other = wire.agents.iter().find(|a| a.uuid == "u-other-tab");
+        assert_eq!(other.and_then(|a| a.standby_tab), Some(5));
 
         clear_session_order(&p).unwrap();
         let s = read_store(&p).unwrap();
@@ -2188,7 +2192,10 @@ mod tests {
         let standby: Vec<&str> = wire
             .agents
             .iter()
-            .filter(|a| a.standby)
+            .filter(|a| {
+                a.standby_since
+                    .is_some_and(|t| clave_types::standby_live(t, now))
+            })
             .map(|a| a.uuid.as_str())
             .collect();
         // u-bind is still bound at the launch, so the launch stamps it anew.

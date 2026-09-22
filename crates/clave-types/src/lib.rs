@@ -388,12 +388,14 @@ pub struct Agent {
     /// pre-field payloads parseable.
     #[serde(default)]
     pub stale: bool,
-    /// A STANDBY row: its agent ended because the session quit, with its tab
-    /// still open, less than [`STANDBY_SECS`] ago. The host decides, because
-    /// the bar has no clock. Arriving on a standby row opens it; a dormant
-    /// row waits for Alt+Enter. `default` keeps pre-field payloads parseable.
+    /// When the row's agent went down with the session, its tab still open
+    /// (unix s). A dormant row is STANDBY while [`standby_live`] holds at the
+    /// bar's own clock: an idle fleet writes no snapshot for hours, so a flag
+    /// decided at the write went stale overnight (swarm review, 2026-09-23).
+    /// Arriving on a standby row opens it; a dormant row waits for
+    /// Alt+Enter. `default` keeps pre-field payloads parseable.
     #[serde(default)]
-    pub standby: bool,
+    pub standby_since: Option<u64>,
     /// The tab the agent held when it ended, in THIS zellij session only
     /// (the launch clears it: zellij reuses ids). The bar prunes it like a
     /// bound tab, so a tab close that the agent's SessionEnd beat to the store
@@ -596,6 +598,13 @@ pub const LABEL_SEP: &str = " \u{00b7} ";
 /// (maintainer ruling, 2026-09-22): a day. After that it is dormant, and
 /// only Alt+Enter opens it.
 pub const STANDBY_SECS: u64 = 24 * 60 * 60;
+
+/// Is a row that went down at `since` still standby at `now`? The one rule,
+/// for the host's launch pass and the bar's clock alike. A `since` in the
+/// future (a clock step back) counts as fresh rather than wrapping.
+pub fn standby_live(since: u64, now: u64) -> bool {
+    now.saturating_sub(since) < STANDBY_SECS
+}
 
 // ── sidebar geometry ────────────────────────────────────────────────────────
 //
@@ -1158,7 +1167,7 @@ mod tests {
             tab_id: None,
             pane_id: None,
             stale: false,
-            standby: false,
+            standby_since: None,
             standby_tab: None,
             title: None,
             summary: String::new(),
@@ -1200,7 +1209,7 @@ mod tests {
                 tab_id: None,
                 pane_id: None,
                 stale: false,
-                standby: false,
+                standby_since: None,
                 standby_tab: None,
                 title: None,
                 summary: String::new(),
@@ -1241,7 +1250,7 @@ mod tests {
             tab_id: Some(4),
             pane_id: None,
             stale: false,
-            standby: false,
+            standby_since: None,
             standby_tab: None,
             title: None,
             summary: String::new(),
@@ -1284,7 +1293,7 @@ mod tests {
             tab_id: None,
             pane_id: None,
             stale: true,
-            standby: false,
+            standby_since: None,
             standby_tab: None,
             title: None,
             summary: String::new(),
@@ -1329,7 +1338,7 @@ mod tests {
             tab_id: None,
             pane_id: None,
             stale: false,
-            standby: false,
+            standby_since: None,
             standby_tab: None,
             title: Some("CLA-MAIN".into()),
             summary: "fix the flaky auth".into(),
@@ -1388,7 +1397,7 @@ mod tests {
             tab_id: None,
             pane_id: None,
             stale: false,
-            standby: false,
+            standby_since: None,
             standby_tab: None,
             title: None,
             summary: String::new(),
@@ -1475,7 +1484,7 @@ mod tests {
             tab_id: None,
             pane_id: None,
             stale: false,
-            standby: false,
+            standby_since: None,
             standby_tab: None,
             title: None,
             summary: String::new(),

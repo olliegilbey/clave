@@ -1480,11 +1480,14 @@ impl BarModel {
         !tab_live && !pane_live
     }
 
-    /// A dormant row the last quit left live, within the host's 24 hours
-    /// (`clave_types::STANDBY_SECS`; the bar has no clock). A stale row
-    /// cannot open, so it stays plain dormant.
+    /// A dormant row the last quit left live, less than a day ago by the
+    /// bar's own clock (`clave_types::standby_live`). A stale row cannot
+    /// open, so it stays plain dormant.
     fn is_standby(&self, a: &Agent) -> bool {
-        a.standby && !a.stale && self.is_dormant(a)
+        a.standby_since
+            .is_some_and(|t| clave_types::standby_live(t, self.now))
+            && !a.stale
+            && self.is_dormant(a)
     }
 
     /// Drop in-flight marks that resolved: the store bound the row to a tab or
@@ -3306,7 +3309,7 @@ mod tests {
             tab_id,
             pane_id: None,
             stale: false,
-            standby: false,
+            standby_since: None,
             standby_tab: None,
             title: None,
             summary: String::new(),
@@ -3351,7 +3354,7 @@ mod tests {
             tab_id,
             pane_id: None,
             stale: false,
-            standby: false,
+            standby_since: None,
             standby_tab: None,
             title: None,
             summary: String::new(),
@@ -8472,12 +8475,14 @@ mod tests {
     /// one dormant row, and one standby row whose cwd is gone. Ordinals put
     /// the dormant row HIGHEST, so a standby row above it is the block
     /// rule, not the number.
+    const STANDBY_FLEET_SINCE: u64 = 1_000;
+
     fn standby_fleet() -> BarModel {
         let mut m = BarModel::default();
         m.apply_tabs(vec![tab(1, 0, "one", true), tab(2, 1, "two", false)]);
         let row = |uuid: &str, ord: u64, standby: bool, stale: bool| Agent {
             commit_ord: ord,
-            standby,
+            standby_since: standby.then_some(STANDBY_FLEET_SINCE),
             stale,
             ..agent(uuid, Status::Idle, None)
         };
@@ -8517,6 +8522,25 @@ mod tests {
         assert!(
             m.rows()[2].1.dormant,
             "standby fades with the dormant block"
+        );
+    }
+
+    #[test]
+    fn a_standby_row_turns_dormant_on_the_bars_own_clock() {
+        // Swarm review, 2026-09-23: the host decided expiry once, when it
+        // wrote the snapshot, and an idle fleet writes nothing overnight. A
+        // row past its 24 hours still read standby in the morning, and the
+        // first walk onto it spawned an agent. The bar's clock decides.
+        let mut m = standby_fleet();
+        let end = STANDBY_FLEET_SINCE + clave_types::STANDBY_SECS;
+        m.tick(end - 1);
+        assert_eq!(status_at(&m, 2), Some(RowStatus::Standby));
+        m.tick(end);
+        assert_eq!(status_at(&m, 2), Some(RowStatus::Dormant));
+        assert!(
+            keys(&m).iter().all(|k| !matches!(k, RowKey::Standby(_))),
+            "{:?}",
+            keys(&m)
         );
     }
 
@@ -8612,7 +8636,7 @@ mod tests {
         m.apply_panes(panes_at(&[(0, 100, 5), (1, 101, 6)]));
         m.apply_tabs(vec![tab(10, 0, "a", true), tab(11, 1, "b", false)]);
         let stamped = Agent {
-            standby: true,
+            standby_since: Some(0),
             standby_tab: Some(11),
             ..agent("u-s", Status::Idle, None)
         };
