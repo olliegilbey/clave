@@ -809,15 +809,20 @@ pub struct BarModel {
     /// the human CLOSES re-enters — so the bar would reopen the tab they just
     /// shut, and keep doing it. The restore owes each row exactly one open.
     restore_sent: BTreeSet<String>,
-    /// Rows this bar's restore opened whose beacon steal is not yet answered
-    /// (#261). Filled beside `restore_sent`; drained only when a re-anchor
-    /// EMITS for the restore — see `beacon_on_a_restored_tab`.
+    /// Rows this bar's restore opened whose newborn has not yet stolen the
+    /// beacon (#261). Filled beside `restore_sent`; a row leaves when the
+    /// beacon that IS its steal arrives — see `note_restore_steal`.
+    restore_reanchor_owed: BTreeSet<String>,
+    /// A restored newborn's announce has moved the beacon off this owner's
+    /// tab and no re-anchor has answered it yet. Armed by the beacon itself
+    /// in `note_restore_steal`; spent when the re-anchor EMITS, or when a
+    /// later beacon proves the human walked. Never by a frame.
     ///
-    /// Its own set rather than `organic_pending`, which [`BarModel::beacon`]
+    /// Its own flag rather than `organic_pending`, which [`BarModel::beacon`]
     /// clears on the grounds that an arriving beacon is truth: right for
     /// Alt+o, backwards here, where the arriving beacon IS the thing to undo.
     /// A tidy that makes `beacon()` clear this too deletes the fix.
-    restore_reanchor_owed: BTreeSet<String>,
+    restore_steal_pending: bool,
     /// The beacon has named two different tabs in this instance's lifetime —
     /// i.e. the focus has moved at least once since this bar was born (#261).
     /// See [`BarModel::beacon`] for what it is worth, and `run_held_effect`
@@ -1008,6 +1013,7 @@ impl BarModel {
     /// it elects the nav executor; it never reorders (§6.6: focus is not a
     /// commitment).
     pub fn beacon(&mut self, tab_id: usize) {
+        self.note_restore_steal(tab_id);
         self.set_beacon(tab_id);
         self.organic_pending = false; // truth arrived; leftover flags are poison
         // A new beacon re-anchors the election, so whatever an earlier tab
@@ -1958,7 +1964,8 @@ impl BarModel {
             .any(|a| a.uuid == owner && a.tab_id == Some(own))
     }
 
-    /// Does the beacon name a tab this bar's restore built?
+    /// Is this arriving beacon a restored newborn's steal? Decide it HERE,
+    /// at the pipe, where the row is exact.
     ///
     /// A tab made by `zellij action new-tab` is born focused, so its newborn
     /// bar announces itself and moves every beacon onto it; `clave open` then
@@ -1967,43 +1974,49 @@ impl BarModel {
     /// pair is the steal, and `apply_tabs` answers it with a re-anchor.
     ///
     /// The announce can land on either side of the bound snapshot, so the
-    /// tab is known two ways: while an owed restore open is in flight, a
-    /// beacon off this tab MAY be the newborn's; once the row is bound, the
-    /// beacon names the tab an owed row holds. Whether the human is really
-    /// standing here is not this predicate's question: `apply_tabs` emits
-    /// only when the frame flags this tab active and the beacon disagrees.
-    /// A hidden owner gets no such frame (FOOTGUNS, TabUpdate reaches the
-    /// active tab), so a human walk during the restore is left alone.
+    /// row is known two ways: bound, the beacon names the tab an owed row
+    /// holds; not yet bound, the beacon names a tab no row holds while an
+    /// owed open is in flight, and only one open is ever in flight. Either
+    /// way that ROW leaves the owed set, and no other: the box (run 26,
+    /// 2026-09-22) answered tab 3's steal after tab 4's open had gone out,
+    /// and a drain of the whole set on that emit left tab 4's steal
+    /// unanswered — the flap, back.
     ///
-    /// Derived, not claimed. A one-shot flag set at the open and spent on the
-    /// next frame lost the race twice: spent on a frame that beat the tab
-    /// (2026-09-17), then spent on the frame between the bound snapshot and
-    /// the birth announce (devbox, 2026-09-22, the Alt+c flap). Reading the
-    /// beacon directly has no window to lose.
-    ///
-    /// Bounded twice. Per stray: the re-anchor moves the beacon home, and
-    /// only another bar's pipe can move it back. Per restore: the owed set
-    /// is drained when the re-anchor emits, so a rule that read only
-    /// `restore_sent` — armed for the session — cannot later drag the beacon
-    /// off a restored tab the human walked to (review, 2026-09-22).
-    ///
-    /// The own-tab guard repeats the emit gate on purpose: it keeps the
-    /// predicate honest for a direct caller, and it covers a frame that flags
-    /// two tabs active, where the position join and `find(active)` can name
-    /// different tabs.
-    fn beacon_on_a_restored_tab(&self) -> bool {
-        let Some(current) = self.current_tab else {
-            return false;
-        };
-        if !self.owns_the_restore() || self.own_tab() == Some(current) {
-            return false;
+    /// A beacon on any other tab is the human's, and a human's truth ends
+    /// the claim. That is what bounds it: after the restore the owed set is
+    /// empty, so a later walk to a restored tab arms nothing, and a stale
+    /// frame flagging the owner's tab active drags nothing back (review,
+    /// 2026-09-22). Armed by the announce and spent on emit, there is no
+    /// frame that can spend it early — the one-shot flag spent on the next
+    /// frame lost that race twice (2026-09-17, 2026-09-22; FOOTGUNS).
+    fn note_restore_steal(&mut self, tab_id: usize) {
+        if self.own_tab() == Some(tab_id) {
+            self.restore_steal_pending = false;
+            return;
         }
-        let owed = &self.restore_reanchor_owed;
-        owed.iter().any(|u| self.opening.contains(u))
-            || self
-                .agents
+        let mut stolen: Vec<String> = self
+            .agents
+            .iter()
+            .filter(|a| a.tab_id == Some(tab_id) && self.restore_reanchor_owed.contains(&a.uuid))
+            .map(|a| a.uuid.clone())
+            .collect();
+        let tab_is_unbound = !self.agents.iter().any(|a| a.tab_id == Some(tab_id));
+        if stolen.is_empty() && tab_is_unbound {
+            stolen = self
+                .restore_reanchor_owed
                 .iter()
-                .any(|a| a.tab_id == Some(current) && owed.contains(&a.uuid))
+                .filter(|u| self.opening.contains(*u))
+                .cloned()
+                .collect();
+        }
+        if stolen.is_empty() {
+            self.restore_steal_pending = false;
+            return;
+        }
+        for u in stolen {
+            self.restore_reanchor_owed.remove(&u);
+        }
+        self.restore_steal_pending = true;
     }
 
     /// The head of the queue, whether or not this instant is a good time to
@@ -2058,7 +2071,7 @@ impl BarModel {
         self.restore_sent.insert(uuid.clone());
         // The new tab will take the focus and `clave open` will hand it back.
         // Whatever the bar born there says about itself in between, the beacon
-        // belongs on this tab — see `beacon_on_a_restored_tab`.
+        // belongs on this tab — see `note_restore_steal`.
         self.restore_reanchor_owed.insert(uuid.clone());
         self.open_effects(&uuid, Some(home))
     }
@@ -2428,10 +2441,10 @@ impl BarModel {
         // arrives.
         let birth = !self.birth_announced;
         let organic = self.organic_pending;
-        // #261's third trigger. Not a claim: derived from the beacon itself,
-        // so it cannot be spent early or arrive late — see
-        // `beacon_on_a_restored_tab`.
-        let restore_home = self.beacon_on_a_restored_tab();
+        // #261's third trigger. Armed by the beacon that is the steal and
+        // spent only on emit, so no frame can spend it early — see
+        // `note_restore_steal`.
+        let restore_home = self.restore_steal_pending;
         if let Some(active_id) = self.tabs.iter().find(|t| t.active).map(|t| t.tab_id) {
             if self.current_tab == Some(active_id) {
                 // The beacon ALREADY names the active tab: both claims are
@@ -2450,9 +2463,7 @@ impl BarModel {
                 effects.push(Effect::AnnounceVisit { tab_id: active_id });
             } else if (organic || stranded || restore_home) && self.elects_presumed() {
                 self.organic_pending = false;
-                if restore_home {
-                    self.restore_reanchor_owed.clear();
-                }
+                self.restore_steal_pending = false;
                 self.set_beacon(active_id);
                 effects.push(Effect::ReanchorVisit { tab_id: active_id });
             }
@@ -12377,7 +12388,7 @@ mod tests {
             "a frame with no new beacon re-anchors nothing: {second:?}"
         );
         assert!(
-            !m.beacon_on_a_restored_tab(),
+            !m.restore_steal_pending,
             "the trigger is off while the beacon is home"
         );
     }
@@ -12406,7 +12417,7 @@ mod tests {
             "premise: one open sent"
         );
         assert!(
-            !m.beacon_on_a_restored_tab(),
+            !m.restore_steal_pending,
             "a beacon at home is nobody's steal, open in flight or not"
         );
         // `clave open` binds the row before the newborn bar has spoken.
@@ -12473,12 +12484,12 @@ mod tests {
         assert!(!m.restore_pending(), "premise: the restore is done");
         m.beacon(10);
         assert!(
-            !m.beacon_on_a_restored_tab(),
+            !m.restore_steal_pending,
             "u-c's tab was live before the restore; the beacon there is the human's"
         );
         m.beacon(12);
         assert!(
-            m.beacon_on_a_restored_tab(),
+            m.restore_steal_pending,
             "u-b's tab is the one the restore built"
         );
     }
@@ -12537,6 +12548,97 @@ mod tests {
             m.current_tab,
             Some(12),
             "the beacon stays where the human is"
+        );
+    }
+
+    /// The box trace (run 26, 17:06:12): the owner answered tab 3's steal
+    /// AFTER it had already sent the open for tab 4. A drain that cleared
+    /// every owed row on that emit took tab 4's row with it, so tab 4's
+    /// announce found nothing owed and the beacon rested there — the flap,
+    /// back. Each steal is its own row; answering one must not answer the
+    /// next.
+    #[test]
+    fn answering_one_steal_leaves_the_next_open_owed() {
+        let mut m = focused_bar();
+        m.apply_snapshot(snap_live(
+            9,
+            vec![
+                agent("u-a", Status::Idle, Some(11)),
+                agent("u-b", Status::Idle, None),
+                agent("u-c", Status::Idle, None),
+            ],
+            &["u-a", "u-b", "u-c"],
+        ));
+        // u-b binds; the queue sends u-c at once.
+        let fx = m.apply_snapshot(snap_live(
+            10,
+            vec![
+                agent("u-a", Status::Idle, Some(11)),
+                agent("u-b", Status::Idle, Some(12)),
+                agent("u-c", Status::Idle, None),
+            ],
+            &["u-a", "u-b", "u-c"],
+        ));
+        assert_eq!(
+            opens(&fx),
+            vec!["u-c".to_string()],
+            "premise: u-c in flight"
+        );
+        // Only now does u-b's newborn announce arrive, and the owner answers.
+        m.beacon(12);
+        let fx = m.apply_tabs(vec![
+            tab(10, 0, "a", false),
+            tab(11, 1, "b", true),
+            tab(12, 2, "c", false),
+        ]);
+        assert!(
+            fx.contains(&Effect::ReanchorVisit { tab_id: 11 }),
+            "premise: tab 12's steal answered"
+        );
+        // u-c's newborn announces from a tab the store has not bound yet.
+        m.beacon(13);
+        let fx = m.apply_tabs(vec![
+            tab(10, 0, "a", false),
+            tab(11, 1, "b", true),
+            tab(12, 2, "c", false),
+            tab(13, 3, "d", false),
+        ]);
+        assert!(
+            fx.contains(&Effect::ReanchorVisit { tab_id: 11 }),
+            "u-c's steal is still owed an answer: {fx:?}"
+        );
+        assert_eq!(
+            m.current_tab,
+            Some(11),
+            "the beacon rests on the owner's tab"
+        );
+    }
+
+    /// A beacon on a tab that already holds a row is that row's tab, not the
+    /// in-flight open's: the human walked there while the restore was
+    /// building. Only a beacon on a tab NO row holds can be the unbound
+    /// newborn's.
+    #[test]
+    fn a_walk_to_a_live_tab_during_an_open_is_not_the_newborns_steal() {
+        let mut m = focused_bar();
+        let fx = m.apply_snapshot(snap_live(
+            9,
+            vec![
+                agent("u-a", Status::Idle, Some(11)),
+                agent("u-c", Status::Idle, Some(10)),
+                agent("u-b", Status::Idle, None),
+            ],
+            &["u-a", "u-c", "u-b"],
+        ));
+        assert_eq!(
+            opens(&fx),
+            vec!["u-b".to_string()],
+            "premise: u-b in flight"
+        );
+        m.beacon(10);
+        assert!(
+            !m.restore_steal_pending,
+            "tab 10 is u-c's, live before the restore; the human walked"
         );
     }
 
