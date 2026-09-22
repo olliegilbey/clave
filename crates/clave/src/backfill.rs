@@ -433,6 +433,7 @@ mod tests {
             tab_id: None,
             pane_id: None,
             stale: false,
+            standby_stamp: None,
             title: None,
             summary: String::new(),
             default_branch: None,

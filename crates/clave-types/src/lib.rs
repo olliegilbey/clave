@@ -388,6 +388,18 @@ pub struct Agent {
     /// pre-field payloads parseable.
     #[serde(default)]
     pub stale: bool,
+    /// A STANDBY row: its agent ended because the session quit, with its tab
+    /// still open, less than [`STANDBY_SECS`] ago. The host decides, because
+    /// the bar has no clock. Arriving on a standby row opens it; a dormant
+    /// row waits for Alt+Enter. `default` keeps pre-field payloads parseable.
+    #[serde(default)]
+    pub standby: bool,
+    /// The tab the agent held when it ended, in THIS zellij session only
+    /// (the launch clears it: zellij reuses ids). The bar prunes it like a
+    /// bound tab, so a tab close that the agent's SessionEnd beat to the store
+    /// still turns the row dormant, not standby.
+    #[serde(default)]
+    pub standby_tab: Option<usize>,
     /// Claude's session rename (`custom-title` in the transcript) — the
     /// filled chip in design-lock §2's 7-column title field. `None` = never
     /// renamed, which is the majority of rows. Structural rather than parsed
@@ -579,6 +591,11 @@ pub struct Register {
 /// from a clean-looking diff. S4 §4.1 and S5 §3.1 each proposed this constant
 /// independently — it lands once, here (#69).
 pub const LABEL_SEP: &str = " \u{00b7} ";
+
+/// How long a row stays STANDBY after its agent ended with the session
+/// (maintainer ruling, 2026-09-22): a day. After that it is dormant, and
+/// only Alt+Enter opens it.
+pub const STANDBY_SECS: u64 = 24 * 60 * 60;
 
 // ── sidebar geometry ────────────────────────────────────────────────────────
 //
@@ -1134,6 +1151,8 @@ mod tests {
             tab_id: None,
             pane_id: None,
             stale: false,
+            standby: false,
+            standby_tab: None,
             title: None,
             summary: String::new(),
             worktree: None,
@@ -1174,6 +1193,8 @@ mod tests {
                 tab_id: None,
                 pane_id: None,
                 stale: false,
+                standby: false,
+                standby_tab: None,
                 title: None,
                 summary: String::new(),
                 worktree: None,
@@ -1213,6 +1234,8 @@ mod tests {
             tab_id: Some(4),
             pane_id: None,
             stale: false,
+            standby: false,
+            standby_tab: None,
             title: None,
             summary: String::new(),
             worktree: None,
@@ -1254,6 +1277,8 @@ mod tests {
             tab_id: None,
             pane_id: None,
             stale: true,
+            standby: false,
+            standby_tab: None,
             title: None,
             summary: String::new(),
             worktree: None,
@@ -1297,6 +1322,8 @@ mod tests {
             tab_id: None,
             pane_id: None,
             stale: false,
+            standby: false,
+            standby_tab: None,
             title: Some("CLA-MAIN".into()),
             summary: "fix the flaky auth".into(),
             worktree: Some("/x/.claude/worktrees/wt".into()),
@@ -1354,6 +1381,8 @@ mod tests {
             tab_id: None,
             pane_id: None,
             stale: false,
+            standby: false,
+            standby_tab: None,
             title: None,
             summary: String::new(),
             worktree: None,
@@ -1439,6 +1468,8 @@ mod tests {
             tab_id: None,
             pane_id: None,
             stale: false,
+            standby: false,
+            standby_tab: None,
             title: None,
             summary: String::new(),
             worktree: None,

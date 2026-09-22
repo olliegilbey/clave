@@ -51,6 +51,25 @@ pub enum LabelSource {
     Summary,
 }
 
+/// When a row's agent ended with the session, and the tab it held then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Standby {
+    /// unix s of the SessionEnd. Standby lasts [`clave_types::STANDBY_SECS`].
+    pub since: u64,
+    /// The tab id in the session that ended. Session-scoped: the launch
+    /// clears it, because zellij reuses tab ids.
+    #[serde(default)]
+    pub tab: Option<usize>,
+}
+
+impl Standby {
+    /// Still standby at `now`? A stamp from the future (a clock step back)
+    /// counts as fresh rather than panicking on the subtraction.
+    pub fn live_at(&self, now: u64) -> bool {
+        now.saturating_sub(self.since) < clave_types::STANDBY_SECS
+    }
+}
+
 /// One store row (spec §5's agent record, minus the deleted `archived`).
 /// Mirrors `clave_types::Agent` plus the store-only `label_source`, which the
 /// plugin never needs to see. `worktree` was store-only until #69 put it on
@@ -115,6 +134,14 @@ pub struct AgentRecord {
     /// pre-field payloads parseable.
     #[serde(default)]
     pub stale: bool,
+    /// Set when the agent ENDED with its tab still open and not by the
+    /// human's own hand (`hook::apply_hook_pane`, SessionEnd). A zellij quit
+    /// fires SessionEnd for every running agent and the hook unbinds the tab
+    /// (QA run 12, 2026-09-16), so "was live" must be stamped here, at the
+    /// end: by the next launch the binds are gone. Cleared by a bind, and by a
+    /// prune of the tab it names (the human closed that tab).
+    #[serde(default)]
+    pub standby_stamp: Option<Standby>,
     /// Claude's session rename, from the transcript's `custom-title` line.
     /// Store-side home for the wire field of the same name (#69). Written by
     /// `hook::refresh_row_fields`, held last-non-empty — `None` means the
@@ -483,6 +510,11 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
                 tab_id: r.tab_id,
                 pane_id: r.pane_id,
                 stale: r.stale,
+                // Decided here, against the host clock: the bar has none.
+                // A bound row is live whatever the stamp says.
+                standby: r.tab_id.is_none()
+                    && r.standby_stamp.is_some_and(|sb| sb.live_at(now_unix())),
+                standby_tab: r.standby_stamp.and_then(|sb| sb.tab),
                 title: r.title.clone(),
                 summary: r.summary.clone(),
                 // Projected now — `AgentRecord` has carried this since §6.3
@@ -1038,6 +1070,7 @@ mod tests {
             tab_id: None,
             pane_id: None,
             stale: false,
+            standby_stamp: None,
             title: None,
             summary: String::new(),
             default_branch: None,

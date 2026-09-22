@@ -979,6 +979,7 @@ fn agent_record(
         tab_id: None,
         pane_id: None,
         stale: false,
+        standby_stamp: None,
         title: a.title.map(String::from),
         summary: a.summary.to_string(),
         // S7 (#62). The LEVEL is not seeded — it is derived here from the same
