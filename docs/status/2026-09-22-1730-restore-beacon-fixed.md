@@ -69,3 +69,15 @@ Check `./scripts/remote-qa.sh qa-log 20` first: if run 28 has started, follow it
 ## Suggested Skills
 
 `catch-up`; `superpowers:test-driven-development` if anything goes red in the model; `superpowers:requesting-code-review` before the PR.
+
+## Amendment, 17:35 — run 28 went red in phase 2, not on the fix
+
+- Run 28 (box, `6cbc67e` + `b08bf7f`): preflight green, phase 2 rung 1 `tab_id bound` FAIL after 10 s. The minted row (`560a5cd3…`) holds `tab_id null, pane_id null` still. Its tab was created, its bar (id 2) loaded, resolved (`bind leg live again (tab 1)`), and piped `beacon 1`; both bars dropped the `clave-register` pipe as empty, but run 26 shows the SAME drops and CliPipe timeouts at its rung 1 and bound fine. So the register's store write (pane_id) is what did not land, and that is host-side (`clave spawn`/`add`/hook), which no commit on this branch touches. | **Checked** | box `zellij.log` 17:25:05; `clave dev status` on the box
+- Two suspects, unmeasured: a flake; or the drive now running detached as `env QA_… ./scripts/qa-drive.sh` (the `qa` verb after `b08bf7f`) instead of under `just qa`. The `drive` verb used that form already but had never been run. | **Inferred** | `scripts/remote-qa.sh` `qa)`
+- Mac drive is staged (`/tmp/clave-local-qa.log`, `nohup just qa qa-fleet 3600`) at the same commit; its phase 2 runs 30 s after the launch and answers "regression or box-only". | **Checked** | this session
+- Box sandbox `clave-test` is UP from run 28 (broken row, drive finished). Kill with `./scripts/remote-qa.sh kill` before restaging.
+
+### Next Steps (supersede the list above)
+
+1. Mac: the human launches; read `/tmp/clave-local-qa.log` for `P2-bind-ladder`. Green → box-only, rerun the box once with the `qa` verb changed to detach `just qa` again (keep the attached stage: `remote "just sandbox …"`, then `nohup setsid env … just qa-drive`-equivalent — or simplest, revert the drive line to `nohup setsid just qa …` and accept that `just qa` restages, which is harmless after an attached stage). Red → the fix regressed the bind; read bar 2's lines and the `Bind` gate (`model.rs` ~1821, `elects_confirmed`), and check whether `note_restore_steal` in `beacon()` changes anything before `set_beacon` for a newborn (it should not: owed is empty off the owner).
+2. Then run 6c on both hosts as before, and the rest of the original steps.
