@@ -250,7 +250,11 @@ impl RowStatus {
             RowStatus::Dormant => ('\u{25cb}', theme.default_ink),
             // Half-filled: a row the last quit left live. It opens on
             // arrival, where ○ waits for Alt+Enter (Ollie, 2026-09-22).
-            RowStatus::Standby => ('\u{25d0}', theme.default_ink),
+            // `nf-fa-adjust`, not U+25D0: JetBrains Mono has no ◐, so the
+            // terminal drew it from a fallback font, larger than ○ and ●
+            // (measured 2026-09-23: this glyph is 600 units tall, ○ and ● 620,
+            // the fallback ◐ visibly bigger).
+            RowStatus::Standby => ('\u{f042}', theme.default_ink),
             RowStatus::DormantSelected => ('\u{23ce}', OPENING_INK),
             RowStatus::Opening => ('\u{21bb}', OPENING_INK),
             RowStatus::Stale => ('\u{2717}', FAILED_INK),
@@ -2282,7 +2286,7 @@ mod tests {
             (RowStatus::Idle, '\u{25cf}', sumi_ink4),
             (RowStatus::Failed, '\u{2716}', samurai_red), // HEAVY multiplication x
             (RowStatus::Dormant, '\u{25cb}', fuji_white),
-            (RowStatus::Standby, '\u{25d0}', fuji_white), // ◐ half-live: opens on arrival
+            (RowStatus::Standby, '\u{f042}', fuji_white), // nf-fa-adjust, half-live: opens on arrival
             (RowStatus::DormantSelected, '\u{23ce}', carp_yellow), // ⏎ commit affordance (#100)
             (RowStatus::Opening, '\u{21bb}', carp_yellow),
             (RowStatus::Stale, '\u{2717}', samurai_red), // BALLOT x — a flag, not a Status

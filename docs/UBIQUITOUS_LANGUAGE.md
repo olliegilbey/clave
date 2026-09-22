@@ -100,7 +100,7 @@ column target, was deleted at #181; the term survives only in the ledger.)
 - **standby row** — a dormant row that was live when the session quit, for 24
   hours after. It sits between the live and dormant blocks, inside the
   Alt+Up/Down ring, and **arriving on it opens it** (walk, Alt+N or click).
-  Glyph ◐. The quit's `SessionEnd` (reason `other`) stamps it; a bind, a prune
+  Glyph: a half-filled circle (`nf-fa-adjust`). The quit's `SessionEnd` (reason `other`) stamps it; a bind, a prune
   of its tab, or the 24 hours clear the stamp. /exit, /clear and a closed tab
   leave a plain dormant row. Not "waiting": that word is the NeedsYou state.
 - **dormant row** — an agent session with no tab open. Alt+Enter opens it.
