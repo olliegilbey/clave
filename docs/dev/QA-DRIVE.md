@@ -8,6 +8,26 @@ owns everything they structurally cannot reach._
 
 ## Run ledger — the useful recent history
 
+- **runs 26 to 29, 2026-09-22 — four reds, three of them the drive's own,
+  and a host race the box lost every time.** Run 26 (box) went red in 6c on
+  the second shape of the beacon fix: three asks for two presses, because a
+  drain of every owed row on emit answered tab 3's steal after tab 4's open
+  had gone out (FOOTGUNS, "A claim armed by an event"). Run 27 (box) died
+  in preflight: the launch line printed before the detached stage had run,
+  and the seed deleted the launch.kdl eight seconds after the launch. The
+  stage now runs attached and the launch line follows it. Runs 28 and 29
+  (box) went red in phase 2 rung 1: `clave add` created the tab first and
+  recorded the row after, the newborn's `clave spawn` registered its pane
+  id into a store with no such row, and `pane_id` stayed null for the life
+  of the row. The host log shows it in order: `spawn: Create` then `add:
+  recorded`, same second. The Mac won that race in every run and never
+  showed it. The record now precedes the open (`add.rs`
+  `record_then_open`). The Mac drive of the same commit passed phase 2
+  and went red in 5b on a fixture collision: a sibling sandbox's leftover
+  transcript shares the scenario uuid, sorts first in the drive's glob, and
+  had an unclosed launch from run 25 inside the six-hour bound. That one is
+  the Mac's, not the code's; the box has no sibling sandboxes.
+
 - **runs 24 and 25, 2026-09-22 — the Alt+c flap on a restored fleet, caught
   by a new 6c check, fixed, green on both machines.** Run 24 on the devbox
   (232 checks) and run 25 on the Mac (233 checks), 0 failures each. After
