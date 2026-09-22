@@ -8489,8 +8489,10 @@ mod tests {
         let mut s = snap(
             1,
             vec![
-                row("u-s1", 800, true, false),
-                row("u-s2", 700, true, false),
+                // Rank and uuid order disagree, so the block's own sort
+                // is what puts u-s2 first.
+                row("u-s2", 800, true, false),
+                row("u-s1", 700, true, false),
                 row("u-d", 999, false, false),
                 row("u-x", 600, true, true),
             ],
@@ -8510,8 +8512,8 @@ mod tests {
             vec![
                 RowKey::Tab(1),
                 RowKey::Tab(2),
-                RowKey::Standby("u-s1".into()),
                 RowKey::Standby("u-s2".into()),
+                RowKey::Standby("u-s1".into()),
                 RowKey::Dormant("u-d".into()),
                 RowKey::Dormant("u-x".into()),
             ]
@@ -8555,14 +8557,14 @@ mod tests {
         assert_eq!(
             m.nav("{\"dir\":\"next\"}", Some(2)),
             vec![Effect::OpenAgent {
-                uuid: "u-s1".into()
+                uuid: "u-s2".into()
             }]
         );
         assert_eq!(status_at(&m, 2), Some(RowStatus::Opening));
         assert_eq!(
             m.nav("{\"dir\":\"next\"}", Some(2)),
             vec![Effect::OpenAgent {
-                uuid: "u-s2".into()
+                uuid: "u-s1".into()
             }]
         );
         assert!(
@@ -8577,7 +8579,7 @@ mod tests {
         assert_eq!(
             m.nav("{\"dir\":\"prev\"}", Some(1)),
             Vec::<Effect>::new(),
-            "u-s2 is already opening: arriving again opens nothing twice"
+            "u-s1 is already opening: arriving again opens nothing twice"
         );
     }
 
@@ -8587,7 +8589,7 @@ mod tests {
         assert_eq!(
             m.click(2, TALL_PANE),
             vec![Effect::OpenAgent {
-                uuid: "u-s1".into()
+                uuid: "u-s2".into()
             }]
         );
         let mut m = standby_fleet();
@@ -8595,7 +8597,7 @@ mod tests {
         assert_eq!(
             m.nav("{\"row\":4}", Some(1)),
             vec![Effect::OpenAgent {
-                uuid: "u-s2".into()
+                uuid: "u-s1".into()
             }]
         );
         assert_eq!(

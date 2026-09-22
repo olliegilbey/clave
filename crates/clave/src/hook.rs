@@ -5520,7 +5520,7 @@ mod tests {
             "u1",
             "SessionEnd",
             Some(7),
-            None,
+            Some("other"), // a quit's reason: only the missing tab says no
             1_000
         ));
         assert_eq!(s.agents["u1"].standby_stamp, None);
