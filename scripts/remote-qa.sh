@@ -92,6 +92,13 @@ case "$CMD" in
     launch_line
     ;;
   qa)
+    # One drive at a time: a second one force-pushes the checkout under the
+    # first, restages its sandbox and shares its log (swarm review,
+    # 2026-09-23). Stop the first one before a rerun.
+    if remote "pgrep -f 'qa-drive[.]sh|sandbox-setup[.]sh' >/dev/null"; then
+      echo "a drive is already running on $HOST; stop it first" >&2
+      exit 1
+    fi
     sync_remote
     SCENARIO="${1:-qa-fleet}"
     WAIT="${2:-1800}"
@@ -111,6 +118,13 @@ case "$CMD" in
     launch_line
     ;;
   drive)
+    # One drive at a time: a second one force-pushes the checkout under the
+    # first, restages its sandbox and shares its log (swarm review,
+    # 2026-09-23). Stop the first one before a rerun.
+    if remote "pgrep -f 'qa-drive[.]sh|sandbox-setup[.]sh' >/dev/null"; then
+      echo "a drive is already running on $HOST; stop it first" >&2
+      exit 1
+    fi
     # The drive alone, against a remote sandbox that is ALREADY live — the
     # re-run after a fix to the drive itself, when nothing needs restaging
     # and the human's session is up. Refuses on its own if it is not.
