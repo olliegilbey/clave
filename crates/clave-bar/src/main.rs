@@ -1230,9 +1230,17 @@ impl ZellijPlugin for State {
         // drive counts these lines per sandbox instance; a bar at its width
         // asks nothing, so any ask during a nav walk is a defect. Cheap:
         // a healthy bar asks at most once per toggle.
+        // Own tab, focused tab and the own tab's tiled pane count ride
+        // along (2026-09-22): zellij applies a swap to the focused tab, and
+        // an ask that never lands needs those three to name the seam.
         for e in &fx {
             if let Effect::SwapWidth { backwards } = e {
-                eprintln!("clave-bar: swap-width backwards={backwards} cols={cols}");
+                let tab = self.model.own_tab();
+                let active = self.model.active_tab_id();
+                let panes = self.model.own_tab_tiled_pane_count();
+                eprintln!(
+                    "clave-bar: swap-width backwards={backwards} cols={cols} tab={tab:?} active={active:?} panes={panes:?}"
+                );
             }
         }
         self.run_effects(fx);

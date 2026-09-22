@@ -1404,6 +1404,21 @@ impl BarModel {
             .is_some_and(|t| t.active)
     }
 
+    /// Tiled pane count of the tab this instance sits in, from the last
+    /// PaneUpdate. Diagnostic only: a swap layout applies to the FOCUSED
+    /// tab's tiled panes, so a tab whose count the layout cannot map is the
+    /// first suspect when an ask never lands (2026-09-22, the devbox's baked
+    /// first tab). `None` while the frames disagree, like `own_tab`.
+    pub fn own_tab_tiled_pane_count(&self) -> Option<usize> {
+        let pos = self.own_tab_position()?;
+        Some(
+            self.panes
+                .iter()
+                .filter(|p| p.tab_position == pos && !p.is_floating)
+                .count(),
+        )
+    }
+
     /// The tab zellij's last frame says is active — any instance's view.
     pub fn active_tab_id(&self) -> Option<usize> {
         self.tabs.iter().find(|t| t.active).map(|t| t.tab_id)
