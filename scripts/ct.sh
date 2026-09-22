@@ -81,7 +81,21 @@ fi
 # fails closed, so it looked exactly like "the sandbox is not running".
 # (Found reviewing PR #152, 2026-08-10.)
 TMP="${TMPDIR:-/tmp}"
-SOCKET_ROOT="${TMP%/}/zellij-$(id -u)"
+# Zellij's socket dir is NOT the tmp dir on Linux. The rule (zellij-utils
+# consts.rs `ZELLIJ_SOCK_DIR`, 0.44.3:316-327, same in 0.45.1): the
+# `ZELLIJ_SOCKET_DIR` variable if set, else the project runtime dir — which
+# the `directories` crate gives as `$XDG_RUNTIME_DIR/zellij` on Linux and as
+# nothing on macOS — else `<tmp>/zellij-<uid>`. The devbox's sockets live at
+# `/run/user/1000/zellij/contract_version_1/<session>` while its LOG stays
+# under `/tmp/zellij-1000/zellij-log/` (the log dir is always the tmp one).
+# The first remote drive (2026-09-22) refused every read for exactly this.
+if [[ -n "${ZELLIJ_SOCKET_DIR:-}" ]]; then
+  SOCKET_ROOT="$ZELLIJ_SOCKET_DIR"
+elif [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
+  SOCKET_ROOT="${XDG_RUNTIME_DIR%/}/zellij"
+else
+  SOCKET_ROOT="${TMP%/}/zellij-$(id -u)"
+fi
 
 if [[ $# -eq 0 ]]; then
   echo "usage: $0 <zellij-action> [args…]   (runs against ${SESSION} only)" >&2

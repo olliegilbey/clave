@@ -103,6 +103,15 @@ case "$CMD" in
     # owns the process, writes $RUN_LOG there, and `qa-log` reads it.
     remote "nohup setsid just qa $SCENARIO $WAIT > $RUN_LOG 2>&1 < /dev/null & echo \"started on $HOST, log $RUN_LOG\""
     ;;
+  drive)
+    # The drive alone, against a remote sandbox that is ALREADY live — the
+    # re-run after a fix to the drive itself, when nothing needs restaging
+    # and the human's session is up. Refuses on its own if it is not.
+    sync_remote
+    SCENARIO="${1:-qa-fleet}"
+    WAIT="${2:-1800}"
+    remote "nohup setsid env QA_WAIT_SECS=$WAIT QA_RELAUNCH_WAIT=$WAIT ./scripts/qa-drive.sh $SCENARIO > $RUN_LOG 2>&1 < /dev/null & echo \"drive started on $HOST, log $RUN_LOG\""
+    ;;
   qa-log)
     remote "tail -n ${1:-40} $RUN_LOG 2>/dev/null || echo 'no run log yet'"
     ;;
