@@ -117,6 +117,9 @@ struct State {
     /// The last `width-deaf` line written, so a bar held at the wrong width
     /// logs once per (width, reason) and not once per paint.
     last_deaf: Option<(usize, &'static str)>,
+    /// The width of the last paint, so `render` logs a `painted` line only
+    /// when zellij changes it — the trace of a swap landing, or being undone.
+    last_cols: Option<usize>,
     /// A term-facts poll timer is in flight (#206) — one at a time, re-armed
     /// on expiry only while `term_poll_wanted()` holds.
     term_poll_armed: bool,
@@ -1158,6 +1161,17 @@ impl ZellijPlugin for State {
                 // the deafness a few ms early is harmless, and no expiry can
                 // strand it.
                 let fx = self.model.width_cooldown_elapsed();
+                // The cooldown's own asks were unlogged until 2026-09-22:
+                // `render` logs only the asks it makes, and this leg makes
+                // the rest. The QA counter reads both lines.
+                for e in &fx {
+                    if let Effect::SwapWidth { backwards } = e {
+                        let last = self.last_cols;
+                        eprintln!(
+                            "clave-bar: swap-width backwards={backwards} cols={last:?} source=cooldown"
+                        );
+                    }
+                }
                 let width_moved = !fx.is_empty();
                 self.run_effects(fx);
                 // The term-poll leg (#206): re-probe, re-arm while wanted,
@@ -1234,6 +1248,13 @@ impl ZellijPlugin for State {
         // pane id the request carries (v0.44.3 — FOOTGUNS.md). The gate lives in
         // `width_effects`, which holds the switch until this bar's own tab is
         // the focused one.
+        // Every width change zellij paints (2026-09-22): the only trace of
+        // a swap that landed on this pane, or landed and was undone.
+        if self.last_cols != Some(cols) {
+            let was = self.last_cols;
+            eprintln!("clave-bar: painted cols={cols} was={was:?}");
+            self.last_cols = Some(cols);
+        }
         let fx = self.model.width_effects(Some(cols));
         // One log line per width ask, SHIPPED: it is the only observable
         // of the flap the devbox had (2026-09-22: sixteen asks in four
