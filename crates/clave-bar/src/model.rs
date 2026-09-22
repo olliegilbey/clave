@@ -809,6 +809,15 @@ pub struct BarModel {
     /// the human CLOSES re-enters — so the bar would reopen the tab they just
     /// shut, and keep doing it. The restore owes each row exactly one open.
     restore_sent: BTreeSet<String>,
+    /// Rows this bar's restore opened whose beacon steal is not yet answered
+    /// (#261). Filled beside `restore_sent`; drained only when a re-anchor
+    /// EMITS for the restore — see `beacon_on_a_restored_tab`.
+    ///
+    /// Its own set rather than `organic_pending`, which [`BarModel::beacon`]
+    /// clears on the grounds that an arriving beacon is truth: right for
+    /// Alt+o, backwards here, where the arriving beacon IS the thing to undo.
+    /// A tidy that makes `beacon()` clear this too deletes the fix.
+    restore_reanchor_owed: BTreeSet<String>,
     /// The beacon has named two different tabs in this instance's lifetime —
     /// i.e. the focus has moved at least once since this bar was born (#261).
     /// See [`BarModel::beacon`] for what it is worth, and `run_held_effect`
@@ -1958,17 +1967,30 @@ impl BarModel {
     /// pair is the steal, and `apply_tabs` answers it with a re-anchor.
     ///
     /// The announce can land on either side of the bound snapshot, so the
-    /// tab is known two ways: while the open is in flight, any beacon off
-    /// this tab is the newborn's, because only bars pipe the beacon and the
-    /// human is standing here; once the row is bound, the beacon names the
-    /// tab a `restore_sent` row holds.
+    /// tab is known two ways: while an owed restore open is in flight, a
+    /// beacon off this tab MAY be the newborn's; once the row is bound, the
+    /// beacon names the tab an owed row holds. Whether the human is really
+    /// standing here is not this predicate's question: `apply_tabs` emits
+    /// only when the frame flags this tab active and the beacon disagrees.
+    /// A hidden owner gets no such frame (FOOTGUNS, TabUpdate reaches the
+    /// active tab), so a human walk during the restore is left alone.
     ///
     /// Derived, not claimed. A one-shot flag set at the open and spent on the
     /// next frame lost the race twice: spent on a frame that beat the tab
     /// (2026-09-17), then spent on the frame between the bound snapshot and
     /// the birth announce (devbox, 2026-09-22, the Alt+c flap). Reading the
-    /// beacon directly has no window to lose. Bounded by the beacon: the
-    /// re-anchor moves it home, and only another bar's pipe can move it back.
+    /// beacon directly has no window to lose.
+    ///
+    /// Bounded twice. Per stray: the re-anchor moves the beacon home, and
+    /// only another bar's pipe can move it back. Per restore: the owed set
+    /// is drained when the re-anchor emits, so a rule that read only
+    /// `restore_sent` — armed for the session — cannot later drag the beacon
+    /// off a restored tab the human walked to (review, 2026-09-22).
+    ///
+    /// The own-tab guard repeats the emit gate on purpose: it keeps the
+    /// predicate honest for a direct caller, and it covers a frame that flags
+    /// two tabs active, where the position join and `find(active)` can name
+    /// different tabs.
     fn beacon_on_a_restored_tab(&self) -> bool {
         let Some(current) = self.current_tab else {
             return false;
@@ -1976,11 +1998,12 @@ impl BarModel {
         if !self.owns_the_restore() || self.own_tab() == Some(current) {
             return false;
         }
-        !self.opening.is_empty()
+        let owed = &self.restore_reanchor_owed;
+        owed.iter().any(|u| self.opening.contains(u))
             || self
                 .agents
                 .iter()
-                .any(|a| a.tab_id == Some(current) && self.restore_sent.contains(&a.uuid))
+                .any(|a| a.tab_id == Some(current) && owed.contains(&a.uuid))
     }
 
     /// The head of the queue, whether or not this instant is a good time to
@@ -2036,6 +2059,7 @@ impl BarModel {
         // The new tab will take the focus and `clave open` will hand it back.
         // Whatever the bar born there says about itself in between, the beacon
         // belongs on this tab — see `beacon_on_a_restored_tab`.
+        self.restore_reanchor_owed.insert(uuid.clone());
         self.open_effects(&uuid, Some(home))
     }
 
@@ -2426,6 +2450,9 @@ impl BarModel {
                 effects.push(Effect::AnnounceVisit { tab_id: active_id });
             } else if (organic || stranded || restore_home) && self.elects_presumed() {
                 self.organic_pending = false;
+                if restore_home {
+                    self.restore_reanchor_owed.clear();
+                }
                 self.set_beacon(active_id);
                 effects.push(Effect::ReanchorVisit { tab_id: active_id });
             }
@@ -12378,6 +12405,10 @@ mod tests {
             vec!["u-b".to_string()],
             "premise: one open sent"
         );
+        assert!(
+            !m.beacon_on_a_restored_tab(),
+            "a beacon at home is nobody's steal, open in flight or not"
+        );
         // `clave open` binds the row before the newborn bar has spoken.
         m.apply_snapshot(snap_live(
             10,
@@ -12449,6 +12480,63 @@ mod tests {
         assert!(
             m.beacon_on_a_restored_tab(),
             "u-b's tab is the one the restore built"
+        );
+    }
+
+    /// The trigger must not outlive the restore. `restore_sent` and the
+    /// owner's name both persist for the session, so a rule that reads only
+    /// those is armed for months: the human walks to a restored tab, a
+    /// stale frame flags the owner's own tab active (the shape FOOTGUNS
+    /// records for #162), and the owner drags the beacon off the tab the
+    /// human is standing in. Nothing re-derives it after that (review,
+    /// 2026-09-22). A steal is answered once; after that the tab is the
+    /// human's.
+    #[test]
+    fn a_finished_restore_does_not_drag_the_beacon_off_a_tab_the_human_walked_to() {
+        let mut m = focused_bar();
+        m.apply_snapshot(snap_live(
+            9,
+            vec![
+                agent("u-a", Status::Idle, Some(11)),
+                agent("u-b", Status::Idle, None),
+            ],
+            &["u-a", "u-b"],
+        ));
+        m.beacon(12);
+        let fx = m.apply_tabs(vec![
+            tab(10, 0, "a", false),
+            tab(11, 1, "b", true),
+            tab(12, 2, "c", false),
+        ]);
+        assert!(
+            fx.contains(&Effect::ReanchorVisit { tab_id: 11 }),
+            "premise: the steal was answered"
+        );
+        m.apply_snapshot(snap_live(
+            10,
+            vec![
+                agent("u-a", Status::Idle, Some(11)),
+                agent("u-b", Status::Idle, Some(12)),
+            ],
+            &["u-a", "u-b"],
+        ));
+        assert!(!m.restore_pending(), "premise: the restore is done");
+        // Later, the human walks to the restored tab.
+        m.beacon(12);
+        // A frame that still flags the owner's tab active reaches it.
+        let fx = m.apply_tabs(vec![
+            tab(10, 0, "a", false),
+            tab(11, 1, "b", true),
+            tab(12, 2, "c", false),
+        ]);
+        assert!(
+            !fx.iter().any(|e| matches!(e, Effect::ReanchorVisit { .. })),
+            "the restore is over; this beacon is the human's: {fx:?}"
+        );
+        assert_eq!(
+            m.current_tab,
+            Some(12),
+            "the beacon stays where the human is"
         );
     }
 
