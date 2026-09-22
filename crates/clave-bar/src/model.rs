@@ -2977,7 +2977,7 @@ impl BarModel {
     /// This carves NO exception into D16's state-not-cols lock — a hydrated
     /// bar (every peek, every toggle) still chooses by state alone.
     pub fn widths_at(&self, cols: usize) -> Widths {
-        if self.awaiting_hydration && cols == self.row_height.target_cols(true) {
+        if self.awaiting_hydration && self.row_height.mode_at(cols) == Some(true) {
             return Widths::COLLAPSED;
         }
         self.widths()
@@ -3647,12 +3647,7 @@ impl BarModel {
         // bounded: the review of 2026-09-21 walked every case, and the worst
         // is the old two-step switch, never a loop.
         if let (None, Some(cols)) = (self.birth_collapsed, own_cols) {
-            for mode in [false, true] {
-                if cols == self.row_height.target_cols(mode) {
-                    self.birth_collapsed = Some(mode);
-                    break;
-                }
-            }
+            self.birth_collapsed = self.row_height.mode_at(cols);
         }
         // D37: the mode is not known yet, so any switch would be against a
         // guess. The pane is already born at the persisted mode's width.
@@ -3684,7 +3679,8 @@ impl BarModel {
             return Vec::new();
         }
         let want = self.showing_collapsed();
-        if cols == self.row_height.target_cols(want) {
+        // By mode, not by exact column: the paint can be one short.
+        if self.row_height.mode_at(cols) == Some(want) {
             self.walk_spent = None;
             return Vec::new();
         }
@@ -7978,6 +7974,44 @@ mod tests {
         assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
     }
 
+    /// **The separator column.** With `pane_frames false` zellij reserves one
+    /// column of every tiled pane that is not at the viewport's right edge,
+    /// borderless or not, for the line between it and its neighbour
+    /// (`zellij-server/src/panes/tiled_panes/mod.rs`, `pane_content_offset`,
+    /// the same in 0.44.3 and 0.45.1). The bar is the left pane, so a 48-col
+    /// pane paints at 47 and a 16-col one at 15. Measured on the devbox
+    /// 2026-09-22: sixteen asks in four seconds, every one `cols=47` or
+    /// `cols=15` while wanting the width it already had, and each swap walked
+    /// the tab through the other geometry. A painted width one short of a
+    /// declared width IS that width.
+    #[test]
+    fn a_painted_width_one_short_of_the_target_is_at_the_target() {
+        let mut m = focused_bar();
+        // Born and painted at 47: the birth guess is expanded, and no ask.
+        assert_eq!(m.width_effects(Some(EXP_W - 1)), Vec::<Effect>::new());
+        assert_eq!(m.birth_collapsed, Some(false));
+        // A toggle from 47 still asks, and 15 ends it.
+        m.toggle();
+        assert_eq!(
+            m.width_effects(Some(EXP_W - 1)),
+            vec![Effect::SwapWidth { backwards: true }]
+        );
+        assert_eq!(m.width_effects(Some(COL_W - 1)), Vec::<Effect>::new());
+        assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new());
+        // Before hydration the paint picks the profile: 15 is the collapsed one.
+        let fresh = BarModel {
+            awaiting_hydration: true,
+            ..BarModel::default()
+        };
+        assert_eq!(fresh.widths_at(COL_W - 1), Widths::COLLAPSED);
+        // Two short is NOT a declared width: nothing else is tolerated.
+        let mut m = focused_bar();
+        assert_eq!(
+            m.width_effects(Some(EXP_W - 2)),
+            vec![Effect::SwapWidth { backwards: false }]
+        );
+    }
+
     /// **The step direction** (measured 2026-09-21: the 0.2s collapse lag).
     /// Away from the birth width the step is BACKWARDS, which lands on the
     /// far geometry in one; towards it, forward, which returns to birth in
@@ -8027,10 +8061,11 @@ mod tests {
     fn an_unknown_birth_width_steps_forward() {
         let mut m = focused_bar();
         m.toggle();
-        // The first paint ever is one column short of either width: no
+        // The first paint ever is two columns short of either width (one
+        // short is the separator column, and IS the width): no
         // birth is recorded, and the ask still goes out, forward.
         assert_eq!(
-            m.width_effects(Some(47)),
+            m.width_effects(Some(EXP_W - 2)),
             vec![Effect::SwapWidth { backwards: false }]
         );
         assert_eq!(m.birth_collapsed, None);
@@ -8363,9 +8398,9 @@ mod tests {
     #[test]
     fn a_width_zellij_cannot_produce_is_asked_thrice_then_rested() {
         let mut m = focused_bar();
-        m.toggle(); // wants collapsed; the window can only paint 47
+        m.toggle(); // wants collapsed; the window can only paint 46
         assert_eq!(
-            m.width_effects(Some(47)),
+            m.width_effects(Some(EXP_W - 2)),
             vec![Effect::SwapWidth { backwards: false }]
         );
         for _ in 1..WALK_ASK_CAP {
@@ -8375,7 +8410,11 @@ mod tests {
             );
         }
         assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new(), "rested");
-        assert_eq!(m.width_effects(Some(47)), Vec::<Effect>::new(), "still");
+        assert_eq!(
+            m.width_effects(Some(EXP_W - 2)),
+            Vec::<Effect>::new(),
+            "still"
+        );
     }
 
     /// The budget is per INTENT, not per width: a walk whose positions keep
@@ -8393,7 +8432,7 @@ mod tests {
             m.width_effects(Some(COL_W)),
             vec![Effect::SwapWidth { backwards: true }]
         );
-        for paint in [47, COL_W] {
+        for paint in [EXP_W - 2, COL_W] {
             assert_eq!(m.width_effects(Some(paint)), Vec::<Effect>::new());
             assert_eq!(
                 m.width_cooldown_elapsed(),
@@ -8401,7 +8440,7 @@ mod tests {
             );
         }
         // Three spent without a landing: the walk rests, moving or not.
-        assert_eq!(m.width_effects(Some(47)), Vec::<Effect>::new());
+        assert_eq!(m.width_effects(Some(EXP_W - 2)), Vec::<Effect>::new());
         assert_eq!(m.width_cooldown_elapsed(), Vec::<Effect>::new(), "rested");
         assert_eq!(m.width_effects(Some(COL_W)), Vec::<Effect>::new(), "still");
     }
@@ -8472,9 +8511,10 @@ mod tests {
     /// every further press.
     #[test]
     fn a_walk_that_never_landed_still_hands_the_next_intent_a_full_budget() {
-        // Neither target, so no paint below can end an episode by landing —
+        // Neither target (one short is the separator column and counts as
+        // the target), so no paint below can end an episode by landing —
         // the budget can only be re-armed by the intent changing.
-        const NEITHER: usize = EXP_W - 1;
+        const NEITHER: usize = EXP_W - 2;
         let mut m = focused_bar();
         m.toggle(); // wants collapsed
         assert_eq!(

@@ -742,11 +742,37 @@ pub enum RowHeight {
 /// mechanism as [`CLAVE_BINARY_KEY`], #44).
 pub const ROW_HEIGHT_KEY: &str = "row_height";
 
+/// The one column zellij takes from a frameless pane for the separator
+/// line to its right neighbour. See [`RowHeight::mode_at`].
+pub const SEPARATOR_COLS: usize = 1;
+
 impl RowHeight {
     /// The width the seek machinery asks for in this mode — the card
     /// budgets ratified in #232, or the legacy pair for `Single`. `const` so
     /// the bar's test-mod width-target pins (`EXP_W`/`COL_W`) can compute
     /// off it at compile time instead of duplicating the numbers.
+    /// The mode a PAINTED width is in, or `None` when it is at neither
+    /// declared width. A pane paints one column short of its declared size
+    /// when `pane_frames` is off: zellij reserves that column on every
+    /// tiled pane that is not at the viewport's right edge, borderless or
+    /// not, for the line to its neighbour (`zellij-server/src/panes/
+    /// tiled_panes/mod.rs`, `pane_content_offset`, unchanged from 0.44.3
+    /// to 0.45.1). The bar is the left pane, so 48 paints as 47 and 16 as
+    /// 15. Measured on the devbox 2026-09-22: an exact comparison asked for
+    /// a swap on every paint and walked the tab through the other width.
+    pub const fn mode_at(self, cols: usize) -> Option<bool> {
+        let mut i = 0;
+        while i < 2 {
+            let collapsed = i == 1;
+            let target = self.target_cols(collapsed);
+            if cols == target || cols + SEPARATOR_COLS == target {
+                return Some(collapsed);
+            }
+            i += 1;
+        }
+        None
+    }
+
     pub const fn target_cols(self, collapsed: bool) -> usize {
         match (self, collapsed) {
             (RowHeight::Card, false) => 48,
