@@ -746,6 +746,22 @@ pub const ROW_HEIGHT_KEY: &str = "row_height";
 /// line to its right neighbour. See [`RowHeight::mode_at`].
 pub const SEPARATOR_COLS: usize = 1;
 
+// `mode_at` tolerates `SEPARATOR_COLS` below each declared width, so the
+// two widths of one mode must sit further apart than that or the collapsed
+// width would read as "expanded, one short" and never land. Pinned here so
+// a retune of the pairs cannot make a mode unreachable.
+const _: () = {
+    let mut i = 0;
+    let modes = [RowHeight::Card, RowHeight::Double, RowHeight::Single];
+    while i < modes.len() {
+        assert!(
+            modes[i].target_cols(true) + SEPARATOR_COLS < modes[i].target_cols(false),
+            "a mode's collapsed width must sit more than SEPARATOR_COLS below its expanded one"
+        );
+        i += 1;
+    }
+};
+
 impl RowHeight {
     /// The mode a PAINTED width is in, or `None` when it is at neither
     /// declared width. A pane paints one column short of its declared size
@@ -1597,6 +1613,36 @@ mod tests {
         assert_eq!(RowHeight::Single.target_cols(true), COLLAPSED_TARGET_COLS);
         assert_eq!(RowHeight::Double.lines_per_row(), 2);
         assert_eq!(RowHeight::Single.lines_per_row(), 1);
+    }
+
+    /// The tolerance is ONE-SIDED and exactly the separator column: a
+    /// frameless pane paints one short, never one wide, and never two short.
+    /// A symmetric or wider allowance would pass every bar test that only
+    /// probes below the target, so the contract is pinned here.
+    #[test]
+    fn mode_at_allows_the_separator_column_below_each_target_only() {
+        for mode in [RowHeight::Card, RowHeight::Double, RowHeight::Single] {
+            for collapsed in [false, true] {
+                let target = mode.target_cols(collapsed);
+                assert_eq!(mode.mode_at(target), Some(collapsed), "{mode:?} exact");
+                assert_eq!(
+                    mode.mode_at(target - SEPARATOR_COLS),
+                    Some(collapsed),
+                    "{mode:?} one short"
+                );
+                assert_eq!(
+                    mode.mode_at(target - SEPARATOR_COLS - 1),
+                    None,
+                    "{mode:?} two short is neither width"
+                );
+                assert_eq!(
+                    mode.mode_at(target + 1),
+                    None,
+                    "{mode:?} one wide is neither width"
+                );
+            }
+        }
+        assert_eq!(RowHeight::Card.mode_at(0), None);
     }
 
     #[test]

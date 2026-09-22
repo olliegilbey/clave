@@ -838,9 +838,10 @@ pub struct BarModel {
     ///
     /// A switch is DERIVED: it is owed whenever the width zellij paints this
     /// pane at is not the width the mode declares
-    /// (`self.row_height.target_cols` — a fixed column count, per #232's
-    /// mode, that the layouts carry verbatim, so the comparison is equality
-    /// against a constant). There is no queue to replay, only an end state
+    /// (`self.row_height.mode_at` — a fixed column count per #232's mode,
+    /// carried verbatim by the layouts, judged with one column of tolerance
+    /// because a frameless pane paints one short; see FOOTGUNS "A frameless
+    /// pane paints one column short"). There is no queue to replay, only an end state
     /// to reach; a mode that leaves and returns owes nothing.
     ///
     /// `swap_owed`: an ask has been sent and the fast-band expiries it is
@@ -3574,9 +3575,11 @@ impl BarModel {
     /// to its cooldown expiry.** The declared widths are fixed column
     /// counts ([`clave_types::RowHeight::target_cols`], read through
     /// `self.row_height`) carried verbatim by the layouts and applied
-    /// exactly by layout application, so "which geometry
-    /// am I in" is one equality against a constant — the same shape as the
-    /// battery cell's one-bit read of the mode, pointed at the supply side.
+    /// exactly by layout application. "Which geometry am I in" is
+    /// [`clave_types::RowHeight::mode_at`]: the nearest declared width,
+    /// allowing the one column a frameless pane loses to the separator
+    /// (FOOTGUNS "A frameless pane paints one column short"). NOT equality
+    /// against the constant: that belief was the devbox flap.
     ///
     /// Two machines died here, for opposite halves of the same lesson. The
     /// pre-#197 machine kept a BELIEF about which geometry its tab was in and
