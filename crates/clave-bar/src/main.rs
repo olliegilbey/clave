@@ -253,12 +253,6 @@ impl State {
         let bin = self.clave_binary.clone();
         for e in effects {
             match e {
-                Effect::RunHeldPane { pane_id } => {
-                    // The restored tab's agent starts here — `rerun` is
-                    // zellij's one verb for a held command pane, and a pane
-                    // held from birth has simply never run once.
-                    rerun_command_pane(pane_id);
-                }
                 Effect::FocusPane { pane_id } => {
                     // S2-proven nav: focus the terminal pane; Zellij pulls
                     // its tab forward. go_to_tab is a known dead end.
@@ -470,7 +464,7 @@ impl State {
                         ),
                     );
                 }
-                Effect::OpenAgent { uuid, restore_to } => {
+                Effect::OpenAgent { uuid } => {
                     // Collapse mode rides along for D36's reason: the new tab
                     // must be born in the mode the fleet is in. The width
                     // needs no measuring — the layout `clave open` writes is
@@ -478,13 +472,6 @@ impl State {
                     let mut argv = vec![bin.as_str(), "open", &uuid];
                     if self.model.collapsed {
                         argv.push("--collapsed");
-                    }
-                    // #261: held, and hand the focus back to this tab. The
-                    // model decided both — see `Effect::OpenAgent`.
-                    let home = restore_to.map(|t| t.to_string());
-                    if let Some(home) = home.as_deref() {
-                        argv.push("--restore-to");
-                        argv.push(home);
                     }
                     run_command(&argv, BTreeMap::new());
                 }
@@ -527,15 +514,6 @@ impl State {
         // out of `identity_effects` also keeps that function's contract what it
         // has always been — the actions to take, nothing else.
         let mut fx: Vec<Effect> = self.model.bind_stall_report().into_iter().collect();
-        // The held-tab binds. Kept beside `identity_effects` rather than
-        // inside it so the two ledgers stay visibly separate — `bind_effects`
-        // clears `bind_sent` for every uuid without a registered pane, which
-        // is this leg's whole population (CodeRabbit, #261). It carries its
-        // OWN election gate and reports for every held tab, not just ours:
-        // zellij sends the tab frame only to the focused tab, so a bar in an
-        // unvisited tab cannot resolve its own tab id at all. The elected bar
-        // can, for all of them — the pane manifest is global.
-        fx.extend(self.model.restored_bind_effects());
         fx.extend(self.model.identity_effects());
         if !fx.is_empty() {
             self.run_effects(fx);
@@ -713,15 +691,6 @@ impl State {
                         self.pending_peeks += 1;
                         set_timeout(PEEK_SINK_SECS); // user-tuned: 1.0 felt a touch long
                     }
-                    // The beacon is a join input, like the two frames (#261).
-                    // Waking a held agent needs the beacon AND this instance's
-                    // own tab, and the two arrive by different routes: on a nav
-                    // landing the target bar gets its `TabUpdate` while the
-                    // beacon still names the tab the human left, so the wake
-                    // arm refuses — and without this line nothing re-enters
-                    // when the beacon catches up. Fail-closed and idempotent,
-                    // so settling on the losing order costs nothing.
-                    self.settle_identity();
                     true // active-row highlight may move
                 }
                 Err(e) => {
@@ -1023,7 +992,6 @@ impl ZellijPlugin for State {
                             is_focused: p.is_focused,
                             is_floating: p.is_floating,
                             terminal_command: p.terminal_command.clone(),
-                            is_held: p.is_held,
                             exited: p.exited,
                             exit_status: p.exit_status,
                         });

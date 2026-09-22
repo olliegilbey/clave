@@ -38,13 +38,10 @@ pub enum OpenDecision {
 /// function was written to prevent. `add::live_uuid_union` is the same
 /// translation for the picker.
 pub fn open_is_live(store: &crate::store::Store, row: &AgentRecord, dump_layout: &str) -> bool {
-    // An EXITED agent keeps its tab (#261) so the next launch restores it,
-    // but nothing runs there. Reading that bind as liveness turns both the
-    // dwell-open and the bar's restart into a jump onto an empty tab.
-    (row.tab_id.is_some() && row.status != clave_types::Status::Exited)
-        // `pane_id` counts too (#226): an adopted session is registered by its
-        // first hook and bound only when the owning bar's join lands — keying
-        // on the bind alone would read the row dead inside that window.
+    // `pane_id` counts too (#226): an adopted session is registered by its
+    // first hook and bound only when the owning bar's join lands — keying on
+    // the bind alone would read the row dead inside that window.
+    row.tab_id.is_some()
         || row.pane_id.is_some()
         || crate::add::resolved_scan_uuids(store, dump_layout).contains(&row.uuid)
 }
@@ -95,14 +92,7 @@ pub fn open_decision(_row: &AgentRecord, is_live: bool, cwd_exists: bool) -> Ope
 /// `collapsed` comes from the BAR (D36): the new tab must be born in the mode
 /// the fleet is in, or it flashes wide and then snaps. A hand-run `clave open`
 /// passes nothing and is born expanded.
-///
-/// `restore_to` turns this into the staggered restore's open (#261) and carries
-/// the tab id the focus belongs to. ONE option rather than a held flag and a
-/// focus target, because the two are never separable: a held tab the human is
-/// left standing on is started at once by the bar that owns it
-/// (`run_held_effect`), so a hold without a focus return is a hold that does
-/// not hold. See `add::TabStart` for why the focus cannot simply stay put.
-pub fn run_open(uuid: &str, collapsed: bool, restore_to: Option<usize>) -> Result<()> {
+pub fn run_open(uuid: &str, collapsed: bool) -> Result<()> {
     let paths = crate::store::store_paths()?;
     let store = crate::store::read_store(&paths)?;
     let Some(row) = store.agents.get(uuid) else {
@@ -192,10 +182,6 @@ pub fn run_open(uuid: &str, collapsed: bool, restore_to: Option<usize>) -> Resul
                 cwd: open_cwd,
                 collapsed,
                 row_height,
-                start: match restore_to {
-                    Some(_) => crate::add::TabStart::Held,
-                    None => crate::add::TabStart::Running,
-                },
             });
             let tmp = std::env::temp_dir().join(format!("clave-open-{uuid}.kdl"));
             std::fs::write(&tmp, layout)?;
@@ -210,33 +196,6 @@ pub fn run_open(uuid: &str, collapsed: bool, restore_to: Option<usize>) -> Resul
                 .status()?;
             let _ = std::fs::remove_file(&tmp);
             anyhow::ensure!(status.success(), "zellij action new-tab failed");
-            // Put the human back where he was standing. Sent from HERE, and
-            // not as a second effect from the bar, because only this process
-            // knows the tab exists — `run_command` gives the bar no completion
-            // to sequence against, so a bar-side return would race the create
-            // it is meant to follow.
-            //
-            // Addressed by STABLE ID (`go-to-tab-by-id`, `zellij-utils-0.44.3/
-            // src/cli.rs:1214`), never by position: FOOTGUNS records a
-            // position-addressed jump wedging nav permanently when the aim
-            // went past the real tab list, and a restore is exactly when the
-            // tab list is changing under us.
-            if let Some(tab_id) = restore_to {
-                let back = std::process::Command::new(&zellij)
-                    .env("ZELLIJ_SESSION_NAME", &session)
-                    .args(["action", "go-to-tab-by-id", &tab_id.to_string()])
-                    .status();
-                // Loud in the log, not fatal: the tab IS restored, and the
-                // only loss is where the cursor sits. Bailing here would halt
-                // the whole queue over a cosmetic failure.
-                match back {
-                    Ok(s) if s.success() => {}
-                    other => crate::evlog::log_event(
-                        "open",
-                        &format!("{uuid}: focus return to tab {tab_id} failed: {other:?}"),
-                    ),
-                }
-            }
             crate::evlog::log_event("open", &format!("{uuid}: tab created (resume via spawn)"));
             // A previously-stale row that opens fine heals (§5).
             if let Some(snap) = crate::store::apply_open_result(&paths, uuid, false)? {
@@ -338,32 +297,6 @@ mod tests {
         // Never moved, or no transcript at all: the row's cwd, untouched.
         let row = rec("u-none");
         assert_eq!(pane_cwd_in(&claude, &row), "/x");
-    }
-
-    /// A row whose agent EXITED keeps its tab (#261), so the bind alone can
-    /// no longer answer "is this live". Read literally it says the row is
-    /// already live, and `clave open` becomes a jump to a tab with nothing in
-    /// it — which is also what the bar's restart runs, so the human would
-    /// press the key and watch nothing happen.
-    #[test]
-    fn a_row_whose_agent_exited_is_not_live_even_though_it_holds_a_tab() {
-        let mut s = crate::store::Store::default();
-        let mut gone = rec("u1");
-        gone.tab_id = Some(3); // the tab is still on screen…
-        gone.pane_id = None; // …and its claude is gone
-        gone.status = clave_types::Status::Exited;
-        s.agents.insert("u1".into(), gone.clone());
-        let live = open_is_live(&s, &gone, "layout { tab { pane } }");
-        assert!(
-            !live,
-            "nothing runs in that tab, so opening the row must resume it"
-        );
-        assert_eq!(open_decision(&gone, live, true), OpenDecision::Open);
-        // A row still bound with a live agent in it is untouched.
-        let mut alive = rec("u2");
-        alive.tab_id = Some(4);
-        s.agents.insert("u2".into(), alive.clone());
-        assert!(open_is_live(&s, &alive, "layout { tab { pane } }"));
     }
 
     #[test]

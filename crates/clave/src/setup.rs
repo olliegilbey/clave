@@ -539,26 +539,20 @@ pub fn layout_kdl(binary: &str, wasm: &str, row_height: clave_types::RowHeight) 
 
 /// §6.8 (C8): the launch layout, composed DYNAMICALLY at session-create
 /// time. Base = the bar template; `row` is the ONE row to bake a tab for —
-/// the top of the previous live set's rank (`restore_rows`), or the single
-/// most-recent row when there is nothing to restore, or none at all on a
-/// first run. Every other row surfaces as a dormant bar row (§6.6), and the
-/// bar opens the deferred ones one tab at a time.
+/// the single most-recent row (`eager_row`), or none at all on a first run.
+/// Every other row surfaces as a dormant bar row (§6.6), and Alt+Enter opens
+/// it.
 ///
-/// One tab, because a layout of held tabs made zellij build the whole fleet
-/// inside one second and the handle burst killed the server (#261, measured
-/// 2026-09-17). The baked row also runs straight from the layout, which keeps
-/// the single-eager-row behaviour as the floor: a relaunch lands in a working
-/// agent even if the bar's restore path is broken. `restore_rows` ranks its
-/// output for exactly this reason — the row that runs is the top of the
-/// fleet, not whichever tab happened to be leftmost.
+/// One tab, never a set. A layout of many tabs made zellij build the whole
+/// fleet inside one second and the handle burst killed the server (#261,
+/// measured 2026-09-17: four tabs peaked at 252 handles against macOS's
+/// ceiling of 256, five crashed the server). The live-set restore that
+/// sequenced the rest through the bar was removed on 2026-09-22 (FOOTGUNS,
+/// "The restore that sequenced tabs through the bar"); the type takes one
+/// row so the fleet-in-one-layout shape stays unspellable.
 pub fn launch_layout_kdl(
     binary: &str,
     wasm: &str,
-    // ONE row, or none — not a slice (#261). The launch bakes exactly the top
-    // of the rank and the bar brings the rest back one at a time, so a slice
-    // let this signature express the fleet-in-one-layout shape that killed the
-    // zellij server. `bakeable_rows` already returns at most one; saying so in
-    // the type is what stops a later caller re-inventing the crash.
     row: Option<&crate::store::AgentRecord>,
     collapsed: bool,
     row_height: clave_types::RowHeight,
@@ -639,9 +633,8 @@ pub const HOOK_EVENTS: [&str; 5] = [
     "SessionStart",
 ];
 
-/// Is `bin` one of ours? Shared by the hook and statusLine matchers here, and
-/// by the bar's held-pane matcher, so the rule lives once
-/// (`clave_types::is_clave_binary` carries the reasoning).
+/// Is `bin` one of ours? Shared by the hook and statusLine matchers here, so
+/// the rule lives once (`clave_types::is_clave_binary` carries the reasoning).
 fn is_clave_bin(bin: &str) -> bool {
     clave_types::is_clave_binary(bin)
 }
@@ -1206,137 +1199,9 @@ pub fn eager_row(store: &crate::store::Store) -> Option<&crate::store::AgentReco
         .max_by_key(|r| r.last_interacted)
 }
 
-/// The rows a relaunch rebuilds the layout from: the previous session's live
-/// set (`Store::last_live`, written by `clear_session_order`), resolved to
-/// records and RANKED the way the bar ranks them.
-///
-/// `last_live` is a SET, not an order — written in ascending tab id, which is
-/// creation order and never the order the human saw (the bar ranks by
-/// investment, and Alt+1..9 indexes rendered ROWS, not the tab strip). The
-/// rank is therefore computed here from the agent record, which only works
-/// because `buckets` and `commit_ord` are agent-scoped and survive the
-/// session, while every tab-scoped twin dies with it.
-///
-/// Launch focuses the FIRST row, so the first row is the one that starts: the
-/// top of the fleet is the row worth paying ~350 MB for.
-///
-/// Two kinds of entry are dropped, because the snapshot is a faithful record
-/// rather than a filtered one: a uuid naming no row (idle-pruned between
-/// sessions), and a row whose cwd has vanished. Baking a tab for either emits
-/// a spawn that dies at canonicalize.
-///
-/// Empty is the ordinary cold-start answer, not an error: a first run, or a
-/// session quit with nothing open. Launch falls back to the single eager row.
-pub fn restore_rows(store: &crate::store::Store, now_hour: u32) -> Vec<&crate::store::AgentRecord> {
-    // `model::live_key` and `model::live_group`, read from the host side.
-    // Frecency mode scores the agent's own buckets with the fleet's own dial,
-    // and a row that scores nothing falls back to the commitment ordinal — so
-    // any scoring row outranks every unscored one, which is why the second
-    // element is zeroed rather than carried. Recency mode has no dial and no
-    // repo layer: the ordinal is the whole key.
-    //
-    // `repo_root` is the PARENT repo even for a worktree agent (the worktree
-    // path lives in its own field), so worktree rows cluster with their repo
-    // exactly as they do in the bar. The tiebreak is the row's index in
-    // `last_live`, i.e. ascending tab id, so rows the ranking cannot separate
-    // keep the order the previous session left them in.
-    let mut rows: Vec<clave_types::LiveRow<&crate::store::AgentRecord>> = store
-        .last_live
-        .iter()
-        .filter_map(|uuid| store.agents.get(uuid))
-        .filter(|r| std::path::Path::new(&r.cwd).is_dir())
-        .enumerate()
-        .map(|(i, r)| {
-            let (group, millis) = match store.order {
-                clave_types::OrderMode::Recency => (None, 0),
-                clave_types::OrderMode::Frecency { half_life_hours } => (
-                    Some(r.repo_root.clone()).filter(|s| !s.is_empty()),
-                    clave_types::frecency_millis(&r.buckets, now_hour, half_life_hours),
-                ),
-            };
-            let key = clave_types::live_key(store.order, millis, r.commit_ord);
-            clave_types::LiveRow {
-                group,
-                key,
-                tiebreak: i,
-                row: r,
-            }
-        })
-        .collect();
-    clave_types::sort_live_block(&mut rows);
-    rows.into_iter().map(|e| e.row).collect()
-}
-
-/// The rows launch actually bakes, and how a bad cwd is treated on each path.
-///
-/// Splits the restored set three ways: the ONE row the launch bakes, the rows
-/// the sidebar opens afterwards, and the rows that cannot be restored at all.
-///
-/// Every baked cwd is guarded (`add::validate_cwd`) — a `"` or a control
-/// character emits malformed KDL and the whole session fails to create. The
-/// two paths fail differently ON PURPOSE. With one eager row a bad cwd is the
-/// only thing the launch was going to bake, so it stays fatal and loud. Across
-/// a restored set one bad row must not take the other ten down, so it is
-/// dropped, reported, and the rest still come back.
-///
-/// An emptied restored set falls through to the eager row. Checking the set
-/// for emptiness BEFORE the filter bakes a session with a bar and no agent at
-/// all on the day every restored cwd is rejected — strictly worse than the
-/// cold start it replaced.
-///
-/// Returns the rows and the lines to report rather than reporting them, which
-/// keeps the decision pure and testable. It sits beside `restore_rows` and
-/// `eager_row` because `launch_session` is excluded from `just mutants` on the
-/// grounds that the pieces it orchestrates are each tested directly.
-///
-/// The one-row limit is a resource bound, measured 2026-09-16: building a tab
-/// costs a burst of about fifty file handles, four tabs peaked at 252 against
-/// macOS's ceiling of 256, and five crashed the zellij server with "Too many
-/// open files" (reproduced twice). Baking the whole fleet fails on exactly the
-/// fleets the restore exists to serve, and a crashed launch loses tabs for
-/// good. Sequencing holds the burst at one tab whatever the fleet size.
-///
-/// DEFERRED IS NOT DROPPED. A deferred row comes back a few seconds later. A
-/// dropped row does not come back at all, and says why.
-fn bakeable_rows<'a>(
-    restored: Vec<&'a crate::store::AgentRecord>,
-    eager: Option<&'a crate::store::AgentRecord>,
-    mut check: impl FnMut(&str) -> anyhow::Result<()>,
-) -> anyhow::Result<(
-    Vec<&'a crate::store::AgentRecord>,
-    Vec<&'a crate::store::AgentRecord>,
-    Vec<String>,
-)> {
-    let mut dropped = Vec::new();
-    let mut kept: Vec<&crate::store::AgentRecord> = restored
-        .into_iter()
-        .filter(|r| match check(&r.cwd) {
-            Ok(()) => true,
-            Err(e) => {
-                dropped.push(format!("restore dropped {}: {e}", r.uuid));
-                false
-            }
-        })
-        .collect();
-    if !kept.is_empty() {
-        // `split_off(1)` rather than a truncate-and-clone: the head keeps its
-        // place and the tail keeps the restore ranking, which is the order the
-        // sidebar walks down.
-        let deferred = kept.split_off(1);
-        return Ok((kept, deferred, dropped));
-    }
-    // Nothing restorable. The eager row is the cold-start path and is already
-    // one row, so there is nothing to defer behind it.
-    let eager: Vec<&crate::store::AgentRecord> = eager.into_iter().collect();
-    for r in &eager {
-        check(&r.cwd)?;
-    }
-    Ok((eager, Vec::new(), dropped))
-}
-
 /// The record the launch bakes: `row` with its cwd replaced by `pane_cwd`
 /// (`open::pane_cwd`, the one rule) — but only when that value passes the
-/// same KDL guard `bakeable_rows` ran over the row's own cwd. A relocation
+/// same KDL guard `launch_session` ran over the row's own cwd. A relocation
 /// target comes from a transcript's tail and has never been validated; raw
 /// into `launch.kdl` a `"` or `\\` in it fails the whole session create
 /// (FOOTGUNS). One clone of one record, so `launch_layout_kdl` stays pure.
@@ -1496,77 +1361,15 @@ pub fn launch_session() -> Result<()> {
             }
         }
     }
-    // Compose the launch layout from the store (§6.8). The previous session's
-    // live set if there is one — `clear_session_order` above has just recorded
-    // it — and the single most-recent row when there is not: a first run, or a
-    // session quit with nothing open, where the useful thing to hand back is
-    // one agent ready to work rather than a bar and no tabs.
+    // Compose the launch layout from the store (eager most-recent, §6.8).
     // Harmless when live (attach ignores --layout for an existing session).
     let store = crate::store::read_store(&crate::store::store_paths()?)?;
-    let now_hour = crate::store::unix_hour(crate::store::now_unix());
-    let restorable = restore_rows(&store, now_hour);
-    // Say why a row is not coming back. `restore_rows` silently drops a uuid
-    // naming no record (idle-pruned between sessions) and a row whose cwd has
-    // gone (a deleted worktree), and the drop is PERMANENT — the next
-    // `clear_session_order` rebuilds `last_live` from binds, so a row that was
-    // never baked is gone from the set for good. Without this the launch log
-    // prints `baked=[…]` with the row simply absent, which reads as the
-    // restore losing it rather than the disk having lost it (found in review).
-    //
-    // A CREATE only. An attach bakes no tab and defers nothing, and
-    // `clear_session_order` did not run, so `last_live` still describes the
-    // session before the live one: logging here would announce a restore that
-    // is not happening, over a two-session-old set (#261).
-    if !live {
-        for uuid in &store.last_live {
-            if !restorable.iter().any(|r| &r.uuid == uuid) {
-                let why = match store.agents.get(uuid) {
-                    None => "no row (pruned between sessions)".to_string(),
-                    Some(r) => format!("cwd is gone: {}", r.cwd),
-                };
-                crate::evlog::log_event("launch", &format!("restore dropped {uuid}: {why}"));
-            }
-        }
-    }
-    let (rows, deferred, dropped) =
-        bakeable_rows(restorable, eager_row(&store), crate::add::validate_cwd)?;
-    if !live {
-        for line in dropped {
-            crate::evlog::log_event("launch", &line);
-        }
-    }
-    // Recorded so a restore that never finishes is diagnosable from the log
-    // alone: the launch states what it handed to the sidebar, and the sidebar
-    // logs each row as it opens it.
-    if !live && !deferred.is_empty() {
-        crate::evlog::log_event(
-            "launch",
-            &format!(
-                "deferred to the bar: {}",
-                deferred
-                    .iter()
-                    .map(|r| r.uuid.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        );
-        // Name the tab that will drive the queue, in the store, where every
-        // bar reads it (#261). The head of `rows` is the row this launch
-        // bakes, so it is the tab that exists before the restore starts and
-        // the one `clave open` hands the focus back to. A bar born in a tab
-        // the restore MADE must not sequence; it cannot tell from the focus,
-        // because taking the focus is what a new tab does, so it is told.
-        // Only a CREATE arms it. A second `clave` from another terminal is an
-        // attach: the layout is ignored, no tab is baked, and nothing is
-        // deferred — but re-arming the owner here would put a running bar back
-        // in charge of a queue that has already been served. It is a no-op
-        // until that bar reloads, and then every tab the human deliberately
-        // closed is owed again, because closing a tab unbinds its row.
-        if let Some(home) = rows.first() {
-            crate::store::with_store_mut(&crate::store::store_paths()?, |s| {
-                s.restore_owner = Some(home.uuid.clone());
-            })?;
-        }
+    let most_recent = eager_row(&store);
+    // Guard the eager row's cwd before it's baked into the launch layout
+    // (add::validate_cwd) — a `"`/control char would emit malformed KDL and
+    // the whole session would fail to create.
+    if let Some(r) = most_recent {
+        crate::add::validate_cwd(&r.cwd)?;
     }
     let wasm = wasm_path()?;
     // Bake the environment's clave into the eager tab's spawn: the versioned
@@ -1584,9 +1387,8 @@ pub fn launch_session() -> Result<()> {
     // a row whose conversation relocated is baked where it went, not where
     // the row last stood. One clone of one record, so `launch_layout_kdl`
     // stays pure over the row it is handed.
-    let home = rows
-        .first()
-        .map(|r| baked_home(r, crate::open::pane_cwd(r), crate::add::validate_cwd));
+    let home =
+        most_recent.map(|r| baked_home(r, crate::open::pane_cwd(r), crate::add::validate_cwd));
     let layout_text = launch_layout_kdl(
         &binary,
         wasm.to_str().context("wasm path")?,
@@ -1603,7 +1405,7 @@ pub fn launch_session() -> Result<()> {
         "launch",
         &format!(
             "session={session} live={live} baked={:?}",
-            rows.iter().map(|r| r.uuid.as_str()).collect::<Vec<_>>()
+            home.as_ref().map(|r| r.uuid.as_str())
         ),
     );
     use std::os::unix::process::CommandExt;
@@ -1796,7 +1598,6 @@ mod tests {
                         cwd: "/c",
                         collapsed,
                         row_height,
-                        start: crate::add::TabStart::Running,
                     }),
                     "tab name=",
                 ),
@@ -2064,97 +1865,11 @@ mod tests {
         assert!(!kdl.contains("\"spawn\""));
     }
 
-    /// A bare record with just the fields a launch layout reads, so the
-    /// multi-row tests below say what they are about instead of restating
-    /// twenty-odd irrelevant defaults.
-    #[cfg(test)]
-    fn layout_row(uuid: &str, label: &str, cwd: &str) -> crate::store::AgentRecord {
-        crate::store::AgentRecord {
-            uuid: uuid.into(),
-            cwd: cwd.into(),
-            repo_root: cwd.into(),
-            branch: "main".into(),
-            label: label.into(),
-            status: clave_types::Status::Idle,
-            last_interacted: 0,
-            commit_ord: 0,
-            last_visited: 0,
-            worktree: None,
-            label_source: crate::store::LabelSource::FirstPrompt,
-            tab_id: None,
-            pane_id: None,
-            stale: false,
-            title: None,
-            summary: String::new(),
-            default_branch: None,
-            context_tokens: None,
-            context_level: None,
-            live_session: None,
-            metered_at: 0,
-            buckets: Default::default(),
-            model: None,
-            provider: None,
-            effort: None,
-            pr_number: None,
-            pr_checked: 0,
-            pr_branch: String::new(),
-            wants: None,
-            subagents: false,
-        }
-    }
-
-    /// The relaunch layout: every row of the previous live set comes back as
-    /// a tab, ranked by the fleet's own frecency (`restore_rows`, which is
-    /// where that rank is decided) — but only the FIRST one runs. The rest are
-    /// created HELD, which costs a tab and a pane and no `claude` process, so
-    /// a relaunch restores the whole fleet's shape at near-zero cost and the
-    /// bar starts each agent when the human navigates to it.
-    ///
-    /// The first tab deliberately runs eagerly rather than being started by
-    /// the bar like the others: it is the tab launch focuses, and running it
-    /// from the layout keeps today's single-eager-row behaviour as the FLOOR
-    /// — if the bar's start-on-focus path ever fails, a relaunch still lands
-    /// the human in a working agent rather than a fleet of dead tabs.
-    /// The launch bakes ONE tab, and the type will not let it bake two.
-    ///
-    /// This test used to build three rows and assert two held tabs. That
-    /// layout has not been emitted since the restore became staggered (#261):
-    /// `bakeable_rows` keeps the head of the rank and defers the rest to the
-    /// bar, because zellij building a fleet of tabs in one breath exhausts the
-    /// process file-handle ceiling and kills the server. `launch_layout_kdl`
-    /// now takes one row or none, so the old shape is unspellable — and the
-    /// held path that IS live is `add::tab_layout` with `TabStart::Held`,
-    /// covered in `kdl_guardrail.rs`.
-    #[test]
-    fn the_launch_bakes_one_running_tab_and_never_a_held_one() {
-        let row = layout_row("u-1", "alpha · main", "/repo/alpha");
-        let kdl = launch_layout_kdl(
-            "clave",
-            "/w.wasm",
-            Some(&row),
-            false,
-            clave_types::RowHeight::Card,
-        );
-        assert_eq!(
-            kdl.matches("tab name=").count(),
-            1,
-            "a launch bakes exactly one tab\n{kdl}"
-        );
-        assert_eq!(kdl.matches("focus=true").count(), 1, "{kdl}");
-        assert!(
-            !kdl.contains("start_suspended"),
-            "the launch holds nothing; the bar paces the rest\n{kdl}"
-        );
-        assert!(kdl.contains("alpha"), "{kdl}");
-    }
-
     #[test]
     fn launch_layout_with_a_single_row_bakes_one_running_focused_tab() {
-        // §6.8, now the FALLBACK path: with nothing to restore, launch bakes
-        // the most-recent row alone — resumed, focused, and NOT held, every
-        // other row dormant in the bar. This is what a first run and a
-        // quit-with-nothing-open both land on, so it must stay byte-stable
-        // even as the restored-set branch grows beside it.
+        // §6.8: launch bakes the most-recent row alone — resumed, focused,
+        // every other row dormant in the bar. Every relaunch lands here, so
+        // it must stay byte-stable.
         let mut r = crate::store::AgentRecord {
             uuid: "u-recent".into(),
             cwd: "/repo/.claude-worktrees/ab".into(), // worktree row: bake ITS cwd
@@ -2276,8 +1991,8 @@ mod tests {
         assert!(eager_row(&none).is_none());
     }
 
-    /// A store row with nothing on it but a uuid and a cwd — every field the
-    /// restore reads is set by the caller, so a test says what it means.
+    /// A store row with nothing on it but a uuid and a cwd — every field a
+    /// test reads is set by the caller, so the test says what it means.
     fn bare_record(uuid: &str, cwd: &str) -> crate::store::AgentRecord {
         use crate::store::{AgentRecord, LabelSource};
         AgentRecord {
@@ -2312,286 +2027,6 @@ mod tests {
             wants: None,
             subagents: false,
         }
-    }
-
-    /// The launch builds ONE tab, however big the restored fleet is.
-    ///
-    /// Measured 2026-09-16: zellij opens a burst of about fifty file handles
-    /// per tab while it builds a session, all in the same instant, and drains
-    /// them a second later. Four tabs peaked at 252 handles against macOS's
-    /// default ceiling of 256; five crashed the server outright with "Too many
-    /// open files", twice, and a crashed launch loses tabs for good. A fleet
-    /// of any real size could never start.
-    ///
-    /// So the launch bakes the row the human lands on anyway, and the rest are
-    /// DEFERRED — the sidebar opens them one at a time, seconds apart, which
-    /// keeps the burst to a single tab's worth however many are coming back.
-    /// Deferring is not dropping: every deferred row is still restored.
-    #[test]
-    fn the_launch_bakes_one_tab_and_defers_the_rest_to_the_sidebar() {
-        let a = bare_record("u-a", "/good/a");
-        let b = bare_record("u-b", "/good/b");
-        let c = bare_record("u-c", "/good/c");
-        let eager = bare_record("u-eager", "/good/e");
-        let (baked, deferred, dropped) =
-            bakeable_rows(vec![&a, &b, &c], Some(&eager), |_| Ok(())).expect("all good");
-        assert_eq!(
-            baked.iter().map(|r| r.uuid.as_str()).collect::<Vec<_>>(),
-            vec!["u-a"],
-            "the head of the restore ranking is the tab the human lands on"
-        );
-        assert_eq!(
-            deferred.iter().map(|r| r.uuid.as_str()).collect::<Vec<_>>(),
-            vec!["u-b", "u-c"],
-            "the rest are the sidebar's queue, in the same order"
-        );
-        assert!(dropped.is_empty());
-    }
-
-    /// Across a restored set, one unbakeable row must not take the rest down.
-    #[test]
-    fn a_bad_cwd_in_a_restored_set_drops_that_row_and_keeps_the_others() {
-        let a = bare_record("u-a", "/good/a");
-        let b = bare_record("u-b", "/bad");
-        let c = bare_record("u-c", "/good/c");
-        let eager = bare_record("u-eager", "/good/e");
-        let (rows, deferred, dropped) = bakeable_rows(vec![&a, &b, &c], Some(&eager), |cwd| {
-            if cwd == "/bad" {
-                anyhow::bail!("bad cwd")
-            } else {
-                Ok(())
-            }
-        })
-        .expect("one bad row is not fatal across a set");
-        // The survivors keep their order across the split: u-a is baked, u-c
-        // is still restored, just by the sidebar a few seconds later.
-        assert_eq!(
-            rows.iter().map(|r| r.uuid.as_str()).collect::<Vec<_>>(),
-            vec!["u-a"]
-        );
-        assert_eq!(
-            deferred.iter().map(|r| r.uuid.as_str()).collect::<Vec<_>>(),
-            vec!["u-c"],
-            "the good row behind the bad one is deferred, NOT lost with it"
-        );
-        assert_eq!(dropped.len(), 1, "the drop is reported, not silent");
-        assert!(dropped[0].contains("u-b"));
-    }
-
-    /// A set whose rows are ALL rejected must still launch something. Testing
-    /// the set for emptiness before the filter baked a bar and no agent —
-    /// worse than the cold start the restore replaced.
-    #[test]
-    fn a_restored_set_that_is_entirely_unbakeable_falls_back_to_the_eager_row() {
-        let a = bare_record("u-a", "/bad");
-        let eager = bare_record("u-eager", "/good");
-        let (rows, _deferred, dropped) = bakeable_rows(vec![&a], Some(&eager), |cwd| {
-            if cwd == "/bad" {
-                anyhow::bail!("bad cwd")
-            } else {
-                Ok(())
-            }
-        })
-        .expect("the eager row is bakeable");
-        assert_eq!(
-            rows.iter().map(|r| r.uuid.as_str()).collect::<Vec<_>>(),
-            vec!["u-eager"],
-            "an emptied restored set falls through to the cold-start row"
-        );
-        assert_eq!(dropped.len(), 1);
-    }
-
-    /// With ONE row to bake, a bad cwd is the whole launch: fatal and loud,
-    /// never a session that silently came up empty.
-    #[test]
-    fn a_bad_cwd_on_the_eager_row_is_fatal() {
-        let eager = bare_record("u-eager", "/bad");
-        assert!(
-            bakeable_rows(vec![], Some(&eager), |_| anyhow::bail!("bad cwd")).is_err(),
-            "the cold-start path stays fatal"
-        );
-    }
-
-    /// A first run: nothing restored, nothing to be eager about, no error.
-    #[test]
-    fn nothing_to_bake_is_not_an_error() {
-        let (rows, deferred, dropped) =
-            bakeable_rows(vec![], None, |_| Ok(())).expect("empty is ordinary");
-        assert!(rows.is_empty() && deferred.is_empty() && dropped.is_empty());
-    }
-
-    /// The read side of the live-set snapshot: `last_live` is a faithful
-    /// record, so it can name rows that no longer exist (idle-pruned between
-    /// sessions) or whose directory has since gone (a deleted worktree). Both
-    /// are dropped here rather than at write time — the store stays the honest
-    /// record, and only what launch can actually BAKE survives this call. A
-    /// vanished cwd left in would emit a tab whose spawn dies at canonicalize,
-    /// the same trap `eager_row` already guards.
-    #[test]
-    fn restore_rows_drops_pruned_and_vanished_rows() {
-        use crate::store::{AgentRecord, LabelSource, Store};
-        // `tempfile` rather than a pid-keyed path: it is removed on drop, so a
-        // panicking test leaks nothing and a reused pid cannot inherit a stale
-        // directory. Same convention as the store tests.
-        let tmp = tempfile::tempdir().unwrap();
-        let live_dir = tmp.path().to_path_buf();
-        let mk = |uuid: &str, cwd: &str| AgentRecord {
-            uuid: uuid.into(),
-            cwd: cwd.into(),
-            repo_root: String::new(),
-            branch: String::new(),
-            label: uuid.into(),
-            status: clave_types::Status::Idle,
-            last_interacted: 0,
-            commit_ord: 0,
-            last_visited: 0,
-            worktree: None,
-            label_source: LabelSource::FirstPrompt,
-            tab_id: None,
-            pane_id: None,
-            stale: false,
-            title: None,
-            summary: String::new(),
-            default_branch: None,
-            context_tokens: None,
-            context_level: None,
-            live_session: None,
-            metered_at: 0,
-            buckets: Default::default(),
-            model: None,
-            provider: None,
-            effort: None,
-            pr_number: None,
-            pr_checked: 0,
-            pr_branch: String::new(),
-            wants: None,
-            subagents: false,
-        };
-        let here = live_dir.to_str().unwrap();
-        let mut store = Store::default();
-        store.agents.insert("u-b".into(), mk("u-b", here));
-        store.agents.insert("u-a".into(), mk("u-a", here));
-        store
-            .agents
-            .insert("u-gone".into(), mk("u-gone", "/no/such/clave/restore/dir"));
-        store.last_live = vec![
-            "u-pruned".into(), // named in the snapshot, no longer a row
-            "u-b".into(),
-            "u-gone".into(), // row exists, its directory does not
-            "u-a".into(),
-        ];
-        let uuids = |store: &Store| -> Vec<String> {
-            restore_rows(store, 0)
-                .iter()
-                .map(|r| r.uuid.to_string())
-                .collect()
-        };
-        // Nothing separates these two rows, so the set's own order stands.
-        assert_eq!(uuids(&store), vec!["u-b", "u-a"], "viable rows only");
-        assert!(
-            restore_rows(&Store::default(), 0).is_empty(),
-            "no snapshot ⇒ nothing to restore, and launch falls back to the eager row"
-        );
-    }
-
-    /// The set is written in ascending tab id — the order the tabs were
-    /// CREATED in, which is not the order the human saw. The bar sorts rows
-    /// by investment, so a relaunch has to sort them too, or the fleet comes
-    /// back shuffled and, worse, the row launch starts (the first one) is
-    /// whichever tab happened to be leftmost rather than the one at the top.
-    #[test]
-    fn restore_rows_rank_by_the_same_key_the_bar_uses() {
-        use crate::store::Store;
-        // `tempfile` rather than a pid-keyed path: it is removed on drop, so a
-        // panicking test leaks nothing and a reused pid cannot inherit a stale
-        // directory. Same convention as the store tests.
-        let tmp = tempfile::tempdir().unwrap();
-        let live_dir = tmp.path().to_path_buf();
-        let here = live_dir.to_str().unwrap().to_string();
-        let mut store = Store::default();
-        // Tab-id order is a, b, c. Investment says b, then c, then a.
-        for (uuid, count, ord) in [("u-a", 1, 9), ("u-b", 5, 1), ("u-c", 3, 2)] {
-            let mut r = bare_record(uuid, &here);
-            r.buckets.insert(0, count);
-            r.commit_ord = ord;
-            store.agents.insert(uuid.into(), r);
-            store.last_live.push(uuid.into());
-        }
-        let uuids = |store: &Store| -> Vec<String> {
-            restore_rows(store, 0)
-                .iter()
-                .map(|r| r.uuid.to_string())
-                .collect()
-        };
-        assert_eq!(uuids(&store), vec!["u-b", "u-c", "u-a"], "frecency");
-        // `commit_ord` is the fallback, and a fleet with no buckets at all —
-        // upgrade day — must still come back in a meaningful order rather
-        // than collapsing to the tab strip.
-        for r in store.agents.values_mut() {
-            r.buckets.clear();
-        }
-        assert_eq!(uuids(&store), vec!["u-a", "u-c", "u-b"], "ordinal fallback");
-        // Recency mode has no dial: the ordinal is the whole key, so the
-        // buckets above must not have been ranking it.
-        store.order = clave_types::OrderMode::Recency;
-        for (uuid, count) in [("u-a", 1), ("u-b", 5), ("u-c", 3)] {
-            store.agents.get_mut(uuid).unwrap().buckets.insert(0, count);
-        }
-        assert_eq!(uuids(&store), vec!["u-a", "u-c", "u-b"], "recency mode");
-    }
-
-    /// The layer ABOVE the row key (CodeRabbit, PR #261). The bar clusters
-    /// live rows by repo and ranks the CLUSTERS by their summed score, so a
-    /// repo holding several middling rows outranks another repo's single
-    /// better one. Ranking each row on its own crossed that: the bar showed
-    /// `a1` on top and the relaunch focused — and therefore STARTED — `b1`.
-    ///
-    /// Both sides now call `clave_types::sort_live_block`, so this asserts the
-    /// shared rule reaches the host, not a second copy of it.
-    #[test]
-    fn restore_rows_rank_repo_clusters_the_way_the_bar_does() {
-        use crate::store::Store;
-        // `tempfile` rather than a pid-keyed path: it is removed on drop, so a
-        // panicking test leaks nothing and a reused pid cannot inherit a stale
-        // directory. Same convention as the store tests.
-        let tmp = tempfile::tempdir().unwrap();
-        let live_dir = tmp.path().to_path_buf();
-        let here = live_dir.to_str().unwrap().to_string();
-        let mut store = Store::default();
-        // Flat, b1 wins at 8000. Clustered, repo a wins with Σ 9000.
-        for (uuid, repo, count) in [
-            ("u-b1", "/r/b", 8),
-            ("u-a1", "/r/a", 5),
-            ("u-a2", "/r/a", 4),
-        ] {
-            let mut r = bare_record(uuid, &here);
-            r.repo_root = repo.into();
-            r.buckets.insert(0, count);
-            store.agents.insert(uuid.into(), r);
-            store.last_live.push(uuid.into());
-        }
-        let uuids: Vec<String> = restore_rows(&store, 0)
-            .iter()
-            .map(|r| r.uuid.to_string())
-            .collect();
-        assert_eq!(
-            uuids,
-            vec!["u-a1", "u-a2", "u-b1"],
-            "the cluster's sum outranks a better lone row, and the first row is what starts"
-        );
-        // A worktree row clusters with its PARENT repo, because `repo_root` is
-        // the parent even when `worktree` is set — the same field the bar
-        // groups on, so a worktree cannot split its repo's cluster in two.
-        let wt = store.agents.get_mut("u-a2").unwrap();
-        wt.worktree = Some(format!("{here}/wt"));
-        assert_eq!(
-            restore_rows(&store, 0)
-                .iter()
-                .map(|r| r.uuid.to_string())
-                .collect::<Vec<_>>(),
-            vec!["u-a1", "u-a2", "u-b1"],
-            "a worktree row stays inside its repo's cluster"
-        );
     }
 
     #[test]
