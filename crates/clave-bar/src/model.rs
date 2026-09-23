@@ -8737,6 +8737,18 @@ mod tests {
     }
 
     #[test]
+    fn the_stores_bind_to_a_live_tab_outranks_a_spawn_pane() {
+        // One tab per agent: where the store binds the row to a live tab,
+        // a second tab's pane naming the row does not claim it too.
+        let mut m = tab_opened_before_its_bind(true, false);
+        m.agents[0].tab_id = Some(1);
+        assert_eq!(m.agent_in_tab(3), None);
+        // A bind that names a closed tab is no bind: the spawn pane joins.
+        m.agents[0].tab_id = Some(9);
+        assert_eq!(m.agent_in_tab(3).map(|a| a.uuid.as_str()), Some("u-s1"));
+    }
+
+    #[test]
     fn a_new_bar_sends_no_birth_touch_before_its_first_snapshot() {
         // Without the snapshot the bar cannot tell a standby row's tab from
         // a newborn, and a touch sent blind is the hop.
