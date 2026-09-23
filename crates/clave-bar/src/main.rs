@@ -114,6 +114,12 @@ struct State {
     /// the click map falls back to the pre-viewport identity mapping (line N
     /// selects row N) rather than misbehaving.
     pane_height: usize,
+    /// The last `width-deaf` line written, so a bar held at the wrong width
+    /// logs once per (width, reason) and not once per paint.
+    last_deaf: Option<(usize, &'static str)>,
+    /// The width of the last paint, so `render` logs a `painted` line only
+    /// when zellij changes it — the trace of a swap landing, or being undone.
+    last_cols: Option<usize>,
     /// A term-facts poll timer is in flight (#206) — one at a time, re-armed
     /// on expiry only while `term_poll_wanted()` holds.
     term_poll_armed: bool,
@@ -247,12 +253,6 @@ impl State {
         let bin = self.clave_binary.clone();
         for e in effects {
             match e {
-                Effect::RunHeldPane { pane_id } => {
-                    // The restored tab's agent starts here — `rerun` is
-                    // zellij's one verb for a held command pane, and a pane
-                    // held from birth has simply never run once.
-                    rerun_command_pane(pane_id);
-                }
                 Effect::FocusPane { pane_id } => {
                     // S2-proven nav: focus the terminal pane; Zellij pulls
                     // its tab forward. go_to_tab is a known dead end.
@@ -464,7 +464,7 @@ impl State {
                         ),
                     );
                 }
-                Effect::OpenAgent { uuid, restore_to } => {
+                Effect::OpenAgent { uuid } => {
                     // Collapse mode rides along for D36's reason: the new tab
                     // must be born in the mode the fleet is in. The width
                     // needs no measuring — the layout `clave open` writes is
@@ -472,13 +472,6 @@ impl State {
                     let mut argv = vec![bin.as_str(), "open", &uuid];
                     if self.model.collapsed {
                         argv.push("--collapsed");
-                    }
-                    // #261: held, and hand the focus back to this tab. The
-                    // model decided both — see `Effect::OpenAgent`.
-                    let home = restore_to.map(|t| t.to_string());
-                    if let Some(home) = home.as_deref() {
-                        argv.push("--restore-to");
-                        argv.push(home);
                     }
                     run_command(&argv, BTreeMap::new());
                 }
@@ -521,15 +514,6 @@ impl State {
         // out of `identity_effects` also keeps that function's contract what it
         // has always been — the actions to take, nothing else.
         let mut fx: Vec<Effect> = self.model.bind_stall_report().into_iter().collect();
-        // The held-tab binds. Kept beside `identity_effects` rather than
-        // inside it so the two ledgers stay visibly separate — `bind_effects`
-        // clears `bind_sent` for every uuid without a registered pane, which
-        // is this leg's whole population (CodeRabbit, #261). It carries its
-        // OWN election gate and reports for every held tab, not just ours:
-        // zellij sends the tab frame only to the focused tab, so a bar in an
-        // unvisited tab cannot resolve its own tab id at all. The elected bar
-        // can, for all of them — the pane manifest is global.
-        fx.extend(self.model.restored_bind_effects());
         fx.extend(self.model.identity_effects());
         if !fx.is_empty() {
             self.run_effects(fx);
@@ -707,15 +691,6 @@ impl State {
                         self.pending_peeks += 1;
                         set_timeout(PEEK_SINK_SECS); // user-tuned: 1.0 felt a touch long
                     }
-                    // The beacon is a join input, like the two frames (#261).
-                    // Waking a held agent needs the beacon AND this instance's
-                    // own tab, and the two arrive by different routes: on a nav
-                    // landing the target bar gets its `TabUpdate` while the
-                    // beacon still names the tab the human left, so the wake
-                    // arm refuses — and without this line nothing re-enters
-                    // when the beacon catches up. Fail-closed and idempotent,
-                    // so settling on the losing order costs nothing.
-                    self.settle_identity();
                     true // active-row highlight may move
                 }
                 Err(e) => {
@@ -802,10 +777,18 @@ impl ZellijPlugin for State {
         // start-or-reload-plugin`): stamp the build so the zellij log tells
         // you WHICH wasm produced a trace. Set by the rebuild recipe via
         // CLAVE_BUILD_TAG; "dev" means an untagged local build.
+        // The client id rides along (2026-09-22): zellij routes every
+        // swap-layout ask by the client this instance was loaded under
+        // (zellij-server 0.45.1 plugins/zellij_exports.rs:120-140, then
+        // screen.rs:10372 `active_tab_and_connected_client_id!`), and
+        // ids are the lowest free number (lib.rs:663-672), so a tab minted
+        // by a CLI client inherits an id the next CLI client will reuse.
+        let ids = get_plugin_ids();
         eprintln!(
-            "clave-bar: loaded v{} build={}",
+            "clave-bar: loaded v{} build={} client={}",
             env!("CARGO_PKG_VERSION"),
-            option_env!("CLAVE_BUILD_TAG").unwrap_or("dev")
+            option_env!("CLAVE_BUILD_TAG").unwrap_or("dev"),
+            ids.client_id
         );
         // #44: resolve the CLI from plugin configuration instead of PATH. A
         // stale `clave` on PATH previously served a live session's `clave
@@ -1009,7 +992,6 @@ impl ZellijPlugin for State {
                             is_focused: p.is_focused,
                             is_floating: p.is_floating,
                             terminal_command: p.terminal_command.clone(),
-                            is_held: p.is_held,
                             exited: p.exited,
                             exit_status: p.exit_status,
                         });
@@ -1147,6 +1129,17 @@ impl ZellijPlugin for State {
                 // the deafness a few ms early is harmless, and no expiry can
                 // strand it.
                 let fx = self.model.width_cooldown_elapsed();
+                // The cooldown's own asks were unlogged until 2026-09-22:
+                // `render` logs only the asks it makes, and this leg makes
+                // the rest. The QA counter reads both lines.
+                for e in &fx {
+                    if let Effect::SwapWidth { backwards } = e {
+                        let last = self.last_cols;
+                        eprintln!(
+                            "clave-bar: swap-width backwards={backwards} cols={last:?} source=cooldown"
+                        );
+                    }
+                }
                 let width_moved = !fx.is_empty();
                 self.run_effects(fx);
                 // The term-poll leg (#206): re-probe, re-arm while wanted,
@@ -1223,7 +1216,48 @@ impl ZellijPlugin for State {
         // pane id the request carries (v0.44.3 — FOOTGUNS.md). The gate lives in
         // `width_effects`, which holds the switch until this bar's own tab is
         // the focused one.
+        // Every width change zellij paints (2026-09-22): the only trace of
+        // a swap that landed on this pane, or landed and was undone.
+        if self.last_cols != Some(cols) {
+            let was = self.last_cols;
+            eprintln!("clave-bar: painted cols={cols} was={was:?}");
+            self.last_cols = Some(cols);
+        }
         let fx = self.model.width_effects(Some(cols));
+        // One log line per width ask, SHIPPED: it is the only observable
+        // of the flap the devbox had (2026-09-22: sixteen asks in four
+        // seconds, every one for the width the pane already had). The QA
+        // drive counts these lines per sandbox instance; a bar at its width
+        // asks nothing, so any ask during a nav walk is a defect. Cheap:
+        // a healthy bar asks at most once per toggle.
+        // Own tab, focused tab and the own tab's tiled pane count ride
+        // along (2026-09-22): zellij applies a swap to the focused tab, and
+        // an ask that never lands needs those three to name the seam.
+        for e in &fx {
+            if let Effect::SwapWidth { backwards } = e {
+                let tab = self.model.own_tab();
+                let active = self.model.active_tab_id();
+                let panes = self.model.own_tab_tiled_pane_count();
+                let client = get_plugin_ids().client_id;
+                eprintln!(
+                    "clave-bar: swap-width backwards={backwards} cols={cols} tab={tab:?} active={active:?} panes={panes:?} client={client}"
+                );
+            }
+        }
+        // The silent case (2026-09-22): a paint at the wrong width with no
+        // ask. One line per (width, reason), so a bar resting wrong for a
+        // minute costs one line, not one per frame.
+        let deaf = self.model.width_deaf_reason(cols).map(|r| (cols, r));
+        if deaf != self.last_deaf {
+            if let Some((_, reason)) = deaf {
+                let tab = self.model.own_tab();
+                let active = self.model.active_tab_id();
+                eprintln!(
+                    "clave-bar: width-deaf cols={cols} reason={reason} tab={tab:?} active={active:?}"
+                );
+            }
+            self.last_deaf = deaf;
+        }
         self.run_effects(fx);
         // One line per row, display-ordered. Everything visual — the column
         // arithmetic, the palette, the fade, the truncation — lives in

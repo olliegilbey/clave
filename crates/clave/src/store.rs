@@ -312,59 +312,6 @@ pub struct Store {
     /// session recreate). `default` keeps pre-field store files loading.
     #[serde(default)]
     pub tab_touched: BTreeMap<usize, u64>,
-    /// The rows that held a tab when the PREVIOUS zellij session died — the
-    /// set a relaunch restores. Written by `clear_session_order`, which is the
-    /// one pass that both runs at every launch and still sees the old binds a
-    /// beat before it clears them; read by `setup::restore_rows`. Nothing else
-    /// writes it.
-    ///
-    /// "Held a tab" means the BIND, and a restored tab binds before its spawn
-    /// runs (the bar's `restored_bind_effects`). Both halves are load-bearing:
-    /// derived from binds written by a running agent alone, the set recorded
-    /// only the tabs the human visited and the restored fleet decayed to a
-    /// single row over a few relaunches.
-    ///
-    /// Deliberately UNRANKED and UNCAPPED. A SET, written in ascending tab id
-    /// only so the file is deterministic; the order the human saw was the
-    /// bar's ranking, which `restore_rows` recomputes. Every policy about how
-    /// much comes back hot lives on the read side, so it can be retuned
-    /// without touching the store's correctness.
-    ///
-    /// Agent-scoped, unlike `tab_order`/`tab_buckets`/`tab_touched` beside it:
-    /// those hold session-scoped tab ids and must die with the session. An
-    /// empty default means "nothing to restore" — the single-eager-row path.
-    #[serde(default)]
-    pub last_live: Vec<String>,
-    /// Which row's tab drives the staggered restore (#261).
-    ///
-    /// Session-scoped, like the binds beside it: written by `setup::launch`
-    /// once it has picked the row to bake, cleared by `clear_session_order`
-    /// on the way into the next session. `None` means no restore is owed.
-    /// See the field of the same name on `AgentSnapshot` for why the launch
-    /// has to say this out loud rather than let the bars work it out.
-    #[serde(default)]
-    pub restore_owner: Option<String>,
-    /// Did any row bind a tab since the last launch? (#261)
-    ///
-    /// Two very different sessions reach the next launch with no binds and no
-    /// tab order: one that opened tabs and closed them all (the set must go
-    /// EMPTY), and one that never bound at all — a bar that failed to load, a
-    /// human who quit in the first seconds (the set must SURVIVE). This flag
-    /// is the one fact separating them, and only a live session supplies it.
-    /// Armed false by `clear_session_order`, set true by the first
-    /// `apply_bind`. Gating on `tab_order` instead does NOT work: the
-    /// quit-with-nothing-open case clears it on the same pass.
-    ///
-    /// The default is TRUE, and only a store the PREVIOUS clave wrote can
-    /// reach it — every launch from this version on writes the field. So the
-    /// default answers one question: may the first launch after an upgrade
-    /// trust the binds it can see? It may. The crash this flag guards against
-    /// leaves the flag behind set to false; it cannot leave the flag missing.
-    /// Defaulting to false instead cost one cold start for every person who
-    /// upgrades — their agents came back from the launch AFTER next, which
-    /// reads as the feature not working.
-    #[serde(default = "trust_binds_from_before_the_upgrade")]
-    pub bound_since_launch: bool,
     /// Which row geometry the NEXT `clave` launch bakes (#232). Read once by
     /// `launch_layout_kdl` at session-create time — never rides the pipe
     /// (unlike `collapsed`/`order`): geometry is launch-baked into fixed pane
@@ -464,13 +411,6 @@ pub fn store_paths() -> Result<StorePaths> {
 /// Lock-free read. Safe without the lock because writers replace the file by
 /// atomic rename — a reader opens either the old whole file or the new whole
 /// file, never a torn write. Missing file = empty store (first run).
-/// See `Store::bound_since_launch`. A store with no such field was written by
-/// a clave that had no live-set restore, so its binds describe a real fleet
-/// and the launch reading them is the first one able to bring it back.
-fn trust_binds_from_before_the_upgrade() -> bool {
-    true
-}
-
 pub fn read_store(paths: &StorePaths) -> Result<Store> {
     match fs::read(&paths.data) {
         Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
@@ -522,8 +462,6 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
     AgentSnapshot {
         seq: store.seq,
         tab_order: store.tab_order.clone(),
-        last_live: store.last_live.clone(),
-        restore_owner: store.restore_owner.clone(),
         collapsed: store.collapsed,
         tab_buckets: store.tab_buckets.clone(),
         order: store.order,
@@ -728,12 +666,6 @@ pub fn apply_bind(paths: &StorePaths, uuid: &str, tab_id: usize) -> Result<Optio
         if let Some(r) = s.agents.get_mut(uuid) {
             r.tab_id = Some(tab_id);
         }
-        // This session has now bound at least one row, so the NEXT
-        // `clear_session_order` may trust its reading (#261). Set on the
-        // changing path only: a re-report returns above and stays free, and
-        // the first bind of any session is always a change, because the
-        // launch nulled every bind a beat earlier.
-        s.bound_since_launch = true;
         // An agent-bound tab's twin never holds inherited buckets (maintainer
         // ruling, 2026-08-19 post-drive): the row must rank on the agent's own
         // decayed score. Insert EMPTY rather than remove — an occupied key is
@@ -765,23 +697,10 @@ pub fn apply_register(
 ) -> Result<Option<AgentSnapshot>> {
     with_store_mut(paths, |s| {
         let r = s.agents.get_mut(uuid)?;
-        // A registration is the agent announcing itself one line before the
-        // exec into claude, so it is the moment we KNOW the row runs again.
-        // An `Exited` mark from the last session is wrong from here on, and
-        // nothing else clears it: `status_for_event` has no SessionStart leg,
-        // so the mark survives until the first prompt — which can be never.
-        // A restarted row that keeps it draws dim (`Status::Exited` → '○'),
-        // and `bound_live_uuids` offers it to the picker as a RESUME instead
-        // of a jump, which double-attaches the session (#261).
-        let stale_exit = r.status == Status::Exited;
-        if r.pane_id == Some(pane_id) && !stale_exit {
+        if r.pane_id == Some(pane_id) {
             return None; // re-registration of the same pane: no push
         }
         r.pane_id = Some(pane_id);
-        if stale_exit {
-            // Idle, not Working: the process is up, the turn is the user's.
-            r.status = Status::Idle;
-        }
         s.seq += 1; // monotonic pipe contract (§5)
         Some(snapshot_from(s))
     })
@@ -986,44 +905,6 @@ pub fn clear_session_order(paths: &StorePaths) -> Result<()> {
             .values()
             .any(|r| r.tab_id.is_some() || r.pane_id.is_some());
         let mut changed = false;
-        // Record the set a beat BEFORE clearing it: this pass is the last
-        // moment the previous session's binds exist, and `last_live` is what
-        // the next launch rebuilds the layout from. COMPUTED here and written
-        // below under one condition — see the gate. It used to be written
-        // unconditionally, and the paragraph on that gate says why that was
-        // nearly right and still wrong.
-        let live_set: Vec<String> = {
-            let mut by_tab: Vec<(usize, &str)> = s
-                .agents
-                .values()
-                .filter_map(|r| r.tab_id.map(|t| (t, r.uuid.as_str())))
-                .collect();
-            by_tab.sort_unstable(); // ascending tab id: deterministic, NOT a rank
-            by_tab.into_iter().map(|(_, u)| u.to_string()).collect()
-        };
-        // Gated on a bind having happened (#261). An unconditional write
-        // looks right — a quit with nothing open must leave an EMPTY set, and
-        // a conditional write would resurrect the layout from two launches
-        // ago — but it also lets a launch that DIED before binding anything
-        // erase the real set on the launch after. `bound_since_launch` is the
-        // fact that tells the two apart.
-        if s.bound_since_launch && s.last_live != live_set {
-            s.last_live = live_set;
-            changed = true;
-        }
-        // Arm for the session this launch is about to start.
-        if s.bound_since_launch {
-            s.bound_since_launch = false;
-            changed = true;
-        }
-        // Session-scoped, exactly like the binds below: the owner names a row
-        // whose TAB sequences one session's restore. The launch that follows
-        // this pass names the new one, and names nothing when it defers
-        // nothing, so a stale owner cannot make a bar sequence an empty queue.
-        if s.restore_owner.is_some() {
-            s.restore_owner = None;
-            changed = true;
-        }
         if !s.tab_order.is_empty() || bound {
             s.tab_order.clear();
             s.tab_buckets.clear();
@@ -1035,12 +916,12 @@ pub fn clear_session_order(paths: &StorePaths) -> Result<()> {
             changed = true;
         }
         // No agent runs at a launch, so a status that describes a RUNNING
-        // PROCESS is a claim about something that is gone. A restored tab came
-        // back wearing the mark of an agent that had stopped, which reads as an
-        // empty tab beside the live ones (#261, QA run 18). The first hook of
-        // the new session states the truth; the launch only stops asserting the
-        // old one. Binds above and status here go on the same pass, because
-        // they die of the same cause.
+        // PROCESS is a claim about something that is gone. A row that came
+        // back wearing the mark of an agent that had stopped read as a
+        // different state beside the live ones (#261, QA run 18). The first
+        // hook of the new session states the truth; the launch only stops
+        // asserting the old one. Binds above and status here go on the same
+        // pass, because they die of the same cause.
         //
         // `Done` and `Failed` survive, and the distinction is the whole point
         // of this loop (found in review). They describe a finished TURN, not a
@@ -1050,10 +931,7 @@ pub fn clear_session_order(paths: &StorePaths) -> Result<()> {
         // it destroyed an unread result on every relaunch, and dimmed every
         // seeded demo fleet the moment the maintainer launched it.
         for r in s.agents.values_mut() {
-            if matches!(
-                r.status,
-                Status::Working | Status::NeedsYou | Status::Exited
-            ) {
+            if matches!(r.status, Status::Working | Status::NeedsYou) {
                 r.status = Status::Idle;
                 changed = true;
             }
@@ -1796,86 +1674,6 @@ mod tests {
     }
 
     #[test]
-    fn the_first_launch_after_an_upgrade_brings_the_old_fleet_back() {
-        // The live-set restore reads a list this launch writes from the binds
-        // the last session left. That write is gated on a flag added WITH the
-        // feature, so a store the previous clave wrote has no such flag —
-        // and reading its absence as "do not trust the binds" starts the
-        // upgrader cold, with their agents returning only from the launch
-        // AFTER next. The binds in that store are real; nothing else could
-        // have written them.
-        let d = tempfile::tempdir().unwrap();
-        let p = tmp_paths(d.path());
-        with_store_mut(&p, |s| {
-            let mut r = rec("u1");
-            r.tab_id = Some(2);
-            s.agents.insert("u1".into(), r);
-            Some(())
-        })
-        .unwrap();
-        // Age the file into what the previous version wrote: the bind stays,
-        // the flag was never a field.
-        let mut raw: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&p.data).unwrap()).unwrap();
-        assert!(
-            raw.as_object_mut()
-                .unwrap()
-                .remove("bound_since_launch")
-                .is_some(),
-            "the field must be there to remove, or this test ages nothing"
-        );
-        std::fs::write(&p.data, serde_json::to_string(&raw).unwrap()).unwrap();
-
-        clear_session_order(&p).unwrap();
-        assert_eq!(
-            read_store(&p).unwrap().last_live,
-            vec!["u1".to_string()],
-            "the upgrader's fleet comes back on the FIRST launch"
-        );
-    }
-
-    #[test]
-    fn a_restarted_agent_stops_wearing_the_mark_of_the_one_that_quit() {
-        // Seen on screen 2026-09-17. An agent that quit was restarted, came up
-        // and ran — and its row kept `Exited`. Nothing else takes that mark
-        // off: the hook table has no SessionStart leg, so the row lied until
-        // the next prompt, drawing dim and offering itself to the picker as a
-        // resume, which double-attaches the session (#261).
-        let d = tempfile::tempdir().unwrap();
-        let p = tmp_paths(d.path());
-        with_store_mut(&p, |s| {
-            let mut r = rec("u1");
-            r.status = Status::Exited;
-            r.pane_id = Some(42);
-            s.agents.insert("u1".into(), r);
-        })
-        .unwrap();
-        // The restart lands on a FRESH pane, the ordinary case.
-        let snap = apply_register(&p, "u1", 43).unwrap().expect("registered");
-        assert_eq!(snap.agents[0].status, Status::Idle, "it runs again");
-        // And on the SAME pane id, which the change gate would otherwise drop
-        // on the floor — the mark has to come off there too.
-        with_store_mut(&p, |s| {
-            s.agents.get_mut("u1").unwrap().status = Status::Exited;
-            Some(())
-        })
-        .unwrap();
-        let snap = apply_register(&p, "u1", 43)
-            .unwrap()
-            .expect("same pane, but the status changed");
-        assert_eq!(snap.agents[0].status, Status::Idle);
-        // A row that never quit keeps whatever it was doing: registering is
-        // not a status write, it is the removal of one wrong mark.
-        with_store_mut(&p, |s| {
-            s.agents.get_mut("u1").unwrap().status = Status::Working;
-            Some(())
-        })
-        .unwrap();
-        apply_register(&p, "u1", 44).unwrap().expect("registered");
-        assert_eq!(read_store(&p).unwrap().agents["u1"].status, Status::Working);
-    }
-
-    #[test]
     fn a_closing_tab_takes_its_pane_mapping_with_it() {
         // Codex P2 on PR #185. A pane that outlives its tab is worse than no
         // pane at all: the dormant row reads as "announced but absent", which
@@ -2177,220 +1975,10 @@ mod tests {
         );
     }
 
-    /// The restore's owner is SESSION-scoped, like the binds it sits beside.
-    ///
-    /// It names a row whose TAB sequences one session's restore, so carrying
-    /// it into the next session would put a bar in charge of a queue that no
-    /// longer exists. The launch names the new one on its way up, and names
-    /// nothing at all when it defers nothing. (#261)
-    #[test]
-    fn the_restores_owner_does_not_outlive_its_session() {
-        let d = tempfile::tempdir().unwrap();
-        let p = tmp_paths(d.path());
-        with_store_mut(&p, |s| {
-            s.agents.insert("u-a".into(), rec("u-a"));
-            s.restore_owner = Some("u-a".into());
-        })
-        .unwrap();
-        apply_bind(&p, "u-a", 1).unwrap();
-        assert_eq!(
-            read_store(&p).unwrap().restore_owner.as_deref(),
-            Some("u-a"),
-            "premise: the session came up with an owner"
-        );
-        clear_session_order(&p).unwrap();
-        assert_eq!(
-            read_store(&p).unwrap().restore_owner,
-            None,
-            "a stale owner would make a bar sequence the previous session's queue"
-        );
-    }
-
-    /// The launch pass that clears the session-scoped binds RECORDS them
-    /// first: `last_live` is the previous session's live SET, written in
-    /// ascending tab id so the file is deterministic. It is not a rank — the
-    /// relaunch ranks it on the read side (`setup::restore_rows`).
-    /// Without this the knowledge dies on the same pass that clears it, and
-    /// every previously-live row comes back dormant — the relaunch complaint.
-    #[test]
-    fn clear_session_order_records_the_live_set_in_tab_order() {
-        let d = tempfile::tempdir().unwrap();
-        let p = tmp_paths(d.path());
-        with_store_mut(&p, |s| {
-            // Inserted out of tab order, and keyed by uuid in a BTreeMap, so a
-            // pass that recorded iteration order rather than TAB order would
-            // pass by luck on a two-row fixture. Here uuid order and tab order
-            // disagree deliberately.
-            for uuid in ["u-c", "u-a", "u-b"] {
-                s.agents.insert(uuid.into(), rec(uuid));
-            }
-            // A dormant row holds no tab and is not part of the live set.
-            s.agents.insert("u-dormant".into(), rec("u-dormant"));
-        })
-        .unwrap();
-        // Bound through `apply_bind`, the one writer a live session uses:
-        // hand-set binds skip `bound_since_launch` and would leave this
-        // fixture describing a session that never came up (FOOTGUNS: build the
-        // fixture from what the shell delivers).
-        for (uuid, tab) in [("u-c", 1usize), ("u-a", 9), ("u-b", 4)] {
-            apply_bind(&p, uuid, tab).unwrap();
-            with_store_mut(&p, |s| {
-                s.tab_order.insert(tab, 0);
-            })
-            .unwrap();
-        }
-        clear_session_order(&p).unwrap();
-        let s = read_store(&p).unwrap();
-        assert_eq!(
-            s.last_live,
-            vec!["u-c".to_string(), "u-b".to_string(), "u-a".to_string()],
-            "ascending tab id (1, 4, 9), not uuid order, and dormant rows excluded"
-        );
-        // The binds themselves still go — recording must not preserve them.
-        assert!(s.agents.values().all(|r| r.tab_id.is_none()));
-    }
-
-    /// A RESTORED row holds a tab without ever running a process, and it must
-    /// still count as live — otherwise the set shrinks to the tabs the human
-    /// happened to visit and the restored fleet decays to one row over a few
-    /// relaunches (measured on this branch: three rows in, one row back). The
-    /// bind arrives from the bar's `restored_bind_effects`, so the discriminator
-    /// here is `tab_id` ALONE: a row with a tab and no registered pane is a
-    /// tab on screen, which is exactly what the set records.
-    #[test]
-    fn clear_session_order_counts_a_restored_row_that_never_ran() {
-        let d = tempfile::tempdir().unwrap();
-        let p = tmp_paths(d.path());
-        with_store_mut(&p, |s| {
-            s.agents.insert("u-visited".into(), rec("u-visited"));
-            s.agents.insert("u-waiting".into(), rec("u-waiting"));
-        })
-        .unwrap();
-        apply_bind(&p, "u-visited", 0).unwrap();
-        apply_bind(&p, "u-waiting", 1).unwrap(); // a tab on screen…
-        with_store_mut(&p, |s| {
-            s.agents.get_mut("u-visited").unwrap().pane_id = Some(7); // ran
-            s.agents.get_mut("u-waiting").unwrap().pane_id = None; // never ran
-        })
-        .unwrap();
-        clear_session_order(&p).unwrap();
-        assert_eq!(
-            read_store(&p).unwrap().last_live,
-            vec!["u-visited".to_string(), "u-waiting".to_string()],
-            "a restored tab the human never reached is still a tab that was open"
-        );
-    }
-
-    /// The tab a human was WORKING in must survive the quit. QA run 12
-    /// (2026-09-16) bound six tabs and got five back: the one row whose claude
-    /// had really started was missing, because its `SessionEnd` unbound the
-    /// row from a tab that was still on screen, and `clear_session_order`
-    /// records only rows that still hold a tab.
-    ///
-    /// An agent EXITING and a tab CLOSING are different events. Only the
-    /// second may remove the row from the next launch's set; that one is
-    /// `apply_prune_tabs`, pinned separately.
-    #[test]
-    fn clear_session_order_keeps_a_row_whose_agent_exited_in_its_open_tab() {
-        let d = tempfile::tempdir().unwrap();
-        let p = tmp_paths(d.path());
-        with_store_mut(&p, |s| {
-            s.agents.insert("u-worked-in".into(), rec("u-worked-in"));
-            s.agents.insert("u-untouched".into(), rec("u-untouched"));
-        })
-        .unwrap();
-        apply_bind(&p, "u-worked-in", 0).unwrap();
-        apply_bind(&p, "u-untouched", 1).unwrap(); // a tab on screen, spawn never run
-        with_store_mut(&p, |s| {
-            s.agents.get_mut("u-worked-in").unwrap().pane_id = Some(7); // owns the pane
-            // The claude in tab 0 exits. The tab stays open.
-            crate::hook::apply_hook_pane(s, "u-worked-in", "SessionEnd", Some(7));
-        })
-        .unwrap();
-        clear_session_order(&p).unwrap();
-        assert_eq!(
-            read_store(&p).unwrap().last_live,
-            vec!["u-worked-in".to_string(), "u-untouched".to_string()],
-            "an agent exiting does not close its tab, so the row is still restored"
-        );
-    }
-
-    /// Quitting with nothing open must leave an EMPTY set, not the set from
-    /// the launch before, or the relaunch resurrects a two-launches-ago
-    /// layout. Empty is also the signal launch reads to take its existing
-    /// single-eager-row path.
-    ///
-    /// The session here OPENED a tab and then closed it. That is what makes
-    /// the empty reading trustworthy, and it is the whole difference from
-    /// `clear_session_order_keeps_the_live_set_when_the_last_launch_never_bound`
-    /// beside it, where the session never bound anything and the set must
-    /// survive. Both reach this pass with no binds and no tab order; only
-    /// `bound_since_launch` separates them (#261).
-    #[test]
-    fn clear_session_order_empties_the_live_set_when_the_session_quit_with_nothing_open() {
-        let d = tempfile::tempdir().unwrap();
-        let p = tmp_paths(d.path());
-        with_store_mut(&p, |s| {
-            s.last_live = vec!["u-stale".into()];
-            s.agents.insert("u-dormant".into(), rec("u-dormant"));
-        })
-        .unwrap();
-        apply_bind(&p, "u-dormant", 0).unwrap();
-        with_store_mut(&p, |s| {
-            // The human closes the tab. `apply_prune_tabs` unbinds the row,
-            // and the session then quits with nothing open.
-            s.agents.get_mut("u-dormant").unwrap().tab_id = None;
-        })
-        .unwrap();
-        clear_session_order(&p).unwrap();
-        assert!(
-            read_store(&p).unwrap().last_live.is_empty(),
-            "a session that closed its tabs clears the set rather than keeping it"
-        );
-    }
-
-    /// A launch that never bound anything must LEAVE the set alone (#261).
-    /// `clear_session_order` records the set and then nulls every bind, so a
-    /// session that comes up and binds nothing — a bar that fails to load, or
-    /// a human who quits within the first seconds — reaches the next launch
-    /// with an empty store and would overwrite the real set with nothing.
-    /// That is the very failure this feature exists to prevent, arriving by
-    /// another door. Found by swarm review, 2026-09-16.
-    #[test]
-    fn clear_session_order_keeps_the_live_set_when_the_last_launch_never_bound() {
-        let d = tempfile::tempdir().unwrap();
-        let p = tmp_paths(d.path());
-        with_store_mut(&p, |s| {
-            s.agents.insert("u-a".into(), rec("u-a"));
-            s.agents.insert("u-b".into(), rec("u-b"));
-        })
-        .unwrap();
-        apply_bind(&p, "u-a", 0).unwrap();
-        apply_bind(&p, "u-b", 1).unwrap();
-        // The session quits: the set is recorded and every bind is nulled.
-        clear_session_order(&p).unwrap();
-        assert_eq!(
-            read_store(&p).unwrap().last_live,
-            vec!["u-a".to_string(), "u-b".to_string()],
-            "the quit records what was open"
-        );
-        // The next launch dies before any row binds, so the one after it
-        // finds nothing. The set it must restore is still the same two rows.
-        clear_session_order(&p).unwrap();
-        assert_eq!(
-            read_store(&p).unwrap().last_live,
-            vec!["u-a".to_string(), "u-b".to_string()],
-            "a launch that bound nothing is a re-run over an already-cleared \
-             store, not a quit with nothing open"
-        );
-    }
-
     /// A launch begins with no agent running anywhere, so a status that names
     /// a RUNNING PROCESS is a claim about the session BEFORE. Left alone, a
-    /// restored tab comes back wearing the spinner of work that stopped at the
-    /// quit; on this branch it came back wearing `Exited`, which draws the
-    /// hollow "nothing here" mark on a tab that is about to start its agent —
-    /// two opposite rows rendered the same (#261, seen on QA run 18).
+    /// row comes back wearing the spinner of work that stopped at the quit
+    /// (#261, seen on QA run 18).
     ///
     /// The first hook event of the new session states the truth, so the launch
     /// only has to stop asserting the old one.
@@ -2406,7 +1994,6 @@ mod tests {
         let p = tmp_paths(d.path());
         with_store_mut(&p, |s| {
             for (uuid, st) in [
-                ("u-restored", Status::Exited),
                 ("u-mid-turn", Status::Working),
                 ("u-waiting", Status::NeedsYou),
                 ("u-dormant", Status::Failed),
@@ -2417,12 +2004,11 @@ mod tests {
             }
         })
         .unwrap();
-        apply_bind(&p, "u-restored", 0).unwrap();
         apply_bind(&p, "u-mid-turn", 1).unwrap();
         apply_bind(&p, "u-waiting", 2).unwrap();
         clear_session_order(&p).unwrap();
         let s = read_store(&p).unwrap();
-        for uuid in ["u-restored", "u-mid-turn", "u-waiting"] {
+        for uuid in ["u-mid-turn", "u-waiting"] {
             assert_eq!(
                 s.agents[uuid].status,
                 Status::Idle,
@@ -2433,16 +2019,6 @@ mod tests {
             s.agents["u-dormant"].status,
             Status::Failed,
             "a finished turn is not a running process — the result is still unread"
-        );
-        // The rows themselves are untouched, and the live set is still recorded
-        // from the binds — resetting the status must not cost the restore.
-        assert_eq!(
-            s.last_live,
-            vec![
-                "u-restored".to_string(),
-                "u-mid-turn".to_string(),
-                "u-waiting".to_string()
-            ],
         );
     }
 

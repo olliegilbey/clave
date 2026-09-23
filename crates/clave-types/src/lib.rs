@@ -144,21 +144,6 @@ pub enum Status {
     NeedsYou,
     Done,
     Failed,
-    /// The agent's session ended, but its TAB is still open (#261).
-    ///
-    /// A row in this state owns a tab and runs nothing. Before the restore
-    /// work it could not arise: `SessionEnd` unbound the row, so the row went
-    /// dormant and the tab became an ordinary terminal. Keeping the bind is
-    /// what makes the tab come back on the next launch, and it is also what
-    /// makes this state reachable — so the state has to be nameable, or it
-    /// renders as `Idle` and the human cannot tell a dead tab from a live
-    /// agent waiting on them.
-    ///
-    /// An older binary reading this store falls back to `Idle` by the lenient
-    /// default above, which is exactly the behaviour it had before. Any later
-    /// hook event overwrites it, so a restarted agent leaves the state on its
-    /// own.
-    Exited,
 }
 
 impl Status {
@@ -172,11 +157,6 @@ impl Status {
             Status::Done => ('●', 32),     // green: finished & unread
             Status::Idle => ('●', 90),     // dim: read / no session
             Status::Failed => ('✖', 31),   // red cross: turn failed
-            // Hollow, not filled: the fleet's existing shorthand for "a row
-            // with no process behind it". Dim like `Idle`, because an exited
-            // agent is not asking for anything — but hollow, because the
-            // difference the human must see is that nothing is running.
-            Status::Exited => ('○', 90),
         }
     }
 }
@@ -285,13 +265,10 @@ pub struct LiveRow<T> {
 /// rewritten, or started.
 ///
 /// ONE function across the workspace. The host asks it of a hook command and
-/// of the baked layout; the bar asks it of a held pane's launch command before
-/// it will start that pane. Those callers parse different shapes — quoted KDL
-/// tokens against a space-joined command line — and the matcher was all they
-/// had in common, so it was copied, and the copy in the bar was covered by no
-/// test at all. A release install is the ONLY environment that bakes the
-/// versioned form (a sandbox shims a bare `clave`), so the copy that mattered
-/// was the one nothing exercised.
+/// of the baked layout, and a matcher copied per caller drifted once (#261):
+/// the copy that mattered was covered by no test. A release install is the
+/// ONLY environment that bakes the versioned form (a sandbox shims a bare
+/// `clave`), so the shared rule is tested here, once.
 pub fn is_clave_binary(bin: &str) -> bool {
     matches!(
         std::path::Path::new(bin).file_name().and_then(|n| n.to_str()),
@@ -305,11 +282,8 @@ pub fn is_clave_binary(bin: &str) -> bool {
 /// One row's ranking key, for every surface that ranks clave rows.
 ///
 /// ONE function, for the reason [`sort_live_block`] beneath it is one: the
-/// cluster layer found a single home after PR #261 and the key it clusters did
-/// not follow, so the same rule still lived in the bar (live rows and dormant
-/// rows) and in the host (the set a relaunch bakes). Retune the policy on one
-/// side and a relaunch again starts a row that is not the bar's top — the #261
-/// defect, one level down.
+/// bar ranks live rows and dormant rows with it, and any host-side ranking
+/// must use the same rule or the two surfaces disagree (the #261 defect).
 ///
 /// `millis` is the caller's own decayed score, because that part genuinely
 /// differs: the bar can max-merge a tab-scoped bucket the host cannot see.
@@ -329,12 +303,11 @@ pub fn live_key(order: OrderMode, millis: u64, ordinal: u64) -> (u64, u64) {
 /// cluster by group, clusters rank by (Σ member score, best member key), and
 /// members keep the row rule within their cluster.
 ///
-/// ONE function, for the same reason [`frecency_millis`] is one. The bar sorts
-/// the rows it renders; the host sorts the rows a relaunch bakes, and the
-/// FIRST of those is the only agent a relaunch starts. Two copies of the rule
-/// disagreed as soon as a repo held several rows — a cluster can outrank a
-/// higher-scoring lone row — so a relaunch focused and started an agent that
-/// was not the one at the top of the bar (CodeRabbit, PR #261).
+/// ONE function, for the same reason [`frecency_millis`] is one. The bar is
+/// its only caller today; it lives in the shared crate so a host-side ranking
+/// can never grow a second copy. Two copies of the rule disagreed as soon as
+/// a repo held several rows — a cluster can outrank a higher-scoring lone row
+/// (CodeRabbit, PR #261).
 ///
 /// A group-of-one's cluster key is its own key restated, so ungrouped rows
 /// sort exactly as the flat rule would, and `Recency` mode is unaffected. The
@@ -550,35 +523,6 @@ pub struct AgentSnapshot {
     /// can never leak into the ordinal space and outrank every real ordinal.
     #[serde(default)]
     pub tab_order: std::collections::BTreeMap<usize, u64>,
-    /// The set the PREVIOUS session was holding, in ASCENDING TAB ID — the
-    /// order those tabs were created, which is not a rank (`store.rs`,
-    /// `clear_session_order`). The launch ranks a copy of it to choose the one
-    /// row it bakes, and never writes that rank back, so the bar opens the
-    /// rest in the previous session's tab order, one at a time.
-    ///
-    /// It rides the snapshot rather than being passed at load, because a bar
-    /// born in a tab the RESTORE created must reach the same conclusion as the
-    /// bar in the baked tab, and the store is the only thing both can read.
-    /// Rows that hold a tab are already back, so the queue is what remains.
-    /// `default` keeps pre-field payloads parseable (§5).
-    #[serde(default)]
-    pub last_live: Vec<String>,
-    /// Which row's tab drives the staggered restore (#261).
-    ///
-    /// Named by the launch, because the launch is the only party that knows:
-    /// it picks one row to bake as a tab and hands the rest to the bar. Every
-    /// instance reads the same name, so exactly one of them sequences the
-    /// queue however the focus moves.
-    ///
-    /// Inferring this from the focus instead cost three live runs. A tab made
-    /// by `zellij action new-tab` always takes the focus (FOOTGUNS), so each
-    /// restored tab's bar briefly saw itself as the focused one and started
-    /// the queue again from the top: five tabs in 800 ms, and once a dead
-    /// zellij server. The sequencer cannot be elected by a signal the
-    /// sequencer's own work destroys. `default` (None) means "nothing to
-    /// sequence" and keeps pre-field payloads parseable (§5).
-    #[serde(default)]
-    pub restore_owner: Option<String>,
     /// Bar collapse mode (issue #5, C8 parity-desync family): per-instance
     /// memory synced only by the `clave-toggle` broadcast desynced live — a
     /// tab born after a toggle, a plugin reload, or one missed pipe flips an
@@ -742,7 +686,49 @@ pub enum RowHeight {
 /// mechanism as [`CLAVE_BINARY_KEY`], #44).
 pub const ROW_HEIGHT_KEY: &str = "row_height";
 
+/// The one column zellij takes from a frameless pane for the separator
+/// line to its right neighbour. See [`RowHeight::mode_at`].
+pub const SEPARATOR_COLS: usize = 1;
+
+// `mode_at` tolerates `SEPARATOR_COLS` below each declared width, so the
+// two widths of one mode must sit further apart than that or the collapsed
+// width would read as "expanded, one short" and never land. Pinned here so
+// a retune of the pairs cannot make a mode unreachable.
+const _: () = {
+    let mut i = 0;
+    let modes = [RowHeight::Card, RowHeight::Double, RowHeight::Single];
+    while i < modes.len() {
+        assert!(
+            modes[i].target_cols(true) + SEPARATOR_COLS < modes[i].target_cols(false),
+            "a mode's collapsed width must sit more than SEPARATOR_COLS below its expanded one"
+        );
+        i += 1;
+    }
+};
+
 impl RowHeight {
+    /// The mode a PAINTED width is in, or `None` when it is at neither
+    /// declared width. A pane paints one column short of its declared size
+    /// when `pane_frames` is off: zellij reserves that column on every
+    /// tiled pane that is not at the viewport's right edge, borderless or
+    /// not, for the line to its neighbour (`zellij-server/src/panes/
+    /// tiled_panes/mod.rs`, `pane_content_offset`, unchanged from 0.44.3
+    /// to 0.45.1). The bar is the left pane, so 48 paints as 47 and 16 as
+    /// 15. Measured on the devbox 2026-09-22: an exact comparison asked for
+    /// a swap on every paint and walked the tab through the other width.
+    pub const fn mode_at(self, cols: usize) -> Option<bool> {
+        let mut i = 0;
+        while i < 2 {
+            let collapsed = i == 1;
+            let target = self.target_cols(collapsed);
+            if cols == target || cols + SEPARATOR_COLS == target {
+                return Some(collapsed);
+            }
+            i += 1;
+        }
+        None
+    }
+
     /// The width the seek machinery asks for in this mode — the card
     /// budgets ratified in #232, or the legacy pair for `Single`. `const` so
     /// the bar's test-mod width-target pins (`EXP_W`/`COL_W`) can compute
@@ -1018,12 +1004,11 @@ mod tests {
     /// Every status, as the two tests below must see it: its wire spelling and
     /// its glyph.
     ///
-    /// A MATCH, not a list. Both tests said "every variant" and listed five of
-    /// six for the whole life of `Exited` (#261) — a list cannot notice what is
-    /// missing from it, and the one that went missing is the one that rides a
-    /// persisted store across an upgrade. Adding a status without adding it
-    /// here is now a compile error. `ALL` still has to grow by hand, so the
-    /// count assertion below is what catches that half.
+    /// A MATCH, not a list. Both tests said "every variant" and once listed
+    /// one variant short for the life of a status (#261) — a list cannot
+    /// notice what is missing from it. Adding a status without adding it here
+    /// is a compile error. `ALL` still has to grow by hand, so the count
+    /// assertion below is what catches that half.
     fn wire_and_glyph(v: Status) -> (&'static str, (char, u8)) {
         match v {
             Status::Idle => ("\"idle\"", ('●', 90)), // dim: read / no session
@@ -1031,18 +1016,15 @@ mod tests {
             Status::NeedsYou => ("\"needs_you\"", ('●', 31)), // red: waiting on you
             Status::Done => ("\"done\"", ('●', 32)), // green: finished & unread
             Status::Failed => ("\"failed\"", ('✖', 31)), // red cross
-            // Hollow and dim: nothing is running, and it asks for nothing.
-            Status::Exited => ("\"exited\"", ('○', 90)),
         }
     }
 
-    const ALL: [Status; 6] = [
+    const ALL: [Status; 5] = [
         Status::Idle,
         Status::Working,
         Status::NeedsYou,
         Status::Done,
         Status::Failed,
-        Status::Exited,
     ];
 
     #[test]
@@ -1172,8 +1154,6 @@ mod tests {
     #[test]
     fn snapshot_roundtrips() {
         let snap = AgentSnapshot {
-            last_live: Default::default(),
-            restore_owner: None,
             seq: 7,
             tab_order: Default::default(),
             collapsed: false,
@@ -1407,8 +1387,6 @@ mod tests {
         // full-state replace, the one channel that never diverged (C5 rd 5:
         // fire-and-forget pipe deltas diverged per instance).
         let snap = AgentSnapshot {
-            last_live: Default::default(),
-            restore_owner: None,
             seq: 1,
             agents: vec![],
             tab_order: std::collections::BTreeMap::from([(4usize, 12u64)]),
@@ -1488,8 +1466,6 @@ mod tests {
         // payload without the field must parse as expanded (false) — the
         // born-expanded default — for old-CLI/new-plugin interop.
         let snap = AgentSnapshot {
-            last_live: Default::default(),
-            restore_owner: None,
             seq: 2,
             agents: vec![],
             tab_order: Default::default(),
@@ -1571,6 +1547,36 @@ mod tests {
         assert_eq!(RowHeight::Single.target_cols(true), COLLAPSED_TARGET_COLS);
         assert_eq!(RowHeight::Double.lines_per_row(), 2);
         assert_eq!(RowHeight::Single.lines_per_row(), 1);
+    }
+
+    /// The tolerance is ONE-SIDED and exactly the separator column: a
+    /// frameless pane paints one short, never one wide, and never two short.
+    /// A symmetric or wider allowance would pass every bar test that only
+    /// probes below the target, so the contract is pinned here.
+    #[test]
+    fn mode_at_allows_the_separator_column_below_each_target_only() {
+        for mode in [RowHeight::Card, RowHeight::Double, RowHeight::Single] {
+            for collapsed in [false, true] {
+                let target = mode.target_cols(collapsed);
+                assert_eq!(mode.mode_at(target), Some(collapsed), "{mode:?} exact");
+                assert_eq!(
+                    mode.mode_at(target - SEPARATOR_COLS),
+                    Some(collapsed),
+                    "{mode:?} one short"
+                );
+                assert_eq!(
+                    mode.mode_at(target - SEPARATOR_COLS - 1),
+                    None,
+                    "{mode:?} two short is neither width"
+                );
+                assert_eq!(
+                    mode.mode_at(target + 1),
+                    None,
+                    "{mode:?} one wide is neither width"
+                );
+            }
+        }
+        assert_eq!(RowHeight::Card.mode_at(0), None);
     }
 
     #[test]

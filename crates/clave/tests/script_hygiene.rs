@@ -21,22 +21,20 @@ const DRIVE: &str = include_str!("../../../scripts/qa-drive.sh");
 const CT: &str = include_str!("../../../scripts/ct.sh");
 const LIB: &str = include_str!("../../../scripts/qa/lib.sh");
 const SELFTEST: &str = include_str!("../../../scripts/qa/lib-selftest.sh");
-const VERDICT: &str = include_str!("../../../scripts/qa/relaunch-verdict.sh");
 const SAMPLER: &str = include_str!("../../../scripts/qa/fd-sampler.sh");
 
 /// Every script the drive is made of. The hook rule is about the WHOLE drive,
 /// not about one file of it: the instrument was split out of qa-drive.sh on
 /// 2026-09-12, and a rule that only read the file it was written against
 /// would have stopped covering anything that moved.
-const DRIVE_SOURCES: [(&str, &str); 5] = [
+const DRIVE_SOURCES: [(&str, &str); 4] = [
     ("scripts/qa-drive.sh", DRIVE),
     ("scripts/qa/lib.sh", LIB),
     ("scripts/qa/lib-selftest.sh", SELFTEST),
-    // The two tools #261 added. They were outside every rule here until review
-    // pointed it out, which is the failure mode the paragraph above describes
+    // A tool #261 added. It was outside every rule here until review pointed
+    // it out, which is the failure mode the paragraph above describes
     // happening a second time: the list is a list, so growing the drive does
     // not grow the guard. Anything new under scripts/qa/ belongs here.
-    ("scripts/qa/relaunch-verdict.sh", VERDICT),
     ("scripts/qa/fd-sampler.sh", SAMPLER),
 ];
 
@@ -445,19 +443,22 @@ fn the_drive_never_starts_or_ends_a_session_itself() {
 
 #[test]
 fn the_relaunch_phase_reads_the_set_through_the_tested_readers() {
-    // Phase 6c is the only phase that reads what the PREVIOUS session
-    // recorded, so it is the only one that can see the live set decay (#261) —
-    // a defect that reached a shipped branch with every gate green because no
-    // test launches twice.
+    // Phase 6c is the only phase that reads the store on both sides of a
+    // session boundary, so it is the only one that can see what a relaunch
+    // does with the store the quit left. It proves one eager tab and every
+    // other row dormant (setup.rs `launch_layout_kdl`, decision of
+    // 2026-09-22). The live-set restore it replaced (#261) reached a shipped
+    // branch with every gate green because no test launches twice.
     assert!(
         DRIVE.contains("P6c-relaunch"),
         "the relaunch phase must exist — without it nothing but a human \
-         launching twice can catch the live set decaying"
+         launching twice can see what a relaunch bakes"
     );
     // The verdict itself lives in qa/lib.sh and is exercised offline, against
-    // a store that decayed. The phase costs two maintainer launches, so a
-    // comparison only that pair of launches can try is one nobody tries —
-    // and the defect this phase exists for is exactly a leg that no test ran.
+    // a store with two bound rows, the wrong row bound, and a stale status.
+    // The phase costs two maintainer launches, so a comparison only that pair
+    // of launches can try is one nobody tries — and the defect this phase
+    // exists for is exactly a leg that no test ran.
     assert!(
         DRIVE.contains("relaunch_checks"),
         "phase 6c must reach its verdict through `relaunch_checks`, not a \
@@ -465,10 +466,8 @@ fn the_relaunch_phase_reads_the_set_through_the_tested_readers() {
     );
     for reader in [
         "bound_uuids",
-        "last_live_uuids",
-        "held_bound_uuids",
+        "eager_candidate_uuid",
         "stale_status_uuids",
-        "close_candidate_tab",
         "relaunch_checks",
     ] {
         assert!(

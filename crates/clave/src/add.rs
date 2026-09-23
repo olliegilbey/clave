@@ -12,8 +12,10 @@ use anyhow::{Context, Result};
 use crate::hook::push_snapshot;
 use crate::setup::{data_dir, session_row_height, wasm_path};
 use crate::store::{
-    AgentRecord, LabelSource, Store, now_unix, snapshot_from, store_paths, with_store_mut,
+    AgentRecord, LabelSource, Store, StorePaths, now_unix, snapshot_from, store_paths,
+    with_store_mut,
 };
+use clave_types::AgentSnapshot;
 
 /// Parse `zellij action dump-layout` for live agent uuids (§6.3 liveness).
 /// Zellij serializes the LIVE pane process, not the baked layout command
@@ -110,11 +112,7 @@ pub fn bound_live_uuids(store: &Store) -> Vec<String> {
     store
         .agents
         .values()
-        // An EXITED agent keeps its tab (#261), and that bind is what restores
-        // the tab on the next launch — it is not a running session. Offering
-        // it as live would make the pick a jump onto an empty tab, with no way
-        // back to the conversation from here.
-        .filter(|r| r.tab_id.is_some() && r.status != clave_types::Status::Exited)
+        .filter(|r| r.tab_id.is_some())
         .map(|r| r.uuid.clone())
         .collect()
 }
@@ -186,28 +184,6 @@ pub fn sanitize_label(s: &str) -> String {
         .join(" ")
 }
 
-/// How a one-shot tab's baked `clave spawn` starts.
-///
-/// The pair `(focus, runs)` is deliberately NOT expressible: every tab made by
-/// `zellij action new-tab` takes the focus whatever the layout says
-/// (`zellij-utils-0.44.3/src/input/actions.rs:1611-1625` — the tab node's
-/// `focus` property becomes the layout's `focused_tab_index`, and the
-/// new-tab path reads the ROOT PANE's `focus`, which a tab node never sets, so
-/// the first tab always gets `should_change_focus_to_new_tab = true`). Focus is
-/// therefore not an input here; only the command is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TabStart {
-    /// The spawn runs at once — the Alt+Enter pick, where the human asked for
-    /// this conversation and is about to land on it.
-    Running,
-    /// The spawn is created HELD (`start_suspended`, which zellij parses as
-    /// `hold_on_start`): the tab, its name and its baked command all exist, and
-    /// no `claude` process does. The staggered restore (#261) uses this so a
-    /// fleet costs a layout instead of ~350 MB per row; the bar starts the
-    /// command when the human lands on the tab (`run_held_effect`).
-    Held,
-}
-
 /// Everything a one-shot tab is made of, named rather than positional.
 ///
 /// `collapsed` is the mode the tab must be born in (LEDGER D36, task 7b′): a
@@ -227,7 +203,6 @@ pub struct TabSpec<'a> {
     pub cwd: &'a str,
     pub collapsed: bool,
     pub row_height: clave_types::RowHeight,
-    pub start: TabStart,
 }
 
 /// The agent-tab KDL node WITH its own bar pane — for one-shot
@@ -246,7 +221,6 @@ pub fn tab_node(spec: &TabSpec) -> String {
         cwd,
         collapsed,
         row_height,
-        start,
     } = *spec;
     // split_direction="vertical" is REQUIRED for a LEFT bar: zellij stacks
     // sibling panes horizontally (rows) by default (Task 9 C1 finding; same
@@ -256,19 +230,15 @@ pub fn tab_node(spec: &TabSpec) -> String {
     // `command` bakes the environment's clave (§2 binary split): the
     // versioned copy's absolute path in a stable session, bare `clave` in
     // dev/sandbox — so the resurrected pane re-execs the SAME binary.
-    // Inside the pane node, beside `args` — a sibling property of the run
-    // command, not of the tab. Same syntax `tab_node_bare` bakes for the
-    // launch layout's unfocused tabs.
-    let hold = match start {
-        TabStart::Running => "",
-        TabStart::Held => "                start_suspended true\n",
-    };
+    // Every tab made by `zellij action new-tab` takes the focus whatever the
+    // layout says (`zellij-utils-0.44.3/src/input/actions.rs:1611-1625`), so
+    // focus is not an input here; only the command is.
     format!(
         r#"    tab name="{label}" focus=true {{
         pane split_direction="vertical" {{
 {pane}            pane cwd="{cwd}" command="{binary}" {{
                 args "spawn" "{uuid}" "--name" "{label}" "--cwd" "{cwd}"
-{hold}            }}
+            }}
         }}
     }}
 "#,
@@ -288,12 +258,9 @@ pub fn tab_node(spec: &TabSpec) -> String {
 /// slot. Same baked idempotent spawn — only the bar pane differs.
 ///
 /// The node is always focused and always runs, because a launch bakes at most
-/// ONE tab (#261). It took a `held` variant when the launch baked the whole
-/// restored set, and that design is gone: a layout of held tabs made zellij
-/// build them all inside one second, and the handle burst killed the server
-/// with "Too many open files" (measured 2026-09-17). The fleet now comes back
-/// one tab at a time, paced by the bar, through `add::tab_layout` with
-/// `TabStart::Held` — which is where `start_suspended` lives now.
+/// ONE tab (#261): a layout of many tabs made zellij build them all inside
+/// one second, and the handle burst killed the server with "Too many open
+/// files" (measured 2026-09-17).
 ///
 /// Exactly one node in a layout may be focused; with none, or with several,
 /// zellij picks, and the row the human lands on stops being ours to choose.
@@ -1532,30 +1499,19 @@ pub fn run_add(worktree: bool) -> Result<()> {
         cwd: &agent_cwd,
         collapsed,
         row_height,
-        start: TabStart::Running,
     });
     let tmp = std::env::temp_dir().join(format!("clave-{uuid}.kdl"));
     std::fs::write(&tmp, layout)?;
-    let status = Command::new(&zellij) // discovered above (Fix 2)
-        .args([
-            "--session",
-            &session,
-            "action",
-            "new-tab",
-            "--layout",
-            tmp.to_str().context("tmp path")?,
-        ])
-        .status()?;
-    let _ = std::fs::remove_file(&tmp);
-    anyhow::ensure!(status.success(), "zellij action new-tab failed");
 
-    // 7) Record + push (§6.3): the row exists BEFORE the first hook event so
-    //    the hook's untracked fast path doesn't drop this agent's events.
+    // 7) Record + open + push (§6.3): the row exists BEFORE the first hook
+    //    event so the hook's untracked fast path doesn't drop this agent's
+    //    events, and before the tab so the spawn's registration finds it
+    //    (see `record_then_open`).
     //    UPDATE-OR-INSERT, not blind insert (plan-review fix): resuming an
     //    agent with an existing row must preserve it — merge_resume_record
     //    keeps everything and resets only status. The authoritative
-    //    existing-row lookup happens HERE, inside the lock (the step-4 copy
-    //    was lock-free and only derived layout inputs).
+    //    existing-row lookup happens inside the lock (the step-4 copy was
+    //    lock-free and only derived layout inputs).
     // A resumed conversation's own history, read OUTSIDE the store lock (a
     // transcript can be tens of MB; the lock protects the store, not this
     // read). Probes the transcript's possible homes (#139: not always the
@@ -1572,30 +1528,68 @@ pub fn run_add(worktree: bool) -> Result<()> {
             crate::store::unix_hour(now_unix()),
         )
     });
-    let snap = with_store_mut(&paths, |s| {
-        // S1: a new row is a user commitment, so it is minted an ordinal from
-        // this same locked write and enters at the top. Before S1 a new row
-        // inherited no order at all and could sink below every dormant row.
-        // See `mint_record` for the ordinal mint, the newborn's inherited
-        // buckets, and the resume-preserving merge.
-        mint_record(
-            s,
-            FreshRecordInputs {
-                uuid: &uuid,
-                cwd: &agent_cwd,
-                repo_root: resume_root.as_deref().unwrap_or(&repo_root),
-                branch: &agent_branch,
-                label: &label,
-                worktree: worktree_dir.clone(),
-                default_branch: default_branch.clone(),
-                own_buckets: own_buckets.clone(),
-            },
-        );
-        snapshot_from(s)
-    })?;
+    let snap = record_then_open(
+        &paths,
+        FreshRecordInputs {
+            uuid: &uuid,
+            cwd: &agent_cwd,
+            repo_root: resume_root.as_deref().unwrap_or(&repo_root),
+            branch: &agent_branch,
+            label: &label,
+            worktree: worktree_dir.clone(),
+            default_branch: default_branch.clone(),
+            own_buckets,
+        },
+        || {
+            let status = Command::new(&zellij) // discovered above (Fix 2)
+                .args([
+                    "--session",
+                    &session,
+                    "action",
+                    "new-tab",
+                    "--layout",
+                    tmp.to_str().context("tmp path")?,
+                ])
+                .status()?;
+            let _ = std::fs::remove_file(&tmp);
+            anyhow::ensure!(status.success(), "zellij action new-tab failed");
+            Ok(())
+        },
+    )?;
     push_snapshot(&snap);
     crate::evlog::log_event("add", &format!("{uuid}: recorded ({choice})"));
     Ok(())
+}
+
+/// Mint (or merge) the row under the store lock, THEN ask zellij for its tab.
+///
+/// The record is `mint_record` (S1: a new row is a user commitment, so it is
+/// minted an ordinal from this same locked write and enters at the top; the
+/// newborn's inherited buckets and the resume-preserving merge live there
+/// too). The open is the caller's `zellij action new-tab`, kept out of this
+/// function so the sequence host-tests without zellij.
+///
+/// THE ORDER IS THE POINT. The newborn pane runs `clave spawn`, which
+/// persists its pane id into the store one line before it execs
+/// (`spawn.rs` `register_pane`), and `apply_register` answers None for a uuid
+/// it cannot find — silently, by design (a spawn can race a pruned row). Until
+/// 2026-09-22 the tab was created first and the row recorded after, with a
+/// transcript probe of tens of MB between them; on the box (runs 28 and 29)
+/// the spawn won that race every time, `pane_id` stayed null for the life of
+/// the row, and the tab never bound. A row that exists before its tab cannot
+/// lose it. If the open fails the row stays, reopenable from the picker, and
+/// the error is the caller's.
+pub(crate) fn record_then_open(
+    paths: &StorePaths,
+    inputs: FreshRecordInputs<'_>,
+    open: impl FnOnce() -> Result<()>,
+) -> Result<AgentSnapshot> {
+    let snap = with_store_mut(paths, |s| {
+        mint_record(s, inputs);
+        snapshot_from(s)
+    })?;
+    open()?;
+    Ok(snap)
 }
 
 #[cfg(test)]
@@ -1712,6 +1706,47 @@ mod tests {
         )
     }
 
+    /// `clave spawn` in the newborn pane persists its pane id one line before
+    /// it execs (`register_pane`), and `apply_register` answers None for a
+    /// uuid it cannot find. So the row must be in the store BEFORE the tab is
+    /// asked for. Box runs 28 and 29 (2026-09-22): tab first, row second,
+    /// `pane_id` null for the life of the row, and the drive's rung 1 never
+    /// bound. The transcript probe between the two widened the window; the
+    /// order is what closes it.
+    #[test]
+    fn the_row_is_in_the_store_before_the_tab_is_asked_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StorePaths {
+            dir: dir.path().to_path_buf(),
+            data: dir.path().join("agents.json"),
+            lock: dir.path().join("agents.lock"),
+        };
+        let seen = std::cell::Cell::new(false);
+        record_then_open(
+            &paths,
+            FreshRecordInputs {
+                uuid: "u-new",
+                cwd: "/x",
+                repo_root: "/x",
+                branch: "main",
+                label: "x · main",
+                worktree: None,
+                default_branch: None,
+                own_buckets: None,
+            },
+            || {
+                let store = crate::store::read_store(&paths).unwrap();
+                seen.set(store.agents.contains_key("u-new"));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(
+            seen.get(),
+            "the tab was asked for before the row existed: a spawn that registers now finds no row"
+        );
+    }
+
     /// Spec: newborn initialisation. A fresh row inherits the opener's
     /// buckets — exact copy, so the tie + position tiebreak lands it
     /// directly below its opener in frecency mode.
@@ -1780,28 +1815,6 @@ mod tests {
         s.agents.insert("u-live".into(), bound);
         s.agents.insert("u-dormant".into(), rec("u-dormant")); // tab_id None
         assert_eq!(bound_live_uuids(&s), vec!["u-live".to_string()]);
-    }
-
-    /// A row whose agent EXITED keeps its tab (#261). The picker must still
-    /// offer it as a RESUME: treating the leftover bind as liveness makes the
-    /// pick a jump onto a tab with nothing running in it, and there is then no
-    /// way to bring the conversation back from the picker at all.
-    #[test]
-    fn an_exited_agents_leftover_bind_is_not_liveness_for_the_picker() {
-        let mut s = Store::default();
-        let mut gone = rec("u-gone");
-        gone.tab_id = Some(7); // the tab is still on screen…
-        gone.pane_id = None; // …and its claude is gone
-        gone.status = clave_types::Status::Exited;
-        s.agents.insert("u-gone".into(), gone);
-        let mut alive = rec("u-live");
-        alive.tab_id = Some(8);
-        s.agents.insert("u-live".into(), alive);
-        assert_eq!(
-            bound_live_uuids(&s),
-            vec!["u-live".to_string()],
-            "only the row with something running in its tab is live"
-        );
     }
 
     #[test]
@@ -1941,7 +1954,7 @@ mod tests {
 
     #[test]
     fn tab_layout_bakes_the_idempotent_spawn() {
-        let kdl = tab_layout(&spec("clave", "/data/clave-bar.wasm", TabStart::Running));
+        let kdl = tab_layout(&spec("clave", "/data/clave-bar.wasm"));
         // The bar pane, the baked spawn (idempotent resurrection, §6.3/S4),
         // and the cwd all present:
         assert!(kdl.contains("location=\"file:/data/clave-bar.wasm\""));
@@ -1953,18 +1966,14 @@ mod tests {
         // §2 binary split: the pane command is the passed binary. A stable
         // session bakes the versioned copy's absolute path instead of bare.
         assert!(kdl.contains("command=\"clave\""));
-        let abs = tab_layout(&spec(
-            "/data/clave/bin/clave-v0.1.0",
-            "/w",
-            TabStart::Running,
-        ));
+        let abs = tab_layout(&spec("/data/clave/bin/clave-v0.1.0", "/w"));
         assert!(abs.contains("command=\"/data/clave/bin/clave-v0.1.0\""));
         assert!(!abs.contains("command=\"clave\""));
     }
 
-    /// One tab, two binaries, two start modes — everything else fixed, so a
-    /// test names only what it is actually about.
-    fn spec<'a>(binary: &'a str, wasm: &'a str, start: TabStart) -> TabSpec<'a> {
+    /// One tab, two binaries — everything else fixed, so a test names only
+    /// what it is actually about.
+    fn spec<'a>(binary: &'a str, wasm: &'a str) -> TabSpec<'a> {
         TabSpec {
             binary,
             wasm,
@@ -1973,39 +1982,7 @@ mod tests {
             cwd: "/x",
             collapsed: false,
             row_height: clave_types::RowHeight::Double,
-            start,
         }
-    }
-
-    /// #261: the staggered restore brings a tab back WITHOUT starting its
-    /// agent. The layout must be identical to the running one but for the
-    /// hold, because everything else about the tab — its bar, its swap
-    /// geometries, its baked spawn — is what makes it a real clave tab the
-    /// moment the human lands on it.
-    #[test]
-    fn a_held_tab_layout_bakes_the_same_spawn_suspended() {
-        let running = tab_layout(&spec("clave", "/data/clave-bar.wasm", TabStart::Running));
-        let held = tab_layout(&spec("clave", "/data/clave-bar.wasm", TabStart::Held));
-        assert!(
-            !running.contains("start_suspended"),
-            "the pick path must still run its agent\n{running}"
-        );
-        // `hold_on_start` is what zellij calls this property internally; the
-        // KDL spelling is the one the launch layout already bakes.
-        assert_eq!(
-            held.matches("start_suspended true").count(),
-            1,
-            "exactly the agent pane is held — not the bar\n{held}"
-        );
-        assert!(
-            held.contains("\"spawn\" \"u-1\""),
-            "the held tab keeps the idempotent spawn\n{held}"
-        );
-        assert_eq!(
-            held.replace("                start_suspended true\n", ""),
-            running,
-            "held differs from running by the hold and nothing else"
-        );
     }
 
     #[test]
@@ -2745,7 +2722,6 @@ garbage that should be ignored
             cwd: &picked.cwd,
             collapsed: false,
             row_height: clave_types::RowHeight::Double,
-            start: TabStart::Running,
         });
         assert!(kdl.contains("cwd=\"/repo/.claude/worktrees/wt\""));
         assert!(!kdl.contains("cwd=\"/repo\"")); // NOT the picker/root dir

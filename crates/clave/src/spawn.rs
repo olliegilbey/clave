@@ -233,20 +233,7 @@ pub fn conversation_evidenced(rec: &AgentRecord) -> bool {
         || rec.title.is_some()
         || !rec.summary.is_empty()
         || rec.context_tokens.is_some()
-        // Every status here means a TURN happened — except `Exited`, which is
-        // new on this branch and means only that the process stopped (#261).
-        // A row that quit before it ever conversed has no transcript to
-        // shadow, and counting its status as evidence made it permanently
-        // unspawnable: the row goes dormant, the deliberate restart fires, and
-        // `spawn` refuses with "this row has already conversed". That is the
-        // exact dead end the restart exists to open. Seen on screen
-        // 2026-09-17. The other legs above still catch an exited row that DID
-        // converse, because a conversation leaves a title, a summary or a
-        // token count behind.
-        || !matches!(
-            rec.status,
-            clave_types::Status::Idle | clave_types::Status::Exited
-        )
+        || rec.status != clave_types::Status::Idle
 }
 
 /// #139: verify the transcript is where the row says before exec'ing claude,
@@ -1011,21 +998,6 @@ mod tests {
         assert!(conversation_evidenced(&rec(
             |r| r.status = clave_types::Status::Working
         )));
-        // `Exited` is the one status that is NOT evidence, and it arrived with
-        // the staggered restore (#261). It says the process stopped, not that a
-        // turn happened. Counted as evidence, a row that quit before it ever
-        // conversed had no way home at all: dormant, the deliberate restart
-        // fires, and this function makes `spawn` refuse over a transcript that
-        // was never written. Seen on screen 2026-09-17.
-        assert!(!conversation_evidenced(&rec(
-            |r| r.status = clave_types::Status::Exited
-        )));
-        // An exited row that DID converse is still protected — by the traces a
-        // conversation leaves, which is where that belongs.
-        assert!(conversation_evidenced(&rec(|r| {
-            r.status = clave_types::Status::Exited;
-            r.summary = "fix auth".into();
-        })));
         assert!(conversation_evidenced(&rec(
             |r| r.live_session = Some("rot".into())
         )));

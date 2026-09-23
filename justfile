@@ -287,8 +287,8 @@ launch:
 # Stage + wait for the human's launch + drive phases 0-7, in one command.
 #
 # It asks for a SECOND launch part way through: phase 6c asks the maintainer to
-# quit the sandbox and launch it again, because the live set can only decay
-# across a session
+# quit the sandbox and launch it again, because what a relaunch bakes (one
+# eager tab, every other row dormant) can only be seen across a session
 # boundary and no other phase crosses one. The drive prints both commands and
 # waits; `wait` is the budget for EACH ask.
 #
@@ -299,3 +299,32 @@ launch:
 qa scenario="qa-fleet" wait="1800":
     ./scripts/sandbox-setup.sh {{scenario}}
     QA_WAIT_SECS={{wait}} QA_RELAUNCH_WAIT={{wait}} ./scripts/qa-drive.sh {{scenario}}
+
+# The same loop against a REMOTE machine (scripts/remote-qa.sh): push this
+# HEAD to a plain checkout there, run `just qa` in ITS environment — its
+# zellij config, its frames setting, its Claude Code — and stream the drive
+# here. The launch is still the human's: `ssh -t <host> 'cd <dir> && just
+# launch'`, from any terminal. Host and dir: CLAVE_QA_HOST / CLAVE_QA_DIR.
+#
+# Born of the 2026-09-22 devbox regressions: none reproduced on the Mac,
+# every one was diagnosed from the box's log over ssh. Now that is the loop.
+remote-qa scenario="qa-fleet" wait="1800":
+    ./scripts/remote-qa.sh qa {{scenario}} {{wait}}
+
+# Stage only, on the remote, and print the launch line.
+remote-sandbox scenario="c8-cold-start":
+    ./scripts/remote-qa.sh stage {{scenario}}
+
+# The remote's zellij log tail (n lines) — every reading the drive makes
+# comes from this file, and it is readable from here without touching a
+# session.
+remote-log n="40":
+    ./scripts/remote-qa.sh log {{n}}
+
+# The newest remote drive log's tail.
+remote-drive-log n="40":
+    ./scripts/remote-qa.sh drive-log {{n}}
+
+# Kill the remote SANDBOX session, by the exact name the remote binary derives.
+remote-kill:
+    ./scripts/remote-qa.sh kill

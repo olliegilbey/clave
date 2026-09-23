@@ -8,6 +8,72 @@ owns everything they structurally cannot reach._
 
 ## Run ledger — the useful recent history
 
+- **runs 31 and 32, 2026-09-22 — the stripped build, green 0-7 on the box
+  and the Mac.** Run 31 went red in 5b on both machines: the drive still
+  expected `exited` after SessionEnd, a status the removal took out, and
+  the build reported `idle`. The check is back to its pre-restore form
+  (`f14d40b`). Run 32: box 242 checks, Mac 243, no failure; 6c bound
+  exactly one row after the relaunch on both, and the two Alt+c presses
+  made one ask each. The Mac's first run 32 attempt went red once in 5:
+  the five rapid presses settled one flip short (store `collapsed=false`,
+  expected `true`); the rerun passed, and the box passed 5 in every run.
+  Open: an intermittent lost press in a rapid burst on the Mac (FOOTGUNS,
+  "Two rapid `clave collapse` writes have no arrival order"). Before the
+  run, the Mac's 5b fixture clash was cleared: a dead sandbox's fixture
+  transcripts under `~/.claude/projects` sorted ahead of this worktree's
+  own; they are moved to `~/.local/state/clave-qa-quarantine`, not deleted.
+
+- **run 30, 2026-09-22 — box, phase 2 green after the add-order fix; 6c red
+  again.** Three asks for two presses: the owner bar never emitted the
+  re-anchor, so the beacon sat on the last tab built and the first tab's bar
+  answered a press it did not own. Decision: the live-set restore is removed
+  (commit `9670fbf`); 6c now verifies one eager tab and a dormant fleet.
+
+- **runs 26 to 29, 2026-09-22 — four reds, three of them the drive's own,
+  and a host race the box lost every time.** Run 26 (box) went red in 6c on
+  the second shape of the beacon fix: three asks for two presses, because a
+  drain of every owed row on emit answered tab 3's steal after tab 4's open
+  had gone out (FOOTGUNS, "A claim armed by an event"). Run 27 (box) died
+  in preflight: the launch line printed before the detached stage had run,
+  and the seed deleted the launch.kdl eight seconds after the launch. The
+  stage now runs attached and the launch line follows it. Runs 28 and 29
+  (box) went red in phase 2 rung 1: `clave add` created the tab first and
+  recorded the row after, the newborn's `clave spawn` registered its pane
+  id into a store with no such row, and `pane_id` stayed null for the life
+  of the row. The host log shows it in order: `spawn: Create` then `add:
+  recorded`, same second. The Mac won that race in every run and never
+  showed it. The record now precedes the open (`add.rs`
+  `record_then_open`). The Mac drive of the same commit passed phase 2
+  and went red in 5b on a fixture collision: a sibling sandbox's leftover
+  transcript shares the scenario uuid, sorts first in the drive's glob, and
+  had an unclosed launch from run 25 inside the six-hour bound. That one is
+  the Mac's, not the code's; the box has no sibling sandboxes.
+
+- **runs 24 and 25, 2026-09-22 — the Alt+c flap on a restored fleet, caught
+  by a new 6c check, fixed, green on both machines.** Run 24 on the devbox
+  (232 checks) and run 25 on the Mac (233 checks), 0 failures each. After
+  the relaunch verdict, 6c now presses the toggle twice in the tab the
+  restore left focused, with NO beacon anchor, and asserts one width ask per
+  press from that tab's bar, painted by that bar. Before the fix the beacon
+  ended every restore on the LAST tab built: the first tab's bar asked
+  nothing, the last tab's bar asked, and zellij applied each ask to the
+  first tab. Phase 5 never saw it because it pipes the beacon before it
+  presses. The trace on both hosts: one `swap-width` line per press from
+  the standing tab's instance, its `painted` line about 30 ms later, no
+  other instance asking.
+
+- **run 23, 2026-09-22 — the FIRST REMOTE DRIVE, on the devbox, twelve
+  phases green, 224 checks, 0 failures.** `just remote-qa qa-fleet` from a
+  Mac worktree; the box has `pane_frames false` and zellij 0.45.1, which no
+  Mac sandbox has. The new width assertion held: zero asks at launch, zero
+  across both ring-walk legs over six live tabs, one ask per press in the
+  collapse burst (sixteen for eighteen presses, alternating direction, one
+  instance). The first attempt died in phase 1 because `ct.sh` looked for
+  the sockets under `/tmp`; on Linux they are under `$XDG_RUNTIME_DIR`
+  (FOOTGUNS). The launch must come from a Mac terminal that is NOT a
+  zellij pane: zellij 0.45 detects the outer session through the terminal
+  and offers a nesting dialog instead of the fleet.
+
 - **run 22, 2026-09-17 — TWELVE phases green, 237 checks, 0 failures.** The
   first fully green drive on `worktree-live-set-restore` (#261), and the first
   in which `restored rows were bound before their agent ran (tab, no pane)`
@@ -17,9 +83,9 @@ owns everything they structurally cannot reach._
   "Too many open files". Run 21 measured 2 of 4 awake. The fix was to stop
   inferring which tab drives the restore and have the launch name it.
 - **Two phase-6c runs timed out** waiting 30 minutes for the second launch,
-  costing a pair of launches each. `scripts/qa/relaunch-verdict.sh` exists for
-  exactly that: it runs 6c's verdict on its own against a sandbox still in the
-  pre-quit state. Capture the bound set BEFORE asking for the quit.
+  costing a pair of launches each. A standalone verdict script existed for
+  exactly that: it ran 6c's verdict on its own against a sandbox still in the
+  pre-quit state (deleted with the restore, 2026-09-22).
 - **A fixture that stages nothing passes.** `dev scenario relaunch-restore`
   had been silently staging no restore at all since `bound_since_launch`
   landed. `clave dev scenario` now prints how many rows the next launch will
@@ -127,7 +193,7 @@ loudly and stops the run; later phases assume earlier truth.
 | 5c | **Terminal facts (OS side)** | a real `sleep` typed into a plain shell tab, behind a shell allowlist, while that tab is focused; then focus moves to an agent tab with the command still running | leg A: at least one sandbox bar learns the change — the OS-facts pipeline (`get_pane_cwd`/`get_pane_running_command` → `apply_pane_facts` → the terminal row) delivers end to end, which nothing tested before. Leg B MEASURES whether a second instance learns it from another tab, the open question under the store-backed fix, and asserts nothing: the facts are per-instance today, so "every bar agrees" is not yet true and a drive must not go red on a known-open defect | the 2026-09-12 flicker (a terminal row with facts under one tab and none under another), #206, #239 |
 | 6 | Quiescence | idle 60s | evlog and store `seq` flat; zellij log flat after the mark for sandbox-attributable lines only (the shared log is never globally flat with a live maintainer fleet — see Delivery accounting) | P17, B19/B20, drive step 6 |
 | 6b | **Isolation witness** | nothing (reads this run's own evidence) | zero `push-refused` events across the run — no push was aimed at a bar that does not own this store; the ambient zellij identity is STILL the sandbox's at the END of the run, not just at the start; the inherited session's name appears nowhere as a push target | FOOTGUNS #281, the 2026-09-11 incident |
-| 6c | **Relaunch (the second launch)** | quit the sandbox session, then ask the maintainer to `just launch` it again | the restored set comes back the SAME SIZE, and holds the same uuids, after a first session in which only ONE tab was visited; EVERY restored row carries a `tab_id` in the store, and each row except the first carries it BEFORE its agent runs — the first is the eager one, which starts at launch, so the timing half of that assertion applies only to the held rows; a tab closed in session N is absent in session N+1. This is the only phase that reads what the previous session recorded, so it is the only one that can see the live set decay | the relaunch seam (TESTING.md's escape record); #261's decay |
+| 6c | **Relaunch (the second launch)** | quit the sandbox session, then ask the maintainer to `just launch` it again | exactly ONE row is bound after the relaunch — the most-recent row, the eager tab the launch bakes — and every other row is dormant: no `tab_id`, no `pane_id`, and no stale `Working` or `NeedsYou` carried over from the first session. Then the beacon leg: two `clave-toggle` presses in the eager tab, with NO anchor pipe first. Each press is ONE width ask, from that tab's bar, painted by that bar | the relaunch seam (TESTING.md's escape record); the one-eager-tab rule, commit `9670fbf` |
 | 7 | Teardown | nothing | prints the kill pair (the agent may run it once both eyeballs are in) | drive step 9 |
 
 **Why 5b could not catch the 2026-09-14 red-glyph defect.** Its event
@@ -196,8 +262,8 @@ the stable binary (FOOTGUNS, 2026-08-24).
    one-command loop. The drive carries **twelve** now: 5c joined on
    2026-09-12 and 6c on 2026-09-16. **Run 12, 2026-09-16** drove all twelve:
    phases 0–6b green, and 6c went red on its first complete run, on a real
-   defect — the live set lost the one row whose agent was genuinely running
-   (see the handoff for the mechanism). That is the phase doing its job on
+   defect — the restore of the day (since removed) lost the one row whose
+   agent was genuinely running. That is the phase doing its job on
    the first attempt at a class nothing else could see. **Run 16, 2026-09-16,
    is the first ALL TWELVE green**, with the `SessionEnd` fix in and phase 6c
    closing its own tab. Runs 13–15 sit between them and are worth reading as
@@ -206,8 +272,8 @@ the stable binary (FOOTGUNS, 2026-08-24).
    asserts the witness is there, which is what ended that.
    **Runs 17 and 18, 2026-09-16**, followed the second swarm review. 17 went
    red at phase 5b on the DRIVE, not the product: the phase ends a session two
-   lines above the check and then asserted `idle`, which since `Status::Exited`
-   is the reading for an agent that is still alive. 18 is green in all twelve,
+   lines above the check and then asserted `idle`, which under the restore's
+   `Exited` status (since removed) was the reading for an agent that is still alive. 18 is green in all twelve,
    and is the run that proves both swarm-review blocker fixes live — five rows
    recorded, five rebound by the bar with nothing driven, focused or typed,
    four of them bound before their agent ran, and the tab closed in the first
@@ -245,41 +311,84 @@ the stable binary (FOOTGUNS, 2026-08-24).
 phase runs inside one session, which is exactly why the live-set decay (#261)
 reached a shipped branch with all gates green and a full drive behind it. The
 phase is cheap — quit, relaunch, count — and it is the only automated look at
-state that crosses a session boundary. Do not fold it into phase 1 by staging
-a pre-bound fixture: staging the binds is what makes the first launch pass
-without ever proving the first session could have RECORDED them.
+state that crosses a session boundary.
 
-Three things about how it is built (2026-09-16), each of which a later edit
-could undo without any test noticing:
+What it asserts (2026-09-22, after the live-set restore was removed, commit
+`9670fbf`): a relaunch bakes ONE tab, for the most-recent row. So after the
+second launch exactly one row is bound, every other row has no `tab_id` and no
+`pane_id`, and no row carries a `Working` or `NeedsYou` from the first
+session. Then two `clave-toggle` presses in that one tab, each answered by
+exactly one width ask from that tab's bar. Both halves read the store and the
+log; nothing is driven between the relaunch and the reading — no focus, no
+nav, no keystroke — so the reading is the launch's own work.
+
+Two things about how it is built, each of which a later edit could undo
+without any test noticing:
 
 - **It kills nothing and launches nothing.** It prints the pair and waits for
   liveness to drop and return. Session lifecycle stays the maintainer's, and
-  `script_hygiene.rs` now fails the build for any line in the drive that
-  starts or ends a session.
-- **The verdict lives in `scripts/qa/lib.sh` (`relaunch_checks`), not in the
-  phase.** The selftest runs it against a store that decayed and requires it
-  to go RED. A comparison only two maintainer launches could try is a
-  comparison nobody tries — which is the shape of the defect the phase exists
-  for.
-- **It closes its own tab, right before the ask.** The "a closed tab stays
-  closed" half needs a row that was unbound at the quit. Naming the tab phase
-  3 closed does not give one: phase 4 wakes the top wakeable dormant row, and
-  that is the row phase 3 just made dormant, so the drive re-opened its own
-  closed row and then demanded the restore leave it out (run 13, 2026-09-16).
-  Nothing runs between this close and the quit, so nothing can wake the row.
-  The phase checks the prune landed BEFORE it records the set; if it has not,
-  the run stops there rather than asking for a launch it cannot read.
-- **The readings are non-vacuous because a launch CLEARS the binds** before it
-  bakes the layout, and records the set it cleared into `last_live` on the
-  same pass (`setup.rs` `clear_session_order`). So every tab id read after the
-  relaunch was made by the second session, and the store carries its own
-  expectation. Neither fact is incidental; if either changes, this phase is
-  measuring nothing.
+  `script_hygiene.rs` fails the build for any line in the drive that starts
+  or ends a session.
+- **The readings are non-vacuous because a launch CLEARS the binds** before
+  it bakes the layout (`setup.rs` `clear_session_order`). So every tab id read
+  after the relaunch was made by the second session. If that changes, this
+  phase is measuring nothing.
 
-**Nothing is driven between the relaunch and the reading** — no focus, no nav,
-no keystroke. The whole defect was that a restored row bound only when the
-maintainer landed on its tab, so a drive that touched a tab first would hide
-exactly what it came to see.
+The verdict lives in `scripts/qa/lib.sh` (`relaunch_checks`), not in the
+phase, so the selftest can run it against a store with two bound rows and
+require it to go RED.
+
+## The remote drive (a second machine, over ssh)
+
+Ratified 2026-09-22, after the v0.5.2 rollout: the devbox showed a fleet of
+regressions the Mac never did — the width flap needed `pane_frames false`,
+which the box has and the Mac does not; the restore defects needed the
+box's Claude Code daemon. Every one was found by the human at the box and
+diagnosed by an agent reading the box's log over ssh. So that is now the
+loop, in one command:
+
+```
+just remote-qa qa-fleet          # push HEAD, stage on the box, wait, drive
+just remote-log 60               # the box's zellij log tail
+just remote-drive-log 60         # the newest drive log on the box
+just remote-kill                 # the box SANDBOX, by exact name
+```
+
+`scripts/remote-qa.sh` is the whole mechanism. It pushes this HEAD to a
+plain git checkout on the remote (`~/code/clave-qa` by default; the repo
+accepts a push onto its checked-out branch), then runs the SAME `just qa`
+there, in the remote's own environment — its zellij config, its frames
+setting, its Claude Code. There is no second drive and no remote-only
+phase: one code path. The remote sandbox is `clave dev instance` on the
+remote, and the remote's live fleet is untouched for the same reasons the
+local one is. `CLAVE_QA_HOST` and `CLAVE_QA_DIR` pick the machine.
+
+The human's one job is unchanged: launch. The line is
+
+```
+ssh -t devbox 'cd ~/code/clave-qa && just launch'
+```
+
+and it works from ANY terminal, inside zellij or not, because ssh forwards
+none of the zellij variables that make `just launch` refuse. Phase 6c's
+second launch is the same line after the quit.
+
+**Reading a remote sandbox is not touching the remote fleet.** The zellij
+log is a file (`/tmp/zellij-<uid>/zellij-log/zellij.log` on Linux), the
+drive log is a file under the remote sandbox state dir, and the store is a
+file. `just remote-log` and `just remote-drive-log` read those and nothing
+else. A `zellij action` typed into an ssh shell on the box aims at whatever
+session that shell sits in — the human's `remote` session — so nothing here
+runs one outside `ct.sh`, which the drive already routes through.
+
+**The frames seam has an assertion now.** The shipped bar logs one line per
+width ask (`clave-bar: swap-width backwards=… cols=…`, main.rs `render`).
+Phase 1 records the launch's ask count per sandbox instance; phase 4 asserts
+ZERO asks across both ring-walk legs, because a walk toggles nothing and a
+bar at its painted width asks nothing — the flap asked on every focus
+change. The reading is per LINE (`swap_ask_count_since`, lib.sh), not per
+instance: a flap is one instance asking sixteen times, and an instance
+count reads that as 1.
 
 ## When it runs
 
@@ -303,6 +412,6 @@ exactly what it came to see.
 4. Runbook/TESTING integration line + retire the duplicated manual steps.
 5. Phase 6c (the relaunch). LANDED (2026-09-16, #261). Driven live on run 12
    the same day: the settle window held for a six-tab fleet, and the phase
-   went RED on a real defect — `SessionEnd` unbound the row from a tab that
-   was still open, so the restore set lost every tab whose agent had really
-   been running (fixed on this branch; FOOTGUNS records the shape).
+   went RED on a real defect in the restore of the day. The restore itself
+   was removed on 2026-09-22 (commit `9670fbf`); 6c now verifies one eager
+   tab and a dormant fleet.

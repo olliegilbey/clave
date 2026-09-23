@@ -77,6 +77,16 @@ const EXPANDED_COLS: usize = clave_types::RowHeight::Double.target_cols(false);
 const CARD_COLLAPSED_COLS: usize = clave_types::RowHeight::Card.target_cols(true);
 const CARD_EXPANDED_COLS: usize = clave_types::RowHeight::Card.target_cols(false);
 
+/// Whether a painted width gets the expanded profile. A frameless pane
+/// paints one column short of its declared width (FOOTGUNS: "A frameless
+/// pane paints one column short"), so the threshold tolerates exactly the
+/// separator column, the same allowance the model's `RowHeight::mode_at`
+/// makes. Exact here and tolerant there would leave a frames-off bar parked
+/// at the expanded width drawing the collapsed card: a third state.
+fn is_expanded(build: usize, expanded_cols: usize) -> bool {
+    build + clave_types::SEPARATOR_COLS >= expanded_cols
+}
+
 /// The card's left chrome: margin, mark, air, rail, air. A four-cell version
 /// that butted the rail against the mark column was rejected on sight — the
 /// rule sat on top of the glyphs. The fifth column costs nothing that matters:
@@ -332,7 +342,7 @@ pub(crate) fn render_double_card(
     // and loses the same trailing cells on every row (LEDGER D13), rather than
     // going ragged or — worse — wrapping into a third line.
     let build = cols.max(COLLAPSED_COLS);
-    let branch_w = if build >= EXPANDED_COLS {
+    let branch_w = if is_expanded(build, EXPANDED_COLS) {
         BRANCH_MIN
     } else {
         0
@@ -511,7 +521,7 @@ pub(crate) fn render_card(
     // and loses the same trailing cells on every row rather than going ragged
     // or, worse, wrapping into a fifth line.
     let build = cols.max(CARD_COLLAPSED_COLS);
-    let expanded = build >= CARD_EXPANDED_COLS;
+    let expanded = is_expanded(build, CARD_EXPANDED_COLS);
     let c = cells(&row.content, theme);
 
     let dormant = row.dormant
@@ -1490,6 +1500,78 @@ mod tests {
                 i + 1
             );
         }
+    }
+
+    /// A frameless pane paints one column short of its declared width
+    /// (FOOTGUNS: "A frameless pane paints one column short"). The expanded
+    /// card must still be the expanded card at 47: the PR cell and the model
+    /// tail stay, and the rows fill exactly the painted width. Before the
+    /// fix the threshold was exact, so a frames-off bar sat at full width
+    /// drawing the collapsed card, which reads as a third state.
+    #[test]
+    fn the_card_one_column_under_expanded_is_the_expanded_card() {
+        let row = A {
+            tokens: Some(9_949_999),
+            pr: Some(1234),
+            branch: "feat/some-long-branch-name",
+            repo: "a-long-repository-name",
+            elapsed: "59s",
+            ..A::default()
+        }
+        .row();
+        let painted = CARD_EXPANDED_COLS - clave_types::SEPARATOR_COLS;
+        let got = render_card(&row, painted, false, 0, &Theme::default());
+        let l2 = strip_sgr(&got[1]);
+        let l3 = strip_sgr(&got[2]);
+        assert!(
+            l2.contains("1234") || l3.contains("1234"),
+            "the PR cell must survive one column short: {l2:?} / {l3:?}"
+        );
+        assert!(l2.contains("fable"), "the model tail must survive: {l2:?}");
+        for (i, line) in got.iter().enumerate() {
+            assert_eq!(
+                display_cells(&strip_sgr(line)),
+                painted,
+                "line {} left the painted width",
+                i + 1
+            );
+        }
+        // Two short is still the collapsed card: the tolerance is exactly
+        // the separator column, not a slope.
+        let two_short = render_card(&row, painted - 1, false, 0, &Theme::default());
+        let l2 = strip_sgr(&two_short[1]);
+        let l3 = strip_sgr(&two_short[2]);
+        assert!(
+            !l2.contains("1234") && !l3.contains("1234"),
+            "two short must draw the collapsed card: {l2:?} / {l3:?}"
+        );
+    }
+
+    /// The same separator column, on the double card: its branch cell is the
+    /// thing the expanded width buys, and it must not vanish at 47.
+    #[test]
+    fn the_double_card_one_column_under_expanded_keeps_its_branch() {
+        // With a PR the collapsed profile has no columns left for a branch,
+        // so its presence is the one-bit read of which profile was drawn.
+        let row = A {
+            branch: "feat/some-long-branch-name",
+            pr: Some(1234),
+            ..A::default()
+        }
+        .row();
+        let painted = EXPANDED_COLS - clave_types::SEPARATOR_COLS;
+        let (l1, l2) = render_double_card(&row, painted, false, false, &Theme::default());
+        let joined = format!("{}{}", strip_sgr(&l1), strip_sgr(&l2));
+        assert!(
+            joined.contains("feat/"),
+            "the branch cell must survive one column short: {joined:?}"
+        );
+        let (l1, l2) = render_double_card(&row, painted - 1, false, false, &Theme::default());
+        let joined = format!("{}{}", strip_sgr(&l1), strip_sgr(&l2));
+        assert!(
+            !joined.contains("feat/"),
+            "two short must draw the collapsed double card: {joined:?}"
+        );
     }
 
     /// The cell column a needle starts at. Line 3's chrome carries a
