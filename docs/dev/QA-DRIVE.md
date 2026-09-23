@@ -8,6 +8,10 @@ owns everything they structurally cannot reach._
 
 ## Run ledger — the useful recent history
 
+- **run 39, 2026-09-23 — standby rebased onto the #271 merge.** Build
+  `b75b684`, a tree identical to run 38's. Mac 0-7 green, 250 checks; box
+  0-7 green, 249 checks. The agent quit both sandboxes at 6c.
+
 - **runs 36 to 38, 2026-09-23 — standby rank, and the hop.** Run 36 at
   `7a0af62`: Mac 0-7 green, 249 checks. Box red once in phase 5 (the rapid
   burst lost one press, the known intermittent), then 0-7 green, 248 checks.
