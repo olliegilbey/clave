@@ -273,7 +273,8 @@ relaunch_status() {
   # Every row carries a `status`, because a real store always writes one: a
   # fixture that omitted it would make the stale check fire on every case and
   # so prove nothing. Each bound row has its own tab, ranked by the row's own
-  # ordinal; "rank-lost" gives u-a's tab a fresh top one instead.
+  # ordinal; "rank-lost" gives u-a's tab a fresh top one instead, and
+  # "touched" gives it the birth touch's stamp.
   jq -nc --argjson bound "$1" --arg mode "${2:-}" --argjson stamped "${3:-[]}" '
     { "u-eager": { tab: 1, ord: 3 }, "u-a": { tab: 2, ord: 4 }, "u-b": { tab: 3, ord: 6 } } as $rows
     | { store:
@@ -283,6 +284,7 @@ relaunch_status() {
                            value: (if $mode == "rank-lost" and .key == "u-a"
                                    then 13 else .value.ord end) } ]
                      | from_entries ),
+        tab_touched: (if $mode == "touched" then { "2": 1700 } else {} end),
         agents: ( [ ("u-eager", "u-a", "u-b") | { key: ., value:
                       { uuid: .,
                         tab_id: (if . as $u | $bound | index($u) then $rows[.].tab else null end),
@@ -367,6 +369,8 @@ want "an arrival whose bind kept the stamp fails" "$?" "1"
 want "an arrival that opened two rows fails" "$?" "1"
 (arrival_checks "u-eager" "$LEFT_LIVE" "$(relaunch_status '["u-eager","u-a"]' "rank-lost" '["u-b"]')" >/dev/null 2>&1)
 want "an arrival that lifted the row to the top fails" "$?" "1"
+(arrival_checks "u-eager" "$LEFT_LIVE" "$(relaunch_status '["u-eager","u-a"]' "touched" '["u-b"]')" >/dev/null 2>&1)
+want "an arrival whose tab took a birth touch fails" "$?" "1"
 
 printf '\n%s\n' "== qa/lib selftest: $FAILURES failure(s) =="
 [[ "$FAILURES" -eq 0 ]]

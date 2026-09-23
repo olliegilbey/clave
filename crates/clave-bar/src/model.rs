@@ -448,6 +448,14 @@ pub const PROBE_FAILURE_STANDDOWN: u8 = 3;
 /// a session recreate clears the store's tab order.
 const NO_COMMITMENT: u64 = 0;
 
+/// The uuid in a pane command `<clave binary> spawn <uuid> …`. The binary's
+/// name varies (a versioned copy, a shim), so only the word `spawn` anchors.
+fn spawn_uuid(command: &str) -> Option<&str> {
+    let mut words = command.split_whitespace();
+    words.find(|w| *w == "spawn")?;
+    words.next()
+}
+
 /// Row identity (§6.6 C8): a live zellij tab, a standby row (dormant, but the
 /// last quit left it live, so arriving on it opens it), or a dormant store
 /// row (conversation with no tab yet — claude.ai-style list).
@@ -1279,8 +1287,18 @@ impl BarModel {
         // while gating on a position join against the PANE frame. Requiring
         // the active tab to be OUR tab makes the touch self-consistent by
         // construction.
+        //
+        // No touch for a tab opened for a standby row: a walk is not a
+        // commitment, and the bind gives the tab the row's own rank. A touch
+        // would lift it to the top until the bind took it back. The bar needs
+        // its first snapshot to tell that tab from a newborn.
         if let Some(active) = self.active_tab_id()
             && active == own
+            && !self.awaiting_hydration
+            && !self.spawned_agent(active).is_some_and(|a| {
+                a.standby_since
+                    .is_some_and(|t| clave_types::standby_live(t, self.now))
+            })
             && self.needs_birth_touch(active)
         {
             fx.push(Effect::Touch { tab_id: active });
@@ -1298,7 +1316,32 @@ impl BarModel {
     /// only join every instance agrees on. Local register/manifest joins are
     /// used solely to CREATE binds (bind_effects).
     fn agent_in_tab(&self, tab_id: usize) -> Option<&Agent> {
-        self.agents.iter().find(|a| a.tab_id == Some(tab_id))
+        self.agents
+            .iter()
+            .find(|a| a.tab_id == Some(tab_id))
+            .or_else(|| self.spawned_agent(tab_id))
+    }
+
+    /// The row this tab's pane was launched to resume, while the store's
+    /// bind has not landed. Every agent tab's pane runs `clave spawn <uuid>`
+    /// (`add.rs` `tab_node`), and zellij reports that command from the tab's
+    /// first frame (`terminal_command`, measured 2026-09-23). Without this
+    /// join an opened row sat at the bottom, then the top, then its own place
+    /// (Ollie, 2026-09-23). An exited pane runs nothing, and a row the store
+    /// binds to a live tab belongs to that tab, so neither joins here.
+    fn spawned_agent(&self, tab_id: usize) -> Option<&Agent> {
+        let position = self.tabs.iter().find(|t| t.tab_id == tab_id)?.position;
+        let uuid = self
+            .panes
+            .iter()
+            .filter(|p| p.tab_position == position && !p.is_plugin && !p.exited)
+            .find_map(|p| spawn_uuid(p.terminal_command.as_deref()?))?;
+        self.agents.iter().find(|a| {
+            a.uuid == uuid
+                && !a
+                    .tab_id
+                    .is_some_and(|id| self.tabs.iter().any(|t| t.tab_id == id))
+        })
     }
 
     /// §6.6 Design B bootstrap: agents whose REGISTERED pane sits in
@@ -1462,7 +1505,11 @@ impl BarModel {
             .uuid_to_pane
             .get(&a.uuid)
             .is_some_and(|p| self.tab_position_of_pane(*p).is_some());
-        !tab_live && !pane_live
+        let spawn_live = self.tabs.iter().any(|t| {
+            self.spawned_agent(t.tab_id)
+                .is_some_and(|s| s.uuid == a.uuid)
+        });
+        !tab_live && !pane_live && !spawn_live
     }
 
     /// A dormant row the last quit left live, less than a day ago by the
@@ -8614,6 +8661,93 @@ mod tests {
         s.tab_order = [(10usize, 100u64)].into();
         m.apply_snapshot(s);
         assert!(!m.identity_effects().contains(&pruned));
+    }
+
+    /// The new tab a walk opened for row u-s1, seen by that tab's own bar
+    /// before the store binds it: its pane runs `clave spawn u-s1` (the
+    /// command zellij reports, measured 2026-09-23). u-s1 ranks between the
+    /// two older tabs. `standby` false makes it a plain dormant row.
+    fn tab_opened_before_its_bind(standby: bool, exited: bool) -> BarModel {
+        let mut m = BarModel::default();
+        m.set_own_pane(300);
+        let spawn = PaneMeta {
+            terminal_command: Some("clave spawn u-s1 --name one · two --cwd /r".into()),
+            exited,
+            ..pane(2, 301, false, true)
+        };
+        m.apply_panes(vec![
+            pane(0, 100, true, false),
+            pane(0, 101, false, false),
+            pane(1, 200, true, false),
+            pane(1, 201, false, false),
+            pane(2, 300, true, false),
+            spawn,
+        ]);
+        m.apply_tabs(vec![
+            tab(1, 0, "one", false),
+            tab(2, 1, "two", false),
+            tab(3, 2, "new", true),
+        ]);
+        let row = Agent {
+            commit_ord: 450,
+            standby_since: standby.then_some(STANDBY_FLEET_SINCE),
+            ..agent("u-s1", Status::Idle, None)
+        };
+        let mut s = snap(1, vec![row]);
+        s.tab_order = [(1usize, 500u64), (2, 400)].into();
+        m.apply_snapshot(s);
+        m
+    }
+
+    #[test]
+    fn a_tab_opened_for_a_standby_row_takes_the_rows_place_before_its_bind() {
+        // Ollie, 2026-09-23: an opened standby row hopped bottom, top, then
+        // its own place, in about 100 ms. The pane's command names the row
+        // from the tab's first frame, so the row holds its place throughout.
+        let m = tab_opened_before_its_bind(true, false);
+        assert_eq!(
+            keys(&m),
+            vec![RowKey::Tab(1), RowKey::Tab(3), RowKey::Tab(2)],
+            "ranked by the row's own ordinal, and the standby row is not shown twice"
+        );
+    }
+
+    #[test]
+    fn a_tab_opened_for_a_standby_row_sends_no_birth_touch() {
+        // The touch would mint a fresh top ordinal, and the bind would then
+        // take it back: the hop. The bind alone gives the tab the row's rank.
+        let mut m = tab_opened_before_its_bind(true, false);
+        assert!(
+            !m.identity_effects()
+                .iter()
+                .any(|e| matches!(e, Effect::Touch { .. })),
+        );
+        // Alt+Enter on a dormant row is a commitment: its tab still goes top.
+        let mut m = tab_opened_before_its_bind(false, false);
+        assert!(m.identity_effects().contains(&Effect::Touch { tab_id: 3 }));
+    }
+
+    #[test]
+    fn an_exited_spawn_pane_names_no_row() {
+        // After /exit the held pane keeps its launch command, but runs
+        // nothing: the row is not live there.
+        let m = tab_opened_before_its_bind(true, true);
+        assert!(keys(&m).contains(&RowKey::Standby("u-s1".into())));
+        assert!(m.agent_in_tab(3).is_none());
+    }
+
+    #[test]
+    fn a_new_bar_sends_no_birth_touch_before_its_first_snapshot() {
+        // Without the snapshot the bar cannot tell a standby row's tab from
+        // a newborn, and a touch sent blind is the hop.
+        let mut m = tab_opened_before_its_bind(true, false);
+        m.agents.clear();
+        m.await_hydration();
+        assert!(
+            !m.identity_effects()
+                .iter()
+                .any(|e| matches!(e, Effect::Touch { .. })),
+        );
     }
 
     #[test]

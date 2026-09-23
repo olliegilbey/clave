@@ -716,8 +716,12 @@ pub fn apply_bind(paths: &StorePaths, uuid: &str, tab_id: usize) -> Result<Optio
             // and a walk is not a commitment, so the tab takes the row's own
             // ordinal and the row keeps its rank (Ollie, 2026-09-23). This
             // overwrites a birth touch that landed first; `touch_in` keeps
-            // it against one that lands after.
-            if r.standby_stamp.take().is_some() {
+            // it against one that lands after. An expired stamp is a
+            // dormant row, and waking one is a commitment.
+            if r.standby_stamp
+                .take()
+                .is_some_and(|sb| sb.live_at(now_unix()))
+            {
                 s.tab_order.insert(tab_id, r.commit_ord);
             }
         }
@@ -2257,11 +2261,13 @@ mod tests {
         // frecency puts it, not to the top. A walk opens it; that is not a
         // commitment. With no score, the rank is the ordinal, so the new
         // tab must carry the row's own ordinal, never a fresh top one. The
-        // bar sends the birth touch and the bind together, and they race
-        // for the store lock, so both arrival orders are pinned. A woken
-        // DORMANT row (Alt+Enter) is a commitment and still takes the top.
+        // bar sends no birth touch for a standby row's tab; both arrival
+        // orders are still pinned, for a bar that sent one blind. A woken
+        // DORMANT row (Alt+Enter) is a commitment and still takes the top,
+        // and so does a row whose stamp expired: past a day it is dormant.
         for touch_first in [true, false] {
-            for standby in [true, false] {
+            for stamp_age in [None, Some(0), Some(clave_types::STANDBY_SECS + 60)] {
+                let standby = stamp_age == Some(0);
                 let d = tempfile::tempdir().unwrap();
                 let p = tmp_paths(d.path());
                 with_store_mut(&p, |s| {
@@ -2272,12 +2278,10 @@ mod tests {
                     s.tab_order.insert(1, 9);
                     let mut row = rec("u-row");
                     row.commit_ord = 5;
-                    if standby {
-                        row.standby_stamp = Some(Standby {
-                            since: now_unix(),
-                            tab: None,
-                        });
-                    }
+                    row.standby_stamp = stamp_age.map(|age| Standby {
+                        since: now_unix() - age,
+                        tab: None,
+                    });
                     s.agents.insert("u-row".into(), row);
                     s.seq = 20;
                 })
@@ -2294,7 +2298,10 @@ mod tests {
                 if standby {
                     assert_eq!(ord, 5, "touch_first={touch_first}: its own rank");
                 } else {
-                    assert!(ord > 20, "touch_first={touch_first}: {ord}, not the top");
+                    assert!(
+                        ord > 20,
+                        "touch_first={touch_first} age={stamp_age:?}: {ord}, not the top"
+                    );
                 }
             }
         }

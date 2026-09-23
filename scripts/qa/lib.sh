@@ -389,6 +389,15 @@ arrival_checks() {
       elif $t == $a.commit_ord then "held"
       else "tab \($t) over row \($a.commit_ord)" end' <<<"$status" 2>/dev/null)"
   check "and its tab kept the row's own rank" "$rank" "held"
+  # And it held that rank throughout: the new tab's bar sends no birth touch
+  # for a standby row. The touch lifted the row to the top until the bind
+  # took it back, a hop the human saw (Ollie, 2026-09-23; model.rs
+  # `identity_effects`). A touch stamps `tab_touched`; a bind does not.
+  local touched="unread"
+  [[ -n "$opened" ]] && touched="$(jq -r --arg u "$opened" '
+    .store as $s | ($s.tab_touched // {})[($s.agents[$u].tab_id | tostring)]
+    | if . == null then "none" else "touched at \(.)" end' <<<"$status" 2>/dev/null)"
+  check "and no birth touch lifted it to the top first" "$touched" "none"
 }
 
 # Guarded list-panes read. Never the bare env-var form (TESTING.md, "the
