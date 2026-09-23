@@ -43,6 +43,11 @@ pub struct HookPayload {
     /// Notification carries a human message; §6.5 matches on its text.
     #[serde(default)]
     pub message: Option<String>,
+    /// SessionEnd carries why the session ended: `clear`, `resume`,
+    /// `logout`, `prompt_input_exit` or `other` (code.claude.com/docs/en/hooks).
+    /// Only `other` can be a zellij quit, which is what stamps standby.
+    #[serde(default)]
+    pub reason: Option<String>,
     /// Where Claude is writing this session's transcript RIGHT NOW (#87).
     ///
     /// The alternative — rebuilding the path from the store's creation-time
@@ -1803,10 +1808,19 @@ pub fn mint_adopted(
 /// runs, `clave spawn` or not (the S17 reversal). Change-gated; bumps `seq`
 /// itself on a real write because the bar renders and joins from `pane_id`
 /// (unlike `live_session`, which pushes no pixel).
-pub fn apply_hook_pane(s: &mut Store, uuid: &str, event: &str, pane: Option<u32>) -> bool {
+pub fn apply_hook_pane(
+    s: &mut Store,
+    uuid: &str,
+    event: &str,
+    pane: Option<u32>,
+    reason: Option<&str>,
+    now: u64,
+) -> bool {
     let Some(pane) = pane else {
         return false; // unverified pane: never write, never erase
     };
+    // Read before the row borrow below: the end carries its tab's ordinal.
+    let tab_ords = &s.tab_order;
     let Some(rec) = s.agents.get_mut(uuid) else {
         return false; // raced a prune — fine
     };
@@ -1817,6 +1831,25 @@ pub fn apply_hook_pane(s: &mut Store, uuid: &str, event: &str, pane: Option<u32>
         if rec.pane_id != Some(pane) {
             return false;
         }
+        // Standby: a zellij quit fires SessionEnd for every running agent,
+        // and the unbind below erases the only record that this row was live
+        // (QA run 12), so the end itself stamps it. Only `other` (a killed
+        // pane) counts: /exit, /clear, /resume and /logout are the human's
+        // own endings (reasons: code.claude.com/docs/en/hooks). No reason is
+        // not a quit either, because a false stamp spawns an agent on
+        // arrival. A tab close is also `other`; its prune dismisses the
+        // stamp by tab.
+        if rec.tab_id.is_some() && reason == Some("other") {
+            rec.standby_stamp = Some(crate::store::Standby {
+                since: now,
+                tab: rec.tab_id,
+            });
+        }
+        // The row inherits its tab's ordinal before the unbind drops the
+        // tab, the prune's own rule (R2): without it, a standby row came back
+        // ranked by an older prompt, not where the quit left it.
+        let carried = rec.tab_id.and_then(|t| tab_ords.get(&t)).copied();
+        rec.commit_ord = rec.commit_ord.max(carried.unwrap_or(0));
         rec.pane_id = None;
         rec.tab_id = None;
         s.seq += 1; // monotonic pipe contract (§5)
@@ -2120,7 +2153,7 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
         // pane-verified, change-gated, and the bar renders from it. A fresh
         // mint always lands here too (row pane None → Some), so an adoption
         // pushes even when the event itself moved nothing.
-        changed |= apply_hook_pane(s, &uuid, event, pane);
+        changed |= apply_hook_pane(s, &uuid, event, pane, payload.reason.as_deref(), now_unix());
         // Read-only (#232): comparing two integers/strings against the row
         // this same write just touched. NOT a network call — that discipline
         // is the whole point (§6.5) — just the decision whether one is owed.
@@ -2513,6 +2546,7 @@ mod tests {
             tab_id: None,
             pane_id: None,
             stale: false,
+            standby_stamp: None,
             title: None,
             summary: String::new(),
             default_branch: None,
@@ -2822,6 +2856,7 @@ mod tests {
             session_id: Some("u1".into()),
             prompt: None,
             message: None,
+            reason: None,
             transcript_path: None,
             cwd: None,
         };
@@ -2845,6 +2880,7 @@ mod tests {
             session_id: Some("u1".into()),
             prompt: None,
             message: Some("needs your permission".into()),
+            reason: None,
             transcript_path: None,
             cwd: None,
         };
@@ -2903,6 +2939,7 @@ mod tests {
             session_id: Some("u-a".into()),
             prompt: None,
             message: None,
+            reason: None,
             transcript_path: None,
             cwd: None,
         };
@@ -2910,6 +2947,7 @@ mod tests {
             session_id: Some("u-b".into()),
             prompt: None,
             message: None,
+            reason: None,
             transcript_path: None,
             cwd: None,
         };
@@ -2946,6 +2984,7 @@ mod tests {
             session_id: Some("u1".into()),
             prompt: None,
             message: None,
+            reason: None,
             transcript_path: None,
             cwd: None,
         };
@@ -3016,6 +3055,7 @@ mod tests {
             session_id: Some("u1".into()),
             prompt: None,
             message: None,
+            reason: None,
             transcript_path: None,
             cwd: None,
         };
@@ -3047,6 +3087,7 @@ mod tests {
             session_id: Some("u1".into()),
             prompt: None,
             message: None,
+            reason: None,
             transcript_path: None,
             cwd: None,
         };
@@ -4808,6 +4849,7 @@ mod tests {
             session_id: Some("u1".into()),
             prompt: Some("fix the flaky auth test".into()),
             message: None,
+            reason: None,
             transcript_path: None,
             cwd: None,
         };
@@ -4837,6 +4879,7 @@ mod tests {
             session_id: Some("u1".into()),
             prompt: Some("<task-notification> <task-id>bai</task-notification>".into()),
             message: None,
+            reason: None,
             transcript_path: None,
             cwd: None,
         };
@@ -4849,6 +4892,7 @@ mod tests {
             session_id: Some("u1".into()),
             prompt: Some("fix the flaky auth test".into()),
             message: None,
+            reason: None,
             transcript_path: None,
             cwd: None,
         };
@@ -4870,6 +4914,7 @@ mod tests {
                 session_id: Some("u1".into()),
                 prompt: Some(injected_text.clone()),
                 message: None,
+                reason: None,
                 transcript_path: None,
                 cwd: None,
             };
@@ -5029,6 +5074,7 @@ mod tests {
             session_id: Some("u1".into()),
             prompt: Some("a prompt that must not win".into()),
             message: None,
+            reason: None,
             transcript_path: None,
             cwd: None,
         };
@@ -5055,6 +5101,7 @@ mod tests {
             session_id: Some("u1".into()),
             prompt: Some("a later prompt".into()),
             message: None,
+            reason: None,
             transcript_path: None,
             cwd: None,
         };
@@ -5125,6 +5172,7 @@ mod tests {
             session_id: Some("u1".into()),
             prompt: Some("a prompt that must not win".into()),
             message: None,
+            reason: None,
             transcript_path: None,
             cwd: None,
         };
@@ -5262,6 +5310,7 @@ mod tests {
             session_id: Some("u1".into()),
             prompt: Some(r#"fix the \d "regex" now"#.into()),
             message: None,
+            reason: None,
             transcript_path: None,
             cwd: None,
         };
@@ -5298,15 +5347,22 @@ mod tests {
         let mut s = Store::default();
         s.agents.insert("u1".into(), rec("u1"));
         let before = s.seq;
-        assert!(apply_hook_pane(&mut s, "u1", "Notification", Some(7)));
+        assert!(apply_hook_pane(
+            &mut s,
+            "u1",
+            "Notification",
+            Some(7),
+            None,
+            0
+        ));
         assert_eq!(s.agents["u1"].pane_id, Some(7));
         assert_eq!(s.seq, before + 1, "pane_id is bar-rendered: seq bumps");
         assert!(
-            !apply_hook_pane(&mut s, "u1", "Notification", Some(7)),
+            !apply_hook_pane(&mut s, "u1", "Notification", Some(7), None, 0),
             "re-registration of the same pane is free"
         );
         assert!(
-            !apply_hook_pane(&mut s, "u1", "Notification", None),
+            !apply_hook_pane(&mut s, "u1", "Notification", None, None, 0),
             "no verified pane, no write"
         );
         assert_eq!(
@@ -5316,7 +5372,14 @@ mod tests {
         );
         // Last-writer-wins (#226 ruling): resuming the same session in a second
         // pane steals the register; the old tab reverts via the bind eviction.
-        assert!(apply_hook_pane(&mut s, "u1", "Notification", Some(9)));
+        assert!(apply_hook_pane(
+            &mut s,
+            "u1",
+            "Notification",
+            Some(9),
+            None,
+            0
+        ));
         assert_eq!(s.agents["u1"].pane_id, Some(9));
     }
 
@@ -5334,20 +5397,133 @@ mod tests {
         r.tab_id = Some(3);
         s.agents.insert("u1".into(), r);
         // A stranger pane's SessionEnd (pane 9) clears nothing.
-        assert!(!apply_hook_pane(&mut s, "u1", "SessionEnd", Some(9)));
+        assert!(!apply_hook_pane(
+            &mut s,
+            "u1",
+            "SessionEnd",
+            Some(9),
+            None,
+            0
+        ));
         assert_eq!(s.agents["u1"].pane_id, Some(7));
         assert_eq!(s.agents["u1"].tab_id, Some(3));
         // No verified pane: also nothing.
-        assert!(!apply_hook_pane(&mut s, "u1", "SessionEnd", None));
+        assert!(!apply_hook_pane(&mut s, "u1", "SessionEnd", None, None, 0));
         assert_eq!(s.agents["u1"].tab_id, Some(3));
         // The owning pane's SessionEnd reverts — both halves, one seq bump.
         let before = s.seq;
-        assert!(apply_hook_pane(&mut s, "u1", "SessionEnd", Some(7)));
+        assert!(apply_hook_pane(
+            &mut s,
+            "u1",
+            "SessionEnd",
+            Some(7),
+            None,
+            0
+        ));
         assert_eq!(s.agents["u1"].pane_id, None);
         assert_eq!(s.agents["u1"].tab_id, None);
         assert_eq!(s.seq, before + 1);
         // Idempotent: a second SessionEnd finds nothing to clear.
-        assert!(!apply_hook_pane(&mut s, "u1", "SessionEnd", Some(7)));
+        assert!(!apply_hook_pane(
+            &mut s,
+            "u1",
+            "SessionEnd",
+            Some(7),
+            None,
+            0
+        ));
+    }
+
+    /// Standby (2026-09-22): a zellij quit fires SessionEnd for every running
+    /// agent, and the unbind below erases the only record that the row was
+    /// live (QA run 12). So the end itself stamps it — with the tab, which a
+    /// later prune of that tab uses to dismiss the stamp. The human's own
+    /// endings (`/exit`, `/clear`, `/resume`, `/logout`) stamp nothing, and a
+    /// row with no tab was never live.
+    #[test]
+    fn a_session_end_carries_the_tabs_rank_into_the_row() {
+        // The same rule as the prune (R2): the row takes its tab's ordinal
+        // before the unbind drops the tab, so the quit moves nothing.
+        let mut r = rec("u1");
+        r.pane_id = Some(7);
+        r.tab_id = Some(3);
+        r.commit_ord = 5;
+        let mut s = Store::default();
+        s.agents.insert("u1".into(), r);
+        s.tab_order.insert(3, 12);
+        assert!(apply_hook_pane(
+            &mut s,
+            "u1",
+            "SessionEnd",
+            Some(7),
+            Some("other"),
+            1_000
+        ));
+        assert_eq!(s.agents["u1"].commit_ord, 12);
+    }
+
+    #[test]
+    fn a_session_end_by_quit_stamps_standby_and_the_humans_own_end_does_not() {
+        let bound = |pane| {
+            let mut r = rec("u1");
+            r.pane_id = Some(pane);
+            r.tab_id = Some(3);
+            let mut s = Store::default();
+            s.agents.insert("u1".into(), r);
+            s
+        };
+        {
+            let mut s = bound(7);
+            assert!(apply_hook_pane(
+                &mut s,
+                "u1",
+                "SessionEnd",
+                Some(7),
+                Some("other"),
+                1_000
+            ));
+            assert_eq!(
+                s.agents["u1"].standby_stamp,
+                Some(crate::store::Standby {
+                    since: 1_000,
+                    tab: Some(3)
+                })
+            );
+            assert_eq!(s.agents["u1"].tab_id, None, "the unbind still happens");
+        }
+        // No reason is not a quit either. A standby row opens on arrival, so
+        // a false stamp spawns an agent the human ended; a false dormant row
+        // costs one Alt+Enter. A hand-fired hook (the QA drive) sends none.
+        for reason in [
+            Some("prompt_input_exit"),
+            Some("clear"),
+            Some("resume"),
+            Some("logout"),
+            None,
+        ] {
+            let mut s = bound(7);
+            assert!(apply_hook_pane(
+                &mut s,
+                "u1",
+                "SessionEnd",
+                Some(7),
+                reason,
+                1_000
+            ));
+            assert_eq!(s.agents["u1"].standby_stamp, None, "{reason:?}");
+        }
+        // No tab bound: the agent was never live in a tab, so nothing to keep.
+        let mut s = bound(7);
+        s.agents.get_mut("u1").unwrap().tab_id = None;
+        assert!(apply_hook_pane(
+            &mut s,
+            "u1",
+            "SessionEnd",
+            Some(7),
+            Some("other"), // a quit's reason: only the missing tab says no
+            1_000
+        ));
+        assert_eq!(s.agents["u1"].standby_stamp, None);
     }
 
     /// #226 live adoption, mint half: a session clave has never seen, speaking

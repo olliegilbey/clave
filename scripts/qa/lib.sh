@@ -287,6 +287,24 @@ stale_status_uuids() {
          | select(.value.status == "working" or .value.status == "needs_you") | .key' <<<"$1" 2>/dev/null | sort
 }
 
+# Rows on standby: a quit stamped them (hook.rs, SessionEnd with reason
+# `other`, or the launch for a row still bound, store.rs
+# `clear_session_order`), and no bind, prune or expiry has spent the stamp
+# since. The store record carries the stamp; the wire carries its time.
+standby_uuids() {
+  jq -r '.store.agents | to_entries[] | select(.value.standby_stamp != null) | .key' <<<"$1" 2>/dev/null | sort
+}
+
+# The rows a relaunch must bring back on standby. Read from the PRE-QUIT
+# snapshot, like the eager row: every row bound to a tab (its agent is running,
+# so the quit's SessionEnd or the launch stamps it) and every row already stamped, minus the
+# eager row, whose bind at the launch spends its stamp. $2 is that eager row.
+standby_expected_uuids() {
+  jq -r --arg eager "${2:-}" '.store.agents | to_entries[]
+         | select((.value.tab_id != null or .value.standby_stamp != null) and .key != $eager)
+         | .key' <<<"$1" 2>/dev/null | sort
+}
+
 # How many rows a set holds, and the set on one line for a verdict a human
 # reads. Non-empty lines only: two empty sets compare EQUAL, so a set
 # comparison built on a dead read reports a perfect relaunch. The count is
@@ -295,8 +313,8 @@ uuid_count() { printf '%s' "${1:-}" | grep -c .; }
 uuid_line() { printf '%s' "${1:-}" | tr '\n' ' '; }
 
 # The relaunch verdict (phase 6c). A relaunch bakes ONE tab, for the row
-# `eager_candidate_uuid` names, and every other row comes back dormant with
-# no running-process status (setup.rs `launch_layout_kdl`, decision of
+# `eager_candidate_uuid` names. The rows the quit left live come back on
+# standby, every other row dormant, and none with a running-process status (setup.rs `launch_layout_kdl`, decision of
 # 2026-09-22). Takes the uuid expected to be bound, computed from the
 # pre-quit snapshot, and the `dev status` read after the relaunch. Every
 # reading below comes from that one snapshot, so no two checks can disagree
@@ -307,7 +325,7 @@ uuid_line() { printf '%s' "${1:-}" | tr '\n' ' '; }
 # nobody tries. The selftest runs it against a store with two bound rows, the
 # wrong row bound, a stale status, and an empty read — each must go red.
 relaunch_checks() {
-  local expected="$1" status="$2"
+  local expected="$1" status="$2" expected_standby="${3:-}"
   local set_after n_after stale
   set_after="$(bound_uuids "$status")"
   n_after="$(uuid_count "$set_after")"
@@ -327,11 +345,59 @@ relaunch_checks() {
   # And it is the most-recent row, not whichever the launch happened to pick.
   check "and that row is the most-recent one" "$(uuid_line "$set_after")" "$expected"
 
-  # Every other row came back dormant, and none wears a status from the
+  # Every other row came back unbound, and none wears a status from the
   # session before.
   stale="$(stale_status_uuids "$status")"
   check "no row carries a running-process status from the session before" \
     "$(uuid_line "$stale")" ""
+
+  # The rows the quit left live come back on standby (Ollie, 2026-09-22).
+  # Refused when the expectation is empty, because two empty sets compare
+  # equal: a quit that stamped nothing would pass against a one-row fleet.
+  # A row missing here was lost in the quit: SessionEnd did not say `other`,
+  # or a bar pruned its tab while the session went down.
+  check_nonempty "the pre-quit snapshot named rows the quit leaves on standby" \
+    "$(uuid_line "$expected_standby")"
+  check "every row the quit left live is on standby" \
+    "$(uuid_line "$(standby_uuids "$status")")" "$(uuid_line "$expected_standby")"
+}
+
+# The arrival verdict (phase 6c, after the beacon leg). One Alt+Down from the
+# baked tab lands on the top standby row, and the landing opens it with no
+# Alt+Enter (Ollie, 2026-09-22). $1 is the baked row, $2 the standby set
+# before the press, $3 the `dev status` read after it. The opened row is the
+# one bound row that is not the baked one. Its bind must spend its stamp.
+arrival_checks() {
+  local eager="$1" standby_before="$2" status="$3"
+  local opened was_standby="no" stamp="unread"
+  opened="$(bound_uuids "$status" | grep -vx -- "$eager" || true)"
+  measure "the row one Alt+Down opened" "$(uuid_line "$opened")"
+  check "one Alt+Down opened exactly one row" "$(uuid_count "$opened")" "1"
+  if [[ -n "$opened" ]] && grep -qx -- "$opened" <<<"$standby_before"; then
+    was_standby="yes"
+  fi
+  check "and that row was on standby (a dormant row waits for Alt+Enter)" "$was_standby" "yes"
+  [[ -n "$opened" ]] && stamp="$(jq -r --arg u "$opened" '.store.agents[$u].standby_stamp' <<<"$status" 2>/dev/null)"
+  check "and its bind spent the stamp" "$stamp" "null"
+  # A walk is not a commitment: the new tab ranks by the row's own ordinal,
+  # never a fresh top one (Ollie, 2026-09-23; store.rs `apply_bind`).
+  local rank="unread"
+  [[ -n "$opened" ]] && rank="$(jq -r --arg u "$opened" '
+    .store as $s | $s.agents[$u] as $a
+    | ($s.tab_order // {})[($a.tab_id | tostring)] as $t
+    | if $a.commit_ord == null then "unread"
+      elif $t == $a.commit_ord then "held"
+      else "tab \($t) over row \($a.commit_ord)" end' <<<"$status" 2>/dev/null)"
+  check "and its tab kept the row's own rank" "$rank" "held"
+  # And it held that rank throughout: the new tab's bar sends no birth touch
+  # for a standby row. The touch lifted the row to the top until the bind
+  # took it back, a hop the human saw (Ollie, 2026-09-23; model.rs
+  # `identity_effects`). A touch stamps `tab_touched`; a bind does not.
+  local touched="unread"
+  [[ -n "$opened" ]] && touched="$(jq -r --arg u "$opened" '
+    .store as $s | ($s.tab_touched // {})[($s.agents[$u].tab_id | tostring)]
+    | if . == null then "none" else "touched at \(.)" end' <<<"$status" 2>/dev/null)"
+  check "and no birth touch lifted it to the top first" "$touched" "none"
 }
 
 # Guarded list-panes read. Never the bare env-var form (TESTING.md, "the

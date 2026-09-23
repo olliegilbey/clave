@@ -51,6 +51,27 @@ pub enum LabelSource {
     Summary,
 }
 
+/// When a row's agent ended with the session, and the tab it held then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Standby {
+    /// unix s the row went down: the SessionEnd, or, when that never
+    /// landed, the store's last write before the launch (a lower bound).
+    /// Standby lasts [`clave_types::STANDBY_SECS`].
+    pub since: u64,
+    /// The tab id in the session that ended. Session-scoped: the launch
+    /// clears it, because zellij reuses tab ids.
+    #[serde(default)]
+    pub tab: Option<usize>,
+}
+
+impl Standby {
+    /// Still standby at `now`? A stamp from the future (a clock step back)
+    /// counts as fresh rather than panicking on the subtraction.
+    pub fn live_at(&self, now: u64) -> bool {
+        clave_types::standby_live(self.since, now)
+    }
+}
+
 /// One store row (spec §5's agent record, minus the deleted `archived`).
 /// Mirrors `clave_types::Agent` plus the store-only `label_source`, which the
 /// plugin never needs to see. `worktree` was store-only until #69 put it on
@@ -115,6 +136,15 @@ pub struct AgentRecord {
     /// pre-field payloads parseable.
     #[serde(default)]
     pub stale: bool,
+    /// Set when the agent ENDED with its tab still open and not by the
+    /// human's own hand. Two writers. The quit's SessionEnd
+    /// (`hook::apply_hook_pane`) stamps and unbinds. But SessionEnd is lossy
+    /// at a kill (QA run 33: one of five landed), so the launch
+    /// (`clear_session_order`) also stamps every row still bound. Cleared by
+    /// a bind, by a prune of the tab it names (the human closed that tab),
+    /// and by expiry at the launch.
+    #[serde(default)]
+    pub standby_stamp: Option<Standby>,
     /// Claude's session rename, from the transcript's `custom-title` line.
     /// Store-side home for the wire field of the same name (#69). Written by
     /// `hook::refresh_row_fields`, held last-non-empty — `None` means the
@@ -483,6 +513,10 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
                 tab_id: r.tab_id,
                 pane_id: r.pane_id,
                 stale: r.stale,
+                // The bar decides expiry on its own clock, and a bound row
+                // is live whatever the stamp says.
+                standby_since: r.standby_stamp.map(|sb| sb.since),
+                standby_tab: r.standby_stamp.and_then(|sb| sb.tab),
                 title: r.title.clone(),
                 summary: r.summary.clone(),
                 // Projected now — `AgentRecord` has carried this since §6.3
@@ -584,12 +618,12 @@ pub fn apply_touch(paths: &StorePaths, tab_id: usize) -> Result<AgentSnapshot> {
 }
 
 /// The pure half of [`apply_touch`] — mint and stamp, no I/O. Returns the
-/// ordinal it minted. `mint_ord` bumps `seq` itself, so this IS the pipe
+/// ordinal it minted, or `None` when the tab's agent already ranks it. `mint_ord` bumps `seq` itself, so this IS the pipe
 /// contract's one bump for the write (§5); callers must not bump again.
 /// `now` also stamps `tab_touched` — the wall-clock twin of the ordinal this
 /// function mints, taken as a parameter (rather than read via `now_unix()`
 /// inside) so the total-order proptest below can drive it deterministically.
-pub(crate) fn touch_in(s: &mut Store, tab_id: usize, now: u64) -> u64 {
+pub(crate) fn touch_in(s: &mut Store, tab_id: usize, now: u64) -> Option<u64> {
     // Newborn-inheritance seed (spec): computed BEFORE the mint, and only
     // on vacancy, so a tab already tracking its own buckets is never
     // re-seeded and the newborn's own stamp can't shift the opener it
@@ -612,10 +646,23 @@ pub(crate) fn touch_in(s: &mut Store, tab_id: usize, now: u64) -> u64 {
         };
         s.tab_buckets.insert(tab_id, inherited);
     }
+    // A birth touch that lands after a standby row's bind: the bind gave
+    // the tab the row's own ordinal (`apply_bind`), and a fresh mint here
+    // would lift the row to the top. The equality is the bind's mark. It
+    // also holds on a tab whose agent has prompted since, where the prompt's
+    // ordinal is already the freshest, so nothing is lost there either.
+    if let Some(&held) = s.tab_order.get(&tab_id)
+        && s.agents
+            .values()
+            .any(|r| r.tab_id == Some(tab_id) && r.commit_ord == held)
+    {
+        s.seq += 1; // monotonic pipe contract (§5)
+        return None;
+    }
     let ord = s.mint_ord();
     s.tab_order.insert(tab_id, ord);
     s.tab_touched.insert(tab_id, now);
-    ord
+    Some(ord)
 }
 
 /// `clave bind <uuid> <tab_id>` (§6.6 Design B): persist the uuid→tab join
@@ -665,6 +712,18 @@ pub fn apply_bind(paths: &StorePaths, uuid: &str, tab_id: usize) -> Result<Optio
         }
         if let Some(r) = s.agents.get_mut(uuid) {
             r.tab_id = Some(tab_id);
+            // Live again: standby has done its job. A walk opened this row,
+            // and a walk is not a commitment, so the tab takes the row's own
+            // ordinal and the row keeps its rank (Ollie, 2026-09-23). This
+            // overwrites a birth touch that landed first; `touch_in` keeps
+            // it against one that lands after. An expired stamp is a
+            // dormant row, and waking one is a commitment.
+            if r.standby_stamp
+                .take()
+                .is_some_and(|sb| sb.live_at(now_unix()))
+            {
+                s.tab_order.insert(tab_id, r.commit_ord);
+            }
         }
         // An agent-bound tab's twin never holds inherited buckets (maintainer
         // ruling, 2026-08-19 post-drive): the row must rank on the agent's own
@@ -770,6 +829,17 @@ pub(crate) fn prune_in(s: &mut Store, stale_ids: &[usize]) -> bool {
             // permanent false episode masking the real ones — and a
             // uuid-directed nav would chase a pane that no longer exists.
             r.pane_id = None;
+            changed = true;
+        }
+    }
+    // A standby stamp names the tab its agent ended in. A prune of that tab
+    // is the human closing it — which the agent's SessionEnd may have reached
+    // the store first and stamped as a quit — so the row goes dormant.
+    for r in s.agents.values_mut() {
+        if r.standby_stamp
+            .is_some_and(|sb| sb.tab.is_some_and(|t| stale_ids.contains(&t)))
+        {
+            r.standby_stamp = None;
             changed = true;
         }
     }
@@ -905,11 +975,40 @@ pub fn clear_session_order(paths: &StorePaths) -> Result<()> {
             .values()
             .any(|r| r.tab_id.is_some() || r.pane_id.is_some());
         let mut changed = false;
+        let now = now_unix();
+        // The quit's time is unknown, so the stamp takes a lower bound: the
+        // store's last write, the last moment the old session is known to
+        // have lived. The launch has not written yet (we hold the lock). A
+        // low bound errs toward dormant, the cheap error: a launch days
+        // after the quit must not open a fresh day of standby (swarm review,
+        // 2026-09-23). The expiry pass below then drops it.
+        let quit = fs::metadata(&paths.data)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map_or(now, |d| d.as_secs().min(now));
         if !s.tab_order.is_empty() || bound {
-            s.tab_order.clear();
+            let tab_ords = std::mem::take(&mut s.tab_order);
             s.tab_buckets.clear();
             s.tab_touched.clear();
             s.agents.values_mut().for_each(|r| {
+                // The prune's rule (R2): the row inherits its tab's ordinal
+                // before the bind goes, so a standby row keeps its rank.
+                if let Some(ord) = r.tab_id.and_then(|t| tab_ords.get(&t)) {
+                    r.commit_ord = r.commit_ord.max(*ord);
+                }
+                // Standby, second path. A row still bound here was live at
+                // the quit, and its SessionEnd never reached the store: QA
+                // run 33 saw one hook land of five running agents, on the box
+                // and the Mac alike. /exit and a tab close unbind before the
+                // quit, so they never reach this line. A stamp the end
+                // already wrote keeps its own time.
+                if r.tab_id.is_some() && r.standby_stamp.is_none() {
+                    r.standby_stamp = Some(Standby {
+                        since: quit,
+                        tab: None,
+                    });
+                }
                 r.tab_id = None;
                 r.pane_id = None;
             });
@@ -933,6 +1032,20 @@ pub fn clear_session_order(paths: &StorePaths) -> Result<()> {
         for r in s.agents.values_mut() {
             if matches!(r.status, Status::Working | Status::NeedsYou) {
                 r.status = Status::Idle;
+                changed = true;
+            }
+        }
+        // Standby stamps outlive the session, but their tab ids do not
+        // (zellij reuses ids, so a stale one would let the new session's
+        // close of an unrelated tab dismiss the row). A stamp older than a
+        // day is dormant for good.
+        for r in s.agents.values_mut() {
+            let kept = r
+                .standby_stamp
+                .filter(|sb| sb.live_at(now))
+                .map(|sb| Standby { tab: None, ..sb });
+            if kept != r.standby_stamp {
+                r.standby_stamp = kept;
                 changed = true;
             }
         }
@@ -1038,6 +1151,7 @@ mod tests {
             tab_id: None,
             pane_id: None,
             stale: false,
+            standby_stamp: None,
             title: None,
             summary: String::new(),
             default_branch: None,
@@ -2022,6 +2136,255 @@ mod tests {
         );
     }
 
+    /// Standby's three store rules. A bind is the row going live again, so
+    /// the stamp goes. A prune of the stamp's own tab is the human closing it,
+    /// so the row goes dormant (the order-safe twin of the hook's pane check).
+    /// A launch forgets the tab, because zellij reuses ids, and drops a stamp
+    /// older than a day (maintainer ruling, 2026-09-22).
+    #[test]
+    fn a_standby_stamp_is_dormant_from_the_24th_hour_on() {
+        // Ollie, 2026-09-22: standby becomes dormant after 24 hours.
+        let sb = Standby {
+            since: 1_000,
+            tab: None,
+        };
+        assert!(sb.live_at(1_000 + clave_types::STANDBY_SECS - 1));
+        assert!(!sb.live_at(1_000 + clave_types::STANDBY_SECS));
+    }
+
+    #[test]
+    fn a_standby_stamp_clears_on_bind_on_its_tabs_prune_and_on_expiry() {
+        let stamp = |since, tab| Some(Standby { since, tab });
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        let now = now_unix();
+        with_store_mut(&p, |s| {
+            for uuid in ["u-bind", "u-closed", "u-other-tab", "u-fresh", "u-old"] {
+                s.agents.insert(uuid.into(), rec(uuid));
+            }
+            s.agents.get_mut("u-bind").unwrap().standby_stamp = stamp(now, Some(1));
+            s.agents.get_mut("u-closed").unwrap().standby_stamp = stamp(now, Some(4));
+            s.agents.get_mut("u-other-tab").unwrap().standby_stamp = stamp(now, Some(5));
+            s.agents.get_mut("u-fresh").unwrap().standby_stamp = stamp(now - 60, Some(6));
+            s.agents.get_mut("u-old").unwrap().standby_stamp =
+                stamp(now - clave_types::STANDBY_SECS - 1, Some(7));
+        })
+        .unwrap();
+        apply_bind(&p, "u-bind", 9).unwrap();
+        apply_prune_tabs(&p, &[4]).unwrap();
+        let s = read_store(&p).unwrap();
+        assert_eq!(
+            s.agents["u-bind"].standby_stamp, None,
+            "a bind is live again"
+        );
+        assert_eq!(
+            s.agents["u-closed"].standby_stamp, None,
+            "its tab was closed"
+        );
+        assert_eq!(s.agents["u-other-tab"].standby_stamp, stamp(now, Some(5)));
+        // The wire names the stamp's tab, so a bar prunes it like a bound
+        // tab: dropped here, a tab the human closed came back as standby.
+        let wire = snapshot_from(&s);
+        let other = wire.agents.iter().find(|a| a.uuid == "u-other-tab");
+        assert_eq!(other.and_then(|a| a.standby_tab), Some(5));
+
+        clear_session_order(&p).unwrap();
+        let s = read_store(&p).unwrap();
+        assert_eq!(s.agents["u-fresh"].standby_stamp, stamp(now - 60, None));
+        assert_eq!(s.agents["u-old"].standby_stamp, None, "a day has passed");
+        let wire = snapshot_from(&s);
+        let standby: Vec<&str> = wire
+            .agents
+            .iter()
+            .filter(|a| {
+                a.standby_since
+                    .is_some_and(|t| clave_types::standby_live(t, now))
+            })
+            .map(|a| a.uuid.as_str())
+            .collect();
+        // u-bind is still bound at the launch, so the launch stamps it anew.
+        assert_eq!(standby, ["u-bind", "u-fresh", "u-other-tab"]);
+    }
+
+    #[test]
+    fn a_launch_puts_every_row_still_bound_on_standby() {
+        // QA run 33, 2026-09-23, box and Mac alike: of five agents running
+        // at a kill-session, ONE SessionEnd reached the store (seq 75 to 80
+        // across the relaunch, no room for more). The other four rows were
+        // still bound when the launch ran. A row the quit left bound was live
+        // at the quit, so the launch stamps it before it clears the bind.
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        let before = now_unix();
+        let early = Standby {
+            since: before - 60,
+            tab: Some(2),
+        };
+        with_store_mut(&p, |s| {
+            let mut bound = rec("u-bound");
+            bound.tab_id = Some(3);
+            s.agents.insert("u-bound".into(), bound);
+            let mut stamped = rec("u-stamped");
+            stamped.standby_stamp = Some(early);
+            s.agents.insert("u-stamped".into(), stamped);
+            s.agents.insert("u-dormant".into(), rec("u-dormant"));
+        })
+        .unwrap();
+        // The stamp dates from the store's last write, the last moment the
+        // old session is known to have lived, not from the launch: a launch
+        // days after the quit must not open a fresh day of standby.
+        set_store_mtime(&p, before - 30);
+        clear_session_order(&p).unwrap();
+        let s = read_store(&p).unwrap();
+        let sb = s.agents["u-bound"]
+            .standby_stamp
+            .expect("still bound at the launch");
+        assert_eq!(
+            sb,
+            Standby {
+                since: before - 30,
+                tab: None
+            }
+        );
+        assert_eq!(s.agents["u-bound"].tab_id, None);
+        assert_eq!(
+            s.agents["u-stamped"].standby_stamp,
+            Some(Standby { tab: None, ..early }),
+            "an end-of-session stamp keeps its own time"
+        );
+        assert_eq!(s.agents["u-dormant"].standby_stamp, None);
+    }
+
+    #[test]
+    fn an_opened_standby_row_keeps_its_rank_and_a_woken_dormant_row_does_not() {
+        // Ollie, 2026-09-23: an opened standby row moves to where its
+        // frecency puts it, not to the top. A walk opens it; that is not a
+        // commitment. With no score, the rank is the ordinal, so the new
+        // tab must carry the row's own ordinal, never a fresh top one. The
+        // bar sends no birth touch for a standby row's tab; both arrival
+        // orders are still pinned, for a bar that sent one blind. A woken
+        // DORMANT row (Alt+Enter) is a commitment and still takes the top,
+        // and so does a row whose stamp expired: past a day it is dormant.
+        for touch_first in [true, false] {
+            for stamp_age in [None, Some(0), Some(clave_types::STANDBY_SECS + 60)] {
+                let standby = stamp_age == Some(0);
+                let d = tempfile::tempdir().unwrap();
+                let p = tmp_paths(d.path());
+                with_store_mut(&p, |s| {
+                    let mut live = rec("u-live");
+                    live.tab_id = Some(1);
+                    live.commit_ord = 9;
+                    s.agents.insert("u-live".into(), live);
+                    s.tab_order.insert(1, 9);
+                    let mut row = rec("u-row");
+                    row.commit_ord = 5;
+                    row.standby_stamp = stamp_age.map(|age| Standby {
+                        since: now_unix() - age,
+                        tab: None,
+                    });
+                    s.agents.insert("u-row".into(), row);
+                    s.seq = 20;
+                })
+                .unwrap();
+                if touch_first {
+                    apply_touch(&p, 2).unwrap();
+                    apply_bind(&p, "u-row", 2).unwrap();
+                } else {
+                    apply_bind(&p, "u-row", 2).unwrap();
+                    apply_touch(&p, 2).unwrap();
+                }
+                let s = read_store(&p).unwrap();
+                let ord = s.tab_order.get(&2).copied().unwrap_or(0);
+                if standby {
+                    assert_eq!(ord, 5, "touch_first={touch_first}: its own rank");
+                } else {
+                    assert!(
+                        ord > 20,
+                        "touch_first={touch_first} age={stamp_age:?}: {ord}, not the top"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_touch_keeps_the_rank_only_for_the_tabs_own_agent_at_its_own_ordinal() {
+        // The keep needs both halves: the agent is bound to THIS tab, and
+        // the tab holds that agent's own ordinal. A tab id reused before its
+        // prune still carries the dead tab's ordinal, which no agent bound
+        // here holds; and a row elsewhere at that ordinal proves nothing.
+        let mut s = Store::default();
+        let mut here = rec("u-here");
+        here.tab_id = Some(2);
+        here.commit_ord = 3;
+        s.agents.insert("u-here".into(), here);
+        let mut elsewhere = rec("u-elsewhere");
+        elsewhere.commit_ord = 7;
+        s.agents.insert("u-elsewhere".into(), elsewhere);
+        s.tab_order.insert(2, 7);
+        s.seq = 20;
+        assert_eq!(
+            touch_in(&mut s, 2, 1000),
+            Some(21),
+            "not its own rank: mint"
+        );
+        s.tab_order.insert(2, 3);
+        assert_eq!(touch_in(&mut s, 2, 1000), None, "its own rank: keep");
+        assert_eq!(s.tab_order[&2], 3);
+        assert_eq!(s.seq, 22, "the kept touch still bumps seq (§5)");
+    }
+
+    #[test]
+    fn a_launch_carries_a_bound_rows_tab_rank_into_the_row() {
+        // The prune carries a closed tab's ordinal into its row (R2), so a
+        // close moves nothing. The launch unbinds too, and must carry the
+        // same way, or a standby row comes back ranked by an older prompt.
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            let mut bound = rec("u-bound");
+            bound.tab_id = Some(3);
+            bound.commit_ord = 5;
+            s.agents.insert("u-bound".into(), bound);
+            s.tab_order.insert(3, 12);
+        })
+        .unwrap();
+        clear_session_order(&p).unwrap();
+        assert_eq!(read_store(&p).unwrap().agents["u-bound"].commit_ord, 12);
+    }
+
+    /// Back-date the store file, as a quit that long ago would leave it.
+    fn set_store_mtime(p: &StorePaths, unix: u64) {
+        let t = UNIX_EPOCH + std::time::Duration::from_secs(unix);
+        fs::File::options()
+            .write(true)
+            .open(&p.data)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_launch_a_day_after_the_quit_leaves_the_rows_dormant() {
+        // Verifier, swarm review 2026-09-23: the launch stamped `now`, so a
+        // Monday launch after a Friday quit gave every row whose SessionEnd
+        // was lost (4 of 5 in QA run 33) a fresh day of standby, and each
+        // walk onto one spawned an agent.
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            let mut bound = rec("u-bound");
+            bound.tab_id = Some(3);
+            s.agents.insert("u-bound".into(), bound);
+        })
+        .unwrap();
+        set_store_mtime(&p, now_unix() - clave_types::STANDBY_SECS - 60);
+        clear_session_order(&p).unwrap();
+        let s = read_store(&p).unwrap();
+        assert_eq!(s.agents["u-bound"].standby_stamp, None);
+        assert_eq!(s.agents["u-bound"].tab_id, None);
+    }
+
     #[test]
     fn clear_session_order_preserves_agent_ordinals() {
         // Tab ids are SESSION-scoped, so the tab order and the binds go. Agent
@@ -2618,7 +2981,7 @@ mod tests {
 
         fn run(s: &mut Store, op: &Op, minted: &mut Vec<u64>) {
             match op {
-                Op::Touch(id) => minted.push(touch_in(s, *id, 1000)),
+                Op::Touch(id) => minted.extend(touch_in(s, *id, 1000)),
                 Op::Prune(ids) => {
                     prune_in(s, ids);
                 }
@@ -2628,6 +2991,7 @@ mod tests {
                         session_id: Some(uuid.clone()),
                         prompt: None,
                         message: Some("needs your permission".into()),
+                        reason: None,
                         transcript_path: None,
                         cwd: None,
                     };

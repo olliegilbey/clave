@@ -1235,7 +1235,7 @@ mod tests {
         assert_eq!(
             pin(sel, 38),
             (
-                " \u{25cf} \u{256d} \u{e0b6}CLV-M2 \u{e0b4} Goal is shipping\u{2026} 130k "
+                " \u{f111} \u{256d} \u{e0b6}CLV-M2 \u{e0b4} Goal is shipping\u{2026} 130k "
                     .to_string(),
                 " \u{f1bb} \u{2570}  clave     #225  \u{ec82} fable  xh  5m ".to_string(),
             )
@@ -1243,7 +1243,7 @@ mod tests {
         assert_eq!(
             pin(sel, 48),
             (
-                " \u{25cf} \u{256d} \u{e0b6}CLV-M2 \u{e0b4} Goal is shipping v0.2.2 cl\u{2026} 130k "
+                " \u{f111} \u{256d} \u{e0b6}CLV-M2 \u{e0b4} Goal is shipping v0.2.2 cl\u{2026} 130k "
                     .to_string(),
                 " \u{f1bb} \u{2570}  clave v022-prep     #225  \u{ec82} fable  xh  5m ".to_string(),
             )
@@ -1280,12 +1280,12 @@ mod tests {
                 // cell moves it here.
                 0,
                 [
-                    " \u{25cf} \u{2502} \u{e0b6}CORTI2 \u{e0b4} Qdos IR35 assessment: the contr\u{2026} ",
+                    " \u{f111} \u{2502} \u{e0b6}CORTI2 \u{e0b4} Qdos IR35 assessment: the contr\u{2026} ",
                     "   \u{2502} hermes                         \u{ec82} fable  hi ",
                     "   \u{2502} 105k    3m Bash (cargo mutants --in-diff \u{2026} ",
                 ],
                 [
-                    " \u{25cf} \u{2502} \u{e0b6}CORTI2 \u{e0b4}  ",
+                    " \u{f111} \u{2502} \u{e0b6}CORTI2 \u{e0b4}  ",
                     "   \u{2502} hermes     ",
                     "   \u{2502} 105k    3m ",
                 ],
@@ -2143,9 +2143,9 @@ mod tests {
         let want: [(usize, &str, &str, &str, &str); 7] = [
             (
                 4,
-                " \u{25cf} \u{256d} \u{e0b6}CLV-3  \u{e0b4} Drive launch      117k ",
+                " \u{f111} \u{256d} \u{e0b6}CLV-3  \u{e0b4} Drive launch      117k ",
                 " \u{f1bb} \u{2570}  clave     #204  \u{ec82} sonnet hi 45m ",
-                " \u{25cf} \u{256d} \u{e0b6}CLV-3  \u{e0b4} Drive launch                117k ",
+                " \u{f111} \u{256d} \u{e0b6}CLV-3  \u{e0b4} Drive launch                117k ",
                 " \u{f1bb} \u{2570}  clave drive-launch  #204  \u{ec82} sonnet hi 45m ",
             ),
             (
@@ -2157,23 +2157,23 @@ mod tests {
             ),
             (
                 9,
-                " \u{25cf} \u{256d}  Create close conversation\u{2026}  34k ",
+                " \u{f111} \u{256d}  Create close conversation\u{2026}  34k ",
                 "   \u{2570}  hermes          \u{ec82} opus   hi  2h ",
-                " \u{25cf} \u{256d}  Create close conversation summary f\u{2026}  34k ",
+                " \u{f111} \u{256d}  Create close conversation summary f\u{2026}  34k ",
                 "   \u{2570}  hermes                    \u{ec82} opus   hi  2h ",
             ),
             (
                 10,
-                " \u{25cf} \u{256d} \u{e0b6}GTMSS  \u{e0b4} GTM Landscape - \u{2026} 119k ",
+                " \u{f111} \u{256d} \u{e0b6}GTMSS  \u{e0b4} GTM Landscape - \u{2026} 119k ",
                 " \u{f062c} \u{2570}  nalu      #31   \u{ec82} haiku  hi  1d ",
-                " \u{25cf} \u{256d} \u{e0b6}GTMSS  \u{e0b4} GTM Landscape - and first \u{2026} 119k ",
+                " \u{f111} \u{256d} \u{e0b6}GTMSS  \u{e0b4} GTM Landscape - and first \u{2026} 119k ",
                 " \u{f062c} \u{2570}  nalu gtm-pass       #31   \u{ec82} haiku  hi  1d ",
             ),
             (
                 13,
-                " \u{25cf} \u{256d}  Landing page hero copy re\u{2026}  55k ",
+                " \u{f111} \u{256d}  Landing page hero copy re\u{2026}  55k ",
                 " \u{f062c} \u{2570}  clave-we\u{2026} #12   \u{ec81} gpt-5     30m ",
-                " \u{25cf} \u{256d}  Landing page hero copy rewrite pass   55k ",
+                " \u{f111} \u{256d}  Landing page hero copy rewrite pass   55k ",
                 " \u{f062c} \u{2570}  clave-we\u{2026} hero-copy #12   \u{ec81} gpt-5     30m ",
             ),
             (
@@ -2185,9 +2185,9 @@ mod tests {
             ),
             (
                 15,
-                " \u{25cb} \u{256d} \u{e0b6}FOOTER \u{e0b4} ollie.gg company\u{2026}  73k ",
+                " \u{f10c} \u{256d} \u{e0b6}FOOTER \u{e0b4} ollie.gg company\u{2026}  73k ",
                 "   \u{2570}  resumaker       \u{ec82} opus   hi  2w ",
-                " \u{25cb} \u{256d} \u{e0b6}FOOTER \u{e0b4} ollie.gg company details f\u{2026}  73k ",
+                " \u{f10c} \u{256d} \u{e0b6}FOOTER \u{e0b4} ollie.gg company details f\u{2026}  73k ",
                 "   \u{2570}  resumaker                 \u{ec82} opus   hi  2w ",
             ),
         ];

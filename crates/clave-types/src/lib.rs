@@ -265,7 +265,7 @@ pub struct LiveRow<T> {
 /// rewritten, or started.
 ///
 /// ONE function across the workspace. The host asks it of a hook command and
-/// of the baked layout, and a matcher copied per caller drifted once (#261):
+/// of a statusLine command, and a matcher copied per caller drifted once (#261):
 /// the copy that mattered was covered by no test. A release install is the
 /// ONLY environment that bakes the versioned form (a sandbox shims a bare
 /// `clave`), so the shared rule is tested here, once.
@@ -388,6 +388,20 @@ pub struct Agent {
     /// pre-field payloads parseable.
     #[serde(default)]
     pub stale: bool,
+    /// When the row's agent went down with the session, its tab still open
+    /// (unix s). A dormant row is STANDBY while [`standby_live`] holds at the
+    /// bar's own clock: an idle fleet writes no snapshot for hours, so a flag
+    /// decided at the write went stale overnight (swarm review, 2026-09-23).
+    /// Arriving on a standby row opens it; a dormant row waits for
+    /// Alt+Enter. `default` keeps pre-field payloads parseable.
+    #[serde(default)]
+    pub standby_since: Option<u64>,
+    /// The tab the agent held when it ended, in THIS zellij session only
+    /// (the launch clears it: zellij reuses ids). The bar prunes it like a
+    /// bound tab, so a tab close that the agent's SessionEnd beat to the store
+    /// still turns the row dormant, not standby.
+    #[serde(default)]
+    pub standby_tab: Option<usize>,
     /// Claude's session rename (`custom-title` in the transcript) — the
     /// filled chip in design-lock §2's 7-column title field. `None` = never
     /// renamed, which is the majority of rows. Structural rather than parsed
@@ -579,6 +593,18 @@ pub struct Register {
 /// from a clean-looking diff. S4 §4.1 and S5 §3.1 each proposed this constant
 /// independently — it lands once, here (#69).
 pub const LABEL_SEP: &str = " \u{00b7} ";
+
+/// How long a row stays STANDBY after its agent ended with the session
+/// (maintainer ruling, 2026-09-22): a day. After that it is dormant, and
+/// only Alt+Enter opens it.
+pub const STANDBY_SECS: u64 = 24 * 60 * 60;
+
+/// Is a row that went down at `since` still standby at `now`? The one rule,
+/// for the host's launch pass and the bar's clock alike. A `since` in the
+/// future (a clock step back) counts as fresh rather than wrapping.
+pub fn standby_live(since: u64, now: u64) -> bool {
+    now.saturating_sub(since) < STANDBY_SECS
+}
 
 // ── sidebar geometry ────────────────────────────────────────────────────────
 //
@@ -899,6 +925,13 @@ const _: () = assert!(
 mod tests {
     use super::*;
 
+    /// Ollie, 2026-09-22: standby lasts a day. Spelled in seconds here, so a
+    /// slip in the product that builds the constant cannot pass.
+    #[test]
+    fn standby_lasts_one_day() {
+        assert_eq!(STANDBY_SECS, 86_400);
+    }
+
     /// The release install is the only environment that bakes the versioned
     /// form, so this arm is the one no sandbox drive can reach. `clave-vault`
     /// is the near-miss the digit check exists for.
@@ -1134,6 +1167,8 @@ mod tests {
             tab_id: None,
             pane_id: None,
             stale: false,
+            standby_since: None,
+            standby_tab: None,
             title: None,
             summary: String::new(),
             worktree: None,
@@ -1174,6 +1209,8 @@ mod tests {
                 tab_id: None,
                 pane_id: None,
                 stale: false,
+                standby_since: None,
+                standby_tab: None,
                 title: None,
                 summary: String::new(),
                 worktree: None,
@@ -1213,6 +1250,8 @@ mod tests {
             tab_id: Some(4),
             pane_id: None,
             stale: false,
+            standby_since: None,
+            standby_tab: None,
             title: None,
             summary: String::new(),
             worktree: None,
@@ -1254,6 +1293,8 @@ mod tests {
             tab_id: None,
             pane_id: None,
             stale: true,
+            standby_since: None,
+            standby_tab: None,
             title: None,
             summary: String::new(),
             worktree: None,
@@ -1297,6 +1338,8 @@ mod tests {
             tab_id: None,
             pane_id: None,
             stale: false,
+            standby_since: None,
+            standby_tab: None,
             title: Some("CLA-MAIN".into()),
             summary: "fix the flaky auth".into(),
             worktree: Some("/x/.claude/worktrees/wt".into()),
@@ -1354,6 +1397,8 @@ mod tests {
             tab_id: None,
             pane_id: None,
             stale: false,
+            standby_since: None,
+            standby_tab: None,
             title: None,
             summary: String::new(),
             worktree: None,
@@ -1439,6 +1484,8 @@ mod tests {
             tab_id: None,
             pane_id: None,
             stale: false,
+            standby_since: None,
+            standby_tab: None,
             title: None,
             summary: String::new(),
             worktree: None,

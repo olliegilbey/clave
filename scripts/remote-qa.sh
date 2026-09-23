@@ -92,6 +92,13 @@ case "$CMD" in
     launch_line
     ;;
   qa)
+    # One drive at a time: a second one force-pushes the checkout under the
+    # first, restages its sandbox and shares its log (swarm review,
+    # 2026-09-23). Stop the first one before a rerun.
+    if remote "pgrep -f 'qa-drive[.]sh|sandbox-setup[.]sh' >/dev/null"; then
+      echo "a drive is already running on $HOST; stop it first" >&2
+      exit 1
+    fi
     sync_remote
     SCENARIO="${1:-qa-fleet}"
     WAIT="${2:-1800}"
@@ -111,6 +118,13 @@ case "$CMD" in
     launch_line
     ;;
   drive)
+    # One drive at a time: a second one force-pushes the checkout under the
+    # first, restages its sandbox and shares its log (swarm review,
+    # 2026-09-23). Stop the first one before a rerun.
+    if remote "pgrep -f 'qa-drive[.]sh|sandbox-setup[.]sh' >/dev/null"; then
+      echo "a drive is already running on $HOST; stop it first" >&2
+      exit 1
+    fi
     # The drive alone, against a remote sandbox that is ALREADY live — the
     # re-run after a fix to the drive itself, when nothing needs restaging
     # and the human's session is up. Refuses on its own if it is not.
@@ -123,7 +137,10 @@ case "$CMD" in
     remote "tail -n ${1:-40} $RUN_LOG 2>/dev/null || echo 'no run log yet'"
     ;;
   qa-running)
-    remote "pgrep -f 'qa-drive.sh|sandbox-setup.sh' >/dev/null && echo running || echo finished"
+    # The brackets keep the pattern from matching the ssh shell that runs
+    # it: that shell's own command line holds the pattern, and it answered
+    # "running" with no drive alive (2026-09-22).
+    remote "pgrep -f 'qa-drive[.]sh|sandbox-setup[.]sh' >/dev/null && echo running || echo finished"
     ;;
   log)
     remote "tail -n ${1:-40} /tmp/zellij-\$(id -u)/zellij-log/zellij.log"

@@ -448,11 +448,21 @@ pub const PROBE_FAILURE_STANDDOWN: u8 = 3;
 /// a session recreate clears the store's tab order.
 const NO_COMMITMENT: u64 = 0;
 
-/// Row identity (§6.6 C8): a live zellij tab, or a dormant store row
-/// (conversation with no tab yet — claude.ai-style list).
+/// The uuid in a pane command `<clave binary> spawn <uuid> …`. The binary's
+/// name varies (a versioned copy, a shim), so only the word `spawn` anchors.
+fn spawn_uuid(command: &str) -> Option<&str> {
+    let mut words = command.split_whitespace();
+    words.find(|w| *w == "spawn")?;
+    words.next()
+}
+
+/// Row identity (§6.6 C8): a live zellij tab, a standby row (dormant, but the
+/// last quit left it live, so arriving on it opens it), or a dormant store
+/// row (conversation with no tab yet — claude.ai-style list).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RowKey {
     Tab(usize),
+    Standby(String),
     Dormant(String),
 }
 
@@ -1246,21 +1256,6 @@ impl BarModel {
             .is_some_and(|t| t.active)
     }
 
-    /// Tiled pane count of the tab this instance sits in, from the last
-    /// PaneUpdate. Diagnostic only: a swap layout applies to the FOCUSED
-    /// tab's tiled panes, so a tab whose count the layout cannot map is the
-    /// first suspect when an ask never lands (2026-09-22, the devbox's baked
-    /// first tab). `None` while the frames disagree, like `own_tab`.
-    pub fn own_tab_tiled_pane_count(&self) -> Option<usize> {
-        let pos = self.own_tab_position()?;
-        Some(
-            self.panes
-                .iter()
-                .filter(|p| p.tab_position == pos && !p.is_floating)
-                .count(),
-        )
-    }
-
     /// The tab zellij's last frame says is active — any instance's view.
     pub fn active_tab_id(&self) -> Option<usize> {
         self.tabs.iter().find(|t| t.active).map(|t| t.tab_id)
@@ -1292,8 +1287,18 @@ impl BarModel {
         // while gating on a position join against the PANE frame. Requiring
         // the active tab to be OUR tab makes the touch self-consistent by
         // construction.
+        //
+        // No touch for a tab opened for a standby row: a walk is not a
+        // commitment, and the bind gives the tab the row's own rank. A touch
+        // would lift it to the top until the bind took it back. The bar needs
+        // its first snapshot to tell that tab from a newborn.
         if let Some(active) = self.active_tab_id()
             && active == own
+            && !self.awaiting_hydration
+            && !self.spawned_agent(active).is_some_and(|a| {
+                a.standby_since
+                    .is_some_and(|t| clave_types::standby_live(t, self.now))
+            })
             && self.needs_birth_touch(active)
         {
             fx.push(Effect::Touch { tab_id: active });
@@ -1311,7 +1316,32 @@ impl BarModel {
     /// only join every instance agrees on. Local register/manifest joins are
     /// used solely to CREATE binds (bind_effects).
     fn agent_in_tab(&self, tab_id: usize) -> Option<&Agent> {
-        self.agents.iter().find(|a| a.tab_id == Some(tab_id))
+        self.agents
+            .iter()
+            .find(|a| a.tab_id == Some(tab_id))
+            .or_else(|| self.spawned_agent(tab_id))
+    }
+
+    /// The row this tab's pane was launched to resume, while the store's
+    /// bind has not landed. Every agent tab's pane runs `clave spawn <uuid>`
+    /// (`add.rs` `tab_node`), and zellij reports that command from the tab's
+    /// first frame (`terminal_command`, measured 2026-09-23). Without this
+    /// join an opened row sat at the bottom, then the top, then its own place
+    /// (Ollie, 2026-09-23). An exited pane runs nothing, and a row the store
+    /// binds to a live tab belongs to that tab, so neither joins here.
+    fn spawned_agent(&self, tab_id: usize) -> Option<&Agent> {
+        let position = self.tabs.iter().find(|t| t.tab_id == tab_id)?.position;
+        let uuid = self
+            .panes
+            .iter()
+            .filter(|p| p.tab_position == position && !p.is_plugin && !p.exited)
+            .find_map(|p| spawn_uuid(p.terminal_command.as_deref()?))?;
+        self.agents.iter().find(|a| {
+            a.uuid == uuid
+                && !a
+                    .tab_id
+                    .is_some_and(|id| self.tabs.iter().any(|t| t.tab_id == id))
+        })
     }
 
     /// §6.6 Design B bootstrap: agents whose REGISTERED pane sits in
@@ -1475,7 +1505,21 @@ impl BarModel {
             .uuid_to_pane
             .get(&a.uuid)
             .is_some_and(|p| self.tab_position_of_pane(*p).is_some());
-        !tab_live && !pane_live
+        let spawn_live = self.tabs.iter().any(|t| {
+            self.spawned_agent(t.tab_id)
+                .is_some_and(|s| s.uuid == a.uuid)
+        });
+        !tab_live && !pane_live && !spawn_live
+    }
+
+    /// A dormant row the last quit left live, less than a day ago by the
+    /// bar's own clock (`clave_types::standby_live`). A stale row cannot
+    /// open, so it stays plain dormant.
+    fn is_standby(&self, a: &Agent) -> bool {
+        a.standby_since
+            .is_some_and(|t| clave_types::standby_live(t, self.now))
+            && !a.stale
+            && self.is_dormant(a)
     }
 
     /// Drop in-flight marks that resolved: the store bound the row to a tab or
@@ -1618,7 +1662,10 @@ impl BarModel {
         // An id still referenced keeps its claim: the prune has not landed
         // yet, and the next coherent settle re-derives it (detection-driven).
         self.witnessed_dead.retain(|id| {
-            self.agents.iter().any(|a| a.tab_id == Some(*id)) || self.tab_order.contains_key(id)
+            self.agents
+                .iter()
+                .any(|a| a.tab_id == Some(*id) || a.standby_tab == Some(*id))
+                || self.tab_order.contains_key(id)
         });
         let mut effects = Vec::new();
         // Collapse parity heal (issue #5, C8 parity-desync): once
@@ -1915,7 +1962,11 @@ impl BarModel {
         let mut stale: BTreeSet<usize> = self
             .agents
             .iter()
-            .filter_map(|a| a.tab_id)
+            // A standby stamp names the tab its agent ended in. When
+            // SessionEnd beats the prune, only the stamp still names a
+            // closed tab, and the host must hear of it or the row stays
+            // standby.
+            .flat_map(|a| a.tab_id.into_iter().chain(a.standby_tab))
             .filter(&observed_stale)
             .collect();
         stale.extend(self.tab_order.keys().copied().filter(observed_stale));
@@ -2226,6 +2277,8 @@ impl BarModel {
             RowStatus::Stale
         } else if self.opening.contains(&a.uuid) {
             RowStatus::Opening
+        } else if dormant && self.is_standby(a) {
+            RowStatus::Standby
         } else if dormant && selected {
             RowStatus::DormantSelected
         } else if dormant {
@@ -2445,16 +2498,22 @@ impl BarModel {
         }
         let mut agents: Vec<&Agent> = self.agents.iter().filter(|a| self.is_dormant(a)).collect();
         agents.sort_by(|a, b| a.uuid.cmp(&b.uuid)); // stable tiebreak input
+        let mut standby: Vec<Ranked> = Vec::new();
         let mut dormant: Vec<Ranked> = Vec::new();
         for (i, a) in agents.into_iter().enumerate() {
-            dormant.push((
+            let (block, key): (&mut Vec<Ranked>, fn(String) -> RowKey) = if self.is_standby(a) {
+                (&mut standby, RowKey::Standby)
+            } else {
+                (&mut dormant, RowKey::Dormant)
+            };
+            block.push((
                 self.dormant_key(a),
                 // Among dormant rows sharing an ordinal this renders
                 // uuid-DESCENDING (uuid-asc sort, key inverted) — stable and
                 // deterministic, which is all we need.
                 usize::MAX - i,
                 (
-                    RowKey::Dormant(a.uuid.clone()),
+                    key(a.uuid.clone()),
                     Row {
                         content: self.agent_content(
                             a,
@@ -2474,28 +2533,31 @@ impl BarModel {
         // ONE row comparator, applied twice — giving either block its own
         // ROW rule would be the defect two reviewers caught on PR #135. The
         // live block adds a layer ABOVE that rule, and that layer now lives
-        // in `clave_types::sort_live_block` because the HOST ranks the same
-        // rows when a relaunch bakes them: the bar's copy and a host copy
-        // disagreed the moment a repo held several rows, and a relaunch
-        // started an agent that was not the one on top (CodeRabbit, #261).
+        // in `clave_types::sort_live_block` so a host-side ranking cannot
+        // grow a second copy: a bar copy and a host copy disagreed the moment
+        // a repo held several rows (CodeRabbit, #261).
         // Dormant rows never group (maintainer's caveat): dormancy leaves the
         // repo layer, so the dormant block keeps the flat row rule.
         clave_types::sort_live_block(&mut live);
+        standby.sort_by(rank_desc);
         dormant.sort_by(rank_desc);
         live.into_iter()
             .map(|e| e.row)
+            .chain(standby.into_iter().map(|(_, _, r)| r))
             .chain(dormant.into_iter().map(|(_, _, r)| r))
             .collect()
     }
 
-    /// How many leading rows form the LIVE block (#112). [`Self::rows`] emits
-    /// every live row before every dormant one, so the live block is exactly
-    /// the leading run of [`RowKey::Tab`] — derived from the rendered list
+    /// How many leading rows form the LIVE ring (#112). [`Self::rows`] emits
+    /// every live row, then every standby row, then every dormant one, so
+    /// the ring is exactly the leading run of [`RowKey::Tab`] and
+    /// [`RowKey::Standby`]. Standby rows are in it because arriving on one
+    /// opens it (Ollie, 2026-09-22) — derived from the rendered list
     /// rather than from `self.tabs`, so the nav ring cannot drift out of step
     /// with what the user is actually looking at.
     fn live_block_len(rows: &[(RowKey, Row)]) -> usize {
         rows.iter()
-            .take_while(|(k, _)| matches!(k, RowKey::Tab(_)))
+            .take_while(|(k, _)| matches!(k, RowKey::Tab(_) | RowKey::Standby(_)))
             .count()
     }
 
@@ -2577,6 +2639,12 @@ impl BarModel {
             RowKey::Dormant(uuid) => {
                 self.cursor = Some(uuid);
                 Vec::new()
+            }
+            // Standby opens on arrival, a click included (Ollie,
+            // 2026-09-22): the quit, not this click, chose to run it.
+            RowKey::Standby(uuid) => {
+                self.cursor = Some(uuid.clone());
+                self.open_effects(&uuid)
             }
         }
     }
@@ -2734,8 +2802,9 @@ impl BarModel {
     /// the EXECUTOR only (`executor_own_tab` = Some(own tab) on the active
     /// instance — fresh tab set, and the very bar the user is reading; a
     /// broadcast walk over stale sets raced six divergent targets live).
-    /// dir steps ±1 and wraps WITHIN ONE BLOCK (#112) — the live block by
-    /// default, the dormant block while a dormant row is selected. Picking a
+    /// dir steps ±1 and wraps WITHIN ONE BLOCK (#112) — the live block (with
+    /// the standby rows under it) by default, the dormant block while a
+    /// dormant row is selected. Picking a
     /// row is what moves that focus between the blocks; a walk never does.
     /// Safe to walk the visible list, because focus no longer reorders it
     /// (§6.6 revised: only user commitments move rows, so there is no
@@ -2807,11 +2876,16 @@ impl BarModel {
             // live block — the same self-heal `rows()` does for the highlight.
             let live_len = Self::live_block_len(&rows);
             let selected = self.cursor.as_ref().and_then(|u| {
-                rows.iter()
-                    .position(|(k, _)| *k == RowKey::Dormant(u.clone()))
+                rows.iter().position(
+                    |(k, _)| matches!(k, RowKey::Dormant(d) | RowKey::Standby(d) if d == u),
+                )
             });
             // (first line of the block, length of the block, position in it)
             let (base, len, cur) = match selected {
+                // A standby landing keeps the cursor, so a fast walk steps
+                // on from it while the executor's own tab has not moved
+                // yet (the opened tab is still coming up).
+                Some(p) if p < live_len => (0, live_len, p),
                 Some(p) => (live_len, rows.len() - live_len, p),
                 // No live rows AND no selection: unreachable in a real session
                 // — every zellij tab carries a bar instance, so the tab list is
@@ -2887,6 +2961,13 @@ impl BarModel {
                     fx.push(Effect::ArmPeek);
                 }
                 fx
+            }
+            // Standby opens on arrival, walk and Alt+N alike, with no dwell
+            // (Ollie, 2026-09-22). `open_effects` refuses a row already in
+            // flight, so walking back over one opens nothing twice.
+            RowKey::Standby(uuid) => {
+                self.cursor = Some(uuid.clone());
+                self.open_effects(&uuid)
             }
         }
     }
@@ -3080,39 +3161,6 @@ impl BarModel {
         vec![Effect::SwapWidth { backwards }]
     }
 
-    /// Why the width machine made NO ask at this paint although the paint
-    /// disagrees with the store's mode — the gate of `width_effects` that
-    /// held it, in that function's order. `None` when the widths agree or
-    /// when an ask would have gone out. Diagnostic only, read-only, and
-    /// pure: a bar that sits at the wrong width in silence is otherwise
-    /// invisible in the log (the devbox's relaunched tabs, 2026-09-22).
-    pub fn width_deaf_reason(&self, cols: usize) -> Option<&'static str> {
-        let want = self.showing_collapsed();
-        if self.row_height.mode_at(cols) == Some(want) {
-            return None;
-        }
-        if self.awaiting_hydration {
-            return Some("hydrating");
-        }
-        if !self.own_tab_focused() {
-            return Some("unfocused");
-        }
-        if self.own_tab_floating_visible() {
-            return Some("floating-visible");
-        }
-        if self.swap_owed > 0 {
-            return Some("owed");
-        }
-        let spent = match self.walk_spent {
-            Some((w, n)) if w == want => n,
-            _ => 0,
-        };
-        if spent >= WALK_ASK_CAP {
-            return Some("capped");
-        }
-        None
-    }
-
     /// How long a claimed fast tick is believed. Two seconds is ten of them:
     /// long enough that a loaded host delivering one late cannot look stranded,
     /// short enough that a person does not read a frozen spinner as a hung
@@ -3259,6 +3307,8 @@ mod tests {
             tab_id,
             pane_id: None,
             stale: false,
+            standby_since: None,
+            standby_tab: None,
             title: None,
             summary: String::new(),
             worktree: None,
@@ -3302,6 +3352,8 @@ mod tests {
             tab_id,
             pane_id: None,
             stale: false,
+            standby_since: None,
+            standby_tab: None,
             title: None,
             summary: String::new(),
             worktree: None,
@@ -8417,6 +8469,299 @@ mod tests {
         );
     }
 
+    /// The standby fixture: two live tabs (1 active, 2), two standby rows,
+    /// one dormant row, and one standby row whose cwd is gone. Ordinals put
+    /// the dormant row HIGHEST, so a standby row above it is the block
+    /// rule, not the number.
+    const STANDBY_FLEET_SINCE: u64 = 1_000;
+
+    fn standby_fleet() -> BarModel {
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(1, 0, "one", true), tab(2, 1, "two", false)]);
+        let row = |uuid: &str, ord: u64, standby: bool, stale: bool| Agent {
+            commit_ord: ord,
+            standby_since: standby.then_some(STANDBY_FLEET_SINCE),
+            stale,
+            ..agent(uuid, Status::Idle, None)
+        };
+        let mut s = snap(
+            1,
+            vec![
+                // Rank and uuid order disagree, so the block's own sort
+                // is what puts u-s2 first.
+                row("u-s2", 800, true, false),
+                row("u-s1", 700, true, false),
+                row("u-d", 999, false, false),
+                row("u-x", 600, true, true),
+            ],
+        );
+        s.tab_order = [(1usize, 500u64), (2, 400)].into();
+        m.apply_snapshot(s);
+        m
+    }
+
+    #[test]
+    fn standby_rows_sit_between_the_live_block_and_the_dormant_block() {
+        // Ollie, 2026-09-22: the rows a quit left live sit at the top of the
+        // dormant list. A stale one cannot open, so it is plain dormant.
+        let m = standby_fleet();
+        assert_eq!(
+            keys(&m),
+            vec![
+                RowKey::Tab(1),
+                RowKey::Tab(2),
+                RowKey::Standby("u-s2".into()),
+                RowKey::Standby("u-s1".into()),
+                RowKey::Dormant("u-d".into()),
+                RowKey::Dormant("u-x".into()),
+            ]
+        );
+        assert_eq!(status_at(&m, 2), Some(RowStatus::Standby));
+        assert_eq!(status_at(&m, 4), Some(RowStatus::Dormant));
+        assert_eq!(status_at(&m, 5), Some(RowStatus::Stale));
+        assert!(
+            m.rows()[2].1.dormant,
+            "standby fades with the dormant block"
+        );
+    }
+
+    #[test]
+    fn a_standby_row_turns_dormant_on_the_bars_own_clock() {
+        // Swarm review, 2026-09-23: the host decided expiry once, when it
+        // wrote the snapshot, and an idle fleet writes nothing overnight. A
+        // row past its 24 hours still read standby in the morning, and the
+        // first walk onto it spawned an agent. The bar's clock decides.
+        let mut m = standby_fleet();
+        let end = STANDBY_FLEET_SINCE + clave_types::STANDBY_SECS;
+        m.tick(end - 1);
+        assert_eq!(status_at(&m, 2), Some(RowStatus::Standby));
+        m.tick(end);
+        assert_eq!(status_at(&m, 2), Some(RowStatus::Dormant));
+        assert!(
+            keys(&m).iter().all(|k| !matches!(k, RowKey::Standby(_))),
+            "{:?}",
+            keys(&m)
+        );
+    }
+
+    #[test]
+    fn a_walk_opens_each_standby_row_on_arrival_and_skips_the_dormant_block() {
+        // Ollie, 2026-09-22: a fast walk opens every standby row it lands
+        // on, with no delay. The executor's focus has not moved yet between
+        // presses (the new tab is still coming up), so the cursor carries
+        // the walk from one standby row to the next.
+        let mut m = standby_fleet();
+        m.beacon(2);
+        assert_eq!(
+            m.nav("{\"dir\":\"next\"}", Some(2)),
+            vec![Effect::OpenAgent {
+                uuid: "u-s2".into()
+            }]
+        );
+        assert_eq!(status_at(&m, 2), Some(RowStatus::Opening));
+        assert_eq!(
+            m.nav("{\"dir\":\"next\"}", Some(2)),
+            vec![Effect::OpenAgent {
+                uuid: "u-s1".into()
+            }]
+        );
+        assert!(
+            m.nav("{\"dir\":\"next\"}", Some(2))
+                .iter()
+                .any(|e| matches!(
+                    e,
+                    Effect::FocusPane { .. } | Effect::SwitchTab { position: 0 }
+                )),
+            "the ring wraps to the live head, past the dormant block"
+        );
+        assert_eq!(
+            m.nav("{\"dir\":\"prev\"}", Some(1)),
+            Vec::<Effect>::new(),
+            "u-s1 is already opening: arriving again opens nothing twice"
+        );
+    }
+
+    #[test]
+    fn a_click_or_alt_n_on_a_standby_row_opens_it() {
+        let mut m = one_line_bar(standby_fleet());
+        assert_eq!(
+            m.click(2, TALL_PANE),
+            vec![Effect::OpenAgent {
+                uuid: "u-s2".into()
+            }]
+        );
+        let mut m = standby_fleet();
+        m.beacon(1);
+        assert_eq!(
+            m.nav("{\"row\":4}", Some(1)),
+            vec![Effect::OpenAgent {
+                uuid: "u-s1".into()
+            }]
+        );
+        assert_eq!(
+            m.nav("{\"row\":5}", Some(1)),
+            Vec::<Effect>::new(),
+            "a dormant row still only selects"
+        );
+    }
+
+    #[test]
+    fn only_the_executor_opens_a_standby_row() {
+        // FOOTGUNS: a single-instance test cannot see a multi-instance
+        // defect. Every bar gets the press; one tab's worth of agent must
+        // come up, not one per bar.
+        let mut exec = standby_fleet();
+        let mut other = standby_fleet();
+        exec.beacon(2);
+        other.beacon(2);
+        let opens = [
+            exec.nav("{\"dir\":\"next\"}", Some(2)),
+            other.nav("{\"dir\":\"next\"}", None),
+        ]
+        .concat()
+        .into_iter()
+        .filter(|e| matches!(e, Effect::OpenAgent { .. }))
+        .count();
+        assert_eq!(opens, 1);
+    }
+
+    #[test]
+    fn a_closed_tab_prunes_the_standby_stamp_it_names() {
+        // SessionEnd can reach the store before the prune. It unbinds the
+        // row and stamps standby with the tab, and then only the stamp still
+        // names the closed tab. The prune must still fire, or a tab the
+        // human closed comes back as standby.
+        let mut m = BarModel::default();
+        m.set_own_pane(100);
+        m.apply_panes(panes_at(&[(0, 100, 5), (1, 101, 6)]));
+        m.apply_tabs(vec![tab(10, 0, "a", true), tab(11, 1, "b", false)]);
+        let stamped = Agent {
+            standby_since: Some(0),
+            standby_tab: Some(11),
+            ..agent("u-s", Status::Idle, None)
+        };
+        let mut s = snap(1, vec![stamped.clone()]);
+        s.tab_order = [(10usize, 100u64)].into();
+        m.apply_snapshot(s.clone());
+        m.apply_tabs(vec![tab(10, 0, "a", true)]);
+        m.apply_panes(panes_at(&[(0, 100, 5)]));
+        let pruned = Effect::PruneTabs {
+            stale_ids: vec![11],
+        };
+        assert!(m.identity_effects().contains(&pruned));
+        // An echo that still carries the stamp keeps the claim alive.
+        s.seq = 2;
+        m.apply_snapshot(s);
+        assert!(
+            m.identity_effects().contains(&pruned),
+            "the claim outlives an echo that still names it"
+        );
+        // The prune lands: the stamp is gone, and so is the claim.
+        let mut s = snap(3, vec![agent("u-s", Status::Idle, None)]);
+        s.tab_order = [(10usize, 100u64)].into();
+        m.apply_snapshot(s);
+        assert!(!m.identity_effects().contains(&pruned));
+    }
+
+    /// The new tab a walk opened for row u-s1, seen by that tab's own bar
+    /// before the store binds it: its pane runs `clave spawn u-s1` (the
+    /// command zellij reports, measured 2026-09-23). u-s1 ranks between the
+    /// two older tabs. `standby` false makes it a plain dormant row.
+    fn tab_opened_before_its_bind(standby: bool, exited: bool) -> BarModel {
+        let mut m = BarModel::default();
+        m.set_own_pane(300);
+        let spawn = PaneMeta {
+            terminal_command: Some("clave spawn u-s1 --name one · two --cwd /r".into()),
+            exited,
+            ..pane(2, 301, false, true)
+        };
+        m.apply_panes(vec![
+            pane(0, 100, true, false),
+            pane(0, 101, false, false),
+            pane(1, 200, true, false),
+            pane(1, 201, false, false),
+            pane(2, 300, true, false),
+            spawn,
+        ]);
+        m.apply_tabs(vec![
+            tab(1, 0, "one", false),
+            tab(2, 1, "two", false),
+            tab(3, 2, "new", true),
+        ]);
+        let row = Agent {
+            commit_ord: 450,
+            standby_since: standby.then_some(STANDBY_FLEET_SINCE),
+            ..agent("u-s1", Status::Idle, None)
+        };
+        let mut s = snap(1, vec![row]);
+        s.tab_order = [(1usize, 500u64), (2, 400)].into();
+        m.apply_snapshot(s);
+        m
+    }
+
+    #[test]
+    fn a_tab_opened_for_a_standby_row_takes_the_rows_place_before_its_bind() {
+        // Ollie, 2026-09-23: an opened standby row hopped bottom, top, then
+        // its own place, in about 100 ms. The pane's command names the row
+        // from the tab's first frame, so the row holds its place throughout.
+        let m = tab_opened_before_its_bind(true, false);
+        assert_eq!(
+            keys(&m),
+            vec![RowKey::Tab(1), RowKey::Tab(3), RowKey::Tab(2)],
+            "ranked by the row's own ordinal, and the standby row is not shown twice"
+        );
+    }
+
+    #[test]
+    fn a_tab_opened_for_a_standby_row_sends_no_birth_touch() {
+        // The touch would mint a fresh top ordinal, and the bind would then
+        // take it back: the hop. The bind alone gives the tab the row's rank.
+        let mut m = tab_opened_before_its_bind(true, false);
+        assert!(
+            !m.identity_effects()
+                .iter()
+                .any(|e| matches!(e, Effect::Touch { .. })),
+        );
+        // Alt+Enter on a dormant row is a commitment: its tab still goes top.
+        let mut m = tab_opened_before_its_bind(false, false);
+        assert!(m.identity_effects().contains(&Effect::Touch { tab_id: 3 }));
+    }
+
+    #[test]
+    fn an_exited_spawn_pane_names_no_row() {
+        // After /exit the held pane keeps its launch command, but runs
+        // nothing: the row is not live there.
+        let m = tab_opened_before_its_bind(true, true);
+        assert!(keys(&m).contains(&RowKey::Standby("u-s1".into())));
+        assert!(m.agent_in_tab(3).is_none());
+    }
+
+    #[test]
+    fn the_stores_bind_to_a_live_tab_outranks_a_spawn_pane() {
+        // One tab per agent: where the store binds the row to a live tab,
+        // a second tab's pane naming the row does not claim it too.
+        let mut m = tab_opened_before_its_bind(true, false);
+        m.agents[0].tab_id = Some(1);
+        assert_eq!(m.agent_in_tab(3), None);
+        // A bind that names a closed tab is no bind: the spawn pane joins.
+        m.agents[0].tab_id = Some(9);
+        assert_eq!(m.agent_in_tab(3).map(|a| a.uuid.as_str()), Some("u-s1"));
+    }
+
+    #[test]
+    fn a_new_bar_sends_no_birth_touch_before_its_first_snapshot() {
+        // Without the snapshot the bar cannot tell a standby row's tab from
+        // a newborn, and a touch sent blind is the hop.
+        let mut m = tab_opened_before_its_bind(true, false);
+        m.agents.clear();
+        m.await_hydration();
+        assert!(
+            !m.identity_effects()
+                .iter()
+                .any(|e| matches!(e, Effect::Touch { .. })),
+        );
+    }
+
     #[test]
     fn a_selection_gone_live_returns_the_walk_to_the_live_block() {
         // The self-heal: the walk's block is decided by where the cursor is
@@ -9558,7 +9903,7 @@ mod tests {
                                 let ts_of = |k: &RowKey| -> u64 {
                                     match k {
                                         RowKey::Tab(id) => timeline.get(id).copied().unwrap_or(0),
-                                        RowKey::Dormant(u) => ord_by_uuid.get(u).copied().unwrap_or(0),
+                                        RowKey::Dormant(u) | RowKey::Standby(u) => ord_by_uuid.get(u).copied().unwrap_or(0),
                                     }
                                 };
                                 // The blocks are contiguous, and the live one holds every tab.
@@ -9710,7 +10055,7 @@ mod tests {
                                 for (k, _) in m.rows() {
                                     let ord = match &k {
                                         RowKey::Tab(id) => timeline.get(id).copied().unwrap_or(0),
-                                        RowKey::Dormant(u) => {
+                                        RowKey::Dormant(u) | RowKey::Standby(u) => {
                                             m.agents.iter().find(|a| &a.uuid == u).map(|a| a.commit_ord).unwrap_or(0)
                                         }
                                     };

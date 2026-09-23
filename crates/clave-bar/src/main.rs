@@ -114,9 +114,6 @@ struct State {
     /// the click map falls back to the pre-viewport identity mapping (line N
     /// selects row N) rather than misbehaving.
     pane_height: usize,
-    /// The last `width-deaf` line written, so a bar held at the wrong width
-    /// logs once per (width, reason) and not once per paint.
-    last_deaf: Option<(usize, &'static str)>,
     /// The width of the last paint, so `render` logs a `painted` line only
     /// when zellij changes it — the trace of a swap landing, or being undone.
     last_cols: Option<usize>,
@@ -777,18 +774,10 @@ impl ZellijPlugin for State {
         // start-or-reload-plugin`): stamp the build so the zellij log tells
         // you WHICH wasm produced a trace. Set by the rebuild recipe via
         // CLAVE_BUILD_TAG; "dev" means an untagged local build.
-        // The client id rides along (2026-09-22): zellij routes every
-        // swap-layout ask by the client this instance was loaded under
-        // (zellij-server 0.45.1 plugins/zellij_exports.rs:120-140, then
-        // screen.rs:10372 `active_tab_and_connected_client_id!`), and
-        // ids are the lowest free number (lib.rs:663-672), so a tab minted
-        // by a CLI client inherits an id the next CLI client will reuse.
-        let ids = get_plugin_ids();
         eprintln!(
-            "clave-bar: loaded v{} build={} client={}",
+            "clave-bar: loaded v{} build={}",
             env!("CARGO_PKG_VERSION"),
-            option_env!("CLAVE_BUILD_TAG").unwrap_or("dev"),
-            ids.client_id
+            option_env!("CLAVE_BUILD_TAG").unwrap_or("dev")
         );
         // #44: resolve the CLI from plugin configuration instead of PATH. A
         // stale `clave` on PATH previously served a live session's `clave
@@ -1230,33 +1219,16 @@ impl ZellijPlugin for State {
         // drive counts these lines per sandbox instance; a bar at its width
         // asks nothing, so any ask during a nav walk is a defect. Cheap:
         // a healthy bar asks at most once per toggle.
-        // Own tab, focused tab and the own tab's tiled pane count ride
-        // along (2026-09-22): zellij applies a swap to the focused tab, and
-        // an ask that never lands needs those three to name the seam.
+        // Own tab and focused tab ride along: zellij applies a swap to the
+        // focused tab, and the drive's phase 6c counts asks per tab (`tab=`).
         for e in &fx {
             if let Effect::SwapWidth { backwards } = e {
                 let tab = self.model.own_tab();
                 let active = self.model.active_tab_id();
-                let panes = self.model.own_tab_tiled_pane_count();
-                let client = get_plugin_ids().client_id;
                 eprintln!(
-                    "clave-bar: swap-width backwards={backwards} cols={cols} tab={tab:?} active={active:?} panes={panes:?} client={client}"
+                    "clave-bar: swap-width backwards={backwards} cols={cols} tab={tab:?} active={active:?}"
                 );
             }
-        }
-        // The silent case (2026-09-22): a paint at the wrong width with no
-        // ask. One line per (width, reason), so a bar resting wrong for a
-        // minute costs one line, not one per frame.
-        let deaf = self.model.width_deaf_reason(cols).map(|r| (cols, r));
-        if deaf != self.last_deaf {
-            if let Some((_, reason)) = deaf {
-                let tab = self.model.own_tab();
-                let active = self.model.active_tab_id();
-                eprintln!(
-                    "clave-bar: width-deaf cols={cols} reason={reason} tab={tab:?} active={active:?}"
-                );
-            }
-            self.last_deaf = deaf;
         }
         self.run_effects(fx);
         // One line per row, display-ordered. Everything visual — the column

@@ -217,7 +217,12 @@ mutants base="main" *args:
         echo "no changed Rust lines vs {{ base }} — nothing to mutate"
         exit 0
     fi
-    cargo mutants --workspace --in-diff "$diff" --iterate {{ args }}
+    # Four jobs by default: each mutant is a build plus the whole suite, so a
+    # serial run of 159 took 23 minutes on a 12-core Mac (2026-09-22). Each
+    # job copies the tree and builds on its own, so a smaller machine sets
+    # MUTANTS_JOBS lower. The suite is already multi-threaded, so more jobs
+    # buy less than their count.
+    cargo mutants --workspace --in-diff "$diff" --iterate --jobs "${MUTANTS_JOBS:-4}" {{ args }}
 
 # The same run with the cache dropped — the only run that re-tests a mutant an
 # earlier run caught. Run it once before you open the PR, because that is where
@@ -231,7 +236,7 @@ mutants-cold base="main" *args:
 # been rewritten, where --in-diff would mutate everything anyway.
 # Mutation-test one file in full (e.g. crates/clave-bar/src/render.rs).
 mutants-file file *args:
-    cargo mutants --workspace --file {{ file }} {{ args }}
+    cargo mutants --workspace --file {{ file }} --jobs "${MUTANTS_JOBS:-4}" {{ args }}
 
 # Wire THIS WORKING TREE's sandbox without touching the daily surface.
 # The safe alternative to `dev-install` for sandbox validation: nothing here
@@ -288,7 +293,7 @@ launch:
 #
 # It asks for a SECOND launch part way through: phase 6c asks the maintainer to
 # quit the sandbox and launch it again, because what a relaunch bakes (one
-# eager tab, every other row dormant) can only be seen across a session
+# eager tab, the rows left live on standby, the rest dormant) can only be seen across a session
 # boundary and no other phase crosses one. The drive prints both commands and
 # waits; `wait` is the budget for EACH ask.
 #

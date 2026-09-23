@@ -118,6 +118,8 @@ text budget is superseded and is not to be adopted.
 
 ### D10 — The bar owns its status palette; `Status::glyph()` is untouched (2026-07-29, `Dormant`'s ink amended 2026-08-01 · #123)
 
+**Amended 2026-09-23:** the circles in the table below are now drawn from ONE Nerd Font set, Font Awesome: ● U+F111, ○ U+F10C, and standby's half circle U+F042. A base-font circle beside an icon matched in size only by luck (FOOTGUNS, "A glyph the bar's font lacks"). The inks are unchanged.
+
 `clave-types`' `Status::glyph()` returns `(char, u8)` with ANSI colours and is
 consumed by the host CLI. The bar needs 24-bit hues (D8) and needs three row
 states that are not `Status` variants at all — `Dormant`, `Opening` and the

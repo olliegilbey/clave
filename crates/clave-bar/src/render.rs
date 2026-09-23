@@ -198,6 +198,7 @@ pub enum RowStatus {
     Done,
     Idle,
     Failed,
+    Standby,
     Dormant,
     DormantSelected,
     Opening,
@@ -235,18 +236,29 @@ impl RowStatus {
     /// The four-line card overrides the glyph (not the ink) while
     /// [`Self::thinking`] holds — see `card.rs`'s spinner.
     pub fn mark(self, theme: &Theme) -> (char, Rgb) {
+        // The three circles (●, ○, ◐) come from ONE Nerd Font set, Font
+        // Awesome, so every patched font draws them the same size. Base-font
+        // U+25CF/U+25CB beside an icon matched only by luck (measured
+        // 2026-09-23: JetBrains Mono NF Mono 620 vs 600 units, FiraCode NF
+        // Mono 1080 vs 1200, the non-Mono variants 620 vs 923; the Font
+        // Awesome trio is identical in all four). JetBrains Mono has no ◐
+        // at all: the terminal drew U+25D0 from a fallback font, visibly
+        // larger.
         match self {
-            RowStatus::NeedsYou => ('\u{25cf}', NEEDS_YOU_INK),
-            RowStatus::Working => ('\u{25cf}', WORKING_INK),
-            RowStatus::Done => ('\u{25cf}', DONE_INK),
-            RowStatus::Idle => ('\u{25cf}', theme.untinted),
+            RowStatus::NeedsYou => ('\u{f111}', NEEDS_YOU_INK),
+            RowStatus::Working => ('\u{f111}', WORKING_INK),
+            RowStatus::Done => ('\u{f111}', DONE_INK),
+            RowStatus::Idle => ('\u{f111}', theme.untinted),
             RowStatus::Failed => ('\u{2716}', FAILED_INK),
             // Hollow on the DEFAULT ink, never sumiInk4: that read as
             // near-invisible against the bar (#123), and the shape alone
             // carries "not running". #206's row-level fade is applied AFTER
             // this table by `render_row`, so a legible base is what keeps the
             // half-faded glyph above #123's floor.
-            RowStatus::Dormant => ('\u{25cb}', theme.default_ink),
+            RowStatus::Dormant => ('\u{f10c}', theme.default_ink),
+            // Half-filled: a row the last quit left live. It opens on
+            // arrival, where ○ waits for Alt+Enter (Ollie, 2026-09-22).
+            RowStatus::Standby => ('\u{f042}', theme.default_ink),
             RowStatus::DormantSelected => ('\u{23ce}', OPENING_INK),
             RowStatus::Opening => ('\u{21bb}', OPENING_INK),
             RowStatus::Stale => ('\u{2717}', FAILED_INK),
@@ -1202,7 +1214,10 @@ mod tests {
             selected: false,
             // The helper mirrors the model's tier: a fixture asking for a
             // dormant status is a dormant-block row unless the test overrides.
-            dormant: matches!(status, RowStatus::Dormant | RowStatus::DormantSelected),
+            dormant: matches!(
+                status,
+                RowStatus::Standby | RowStatus::Dormant | RowStatus::DormantSelected
+            ),
         }
     }
 
@@ -1977,8 +1992,8 @@ mod tests {
             },
         ];
         let expected = [
-            " \u{1b}[38;2;179;86;98m\u{25cf} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;180;154;109m105k             \u{1b}[38;2;102;125;172mclave   \u{1b}[38;2;173;169;150mI just passed the spe\u{2026} \u{1b}[0m ",
-            "\u{1b}[38;2;45;79;103m\u{e0b6}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m\u{1b}[38;2;255;158;59m\u{25cf}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;220;215;186m\u{2502}\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;230;195;132m105k\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;126;156;216m\u{f1bb}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;122;168;159m\u{1b}[38;2;22;22;29mS6-GUT   \u{1b}[0m\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;126;156;216mclave  \u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m picking the gutter set\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[0m\u{1b}[38;2;45;79;103m\u{e0b4}\u{1b}[0m",
+            " \u{1b}[38;2;179;86;98m\u{f111} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;180;154;109m105k             \u{1b}[38;2;102;125;172mclave   \u{1b}[38;2;173;169;150mI just passed the spe\u{2026} \u{1b}[0m ",
+            "\u{1b}[38;2;45;79;103m\u{e0b6}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m\u{1b}[38;2;255;158;59m\u{f111}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;220;215;186m\u{2502}\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;230;195;132m105k\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;126;156;216m\u{f1bb}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;122;168;159m\u{1b}[38;2;22;22;29mS6-GUT   \u{1b}[0m\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;126;156;216mclave  \u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m picking the gutter set\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[0m\u{1b}[38;2;45;79;103m\u{e0b4}\u{1b}[0m",
             " \u{1b}[38;2;173;169;150m\u{f018d} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;173;169;150mTERM   \u{1b}[48;2;24;24;32m\u{1b}[38;2;122;148;91mTab #16  \u{1b}[0m \u{1b}[38;2;173;169;150m        \u{1b}[38;2;173;169;150m                       \u{1b}[0m ",
         ];
         assert_eq!(render_all(&rows, DESIGN_COLS, Widths::EXPANDED), expected);
@@ -2074,8 +2089,8 @@ mod tests {
             },
         ];
         let expected = [
-            " \u{1b}[38;2;179;86;98m\u{25cf} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;180;154;109m\u{f007c}           \u{1b}[38;2;102;125;172mcla \u{1b}[38;2;173;169;150mI just\u{2026} \u{1b}[0m ",
-            "\u{1b}[38;2;45;79;103m\u{e0b6}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m\u{1b}[38;2;255;158;59m\u{25cf}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;220;215;186m\u{2502}\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;230;195;132m\u{f007c}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;126;156;216m\u{f1bb}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;122;168;159m\u{1b}[38;2;22;22;29mS6-GUT \u{1b}[0m\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;126;156;216mcla\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m pickin\u{2026}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[0m\u{1b}[38;2;45;79;103m\u{e0b4}\u{1b}[0m",
+            " \u{1b}[38;2;179;86;98m\u{f111} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;180;154;109m\u{f007c}           \u{1b}[38;2;102;125;172mcla \u{1b}[38;2;173;169;150mI just\u{2026} \u{1b}[0m ",
+            "\u{1b}[38;2;45;79;103m\u{e0b6}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m\u{1b}[38;2;255;158;59m\u{f111}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;220;215;186m\u{2502}\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;230;195;132m\u{f007c}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;45;79;103m\u{1b}[38;2;126;156;216m\u{f1bb}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[48;2;122;168;159m\u{1b}[38;2;22;22;29mS6-GUT \u{1b}[0m\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[38;2;126;156;216mcla\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m pickin\u{2026}\u{1b}[48;2;45;79;103m\u{1b}[48;2;45;79;103m \u{1b}[0m\u{1b}[38;2;45;79;103m\u{e0b4}\u{1b}[0m",
             " \u{1b}[38;2;173;169;150m\u{f018d} \u{1b}[38;2;173;169;150m\u{2502} \u{1b}[38;2;173;169;150m\u{f120}   \u{1b}[48;2;24;24;32m\u{1b}[38;2;122;148;91mTab #16\u{1b}[0m \u{1b}[38;2;173;169;150m    \u{1b}[38;2;173;169;150m        \u{1b}[0m ",
         ];
         assert_eq!(
@@ -2269,12 +2284,15 @@ mod tests {
         let samurai_red = Rgb(0xE8, 0x24, 0x24);
         let carp_yellow = Rgb(0xE6, 0xC3, 0x84);
         let table = [
-            (RowStatus::NeedsYou, '\u{25cf}', wave_red),
-            (RowStatus::Working, '\u{25cf}', ronin_yellow),
-            (RowStatus::Done, '\u{25cf}', spring_green),
-            (RowStatus::Idle, '\u{25cf}', sumi_ink4),
+            // The three circles come from ONE Nerd Font set (Font Awesome), so
+            // every patched font draws them the same size (measured below).
+            (RowStatus::NeedsYou, '\u{f111}', wave_red), // nf-fa-circle
+            (RowStatus::Working, '\u{f111}', ronin_yellow),
+            (RowStatus::Done, '\u{f111}', spring_green),
+            (RowStatus::Idle, '\u{f111}', sumi_ink4),
             (RowStatus::Failed, '\u{2716}', samurai_red), // HEAVY multiplication x
-            (RowStatus::Dormant, '\u{25cb}', fuji_white),
+            (RowStatus::Dormant, '\u{f10c}', fuji_white), // nf-fa-circle_o
+            (RowStatus::Standby, '\u{f042}', fuji_white), // nf-fa-adjust, half-live: opens on arrival
             (RowStatus::DormantSelected, '\u{23ce}', carp_yellow), // ⏎ commit affordance (#100)
             (RowStatus::Opening, '\u{21bb}', carp_yellow),
             (RowStatus::Stale, '\u{2717}', samurai_red), // BALLOT x — a flag, not a Status

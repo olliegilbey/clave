@@ -42,7 +42,10 @@ pub fn agent(
             subagents: false,
         },
         selected: false,
-        dormant: matches!(status, RowStatus::Dormant | RowStatus::DormantSelected),
+        dormant: matches!(
+            status,
+            RowStatus::Standby | RowStatus::Dormant | RowStatus::DormantSelected
+        ),
     }
 }
 
