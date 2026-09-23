@@ -109,8 +109,8 @@ Two invariants:
 ## The rule that matters most
 
 **Never install over a running clave session, and never kill or launch a session
-on someone else's behalf.** (The one exemption — an agent killing its own
-completed drive sandbox — is in TESTING.md's sandbox drive loop.)
+on someone else's behalf.** (The one exemption: an agent kills the sandboxes
+it staged itself, by exact name. See TESTING.md, "The interaction contract".)
 
 A live session only ever loads the versioned files baked into the config it
 generated at launch, so a normal release lands atomically at the *next* launch
@@ -200,8 +200,9 @@ Plenty of contributors here will be. The repo is set up for it:
 
 Two things to hold your agent to:
 
-- **It must not launch or kill zellij sessions**, or run anything that writes
-  the stable surface. Have it print the command for you to run. A `zellij
+- **It must not launch zellij sessions, or kill any session but a sandbox it
+  staged**, or run anything that writes the stable surface. Have it print
+  the launch command for you to run. A `zellij
   action` against a dead session blocks forever without erroring, which is a
   bad thing to hand an autonomous loop.
 - **Verify what it cites.** Docs go stale. A claim about current behaviour

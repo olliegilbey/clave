@@ -826,7 +826,7 @@ observability, you do not drive the terminal.**
 There is a hard division of labor, and it is not negotiable:
 
 - **The human owns his own session, and owns every visual observation.** Every
-   keypress into the daily fleet, every session launch and kill (including
+   keypress into the daily fleet, every session launch (including
    `clave-test`'s), and every "does this look right" — his. He is the only one
    who can see the screen. Nothing below widens this: the agent's licence is
    scoped to the sandbox, and the sandbox has no screen worth trusting.
@@ -834,12 +834,11 @@ There is a hard division of labor, and it is not negotiable:
   `clave-test`, an agent may run `zellij action` freely — open tabs, close tabs,
   list panes, dump layout. Against the maintainer's session it may run nothing
   at all, not even a read: `list-panes` there is his to run and paste back.
-  Session **lifecycle** stays his either way, with one exemption (ratified
-  2026-09-03, after the v0.4.0 gate): the agent may kill a sandbox it asked
-  him to launch in the same conversation, once the drive on it and both
-  eyeball checkpoints are done — by explicit name, after `clave dev status`
-  reports it live, and never a sandbox another agent staged (per-worktree
-  instances have their own names and roots). Launching is never the agent's.
+  Launching is never the agent's. Killing is (ratified 2026-09-23, "you
+  are the one who kills"): the agent kills the sandboxes it staged, by
+  exact name, when a drive needs a quit, a clean restage, or a teardown.
+  Never a sandbox another agent staged (per-worktree instances have their
+  own names and roots), and never the maintainer's session.
   clave's own `dev` subcommands never launch or kill by construction: `dev
   reset` prints the kill-session command rather than executing it.
 
@@ -897,8 +896,7 @@ deliberately reports those as `keep`: the worktree still exists, so somebody is
 probably mid-drive on another branch. Killing it destroys their in-flight
 evidence. Reap only claims the ones whose worktree is gone.
 
-**Teardown is the human's, like every other session lifecycle step.** Two
-commands, because the first ends the session and the second stops zellij
+**Teardown is the agent's, for the sandboxes it staged.** Two commands, because the first ends the session and the second stops zellij
 offering to resurrect it — a resurrectable corpse still shows in the list and
 still gets picked by mistake:
 
@@ -970,11 +968,11 @@ Each step exists because skipping it produces a confident, wrong result.
    dead row's stamp. Closing alone proves nothing about reuse.
 8. **Report what you did not exercise.** A race that did not reproduce is not a
    race that cannot happen; say so in those words.
-9. **Hand back the teardown.** The loop is not finished when the evidence is
+9. **Tear it down.** The loop is not finished when the evidence is
    gathered — an abandoned sandbox outlives the branch that needed it and joins
-   the session list the next drive has to pick from. Print the kill pair for the
-   human with the report (see "Tear the sandbox down when you are done with it");
-   do not leave it for whoever notices the sprawl.
+   the session list the next drive has to pick from. Once the eyeball checks
+   are in, run the kill pair yourself (see "Tear the sandbox down when you are
+   done with it"); do not leave it for whoever notices the sprawl.
 
 **Never discard the drive's output — and the output is not the delivery
 evidence.** `>/dev/null 2>&1` on a drive loop hides the wrapper refusals, which
@@ -1002,7 +1000,9 @@ every pane and mark the unresolvable ones.
 `just qa <scenario>` runs it as one command — it stages, prints the launch line,
 waits for the human to run it, and drives every phase the moment the session is
 up, with the same never-discard-output discipline as above. QA-DRIVE.md owns the
-phase list; do not keep a second copy of it here. The manual steps in this
+phase list, the runbook for a drive on both machines ("Agent protocol"), and
+how to add a check ("Adding a check to the drive"); do not keep a second copy
+of them here. The manual steps in this
 section remain the fallback, and are what you reach for when the drive cannot
 run at all.
 

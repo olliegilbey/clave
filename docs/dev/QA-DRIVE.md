@@ -251,72 +251,91 @@ the stable binary (FOOTGUNS, 2026-08-24).
 
 ## Agent protocol (the runbook for a drive session)
 
-1. **`just qa qa-fleet`** — one command for steps 1–3 below: it stages the
-   per-worktree instance, prints the launch line, waits up to ten minutes for
-   the human to run it, then drives the full spine the moment the session is
-   up. Prefer this; the three-step form below is what it does, kept because a
-   drive that needs an already-launched session still uses step 3 alone.
-   1. `just sandbox qa-fleet` (per-worktree instance), take the log mark.
-   2. Hand the launch line to the human (`cd <worktree> && just launch`);
-      wait. The agent CANNOT do this: `clave dev launch` refuses when
-      `ZELLIJ` is set, and an agent is always inside a session.
-   3. `scripts/qa-drive.sh qa-fleet` — the full spine, phases 0–7 (with 5b,
-      5c, 6b and 6c in between); stop on first failure.
-   **The run needs the maintainer TWICE**: once for the first launch, and
-   again at phase 6c, which asks for a quit and a relaunch and waits for
-   both (`QA_RELAUNCH_WAIT`, default 1800s each half). Tell him that when you
-   hand over the first launch line, so the second ask is expected rather
-   than a surprise mid-run.
-   **Full 0–7 driven live green: run 4, 2026-08-17**, both eyeball
-   checkpoints confirmed; and **run 11, 2026-09-11**, the ten labels that
-   existed then (5b and 6b were the new ones), on the first run of the
-   one-command loop. The drive carries **twelve** now: 5c joined on
-   2026-09-12 and 6c on 2026-09-16. **Run 12, 2026-09-16** drove all twelve:
-   phases 0–6b green, and 6c went red on its first complete run, on a real
-   defect — the restore of the day (since removed) lost the one row whose
-   agent was genuinely running. That is the phase doing its job on
-   the first attempt at a class nothing else could see. **Run 16, 2026-09-16,
-   is the first ALL TWELVE green**, with the `SessionEnd` fix in and phase 6c
-   closing its own tab. Runs 13–15 sit between them and are worth reading as
-   a set: 13 proved the fix and went red on a stale assertion, 14 and 15 each
-   went green-adjacent on a fleet with no witness in it — the phase now
-   asserts the witness is there, which is what ended that.
-   **Runs 17 and 18, 2026-09-16**, followed the second swarm review. 17 went
-   red at phase 5b on the DRIVE, not the product: the phase ends a session two
-   lines above the check and then asserted `idle`, which under the restore's
-   `Exited` status (since removed) was the reading for an agent that is still alive. 18 is green in all twelve,
-   and is the run that proves both swarm-review blocker fixes live — five rows
-   recorded, five rebound by the bar with nothing driven, focused or typed,
-   four of them bound before their agent ran, and the tab closed in the first
-   session absent from the second. Runs 1–3 each went red on one real finding (all
-   fixed and recorded in FOOTGUNS.md); the script header's ledger records
-   how each once-pending assumption settled. Still awaiting a first live
-   run: the CONCURRENT burst shape (ledger (6) — runs 1–4 drove the burst
-   serially because the CLI pipe blocks). A first red on a new shape is
-   evidence to read, not a script to patch until it greens.
-4. On failure: capture the drive log tail + the joins BEFORE any teardown,
-   grep FOOTGUNS, then debug systematically. A failed phase is evidence,
-   not an excuse to re-run until green.
-   **A re-run needs a fresh stage, not just a re-invocation.** The drive is
-   not idempotent by design: phase 2 rung 1 is a scripted `clave add`, so
-   every run MINTS a row and leaves tabs behind it. Phase 1's seed-count
-   check therefore only holds against a freshly seeded store, and a second
-   run against the same session goes red on the previous run's own residue —
-   which reads as a finding and is not one. The cycle is the full one each
-   time: kill, then `just qa <scenario>` and let the maintainer launch into
-   its wait. (Re-seeding alone is not a shortcut: `clave dev scenario` calls
-   `run_setup`, so it regenerates config.kdl — the #44 hazard that refuses a
-   live session in the first place.)
+The loop below is the one that works (2026-09-23, runs 33 to 38). Run it on
+both machines at once: the Mac and the box each find defects the other
+cannot (see "The remote drive").
 
-   Phase 1 now NAMES a stale stage rather than failing a count that is
-   correctly reading the previous run: it reports the bound-row count, the
-   residue count and the two commands that fix it, then continues so the
-   shape-independent phases still report. A count read on a stale stage is
-   not evidence — the 2026-09-11 "second writer in phase 5b" was six store
-   writes for five events on a stale stage and four on a fresh one, the
-   extras being `pr-sync` writes from the previous run's rows.
-5. Report the per-phase table with measured values; request the two
-   eyeballs; hand back the kill pair.
+1. **Commit first, then stage.** Phase 0 refuses a bar whose source differs
+   from HEAD, so a commit that touches `crates/clave-bar` or
+   `crates/clave-types` while a drive is staged turns the drive red at its
+   first check (run 37: a test-only commit did it). Host, script and doc
+   commits are safe mid-drive.
+2. **Stage both drives in one message:**
+   - Mac: `just qa qa-fleet 3600 > /tmp/mac-qa<N>.log 2>&1`, run in the
+     background. It stages, prints the launch line, waits, then drives.
+   - Box: `./scripts/remote-qa.sh qa qa-fleet 3600`. It pushes HEAD, starts
+     the drive detached on the box, and prints the box's launch line.
+   Wait for the Mac log to print `just launch`, then give the maintainer
+   both launch lines together. Tell him now that 6c asks for a second
+   launch. The `3600` is the wait for each launch, in seconds.
+3. **The maintainer launches. You watch.** Poll the Mac log and
+   `./scripts/remote-qa.sh qa-log 40` in one bounded loop. Stop when each
+   log shows `PHASE 6c needs a SECOND launch`, a `FAIL`, or the summary.
+4. **At 6c, you quit the sandbox; he relaunches it.** Kill by exact name
+   (AGENTS.md): on the Mac `zellij kill-session <session>; zellij
+   delete-session --force <session>` (`clave dev instance --field
+   session`); on the box `./scripts/remote-qa.sh kill`. Then hand him the
+   same launch line again. The drive sees the session go down and come
+   back, and continues by itself.
+5. **On a red phase, read before you rerun.** Capture the log tail, grep
+   FOOTGUNS and this ledger, then debug systematically. One known
+   intermittent: a lost press in phase 5's rapid burst (runs 32 and 36, one
+   red in several runs, on either machine). A known intermittent earns one
+   rerun; anything else is a finding.
+   **A rerun needs a fresh stage.** Phase 2 mints a row and leaves tabs, so a
+   second drive against the same session goes red on the first one's
+   residue. Kill, then stage again (step 2). Phase 1 names a stale stage
+   when it sees one. Re-seeding alone is not a shortcut: `clave dev
+   scenario` regenerates `config.kdl` (#44).
+6. **After both summaries are green:** ask for the eyeball checks the
+   teardown prints, plus anything your change made visible. For a change
+   that opens tabs, run `scripts/qa/fd-sampler.sh <session>` in the
+   background while he walks: macOS kills the server at 256 handles (run
+   36: a walk of four standby rows peaked at 73).
+7. **Tear down and record.** Kill both sandboxes (step 4's commands). Add a
+   ledger entry at the top of this file: the build, the check count per
+   machine, and what went red and why. Commit it.
+
+The drive script is `scripts/qa-drive.sh`; the one-command wrapper is `just
+qa`. Driving an already-launched session without a stage is
+`scripts/qa-drive.sh <scenario>` alone.
+
+Still awaiting a first live run: the CONCURRENT burst shape (ledger (6) in
+the script header). Runs 1 to 18 are summarised in `git log -p --
+docs/dev/QA-DRIVE.md`; each early red was a real finding, recorded in
+FOOTGUNS.md.
+
+## Adding a check to the drive
+
+A check earns its place when it reads a seam that no hermetic test can
+reach: a store written by several processes, a zellij behaviour, a
+relaunch. Logic belongs in a unit test in the pure model; the drive checks
+that the parts meet.
+
+1. **Find the trace.** Pick a store field that only the path under test
+   writes, and read it from `clave dev status` (JSON). Example: only `clave
+   touch` writes `tab_touched`, so an entry for a tab proves a birth touch
+   reached it (the 6c "no birth touch" check, 2026-09-23). A count read from
+   the zellij log is per line, not per instance (`swap_ask_count_since`).
+2. **Put the verdict in `scripts/qa/lib.sh`,** as a function that takes the
+   readings and calls `check`. The phase in `qa-drive.sh` only reads and
+   passes values in. Examples: `relaunch_checks`, `arrival_checks`.
+3. **Prove it goes red in `scripts/qa/lib-selftest.sh`.** Add a fixture mode
+   that builds the wrong store, and a case that requires the verdict to
+   fail. A drive check that has never gone red may be comparing two empty
+   sets; use `check_nonempty` where an empty expectation would pass.
+   Run `bash scripts/qa/lib-selftest.sh`.
+4. **Keep the drive inside its rules.** Every zellij command goes through
+   `scripts/ct.sh`. The drive never starts or ends a session, and
+   `script_hygiene.rs` fails the build if it does. Hooks fire only through
+   `scripts/ct.sh --hook`.
+5. **Document it** in the phase spine table above, and in the phase's
+   "What it asserts" prose when the phase has one.
+6. **Run it live on both machines** before you call it done. A new check
+   that goes red on its first run is evidence to read, not a script to
+   patch until it is green.
+
+## Phase 6c, the relaunch
 
 **Phase 6c needs two maintainer launches, and that is the point.** Every other
 phase runs inside one session, which is exactly why the live-set decay (#261)
@@ -341,9 +360,9 @@ Two things about how it is built, each of which a later edit could undo
 without any test noticing:
 
 - **It kills nothing and launches nothing.** It prints the pair and waits for
-  liveness to drop and return. Session lifecycle stays the maintainer's, and
-  `script_hygiene.rs` fails the build for any line in the drive that starts
-  or ends a session.
+  liveness to drop and return. The agent quits the sandbox and the
+  maintainer launches it; `script_hygiene.rs` fails the build for any line in
+  the drive that starts or ends a session.
 - **The readings are non-vacuous because a launch CLEARS the binds** before
   it bakes the layout (`setup.rs` `clear_session_order`). So every tab id read
   after the relaunch was made by the second session. If that changes, this

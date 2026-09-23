@@ -17,8 +17,8 @@ map and the sanctioned-command list are binding here and are not repeated.
 
 | Who | Does |
 |---|---|
-| **agent** | Part A, the QA-drive gate (once the maintainer has launched its sandbox session), and Part D. Reads logs, the store, `clave dev status`. During the gate, runs **sandbox-scoped** zellij actions through `scripts/ct.sh` only; **prints** the launch command and every other zellij command; never launches a session; may kill the gate's sandbox once the drive and both eyeballs are done (TESTING.md's lifecycle exemption). Never runs `just release`. |
-| **maintainer** | The tag, `just release`, launching the QA drive's sandbox session, every keypress in Part C, killing any session the exemption does not cover, and the go/no-go. **The tag is pushed only after the go** — Part B. |
+| **agent** | Part A, the QA-drive gate (once the maintainer has launched its sandbox session), and Part D. Reads logs, the store, `clave dev status`. During the gate, runs **sandbox-scoped** zellij actions through `scripts/ct.sh` only; **prints** the launch command and every other zellij command; never launches a session; kills the gate's sandbox by exact name: the 6c quit, a restage, and the teardown (TESTING.md, "The interaction contract"). Never runs `just release`. |
+| **maintainer** | The tag, `just release`, launching the QA drive's sandbox session, every keypress in Part C, killing any session that is not a sandbox the agent staged, and the go/no-go. **The tag is pushed only after the go** — Part B. |
 
 ---
 
@@ -61,7 +61,8 @@ a **pre-tag** gate: a red drive means there is nothing worth tagging.
 **`qa-drive` (all built phases) is green on the release candidate.** The agent
 stages the sandbox and prints the launch line; **the maintainer launches the
 session** and hands it back; the agent then runs the drive and reports the
-per-phase table with measured values and the kill pair. The two eyeball
+per-phase table with measured values, and kills the sandbox once the checks
+are in. It runs on the Mac and the box together. The two eyeball
 checkpoints are the **maintainer's**: the agent requests them, the maintainer
 looks and returns the observations, the agent records them verbatim
 (TESTING.md owns visual observation). The protocol and the phase spine are in
