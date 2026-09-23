@@ -8,6 +8,17 @@ owns everything they structurally cannot reach._
 
 ## Run ledger — the useful recent history
 
+- **runs 36 to 38, 2026-09-23 — standby rank, and the hop.** Run 36 at
+  `7a0af62`: Mac 0-7 green, 249 checks. Box red once in phase 5 (the rapid
+  burst lost one press, the known intermittent), then 0-7 green, 248 checks.
+  The human saw opened standby rows hop bottom, top, then their place in
+  about 100 ms; fix `73e883e` (FOOTGUNS, "A new tab's birth touch ranks it as
+  a newborn"), and 6c gained the check "no birth touch lifted it to the top
+  first". A walk of four standby rows peaked at 73 file handles of 256. Run
+  37: box 0-7 green on the fix, 249 checks; Mac red at phase 0, because a
+  test-only commit to the bar source landed while the drive was staged (the
+  runbook's step 1 now). Run 38 at `f3c5929`: Mac 0-7 green, 250 checks.
+
 - **runs 33 to 35, 2026-09-23 — standby rows.** Run 33: 0-6b green on box
   and Mac; 6c red, one of five rows on standby. The store seq (75 to 80 on
   both) showed one `SessionEnd` write and no prune, so the hook is lossy at a

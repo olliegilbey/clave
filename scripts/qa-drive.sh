@@ -2488,14 +2488,15 @@ cat <<EOF
 
 ==> PHASE 6c needs a SECOND launch from you, and that is the whole point.
 
-    Quit the sandbox, then launch it again. Change NOTHING in between, and
-    touch nothing after — the phase reads the fleet the launch bakes by
-    itself: one tab, the rows you left live on standby, the rest dormant.
+    The agent that staged this drive quits the sandbox by name; then the
+    maintainer launches it again. Change NOTHING in between, and touch
+    nothing after — the phase reads the fleet the launch bakes by itself:
+    one tab, the rows left live on standby, the rest dormant.
 
-    zellij kill-session ${SESSION}
-    zellij delete-session --force ${SESSION}
-    cd ${ROOT}
-    just launch
+    agent:       zellij kill-session ${SESSION}
+                 zellij delete-session --force ${SESSION}
+    maintainer:  cd ${ROOT}
+                 just launch
 
     The drive waits up to ${P6C_WAIT}s for the session to go down and come
     back, then reads the store. It kills nothing itself.
@@ -2630,7 +2631,7 @@ fi
 # Phase 7 — teardown (the hand-back)
 # ===========================================================================
 # Asserts nothing, launches nothing, kills nothing: session lifecycle is the
-# human's (AGENTS.md, TESTING.md "the interaction contract"). The drive's
+# agent's and the maintainer's, never the drive's (AGENTS.md). The drive's
 # last act is to print the kill pair and the two eyeball checkpoints it owes.
 phase "P7-teardown"
 
@@ -2650,7 +2651,7 @@ The two eyeball checkpoints (human, one message each — QA-DRIVE):
   1. one bar per tab; woken rows show agent chips, not terminal glyphs
   2. every tab a strip (or every tab wide) — no width outliers
 
-Teardown, when done (human, or the agent that asked for this sandbox once both eyeballs are in):
+Teardown, by the agent that staged this sandbox, once both eyeballs are in:
   zellij kill-session ${SESSION}
   zellij delete-session --force ${SESSION}
 EOF
