@@ -23,7 +23,7 @@ Ordered by weight. When two collide, the earlier one wins.
 
 - **KISS.** The simplest correct thing is almost always right. Build the minimum that reaches the goal, then stop. Do not keep complexity because it is already there. Do not add machinery because it looks impressive.
 - **The transcripts out-rank the store.** Claude writes `~/.claude/projects/**/*.jsonl`. Those files outlive clave, so our store is only a cache over them. Derive history from the transcripts. Never mint a second source.
-- **Measured beats assumed.** Take zellij behaviour from the vendored source (`~/.cargo/registry/src/*/zellij-tile-0.44.3/`, `…/zellij-utils-0.44.3/`), or from a run you did yourself. `TabUpdate` reaches only the active tab. `resize_pane_with_id` refuses fixed panes, and says nothing. `show_self` is a focus action. Each cost a round. Cite the path you read, so the next agent can grep it.
+- **Measured beats assumed.** Take zellij behaviour from the vendored source (`~/.cargo/registry/src/*/zellij-tile-0.45.1/`, `…/zellij-utils-0.45.1/`), or from a run you did yourself. `TabUpdate` reaches only the active tab. `resize_pane_with_id` refuses fixed panes, and says nothing. `show_self` is a focus action. Each cost a round. Cite the path you read, so the next agent can grep it.
 - **The model is pure; the shell is thin.** `model.rs` runs without zellij, and that is the only reason the bar is testable. Logic that moves into the event shell leaves the tier we test well, and enters the tier that needs a human at a terminal. Move it back.
 - **One code path.** The sandbox is the same code as the stable build, with three environment variables moved. Never branch on "am I in dev".
 - **Claude is one agent kind, not the only one.** clave will drive other CLI agents; name the seams for agents in general.
@@ -41,7 +41,7 @@ Ordered by weight. When two collide, the earlier one wins.
 
 ## Great code here
 
-Rust stable, over zellij 0.44.3. Write code that passes the gate by construction.
+Rust stable, over zellij 0.45.1. Write code that passes the gate by construction.
 
 - **Make modules deep.** A module must hide more than it shows. When a file gets long, ask whether its interface got wider. A long file behind a narrow interface beats three shallow ones that pass state between them.
 - **Design errors out of existence.** A type that cannot hold the bad state beats a branch that handles it. Conflating the minted and live uuids passed every test, then froze the row in the field.
