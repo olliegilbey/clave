@@ -11,8 +11,8 @@
 //! start clave).
 //!
 //! This suite runs every layout-shaped artifact through the EXACT parser
-//! zellij 0.44.3 runs — `Layout::from_str` / `Config::from_kdl` from
-//! zellij-utils 0.44.3, the same version resolved in Cargo.lock (transitive
+//! the pinned zellij runs — `Layout::from_str` / `Config::from_kdl` from
+//! zellij-utils at the pinned version, the same version resolved in Cargo.lock (transitive
 //! via zellij-tile) — and the permission cache through the `kdl` crate pinned
 //! to the same 4.7.1 line zellij parses it with. Substring tests assert
 //! CONTENT; these assert VALIDITY. Both matter; neither replaces the other.
@@ -333,7 +333,7 @@ fn config_kdl_unbinds_claude_code_keys_in_every_mode() {
     //     are merged, so it strips the stock binds.
     use zellij_utils::data::{BareKey, InputMode, KeyWithModifier};
 
-    let base = Config::from_default_assets().expect("stock zellij 0.44.3 defaults must parse");
+    let base = Config::from_default_assets().expect("stock zellij defaults must parse");
     let merged = Config::from_kdl(
         &setup::config_kdl("clave", WASM, clave_types::RowHeight::Double),
         Some(base),
@@ -455,7 +455,7 @@ fn alt_f_pipes_the_press_to_the_bar_alone() {
     // the same press, hiding what the bar just spawned.
     use zellij_utils::data::{BareKey, InputMode, KeyWithModifier};
 
-    let base = Config::from_default_assets().expect("stock zellij 0.44.3 defaults must parse");
+    let base = Config::from_default_assets().expect("stock zellij defaults must parse");
     let merged = Config::from_kdl(
         &setup::config_kdl("clave", WASM, clave_types::RowHeight::Double),
         Some(base),

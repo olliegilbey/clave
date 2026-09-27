@@ -2881,7 +2881,10 @@ impl BarModel {
     /// walk, both for trackpad momentum, which sends a burst of events:
     /// the walk stops at the end of its block instead of wrapping, and a
     /// step that goes nowhere emits nothing, so a burst against an end
-    /// does not re-switch to the same tab again and again.
+    /// does not re-switch to the same tab again and again. A third, for the
+    /// same reason: a standby row is only selected, never opened. The walk
+    /// opens standby rows on arrival, and one flick after a quit would open
+    /// the whole old fleet (review of #275). A click or Alt+Enter opens it.
     pub fn wheel(&mut self, down: bool) -> Vec<Effect> {
         let Some(own) = self.own_tab() else {
             return Vec::new();
@@ -2898,7 +2901,10 @@ impl BarModel {
         let Some((key, _)) = rows.get(to).cloned() else {
             return Vec::new();
         };
-        self.land(key)
+        match key {
+            RowKey::Standby(uuid) => self.land(RowKey::Dormant(uuid)),
+            key => self.land(key),
+        }
     }
 
     /// One step of a walk, as display lines: (the row it starts from, the
@@ -8600,7 +8606,10 @@ mod tests {
         assert_eq!(m.cursor.as_deref(), Some("u-d1"));
         assert!(m.wheel(true).is_empty(), "a dormant step switches nothing");
         assert_eq!(m.cursor.as_deref(), Some("u-d0"), "down one dormant row");
-        m.wheel(true);
+        assert!(
+            m.wheel(true).is_empty(),
+            "a step past the end emits nothing"
+        );
         assert_eq!(
             m.cursor.as_deref(),
             Some("u-d0"),
@@ -8613,6 +8622,36 @@ mod tests {
             m.cursor.as_deref(),
             Some("u-d2"),
             "stops at the block's head, never climbs into the live block"
+        );
+    }
+
+    /// A momentum flick past the standby block must open nothing: after a
+    /// quit that block is the whole old fleet. The wheel selects, and the
+    /// selection is one Alt+Enter from open.
+    #[test]
+    fn the_wheel_selects_standby_rows_and_opens_none() {
+        let mut m = standby_fleet();
+        m.set_own_pane(101);
+        m.apply_panes(panes_at(&[(0, 100, 5), (1, 101, 6)]));
+        for _ in 0..10 {
+            assert!(
+                !m.wheel(true)
+                    .iter()
+                    .any(|e| matches!(e, Effect::OpenAgent { .. })),
+                "no wheel step opens a standby row"
+            );
+        }
+        assert_eq!(
+            m.cursor.as_deref(),
+            Some("u-s1"),
+            "the burst stops on the last standby row, not in the dormant block"
+        );
+        assert_eq!(
+            m.nav("{\"commit\":true}", Some(2)),
+            vec![Effect::OpenAgent {
+                uuid: "u-s1".into()
+            }],
+            "Alt+Enter opens the selected standby row"
         );
     }
 

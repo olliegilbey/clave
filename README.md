@@ -103,7 +103,8 @@ exec $SHELL
 | `Alt+f`                              | toggle a floating shell over the current tab, great for your terminal based editor at the same time |
 
 The mouse works too. Click a row to go to it. Scroll over the sidebar to walk
-the rows, one row per step.
+the rows, one row per step. Scrolling stops at the ends and only selects a
+closed row, so a flick never opens anything.
 
 Everything clave binds lives on `Alt`. Five stock Zellij `Ctrl` bindings that
 Claude Code needs (`Ctrl+g/t/o/b/q`) are unbound for you; the rest of

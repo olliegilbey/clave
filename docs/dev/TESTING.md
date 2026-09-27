@@ -28,7 +28,7 @@ tier an agent completes unattended, and it is the whole of CI today
 |---|---|---|
 | Unit tests | across both crates; **63 in `crates/clave-bar/src/model.rs`** | the bar's state machine — the pure event→effect core, superbly covered |
 | Proptests | `model.rs` (`proptest` is a `clave-bar` dev-dep) | invariants over generated event sequences; extend them whenever a new branch becomes reachable |
-| Real-KDL-parser guardrail | `crates/clave/tests/kdl_guardrail.rs` | every generated artifact (config/layout/launch, the one-shot tab layout, the permission cache) parsed by the **exact** zellij-utils 0.44.3 parser. Substring tests assert *content*; this asserts *validity* — a dropped brace or a missing trailing `;` otherwise fails at session launch, where a dead `attach` blocks forever |
+| Real-KDL-parser guardrail | `crates/clave/tests/kdl_guardrail.rs` | every generated artifact (config/layout/launch, the one-shot tab layout, the permission cache) parsed by the **exact** pinned zellij-utils parser (0.45.1). Substring tests assert *content*; this asserts *validity* — a dropped brace or a missing trailing `;` otherwise fails at session launch, where a dead `attach` blocks forever |
 | Version-pin tripwire | `crates/clave/tests/zellij_pin_tripwire.rs` | every zellij-family crate in `Cargo.lock` resolves to **one** version, so the guardrail can never green-light templates against a parser the plugin no longer runs |
 | CLI parse pins | `Cli::try_parse_from` tests in `crates/clave/src/main.rs` | that each plugin-invoked subcommand parses the literal arguments the plugin passes. Added after the `ArgAction` escape; required for **every new surface** |
 | Sandboxed subcommand e2e | `CLAVE_STATE_DIR=<scratch> cargo run -p clave -- …` | one real end-to-end run of a new subcommand against a scratch store. Do it in a **debug** build — clap's `debug_assert` only fires there |
@@ -1314,8 +1314,8 @@ reaches only the active tab; `resize_pane_with_id` silently refuses fixed panes;
 `show_self` is a focus action). The vendored crates are here:
 
 ```
-~/.cargo/registry/src/*/zellij-tile-0.44.3/
-~/.cargo/registry/src/*/zellij-utils-0.44.3/
+~/.cargo/registry/src/*/zellij-tile-0.45.1/
+~/.cargo/registry/src/*/zellij-utils-0.45.1/
 ```
 
 `zellij-server` is not vendored but is fetchable from crates.io — several C6/C8

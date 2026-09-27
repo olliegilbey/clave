@@ -23,8 +23,11 @@ lose time to. One line, mechanism first, cite the source.
 ## Zellij behaviour
 
 Zellij's own source is the authority. Vendored at
-`~/.cargo/registry/src/*/zellij-tile-0.44.3/` and `…/zellij-utils-0.44.3/` —
-cite those by path and the next reader can grep them.
+`~/.cargo/registry/src/*/zellij-tile-0.45.1/` and `…/zellij-utils-0.45.1/` —
+cite those by path and the next reader can grep them. The pin moved from
+0.44.3 to 0.45.1 on 2026-09-27. Older entries cite 0.44.3 paths. Each such
+citation names the version it was read at, so re-read it at 0.45.1 before
+you rely on it.
 
 `zellij-server` is **not** vendored, so a claim about it has to say where it
 came from. Two routes, both fine, and the citation itself says which was taken:
@@ -38,7 +41,7 @@ came from. Two routes, both fine, and the citation itself says which was taken:
   `src/` included, exactly as it appears in the citation:
 
   ```
-  curl -sL https://raw.githubusercontent.com/zellij-org/zellij/v0.44.3/zellij-server/src/tab/layout_applier.rs
+  curl -sL https://raw.githubusercontent.com/zellij-org/zellij/v0.45.1/zellij-server/src/tab/layout_applier.rs
   ```
 
   Read a **tag**, never `main` — `main` is not the code running on anyone's
@@ -47,11 +50,11 @@ came from. Two routes, both fine, and the citation itself says which was taken:
 
   Which tag is the live question, and Cargo.lock does not answer it: the `=`
   pins fix the compile-time `zellij-tile`/`zellij-utils` crates, not the zellij
-  binary the user runs. `doctor::TESTED_ZELLIJ` (0.44.3) is the version the
+  binary the user runs. `doctor::TESTED_ZELLIJ` (0.45.1) is the version the
   ledger's behaviour is pinned to, and a mismatch there **warns, never halts**
   — so a session can legitimately be running a different server than the one
   every citation in this file was read at. Read the tag matching the server
-  whose behaviour you are explaining, and say so when it is not 0.44.3.
+  whose behaviour you are explaining, and say so when it is not 0.45.1.
 
 A source citation says what the code *does*; a ledger citation says what clave
 *saw*. When an entry has both, give both — that pairing is the strongest form,
@@ -271,7 +274,7 @@ do not assume it: its line types changed under us once already.
 - **`·` U+00B7 is the label separator, and it is the highest-stakes literal in the codebase** — baked into every composed session label, therefore into every zellij tab name via `RenameTab`, and every bar row. Losing it in transit silently yields `x main fix auth`.
 - **`✖` is U+2716 HEAVY MULTIPLICATION X, `✗` is U+2717 BALLOT X — different meanings.** U+2716 is `Status::Failed`, a hook-lifecycle status (`clave-types/src/lib.rs:41`). U+2717 is the *stale row* flag, a `bool` not a `Status` (`RowStatus::Stale` in `clave-bar/src/render.rs`, field at `clave-types/src/lib.rs:78`). Both render the same red, so shape is the only discriminator. **A third, unrelated use:** `clave doctor` uses `✗` for a failed check (`doctor.rs:404,415,482`) — a repo-wide replace would corrupt it.
 - **[FIXED] The renderer used to build its gutter by string concatenation**, so a dropped or double-width glyph shifted the row's text, and `main.rs` is `test = false` so nothing caught it. `main.rs` now calls `render_rows` (`render.rs`) and holds no visual logic at all. **Keep it that way** — anything you add to `fn render` is untestable by construction.
-- **`str::chars()` counts Unicode scalars, not terminal cells** — so an East-Asian wide or combining character miscounts the row. `render.rs` measures with `unicode-width` (held at 0.1 — the line zellij-utils 0.44.3 resolves for its own grid), and it is now **the bar's only clamp**: `main.rs`'s char-counting one is gone. The claim is scoped to the bar — host-side, `hook.rs:109` still does `chars().take(32)` on a composed label, and that one is a *store* budget, not a column budget.
+- **`str::chars()` counts Unicode scalars, not terminal cells** — so an East-Asian wide or combining character miscounts the row. `render.rs` measures with `unicode-width` (held at 0.2, the line zellij-utils 0.45.1 lays out its own grid with), and it is now **the bar's only clamp**: `main.rs`'s char-counting one is gone. The claim is scoped to the bar — host-side, `hook.rs:109` still does `chars().take(32)` on a composed label, and that one is a *store* budget, not a column budget.
 - **A colour blend ported from the ratified preview must round ties to EVEN, not away from zero.** Python's `round()` is round-half-to-even and `f64::round` is not, so a naive port shifts a channel by one and the rendered design silently stops matching the one that was signed off. `Rgb::mix` uses `round_ties_even`; fujiWhite faded 25% onto sumiInk3 puts blue on exactly `149.5`, so this is reachable, not theoretical (`render.rs`, `mix_rounds_ties_to_even`).
 - **[DESIGN] Below `min_intact_cols()` a rendered row is WIDER than the pane, deliberately.** Fixed columns everywhere with `summary` the only flex cell (LEDGER D9) means gutter + title + repo + spaces + margin + caps = 32 cells expanded (23 collapsed; it was 29 until #105 took the expanded battery cell to four columns, and 27 before D33 took `EXPANDED` to `(9, 7)` — derive it from `Widths`, never restate the number) that never shrink. A row that reflowed its columns to fit would be the failure lock §2.1 forbids, so the build never reflows — **it is a two-stage row.** `render_row` builds at `cols.max(min_intact_cols())`, over-running uniformly below the floor; `render_rows` then hands that over-run to `clip_to_cells`, because D13 assumed the terminal would clip it and the terminal **wraps** it instead — a blank second line under every row, observed live 2026-07-29. So a row is exactly `cols` cells at every width; what stays intact below the floor is the *uniformity*, not the width. Collapsed is ratified as a width PROFILE (LEDGER D16/D17), so the floor is `Widths::min_intact_cols()` — but the profile is chosen by STATE, not by width, so **nothing keeps the pane above the floor**: a tab spawned below ~123 columns is born under `EXPANDED`'s `min_intact_cols()` floor (32 as of #105). Do not "fix" this by shrinking a fixed column (`render.rs`, `Widths::min_intact_cols`, `clip_to_cells`). **As of #105 the collapsed resting width (30) sits BELOW the expanded floor (32)**, so every peek-on-nav and every Alt+c expand draws the EXPANDED profile through 30-31 cols on its way to 32 — a cosmetic one-frame blink (lost right margin, and for the selected row its right cap) during the grow animation, not a bug to chase.
 - **[SUPERSEDED] `COLLAPSED_TARGET_COLS` is no longer `4`, the width the bar could never reach** — it is **30**, `Widths::COLLAPSED`'s own geometry (LEDGER D17), well above zellij's resize floor. Any collapsed-mode analysis costed against a "text budget 0" row was reasoning about a phantom and does not transfer.
