@@ -1165,6 +1165,18 @@ impl ZellijPlugin for State {
                 }
                 false
             }
+            // One row per event, whatever line count zellij puts in it: a
+            // trackpad already sends one event per small movement. Horizontal
+            // scroll (new in zellij 0.45) falls through to the arm below; the
+            // 0.44.3 tile crate could not decode it and panicked the bar.
+            // Repaint unconditionally, as for a click: a dormant step moves
+            // only the highlight.
+            Event::Mouse(Mouse::ScrollDown(_)) | Event::Mouse(Mouse::ScrollUp(_)) => {
+                let down = matches!(event, Event::Mouse(Mouse::ScrollDown(_)));
+                let fx = self.model.wheel(down);
+                self.run_effects(fx);
+                true
+            }
             _ => false,
         }
     }

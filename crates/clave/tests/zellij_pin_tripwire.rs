@@ -1,6 +1,6 @@
 //! Zellij version-pin tripwire (issue #10 item 4).
 //!
-//! clave's correctness leans on OBSERVED zellij 0.44.3 semantics, not just
+//! clave's correctness leans on OBSERVED zellij semantics, not just
 //! its API: the resize floor/refusal behavior the width-seek machine expects
 //! (SUBSYSTEM-VALIDATION.md C6 rounds 9/17/20/21b), the fixed-pane silent
 //! resize refusal that forced percent panes (C8 2026-07-18), the KDL
@@ -10,10 +10,10 @@
 //! `zellij-tile` bump compiles clean and ships silently-changed semantics.
 //!
 //! Worse, cargo makes the drift invisible: the kdl_guardrail dev-dep pins
-//! `zellij-utils = "=0.44.3"`, but if zellij-tile bumped to 0.45 cargo would
-//! happily hold BOTH zellij-utils versions — the plugin would run 0.45
+//! `zellij-utils` exactly, but if zellij-tile moved alone cargo would
+//! happily hold BOTH zellij-utils versions — the plugin would run the new
 //! semantics while the guardrail kept green-lighting templates against the
-//! 0.44.3 parser. This test is the loud failure for exactly that split.
+//! old parser. This test is the loud failure for exactly that split.
 //!
 //! When it fires: re-audit the call sites above against the new zellij
 //! source (vendored path recipe in docs/dev/TESTING.md), re-run the live
@@ -22,10 +22,11 @@
 
 /// The audited zellij line. Every zellij-family crate in Cargo.lock must
 /// resolve to exactly this version — one version, everywhere.
-const PINNED_ZELLIJ: &str = "0.44.3";
+const PINNED_ZELLIJ: &str = "0.45.1";
 
-/// The kdl line zellij-utils 0.44.3 itself parses with (its own Cargo.toml
-/// pins 4.7.1). The kdl_guardrail's permission-cache check leans on this
+/// The kdl line this workspace resolves for zellij-utils. zellij-utils
+/// declares only `^4.5.0` (0.44.3 and 0.45.1 alike), so this is our pin, not
+/// zellij's. The kdl_guardrail's permission-cache check leans on this
 /// exact match for its fidelity claim (dev-dep `kdl = "=4.7.1"`), and a
 /// decoupled kdl bump — cargo holding a second kdl version for the dev-dep's
 /// consumers — would silently validate permissions.kdl against a different
