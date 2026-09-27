@@ -58,7 +58,7 @@ clave-types = { path = "../clave-types" }
 # it stays out of clave-bar's wasm32 build graph because the workspace uses
 # resolver = "3" (per-target, dev-dep-isolated feature unification) — if that
 # resolver setting ever changes, re-verify the wasm build's dep tree.
-zellij-utils = "=0.44.3"
+zellij-utils = "=0.45.1"
 # (kdl "=4.7.1" moved to [dependencies] for the theme slice — same pin, same
 # rationale, now needed at runtime.)
 # Proves the ux-gate1 dev scenario renders the locked visual design (#85

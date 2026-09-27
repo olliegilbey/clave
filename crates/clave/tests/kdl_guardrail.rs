@@ -290,14 +290,10 @@ fn config_with_theme_slice_parses_and_carries_the_selection() {
 /// The frame half of the passthrough (#262), and the one claim in it that is
 /// a VERSION claim rather than a parse claim.
 ///
-/// `pane_frame_style` does not exist in zellij 0.44.3 — it arrived in 0.45.0.
-/// The slice copies it anyway, because the user's config is shared across a
-/// fleet where some machines run each. That is only safe if the pinned 0.44.3
-/// parser treats the unknown node as inert rather than as an error, and an
-/// error here is a DEAD SESSION on every 0.44.x machine, not a cosmetic miss.
-/// Asserted, never assumed. When the zellij pin moves to 0.45.x this test
-/// keeps its meaning and gains one: `pane_frame_style` becomes readable from
-/// `parsed.options` and the assertion can tighten from "inert" to "carried".
+/// `pane_frame_style` arrived in zellij 0.45.0. The pin was 0.44.3 when the
+/// slice started to copy it, and this test then asserted only that the old
+/// parser took the node as inert. With the pin at 0.45.1 the parser reads it,
+/// so the test asserts that the style is carried, not just survived.
 #[test]
 fn config_with_the_frame_slice_parses_and_carries_pane_frames() {
     let user = "pane_frames true\n\
@@ -315,6 +311,11 @@ fn config_with_the_frame_slice_parses_and_carries_pane_frames() {
         parsed.options.pane_frames,
         Some(true),
         "the user's pane_frames must survive the round-trip:\n{cfg}"
+    );
+    assert_eq!(
+        parsed.options.pane_frame_style,
+        Some(zellij_utils::input::options::PaneFrameStyle::Full),
+        "the user's pane_frame_style must survive the round-trip:\n{cfg}"
     );
 }
 

@@ -47,7 +47,7 @@ Pairs well with [rot-reducer](https://github.com/olliegilbey/rot-reducer), a plu
 
 ## Try it
 
-You need [`zellij`](https://zellij.dev) (0.44.3 is what's tested), `claude`,
+You need [`zellij`](https://zellij.dev) (0.45.1 is what's tested), `claude`,
 `git`, plus `fzf` and `zoxide` for the directory picker (your fleet ranks it, zoxide fills in the rest), and a
 [Nerd Font](https://www.nerdfonts.com/) in your terminal, version 3.5 or newer
 so the provider icons have glyphs. macOS and Linux.
@@ -101,6 +101,9 @@ exec $SHELL
 | `Alt+c`                              | toggle collapsed or expanded view of the sidebar                                                    |
 | `Alt+t` `Alt+w`                      | new terminal tab, close tab                                                                         |
 | `Alt+f`                              | toggle a floating shell over the current tab, great for your terminal based editor at the same time |
+
+The mouse works too. Click a row to go to it. Scroll over the sidebar to walk
+the rows, one row per step.
 
 Everything clave binds lives on `Alt`. Five stock Zellij `Ctrl` bindings that
 Claude Code needs (`Ctrl+g/t/o/b/q`) are unbound for you; the rest of

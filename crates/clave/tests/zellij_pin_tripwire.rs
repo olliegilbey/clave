@@ -22,7 +22,7 @@
 
 /// The audited zellij line. Every zellij-family crate in Cargo.lock must
 /// resolve to exactly this version — one version, everywhere.
-const PINNED_ZELLIJ: &str = "0.44.3";
+const PINNED_ZELLIJ: &str = "0.45.1";
 
 /// The kdl line zellij-utils 0.44.3 itself parses with (its own Cargo.toml
 /// pins 4.7.1). The kdl_guardrail's permission-cache check leans on this
