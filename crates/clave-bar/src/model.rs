@@ -456,6 +456,15 @@ fn spawn_uuid(command: &str) -> Option<&str> {
     words.next()
 }
 
+/// What a one-row walk does at the end of its block.
+#[derive(Clone, Copy)]
+enum Edge {
+    /// Keyboard walk: step off one end onto the other.
+    Wrap,
+    /// Wheel: stay on the end row.
+    Stop,
+}
+
 /// Row identity (§6.6 C8): a live zellij tab, a standby row (dormant, but the
 /// last quit left it live, so arriving on it opens it), or a dormant store
 /// row (conversation with no tab yet — claude.ai-style list).
@@ -2850,69 +2859,125 @@ impl BarModel {
         let rows = self.rows();
         let line = if let Some(n) = v.get("row").and_then(|n| n.as_u64()) {
             (n as usize).checked_sub(1) // 1-based → display line
-        } else if let Some(dir) = v.get("dir").and_then(|d| d.as_str()) {
-            if rows.is_empty() {
-                return Vec::new();
-            }
-            // #112: there are TWO rings, one per block, and the walk never
-            // crosses between them. Which block the walk belongs to is a
-            // FOCUS, held by the cursor and changed only by an explicit pick
-            // (click or Alt+N):
-            //
-            //   no dormant selection  → the live block, based on the
-            //                           executor's own row (focus truth)
-            //   a dormant selection   → the dormant block, based on the
-            //                           selected row
-            //
-            // So clicking into the dormant list keeps `Alt+j`/`Alt+k` inside
-            // it until you pick a live row again, and a walk can never fall
-            // from one block into the other. That matters because on the real
-            // store 17 of 21 rows are dormant: one ring over both is mostly
-            // rows with no process behind them, and the live fleet is four
-            // steps of it.
-            //
-            // The cursor lookup is by DISPLAYED position, so a selection whose
-            // row has gone live (or vanished) silently returns the walk to the
-            // live block — the same self-heal `rows()` does for the highlight.
-            let live_len = Self::live_block_len(&rows);
-            let selected = self.cursor.as_ref().and_then(|u| {
-                rows.iter().position(
-                    |(k, _)| matches!(k, RowKey::Dormant(d) | RowKey::Standby(d) if d == u),
-                )
-            });
-            // (first line of the block, length of the block, position in it)
-            let (base, len, cur) = match selected {
-                // A standby landing keeps the cursor, so a fast walk steps
-                // on from it while the executor's own tab has not moved
-                // yet (the opened tab is still coming up).
-                Some(p) if p < live_len => (0, live_len, p),
-                Some(p) => (live_len, rows.len() - live_len, p),
-                // No live rows AND no selection: unreachable in a real session
-                // — every zellij tab carries a bar instance, so the tab list is
-                // never empty — but the model is pure and must answer. Walk the
-                // dormant block from its head rather than going dead; a dormant
-                // landing only ever selects (#100), so it cannot spawn.
-                None if live_len == 0 => (0, rows.len(), 0),
-                None => (
-                    0,
-                    live_len,
-                    rows.iter()
-                        .position(|(k, _)| *k == RowKey::Tab(own))
-                        .unwrap_or(0),
-                ),
-            };
-            let offset = cur - base;
-            match dir {
-                "next" => Some(base + (offset + 1) % len),
-                "prev" => Some(base + (offset + len - 1) % len),
-                _ => None,
-            }
         } else {
-            None
+            let forward = match v.get("dir").and_then(|d| d.as_str()) {
+                Some("next") => true,
+                Some("prev") => false,
+                _ => return Vec::new(),
+            };
+            Self::walk_line(&rows, self.cursor.as_deref(), own, forward, Edge::Wrap)
+                .map(|(_, to)| to)
         };
         let Some((key, _)) = line.and_then(|l| rows.get(l).cloned()) else {
             return Vec::new();
         };
+        self.land(key)
+    }
+
+    /// Mouse wheel over the bar: one row per event, like `Alt+j`/`Alt+k`
+    /// (Ollie, 2026-09-27). A wheel event reaches only the bar under the
+    /// pointer, so it walks from that bar's own tab with no executor
+    /// election, the same as `click`. Two differences from the keyboard
+    /// walk, both for trackpad momentum, which sends a burst of events:
+    /// the walk stops at the end of its block instead of wrapping, and a
+    /// step that goes nowhere emits nothing, so a burst against an end
+    /// does not re-switch to the same tab again and again. A third, for the
+    /// same reason: a standby row is only selected, never opened. The walk
+    /// opens standby rows on arrival, and one flick after a quit would open
+    /// the whole old fleet (review of #275). A click or Alt+Enter opens it.
+    pub fn wheel(&mut self, down: bool) -> Vec<Effect> {
+        let Some(own) = self.own_tab() else {
+            return Vec::new();
+        };
+        let rows = self.rows();
+        let Some((from, to)) =
+            Self::walk_line(&rows, self.cursor.as_deref(), own, down, Edge::Stop)
+        else {
+            return Vec::new();
+        };
+        if from == to {
+            return Vec::new();
+        }
+        let Some((key, _)) = rows.get(to).cloned() else {
+            return Vec::new();
+        };
+        match key {
+            RowKey::Standby(uuid) => self.land(RowKey::Dormant(uuid)),
+            key => self.land(key),
+        }
+    }
+
+    /// One step of a walk, as display lines: (the row it starts from, the
+    /// row it lands on). `None` when there are no rows.
+    fn walk_line(
+        rows: &[(RowKey, Row)],
+        cursor: Option<&str>,
+        own: usize,
+        forward: bool,
+        edge: Edge,
+    ) -> Option<(usize, usize)> {
+        if rows.is_empty() {
+            return None;
+        }
+        // #112: there are TWO rings, one per block, and the walk never
+        // crosses between them. Which block the walk belongs to is a
+        // FOCUS, held by the cursor and changed only by an explicit pick
+        // (click or Alt+N):
+        //
+        //   no dormant selection  → the live block, based on the
+        //                           executor's own row (focus truth)
+        //   a dormant selection   → the dormant block, based on the
+        //                           selected row
+        //
+        // So clicking into the dormant list keeps `Alt+j`/`Alt+k` inside
+        // it until you pick a live row again, and a walk can never fall
+        // from one block into the other. That matters because on the real
+        // store 17 of 21 rows are dormant: one ring over both is mostly
+        // rows with no process behind them, and the live fleet is four
+        // steps of it.
+        //
+        // The cursor lookup is by DISPLAYED position, so a selection whose
+        // row has gone live (or vanished) silently returns the walk to the
+        // live block — the same self-heal `rows()` does for the highlight.
+        let live_len = Self::live_block_len(rows);
+        let selected = cursor.and_then(|u| {
+            rows.iter().position(
+                |(k, _)| matches!(k, RowKey::Dormant(d) | RowKey::Standby(d) if d.as_str() == u),
+            )
+        });
+        // (first line of the block, length of the block, position in it)
+        let (base, len, cur) = match selected {
+            // A standby landing keeps the cursor, so a fast walk steps
+            // on from it while the executor's own tab has not moved
+            // yet (the opened tab is still coming up).
+            Some(p) if p < live_len => (0, live_len, p),
+            Some(p) => (live_len, rows.len() - live_len, p),
+            // No live rows AND no selection: unreachable in a real session
+            // — every zellij tab carries a bar instance, so the tab list is
+            // never empty — but the model is pure and must answer. Walk the
+            // dormant block from its head rather than going dead; a dormant
+            // landing only ever selects (#100), so it cannot spawn.
+            None if live_len == 0 => (0, rows.len(), 0),
+            None => (
+                0,
+                live_len,
+                rows.iter()
+                    .position(|(k, _)| *k == RowKey::Tab(own))
+                    .unwrap_or(0),
+            ),
+        };
+        let offset = cur - base;
+        let step = match (edge, forward) {
+            (Edge::Wrap, true) => (offset + 1) % len,
+            (Edge::Wrap, false) => (offset + len - 1) % len,
+            (Edge::Stop, true) => (offset + 1).min(len - 1),
+            (Edge::Stop, false) => offset.saturating_sub(1),
+        };
+        Some((cur, base + step))
+    }
+
+    /// Land a walk, a row jump or a wheel step on `key`.
+    fn land(&mut self, key: RowKey) -> Vec<Effect> {
         self.cursor_gen += 1; // every landing invalidates prior dwell arms
         match key {
             RowKey::Tab(tab_id) => {
@@ -8467,6 +8532,134 @@ mod tests {
                 .contains(&Effect::SwitchTab { position: 1 }),
             "the live block has the walk again"
         );
+    }
+
+    /// `fleet_two_live_three_dormant`, seen from the bar in tab `own` (1 at
+    /// position 0, 2 at position 1). The wheel needs a seated bar: it walks
+    /// from its own tab.
+    fn seated_fleet(own: usize) -> BarModel {
+        let mut m = one_line_bar(fleet_two_live_three_dormant());
+        m.set_own_pane(99 + own as u32);
+        m.apply_panes(panes_at(&[(0, 100, 5), (1, 101, 6)]));
+        m
+    }
+
+    #[test]
+    fn the_wheel_steps_one_live_row_per_event() {
+        assert_eq!(
+            seated_fleet(1).wheel(true),
+            vec![
+                Effect::SwitchTab { position: 1 },
+                Effect::AnnounceVisit { tab_id: 2 }
+            ],
+            "down from tab 1 lands on tab 2"
+        );
+        assert_eq!(
+            seated_fleet(2).wheel(false),
+            vec![
+                Effect::SwitchTab { position: 0 },
+                Effect::AnnounceVisit { tab_id: 1 }
+            ],
+            "up from tab 2 lands on tab 1"
+        );
+    }
+
+    /// Trackpad momentum sends a burst of events. A wheel that wrapped would
+    /// spin the fleet; one that re-landed on its own row would re-switch to
+    /// the same tab once per event.
+    #[test]
+    fn the_wheel_stops_at_the_ends_of_its_block_and_emits_nothing_there() {
+        let mut bottom = seated_fleet(2);
+        assert_eq!(
+            bottom.wheel(true),
+            Vec::<Effect>::new(),
+            "down from the last live row: no wrap, no drop into the dormant block"
+        );
+        assert!(bottom.cursor.is_none(), "and no dormant selection");
+        assert_eq!(
+            seated_fleet(1).wheel(false),
+            Vec::<Effect>::new(),
+            "up from the first live row: no wrap"
+        );
+    }
+
+    /// Only the bar under the pointer gets a wheel event, so its own tab is
+    /// the truth. The beacon can still name the tab the user left (a
+    /// beaconless switch), and a walk from there would go the wrong way.
+    #[test]
+    fn the_wheel_walks_from_its_own_tab_not_the_beacon() {
+        let mut m = seated_fleet(1);
+        m.beacon(2);
+        assert_eq!(
+            m.wheel(true),
+            vec![
+                Effect::SwitchTab { position: 1 },
+                Effect::AnnounceVisit { tab_id: 2 }
+            ]
+        );
+    }
+
+    #[test]
+    fn the_wheel_walks_the_dormant_block_after_a_dormant_pick() {
+        let mut m = seated_fleet(1);
+        m.click(3, TALL_PANE);
+        assert_eq!(m.cursor.as_deref(), Some("u-d1"));
+        assert!(m.wheel(true).is_empty(), "a dormant step switches nothing");
+        assert_eq!(m.cursor.as_deref(), Some("u-d0"), "down one dormant row");
+        assert!(
+            m.wheel(true).is_empty(),
+            "a step past the end emits nothing"
+        );
+        assert_eq!(
+            m.cursor.as_deref(),
+            Some("u-d0"),
+            "stops at the block's end, no wrap"
+        );
+        m.wheel(false);
+        m.wheel(false);
+        m.wheel(false);
+        assert_eq!(
+            m.cursor.as_deref(),
+            Some("u-d2"),
+            "stops at the block's head, never climbs into the live block"
+        );
+    }
+
+    /// A momentum flick past the standby block must open nothing: after a
+    /// quit that block is the whole old fleet. The wheel selects, and the
+    /// selection is one Alt+Enter from open.
+    #[test]
+    fn the_wheel_selects_standby_rows_and_opens_none() {
+        let mut m = standby_fleet();
+        m.set_own_pane(101);
+        m.apply_panes(panes_at(&[(0, 100, 5), (1, 101, 6)]));
+        for _ in 0..10 {
+            assert!(
+                !m.wheel(true)
+                    .iter()
+                    .any(|e| matches!(e, Effect::OpenAgent { .. })),
+                "no wheel step opens a standby row"
+            );
+        }
+        assert_eq!(
+            m.cursor.as_deref(),
+            Some("u-s1"),
+            "the burst stops on the last standby row, not in the dormant block"
+        );
+        assert_eq!(
+            m.nav("{\"commit\":true}", Some(2)),
+            vec![Effect::OpenAgent {
+                uuid: "u-s1".into()
+            }],
+            "Alt+Enter opens the selected standby row"
+        );
+    }
+
+    #[test]
+    fn a_wheel_on_a_bar_with_incoherent_frames_does_nothing() {
+        let mut m = seated_fleet(1);
+        m.apply_tabs(vec![tab(1, 0, "a", true)]); // a close, panes not yet in
+        assert_eq!(m.wheel(true), Vec::<Effect>::new());
     }
 
     /// The standby fixture: two live tabs (1 active, 2), two standby rows,

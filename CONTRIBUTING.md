@@ -182,7 +182,7 @@ Two documents will save you a wasted afternoon:
   in there was expensive to learn.
 
 And never trust an assumed Zellij behaviour. Read the vendored source
-(`~/.cargo/registry/src/*/zellij-tile-0.44.3/`, `…/zellij-utils-0.44.3/`)
+(`~/.cargo/registry/src/*/zellij-tile-0.45.1/`, `…/zellij-utils-0.45.1/`)
 before building on it. `TabUpdate` reaches only the active tab,
 `resize_pane_with_id` silently refuses fixed panes, `show_self` is a focus
 action — each of those cost a round.

@@ -11,7 +11,7 @@ use crate::discover::{Discovered, ToolId, Via, tilde};
 
 /// The zellij version the validation ledger pins behavior to (permission-
 /// cache format, pane-resize semantics). Mismatch WARNS, never halts.
-pub const TESTED_ZELLIJ: &str = "0.44.3";
+pub const TESTED_ZELLIJ: &str = "0.45.1";
 
 /// Probed package managers, priority order (spec §Probes: probe-first,
 /// distro identity never consulted). Prefixes match mise's install_prefix.
@@ -883,7 +883,7 @@ mod tests {
         assert!(d.label.contains("0.45.0"));
         assert!(d.label.contains(TESTED_ZELLIJ));
         // Exact match is Ok; unparseable is Warn, never Problem.
-        let ok = found("/u/zellij", Via::PathLookup, Some("0.44.3"));
+        let ok = found("/u/zellij", Via::PathLookup, Some(TESTED_ZELLIJ));
         assert_eq!(
             diagnose_tool(ToolId::Zellij, &ok, None, Path::new("/h")).severity,
             Severity::Ok
@@ -929,7 +929,11 @@ mod tests {
     fn base_facts() -> Facts {
         Facts {
             home: PathBuf::from("/home/u"),
-            zellij: found("/usr/local/bin/zellij", Via::PathLookup, Some("0.44.3")),
+            zellij: found(
+                "/usr/local/bin/zellij",
+                Via::PathLookup,
+                Some(TESTED_ZELLIJ),
+            ),
             claude: found("/home/u/.local/bin/claude", Via::PathLookup, Some("2.1.4")),
             git: found("/usr/bin/git", Via::PathLookup, Some("2.51.0")),
             fzf: found("/opt/homebrew/bin/fzf", Via::PathLookup, Some("0.60.0")),
