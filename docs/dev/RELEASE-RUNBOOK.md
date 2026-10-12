@@ -160,13 +160,18 @@ once is not tidiness: the first draft of this runbook duplicated them, and the
 copy that guarding `launch.kdl` was missing the unversioned probe entirely. Two
 copies drift; one cannot.
 
+Every path here is written `${TMPDIR:-/tmp}`, because zellij puts its log
+under `temp_dir()`, which is `$TMPDIR` or `/tmp` when that is unset
+(`zellij-utils-0.45.1/src/consts.rs:333`). macOS sets `TMPDIR`; Linux usually
+does not, and a bare `$TMPDIR/…` there resolves to `/…` (devbox, 2026-10-12).
+
 They go to a **file**, not just your shell, because Step 3 runs its checks from
 a *second pane* — a different shell, which would not inherit them.
 
 **You type:**
 
 ```bash
-cat > "$TMPDIR/clave-release-checks.sh" <<'CHECKS'
+cat > "${TMPDIR:-/tmp}/clave-release-checks.sh" <<'CHECKS'
 STABLE=("$HOME/.local/share/clave/config.kdl"
         "$HOME/.local/share/clave/layout.kdl"
         "$HOME/.config/zellij/config.kdl")
@@ -190,13 +195,13 @@ clave_unversioned() {
   grep -nE 'clave_binary "clave"|Run "clave"|file:[^"]*clave-bar\.wasm' "$@" 2>/dev/null
 }
 CHECKS
-source "$TMPDIR/clave-release-checks.sh"
+source "${TMPDIR:-/tmp}/clave-release-checks.sh"
 ```
 
 **In every new shell or pane this runbook sends you to, source it first:**
 
 ```bash
-source "$TMPDIR/clave-release-checks.sh"
+source "${TMPDIR:-/tmp}/clave-release-checks.sh"
 ```
 
 ### Step 1 — prove what is on PATH
@@ -265,8 +270,8 @@ previous version's loads too and fails a coherent cut, and a midnight crossing
 returns nothing at all.
 
 ```bash
-ZLOG=$TMPDIR/zellij-$(id -u)/zellij-log/zellij.log
-{ wc -l < "$ZLOG" 2>/dev/null || echo 0; } | tee "$TMPDIR/clave-release-logmark"
+ZLOG=${TMPDIR:-/tmp}/zellij-$(id -u)/zellij-log/zellij.log
+{ wc -l < "$ZLOG" 2>/dev/null || echo 0; } | tee "${TMPDIR:-/tmp}/clave-release-logmark"
 ```
 
 (The `|| echo 0` is for a box that has never run zellij — no log file yet, so
@@ -302,9 +307,9 @@ two sidebars in one tab, or a bar that appears twice at different widths.
 **Then, in another pane, you type:**
 
 ```bash
-source "$TMPDIR/clave-release-checks.sh"     # new pane, new shell
-ZLOG=$TMPDIR/zellij-$(id -u)/zellij-log/zellij.log
-tail -n +$(( $(cat "$TMPDIR/clave-release-logmark") + 1 )) "$ZLOG" \
+source "${TMPDIR:-/tmp}/clave-release-checks.sh"     # new pane, new shell
+ZLOG=${TMPDIR:-/tmp}/zellij-$(id -u)/zellij-log/zellij.log
+tail -n +$(( $(cat "${TMPDIR:-/tmp}/clave-release-logmark") + 1 )) "$ZLOG" \
   | grep "clave-bar: loaded v"
 ```
 
@@ -312,7 +317,7 @@ That's the full log line, `build=` field and all — read it, do not just count
 versions. If you want the deduplicated version list too:
 
 ```bash
-tail -n +$(( $(cat "$TMPDIR/clave-release-logmark") + 1 )) "$ZLOG" \
+tail -n +$(( $(cat "${TMPDIR:-/tmp}/clave-release-logmark") + 1 )) "$ZLOG" \
   | grep "clave-bar: loaded v" | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | sort -u
 ```
 
@@ -409,8 +414,8 @@ If any step says STOP.
    session dies.
 
    ```bash
-   ZLOG=$TMPDIR/zellij-$(id -u)/zellij-log/zellij.log
-   tail -n +$(( $(cat "$TMPDIR/clave-release-logmark") + 1 )) "$ZLOG" | tail -40
+   ZLOG=${TMPDIR:-/tmp}/zellij-$(id -u)/zellij-log/zellij.log
+   tail -n +$(( $(cat "${TMPDIR:-/tmp}/clave-release-logmark") + 1 )) "$ZLOG" | tail -40
    clave_versions "${STABLE[@]}" "${LAUNCH[@]}"     # the skew, as it stands
    clave_unversioned "${STABLE[@]}" "${LAUNCH[@]}"
    ```

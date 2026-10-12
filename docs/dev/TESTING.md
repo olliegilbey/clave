@@ -933,7 +933,7 @@ Each step exists because skipping it produces a confident, wrong result.
    check the tag on them:
 
    ```bash
-   grep 'clave-bar: loaded' "$TMPDIR/zellij-$(id -u)/zellij-log/zellij.log" | tail -5
+   grep 'clave-bar: loaded' "${TMPDIR:-/tmp}/zellij-$(id -u)/zellij-log/zellij.log" | tail -5
    ```
 
    Do **not** `grep -c` for your tag. `just sandbox` derives the tag from `git
