@@ -8,6 +8,14 @@ owns everything they structurally cannot reach._
 
 ## Run ledger — the useful recent history
 
+- **runs 40 and 41, 2026-10-12 — the 0.5.4 cut, the first drive on zellij
+  0.45.1.** Box only; the Mac half did not run. Run 40 at `5e67e0c`: red
+  once in phase 3. After a tab close, one `list-panes` got "Session not
+  found" while the session was up and listed itself (FOOTGUNS, "can say
+  `Session 'X' not found`"). Three repro loops on the same sandbox gave 0 of
+  419. Run 41 at `c572afc`, fresh stage: box 0-7 green, 250 checks; both
+  eyeballs passed. The agent quit the sandbox at 6c and at teardown.
+
 - **run 39, 2026-09-23 — standby rebased onto the #271 merge.** Build
   `b75b684`, a tree identical to run 38's. Mac 0-7 green, 250 checks; box
   0-7 green, 249 checks. The agent quit both sandboxes at 6c.
