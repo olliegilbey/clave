@@ -366,12 +366,10 @@ pub struct Agent {
     pub label: String,
     /// Per-agent status (latest-wins state machine, spec §6.5). `lenient`
     /// because a newer host can name a status this bar has never heard of,
-    /// and rejecting the variant would reject the whole SNAPSHOT.
-    #[serde(
-        default,
-        deserialize_with = "lenient",
-        skip_serializing_if = "is_default"
-    )]
+    /// and rejecting the variant would reject the whole SNAPSHOT. Always
+    /// written, though `Idle` is the default: the `clave ls --json | jq
+    /// '{label, status}'` recipes in the specs read it.
+    #[serde(default, deserialize_with = "lenient")]
     pub status: Status,
     /// unix seconds; bumped on UserPromptSubmit. DISPLAY and cross-session
     /// policy only (`clave ls`, the picker, eager-launch selection) — it is
@@ -535,18 +533,23 @@ pub struct Agent {
 }
 
 impl Agent {
-    /// A row with no tab and no pane, as the store sees it. These rows make up
-    /// most of a push and seldom change, so a push can name them by tag in
-    /// place of carrying them ([`DormantRows`]). The host splits a push on
-    /// this test and the bar puts it back together on the same test, so the
-    /// two sides cannot disagree about which rows a tag names. A row with a
-    /// pane and no tab is mid-spawn and changes soon, so it is not one.
-    pub fn is_dormant(&self) -> bool {
+    /// Whether a snapshot's dormant tag covers this row: it holds no tab and no
+    /// pane in the store. These rows make up most of a push and seldom change,
+    /// so a push can name them by tag in place of carrying them
+    /// ([`DormantRows`]). Not the bar's own `is_dormant`, which asks whether a
+    /// LIVE tab or pane holds the row. A row mid-spawn (a pane, no tab yet) is
+    /// dormant to the glossary but not covered here: it changes soon.
+    ///
+    /// This test is part of the wire. The host splits a push on it and the bar
+    /// rebuilds the push on it, each on its own. Change it only with a new
+    /// name for `DormantRows::Omitted` and a new slim pipe, or a mixed fleet
+    /// holds one set while the host leaves out another.
+    pub fn in_dormant_tag(&self) -> bool {
         self.tab_id.is_none() && self.pane_id.is_none()
     }
 }
 
-/// How a snapshot carries its dormant rows ([`Agent::is_dormant`]). Every bar
+/// How a snapshot carries its dormant rows ([`Agent::in_dormant_tag`]). Every bar
 /// decodes every push, and the cost is linear in bytes times bars (FOOTGUNS:
 /// "Every event and pipe crosses into a plugin as JSON text"). Measured live
 /// on 2026-10-13: 107 of 121 rows were dormant, 92 KB of a 107 KB push, and
@@ -635,6 +638,16 @@ pub struct AgentSnapshot {
     #[serde(default)]
     pub dormant: DormantRows,
 }
+
+/// The pipe a whole snapshot push rides (`DormantRows::Included`).
+pub const STATUS_PIPE: &str = "clave-status";
+
+/// The pipe a slim push rides (`DormantRows::Omitted`). A pipe of its own so
+/// that a bar older than the slim push never reads one: it has no arm for this
+/// name and drops it, so it shows stale rows, not a fleet without its dormant
+/// rows. That bar exists when a release lands under a session that was not
+/// quit, or when a launch attaches to a running session (setup.rs).
+pub const SLIM_STATUS_PIPE: &str = "clave-status-slim";
 
 /// The `clave-register` payload a pane's `clave spawn` pipes to the plugin so it
 /// can map uuid → pane_id → live tab position (spec §6.1 / spike S2).
@@ -1250,8 +1263,8 @@ mod tests {
         let json = serde_json::to_string(&bare).unwrap();
         assert_eq!(
             json,
-            r#"{"uuid":"u1","cwd":"/x","repo_root":"/x","branch":"main","label":"x · main","last_interacted":5,"last_visited":6}"#,
-            "only the fields that cannot default are written"
+            r#"{"uuid":"u1","cwd":"/x","repo_root":"/x","branch":"main","label":"x · main","status":"idle","last_interacted":5,"last_visited":6}"#,
+            "only the fields that cannot default, and the status, are written"
         );
         assert_eq!(serde_json::from_str::<Agent>(&json).unwrap(), bare);
 
@@ -1286,20 +1299,20 @@ mod tests {
     #[test]
     fn a_row_is_dormant_only_with_no_tab_and_no_pane() {
         let bare = bare_agent("u1");
-        assert!(bare.is_dormant());
+        assert!(bare.in_dormant_tag());
         assert!(
             !Agent {
                 tab_id: Some(1),
                 ..bare.clone()
             }
-            .is_dormant()
+            .in_dormant_tag()
         );
         assert!(
             !Agent {
                 pane_id: Some(1),
                 ..bare
             }
-            .is_dormant(),
+            .in_dormant_tag(),
             "mid-spawn rides every push"
         );
     }

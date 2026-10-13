@@ -645,16 +645,20 @@ impl State {
             }
         };
         match name {
-            "clave-status" => match serde_json::from_str(payload) {
-                Ok(snap) => {
-                    self.apply_snapshot_and_settle(snap);
-                    true
+            // Two names, one gate: a slim push rides its own name so that a
+            // bar from before the slim push never reads it as the whole fleet.
+            clave_types::STATUS_PIPE | clave_types::SLIM_STATUS_PIPE => {
+                match serde_json::from_str(payload) {
+                    Ok(snap) => {
+                        self.apply_snapshot_and_settle(snap);
+                        true
+                    }
+                    Err(e) => {
+                        eprintln!("clave-bar: bad {name} payload: {e}");
+                        false
+                    }
                 }
-                Err(e) => {
-                    eprintln!("clave-bar: bad clave-status payload: {e}");
-                    false
-                }
-            },
+            }
             "clave-register" => match serde_json::from_str::<clave_types::Register>(payload) {
                 Ok(reg) => {
                     self.model.register(reg.uuid, reg.pane_id);

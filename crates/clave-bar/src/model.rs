@@ -448,9 +448,10 @@ pub const WALK_ASK_CAP: u8 = 3;
 /// a few frames; its first answered delta clears the stand-down early anyway.
 pub const PROBE_FAILURE_STANDDOWN: u8 = 3;
 
-/// The least time between two asks for a full snapshot (`Effect::Hydrate`).
-/// A `clave snapshot` answers well inside it, so a healthy bar asks once per
-/// missed push; a bar whose answer was lost asks again, not never.
+/// The least time between two asks for a full snapshot (`Effect::Hydrate`),
+/// while no answer has come. A `clave snapshot` answers well inside it, so a
+/// healthy bar asks once per missed push; a bar whose answer was lost asks
+/// again at the next push it cannot rebuild.
 pub const HYDRATE_RETRY_MS: u64 = 2_000;
 
 /// A row that has never received a user commitment (S1). Sorts below every row
@@ -644,10 +645,14 @@ pub struct BarModel {
     /// their tag. A push that leaves them out names this tag
     /// ([`DormantRows::Omitted`]), and `apply_push` puts them back.
     dormant_rows: Option<(u64, Vec<Agent>)>,
-    /// When this bar last asked for a full snapshot (`Effect::Hydrate`). Every
-    /// bar hears every push, so without a bound a missed push would ask once
-    /// per push until the answer lands.
+    /// When this bar last asked for a full snapshot (`Effect::Hydrate`), until
+    /// a whole one arrives. Every bar hears every push, so without a bound a
+    /// missed push would ask once per push until the answer lands.
     hydrate_asked_ms: Option<u64>,
+    /// The highest seq of a push this bar could not rebuild. While `seq` is
+    /// below it, the bar shows an older fleet than the store holds, so it
+    /// asks again for a full snapshot.
+    refused_seq: u64,
     /// uuid → terminal pane id, from clave-register (S2).
     uuid_to_pane: BTreeMap<String, u32>,
     tabs: Vec<TabMeta>,
@@ -1636,28 +1641,50 @@ impl BarModel {
         self.prune_opening();
     }
 
-    /// Apply a full-replace snapshot (§5). Returns rename effects (label
-    /// changes → real-tab renames) — main.rs gates their EXECUTION to the
-    /// active-tab instance, but the guard bookkeeping must run everywhere so
-    /// all instances agree on what has been renamed.
     /// A snapshot from the pipe or from `clave snapshot`, whole or with its
-    /// dormant rows named by tag. A tag this bar holds rebuilds the whole
-    /// snapshot, so the model below only ever sees a whole one. A tag it does
-    /// not hold asks for a full snapshot, and applies nothing: half a fleet
-    /// would show rows going and coming back.
+    /// dormant rows named by tag. Returns rename effects (label changes →
+    /// real-tab renames) — main.rs gates their EXECUTION to the active-tab
+    /// instance, but the guard bookkeeping must run everywhere so all
+    /// instances agree on what has been renamed.
+    ///
+    /// A tag this bar holds rebuilds the whole snapshot, so the model below
+    /// only ever sees a whole one. A tag it does not hold applies nothing,
+    /// because half a fleet would show rows going and coming back. The bar
+    /// asks for a full snapshot instead, and asks again until it shows a seq
+    /// at least as new as the push it refused.
     ///
     /// Ordering: a tag names content, not time, so a kept copy rebuilds any
-    /// push that names it, in any arrival order. The seq gate is checked first,
-    /// so a stale push asks for nothing, and only an accepted snapshot replaces
-    /// the kept copy.
-    pub fn apply_push(&mut self, mut snap: AgentSnapshot, now_ms: u64) -> Vec<Effect> {
+    /// push that names it, in any arrival order. The ask converges because the
+    /// host pushes only after its store write commits (`main.rs`, every
+    /// `push_snapshot` follows a locked write), so a `clave snapshot` asked
+    /// for after a push arrived carries that push's seq or a newer one.
+    pub fn apply_push(&mut self, snap: AgentSnapshot, now_ms: u64) -> Vec<Effect> {
+        if matches!(snap.dormant, DormantRows::Included { tag: Some(_) }) {
+            // A whole snapshot answers the ask in flight, even a stale one:
+            // the next ask must not wait out the window behind it.
+            self.hydrate_asked_ms = None;
+        }
+        let mut fx = match self.rebuild(snap) {
+            Some(snap) => self.apply_snapshot(snap),
+            None => Vec::new(),
+        };
+        if self.seq < self.refused_seq {
+            fx.extend(self.ask_hydrate(now_ms));
+        }
+        fx
+    }
+
+    /// The whole snapshot a fresh push stands for. `None` for a stale push,
+    /// and for a push whose tag this bar does not hold (it is kept in
+    /// `refused_seq`). Only an accepted tagged snapshot replaces the kept rows.
+    fn rebuild(&mut self, mut snap: AgentSnapshot) -> Option<AgentSnapshot> {
         if snap.seq <= self.seq {
-            return Vec::new();
+            return None;
         }
         match snap.dormant {
             DormantRows::Included { tag } => {
                 if let Some(tag) = tag {
-                    let rows = snap.agents.iter().filter(|a| a.is_dormant()).cloned();
+                    let rows = snap.agents.iter().filter(|a| a.in_dormant_tag()).cloned();
                     self.dormant_rows = Some((tag, rows.collect()));
                 }
             }
@@ -1669,15 +1696,18 @@ impl BarModel {
                     snap.agents.sort_by(|a, b| a.uuid.cmp(&b.uuid));
                     snap.dormant = DormantRows::Included { tag: Some(tag) };
                 }
-                _ => return self.ask_hydrate(now_ms),
+                _ => {
+                    self.refused_seq = self.refused_seq.max(snap.seq);
+                    return None;
+                }
             },
         }
-        self.apply_snapshot(snap)
+        Some(snap)
     }
 
-    /// `Effect::Hydrate`, at most once per [`HYDRATE_RETRY_MS`]. A time bound,
-    /// not a flag cleared by the answer: a `clave snapshot` that fails must
-    /// not leave the bar unable to ask again.
+    /// `Effect::Hydrate`, at most once per [`HYDRATE_RETRY_MS`] while no whole
+    /// snapshot has come. A time bound as well as a flag the answer clears: a
+    /// `clave snapshot` that fails must not leave the bar unable to ask again.
     fn ask_hydrate(&mut self, now_ms: u64) -> Vec<Effect> {
         if self
             .hydrate_asked_ms
@@ -4752,6 +4782,56 @@ mod tests {
         m.apply_push(whole(5, Some(7), vec![]), 0);
         assert!(m.apply_push(slim(5, 8, vec![]), 0).is_empty());
         assert!(m.apply_push(slim(4, 8, vec![]), 0).is_empty());
+    }
+
+    /// The adversarial review's lost push: a second refusal falls inside the
+    /// window, and the first answer is older than it. Without a second ask,
+    /// the bar shows push 3's fleet until some later push, which an idle
+    /// fleet may never send.
+    #[test]
+    fn a_push_refused_inside_the_window_is_asked_for_when_an_older_answer_lands() {
+        let mut m = BarModel::default();
+        m.apply_push(whole(1, Some(7), vec![agent("u-a", Status::Idle, None)]), 0);
+        // Push 2 carried tag 8 and was lost. Push 3 names it.
+        assert_eq!(m.apply_push(slim(3, 8, vec![]), 100), vec![Effect::Hydrate]);
+        // Push 4 carried tag 9 and was lost too. Push 5 names it.
+        assert!(m.apply_push(slim(5, 9, vec![]), 200).is_empty());
+
+        let fx = m.apply_push(
+            whole(3, Some(8), vec![agent("u-b", Status::Idle, None)]),
+            300,
+        );
+        assert_eq!(m.seq, 3);
+        assert!(
+            fx.contains(&Effect::Hydrate),
+            "the bar still shows an older fleet than push 5"
+        );
+
+        let fx = m.apply_push(
+            whole(5, Some(9), vec![agent("u-c", Status::Idle, None)]),
+            400,
+        );
+        assert!(!fx.contains(&Effect::Hydrate), "push 5 is answered");
+        assert_eq!(uuids(&m), ["u-c"]);
+        assert!(
+            !m.apply_push(slim(6, 9, vec![]), 500)
+                .contains(&Effect::Hydrate)
+        );
+    }
+
+    /// An answer to an older ask can be staler than the bar itself. It still
+    /// ends the ask in flight, so the bar asks again at once and does not wait
+    /// out the window.
+    #[test]
+    fn a_stale_answer_opens_the_next_ask() {
+        let mut m = BarModel::default();
+        m.apply_push(whole(4, Some(7), vec![]), 0);
+        assert_eq!(m.apply_push(slim(6, 8, vec![]), 100), vec![Effect::Hydrate]);
+        assert_eq!(
+            m.apply_push(whole(3, Some(7), vec![]), 200),
+            vec![Effect::Hydrate]
+        );
+        assert_eq!(m.seq, 4, "the stale answer is not applied");
     }
 
     #[test]

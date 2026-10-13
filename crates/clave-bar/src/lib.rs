@@ -322,6 +322,13 @@ mod shell_text {
             settle.contains("self.model.apply_push(snap, mono_ms())"),
             "a snapshot must pass the push gate:\n{settle}"
         );
+        // The host sends a slim push on its own name, so a bar that does not
+        // listen on that name never hears most pushes.
+        let pipe = fn_body("handle_pipe");
+        assert!(
+            pipe.contains("clave_types::STATUS_PIPE | clave_types::SLIM_STATUS_PIPE =>"),
+            "both status names must reach the snapshot arm:\n{pipe}"
+        );
     }
 
     #[test]
