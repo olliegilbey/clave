@@ -2018,10 +2018,16 @@ check_nonempty "phase-5b target row (scenario-seeded, not stale)" "$P5B_UUID"
 
 # Its transcript, found by globbing rather than by munging the cwd here — the
 # munge is the binary's job and a second implementation of it in bash is a
-# second thing to get wrong.
+# second thing to get wrong. Every sandbox seeds the SAME fixture uuids, so the
+# glob also finds other sandboxes' copies, and the first match is whichever
+# root sorts first. Run 42 appended to `clave-dev-agent-a2-d8ae`'s copy, the
+# hook read this sandbox's own, and the mark never rose. So keep only the copy
+# whose own lines carry this row's cwd: the transcript's fact, not a munge.
+P5B_CWD="$(jq -r --arg u "$P5B_UUID" '.store.agents[$u].cwd // empty' <<<"$P5B_STATUS" 2>/dev/null)"
 P5B_TAIL=""
 for f in "$CLAUDE_PROJECTS"/*/"$P5B_UUID".jsonl; do
-  [[ -f "$f" ]] && P5B_TAIL="$f" && break
+  [[ -f "$f" && -n "$P5B_CWD" ]] && grep -qF "\"cwd\":\"$P5B_CWD\"" "$f" &&
+    P5B_TAIL="$f" && break
 done
 check_nonempty "phase-5b transcript on disk (${P5B_UUID})" "$P5B_TAIL"
 # GUARD, load-bearing: this phase APPENDS a line, and the only files it may

@@ -3374,7 +3374,13 @@ mod tests {
             fn ask(&mut self) {
                 let (pick, delay, lost) = self.picks[self.asks % self.picks.len()];
                 self.asks += 1;
-                assert!(self.asks < 1_000, "the asks never settle");
+                // One ask at birth and at most one per push is the whole
+                // budget; a rule that asks past it is spinning, and fails
+                // here at once rather than after a thousand loops.
+                assert!(
+                    self.asks <= self.states.len(),
+                    "more asks than pushes: the asks never settle"
+                );
                 let n = self.states.len();
                 let at = match (self.broken, lost) {
                     (false, _) => Some(self.heard + usize::from(pick) % (n - self.heard)),
