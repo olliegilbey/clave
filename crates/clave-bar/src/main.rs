@@ -1221,6 +1221,15 @@ impl ZellijPlugin for State {
             // Whether this bar's tab is on screen: the paint gate
             // (`BarModel::paints`) and the spinner read it.
             EventType::Visible,
+            // Not read: the bar never looks at keybinds. Subscribing is what
+            // strips them from every later ModeUpdate (zellij-server
+            // plugins/wasm_bridge.rs:2139-2146 at v0.45.1), and a tab switch
+            // sends the arriving tab's bar one (`move_clients_between_tabs`
+            // → `update_input_modes`, screen.rs:2018). Unsubscribed, each
+            // switch decoded the whole keymap in the bar the user had just
+            // switched to. The keymap now arrives once, at subscribe
+            // (plugins/mod.rs:762), and needs no permission.
+            EventType::InitialKeybinds,
             EventType::Timer, // peek-on-nav sink (set_timeout per peek)
                               // NO InputReceived: it fires for EVERY keystroke INCLUDING the
                               // nav keybinds themselves (C5 round 4: each walk press touched

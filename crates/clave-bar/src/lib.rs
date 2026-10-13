@@ -324,6 +324,15 @@ mod shell_text {
         );
     }
 
+    #[test]
+    fn the_bar_takes_the_keymap_once_and_not_on_every_tab_switch() {
+        let load = fn_body("load");
+        assert!(
+            load.contains("EventType::InitialKeybinds,"),
+            "without it, every ModeUpdate carries the whole keymap:\n{load}"
+        );
+    }
+
     /// The last expression of a shell `fn`: its answer.
     fn last_expr(body: &str) -> &str {
         let inner = body.trim_end().strip_suffix('}').unwrap_or(body);
