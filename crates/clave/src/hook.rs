@@ -1448,7 +1448,10 @@ pub fn push_snapshot(snap: &AgentSnapshot) {
     .stderr(Stdio::null())
     .spawn()
     .is_ok();
-    if let (true, Some(p)) = (spawned, paths.as_ref()) {
+    // Remember the tag only for a push aimed at a named session. An unaimed
+    // push lands where zellij chooses, and fails when several sessions run,
+    // so no bar may hold what it carried (review of 4b3d524).
+    if let (true, Some(p), Some(_)) = (spawned, paths.as_ref(), aim.target()) {
         crate::store::note_pushed(p, &wire);
     }
 }

@@ -3274,14 +3274,17 @@ mod tests {
 
     mod slim_push {
         use super::*;
-        use clave_bar::model::{BarModel, Effect};
+        use clave_bar::model::{BarModel, Effect, TabMeta};
         use proptest::prelude::*;
 
         const ROWS: usize = 5;
 
         #[derive(Debug, Clone)]
         enum Step {
+            /// The row binds to a tab the bar can see, so it shows as live.
             Open(usize, usize),
+            /// The row gets a pane and no tab yet: mid-spawn, outside the tag.
+            Spawn(usize),
             Close(usize),
             Reword(usize, u8),
         }
@@ -3289,20 +3292,41 @@ mod tests {
         fn step() -> impl Strategy<Value = Step> {
             prop_oneof![
                 (0..ROWS, 1..4usize).prop_map(|(r, t)| Step::Open(r, t)),
+                (0..ROWS).prop_map(Step::Spawn),
                 (0..ROWS).prop_map(Step::Close),
                 (0..ROWS, 0..3u8).prop_map(|(r, w)| Step::Reword(r, w)),
             ]
         }
 
         fn run(s: &mut Store, step: &Step) {
-            let (Step::Open(r, _) | Step::Close(r) | Step::Reword(r, _)) = step;
+            let (Step::Open(r, _) | Step::Spawn(r) | Step::Close(r) | Step::Reword(r, _)) = step;
             let row = s.agents.get_mut(&format!("u{r}")).unwrap();
             match step {
                 Step::Open(_, tab) => row.tab_id = Some(*tab),
-                Step::Close(_) => row.tab_id = None,
+                Step::Spawn(r) => row.pane_id = Some(10 + *r as u32),
+                Step::Close(_) => (row.tab_id, row.pane_id) = (None, None),
                 Step::Reword(_, w) => row.summary = format!("words {w}"),
             }
             s.seq += 1;
+        }
+
+        /// The tabs `Open` binds to, as the bar sees them.
+        fn tabs() -> Vec<TabMeta> {
+            (1..4)
+                .map(|id| TabMeta {
+                    tab_id: id,
+                    position: id - 1,
+                    name: format!("t{id}"),
+                    active: id == 1,
+                    floating_visible: false,
+                })
+                .collect()
+        }
+
+        fn newborn() -> BarModel {
+            let mut bar = BarModel::default();
+            bar.apply_tabs(tabs());
+            bar
         }
 
         type Rows = Vec<(clave_bar::model::RowKey, clave_bar::render::Row)>;
@@ -3311,7 +3335,9 @@ mod tests {
         /// ask for a full snapshot gets the store as it is when `clave
         /// snapshot` runs. That is no older than the newest push the bar has
         /// heard, because the host pushes only after its store write commits.
-        /// The answer can land after later pushes.
+        /// The answer can land after later pushes. In a `broken` run that
+        /// premise fails, as when the store goes back or a push comes from
+        /// another store: an answer can be any state, or never come.
         struct Drive {
             bar: BarModel,
             /// `states[i]` is the store after `i` steps.
@@ -3322,29 +3348,42 @@ mod tests {
             heard: usize,
             arrivals: usize,
             now: u64,
+            broken: bool,
             /// (arrivals before it lands, the state it carries).
             answers: Vec<(usize, usize)>,
-            picks: Vec<(u8, usize)>,
+            picks: Vec<(u8, usize, bool)>,
             asks: usize,
         }
 
         impl Drive {
-            fn feed(&mut self, snap: AgentSnapshot) {
-                if self
-                    .bar
-                    .apply_push(snap, self.now)
-                    .contains(&Effect::Hydrate)
-                {
-                    let (pick, delay) = self.picks[self.asks % self.picks.len()];
-                    self.asks += 1;
-                    assert!(self.asks < 1_000, "the asks never settle");
-                    let at = self.heard + usize::from(pick) % (self.states.len() - self.heard);
-                    self.answers.push((self.arrivals + delay, at));
+            fn feed(&mut self, snap: AgentSnapshot, answer: bool) {
+                let fx = if answer {
+                    self.bar.apply_answer(snap, self.now)
+                } else {
+                    self.bar.apply_push(snap, self.now)
+                };
+                if fx.contains(&Effect::Hydrate) {
+                    self.ask();
                 }
                 assert!(
                     self.shown.contains(&self.bar.rows()),
                     "the bar shows a fleet the store never held"
                 );
+            }
+
+            fn ask(&mut self) {
+                let (pick, delay, lost) = self.picks[self.asks % self.picks.len()];
+                self.asks += 1;
+                assert!(self.asks < 1_000, "the asks never settle");
+                let n = self.states.len();
+                let at = match (self.broken, lost) {
+                    (false, _) => Some(self.heard + usize::from(pick) % (n - self.heard)),
+                    (true, true) => None,
+                    (true, false) => Some(usize::from(pick) % n),
+                };
+                if let Some(at) = at {
+                    self.answers.push((self.arrivals + delay, at));
+                }
             }
 
             fn land_answers(&mut self, all: bool) {
@@ -3354,7 +3393,7 @@ mod tests {
                     .position(|&(due, _)| all || due <= self.arrivals)
                 {
                     let (_, at) = self.answers.remove(k);
-                    self.feed(self.states[at].clone());
+                    self.feed(self.states[at].clone(), true);
                 }
             }
         }
@@ -3364,19 +3403,22 @@ mod tests {
             // pre-fix ask (two lost carrying pushes, then a refusal inside the
             // window) took about 1000 cases to find, measured 2026-10-13.
             #![proptest_config(ProptestConfig { cases: 2048, ..ProptestConfig::default() })]
-            /// Property — the slim push cannot be seen. The host slims each
-            /// push against the tag it last pushed. The pushes arrive in any
-            /// order, at any pace, and any of them can be lost. Then (1) the
-            /// bar only ever shows a fleet the store held, and (2) once the
-            /// answers to its asks land, it shows a fleet no older than the
-            /// newest push it heard.
+            /// Property — the slim push cannot be seen, and costs at most one
+            /// ask per push. The host slims each push against the tag it last
+            /// pushed. The pushes arrive in any order, at any pace, and any of
+            /// them can be lost. Then (1) the bar only ever shows a fleet the
+            /// store held; (2) it asks once at birth and at most once per slim
+            /// push it heard, even when the answers are wrong or never come;
+            /// (3) when the answers keep the premise, it ends no older than
+            /// the newest push it heard.
             #[test]
             fn prop_a_bar_shows_only_whole_fleets_and_catches_up(
                 steps in prop::collection::vec(step(), 1..12),
                 keys in prop::collection::vec(any::<u16>(), 12),
                 lost in prop::collection::vec(any::<bool>(), 12),
                 gaps in prop::collection::vec(0..3_000u64, 12),
-                picks in prop::collection::vec((any::<u8>(), 0..3usize), 12),
+                picks in prop::collection::vec((any::<u8>(), 0..3usize, any::<bool>()), 12),
+                broken in any::<bool>(),
             ) {
                 let mut s = fleet(&[], &[]);
                 for r in 0..ROWS {
@@ -3398,38 +3440,53 @@ mod tests {
                 let shown = states
                     .iter()
                     .map(|st| {
-                        let mut fresh = BarModel::default();
+                        let mut fresh = newborn();
                         fresh.apply_push(st.clone(), 0);
                         fresh.rows()
                     })
                     .collect();
                 let mut d = Drive {
-                    bar: BarModel::default(),
+                    bar: newborn(),
                     states,
                     shown,
                     heard: 0,
                     arrivals: 0,
                     now: 0,
+                    broken,
                     answers: Vec::new(),
                     picks,
-                    asks: 0,
+                    asks: 1,
                 };
-                // The bar hydrates at birth, as `load` makes it.
-                d.feed(d.states[0].clone());
+                // The bar asks at birth, as `load` makes it, and the store
+                // has not moved yet.
+                prop_assert_eq!(d.bar.hydrate(0), vec![Effect::Hydrate]);
+                d.feed(d.states[0].clone(), true);
                 let mut arrival: Vec<usize> = (1..wires.len()).collect();
                 arrival.sort_by_key(|&i| keys[i - 1]);
+                let mut slim_heard = 0;
                 for i in arrival.into_iter().filter(|&i| !lost[i - 1]) {
                     d.now += gaps[i - 1];
                     d.land_answers(false);
                     d.heard = d.heard.max(i);
-                    d.feed(wires[i].clone());
+                    if matches!(wires[i].dormant, DormantRows::Omitted { .. }) {
+                        slim_heard += 1;
+                    }
+                    d.feed(wires[i].clone(), false);
                     d.arrivals += 1;
                 }
                 d.land_answers(true);
                 prop_assert!(
-                    d.shown[d.heard..].contains(&d.bar.rows()),
-                    "the bar shows a fleet older than a push it heard"
+                    d.asks <= 1 + slim_heard,
+                    "{} asks for {} slim pushes",
+                    d.asks,
+                    slim_heard
                 );
+                if !broken {
+                    prop_assert!(
+                        d.shown[d.heard..].contains(&d.bar.rows()),
+                        "the bar shows a fleet older than a push it heard"
+                    );
+                }
             }
         }
     }

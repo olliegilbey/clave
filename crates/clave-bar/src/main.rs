@@ -557,8 +557,10 @@ impl State {
     /// `clave-status` push both land here. Two call sites that each had to
     /// remember `settle_identity()` is how the hydrate came to be the only
     /// snapshot that never bound anything (RC-B).
-    fn apply_snapshot_and_settle(&mut self, snap: clave_types::AgentSnapshot) {
-        let fx = self.model.apply_push(snap, mono_ms());
+    /// Both snapshot paths end here, the pipe and the `clave snapshot` answer
+    /// (RC-B #55): the model's effects run, then the binds settle against the
+    /// agents the snapshot brought.
+    fn settle_snapshot(&mut self, fx: Vec<Effect>) {
         self.run_effects(fx);
         self.settle_identity();
     }
@@ -650,7 +652,8 @@ impl State {
             clave_types::STATUS_PIPE | clave_types::SLIM_STATUS_PIPE => {
                 match serde_json::from_str(payload) {
                     Ok(snap) => {
-                        self.apply_snapshot_and_settle(snap);
+                        let fx = self.model.apply_push(snap, mono_ms());
+                        self.settle_snapshot(fx);
                         true
                     }
                     Err(e) => {
@@ -815,8 +818,10 @@ impl State {
                 // Permissions just landed (pre-seeded → immediate): hydrate
                 // from the store via `clave snapshot` (was spike S5). The
                 // result arrives as RunCommandResult below; the seq gate
-                // makes any race with live pushes benign (§5).
-                self.run_effects(vec![Effect::Hydrate]);
+                // makes any race with live pushes benign (§5). The model
+                // books it as the ask in flight.
+                let fx = self.model.hydrate(mono_ms());
+                self.run_effects(fx);
                 false
             }
             Event::RunCommandResult(exit, stdout, stderr, _ctx) => {
@@ -841,8 +846,11 @@ impl State {
                         // changes, so the eager cold-start tab stayed unbound
                         // and its first prompt never moved it. Both snapshot
                         // paths now go through one method, so this cannot
-                        // diverge from the `clave-status` arm again.
-                        self.apply_snapshot_and_settle(snap);
+                        // diverge from the `clave-status` arm again. Only
+                        // `clave snapshot` answers here, so this is the
+                        // answer to the ask in flight.
+                        let fx = self.model.apply_answer(snap, mono_ms());
+                        self.settle_snapshot(fx);
                         true
                     }
                     Err(_) => false, // not a snapshot (e.g. clave focus) — fine

@@ -98,7 +98,10 @@ loop.
    the next clave shortcut makes zellij start a second sidebar, of the new
    version, in the current tab. That happened on the 0.5.4 cut. If you cannot
    quit yet, leave the second sidebar alone until Step 3. If you close it, the
-   next shortcut starts another one.
+   next shortcut starts another one. From 0.5.6 on, the old sidebars also stop
+   updating most rows: most pushes ride `clave-status-slim`, a pipe name they
+   do not know. They show the fleet as it was until a tab opens or closes.
+   Relaunch soon.
 
    ```bash
    just release

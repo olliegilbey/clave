@@ -315,20 +315,34 @@ mod shell_text {
             arm < catch_all,
             "the Hydrate arm must come before the catch-all"
         );
-        // Both snapshot paths (pipe and hydrate) meet in one method, and it
-        // must resolve the dormant rows before the model sees the snapshot.
-        let settle = fn_body("apply_snapshot_and_settle");
+        // A pushed snapshot and an answer each pass their own gate: only an
+        // answer ends the ask in flight. A push sent down the answer's gate
+        // would let a bar ask without end. Both then settle in one method.
+        let pipe = fn_body("handle_pipe");
         assert!(
-            settle.contains("self.model.apply_push(snap, mono_ms())"),
-            "a snapshot must pass the push gate:\n{settle}"
+            pipe.contains("let fx = self.model.apply_push(snap, mono_ms());\n")
+                && !pipe.contains("apply_answer"),
+            "a pushed snapshot passes the push gate:\n{pipe}"
         );
         // The host sends a slim push on its own name, so a bar that does not
         // listen on that name never hears most pushes.
-        let pipe = fn_body("handle_pipe");
         assert!(
             pipe.contains("clave_types::STATUS_PIPE | clave_types::SLIM_STATUS_PIPE =>"),
             "both status names must reach the snapshot arm:\n{pipe}"
         );
+        let events = fn_body("handle_event");
+        assert!(
+            events.contains("let fx = self.model.apply_answer(snap, mono_ms());\n")
+                && !events.contains("apply_push"),
+            "a `clave snapshot` answer passes the answer gate:\n{events}"
+        );
+        assert!(
+            events.contains("let fx = self.model.hydrate(mono_ms());\n"),
+            "the birth ask is booked as the ask in flight:\n{events}"
+        );
+        for body in [pipe, events] {
+            assert!(body.contains("self.settle_snapshot(fx);"));
+        }
     }
 
     #[test]
