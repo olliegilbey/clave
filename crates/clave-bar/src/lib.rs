@@ -299,6 +299,31 @@ mod shell_text {
         );
     }
 
+    #[test]
+    fn every_bar_runs_its_own_hydrate_and_every_snapshot_goes_through_the_push_gate() {
+        // `run_effects` ends in a catch-all that drops the gated writes on a
+        // background bar. A guarded or missing `Hydrate` arm falls into it, and
+        // that bar never rebuilds a slim push again.
+        let effects = fn_body("run_effects");
+        let arm = effects
+            .find("Effect::Hydrate => {")
+            .expect("`Effect::Hydrate` needs an unguarded arm of its own");
+        let catch_all = effects
+            .find("_ => {} // non-active instance skips writes")
+            .expect("the catch-all went stale");
+        assert!(
+            arm < catch_all,
+            "the Hydrate arm must come before the catch-all"
+        );
+        // Both snapshot paths (pipe and hydrate) meet in one method, and it
+        // must resolve the dormant rows before the model sees the snapshot.
+        let settle = fn_body("apply_snapshot_and_settle");
+        assert!(
+            settle.contains("self.model.apply_push(snap, mono_ms())"),
+            "a snapshot must pass the push gate:\n{settle}"
+        );
+    }
+
     /// The last expression of a shell `fn`: its answer.
     fn last_expr(body: &str) -> &str {
         let inner = body.trim_end().strip_suffix('}').unwrap_or(body);

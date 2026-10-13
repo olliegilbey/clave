@@ -502,6 +502,12 @@ impl State {
                     }
                     run_command(&argv, BTreeMap::new());
                 }
+                // UNGATED: each bar keeps its own copy of the dormant rows, so
+                // each must fetch its own. The catch-all below would swallow
+                // it silently.
+                Effect::Hydrate => {
+                    run_command(&[bin.as_str(), "snapshot"], BTreeMap::new());
+                }
                 Effect::PersistCollapse { collapsed } if presumed => {
                     // Issue #5: report the ABSOLUTE collapse mode to the
                     // store (the one writer); its seq-bumped push heals any
@@ -552,7 +558,7 @@ impl State {
     /// remember `settle_identity()` is how the hydrate came to be the only
     /// snapshot that never bound anything (RC-B).
     fn apply_snapshot_and_settle(&mut self, snap: clave_types::AgentSnapshot) {
-        let fx = self.model.apply_snapshot(snap);
+        let fx = self.model.apply_push(snap, mono_ms());
         self.run_effects(fx);
         self.settle_identity();
     }
@@ -806,7 +812,7 @@ impl State {
                 // from the store via `clave snapshot` (was spike S5). The
                 // result arrives as RunCommandResult below; the seq gate
                 // makes any race with live pushes benign (§5).
-                run_command(&[self.clave_binary.as_str(), "snapshot"], BTreeMap::new());
+                self.run_effects(vec![Effect::Hydrate]);
                 false
             }
             Event::RunCommandResult(exit, stdout, stderr, _ctx) => {

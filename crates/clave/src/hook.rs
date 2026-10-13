@@ -1395,7 +1395,13 @@ const PUSH_BOUND_SECS: u32 = 15;
 /// zellij's fallback resolution (see `bounded_pipe_command`); stdio is nulled
 /// so nothing leaks into the hook protocol on stdout.
 pub fn push_snapshot(snap: &AgentSnapshot) {
-    let Ok(payload) = serde_json::to_string(snap) else {
+    let paths = crate::store::store_paths().ok();
+    // Leave the dormant rows out when the last push carried the same ones
+    // (`store::wire_for_push`): they are most of the bytes, and every bar
+    // decodes every byte.
+    let last_pushed = paths.as_ref().and_then(crate::store::last_pushed_tag);
+    let wire = crate::store::wire_for_push(snap, last_pushed);
+    let Ok(payload) = serde_json::to_string(&wire) else {
         return;
     };
     // WHERE this is allowed to land, decided from the store rather than from
@@ -1405,7 +1411,6 @@ pub fn push_snapshot(snap: &AgentSnapshot) {
     // the maintainer's fleet looks like, and it aimed a sandbox snapshot at
     // his live bar and hung his session (FOOTGUNS #281, again on
     // 2026-09-11). The env is the caller's claim; the store is the fact.
-    let paths = crate::store::store_paths().ok();
     let aim = aim_push(
         paths.as_ref().map(|p| p.dir.as_path()),
         own_session().as_deref(),
@@ -1429,7 +1434,7 @@ pub fn push_snapshot(snap: &AgentSnapshot) {
     // status push a silent no-op. Fire-and-forget stays: failure here must
     // never become a hook failure (§6.5 zero-risk citizen).
     let zellij = crate::discover::tool_path(crate::discover::ToolId::Zellij);
-    let _ = bounded_pipe_command(
+    let spawned = bounded_pipe_command(
         &zellij,
         &payload,
         &discover_pipe_bound(),
@@ -1439,7 +1444,11 @@ pub fn push_snapshot(snap: &AgentSnapshot) {
     .stdin(Stdio::null())
     .stdout(Stdio::null())
     .stderr(Stdio::null())
-    .spawn();
+    .spawn()
+    .is_ok();
+    if let (true, Some(p)) = (spawned, paths.as_ref()) {
+        crate::store::note_pushed(p, &wire);
+    }
 }
 
 /// Where a snapshot push may land.

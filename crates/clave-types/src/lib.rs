@@ -127,6 +127,14 @@ where
     })
 }
 
+/// `skip_serializing_if` for a field that reads back as its default when it is
+/// missing (`#[serde(default)]`). Every bar decodes every push, so each byte
+/// costs once per bar; most rows are dormant and most of their fields are
+/// empty, and this left 19% of a live push out (measured 2026-10-13).
+fn is_default<T: Default + PartialEq>(v: &T) -> bool {
+    *v == T::default()
+}
+
 /// Per-agent status. This is a *latest-wins state machine* (spec §6.5), not a
 /// priority-max: a later event can downgrade an earlier one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -340,6 +348,10 @@ pub fn sort_live_block<T>(rows: &mut [LiveRow<T>]) {
 /// One agent row as the plugin renders it. Mirrors the store record's
 /// display-relevant fields (spec §5); the plugin never sees the store, only
 /// this snapshot.
+///
+/// A field that reads back as its default is left off the wire
+/// (`is_default`), so a field without `#[serde(default)]` must always be
+/// written.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Agent {
     /// Minted session UUID — the join key (invariant #3).
@@ -355,7 +367,11 @@ pub struct Agent {
     /// Per-agent status (latest-wins state machine, spec §6.5). `lenient`
     /// because a newer host can name a status this bar has never heard of,
     /// and rejecting the variant would reject the whole SNAPSHOT.
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "is_default"
+    )]
     pub status: Status,
     /// unix seconds; bumped on UserPromptSubmit. DISPLAY and cross-session
     /// policy only (`clave ls`, the picker, eager-launch selection) — it is
@@ -366,7 +382,7 @@ pub struct Agent {
     /// commitment (a prompt, its creation, or the ordinal inherited from its
     /// tab when that tab closed). Minted under the store flock, so it is a
     /// total order with no clock and no ties. 0 = never committed → bottom.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub commit_ord: u64,
     /// unix seconds; bumped on focus → `unread = done && !visited`.
     pub last_visited: u64,
@@ -374,19 +390,19 @@ pub struct Agent {
     /// agent tab's own bar instance (`clave bind`) so glyph joins and prompt
     /// stamps ride the snapshot — per-instance register/manifest joins
     /// diverge (round 6). Session-scoped; None until bound / after recreate.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub tab_id: Option<usize>,
     /// Zellij terminal pane id hosting this agent (#178) — the wire twin of
     /// `AgentRecord::pane_id`, which carries the rationale. Without it a
     /// sidebar born after the `clave-register` broadcast can never learn which
     /// pane its own row owns, so the bind is uncomputable in every instance.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub pane_id: Option<u32>,
     /// §5 (2026-07-17): `clave open` found the row's cwd missing → the bar
     /// renders ✗ instead of ○. A row flag, NOT a status (statuses are hook
     /// lifecycle); cleared by a later successful open. `default` keeps
     /// pre-field payloads parseable.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub stale: bool,
     /// When the row's agent went down with the session, its tab still open
     /// (unix s). A dormant row is STANDBY while [`standby_live`] holds at the
@@ -394,13 +410,13 @@ pub struct Agent {
     /// decided at the write went stale overnight (swarm review, 2026-09-23).
     /// Arriving on a standby row opens it; a dormant row waits for
     /// Alt+Enter. `default` keeps pre-field payloads parseable.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub standby_since: Option<u64>,
     /// The tab the agent held when it ended, in THIS zellij session only
     /// (the launch clears it: zellij reuses ids). The bar prunes it like a
     /// bound tab, so a tab close that the agent's SessionEnd beat to the store
     /// still turns the row dormant, not standby.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub standby_tab: Option<usize>,
     /// Claude's session rename (`custom-title` in the transcript) — the
     /// filled chip in design-lock §2's 7-column title field. `None` = never
@@ -408,7 +424,7 @@ pub struct Agent {
     /// out of `label`: §7.1 rules the bar lays its own fixed-width columns
     /// and needs the VALUE, not a position inside a composed string.
     /// Populated by S4 (#59); `default` keeps pre-field payloads parseable.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub title: Option<String>,
     /// The words segment — design-lock §2's 17-column field, the widest on
     /// the row and the one actually read. Reachable today only by splitting
@@ -416,7 +432,7 @@ pub struct Agent {
     /// whose source tier is retargeted to `ai-title` because the
     /// `type:"summary"` tier is extinct (#79). `default` keeps pre-field
     /// payloads parseable.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub summary: String,
     /// The LINKED worktree this agent runs in, else None — the input to S6's
     /// provenance glyph (#61). Held on `AgentRecord` since §6.3 and simply
@@ -428,7 +444,7 @@ pub struct Agent {
     /// The host decides it now (`add::worktree_of`), from git rather than
     /// from the shape of the path.
     /// `default` keeps pre-field payloads parseable.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub worktree: Option<String>,
     /// The REPOSITORY's default branch — the branch a plain checkout of it sits
     /// on. The second input to S6's provenance glyph (#61): design-lock §5.1
@@ -444,7 +460,7 @@ pub struct Agent {
     /// discoverable default, and the bar falls back to its `main`/`master`
     /// heuristic there so behaviour is never WORSE than before this field
     /// existed. `default` keeps pre-field payloads parseable.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub default_branch: Option<String>,
     /// Tokens the row's conversation is currently holding — the newest assistant
     /// turn's input, cache-read and cache-creation counts summed, read from the
@@ -454,7 +470,7 @@ pub struct Agent {
     /// expanded view renders it as text (#105); eleven glyphs can only ever
     /// approximate it. `None` = no reading yet, which renders blank — the bar
     /// never invents a measurement. `default` keeps pre-field payloads parseable.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub context_tokens: Option<u32>,
     /// Index into the bar's battery ramp: `0` is full, [`BATTERY_LEVELS`]` - 1`
     /// is empty and past the smart zone (S7, #62).
@@ -464,40 +480,40 @@ pub struct Agent {
     /// wasm; the bar renders an index and holds no opinion about tokens. Stamped
     /// when the row's own agent reports, so a dormant row costs nothing to
     /// project. `default` keeps pre-field payloads parseable.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub context_level: Option<u8>,
     /// Commitment hour-buckets: unix hour → count of user commitments that
     /// hour. The frecency numerator; written by the hook on UserPromptSubmit,
     /// seeded at birth from the opener (spec: newborn initialisation),
     /// pruned past 7 days. `default` keeps pre-field payloads parseable.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub buckets: std::collections::BTreeMap<u32, u32>,
     /// The model handle this agent is running (e.g. "sonnet", "opus",
     /// "fable") — the double-height card's second row (#232). `None` = no
     /// reading yet, renders blank — the bar never invents a model name.
     /// `default` keeps pre-field payloads parseable.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub model: Option<String>,
     /// The provider running `model` above (e.g. "claude"). Kept separate
     /// from `model` rather than folded into one string: AGENTS.md commits
     /// clave to other CLI-based agents down the line, and a future provider
     /// may reuse a model NAME clave already knows under a different one.
     /// `None` = no reading yet. `default` keeps pre-field payloads parseable.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub provider: Option<String>,
     /// The effort level the agent is running at, stored as the card's
     /// two-letter tag (`lo` `md` `hi` `xh` `mx` `au`) and read off the same
     /// transcript lines as `model`. `None` = no reading yet, renders blank —
     /// the bar never invents a level. `default` keeps pre-field payloads
     /// parseable.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub effort: Option<String>,
     /// The open PR number for this row's branch, host-resolved (#232).
     /// `None` = no open PR found, or not looked up yet — the bar renders the
     /// same blank chip either way; the lookup's cache bookkeeping
     /// (`AgentRecord::pr_checked`/`pr_branch`) stays host-side and never
     /// rides the wire. `default` keeps pre-field payloads parseable.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub pr_number: Option<u32>,
     /// What this row is blocked on, in the words its own notification used —
     /// the card's `wants` cell (four-line lock §4.7). `None` renders blank,
@@ -507,15 +523,53 @@ pub struct Agent {
     /// `Status::NeedsYou` (`hook::take_wants`), so the bar never has to decide
     /// whether an ask is still live: if the field is set, the block is
     /// standing. `default` keeps pre-field payloads parseable.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub wants: Option<String>,
     /// Whether this row has any agent still running under it — the card's
     /// subagent mark (four-line lock 4.6). A boolean, not a count: "this row
     /// has fanned out" is the whole signal, and a digit beside the mark was
     /// noise. `false` renders a blank cell. `default` keeps pre-field payloads
     /// parseable.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub subagents: bool,
+}
+
+impl Agent {
+    /// A row with no tab and no pane, as the store sees it. These rows make up
+    /// most of a push and seldom change, so a push can name them by tag in
+    /// place of carrying them ([`DormantRows`]). The host splits a push on
+    /// this test and the bar puts it back together on the same test, so the
+    /// two sides cannot disagree about which rows a tag names. A row with a
+    /// pane and no tab is mid-spawn and changes soon, so it is not one.
+    pub fn is_dormant(&self) -> bool {
+        self.tab_id.is_none() && self.pane_id.is_none()
+    }
+}
+
+/// How a snapshot carries its dormant rows ([`Agent::is_dormant`]). Every bar
+/// decodes every push, and the cost is linear in bytes times bars (FOOTGUNS:
+/// "Every event and pipe crosses into a plugin as JSON text"). Measured live
+/// on 2026-10-13: 107 of 121 rows were dormant, 92 KB of a 107 KB push, and
+/// each push cost 4 to 8 CPU seconds across 14 bars.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DormantRows {
+    /// `agents` holds every row. `tag` names the dormant ones among them, so
+    /// a bar can keep them for a later push that leaves them out. `None` is a
+    /// payload from a clave that did not tag them.
+    Included { tag: Option<u64> },
+    /// `agents` holds only the rows that are not dormant. The dormant rows are
+    /// the ones a payload `Included` under this same `tag`. A bar that does
+    /// not hold that tag cannot rebuild the snapshot, and must ask for a full
+    /// one (`clave snapshot`).
+    Omitted { tag: u64 },
+}
+
+impl Default for DormantRows {
+    /// A payload from before this field: it carried every row.
+    fn default() -> Self {
+        DormantRows::Included { tag: None }
+    }
 }
 
 /// The full-replace snapshot `clave` pushes to `clave-bar` on every change
@@ -573,6 +627,13 @@ pub struct AgentSnapshot {
     /// `tab_order` is pruned. `default` keeps pre-field payloads parseable.
     #[serde(default)]
     pub tab_touched: std::collections::BTreeMap<usize, u64>,
+    /// Whether `agents` holds the dormant rows, or names them by tag. A push
+    /// leaves them out when the push before it carried the same rows
+    /// (`clave::store::wire_for_push`). `default` reads a pre-field payload
+    /// as complete, which it is. NOT `lenient`: a variant this bar cannot
+    /// spell may leave rows out, and reading it as complete would drop them.
+    #[serde(default)]
+    pub dormant: DormantRows,
 }
 
 /// The `clave-register` payload a pane's `clave spawn` pipes to the plugin so it
@@ -1151,6 +1212,124 @@ mod tests {
         assert_eq!(known.order, OrderMode::Frecency { half_life_hours: 9 });
     }
 
+    fn bare_agent(uuid: &str) -> Agent {
+        Agent {
+            uuid: uuid.into(),
+            cwd: "/x".into(),
+            repo_root: "/x".into(),
+            branch: "main".into(),
+            label: "x · main".into(),
+            status: Status::Idle,
+            last_interacted: 5,
+            commit_ord: 0,
+            last_visited: 6,
+            tab_id: None,
+            pane_id: None,
+            stale: false,
+            standby_since: None,
+            standby_tab: None,
+            title: None,
+            summary: String::new(),
+            worktree: None,
+            default_branch: None,
+            context_tokens: None,
+            context_level: None,
+            buckets: Default::default(),
+            model: None,
+            provider: None,
+            effort: None,
+            pr_number: None,
+            wants: None,
+            subagents: false,
+        }
+    }
+
+    #[test]
+    fn an_empty_field_stays_off_the_wire_and_reads_back_the_same() {
+        let bare = bare_agent("u1");
+        let json = serde_json::to_string(&bare).unwrap();
+        assert_eq!(
+            json,
+            r#"{"uuid":"u1","cwd":"/x","repo_root":"/x","branch":"main","label":"x · main","last_interacted":5,"last_visited":6}"#,
+            "only the fields that cannot default are written"
+        );
+        assert_eq!(serde_json::from_str::<Agent>(&json).unwrap(), bare);
+
+        let full = Agent {
+            status: Status::Working,
+            commit_ord: 3,
+            tab_id: Some(0),
+            pane_id: Some(0),
+            stale: true,
+            standby_since: Some(0),
+            standby_tab: Some(0),
+            title: Some(String::new()),
+            summary: "words".into(),
+            worktree: Some("w".into()),
+            default_branch: Some("trunk".into()),
+            context_tokens: Some(0),
+            context_level: Some(0),
+            buckets: [(1, 2)].into(),
+            model: Some("opus".into()),
+            provider: Some("claude".into()),
+            effort: Some("xh".into()),
+            pr_number: Some(9),
+            wants: Some("a yes".into()),
+            subagents: true,
+            ..bare_agent("u2")
+        };
+        // `Some(0)` and `Some("")` are not the default (`None`), so they ride.
+        let json = serde_json::to_string(&full).unwrap();
+        assert_eq!(serde_json::from_str::<Agent>(&json).unwrap(), full);
+    }
+
+    #[test]
+    fn a_row_is_dormant_only_with_no_tab_and_no_pane() {
+        let bare = bare_agent("u1");
+        assert!(bare.is_dormant());
+        assert!(
+            !Agent {
+                tab_id: Some(1),
+                ..bare.clone()
+            }
+            .is_dormant()
+        );
+        assert!(
+            !Agent {
+                pane_id: Some(1),
+                ..bare
+            }
+            .is_dormant(),
+            "mid-spawn rides every push"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_without_the_dormant_field_reads_as_whole() {
+        let old: AgentSnapshot = serde_json::from_str(r#"{"seq":1,"agents":[]}"#).unwrap();
+        assert_eq!(old.dormant, DormantRows::Included { tag: None });
+        for dormant in [
+            DormantRows::Included {
+                tag: Some(u64::MAX),
+            },
+            DormantRows::Omitted { tag: 3 },
+        ] {
+            let snap = AgentSnapshot {
+                dormant,
+                ..old.clone()
+            };
+            let json = serde_json::to_string(&snap).unwrap();
+            assert_eq!(serde_json::from_str::<AgentSnapshot>(&json).unwrap(), snap);
+        }
+    }
+
+    #[test]
+    fn a_dormant_variant_this_bar_cannot_spell_refuses_the_snapshot() {
+        // Read as whole, it would drop every row it left out.
+        let newer = r#"{"seq":1,"agents":[],"dormant":{"sliced":{"tag":3}}}"#;
+        assert!(serde_json::from_str::<AgentSnapshot>(newer).is_err());
+    }
+
     #[test]
     fn agent_json_has_no_archived_field() {
         // §6.7 deleted archiving; the pipe schema must not carry the field.
@@ -1189,6 +1368,7 @@ mod tests {
     #[test]
     fn snapshot_roundtrips() {
         let snap = AgentSnapshot {
+            dormant: Default::default(),
             seq: 7,
             tab_order: Default::default(),
             collapsed: false,
@@ -1432,6 +1612,7 @@ mod tests {
         // full-state replace, the one channel that never diverged (C5 rd 5:
         // fire-and-forget pipe deltas diverged per instance).
         let snap = AgentSnapshot {
+            dormant: Default::default(),
             seq: 1,
             agents: vec![],
             tab_order: std::collections::BTreeMap::from([(4usize, 12u64)]),
@@ -1513,6 +1694,7 @@ mod tests {
         // payload without the field must parse as expanded (false) — the
         // born-expanded default — for old-CLI/new-plugin interop.
         let snap = AgentSnapshot {
+            dormant: Default::default(),
             seq: 2,
             agents: vec![],
             tab_order: Default::default(),
