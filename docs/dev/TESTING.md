@@ -1239,6 +1239,18 @@ Four windows into what actually happened. Learn all four.
   its scripted stimulus is itself a `zellij pipe` that a real keypress never
   pays — so use the DELTA between two builds, not the absolute figure. The beacon line costs ~16 ms per gesture at ten sidebars, which is
   recorded and re-decidable in `#257`.
+
+  **Two more gesture-rate lines since 2026-10-13.** `clave-bar: beacon-send
+  <tab_id> <announce|reanchor> own=… active=…` comes from the SENDER, one line
+  per beacon, so the id column says who started a beacon and the kind says
+  why: `announce` is a birth, click or nav landing, and `reanchor` is the
+  `#162` family. It does not match `nav-bench.sh`'s `"clave-bar: beacon "`
+  (the trailing space is load-bearing). `clave-bar: visible <true|false>`
+  comes from a bar whose tab was shown or hidden (zellij's `Event::Visible`).
+  It logs a flip only: zellij repeats `Visible(false)` on every CLI client
+  exit. A hidden bar asks for no paint (zellij still paints it on a resize),
+  so a bar that logs `visible false` and is then seen stale on screen is a
+  missed `Visible(true)`, not a slow paint.
 - **The evlog** — `clave.log`, JSON lines, one per host-side decision. There is
   one per state dir: `~/.local/state/clave/clave.log` for stable,
   `~/.local/state/clave-dev/state/clave.log` for the sandbox.

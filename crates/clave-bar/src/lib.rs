@@ -140,17 +140,51 @@ mod shell_text {
              paints carries a stamp minutes old and is judged stale at \
              once:\n{update}"
         );
+        // The arms moved behind the paint gate (`handle_event`); the clock
+        // stays at the door, so it still advances first.
+        let events = fn_body("handle_event");
         assert!(
-            update.contains("expire_stale_fast_tick()"),
+            events.contains("expire_stale_fast_tick()"),
             "a timer expiry must be allowed to drop a claim the host never \
              honoured; leave it to the next paint and the paint never \
-             comes:\n{update}"
+             comes:\n{events}"
         );
         assert!(
-            update.contains("self.pending_peeks > 0 || self.term_poll_armed"),
+            events.contains("self.pending_peeks > 0 || self.term_poll_armed"),
             "the elimination needs the OTHER kinds' outstanding timers, read \
              before the legs below clear them; without it a misreported fast \
-             expiry is recovered two seconds late, if at all:\n{update}"
+             expiry is recovered two seconds late, if at all:\n{events}"
+        );
+    }
+
+    /// Zellij paints whatever `update` or `pipe` says yes to, on screen or
+    /// not. Both must answer through `BarModel::paints`, or every off-screen
+    /// bar paints every push again: 13 of every 14 paints, measured
+    /// 2026-10-13 with 14 tabs.
+    #[test]
+    fn every_entry_point_answers_through_the_paint_gate() {
+        for (entry, answer) in [
+            ("update", "self.model.paints(wants)"),
+            ("pipe", "self.model.paints(repaint)"),
+        ] {
+            let body = fn_body(entry);
+            assert_eq!(
+                last_expr(body),
+                answer,
+                "`{entry}` must answer through the paint gate:\n{body}"
+            );
+        }
+        let update = fn_body("update");
+        assert!(
+            update.contains("let wants = self.handle_event(event);"),
+            "every event must reach the model, shown or hidden: a hidden bar \
+             binds its own tab's agents:\n{update}"
+        );
+        let pipe = fn_body("pipe");
+        assert!(
+            pipe.contains("self.model.tick(wall_now());"),
+            "a hidden bar no longer paints, so its clock must move on the \
+             pipes it still takes:\n{pipe}"
         );
     }
 
@@ -184,6 +218,91 @@ mod shell_text {
             seen > 0,
             "the search string went stale — no `pending_peeks += 1` in main.rs"
         );
+    }
+
+    /// A probe that sees a change must buy a paint. The manifest arm once
+    /// dropped the answer, and a command that exited between two identical
+    /// frames read "running" until some other change painted the row.
+    #[test]
+    fn no_probe_answer_is_dropped() {
+        let mut seen = 0;
+        for l in SHELL
+            .lines()
+            .filter(|l| l.contains("self.probe_term_facts()"))
+        {
+            seen += 1;
+            assert!(
+                l.contains("= self.probe_term_facts()") && !l.contains("let _"),
+                "a probe's answer is dropped here:\n{l}"
+            );
+        }
+        assert!(seen > 0, "the search string went stale");
+        assert!(
+            fn_body("handle_event").contains("changed || acted || probed"),
+            "the manifest arm must paint on the probe's answer"
+        );
+    }
+
+    /// A frame is news only when compared BEFORE it is applied: applied
+    /// first, it always equals the model, and no frame paints. Each manifest
+    /// arm must also answer with that news, or a changed frame paints only
+    /// when an effect happens to run (adversarial review of #279).
+    #[test]
+    fn each_frame_is_compared_before_it_is_applied() {
+        let events = fn_body("handle_event");
+        for (differs, apply, answer) in [
+            ("tab_frame_differs(", "apply_tabs(", "changed || acted\n"),
+            (
+                "pane_frame_differs(",
+                "apply_panes(",
+                "changed || acted || probed",
+            ),
+        ] {
+            let compared = events.find(differs).expect("the diff call went stale");
+            let applied = events.find(apply).expect("the apply call went stale");
+            assert!(
+                compared < applied,
+                "`{differs}` must run before `{apply}`:\n{events}"
+            );
+            let rest = &events[applied..];
+            let arm = &rest[..rest.find("Event::").unwrap_or(rest.len())];
+            assert!(
+                arm.contains(answer),
+                "the arm with `{apply}` must answer `{}`:\n{arm}",
+                answer.trim()
+            );
+        }
+    }
+
+    /// The paint gate is only as good as the word it reads. Without the
+    /// subscription, every bar stays "on screen" to the model and paints
+    /// every push again; without the arm's answer, a bar that comes back on
+    /// screen shows its last frame until some other change paints it.
+    /// `main.rs` is outside `just mutants`, so these pins are its test.
+    #[test]
+    fn the_bar_hears_visibility_and_paints_on_return() {
+        let load = fn_body("load");
+        assert!(
+            load.contains("EventType::Visible,"),
+            "the bar must subscribe to `Visible`:\n{load}"
+        );
+        let events = fn_body("handle_event");
+        let at = events
+            .find("Event::Visible(visible) => {")
+            .expect("the Visible arm went stale");
+        let arm = &events[at..];
+        let arm = &arm[..arm.find("\n            }").unwrap_or(arm.len())];
+        assert_eq!(
+            last_expr(arm),
+            "visible // a returning bar paints what it took while away",
+            "the Visible arm must answer `visible`:\n{arm}"
+        );
+    }
+
+    /// The last expression of a shell `fn`: its answer.
+    fn last_expr(body: &str) -> &str {
+        let inner = body.trim_end().strip_suffix('}').unwrap_or(body);
+        inner.trim_end().lines().last().unwrap_or("").trim()
     }
 
     /// The body of a `fn` in the shell, signature to the next one at the same

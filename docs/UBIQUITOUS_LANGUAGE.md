@@ -83,6 +83,14 @@ the UX contract is that the instances are indistinguishable, and a user ever
 noticing a "per-tab bar" (mismatched widths, a tab out of step) is that
 abstraction leaking — a defect, not a nuance to document around.
 
+Underneath, each instance is **shown** while its tab is on a client's screen
+and **hidden** otherwise, as zellij's `Event::Visible` says. A **paint** is one
+`render` of an instance. The **paint gate** (`BarModel::paints`) is the one rule
+that decides whether a change earns a paint: a hidden instance still takes every
+update, but it asks for no paint. A **timer chain** is one run of fast ticks
+(the spinner's 0.2s timer) that re-arms itself; two chains at once are a defect
+(FOOTGUNS.md).
+
 Its two width
 states are **expanded** and **collapsed** — never "mini", "wide" or "narrow".
 Each is a **geometry**: a named layout in the generated KDL that zellij switches
