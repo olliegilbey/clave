@@ -776,6 +776,15 @@ pub struct BarModel {
     /// stops the spinner on that instance for good. After
     /// [`FAST_TICK_STRAND_SECS`] the claim is not believed.
     fast_tick_armed_at: Option<u64>,
+    /// When the last fast tick was spent, in milliseconds on the shell's
+    /// monotonic clock ([`Self::spend_fast_tick`]).
+    fast_tick_spent_ms: Option<u64>,
+    /// Zellij said this bar's tab is off screen (`Event::Visible(false)`).
+    /// Stored inverted so the default is "on screen": a bar that loads in a
+    /// tab nobody has shown yet paints as every bar did before this field
+    /// existed, until the next CLI client exit tells it otherwise
+    /// ([`Self::set_visible`]).
+    hidden: bool,
     /// The width of the most recent paint, recorded deaf or not — what the
     /// cooldown expiry judges instead of the paint that preceded the ask.
     last_painted: Option<usize>,
@@ -3260,6 +3269,42 @@ impl BarModel {
         true
     }
 
+    /// Two fast-band expiries closer than this are two timer chains. One
+    /// chain re-arms only after its tick is spent, so its spends are at least
+    /// one `FAST_TICK_SECS` (main.rs, 0.2s) apart: the window must stay under
+    /// a period. Two chains that keep the same period interleave, so one of
+    /// their two gaps is at most half a period: the window must stay over
+    /// half, or two chains exactly half a period apart both live. `main.rs`
+    /// asserts both bounds. Under load each chain re-arms late by its own
+    /// amount, and two chains can then both live for a while. What always
+    /// holds is the spacing: spends are at least this far apart, so the
+    /// spinner never runs faster than 200/150 of its rate, and never at
+    /// double speed.
+    pub const FAST_TICK_DUPLICATE_MS: u64 = 150;
+
+    /// Spend a fast tick the shell has claimed — unless it is a SECOND
+    /// chain's, which is dropped so that chain ends here.
+    ///
+    /// A second chain is how the spinner ran at double speed (Ollie,
+    /// 2026-10-13). When a plugin thread stalls past
+    /// [`Self::FAST_TICK_STRAND_SECS`], [`Self::arm_fast_tick`] stops
+    /// believing the claim and the next paint starts a new timer. The old
+    /// timer was late, not lost: it fires too, and from then on each chain
+    /// re-arms itself and both advance the frame. `Event::Timer` carries no
+    /// identity, so the spacing is the only witness. A dropped expiry leaves
+    /// the claim alone, because the claim belongs to the chain that lives.
+    pub fn spend_fast_tick(&mut self, now_ms: u64) -> bool {
+        if self
+            .fast_tick_spent_ms
+            .is_some_and(|t| now_ms.saturating_sub(t) < Self::FAST_TICK_DUPLICATE_MS)
+        {
+            return false;
+        }
+        self.fast_tick_spent_ms = Some(now_ms);
+        self.fast_tick_fired();
+        true
+    }
+
     /// The fast tick fired. The shell re-arms from the next paint, which is
     /// what stops the spinner the moment the last turn ends.
     pub fn fast_tick_fired(&mut self) {
@@ -3310,7 +3355,51 @@ impl BarModel {
     /// that spends them, so the reading and the cadence driving it cannot
     /// drift apart.
     fn animates_now(&self) -> bool {
-        self.row_height().animates() && self.own_tab_focused()
+        !self.hidden && self.row_height().animates() && self.own_tab_focused()
+    }
+
+    /// Zellij's word on whether this bar's tab is on screen, and whether that
+    /// word changed anything. Zellij sends `Event::Visible(true)` to a tab's
+    /// plugins each time a client arrives on it: a switch, a new tab, a
+    /// close, an attach (zellij-server-0.45.1 `tab/mod.rs` `Tab::visible`,
+    /// called from `screen.rs`). It sends `Visible(false)` to EVERY tab with
+    /// no client each time any client leaves, and every `zellij pipe` or
+    /// `zellij action` is a client that leaves (`Screen::remove_client`,
+    /// `screen.rs:5156`). So most of these are repeats: about ten per hook
+    /// push for each hidden bar. Unlike the beacon, it cannot lag a native
+    /// tab switch.
+    pub fn set_visible(&mut self, visible: bool) -> bool {
+        let flipped = self.hidden == visible;
+        self.hidden = !visible;
+        flipped
+    }
+
+    /// Whether a change the shell wants to show earns a paint. Never while
+    /// the tab is off screen: an off-screen paint is pure cost, and 13 of 14
+    /// bars are off screen. Measured 2026-10-13 (14 tabs, 119 rows, one
+    /// core): every push painted all 14 bars, and one push cost ~2.2 CPU
+    /// seconds in total. The model still takes every update, because a hidden
+    /// bar still binds its own tab's agents. Only the paint waits, and
+    /// `Visible(true)` asks for it.
+    ///
+    /// Nothing else needs an off-screen paint: the width machine is focus
+    /// gated already, and settles on the paint that follows a return.
+    pub fn paints(&self, wants: bool) -> bool {
+        wants && !self.hidden
+    }
+
+    /// Whether a tab frame says anything the last one did not. Zellij sends
+    /// the focused tab's bar a fresh `TabUpdate` and `PaneUpdate` each time
+    /// a CLI client leaves (`Screen::remove_client` reports the session
+    /// state), and every hook push runs CLI clients: measured, about ten
+    /// identical pairs per push, each a full repaint.
+    pub fn tab_frame_differs(&self, tabs: &[TabMeta]) -> bool {
+        self.tabs != tabs
+    }
+
+    /// [`Self::tab_frame_differs`] for the pane frame.
+    pub fn pane_frame_differs(&self, panes: &[PaneMeta]) -> bool {
+        self.panes != panes
     }
 
     /// Whether the shell should ask for a fast tick on the SPINNER's behalf:
@@ -6831,6 +6920,178 @@ mod tests {
             "the drop must leave the band armable, or the heal is only half a \
              heal"
         );
+    }
+
+    /// The double-speed spinner (Ollie, 2026-10-13). A plugin thread that
+    /// stalls past the strand window makes `arm_fast_tick` start a second
+    /// timer while the first is only late. Both fire, and each would re-arm
+    /// and advance the frame, so the spinner ran twice as fast until the turn
+    /// ended. The second chain's tick lands too soon after the first's, and
+    /// is dropped.
+    #[test]
+    fn a_late_timer_never_doubles_the_spinner() {
+        let mut m = focused_bar();
+        m.tick(100);
+        assert!(m.arm_fast_tick(), "chain A starts");
+        m.tick(102);
+        assert!(
+            m.arm_fast_tick(),
+            "past the strand window the claim is not believed, so chain B starts \
+             — this is the stall that made the second chain"
+        );
+        assert!(m.spend_fast_tick(10_000), "the first of the pair is spent");
+        assert!(m.arm_fast_tick(), "its paint re-arms");
+        assert!(
+            !m.spend_fast_tick(10_040),
+            "40ms later is the other chain's tick, and is dropped"
+        );
+        assert!(
+            m.fast_tick_in_flight(),
+            "the drop leaves the claim alone — it belongs to the chain that lives"
+        );
+        assert!(
+            m.spend_fast_tick(10_200),
+            "the survivor's next tick, a full period on, is spent"
+        );
+    }
+
+    /// The window holds at EVERY phase, not only the one the incident had.
+    /// Each chain re-arms one period after its own tick, as the shell does;
+    /// a dropped tick ends its chain, as the shell's early return does. Run
+    /// two chains for three seconds at each offset: one must be left, and it
+    /// must spend at the spinner's own rate.
+    #[test]
+    fn two_timer_chains_end_as_one_at_any_phase() {
+        const PERIOD: u64 = 200; // main.rs FAST_TICK_SECS
+        for offset in 0..PERIOD {
+            let mut m = focused_bar();
+            m.tick(100);
+            assert!(m.arm_fast_tick());
+            let mut due = vec![1_000, 1_000 + offset];
+            let mut spent = 0;
+            while let Some(i) = (0..due.len()).min_by_key(|&i| due[i]) {
+                let at = due[i];
+                if at > 4_000 {
+                    break;
+                }
+                assert!(
+                    m.fast_tick_owns_expiry(true, false),
+                    "offset {offset}ms: a live chain's tick found no claim"
+                );
+                if m.spend_fast_tick(at) {
+                    spent += 1;
+                    assert!(m.arm_fast_tick(), "the paint after a spend re-arms");
+                    due[i] = at + PERIOD;
+                } else {
+                    due.remove(i);
+                }
+            }
+            assert_eq!(due.len(), 1, "offset {offset}ms: both chains lived");
+            assert!(
+                (15..=16).contains(&spent),
+                "offset {offset}ms: {spent} ticks in three seconds — the spinner ran at the wrong rate"
+            );
+        }
+    }
+
+    /// One chain is never mistaken for two: its spends are a full period
+    /// apart however late each expiry is delivered, because it re-arms only
+    /// after a spend.
+    #[test]
+    fn one_late_chain_keeps_every_tick() {
+        let mut m = focused_bar();
+        m.tick(100);
+        let mut at = 1_000;
+        for late in [0, 900, 0, 30, 2_500, 0] {
+            assert!(m.arm_fast_tick() || m.fast_tick_in_flight());
+            at += 200 + late;
+            assert!(m.spend_fast_tick(at), "a tick {late}ms late was dropped");
+        }
+    }
+
+    /// Off screen, no paint is bought. Zellij paints every plugin that asks,
+    /// on screen or not, and on 2026-10-13 that was 13 of every 14 paints a
+    /// push caused (14 tabs, one core: ~2.2 CPU seconds a push).
+    #[test]
+    fn a_hidden_bar_asks_for_no_paint_until_it_is_shown() {
+        let mut m = focused_bar();
+        assert!(
+            m.paints(true),
+            "a bar that never heard Visible paints as every bar did before"
+        );
+        assert!(!m.paints(false), "and buys nothing it did not ask for");
+        m.set_visible(false);
+        assert!(!m.paints(true), "off screen, a wanted paint is not bought");
+        m.set_visible(true);
+        assert!(m.paints(true), "back on screen it paints again");
+    }
+
+    /// Only a change of state is news. Zellij repeats `Visible(false)` to
+    /// every hidden bar on each CLI client exit — about ten a push — so the
+    /// shell logs a flip, not a delivery.
+    #[test]
+    fn only_a_visibility_flip_is_news() {
+        let mut m = focused_bar();
+        assert!(!m.set_visible(true), "a bar starts on screen");
+        assert!(m.set_visible(false), "the switch away flips it");
+        assert!(!m.set_visible(false), "a CLI exit repeats it");
+        assert!(m.set_visible(true), "the switch back flips it");
+    }
+
+    /// The beacon can lag: it names this tab after a native switch away
+    /// (stock Alt+h/Alt+l carry no beacon). Zellij's own Visible cannot lag,
+    /// so a bar it calls hidden runs no spinner and no seconds clock, whatever
+    /// the beacon says.
+    #[test]
+    fn a_hidden_bar_runs_no_spinner_even_when_the_beacon_names_it() {
+        let mut m = focused_bar();
+        m.set_row_height(RowHeight::Card);
+        m.tick(1_003);
+        let mut a = dressed("u1", "/r/one", "main", None, Some(11));
+        a.status = Status::Working;
+        a.last_interacted = 1_000;
+        m.apply_snapshot(snap(1, vec![a]));
+        let elapsed = |m: &BarModel| {
+            m.rows()
+                .into_iter()
+                .find_map(|r| match r.1.content {
+                    RowContent::Agent { elapsed, .. } => Some(elapsed),
+                    RowContent::Terminal { .. } => None,
+                })
+                .expect("the fleet must hold the agent row")
+        };
+        let spins = |m: &BarModel| {
+            let rows: Vec<Row> = m.rows().into_iter().map(|(_, r)| r).collect();
+            m.wants_spinner_tick(&rows)
+        };
+        assert_eq!(elapsed(&m).as_deref(), Some("3s"), "on screen it counts");
+        assert!(spins(&m), "on screen a working row asks for the spinner");
+        m.set_visible(false);
+        assert!(m.own_tab_focused(), "the beacon still names this tab");
+        assert!(!spins(&m), "off screen no 0.2s timer is armed");
+        assert_eq!(
+            elapsed(&m).as_deref(),
+            Some("0m"),
+            "off screen nothing ticks the seconds, so none are shown"
+        );
+    }
+
+    /// Only a frame that says something new is worth a paint. Every hook push
+    /// is a CLI client, and each one's arrival and exit sends the focused bar
+    /// the same tab and pane frames again — about ten pairs a push, measured.
+    #[test]
+    fn a_repeated_frame_is_not_news() {
+        let m = focused_bar();
+        let tabs = m.tabs.clone();
+        let panes = m.panes.clone();
+        assert!(!m.tab_frame_differs(&tabs), "the same tab frame again");
+        assert!(!m.pane_frame_differs(&panes), "the same pane frame again");
+        let mut renamed = tabs.clone();
+        renamed[0].name.push('!');
+        assert!(m.tab_frame_differs(&renamed), "a renamed tab is news");
+        let mut moved = panes.clone();
+        moved[0].is_focused = !moved[0].is_focused;
+        assert!(m.pane_frame_differs(&moved), "a focus move is news");
     }
 
     /// The other half: the second expiry is bought only when a spinner could

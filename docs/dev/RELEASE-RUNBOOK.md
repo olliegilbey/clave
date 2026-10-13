@@ -90,6 +90,16 @@ loop.
    runs, `~/.local/share/clave/` still holds the *previous* version's artifacts
    and Step 1 would validate the old cut.
 
+   **Quit the live session first.** Wait until the agents are idle, then
+   quit it (`box down` from the Mac, or `zellij kill-session clave`). A
+   running zellij server watches its config file and reloads it when it
+   changes (zellij-server-0.45.1 `lib.rs` `watch_config_file_changes`), and
+   `just release` rewrites that file. The keybinds then name the new wasm, so
+   the next clave shortcut makes zellij start a second sidebar, of the new
+   version, in the current tab. That happened on the 0.5.4 cut. If you cannot
+   quit yet, leave the second sidebar alone until Step 3. If you close it, the
+   next shortcut starts another one.
+
    ```bash
    just release
    ```

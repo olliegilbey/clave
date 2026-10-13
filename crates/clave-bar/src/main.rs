@@ -72,6 +72,22 @@ const _: () = assert!(WIDTH_COOLDOWN_SECS <= FAST_TICK_SECS);
 const _: () = assert!(TIMER_KIND_CUTOFF_SECS <= PEEK_SINK_SECS);
 const _: () = assert!(PEEK_SINK_SECS < TERM_POLL_CUTOFF_SECS);
 const _: () = assert!(TERM_POLL_CUTOFF_SECS <= TERM_POLL_SECS);
+// The duplicate-tick window sits between half a fast period and one period
+// (`BarModel::FAST_TICK_DUPLICATE_MS`): over half, so two chains at any phase
+// are told apart; under one, so one chain never loses a tick.
+const _: () = assert!(2.0 * BarModel::FAST_TICK_DUPLICATE_MS as f64 > FAST_TICK_SECS * 1000.0);
+const _: () = assert!((BarModel::FAST_TICK_DUPLICATE_MS as f64) < FAST_TICK_SECS * 1000.0);
+
+/// Milliseconds on a monotonic clock, from the first reading. Only spacing is
+/// read from it (`BarModel::spend_fast_tick`), so its origin does not matter,
+/// and unlike `wall_now` it cannot step back when the host corrects its time.
+fn mono_ms() -> u64 {
+    static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    ORIGIN
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64
+}
 
 /// The shell's wall clock (#232): UNIX-epoch seconds, read once per render
 /// and fed to `BarModel::tick` so `elapsed_label` has a `now` to subtract
@@ -301,6 +317,20 @@ impl State {
                     //
                     // Receivers see `PipeSource::Plugin`, so there is no CLI
                     // blank twin to drop and no `unblock_cli_pipe_input` owed.
+                    // The send side of the `beacon` receipt line. The 0.5.4
+                    // cold start logged ~1,400 receipts a minute and could not
+                    // say who sent them (Ollie, 2026-10-13). This names the
+                    // sender (the log's id column) and its kind: announce is a
+                    // birth, click or nav landing; reanchor is the #162 family.
+                    let kind = match e {
+                        Effect::AnnounceVisit { .. } => "announce",
+                        _ => "reanchor",
+                    };
+                    eprintln!(
+                        "clave-bar: beacon-send {tab_id} {kind} own={:?} active={:?}",
+                        self.model.own_tab(),
+                        self.model.active_tab_id()
+                    );
                     pipe_message_to_plugin(
                         MessageToPlugin::new("clave-visited").with_payload(tab_id.to_string()),
                     );
@@ -766,123 +796,10 @@ impl State {
             }
         }
     }
-}
 
-impl ZellijPlugin for State {
-    fn load(&mut self, config: BTreeMap<String, String>) {
-        // Version marker for the hot-reload workflow (`zellij action
-        // start-or-reload-plugin`): stamp the build so the zellij log tells
-        // you WHICH wasm produced a trace. Set by the rebuild recipe via
-        // CLAVE_BUILD_TAG; "dev" means an untagged local build.
-        eprintln!(
-            "clave-bar: loaded v{} build={}",
-            env!("CARGO_PKG_VERSION"),
-            option_env!("CLAVE_BUILD_TAG").unwrap_or("dev")
-        );
-        // #44: resolve the CLI from plugin configuration instead of PATH. A
-        // stale `clave` on PATH previously served a live session's `clave
-        // open`, composing tab layouts against the OLD wasm — and because
-        // zellij keys plugin identity on location, every such tab loaded a
-        // SECOND bar (duplicate sidebar, dead nav).
-        self.clave_binary = resolve_binary(&config).unwrap_or_else(|| {
-            // LOUD, not silent: the v0.1.1 incident was invisible for hours
-            // precisely because nothing announced which binary answered.
-            eprintln!(
-                "clave-bar: WARNING no `{}` in plugin configuration \
-                 (pre-#44 layout, or a hand-edited config) — falling back to \
-                 PATH `clave`. A stale binary here is what broke v0.1.1; \
-                 regenerate with `clave setup` or `just release`.",
-                clave_types::CLAVE_BINARY_KEY
-            );
-            "clave".to_string()
-        });
-        // #232: resolve which row geometry this bar renders, from the same
-        // plugin configuration `resolve_binary` just read. Every layout since
-        // Task 5 bakes `row_height` alongside `clave_binary`, so a present key
-        // is the steady state; an absent one (pre-#232 layout, hand-edited
-        // config) fails CLOSED to `Card` inside `resolve_row_height` — no
-        // warning owed, unlike the binary path, because there is no wrong
-        // subprocess to run, only a design default to draw.
-        let row_height = resolve_row_height(&config);
-        eprintln!(
-            "clave-bar: row_height: {} ({})",
-            row_height.as_config_value(),
-            if config.contains_key(clave_types::ROW_HEIGHT_KEY) {
-                "from plugin config"
-            } else {
-                "default; key absent"
-            }
-        );
-        self.model.set_row_height(row_height);
-        // D37: gate the width machine HERE, not when the snapshot is requested.
-        // `load()` only ASKS for permission; the grant arrives later as an
-        // event, and zellij renders this pane before then — so a gate set in
-        // the `PermissionRequestResult` arm is set AFTER the first render has
-        // already seeked on the assumed-expanded default. That is the first
-        // fix for this failing live and the reason it failed: the ordering,
-        // not the gate. Nothing before hydration may move the pane, and
-        // `load()` is the only point that precedes every render.
-        self.model.await_hydration();
-        // §6.6 permission set — EXACTLY this list; grants are all-or-nothing
-        // per plugin and the prompt is unanswerable in the bar pane, so
-        // `clave setup` pre-seeds permissions.kdl with THIS set (both key
-        // forms). Changing this list without changing the seed hangs every
-        // pipe (this re-bit S2 — see the ledger). `BAR_PERMISSIONS` in
-        // `clave/src/setup.rs` is that seed, and a test there reads THIS
-        // block to keep the two from drifting.
-        request_permission(&[
-            PermissionType::ReadCliPipes,           // receive the clave-* pipes
-            PermissionType::ChangeApplicationState, // focus_pane / rename_tab / hide_self
-            PermissionType::ReadApplicationState,   // TabUpdate + PaneUpdate truth
-            PermissionType::RunCommands,            // hydrate (clave snapshot) + clave focus
-            PermissionType::OpenTerminalsOrPlugins, // Alt+f scratch-shell spawn (#207)
-            // The beacon's in-plugin channel (#141). zellij gates
-            // `pipe_message_to_plugin` on this one because the same call can
-            // LAUNCH a plugin; clave never does, but the check is on the
-            // command, not the arguments. Withhold it and every announce is
-            // silently refused server-side.
-            PermissionType::MessageAndLaunchOtherPlugins,
-        ]);
-        subscribe(&[
-            EventType::TabUpdate,
-            EventType::PaneUpdate,
-            // The user's theme (#145): zellij sends one on subscribe and again
-            // whenever the mode/style changes, so the bar repaints on a theme
-            // switch without polling. Covered by ReadApplicationState above.
-            EventType::ModeUpdate,
-            // The #206 terminal-row deltas: cwd and foreground-command pushes
-            // between manifests. Per-pane and quiet — nothing like
-            // InputReceived's per-keystroke storm (see below).
-            EventType::CwdChanged,
-            EventType::CommandChanged,
-            EventType::Mouse,
-            EventType::RunCommandResult,
-            EventType::PermissionRequestResult,
-            EventType::Timer, // peek-on-nav sink (set_timeout per peek)
-                              // NO InputReceived: it fires for EVERY keystroke INCLUDING the
-                              // nav keybinds themselves (C5 round 4: each walk press touched
-                              // the departing tab and the touch-spawn storm exhausted the
-                              // server's fds). Plain tabs order by birth only — shell-command
-                              // touches are parked (§6.6).
-        ]);
-        // Stock tab-bar pattern: an unselectable pane receives clicks
-        // directly (no focus-stealing first click) and MoveFocus skips it —
-        // nothing the bar does needs focus (clicks, pipes, hide_self).
-        set_selectable(false);
-        // The plugin's own pane id goes STRAIGHT to the model and is not kept
-        // here: identity resolution lives there, where it can be asserted on —
-        // this file is `test = false`, and RC-A shipped precisely because the
-        // frame join was written where nothing could see it.
-        self.model.set_own_pane(get_plugin_ids().plugin_id);
-    }
-
-    fn update(&mut self, event: Event) -> bool {
-        // The clock advances on EVERY event, not only on a paint (#232 put it
-        // in `render` alone). Two things read it outside a paint: the fast
-        // tick's strand window, which must age in real time so a claim the
-        // host never delivered stops blocking the next arm, and the stamp
-        // `arm_fast_tick` writes when a width ask books a tick between paints.
-        self.model.tick(wall_now());
+    /// One zellij event → model, and whether it changed what the bar shows.
+    /// Split out of `update()` so its early returns still pass the paint gate.
+    fn handle_event(&mut self, event: Event) -> bool {
         match event {
             Event::PermissionRequestResult(_) => {
                 // Permissions just landed (pre-seeded → immediate): hydrate
@@ -945,7 +862,12 @@ impl ZellijPlugin for State {
                         floating_visible: t.are_floating_panes_visible,
                     })
                     .collect();
+                // An identical frame still runs the model, because the #162
+                // re-anchor retries on the NEXT frame whatever it carries.
+                // Only the paint is skipped (`tab_frame_differs`).
+                let changed = self.model.tab_frame_differs(&metas);
                 let fx = self.model.apply_tabs(metas);
+                let acted = !fx.is_empty();
                 // NO beacon announce here (round 11): TabUpdate announces
                 // were poisoned by design — a hidden instance's stale set
                 // always claims its own tab is active (C3), and toggle
@@ -964,7 +886,7 @@ impl ZellijPlugin for State {
                 // disjoint id sets (prune removes observed-dead ids, touch
                 // stamps a live one), so they commute.
                 self.settle_identity(); // fresh tab set → own-tab joins resolvable
-                true
+                changed || acted
             }
             Event::PaneUpdate(manifest) => {
                 // EVERY pane goes into `metas`, plugin ones included: the
@@ -992,16 +914,31 @@ impl ZellijPlugin for State {
                 // one that ends that disagreement. Dropping what it returns
                 // would restore the bug — nav dead for the session whenever the
                 // tab that closed was the one holding the beacon.
+                let changed = self.model.pane_frame_differs(&metas);
                 let fx = self.model.apply_panes(metas);
+                let acted = !fx.is_empty();
                 self.run_effects(fx);
                 self.settle_identity(); // fresh manifest → own-tab joins resolvable
                 // Terminal-tab speakers get their OS facts probed on every
                 // manifest (#206): the events keep them fresh BETWEEN frames,
                 // but neither fires retroactively for a pane that was already
                 // at its prompt when this bar was born.
-                self.probe_term_facts();
+                // Its answer is a paint too: a repeated frame can carry the
+                // probe that sees a command exit, and once the pane reads
+                // idle the 3s poll stops probing it, so nothing else would
+                // paint the row out of "running".
+                let probed = self.probe_term_facts();
                 self.arm_term_poll();
-                true
+                changed || acted || probed
+            }
+            Event::Visible(visible) => {
+                // Zellij repeats `Visible(false)` to every hidden bar on each
+                // CLI client exit, about ten per push (`set_visible`). Log
+                // only a flip, so the line stays gesture-rate.
+                if self.model.set_visible(visible) {
+                    eprintln!("clave-bar: visible {visible}");
+                }
+                visible // a returning bar paints what it took while away
             }
             // The between-frames halves of the #206 probes: zellij pushes cwd
             // and foreground-command deltas per pane. Each maps onto the same
@@ -1101,7 +1038,15 @@ impl ZellijPlugin for State {
                     .fast_tick_owns_expiry(elapsed < TIMER_KIND_CUTOFF_SECS, other_timers_armed);
                 let healed = !owns && self.model.expire_stale_fast_tick();
                 let fast_tick = if owns {
-                    self.model.fast_tick_fired();
+                    if !self.model.spend_fast_tick(mono_ms()) {
+                        // A second timer chain's tick. No paint, so no
+                        // re-arm, and the chain ends here (`spend_fast_tick`).
+                        // The width leg below loses nothing: `owns` says a
+                        // claim is in flight, and that claim was made after
+                        // the last spend, so the surviving chain's timer is
+                        // still out and brings the next tick.
+                        return false;
+                    }
                     // The frame index is the tick's own count, bumped whoever
                     // asked for the tick. At five frames a second a spinner
                     // stepping early off a swap's tick is invisible, and the
@@ -1180,6 +1125,132 @@ impl ZellijPlugin for State {
             _ => false,
         }
     }
+}
+
+impl ZellijPlugin for State {
+    fn load(&mut self, config: BTreeMap<String, String>) {
+        // Version marker for the hot-reload workflow (`zellij action
+        // start-or-reload-plugin`): stamp the build so the zellij log tells
+        // you WHICH wasm produced a trace. Set by the rebuild recipe via
+        // CLAVE_BUILD_TAG; "dev" means an untagged local build.
+        eprintln!(
+            "clave-bar: loaded v{} build={}",
+            env!("CARGO_PKG_VERSION"),
+            option_env!("CLAVE_BUILD_TAG").unwrap_or("dev")
+        );
+        // #44: resolve the CLI from plugin configuration instead of PATH. A
+        // stale `clave` on PATH previously served a live session's `clave
+        // open`, composing tab layouts against the OLD wasm — and because
+        // zellij keys plugin identity on location, every such tab loaded a
+        // SECOND bar (duplicate sidebar, dead nav).
+        self.clave_binary = resolve_binary(&config).unwrap_or_else(|| {
+            // LOUD, not silent: the v0.1.1 incident was invisible for hours
+            // precisely because nothing announced which binary answered.
+            eprintln!(
+                "clave-bar: WARNING no `{}` in plugin configuration \
+                 (pre-#44 layout, or a hand-edited config) — falling back to \
+                 PATH `clave`. A stale binary here is what broke v0.1.1; \
+                 regenerate with `clave setup` or `just release`.",
+                clave_types::CLAVE_BINARY_KEY
+            );
+            "clave".to_string()
+        });
+        // #232: resolve which row geometry this bar renders, from the same
+        // plugin configuration `resolve_binary` just read. Every layout since
+        // Task 5 bakes `row_height` alongside `clave_binary`, so a present key
+        // is the steady state; an absent one (pre-#232 layout, hand-edited
+        // config) fails CLOSED to `Card` inside `resolve_row_height` — no
+        // warning owed, unlike the binary path, because there is no wrong
+        // subprocess to run, only a design default to draw.
+        let row_height = resolve_row_height(&config);
+        eprintln!(
+            "clave-bar: row_height: {} ({})",
+            row_height.as_config_value(),
+            if config.contains_key(clave_types::ROW_HEIGHT_KEY) {
+                "from plugin config"
+            } else {
+                "default; key absent"
+            }
+        );
+        self.model.set_row_height(row_height);
+        // D37: gate the width machine HERE, not when the snapshot is requested.
+        // `load()` only ASKS for permission; the grant arrives later as an
+        // event, and zellij renders this pane before then — so a gate set in
+        // the `PermissionRequestResult` arm is set AFTER the first render has
+        // already seeked on the assumed-expanded default. That is the first
+        // fix for this failing live and the reason it failed: the ordering,
+        // not the gate. Nothing before hydration may move the pane, and
+        // `load()` is the only point that precedes every render.
+        self.model.await_hydration();
+        // §6.6 permission set — EXACTLY this list; grants are all-or-nothing
+        // per plugin and the prompt is unanswerable in the bar pane, so
+        // `clave setup` pre-seeds permissions.kdl with THIS set (both key
+        // forms). Changing this list without changing the seed hangs every
+        // pipe (this re-bit S2 — see the ledger). `BAR_PERMISSIONS` in
+        // `clave/src/setup.rs` is that seed, and a test there reads THIS
+        // block to keep the two from drifting.
+        request_permission(&[
+            PermissionType::ReadCliPipes,           // receive the clave-* pipes
+            PermissionType::ChangeApplicationState, // focus_pane / rename_tab / hide_self
+            PermissionType::ReadApplicationState,   // TabUpdate + PaneUpdate truth
+            PermissionType::RunCommands,            // hydrate (clave snapshot) + clave focus
+            PermissionType::OpenTerminalsOrPlugins, // Alt+f scratch-shell spawn (#207)
+            // The beacon's in-plugin channel (#141). zellij gates
+            // `pipe_message_to_plugin` on this one because the same call can
+            // LAUNCH a plugin; clave never does, but the check is on the
+            // command, not the arguments. Withhold it and every announce is
+            // silently refused server-side.
+            PermissionType::MessageAndLaunchOtherPlugins,
+        ]);
+        subscribe(&[
+            EventType::TabUpdate,
+            EventType::PaneUpdate,
+            // The user's theme (#145): zellij sends one on subscribe and again
+            // whenever the mode/style changes, so the bar repaints on a theme
+            // switch without polling. Covered by ReadApplicationState above.
+            EventType::ModeUpdate,
+            // The #206 terminal-row deltas: cwd and foreground-command pushes
+            // between manifests. Per-pane and quiet — nothing like
+            // InputReceived's per-keystroke storm (see below).
+            EventType::CwdChanged,
+            EventType::CommandChanged,
+            EventType::Mouse,
+            EventType::RunCommandResult,
+            EventType::PermissionRequestResult,
+            // Whether this bar's tab is on screen: the paint gate
+            // (`BarModel::paints`) and the spinner read it.
+            EventType::Visible,
+            EventType::Timer, // peek-on-nav sink (set_timeout per peek)
+                              // NO InputReceived: it fires for EVERY keystroke INCLUDING the
+                              // nav keybinds themselves (C5 round 4: each walk press touched
+                              // the departing tab and the touch-spawn storm exhausted the
+                              // server's fds). Plain tabs order by birth only — shell-command
+                              // touches are parked (§6.6).
+        ]);
+        // Stock tab-bar pattern: an unselectable pane receives clicks
+        // directly (no focus-stealing first click) and MoveFocus skips it —
+        // nothing the bar does needs focus (clicks, pipes, hide_self).
+        set_selectable(false);
+        // The plugin's own pane id goes STRAIGHT to the model and is not kept
+        // here: identity resolution lives there, where it can be asserted on —
+        // this file is `test = false`, and RC-A shipped precisely because the
+        // frame join was written where nothing could see it.
+        self.model.set_own_pane(get_plugin_ids().plugin_id);
+    }
+
+    fn update(&mut self, event: Event) -> bool {
+        // The clock advances on EVERY event, not only on a paint (#232 put it
+        // in `render` alone). Two things read it outside a paint: the fast
+        // tick's strand window, which must age in real time so a claim the
+        // host never delivered stops blocking the next arm, and the stamp
+        // `arm_fast_tick` writes when a width ask books a tick between paints.
+        self.model.tick(wall_now());
+        // The ONE paint gate for events: an off-screen bar asks for no paint,
+        // whatever the event changed (`BarModel::paints`). Every arm returns
+        // through here, so a new arm cannot bypass it.
+        let wants = self.handle_event(event);
+        self.model.paints(wants)
+    }
 
     fn pipe(&mut self, message: PipeMessage) -> bool {
         // A CLI pipe blocks its caller until unblocked; capture the id BEFORE
@@ -1188,13 +1259,17 @@ impl ZellijPlugin for State {
             PipeSource::Cli(id) => Some(id.clone()),
             _ => None,
         };
+        // Same clock rule as `update()`. A hidden bar no longer paints, and
+        // the paint was where its clock moved, but it still decides things
+        // that read the clock — the standby test in its birth touch.
+        self.model.tick(wall_now());
         let repaint = self.handle_pipe(message);
         // UNCONDITIONAL unblock (dd38ace): even a malformed payload must not
         // leave `zellij pipe` hanging until Zellij's 1s server timeout.
         if let Some(id) = cli_pipe_id {
             unblock_cli_pipe_input(&id);
         }
-        repaint
+        self.model.paints(repaint)
     }
 
     fn render(&mut self, rows: usize, cols: usize) {
