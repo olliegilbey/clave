@@ -213,6 +213,14 @@ impl Default for OrderMode {
 /// transcript (the jsonl is the source of truth; the store is a cache).
 pub const BUCKET_RETAIN_HOURS: u32 = 7 * 24;
 
+/// Whether the bucket for `hour` still scores at `now_hour`: it is one of the
+/// last [`BUCKET_RETAIN_HOURS`] hours. Strict `>`: the hour exactly
+/// `BUCKET_RETAIN_HOURS` back is out. The store's prune, the wire's trim and
+/// the score all ask this one test, so they cannot drift.
+pub fn bucket_scores(hour: u32, now_hour: u32) -> bool {
+    hour + BUCKET_RETAIN_HOURS > now_hour
+}
+
 /// Frecency score in millipoints: Σ count × 0.5^(age_hours / half_life_hours),
 /// ×1000, floored. THE score: the bar ranks rows and repo clusters by it,
 /// the host ranks the Alt+a dir picker by it (2026-09-02) — one function,
@@ -236,9 +244,8 @@ pub fn frecency_millis(
     let hl = half_life_hours.max(1) as f64;
     let sum: f64 = buckets
         .iter()
-        // Same window arithmetic as the store's `bump_bucket` prune (strict:
-        // hour + RETAIN > now_hour keeps now_hour-167..=now_hour, 168 hours).
-        .filter(|&(&hour, _)| hour + BUCKET_RETAIN_HOURS > now_hour)
+        // The store's `bump_bucket` prune asks the same test.
+        .filter(|&(&hour, _)| bucket_scores(hour, now_hour))
         .map(|(&hour, &count)| {
             let age_hours = now_hour.saturating_sub(hour) as f64;
             count as f64 * 0.5_f64.powf(age_hours / hl)

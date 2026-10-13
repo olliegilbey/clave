@@ -396,7 +396,7 @@ pub(crate) fn bump_bucket(map: &mut BTreeMap<u32, u32>, now_hour: u32) {
     // Strict `>`, not `>=`: an hour exactly BUCKET_RETAIN_HOURS back is out
     // of the rolling window — the test pins now_hour=1000 pruning hour=832
     // (1000-832=168). Day-era keys (pre-v0.4.0) fall out here too.
-    map.retain(|hour, _| *hour + BUCKET_RETAIN_HOURS > now_hour);
+    map.retain(|hour, _| clave_types::bucket_scores(*hour, now_hour));
 }
 
 /// The newborn-inheritance source (spec: newborn initialisation): the
@@ -489,14 +489,28 @@ pub fn with_store_mut<T>(paths: &StorePaths, f: impl FnOnce(&mut Store) -> T) ->
 /// field it lays a column from arrives here as a value, never as a position
 /// inside `label` (#69).
 pub fn snapshot_from(store: &Store) -> AgentSnapshot {
+    let now_hour = unix_hour(now_unix());
+    // Only the buckets that still score ride the wire. The store prunes a
+    // row's buckets only when the row is bumped, so a dormant row keeps hours
+    // the bar scores as zero at this `now_hour` and every later one: 20 KB of
+    // a 92 KB dormant set, measured live 2026-10-13.
+    let scoring = |b: &BTreeMap<u32, u32>| -> BTreeMap<u32, u32> {
+        let mut b = b.clone();
+        b.retain(|hour, _| clave_types::bucket_scores(*hour, now_hour));
+        b
+    };
     let mut snap = AgentSnapshot {
         dormant: DormantRows::default(),
         seq: store.seq,
         tab_order: store.tab_order.clone(),
         collapsed: store.collapsed,
-        tab_buckets: store.tab_buckets.clone(),
+        tab_buckets: store
+            .tab_buckets
+            .iter()
+            .map(|(tab, b)| (*tab, scoring(b)))
+            .collect(),
         order: store.order,
-        now_hour: unix_hour(now_unix()),
+        now_hour,
         tab_touched: store.tab_touched.clone(),
         agents: store
             .agents
@@ -536,7 +550,7 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
                 // The frecency numerator (2026-08-19 spec) — copied, not
                 // recomputed, for the same reason context_level is: this
                 // runs inside whichever agent's hook fired.
-                buckets: r.buckets.clone(),
+                buckets: scoring(&r.buckets),
                 // #232. `pr_checked`/`pr_branch` stay host-side: cache
                 // bookkeeping the bar has no use for.
                 model: r.model.clone(),
@@ -2977,16 +2991,21 @@ mod tests {
         assert_eq!(snap2.seq, 2);
     }
 
+    /// Only the hours that still score ride the wire: the bar's score cuts the
+    /// rest to zero at this hour and every later one. Hours one back and one
+    /// window back, so a clock tick inside the test moves neither verdict.
     #[test]
-    fn snapshot_carries_buckets_tab_buckets_order_and_today() {
+    fn snapshot_carries_the_buckets_that_score_tab_buckets_order_and_today() {
+        let now_hour = unix_hour(now_unix());
+        let (fresh, expired) = (now_hour - 1, now_hour - BUCKET_RETAIN_HOURS);
         let mut s = Store::default();
         let mut a = rec("u1");
-        a.buckets = [(100, 5)].into();
+        a.buckets = [(expired, 9), (fresh, 5)].into();
         s.agents.insert("u1".into(), a);
-        s.tab_buckets.insert(3, [(100, 1)].into());
+        s.tab_buckets.insert(3, [(expired, 9), (fresh, 1)].into());
         let snap = snapshot_from(&s);
-        assert_eq!(snap.agents[0].buckets, [(100u32, 5u32)].into());
-        assert_eq!(snap.tab_buckets.get(&3), Some(&[(100u32, 1u32)].into()));
+        assert_eq!(snap.agents[0].buckets, [(fresh, 5u32)].into());
+        assert_eq!(snap.tab_buckets.get(&3), Some(&[(fresh, 1u32)].into()));
         assert_eq!(snap.order, clave_types::OrderMode::default());
         assert_eq!(snap.now_hour, unix_hour(now_unix()));
     }
