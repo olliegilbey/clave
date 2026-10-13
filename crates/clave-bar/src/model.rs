@@ -2010,7 +2010,7 @@ impl BarModel {
     /// nothing here. And a hidden instance receives no pane frames at all (C3),
     /// so the payment is frame-witnessed in the same sense the debt is.
     pub fn apply_panes(&mut self, panes: Vec<PaneMeta>) -> Vec<Effect> {
-        self.panes = panes;
+        self.panes = Self::in_tab_order(panes);
         // A closed pane's facts must not survive it: pane ids are minted
         // monotonically by zellij, but a map that only grows is a leak in a
         // bar that lives for the session. Plugin panes are excluded from the
@@ -3376,11 +3376,10 @@ impl BarModel {
 
     /// Whether a change the shell wants to show earns a paint. Never while
     /// the tab is off screen: an off-screen paint is pure cost, and 13 of 14
-    /// bars are off screen. Measured 2026-10-13 (14 tabs, 119 rows, one
-    /// core): every push painted all 14 bars, and one push cost ~2.2 CPU
-    /// seconds in total. The model still takes every update, because a hidden
-    /// bar still binds its own tab's agents. Only the paint waits, and
-    /// `Visible(true)` asks for it.
+    /// bars are off screen (2026-10-13: every push painted all 14 bars). The
+    /// model still takes every update, because a hidden bar still binds its
+    /// own tab's agents. Only the paint waits, and `Visible(true)` asks for
+    /// it.
     ///
     /// Nothing else needs an off-screen paint: the width machine is focus
     /// gated already, and settles on the paint that follows a return.
@@ -3397,9 +3396,22 @@ impl BarModel {
         self.tabs != tabs
     }
 
-    /// [`Self::tab_frame_differs`] for the pane frame.
+    /// [`Self::tab_frame_differs`] for the pane frame, in one fixed order.
     pub fn pane_frame_differs(&self, panes: &[PaneMeta]) -> bool {
-        self.panes != panes
+        self.panes != Self::in_tab_order(panes.to_vec())
+    }
+
+    /// A pane frame in one fixed order. Zellij sends the manifest as a map
+    /// keyed by tab position (zellij-utils-0.45.1 `data.rs:2344`
+    /// `PaneManifest`), and each decode builds a fresh `HashMap` with its own
+    /// random seed, so the same frame arrives in a new tab order each time.
+    /// Measured 2026-10-13 (14 tabs): every repeated frame then read as news,
+    /// and the visible bar painted 8 to 10 extra times per hook push, at
+    /// 16-90 ms each. The sort is stable, so the order zellij sends inside
+    /// one tab is kept.
+    fn in_tab_order(mut panes: Vec<PaneMeta>) -> Vec<PaneMeta> {
+        panes.sort_by_key(|p| p.tab_position);
+        panes
     }
 
     /// Whether the shell should ask for a fast tick on the SPINNER's behalf:
@@ -7011,7 +7023,7 @@ mod tests {
 
     /// Off screen, no paint is bought. Zellij paints every plugin that asks,
     /// on screen or not, and on 2026-10-13 that was 13 of every 14 paints a
-    /// push caused (14 tabs, one core: ~2.2 CPU seconds a push).
+    /// push caused (14 tabs).
     #[test]
     fn a_hidden_bar_asks_for_no_paint_until_it_is_shown() {
         let mut m = focused_bar();
@@ -7077,11 +7089,11 @@ mod tests {
     }
 
     /// Only a frame that says something new is worth a paint. Every hook push
-    /// is a CLI client, and each one's arrival and exit sends the focused bar
+    /// runs CLI clients, and each one's exit sends the focused bar
     /// the same tab and pane frames again — about ten pairs a push, measured.
     #[test]
     fn a_repeated_frame_is_not_news() {
-        let m = focused_bar();
+        let mut m = focused_bar();
         let tabs = m.tabs.clone();
         let panes = m.panes.clone();
         assert!(!m.tab_frame_differs(&tabs), "the same tab frame again");
@@ -7092,6 +7104,21 @@ mod tests {
         let mut moved = panes.clone();
         moved[0].is_focused = !moved[0].is_focused;
         assert!(m.pane_frame_differs(&moved), "a focus move is news");
+        // The manifest is a HashMap, so the same frame comes back with its
+        // tabs in a new order. Whole tab groups move; each group keeps its
+        // own order.
+        let mut shuffled = panes.clone();
+        shuffled.sort_by_key(|p| std::cmp::Reverse(p.tab_position));
+        assert_ne!(shuffled, panes, "the fixture must span more than one tab");
+        assert!(
+            !m.pane_frame_differs(&shuffled),
+            "the same panes in a new tab order are not news"
+        );
+        m.apply_panes(shuffled);
+        assert!(
+            !m.pane_frame_differs(&panes),
+            "and the frame applied in that order compares equal to the first"
+        );
     }
 
     /// The other half: the second expiry is bought only when a spinner could
