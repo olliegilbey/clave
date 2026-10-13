@@ -232,7 +232,7 @@ mod shell_text {
         {
             seen += 1;
             assert!(
-                l.contains("= self.probe_term_facts()"),
+                l.contains("= self.probe_term_facts()") && !l.contains("let _"),
                 "a probe's answer is dropped here:\n{l}"
             );
         }
@@ -241,6 +241,37 @@ mod shell_text {
             fn_body("handle_event").contains("changed || acted || probed"),
             "the manifest arm must paint on the probe's answer"
         );
+    }
+
+    /// A frame is news only when compared BEFORE it is applied: applied
+    /// first, it always equals the model, and no frame paints. Each manifest
+    /// arm must also answer with that news, or a changed frame paints only
+    /// when an effect happens to run (adversarial review of #279).
+    #[test]
+    fn each_frame_is_compared_before_it_is_applied() {
+        let events = fn_body("handle_event");
+        for (differs, apply, answer) in [
+            ("tab_frame_differs(", "apply_tabs(", "changed || acted\n"),
+            (
+                "pane_frame_differs(",
+                "apply_panes(",
+                "changed || acted || probed",
+            ),
+        ] {
+            let compared = events.find(differs).expect("the diff call went stale");
+            let applied = events.find(apply).expect("the apply call went stale");
+            assert!(
+                compared < applied,
+                "`{differs}` must run before `{apply}`:\n{events}"
+            );
+            let rest = &events[applied..];
+            let arm = &rest[..rest.find("Event::").unwrap_or(rest.len())];
+            assert!(
+                arm.contains(answer),
+                "the arm with `{apply}` must answer `{}`:\n{arm}",
+                answer.trim()
+            );
+        }
     }
 
     /// The last expression of a shell `fn`: its answer.

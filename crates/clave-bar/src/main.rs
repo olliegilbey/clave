@@ -932,9 +932,9 @@ impl State {
                 changed || acted || probed
             }
             Event::Visible(visible) => {
-                // Zellij repeats `Visible(false)` to every hidden bar on each
-                // CLI client exit, about ten per push (`set_visible`). Log
-                // only a flip, so the line stays gesture-rate.
+                // Zellij repeats `Visible(false)` to every hidden bar about
+                // four times per CLI call (`set_visible`). Log only a flip,
+                // so the line stays gesture-rate.
                 if self.model.set_visible(visible) {
                     eprintln!("clave-bar: visible {visible}");
                 }
@@ -1037,16 +1037,14 @@ impl State {
                     .model
                     .fast_tick_owns_expiry(elapsed < TIMER_KIND_CUTOFF_SECS, other_timers_armed);
                 let healed = !owns && self.model.expire_stale_fast_tick();
-                let fast_tick = if owns {
-                    if !self.model.spend_fast_tick(mono_ms()) {
-                        // A second timer chain's tick. No paint, so no
-                        // re-arm, and the chain ends here (`spend_fast_tick`).
-                        // The width leg below loses nothing: `owns` says a
-                        // claim is in flight, and that claim was made after
-                        // the last spend, so the surviving chain's timer is
-                        // still out and brings the next tick.
-                        return false;
-                    }
+                // A second timer chain's tick is not spent, and the chain ends
+                // here (`spend_fast_tick`). The other legs still run: a paint
+                // they ask for re-arms nothing, because the surviving chain's
+                // claim is still in flight. An early return here skipped the
+                // term-poll leg too, and so could end the 3s poll chain until
+                // the next pane frame (adversarial review of #279).
+                let fast_tick = owns && self.model.spend_fast_tick(mono_ms());
+                if fast_tick {
                     // The frame index is the tick's own count, bumped whoever
                     // asked for the tick. At five frames a second a spinner
                     // stepping early off a swap's tick is invisible, and the
@@ -1054,10 +1052,7 @@ impl State {
                     // the spinner's" that could disagree with the one that
                     // armed it.
                     self.anim_frame = self.anim_frame.wrapping_add(1);
-                    true
-                } else {
-                    false
-                };
+                }
                 // The width leg runs on EVERY expiry — `width_cooldown_elapsed`
                 // is inert unless an ask is in flight, so a peek expiry ending
                 // the deafness a few ms early is harmless, and no expiry can

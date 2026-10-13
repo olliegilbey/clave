@@ -87,7 +87,7 @@ Underneath, each instance is **shown** while its tab is on a client's screen
 and **hidden** otherwise, as zellij's `Event::Visible` says. A **paint** is one
 `render` of an instance. The **paint gate** (`BarModel::paints`) is the one rule
 that decides whether a change earns a paint: a hidden instance still takes every
-update, but it does not paint. A **timer chain** is one run of fast ticks
+update, but it asks for no paint. A **timer chain** is one run of fast ticks
 (the spinner's 0.2s timer) that re-arms itself; two chains at once are a defect
 (FOOTGUNS.md).
 

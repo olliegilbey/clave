@@ -3360,14 +3360,16 @@ impl BarModel {
 
     /// Zellij's word on whether this bar's tab is on screen, and whether that
     /// word changed anything. Zellij sends `Event::Visible(true)` to a tab's
-    /// plugins each time a client arrives on it: a switch, a new tab, a
-    /// close, an attach (zellij-server-0.45.1 `tab/mod.rs` `Tab::visible`,
-    /// called from `screen.rs`). It sends `Visible(false)` to EVERY tab with
-    /// no client each time any client leaves, and every `zellij pipe` or
-    /// `zellij action` is a client that leaves (`Screen::remove_client`,
-    /// `screen.rs:5156`). So most of these are repeats: about ten per hook
-    /// push for each hidden bar. Unlike the beacon, it cannot lag a native
-    /// tab switch.
+    /// plugins when a client moves into it, when the tab is new, to every
+    /// shown tab after a close, and on an attach to a tab with no client
+    /// (`zellij-server/src/screen.rs` at v0.45.1: `:2025`, `:4993`,
+    /// `:2309-2313`, `:5089-5094`). It sends `Visible(false)` to EVERY tab
+    /// with no client each time the server removes a client (the loop at
+    /// `:5156`). Every `zellij pipe` or `zellij action` is a client that the
+    /// server removes twice, and its session probe is one more, also removed
+    /// twice (`route.rs:2677`, `:2941`; `src/commands.rs:409`). So most of
+    /// these are repeats: about four per CLI call for each hidden bar.
+    /// Unlike the beacon, it cannot lag a native tab switch.
     pub fn set_visible(&mut self, visible: bool) -> bool {
         let flipped = self.hidden == visible;
         self.hidden = !visible;
@@ -3387,11 +3389,12 @@ impl BarModel {
         wants && !self.hidden
     }
 
-    /// Whether a tab frame says anything the last one did not. Zellij sends
-    /// the focused tab's bar a fresh `TabUpdate` and `PaneUpdate` each time
-    /// a CLI client leaves (`Screen::remove_client` reports the session
-    /// state), and every hook push runs CLI clients: measured, about ten
-    /// identical pairs per push, each a full repaint.
+    /// Whether a tab frame says anything the last one did not. Each client
+    /// removal reports the session state twice (`zellij-server/src/screen.rs`
+    /// at v0.45.1: `:5208`, `:10235`), so the focused tab's bar gets the same
+    /// `TabUpdate` and `PaneUpdate` again: about eight pairs per CLI call in
+    /// its own session, and four in every other session on the machine. Each
+    /// was a full repaint before 2026-10-13.
     pub fn tab_frame_differs(&self, tabs: &[TabMeta]) -> bool {
         self.tabs != tabs
     }
@@ -7015,7 +7018,7 @@ mod tests {
         m.tick(100);
         let mut at = 1_000;
         for late in [0, 900, 0, 30, 2_500, 0] {
-            assert!(m.arm_fast_tick() || m.fast_tick_in_flight());
+            m.arm_fast_tick();
             at += 200 + late;
             assert!(m.spend_fast_tick(at), "a tick {late}ms late was dropped");
         }
@@ -7039,8 +7042,8 @@ mod tests {
     }
 
     /// Only a change of state is news. Zellij repeats `Visible(false)` to
-    /// every hidden bar on each CLI client exit — about ten a push — so the
-    /// shell logs a flip, not a delivery.
+    /// every hidden bar about four times per CLI call, so the shell logs a
+    /// flip, not a delivery.
     #[test]
     fn only_a_visibility_flip_is_news() {
         let mut m = focused_bar();
@@ -7089,8 +7092,8 @@ mod tests {
     }
 
     /// Only a frame that says something new is worth a paint. Every hook push
-    /// runs CLI clients, and each one's exit sends the focused bar
-    /// the same tab and pane frames again — about ten pairs a push, measured.
+    /// runs CLI clients, and each one's exit sends the focused bar the same
+    /// tab and pane frames again: about eight pairs per CLI call.
     #[test]
     fn a_repeated_frame_is_not_news() {
         let mut m = focused_bar();

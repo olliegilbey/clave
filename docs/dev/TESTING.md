@@ -1248,8 +1248,9 @@ Four windows into what actually happened. Learn all four.
   (the trailing space is load-bearing). `clave-bar: visible <true|false>`
   comes from a bar whose tab was shown or hidden (zellij's `Event::Visible`).
   It logs a flip only: zellij repeats `Visible(false)` on every CLI client
-  exit. A hidden bar paints nothing, so a bar that logs `visible false` and
-  is then seen stale on screen is a missed `Visible(true)`, not a slow paint.
+  exit. A hidden bar asks for no paint (zellij still paints it on a resize),
+  so a bar that logs `visible false` and is then seen stale on screen is a
+  missed `Visible(true)`, not a slow paint.
 - **The evlog** — `clave.log`, JSON lines, one per host-side decision. There is
   one per state dir: `~/.local/state/clave/clave.log` for stable,
   `~/.local/state/clave-dev/state/clave.log` for the sandbox.
