@@ -1260,6 +1260,26 @@ pub fn needs_version_refresh(
     config_exists && has_embedded && !versioned_wasm_exists
 }
 
+/// `PATH` with `dir` added at the END, or `None` when `dir` is on it already.
+///
+/// The zellij server, every pane, every agent and every hook it spawns take
+/// the launcher's `PATH`. A hook that says bare `clave` then needs clave's own
+/// folder on it, and a launch over a non-interactive ssh command does not
+/// have it: `~/.zshrc` adds it, and an ssh command reads only `~/.zshenv`.
+/// Measured 2026-10-13: every hook in the live session failed `clave: not
+/// found` for 19 hours. Added last, so the sandbox's shim
+/// (`dev::shim_first_on_path`) and anything the user put first still win.
+fn path_with_dir(current: Option<&std::ffi::OsStr>, dir: &Path) -> Option<std::ffi::OsString> {
+    let mut dirs: Vec<PathBuf> = current
+        .map(|p| std::env::split_paths(p).collect())
+        .unwrap_or_default();
+    if dirs.iter().any(|d| d == dir) {
+        return None;
+    }
+    dirs.push(dir.to_path_buf());
+    std::env::join_paths(dirs).ok()
+}
+
 /// Bare `clave`: attach-or-create the dedicated session with OUR config +
 /// a DYNAMIC layout (§6.8 C8: eager most-recent tab; serialization is off,
 /// so a dead session is deleted, never resurrected).
@@ -1410,7 +1430,16 @@ pub fn launch_session() -> Result<()> {
         ),
     );
     use std::os::unix::process::CommandExt;
-    let err = std::process::Command::new(&zellij)
+    let mut zellij_cmd = std::process::Command::new(&zellij);
+    let launcher_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    if let Some(path) =
+        launcher_dir.and_then(|dir| path_with_dir(std::env::var_os("PATH").as_deref(), &dir))
+    {
+        zellij_cmd.env("PATH", path);
+    }
+    let err = zellij_cmd
         .arg("--config")
         .arg(&config)
         .arg("--layout")
@@ -2442,6 +2471,28 @@ mod tests {
         // never touched (§2 running-session immunity).
         extract_embedded(dir.path(), b"DIFFERENT", "0.1.0").unwrap();
         assert_eq!(std::fs::read(&p).unwrap(), b"wasm-bytes");
+    }
+
+    #[test]
+    fn the_launcher_dir_is_added_last_and_only_once() {
+        let dir = Path::new("/home/u/.local/share/clave/bin");
+        let ssh = std::ffi::OsStr::new("/usr/bin:/bin");
+        assert_eq!(
+            path_with_dir(Some(ssh), dir).unwrap(),
+            "/usr/bin:/bin:/home/u/.local/share/clave/bin",
+            "added at the end, so an earlier `clave` (the sandbox shim) still wins"
+        );
+        let login = std::ffi::OsStr::new("/home/u/.local/share/clave/bin:/usr/bin");
+        assert_eq!(
+            path_with_dir(Some(login), dir),
+            None,
+            "already on PATH: unchanged"
+        );
+        assert_eq!(
+            path_with_dir(None, dir).unwrap(),
+            "/home/u/.local/share/clave/bin",
+            "no PATH at all still finds clave"
+        );
     }
 
     #[test]
