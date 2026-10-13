@@ -274,6 +274,31 @@ mod shell_text {
         }
     }
 
+    /// The paint gate is only as good as the word it reads. Without the
+    /// subscription, every bar stays "on screen" to the model and paints
+    /// every push again; without the arm's answer, a bar that comes back on
+    /// screen shows its last frame until some other change paints it.
+    /// `main.rs` is outside `just mutants`, so these pins are its test.
+    #[test]
+    fn the_bar_hears_visibility_and_paints_on_return() {
+        let load = fn_body("load");
+        assert!(
+            load.contains("EventType::Visible,"),
+            "the bar must subscribe to `Visible`:\n{load}"
+        );
+        let events = fn_body("handle_event");
+        let at = events
+            .find("Event::Visible(visible) => {")
+            .expect("the Visible arm went stale");
+        let arm = &events[at..];
+        let arm = &arm[..arm.find("\n            }").unwrap_or(arm.len())];
+        assert_eq!(
+            last_expr(arm),
+            "visible // a returning bar paints what it took while away",
+            "the Visible arm must answer `visible`:\n{arm}"
+        );
+    }
+
     /// The last expression of a shell `fn`: its answer.
     fn last_expr(body: &str) -> &str {
         let inner = body.trim_end().strip_suffix('}').unwrap_or(body);

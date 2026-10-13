@@ -6968,6 +6968,11 @@ mod tests {
             m.spend_fast_tick(10_200),
             "the survivor's next tick, a full period on, is spent"
         );
+        // `just mutants` on #279: `<` → `<=` survived without this line.
+        assert!(
+            m.spend_fast_tick(10_350),
+            "exactly the window apart is not closer than it, so it is spent"
+        );
     }
 
     /// The window holds at EVERY phase, not only the one the incident had.
