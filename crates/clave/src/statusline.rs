@@ -22,16 +22,19 @@
 //!   quiet (a settings edit, a schema change) degrades back to today's
 //!   behaviour instead of freezing the row. A rotation (`/clear`) resets the
 //!   stamp with the battery: the new conversation has not been metered. A
-//!   Stop resets it too, after its own tail has yielded: the turn is over,
-//!   so the meter's next reading lands regardless of its interval and a
-//!   prompt's tail, post-turn and complete, may speak until it arrives.
+//!   turn end (Stop, StopFailure, or the idle nag that ends a turn) resets it
+//!   too, after the yield is decided: the turn is over, so the meter's next
+//!   reading lands regardless of its interval and a prompt's tail, post-turn
+//!   and complete, may speak until it arrives. The turn end also lands the
+//!   transcript's count over the yield when it is the higher one
+//!   (`hook::apply_hook_event`), because the statusLine runs on no turn end.
 //! - **The meter paces itself.** The statusLine runs on every assistant
 //!   message (6 runs, 4 distinct counts in one 15-second sandbox turn), and
 //!   every applied reading is a store rewrite under the flock plus a pipe
 //!   push that re-renders every bar. A count is due only when its TEXT moves
 //!   (`clave_types::token_text`, the bar's own rounding), and then only once
 //!   per [`APPLY_INTERVAL_SECS`]. A level move (a glyph or an ink), a model or
-//!   effort move (a cell) and the first reading after a Stop land at once —
+//!   effort move (a cell) and the first reading after a turn end land at once —
 //!   and a model or effort move brings the held count with it, since the row
 //!   is being written anyway.
 //!
@@ -144,8 +147,12 @@ impl Reading {
 /// (56%), and 25 of the 175 moved no pixel. Each push re-renders every bar.
 /// At ten seconds a working row could push its count six times a minute.
 /// The decision (Ollie, through the coordinator, 2026-10-14): the count on a
-/// working row lags up to 60 s. The band, the model and effort cells and the
-/// resting count stay exact, because those land at once (`count_due`).
+/// working row lags up to 60 s. The band and the model and effort cells land
+/// at once (`count_due`). The resting count is the higher of two readings:
+/// the transcript's at the turn end, and the meter's first reading after it.
+/// The statusLine runs on no turn end (code.claude.com/docs/en/statusline),
+/// so the meter alone can rest on a count it held. What each reading misses
+/// is in `hook::apply_hook_event`, at the turn end.
 pub const APPLY_INTERVAL_SECS: u64 = 60;
 
 /// How long after the meter's last token reading the hook's tail readers hold
@@ -156,7 +163,7 @@ pub const HOOK_YIELD_SECS: u64 = 600;
 
 /// The hook's side of the bargain: while the meter has spoken recently the
 /// hook's tail readers keep quiet on tokens, model and effort. `0` is "not
-/// metered since the last rotation or Stop" — the resets those two perform.
+/// metered since the last rotation or turn end" — the resets those perform.
 /// A clock stepped backwards reads as recent, never as an underflow.
 ///
 /// **Three cells, and only these three.** The scope is not a style note: a
@@ -173,7 +180,7 @@ pub fn hook_yields(rec: &AgentRecord, now: u64) -> bool {
 
 /// Whether a moved count is owed a write on its own merits (the module doc's
 /// pacing rule). A row with no count yet, or none since its rotation, always
-/// takes the first one. A cleared stamp (a Stop) takes the next one whatever
+/// takes the first one. A cleared stamp (a turn end) takes the next one whatever
 /// it renders, so the resting count is the turn's last. Otherwise a count
 /// that renders the same text is not a change: the bar would paint the same
 /// cell (25 of 175 meter pushes did, measured 2026-10-14).

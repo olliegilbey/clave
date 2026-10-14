@@ -64,13 +64,22 @@ pub fn unix_hour_from_iso(ts: &str) -> Option<u32> {
 /// (`hook::is_harness_turn`), so a backfilled row ranks the way a live one
 /// does. A task notification is not `isMeta`: measured 2026-10-14, 1262 of
 /// them in the history counted as typed prompts before this check.
+///
+/// Two more user records never reach the hook as a prompt, so they are not
+/// commitments either: a compaction's summary (`isCompactSummary`, 154 in
+/// the last month) and the CLI's interrupt marker (`hook::INTERRUPT_MARKER`,
+/// 34). Known asymmetries that stay: a scheduled prompt written as `isMeta`,
+/// and a message queued into a live turn, which the transcript keeps as a
+/// `queued_command` attachment.
 fn is_commitment(v: &serde_json::Value) -> bool {
     if v.get("type").and_then(|t| t.as_str()) != Some("user") {
         return false;
     }
-    if v.get("isMeta").and_then(|m| m.as_bool()) == Some(true)
-        || v.get("isSidechain").and_then(|m| m.as_bool()) == Some(true)
-    {
+    let flag = |key: &str| v.get(key).and_then(|m| m.as_bool()) == Some(true);
+    if flag("isMeta") || flag("isSidechain") || flag("isCompactSummary") {
+        return false;
+    }
+    if crate::hook::starts_with_marker(v) {
         return false;
     }
     let typed = |text: &str| !crate::hook::is_harness_turn(text);
@@ -411,6 +420,18 @@ mod tests {
             line(
                 "2026-08-15",
                 r#"[{"type":"text","text":"Another Claude session sent a message:\n"}]"#,
+                "",
+            ),
+            // Never a hook prompt: a compaction's summary, and the
+            // interrupt marker, each on an hour of its own.
+            line(
+                "2026-08-14",
+                r#""This session is being continued from a previous conversation""#,
+                r#","isCompactSummary":true"#,
+            ),
+            line(
+                "2026-08-14T05:00",
+                r#"[{"type":"text","text":"[Request interrupted by user for tool use]"}]"#,
                 "",
             ),
             line("2026-08-20", r#""command output""#, r#","isMeta":true"#), // meta

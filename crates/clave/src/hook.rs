@@ -46,7 +46,9 @@ pub struct HookPayload {
     /// path (no jsonl read needed for the initial label).
     #[serde(default, deserialize_with = "lenient")]
     pub prompt: Option<String>,
-    /// Notification carries a human message; §6.5 matches on its text.
+    /// Notification carries a human message. `notice` reads it only when
+    /// the payload has no `notification_type`; `wants_from_message` takes the
+    /// tool name from it.
     #[serde(default, deserialize_with = "lenient")]
     pub message: Option<String>,
     /// SessionEnd carries why the session ended: `clear`, `resume`,
@@ -91,6 +93,7 @@ pub struct HookPayload {
     pub background_tasks: Option<Vec<serde_json::Value>>,
     /// SessionStart's cause: `startup`, `resume`, `clear`, `compact` or
     /// `fork`. Only `compact` keeps the agents of the session it continues.
+    /// On UserPromptSubmit, who wrote the prompt (`is_typed`).
     #[serde(default, deserialize_with = "lenient")]
     pub source: Option<String>,
 }
@@ -101,13 +104,14 @@ pub fn status_for_event(event: &str, payload: &HookPayload, current: Status) -> 
     match event {
         "UserPromptSubmit" => Some(Status::Working),
         "Stop" => Some(Status::Done),
-        "StopFailure" => Some(Status::Failed),
+        // A subagent's API error ends the subagent's turn, not the parent's.
+        "StopFailure" if !from_a_subagent(event, payload) => Some(Status::Failed),
         "SessionEnd" => Some(Status::Idle),
         // The "answered" event that clave lacked. A batch resolves only after
         // every tool in it ran, so a permission or a question in it has been
         // answered (code.claude.com/docs/en/hooks, PostToolBatch). Only red
         // moves: a batch inside a live turn says nothing new.
-        "PostToolBatch" if !from_a_subagent_batch(event, payload) => {
+        "PostToolBatch" if !from_a_subagent(event, payload) => {
             (current == Status::NeedsYou).then_some(Status::Working)
         }
         "Notification" => match notice(payload) {
@@ -129,12 +133,30 @@ pub fn status_for_event(event: &str, payload: &HookPayload, current: Status) -> 
     }
 }
 
-/// A tool batch from inside a subagent. Its `session_id` names the parent,
-/// but the parent's red is not its to clear (Claude Code 2.1.299 builds the
-/// PostToolBatch input from the subagent's own tool context). `run_hook`
-/// exits on it before the store read: a busy subagent fires one per batch.
-fn from_a_subagent_batch(event: &str, payload: &HookPayload) -> bool {
-    event == "PostToolBatch" && payload.agent_id.is_some()
+/// A tool batch or an API error from inside a subagent. Its `session_id`
+/// names the parent, but the parent's red is not its to clear, and its error
+/// does not fail the parent's turn. Claude Code 2.1.299 builds both inputs
+/// from the subagent's own context, with its `agent_id`, and the shared query
+/// loop runs StopFailure in subagents too (the parent's turn ends in Stop or
+/// in its own StopFailure). Measured over the local history, 2026-10-14: 5 API
+/// errors ended subagent turns and 4 ended main threads. `run_hook` exits on
+/// both before the store read: a busy subagent fires a batch per tool batch.
+fn from_a_subagent(event: &str, payload: &HookPayload) -> bool {
+    matches!(event, "PostToolBatch" | "StopFailure") && payload.agent_id.is_some()
+}
+
+/// Whether this event ends the row's turn: the agent CLI's own end (Stop),
+/// an API error's end (StopFailure, the parent's own), or the idle nag on a
+/// row that still shows a turn. Esc sends no Stop, so for an interrupted turn
+/// the nag about 60 s later is the end clave hears. Read off the status table,
+/// so the two cannot disagree on which nag ends a turn.
+fn ends_turn(event: &str, payload: &HookPayload, current: Status) -> bool {
+    match event {
+        "Stop" => true,
+        "StopFailure" => !from_a_subagent(event, payload),
+        "Notification" => status_for_event(event, payload, current) == Some(Status::Idle),
+        _ => false,
+    }
 }
 
 /// What a Notification asks of the row.
@@ -187,6 +209,7 @@ const HARNESS_TURN_PREFIXES: &[&str] = &[
     "<task-notification",
     "<system-reminder",
     "<cross-session-message",
+    "<agent-message",
     "<teammate-message",
     "Another Claude session sent a message",
     "A peer session sent a message",
@@ -203,6 +226,69 @@ const HARNESS_TURN_PREFIXES: &[&str] = &[
 pub(crate) fn is_harness_turn(text: &str) -> bool {
     let t = text.trim_start();
     HARNESS_TURN_PREFIXES.iter().any(|p| t.starts_with(p))
+}
+
+/// Whether a UserPromptSubmit is a typed prompt. The payload's `source` says
+/// who wrote the prompt, where the CLI sends it: `user` (the composer) and
+/// `sdk` (`-p`, the Agent SDK) are a person; `system`, `loop_wakeup`,
+/// `schedule_wakeup` and `poll_event` are the CLI itself (2.1.299 hook input
+/// schema: "Payloads may omit it while the field rolls out"). Without the
+/// field, the prompt's start decides (`is_harness_turn`). The field closes
+/// the `/loop` and cron gap, whose prompts carry the human's own words.
+fn is_typed(payload: &HookPayload) -> bool {
+    match payload.source.as_deref() {
+        Some(source) => matches!(source, "user" | "sdk"),
+        None => !payload.prompt.as_deref().is_some_and(is_harness_turn),
+    }
+}
+
+/// The text the CLI writes as a user record when Esc interrupts a turn:
+/// `[Request interrupted by user]`, or `… for tool use]` when a tool was
+/// running. Measured over the local history, 2026-10-14: 34 records, each a
+/// text block of its own. No hook carries it, so only the transcript does.
+pub(crate) const INTERRUPT_MARKER: &str = "[Request interrupted by user";
+
+/// Whether the transcript's newest conversation record is an interrupt: the
+/// marker is newer than every assistant record in the tail. Read at a
+/// UserPromptSubmit. Every other record is skipped: tool results,
+/// attachments, system lines, and the new prompt itself if the CLI wrote it
+/// first. So a turn that is still live finds its own assistant record first.
+fn interrupted(tail: &str) -> bool {
+    for line in tail.lines().rev() {
+        // Two byte tests first: the tail parses here only where it can answer.
+        let assistant = line.contains(r#""type":"assistant""#);
+        if !assistant && !line.contains(INTERRUPT_MARKER) {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if v.get("isSidechain").and_then(serde_json::Value::as_bool) == Some(true) {
+            continue;
+        }
+        match v.get("type").and_then(serde_json::Value::as_str) {
+            Some("assistant") => return false,
+            Some("user") if starts_with_marker(&v) => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Whether a user record's first text is the interrupt marker, in either of
+/// the two shapes a user record's content takes (a string, or blocks).
+pub(crate) fn starts_with_marker(v: &serde_json::Value) -> bool {
+    let content = v.get("message").and_then(|m| m.get("content"));
+    let first_text = match content {
+        Some(serde_json::Value::String(t)) => Some(t.as_str()),
+        Some(serde_json::Value::Array(blocks)) => blocks
+            .iter()
+            .find(|b| b.get("type").and_then(serde_json::Value::as_str) == Some("text"))
+            .and_then(|b| b.get("text"))
+            .and_then(serde_json::Value::as_str),
+        _ => None,
+    };
+    first_text.is_some_and(|t| t.trim_start().starts_with(INTERRUPT_MARKER))
 }
 
 /// Wrappers around text the human DID type (a slash command, a local
@@ -632,9 +718,10 @@ pub fn fan_out_reading(event: &str, payload: &HookPayload) -> Option<bool> {
 }
 
 /// The anchor a permission notification's tool name follows. Claude Code's
-/// wording, matched as a substring for the same reason `status_for_event`
-/// matches its notifications that way: the CLI owns the sentence and has
-/// reworded it before, and a substring survives a prefix change.
+/// wording, matched as a substring: the CLI owns the sentence and has
+/// reworded it before, and a substring survives a prefix change. The kind of
+/// a notification comes from `notification_type` (`notice`); the sentence is
+/// the only source of the tool name.
 const PERMISSION_ANCHOR: &str = "permission to use ";
 
 /// What a blocked agent is asking for, from the `Notification` message clave
@@ -665,10 +752,12 @@ const WANTS_MAX_CHARS: usize = 64;
 ///
 /// Three cases, and the middle one is the reason this is a function rather
 /// than an assignment. A flagged row whose message NAMES a tool takes it. A
-/// flagged row whose message does not — the CLI's ~60s idle nag, which fires
-/// while the same permission prompt still stands — HOLDS what it already had,
-/// because a message carrying no news must not erase one that did. An unflagged
-/// row wants nothing, whatever it wanted a moment ago.
+/// flagged row whose message names none (a notification of another kind, or
+/// an ask that the CLI words without the anchor) HOLDS what it already had,
+/// because a message carrying no news must not erase one that did. The idle
+/// nag is not one of these: it never fires while a dialog is on screen
+/// (FOOTGUNS, "The idle nag never fires mid-turn"), and it ends the turn. An
+/// unflagged row wants nothing, whatever it wanted a moment ago.
 ///
 /// Returns whether the value moved, so a push happens only when a pixel would.
 pub fn take_wants(rec: &mut AgentRecord, message: Option<&str>) -> bool {
@@ -887,7 +976,7 @@ pub fn battery_level(tokens: u32, zone: u32) -> u8 {
     tenths.min(u64::from(clave_types::BATTERY_LEVELS - 1)) as u8
 }
 
-/// How much of the transcript the Stop and UserPromptSubmit readings see.
+/// How much of the transcript the readings at a prompt or a turn end see.
 /// Each reading parses every line it is handed, so the window is also their
 /// cost; each takes the newest record of its kind, so a wider one changes no
 /// value.
@@ -900,13 +989,15 @@ pub const TAIL_BYTES: u64 = 64 * 1024;
 /// A read that starts mid-file starts mid-line, so it is cut forward to the
 /// first newline. The readers would skip an unparseable fragment, but the
 /// fragment is a well-formed PREFIX of a real record often enough to parse
-/// as one and report a stale field.
+/// as one and report a stale field. The read starts one byte early, so a
+/// window that starts exactly on a line keeps that line: the byte before it
+/// is the newline the cut finds.
 pub fn read_tail(path: &Path, max_bytes: u64) -> Option<String> {
     let mut f = std::fs::File::open(path).ok()?;
     let len = f.metadata().ok()?.len();
     let start = len.saturating_sub(max_bytes);
-    f.seek(SeekFrom::Start(start)).ok()?;
-    let mut buf = Vec::with_capacity((len - start) as usize);
+    f.seek(SeekFrom::Start(start.saturating_sub(1))).ok()?;
+    let mut buf = Vec::with_capacity((len - start + 1) as usize);
     f.read_to_end(&mut buf).ok()?;
     let whole = if start == 0 {
         &buf[..]
@@ -1428,8 +1519,18 @@ pub fn apply_hook_event(
     // the spinner counts the work, whoever asked for it. A block inside the
     // turn keeps it, so the answer resumes the same count. Every other status
     // ends the turn, and a zero renders blank.
+    //
+    // An interrupt is the exception. Esc sends no Stop, so the row still shows
+    // Working when the next prompt comes, and the old clock would count the
+    // dead turn into the new one. The transcript tells the two apart: after
+    // an interrupt its newest record is the CLI's interrupt marker
+    // (`interrupted`); a message queued into a live turn finds the turn's own
+    // records newest. Measured 2026-10-14: 29 of 40 interrupts were followed
+    // by a prompt, and 51 prompts were queued into live turns.
+    let fresh = event == "UserPromptSubmit"
+        && (was != Status::Working || jsonl_tail.is_some_and(interrupted));
     let turn_started = match rec.status {
-        Status::Working if event == "UserPromptSubmit" && was != Status::Working => now,
+        Status::Working if fresh => now,
         Status::Working | Status::NeedsYou => rec.turn_started,
         _ => 0,
     };
@@ -1449,25 +1550,42 @@ pub fn apply_hook_event(
     let tokens_before = rec.context_tokens;
     note_live_session(rec, uuid, payload.session_id.as_deref(), own_claude);
     // #245: the three cells below have a fresher source when the statusLine
-    // is wired — the meter reads the API response this Stop's tail has not
-    // yet had flushed to it. While the meter is speaking the tail keeps quiet
+    // is wired — the meter reads the API response a turn end's tail may not
+    // yet have had flushed to it. While the meter is speaking the tail keeps quiet
     // on them; `title` and `summary` still read the whole tail
     // (`refresh_label`, below), those stay on the transcript by design.
     let parsed = jsonl_tail;
     let tail = parsed.filter(|_| !crate::statusline::hook_yields(rec, now));
-    // Stop hands the floor back — AFTER the yield decision above, so this
-    // Stop's own stale tail never lands. A cleared stamp lets the meter's
-    // next reading land regardless of its interval (the turn's last count is
-    // otherwise held until the next turn), and until it arrives a prompt's
-    // tail, post-turn and complete, may speak. Not part of `changed`: the
-    // stamp is persisted either way and renders nothing.
-    if event == "Stop" {
+    // The end of a turn hands the floor back, AFTER the yield decision above.
+    // A cleared stamp lets the meter's next reading land regardless of its
+    // interval, and until it arrives a prompt's tail, post-turn and complete,
+    // may speak. Not part of `changed`: the stamp is persisted either way and
+    // renders nothing.
+    let turn_end = ends_turn(event, payload, was);
+    if turn_end {
         rec.metered_at = 0;
     }
-    // A tail reaches us only on Stop / UserPromptSubmit (`run_hook`'s event
+    // A tail reaches us only on a prompt or a turn end (`run_hook`'s event
     // gate). No tail, or a tail carrying no usage line, HOLDS the previous
     // reading — §5.4 fail-closed. Never invent a measurement.
-    if let Some(tokens) = tail.and_then(tokens_from_tail) {
+    //
+    // The resting count. The meter paces a working row's count, so the count
+    // a turn ends on can be one it held, and the statusLine runs on no turn
+    // end (code.claude.com/docs/en/statusline, "When the status line
+    // updates"). So the turn end lands the transcript's count over the yield
+    // when it is the HIGHER one. Between two compactions of one conversation
+    // the context only grows. A compaction shrinks it, and `tokens_from_tail`
+    // reads only past the compaction's boundary. A rotation zeroes the stored
+    // count first (`note_live_session`). Both readings can lag the truth, and the higher
+    // one lags it least. The tail can lack the final response (the CLI drains
+    // its transcript writes on a 100 ms timer, and the Stop hook started a
+    // median 45 ms after the final message, measured over 2,585 Stops on
+    // 2026-10-14); the meter's run 300 ms after that message then lands at
+    // once on the cleared stamp.
+    if let Some(tokens) = parsed
+        .and_then(tokens_from_tail)
+        .filter(|&t| tail.is_some() || (turn_end && rec.context_tokens.is_none_or(|have| t > have)))
+    {
         rec.context_tokens = Some(tokens);
     }
     // #232: the card's model cell. Same source and cadence as the token
@@ -1515,8 +1633,7 @@ pub fn apply_hook_event(
     // talking to itself: measured 2026-10-14 on the live fleet, 32 of 40
     // turn-starting prompts were harness turns, and each one ranked its row
     // above the rows the human was working in.
-    let commitment =
-        event == "UserPromptSubmit" && !payload.prompt.as_deref().is_some_and(is_harness_turn);
+    let commitment = event == "UserPromptSubmit" && is_typed(payload);
     let mut commit_tab = None;
     if commitment {
         rec.last_interacted = now; // wall clock: `clave ls`, picker, eager_row
@@ -1845,14 +1962,21 @@ fn adoption_inputs(raw_cwd: &str, claude_dir: &Path, session: &str) -> Option<Ad
     })
 }
 
-/// Whether this event would leave the store exactly as it is: both halves of
+/// Whether this tool batch leaves the store exactly as it is: both halves of
 /// the hook write, run on a lock-free copy and compared whole. The whole
 /// store, not the `changed` bools: those gate the PUSH, and a write can
-/// persist a field that pushes nothing (`live_session`, `metered_at`).
+/// persist a field that pushes nothing (`live_session`).
 ///
-/// `false` wherever the copy cannot know. Stop and UserPromptSubmit read a
-/// tail under the lock, and the copy is handed none. A row the store does not
-/// hold is an adoption, and its mint is the change.
+/// PostToolBatch only. It fires once per tool batch of every agent, so it is
+/// the one event whose lock is worth saving. The copy's "no" is final, and a
+/// writer that holds the lock can still change the row after the copy was
+/// read. For a batch that is safe: it clears only red, and red clears only
+/// after a person answered, seconds after the ask's write landed. For any
+/// other event it is not (PR #285 review): a SubagentStart that read the copy
+/// before a SubagentStop's write would exit, and the mark would stay down
+/// while the new agent runs. So every other event takes the lock and decides
+/// there. A row the store does not hold is an adoption, and its mint is the
+/// change.
 fn changes_nothing(
     store: &Store,
     uuid: &str,
@@ -1862,7 +1986,7 @@ fn changes_nothing(
     now: u64,
     own_claude: bool,
 ) -> bool {
-    if matches!(event, "Stop" | "UserPromptSubmit") || !store.agents.contains_key(uuid) {
+    if event != "PostToolBatch" || !store.agents.contains_key(uuid) {
         return false;
     }
     let mut probe = store.clone();
@@ -1878,11 +2002,23 @@ fn changes_nothing(
     probe == *store
 }
 
+/// The events that may spawn `pr-sync` for a stale PR cache: the five clave
+/// registered before PR #285. PostToolBatch fires once per tool batch, so a
+/// burst of batches inside one `gh` call would spawn a `gh` for each. The
+/// subagent events and StopFailure add nothing the five do not already
+/// cover: the turn's prompt, its Stop and its notifications.
+fn asks_pr_sync(event: &str) -> bool {
+    matches!(
+        event,
+        "UserPromptSubmit" | "Stop" | "Notification" | "SessionEnd" | "SessionStart"
+    )
+}
+
 /// The whole hook flow. Errors bubble up ONLY so main can log them to
 /// stderr — main exits 0 no matter what (Global Constraint).
 pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
     let payload: HookPayload = serde_json::from_str(stdin_json).unwrap_or_default();
-    if from_a_subagent_batch(event, &payload) {
+    if from_a_subagent(event, &payload) {
         return Ok(());
     }
     let session = payload.session_id.clone();
@@ -1922,21 +2058,10 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
     };
     let now = now_unix();
     let own_claude = env_uuid.as_deref() == Some(uuid.as_str());
-    // The second fast path, the `statusline::meter` pattern: an event that
-    // moves nothing exits before the lock: a PostToolBatch on a row that is
-    // not red (one per tool batch of every agent), a SubagentStart or
-    // SubagentStop that leaves the mark where it was, a repeat Notification,
-    // or a SessionStart from a pane the row holds already. An adoption and
-    // the two events that read a tail always go on (`changes_nothing`).
+    // The second fast path, the `statusline::meter` pattern: a tool batch on
+    // a row that is not red moves nothing, so it exits before the lock. It
+    // owes no PR sync either (`asks_pr_sync`).
     if changes_nothing(&store, &uuid, event, &payload, pane, now, own_claude) {
-        // Read-only, as below: a quiet event still owes a stale PR its sync.
-        if store
-            .agents
-            .get(&uuid)
-            .is_some_and(|rec| crate::pr::pr_is_stale(rec, now))
-        {
-            crate::pr::spawn_pr_sync(&uuid);
-        }
         return Ok(());
     }
     let (snap, pr_stale) = with_store_mut(&paths, |s| {
@@ -1960,8 +2085,9 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
         // row (design-lock §7.1), so gating the read on "the label has not
         // been earned yet" would freeze the bar's two live columns the moment
         // the label froze — the regression this exists to remove. Cost is one
-        // [`TAIL_BYTES`] read on the two label-bearing events, well inside
-        // the §6.5 hook budget; the other events read nothing.
+        // [`TAIL_BYTES`] read on a prompt, a Stop, and a turn end that is not
+        // a Stop (`ends_turn`), well inside the §6.5 hook budget; the other
+        // events read nothing.
         let tail = s.agents.get(&uuid).and_then(|rec| {
             // Event gate FIRST. `resolve_transcript` does up to two
             // `canonicalize` calls, and this closure runs while
@@ -1971,7 +2097,9 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
             // agent. The comment above promises the other events read nothing;
             // this is what makes that true. (CodeRabbit, #98 — the previous
             // ordering was a regression against the code this replaced.)
-            if !matches!(event, "Stop" | "UserPromptSubmit") {
+            if !(matches!(event, "Stop" | "UserPromptSubmit")
+                || ends_turn(event, &payload, rec.status))
+            {
                 return None;
             }
             // The payload names its own CURRENT transcript, so this is right
@@ -1996,10 +2124,10 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
         // Read-only (#232): comparing two integers/strings against the row
         // this same write just touched. NOT a network call — that discipline
         // is the whole point (§6.5) — just the decision whether one is owed.
-        let pr_stale = s
-            .agents
-            .get(&uuid)
-            .is_some_and(|rec| crate::pr::pr_is_stale(rec, now));
+        let pr_stale = asks_pr_sync(event)
+            && s.agents
+                .get(&uuid)
+                .is_some_and(|rec| crate::pr::pr_is_stale(rec, now));
         (changed.then(|| snapshot_from(s)), pr_stale)
     })?;
     if let Some(snap) = snap {
@@ -2526,12 +2654,12 @@ mod tests {
         assert_eq!(live(&s).as_deref(), Some("rotated"));
     }
 
-    /// The probe that lets a quiet event skip the lock. It may say "nothing"
-    /// only when the locked write would persist nothing, and that includes a
+    /// The probe that lets a quiet tool batch skip the lock. It may say
+    /// "nothing" only when the locked write would persist nothing, and that includes a
     /// field that pushes no pixel: a live-id write must still take the lock,
     /// or a rotation is lost and the next release resumes the old file.
     #[test]
-    fn only_an_event_that_moves_nothing_skips_the_lock() {
+    fn only_a_tool_batch_that_moves_nothing_skips_the_lock() {
         let mut s = Store::default();
         let mut r = rec("u");
         r.status = Status::Working;
@@ -2545,23 +2673,50 @@ mod tests {
         let quiet =
             |event, p: &HookPayload, pane| changes_nothing(&s, "u", event, p, pane, 100, true);
         assert!(
-            quiet("SessionStart", &said("u", None), Some(4)),
-            "the pane it holds"
+            quiet("PostToolBatch", &said("u", None), Some(4)),
+            "a batch inside a live turn"
         );
-        assert!(quiet("Notification", &said("u", Some("auth ok")), None));
-        let ask = said("u", Some("Claude needs your permission to use Bash"));
-        assert!(!quiet("Notification", &ask, None), "a status move");
         assert!(
-            !quiet("SessionStart", &said("u", None), Some(5)),
+            !quiet("PostToolBatch", &said("u", None), Some(5)),
             "a new pane"
         );
         assert!(
-            !quiet("SessionStart", &said("rotated", None), Some(4)),
+            !quiet("PostToolBatch", &said("rotated", None), Some(4)),
             "a live-id write"
         );
+        let mut red = s.clone();
+        red.agents.get_mut("u").unwrap().status = Status::NeedsYou;
         assert!(
-            !quiet("SessionEnd", &said("u", None), None),
-            "Working -> Idle"
+            !changes_nothing(
+                &red,
+                "u",
+                "PostToolBatch",
+                &said("u", None),
+                Some(4),
+                100,
+                true
+            ),
+            "the answer clears red"
+        );
+        // Every other event takes the lock, even when the copy says it
+        // moves nothing: its "no" could be stale (PR #285 review).
+        assert!(
+            !quiet("SessionStart", &said("u", None), Some(4)),
+            "the pane it holds"
+        );
+        assert!(
+            !quiet("Notification", &said("u", Some("auth ok")), None),
+            "no news"
+        );
+        let started = HookPayload {
+            agent_id: Some("a1".into()),
+            ..said("u", None)
+        };
+        let mut lit = s.clone();
+        lit.agents.get_mut("u").unwrap().subagents = true;
+        assert!(
+            !changes_nothing(&lit, "u", "SubagentStart", &started, Some(4), 100, true),
+            "a start on a lit mark"
         );
         // A row the store does not hold is an adoption: the mint is the
         // change, though the copy, with no row to move, moves nothing.
@@ -2569,7 +2724,7 @@ mod tests {
             !changes_nothing(
                 &s,
                 "new",
-                "SessionStart",
+                "PostToolBatch",
                 &said("new", None),
                 Some(4),
                 100,
@@ -2577,20 +2732,29 @@ mod tests {
             ),
             "an adoption always takes the lock"
         );
-        // The two events that read a tail take the lock whatever the copy
-        // says: a harness turn on a working row moves no cell the copy can
-        // see, and a Stop on a finished row moves none either.
-        let harness = HookPayload {
-            prompt: Some("<task-notification>\n<task-id>b1</task-id>".into()),
-            ..said("u", None)
-        };
-        assert!(!quiet("UserPromptSubmit", &harness, Some(4)), "a tail read");
-        let mut done = s.clone();
-        done.agents.get_mut("u").unwrap().status = Status::Done;
-        assert!(
-            !changes_nothing(&done, "u", "Stop", &said("u", None), Some(4), 100, true),
-            "a tail read"
-        );
+    }
+
+    /// Only the five events clave registered before PR #285 spawn `pr-sync`.
+    /// A tool batch fires once per batch, and each spawn may run `gh`.
+    #[test]
+    fn a_tool_batch_never_asks_for_a_pr_sync() {
+        for ev in [
+            "UserPromptSubmit",
+            "Stop",
+            "Notification",
+            "SessionEnd",
+            "SessionStart",
+        ] {
+            assert!(asks_pr_sync(ev), "{ev}");
+        }
+        for ev in [
+            "PostToolBatch",
+            "StopFailure",
+            "SubagentStart",
+            "SubagentStop",
+        ] {
+            assert!(!asks_pr_sync(ev), "{ev}");
+        }
     }
 
     /// #97, the bug this exists to prevent recurring.
@@ -2905,6 +3069,132 @@ mod tests {
         assert_eq!(at("Notification", &nag, 460), (Idle, 0), "a missed Stop");
         assert_eq!(at("UserPromptSubmit", &p, 500), (Working, 500));
         assert_eq!(at("SessionEnd", &p, 510), (Idle, 0));
+    }
+
+    /// Esc sends no Stop, so the row still shows Working when the corrected
+    /// prompt comes. The interrupt marker in the transcript gives the new
+    /// turn a clock of its own (PR #285 review: a 0 s turn read 4m30s). A
+    /// message queued into a live turn finds the turn's own records newer,
+    /// and joins its clock.
+    #[test]
+    fn an_interrupted_turn_gives_the_next_prompt_a_clock_of_its_own() {
+        let said = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Working on it"}]}}"#;
+        let esc = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#;
+        let esc_tool = r#"{"type":"user","message":{"role":"user","content":"[Request interrupted by user for tool use]"}}"#;
+        let result = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]}}"#;
+        let quoted = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"[Request interrupted by user]"}]}}"#;
+        let side = r#"{"type":"user","isSidechain":true,"message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#;
+        let tail = |lines: &[&str]| lines.join("\n");
+        assert!(interrupted(&tail(&[said, esc])));
+        assert!(interrupted(&tail(&[said, esc_tool])), "the tool-use form");
+        assert!(
+            !interrupted(&tail(&[esc, said, result])),
+            "a live turn since"
+        );
+        assert!(
+            !interrupted(&tail(&[said, quoted])),
+            "a tool result quoting it"
+        );
+        assert!(!interrupted(&tail(&[said, side])), "a subagent's record");
+        assert!(!interrupted(""));
+
+        let mut s = Store::default();
+        let mut r = rec("u1");
+        r.status = Status::Working;
+        r.turn_started = 100;
+        s.agents.insert("u1".into(), r);
+        let typed = HookPayload {
+            session_id: Some("u1".into()),
+            prompt: Some("no, the other file".into()),
+            ..Default::default()
+        };
+        let ups = "UserPromptSubmit";
+        let after_esc = tail(&[said, esc]);
+        apply_hook_event(&mut s, "u1", ups, &typed, Some(&after_esc), 370, true);
+        assert_eq!(
+            s.agents["u1"].turn_started, 370,
+            "the interrupted turn is over"
+        );
+        let live = tail(&[esc, said, result]);
+        apply_hook_event(&mut s, "u1", ups, &typed, Some(&live), 400, true);
+        assert_eq!(
+            s.agents["u1"].turn_started, 370,
+            "a queued message joins it"
+        );
+    }
+
+    /// The payload's `source` says who wrote the prompt, and it wins over the
+    /// text where the CLI sends it. Without it, the text's start decides.
+    #[test]
+    fn the_prompts_source_says_who_wrote_it() {
+        let ups = |source: Option<&str>, text: &str| HookPayload {
+            prompt: Some(text.into()),
+            source: source.map(str::to_string),
+            ..Default::default()
+        };
+        for who in ["user", "sdk"] {
+            assert!(
+                is_typed(&ups(Some(who), "<task-notification> quoted")),
+                "{who}"
+            );
+        }
+        for who in ["system", "loop_wakeup", "schedule_wakeup", "poll_event"] {
+            assert!(!is_typed(&ups(Some(who), "check the build")), "{who}");
+        }
+        assert!(is_typed(&ups(None, "check the build")));
+        assert!(!is_typed(&ups(None, "<agent-message from=\"a1\">done")));
+        assert!(
+            is_typed(&HookPayload::default()),
+            "no prompt reads as typed"
+        );
+    }
+
+    /// The resting count (PR #285 review). The meter paces a working row's
+    /// count and runs on no turn end, so the count a turn ends on can be a
+    /// held one. A turn end lands the transcript's count over the meter's
+    /// yield when it is higher, and only then: a lower one may be a tail that
+    /// lacks the final response.
+    #[test]
+    fn a_turn_end_lands_the_transcripts_count_when_it_is_higher() {
+        let usage = |n: u32| {
+            format!(r#"{{"type":"assistant","message":{{"usage":{{"input_tokens":{n}}}}}}}"#)
+        };
+        let of_kind = |kind: Option<&str>, agent: Option<&str>| HookPayload {
+            session_id: Some("u1".into()),
+            notification_type: kind.map(str::to_string),
+            agent_id: agent.map(str::to_string),
+            ..Default::default()
+        };
+        let own = of_kind(None, None);
+        let nag = of_kind(Some("idle_prompt"), None);
+        // A metered row, inside the yield, holding 1000.
+        let run = |event: &str, p: &HookPayload, status: Status, tail: u32| {
+            let mut s = Store::default();
+            let mut r = rec("u1");
+            r.status = status;
+            r.context_tokens = Some(1000);
+            r.metered_at = 990;
+            s.agents.insert("u1".into(), r);
+            apply_hook_event(&mut s, "u1", event, p, Some(&usage(tail)), 1000, true);
+            let r = &s.agents["u1"];
+            (r.context_tokens, r.metered_at)
+        };
+        use Status::*;
+        assert_eq!(run("Stop", &own, Working, 1500), (Some(1500), 0));
+        assert_eq!(
+            run("Stop", &own, Working, 800),
+            (Some(1000), 0),
+            "lower holds"
+        );
+        assert_eq!(run("StopFailure", &own, Working, 1500), (Some(1500), 0));
+        assert_eq!(run("Notification", &nag, Working, 1500), (Some(1500), 0));
+        // Not a turn end: the yield holds, and so does the stamp.
+        assert_eq!(run("Notification", &nag, Done, 1500), (Some(1000), 990));
+        assert_eq!(run("UserPromptSubmit", &own, Done, 1500), (Some(1000), 990));
+        let sub = of_kind(None, Some("a1"));
+        assert_eq!(run("StopFailure", &sub, Working, 1500), (Some(1000), 990));
+        assert!(!ends_turn("StopFailure", &sub, Working));
+        assert!(!ends_turn("SessionEnd", &own, Working));
     }
 
     #[test]
@@ -3232,9 +3522,26 @@ mod tests {
         }
         let sub = said(None, None, Some("a1b2"));
         assert_eq!(status_for_event("PostToolBatch", &sub, NeedsYou), None);
-        assert!(from_a_subagent_batch("PostToolBatch", &sub));
-        assert!(!from_a_subagent_batch("PostToolBatch", &own));
-        assert!(!from_a_subagent_batch("Notification", &sub), "only a batch");
+        assert!(from_a_subagent("PostToolBatch", &sub));
+        assert!(!from_a_subagent("PostToolBatch", &own));
+        assert!(
+            !from_a_subagent("Notification", &sub),
+            "a batch or an error only"
+        );
+    }
+
+    /// StopFailure carries `agent_id` when the error ended a subagent's turn
+    /// (2.1.299 builds its input from the subagent's context). The parent's
+    /// turn goes on, so the parent row must not show Failed.
+    #[test]
+    fn a_subagents_api_error_does_not_fail_the_parent() {
+        use Status::*;
+        let own = said(None, None, None);
+        let sub = said(None, None, Some("a1b2"));
+        assert_eq!(status_for_event("StopFailure", &own, Working), Some(Failed));
+        assert_eq!(status_for_event("StopFailure", &sub, Working), None);
+        assert!(from_a_subagent("StopFailure", &sub));
+        assert!(!from_a_subagent("StopFailure", &own));
     }
 
     /// The strict-payload trap (FOOTGUNS). One field of a novel type used to
@@ -3407,6 +3714,11 @@ mod tests {
         // of one: the leading `a` puts every `é` on an odd offset.
         std::fs::write(&path, format!("a{}\n{}", "é".repeat(600), "é".repeat(100))).unwrap();
         assert_eq!(read_tail(&path, 1024), Some("é".repeat(100)));
+        // A window that starts exactly on a line keeps that line (PR #285
+        // review): the last 5 bytes of `ab\ncd\nef` are `cd\nef`.
+        std::fs::write(&path, "ab\ncd\nef").unwrap();
+        assert_eq!(read_tail(&path, 5).as_deref(), Some("cd\nef"));
+        assert_eq!(read_tail(&path, 4).as_deref(), Some("ef"), "mid-line: cut");
     }
 
     /// The window must reach the newest token reading. Measured 2026-10-14
