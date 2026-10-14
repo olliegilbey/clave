@@ -2152,18 +2152,21 @@ wait_field() {
 }
 row_field() { jq -r --arg u "$P5B_UUID" ".store.agents[\$u].$1" < <(dev_status) 2>/dev/null; }
 store_seq() { jq -r '.store.seq' < <(dev_status) 2>/dev/null; }
+store_inode() { file_inode "$STATE_DIR/agents.json"; }
 
-# An event that must move nothing, held to that. The hook runs to completion
-# before ct.sh returns, and the PR cache is warm (below), so nothing of its
-# own lands late. The second read still waits a second, so that a late
-# writer shows as a red here rather than in some later window.
+# An event that must move nothing, held to that: no `seq` move, and no
+# rewrite of the store file (its inode, `quiet_event_checks`). The hook runs
+# to completion before ct.sh returns, and the PR cache is warm (below), so
+# nothing of its own lands late. The second read still waits a second, so
+# that a late writer shows as a red here rather than in some later window.
 P5B_QUIET=0
 quiet_fire() {
-  local desc="$1" event="$2" extra="${3:-}" before
+  local desc="$1" event="$2" extra="${3:-}" before ino
   before="$(store_seq)"
+  ino="$(store_inode)"
   hook_fire "$event" "$extra"
   sleep 1
-  quiet_event_checks "$desc" "$before" "$(store_seq)"
+  quiet_event_checks "$desc" "$before" "$(store_seq)" "$ino" "$(store_inode)"
   P5B_QUIET=$((P5B_QUIET + 1))
 }
 
@@ -2219,7 +2222,7 @@ check "and the card learns what it asks for" "$(wait_field wants Bash)" "Bash"
 
 # A subagent's batch names the parent's session and carries its own
 # `agent_id`. It says nothing about the parent's ask, so it moves nothing,
-# and it never reaches the store lock (hook.rs `from_a_subagent_batch`).
+# and it never reaches the store lock (hook.rs `from_a_subagent`).
 quiet_fire "a subagent's tool batch writes nothing" PostToolBatch '{"agent_id":"qa-5b-agent"}'
 check "and the parent stays red" "$(row_field status)" "needs_you"
 
@@ -2283,7 +2286,7 @@ check "the agent's own stop lowers the mark" "$(wait_field subagents false)" "fa
 # raised first, or the hold proves nothing.
 hook_fire SubagentStart '{"agent_id":"qa-5b-a2","agent_type":"general-purpose"}'
 check "a second start raises the mark again" "$(wait_field subagents true)" "true"
-hook_fire SessionStart '{"source":"compact"}'
+quiet_fire "a compaction holds the mark and writes nothing" SessionStart '{"source":"compact"}'
 check "a compaction holds it" "$(wait_field subagents true)" "true"
 hook_fire Stop '{"background_tasks":[]}'
 check "an empty registry at Stop lowers it" "$(wait_field subagents false)" "false"
@@ -2305,15 +2308,15 @@ check_numeric "phase-5b end store seq readable" "$P5B_SEQ_END"
 P5B_LOUD=$((P5B_EVENTS - P5B_QUIET))
 measure "store seq across the card-cell ladder" \
   "before=${P5B_SEQ0} after=${P5B_SEQ_END} delta=$((P5B_SEQ_END - P5B_SEQ0)) events=${P5B_EVENTS} quiet=${P5B_QUIET}"
-# A write per event that moves a cell is the ceiling: the hook is one locked
-# RMW per event, the snapshot push is not a store write, and the quiet events
-# are pinned at zero above. The warm-up is what makes the count attributable,
-# by taking `pr-sync` out of it. More means something writes twice per event,
-# the shape the paced-12 check watches for on the toggle side. (Fewer is fine:
-# the compaction re-asserts a mark that is already up.)
+# Exactly one write per event that moves a cell: the hook is one locked RMW
+# per event, the snapshot push is not a store write, and the quiet events are
+# pinned at zero above. The warm-up is what makes the count attributable, by
+# taking `pr-sync` out of it. More means something writes twice per event,
+# the shape the paced-12 check watches for on the toggle side. Fewer means an
+# event counted as loud moved nothing, so it belongs in `quiet_fire`.
 if [[ "$P5B_PR_WARM" == "fresh" ]]; then
-  check "phase-5b writes per event that moves a cell <= 1 (delta <= ${P5B_LOUD})" \
-    "$(((P5B_SEQ_END - P5B_SEQ0) <= P5B_LOUD ? 1 : 0))" "1"
+  check "phase-5b writes exactly one store write per event that moves a cell" \
+    "$((P5B_SEQ_END - P5B_SEQ0))" "$P5B_LOUD"
 else
   note 'the PR cache never settled, so every event still spawns a `pr-sync` whose write lands off-schedule — the budget is not attributable here and is recorded above, not asserted'
 fi

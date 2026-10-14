@@ -756,14 +756,27 @@ want "a report with no events is refused, not passed" "$?" "1"
 (hook_registration_checks "" >/dev/null 2>&1)
 want "an unreadable report is refused, not passed" "$?" "1"
 
-(quiet_event_checks "a quiet event" 41 41 >/dev/null 2>&1)
-want "a flat seq passes" "$?" "0"
-(quiet_event_checks "a quiet event" 41 42 >/dev/null 2>&1)
+(quiet_event_checks "a quiet event" 41 41 7340 7340 >/dev/null 2>&1)
+want "a flat seq on the same file passes" "$?" "0"
+(quiet_event_checks "a quiet event" 41 42 7340 7340 >/dev/null 2>&1)
 want "a moved seq fails" "$?" "1"
-(quiet_event_checks "a quiet event" "" "" >/dev/null 2>&1)
+(quiet_event_checks "a quiet event" "" "" 7340 7340 >/dev/null 2>&1)
 want "two dead seq reads are refused, not passed" "$?" "1"
-(quiet_event_checks "a quiet event" null null >/dev/null 2>&1)
+(quiet_event_checks "a quiet event" null null 7340 7340 >/dev/null 2>&1)
 want "two null seq reads are refused, not passed" "$?" "1"
+REWROTE="$(quiet_event_checks "a quiet event" 41 41 7340 7351 2>&1)"
+want "a rewrite with a flat seq fails (the store file moved)" "$?" "1"
+want "and the verdict names the rewrite" "$(grep -c 'not rewritten (inode): measured=7351 expected=7340 FAIL' <<<"$REWROTE")" "1"
+(quiet_event_checks "a quiet event" 41 41 "" "" >/dev/null 2>&1)
+want "two dead inode reads are refused, not passed" "$?" "1"
+INO_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qa-lib-selftest-ino.XXXXXX")"
+printf 'a' >"$INO_DIR/f"
+INO_A="$(file_inode "$INO_DIR/f")"
+want "file_inode reads a number" "$([[ "$INO_A" =~ ^[0-9]+$ ]] && echo yes)" "yes"
+printf 'a' >"$INO_DIR/f.tmp" && mv "$INO_DIR/f.tmp" "$INO_DIR/f"
+want "a write by rename moves the inode" "$([[ "$(file_inode "$INO_DIR/f")" != "$INO_A" ]] && echo yes)" "yes"
+want "a missing file reads as nothing" "$(file_inode "$INO_DIR/absent")" ""
+rm -rf "$INO_DIR"
 
 clock_status() { # last_interacted, commit_ord of row u1
   jq -nc --argjson l "$1" --argjson o "$2" '{store: {agents: {u1: {last_interacted: $l, commit_ord: $o}}}}'
