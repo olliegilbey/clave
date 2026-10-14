@@ -2194,7 +2194,7 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
     // returned, so `pr-sync` (its own locked RMW) can never deadlock against
     // this hook's lock. `pr-sync` re-checks staleness itself, so a hook that
     // fires again before `pr-sync` has answered spawns harmlessly again;
-    // the stamp `pr::begin_pr_sync` sets keeps `gh` from being asked twice.
+    // `gh` may be asked twice, but the same answer twice pushes nothing.
     if pr_stale {
         crate::pr::spawn_pr_sync(&uuid);
     }

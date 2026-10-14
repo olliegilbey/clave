@@ -61,14 +61,14 @@ exclude_re = [
     # hook must return before `gh` starts. There is no observable it could be
     # asserted against; a test that could see the child would be testing a
     # different function. What it forwards to is mutated and killed directly:
-    # `pr_is_stale` decides whether to call it, `begin_pr_sync` decides what
-    # the child does.
+    # `pr_is_stale` decides whether to call it, `pr_sync_target` decides what
+    # the child asks.
     "spawn_pr_sync",
     # `pr-sync`'s process entry point, same argument as `run_on_version_refresh`
     # above: resolves the AMBIENT store paths, takes the store lock, shells out
     # to `gh`, and pushes a snapshot — all process-global, none observable from
     # a unit test. Every decision inside it is reachable and mutated on its own
-    # (`begin_pr_sync` for the re-check and stamp under the lock, `resolve_pr`
+    # (`pr_sync_target` for the re-check, `resolve_pr`
     # for the parse and its degradations, `pr_is_stale` for the TTL, and
     # `apply_pr_answer` for the seq bump the push hangs on). The seam itself is
     # a live-run check: the PR cell filling within a TTL on a PR branch, and

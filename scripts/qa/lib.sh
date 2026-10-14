@@ -401,28 +401,45 @@ arrival_checks() {
   check "and no birth touch lifted it to the top first" "$touched" "none"
 }
 
-# The quiet `pr-sync` (phase 5b, the warm-up). A `pr-sync` bumps seq, and so
-# pushes, only when the PR number moves (pr.rs `apply_pr_answer`). Before
-# 0.5.6 it pushed every answer, and 25 of 27 such pushes on the live fleet
-# changed nothing on screen (2026-10-14). Only `pr-sync` writes `pr_checked`
-# on a SessionEnd, so a moved stamp proves one ran. $1 and $2 are the stamp
-# before the hook and after the settle, $3 and $4 the PR number then, $5 the
-# seq once the hook returned, $6 the seq after the settle.
+# The quiet lookup (phase 5b, the warm-up). Only a `pr-sync` answer writes
+# `pr_checked`, and it bumps seq only when the PR number moves (pr.rs
+# `apply_pr_answer`). Before 0.5.6 every answer pushed, and 25 of 27 such
+# pushes on the live fleet changed nothing on screen (2026-10-14). The
+# sandbox repos have no remote, so in the drive `gh` exits 1 and the lookup
+# FAILS: what this reads is that a failed lookup keeps the number and pushes
+# nothing. A real answer is unit-tested only (pr.rs).
+#
+# $1 is the row. $2, $3 and $4 are one `dev status` read each: before the
+# hook, just after it, and after the settle. One read per moment keeps the
+# seq and the stamp in it from the same store file, and the answer writes
+# both in one write. So the read after the hook holds the answer's bump only
+# if it also holds the answer's stamp, and that read is then not used.
 pr_sync_quiet_checks() {
-  local stamp0="$1" stamp1="$2" pr0="$3" pr1="$4" seq0="$5" seq1="$6"
-  measure "PR cache stamp before the hook / after the settle" "${stamp0:-empty} / ${stamp1:-empty}"
+  # shellcheck disable=SC2016 # `$u` is jq's variable, not the shell's
+  local u="$1" pre="$2" hook="$3" settled="$4" row='.store.agents[$u]'
+  local stamp0 stamp_hook stamp1 pr0 pr1 seq0 seq1
+  stamp0="$(jq -r --arg u "$u" "$row.pr_checked" <<<"$pre" 2>/dev/null)"
+  stamp_hook="$(jq -r --arg u "$u" "$row.pr_checked" <<<"$hook" 2>/dev/null)"
+  stamp1="$(jq -r --arg u "$u" "$row.pr_checked" <<<"$settled" 2>/dev/null)"
+  pr0="$(jq -r --arg u "$u" "$row.pr_number" <<<"$pre" 2>/dev/null)"
+  pr1="$(jq -r --arg u "$u" "$row.pr_number" <<<"$settled" 2>/dev/null)"
+  seq0="$(jq -r '.store.seq' <<<"$hook" 2>/dev/null)"
+  seq1="$(jq -r '.store.seq' <<<"$settled" 2>/dev/null)"
+  measure "PR cache stamp before the hook / just after it / after the settle" \
+    "${stamp0:-empty} / ${stamp_hook:-empty} / ${stamp1:-empty}"
   measure "PR number before / after" "${pr0:-empty} / ${pr1:-empty}"
-  check_numeric "store seq readable once the hook returned" "$seq0"
+  check_numeric "store seq readable just after the hook" "$seq0"
   check_numeric "store seq readable after the settle" "$seq1"
-  # A pr-sync that ran leaves a new stamp. Without one there is nothing to
-  # read, and a pass here would compare two seqs that nothing could move.
-  if [[ ! "$stamp1" =~ ^[0-9]+$ || "$stamp0" == "$stamp1" ]]; then
-    note "no pr-sync stamped the PR cache in the warm-up (it was fresh), so the quiet answer is not read here"
+  if [[ ! "$stamp1" =~ ^[0-9]+$ || "$stamp1" == "$stamp0" ]]; then
+    note "no pr-sync answer landed in the warm-up (the cache was fresh, or no answer came), so the quiet lookup is not read here"
+  elif [[ "$stamp_hook" != "$stamp0" ]]; then
+    note "the pr-sync answered before the read just after the hook, so its write cannot be told from the hook's; the quiet lookup is not read here"
   elif [[ "$pr0" == "$pr1" ]]; then
-    check "a pr-sync that found the same PR wrote no seq (so it pushed nothing)" "$seq1" "$seq0"
+    check "a pr-sync lookup that left the PR number as it was wrote no seq (so it pushed nothing)" \
+      "$seq1" "$seq0"
   else
-    check "a pr-sync that moved the PR wrote seq at most once" \
-      "$(((seq1 - seq0) <= 1 ? 1 : 0))" "1"
+    check "a pr-sync lookup that moved the PR number wrote seq exactly once (none: no bar hears it)" \
+      "$((seq1 - seq0))" "1"
   fi
 }
 

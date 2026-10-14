@@ -11,8 +11,8 @@
 //! only place that runs `gh`, under a hard-killed 5s timeout, and it writes
 //! a miss down as an answer (`pr_number: None`) so the miss does not
 //! retrigger for a full TTL. A miss is an answer. A failed `gh` is not a
-//! miss: it is [`PrLookup::Failed`], and it does not blank a number it cannot
-//! disprove.
+//! miss: it is [`PrLookup::Failed`], and it keeps a number that answers the
+//! row's current question.
 
 use crate::store::{self, AgentRecord};
 
@@ -79,11 +79,18 @@ pub fn resolve_pr(
 
 /// TTL-or-branch-change staleness. A branch switch invalidates the cached
 /// number immediately (the cache is now for the wrong question) even inside
-/// the TTL window; `pr_checked == 0` (never looked) is always stale.
+/// the TTL window; `pr_checked == 0` (never looked, or the checkout moved)
+/// is always stale.
 pub fn pr_is_stale(rec: &AgentRecord, now: u64) -> bool {
-    rec.pr_checked == 0
-        || now.saturating_sub(rec.pr_checked) > PR_TTL_SECS
-        || rec.pr_branch != rec.branch
+    !answers_current_question(rec) || now.saturating_sub(rec.pr_checked) > PR_TTL_SECS
+}
+
+/// The row's number answers the question the row asks now: it was answered
+/// (`pr_checked != 0`) for the branch the row is on. A move zeroes the stamp
+/// (`hook::take_checkout`, `store::apply_relocation`), so a number asked from
+/// another directory fails this too.
+fn answers_current_question(rec: &AgentRecord) -> bool {
+    rec.pr_checked != 0 && rec.pr_branch == rec.branch
 }
 
 /// Spawn `clave pr-sync <uuid>` fully detached: stdin/stdout/stderr null,
@@ -119,8 +126,9 @@ pub fn spawn_pr_sync(uuid: &str) {
 ///
 /// The worktree and the root remain the fallback for a row whose cwd is not
 /// known. A cwd that no longer exists cannot spawn `gh` at all (`gh_runner`
-/// ends in `.spawn().ok()?`), so the answer degrades to blank, never to
-/// something belonging to another project.
+/// ends in `.spawn().ok()?`), so the lookup is [`PrLookup::Failed`]: the row
+/// keeps a number asked from this same checkout, and never gains one that
+/// belongs to another project.
 fn checkout_dir(rec: &AgentRecord) -> String {
     if !rec.cwd.is_empty() {
         return rec.cwd.clone();
@@ -130,43 +138,31 @@ fn checkout_dir(rec: &AgentRecord) -> String {
         .unwrap_or_else(|| rec.repo_root.clone())
 }
 
-/// One lookup a `pr-sync` owes, read under the lock by [`begin_pr_sync`].
+/// One lookup a `pr-sync` owes: where `gh` runs, and what it asks.
 #[derive(Debug, PartialEq, Eq)]
 struct PrAsk {
-    /// Where `gh` runs ([`checkout_dir`]).
+    /// [`checkout_dir`] when the sync started.
     cwd: String,
     repo_root: String,
     branch: String,
-    /// The number the row holds answers this same question: the cache went
-    /// stale on the TTL alone. A branch change, or a move (which zeroes the
-    /// stamp, `hook::take_checkout`), makes it the answer to another question.
-    same_question: bool,
 }
 
-/// Starts a sync UNDER the store lock: re-checks staleness and hands back
-/// the lookup a caller owes. `None` means "nothing to do": the uuid is gone,
-/// or another `pr-sync` started first.
+/// The lookup a stale row owes. `None` means "nothing to do": the uuid is
+/// gone, or the row is fresh because another `pr-sync` answered first.
 ///
-/// It stamps the cache fresh BEFORE `gh` runs. Without the stamp the row
-/// stays stale while `gh` is out, so every hook in that window spawns a
-/// `pr-sync` and each one asks `gh` again. The live 0.5.5 fleet showed two
-/// syncs that wrote the same answer after one double prompt (2026-10-14). The
-/// stamp is host-side only (`store::snapshot_from`), so it moves no seq and
-/// pushes nothing. A sync that dies before its answer leaves the old answer
-/// for one TTL, which is the delay [`pr_is_stale`] already allows for a miss.
-fn begin_pr_sync(s: &mut store::Store, uuid: &str, now: u64) -> Option<PrAsk> {
-    let rec = s.agents.get_mut(uuid)?;
-    if !pr_is_stale(rec, now) {
-        return None;
-    }
-    let same_question = rec.pr_checked != 0 && rec.pr_branch == rec.branch;
-    rec.pr_checked = now;
-    rec.pr_branch = rec.branch.clone();
-    Some(PrAsk {
+/// It writes nothing, so `pr_checked` and `pr_branch` mean "answered for this
+/// branch, at this time". A stamp written here would outlive a sync that dies
+/// (a closed pane), and make an old branch's number read as the answer for
+/// the new one (review of PR #284). Two syncs that start before either
+/// answers both ask `gh`, but the second answer is the same, so it pushes
+/// nothing ([`apply_pr_answer`]). No lock: writers replace the store by
+/// atomic rename (`store::read_store`).
+fn pr_sync_target(s: &store::Store, uuid: &str, now: u64) -> Option<PrAsk> {
+    let rec = s.agents.get(uuid)?;
+    pr_is_stale(rec, now).then(|| PrAsk {
         cwd: checkout_dir(rec),
         repo_root: rec.repo_root.clone(),
         branch: rec.branch.clone(),
-        same_question,
     })
 }
 
@@ -174,12 +170,17 @@ fn begin_pr_sync(s: &mut store::Store, uuid: &str, now: u64) -> Option<PrAsk> {
 /// when the bar renders something new. It returns that decision, and the
 /// caller pushes on it.
 ///
-/// A failed lookup keeps a number that answers the same question, and
-/// changes nothing but the start stamp, so the row waits one TTL as a miss
-/// does. Before 0.5.6 a flaky network blanked the `#N` cell and brought it
-/// back: two pushes, and the one cell that names the PR flickered. A number
-/// asked for another branch or directory is blanked on a failure, because a
-/// wrong number is worse than a blank one ([`checkout_dir`]).
+/// An answer to a question the row no longer asks is dropped: the branch or
+/// the directory moved while `gh` was out. The row keeps what it had, which
+/// answers its own question or is stale, so the next hook asks again.
+///
+/// A failed lookup keeps a number that answers the row's current question
+/// ([`answers_current_question`]) and writes only the time, so a failing
+/// `gh` waits one TTL as a miss does, and is not asked again on every hook.
+/// Before 0.5.6 a flaky network blanked the `#N` cell and brought it back:
+/// two pushes, and the one cell that names the PR flickered. Any other number
+/// is blanked on a failure, because a wrong number is worse than a blank one
+/// ([`checkout_dir`]).
 ///
 /// Of the answer, only the number reaches the wire (`store::snapshot_from`
 /// keeps `pr_checked` and `pr_branch` host-side). A gone PR is a change: the
@@ -201,14 +202,20 @@ fn apply_pr_answer(
     lookup: PrLookup,
     now: u64,
 ) -> bool {
+    let Some(rec) = s.agents.get_mut(uuid) else {
+        return false;
+    };
+    if rec.branch != ask.branch || checkout_dir(rec) != ask.cwd {
+        return false;
+    }
     let pr = match lookup {
         PrLookup::Open(n) => Some(n),
         PrLookup::NoPr => None,
-        PrLookup::Failed if ask.same_question => return false,
+        PrLookup::Failed if answers_current_question(rec) => {
+            rec.pr_checked = now;
+            return false;
+        }
         PrLookup::Failed => None,
-    };
-    let Some(rec) = s.agents.get_mut(uuid) else {
-        return false;
     };
     rec.pr_checked = now; // a miss is an answer too: no new ask for a TTL
     rec.pr_branch = ask.branch.clone();
@@ -275,8 +282,8 @@ fn gh_runner(cwd: String) -> impl Fn(&[&str]) -> Option<String> {
     }
 }
 
-/// `clave pr-sync <uuid>` (main.rs's hidden subcommand): starts the sync
-/// under the lock ([`begin_pr_sync`]), runs the real `gh` lookup OUTSIDE the
+/// `clave pr-sync <uuid>` (main.rs's hidden subcommand): reads the lookup
+/// it owes ([`pr_sync_target`]), runs the real `gh` lookup OUTSIDE the
 /// lock (§6.5: nothing that shells out or hits the network runs under the
 /// store flock), and writes the answer back ([`apply_pr_answer`]). It pushes
 /// only an answer the bar renders differently. Every failure (unreadable
@@ -287,10 +294,8 @@ pub fn run_pr_sync(uuid: &str) {
         return;
     };
     let now = store::now_unix();
-    let target = store::with_store_mut(&paths, |s| begin_pr_sync(s, uuid, now))
-        .ok()
-        .flatten();
-    let Some(ask) = target else {
+    let target = store::read_store(&paths).ok();
+    let Some(ask) = target.and_then(|s| pr_sync_target(&s, uuid, now)) else {
         return;
     };
 
@@ -453,8 +458,8 @@ mod tests {
         })
         .unwrap();
 
-        let target =
-            |uuid: &str| store::with_store_mut(&paths, |s| begin_pr_sync(s, uuid, 1_000)).unwrap();
+        let s = store::read_store(&paths).unwrap();
+        let target = |uuid: &str| pr_sync_target(&s, uuid, 1_000);
         let asks_from = |uuid: &str| target(uuid).map(|ask| ask.cwd);
 
         assert_eq!(
@@ -482,61 +487,40 @@ mod tests {
     }
 
     /// The double-spawn race: every hook that fires while `gh` is out sees a
-    /// stale row and spawns a `pr-sync`. The second one to take the lock must
-    /// back off on the first one's START, before any answer exists, or both
-    /// ask `gh` (two syncs after one double prompt, live fleet 2026-10-14).
+    /// stale row and spawns a `pr-sync`, and each one asks `gh`. That costs a
+    /// second call, not a second push: the second answer is the same (two
+    /// syncs after one double prompt, live fleet 2026-10-14). A sync that
+    /// starts after an answer landed backs off.
     #[test]
-    fn a_second_pr_sync_backs_off_while_the_first_waits_on_gh() {
-        let d = tempfile::tempdir().unwrap();
-        let paths = tmp_paths(d.path());
-        let mut r = rec("u");
-        r.branch = "drive-launch".into();
-        r.pr_branch = "old-branch".into(); // stale on the branch too: the start stamps both
-        store::with_store_mut(&paths, |s| {
-            s.agents.insert("u".into(), r.clone());
-        })
-        .unwrap();
-
-        let now = 1_000;
-        let first = store::with_store_mut(&paths, |s| begin_pr_sync(s, "u", now)).unwrap();
-        assert!(first.is_some(), "a never-checked row is stale");
-
-        // No answer is written: the first sync is still waiting on `gh`.
-        let second = store::with_store_mut(&paths, |s| begin_pr_sync(s, "u", now)).unwrap();
-        assert!(
-            second.is_none(),
-            "the second racer must back off, not ask gh"
-        );
-
-        let seq = store::read_store(&paths).unwrap().seq;
-        assert_eq!(seq, 0, "the start stamp is host-side: no seq, no push");
-    }
-
-    /// Only a cache that went stale on its TTL alone holds a number for the
-    /// same question. A failed `gh` may keep that number, and no other.
-    #[test]
-    fn a_sync_knows_whether_the_held_number_answers_the_same_question() {
-        let same = |pr_checked: u64, pr_branch: &str| {
-            let mut s = store::Store::default();
-            let mut r = rec("u");
-            r.branch = "drive-launch".into();
-            r.pr_number = Some(232);
-            r.pr_checked = pr_checked;
-            r.pr_branch = pr_branch.into();
-            s.agents.insert("u".into(), r);
-            begin_pr_sync(&mut s, "u", 10_000).map(|ask| ask.same_question)
-        };
-        assert_eq!(same(1_000, "drive-launch"), Some(true), "the TTL ran out");
-        assert_eq!(same(1_000, "old-branch"), Some(false), "the branch moved");
+    fn racing_syncs_ask_twice_but_push_once() {
+        let mut s = store_with(None);
+        s.agents.get_mut("u").unwrap().pr_checked = 0; // never asked
+        let first = pr_sync_target(&s, "u", 1_000).expect("a never-asked row is stale");
+        let second = pr_sync_target(&s, "u", 1_000).expect("and still stale: nothing was written");
+        assert!(apply_pr_answer(
+            &mut s,
+            "u",
+            &first,
+            PrLookup::Open(7),
+            1_001
+        ));
+        assert!(!apply_pr_answer(
+            &mut s,
+            "u",
+            &second,
+            PrLookup::Open(7),
+            1_002
+        ));
+        assert_eq!(s.seq, 11, "two answers, one push");
         assert_eq!(
-            same(0, "drive-launch"),
-            Some(false),
-            "a move, or never asked"
+            pr_sync_target(&s, "u", 1_003),
+            None,
+            "a later sync backs off"
         );
     }
 
-    /// A store with one row on `drive-launch`, holding `pr`, at seq 10. Its
-    /// cache carries the start stamp, 1_000, as `begin_pr_sync` leaves it.
+    /// A store with one row on `drive-launch` at `/x`, holding `pr`, at seq
+    /// 10. Its cache holds the answer the last sync wrote at 1_000.
     fn store_with(pr: Option<u32>) -> store::Store {
         let mut s = store::Store::default();
         let mut r = rec("u");
@@ -549,14 +533,17 @@ mod tests {
         s
     }
 
-    /// The lookup a sync started on `drive-launch`.
-    fn ask(same_question: bool) -> PrAsk {
+    /// The lookup a sync started on `branch`, from the row's `/x`.
+    fn ask_for(branch: &str) -> PrAsk {
         PrAsk {
             cwd: "/x".into(),
             repo_root: "/x".into(),
-            branch: "drive-launch".into(),
-            same_question,
+            branch: branch.into(),
         }
+    }
+
+    fn ask() -> PrAsk {
+        ask_for("drive-launch")
     }
 
     /// 25 of 27 `pr-sync` pushes on the live fleet changed nothing on screen
@@ -566,7 +553,7 @@ mod tests {
     fn the_same_answer_again_moves_no_seq_but_still_stamps_the_cache() {
         for (lookup, pr) in [(PrLookup::Open(232), Some(232)), (PrLookup::NoPr, None)] {
             let mut s = store_with(pr);
-            let moved = apply_pr_answer(&mut s, "u", &ask(true), lookup, 5_000);
+            let moved = apply_pr_answer(&mut s, "u", &ask(), lookup, 5_000);
             assert!(!moved, "{pr:?} again renders nothing new");
             assert_eq!(s.seq, 10, "{pr:?} again must not bump seq");
             let r = &s.agents["u"];
@@ -583,7 +570,7 @@ mod tests {
     fn a_new_pr_number_bumps_seq_once() {
         let mut s = store_with(None);
         let answer =
-            |s: &mut store::Store, n| apply_pr_answer(s, "u", &ask(true), PrLookup::Open(n), 5_000);
+            |s: &mut store::Store, n| apply_pr_answer(s, "u", &ask(), PrLookup::Open(n), 5_000);
         assert!(answer(&mut s, 281));
         assert_eq!(s.seq, 11, "a new number is one store write");
         assert_eq!(s.agents["u"].pr_number, Some(281));
@@ -593,67 +580,176 @@ mod tests {
         assert_eq!(s.seq, 12, "another number is another write");
     }
 
+    /// The first answer after a branch switch is the answer FOR the new
+    /// branch. Without the branch written down, the row stays stale and every
+    /// hook asks `gh` again.
+    #[test]
+    fn the_first_answer_after_a_branch_switch_is_recorded_for_the_new_branch() {
+        let mut s = store_with(Some(5));
+        s.agents.get_mut("u").unwrap().pr_branch = "old-branch".into();
+        assert!(
+            pr_is_stale(&s.agents["u"], 1_001),
+            "a switch is stale at once"
+        );
+        assert!(apply_pr_answer(
+            &mut s,
+            "u",
+            &ask(),
+            PrLookup::Open(9),
+            1_002
+        ));
+        let r = &s.agents["u"];
+        assert_eq!(
+            (r.pr_number, r.pr_branch.as_str()),
+            (Some(9), "drive-launch")
+        );
+        assert!(!pr_is_stale(r, 1_003), "the new branch's answer holds");
+    }
+
     /// A PR that went away (merged or closed: `gh pr list` lists open PRs)
     /// changes the card. It drops the `#N` cell and gives its columns to the
     /// branch (card.rs, `pr_extra`), so the bar must hear about it.
     #[test]
     fn a_pr_that_went_away_blanks_the_cell_and_bumps_seq() {
         let mut s = store_with(Some(232));
-        assert!(apply_pr_answer(
-            &mut s,
-            "u",
-            &ask(true),
-            PrLookup::NoPr,
-            5_000
-        ));
+        assert!(apply_pr_answer(&mut s, "u", &ask(), PrLookup::NoPr, 5_000));
         assert_eq!(s.seq, 11);
         assert_eq!(s.agents["u"].pr_number, None);
     }
 
     /// A flaky network must not blank the cell and bring it back. A failed
-    /// `gh` on a row with a known PR keeps the number, bumps nothing, and
-    /// leaves the start stamp, so the row waits one TTL as a miss does.
+    /// `gh` on a row with a known PR keeps the number and bumps nothing. It
+    /// writes the time, so the row waits one TTL as a miss does, and a
+    /// failing `gh` is not asked again on every hook.
     #[test]
     fn a_failed_gh_keeps_a_known_pr_and_moves_no_seq() {
         let mut s = store_with(Some(232));
         assert!(!apply_pr_answer(
             &mut s,
             "u",
-            &ask(true),
+            &ask(),
             PrLookup::Failed,
             5_000
         ));
         assert_eq!(s.seq, 10, "nothing on screen changed");
         let r = &s.agents["u"];
         assert_eq!(r.pr_number, Some(232), "the number stands");
-        assert_eq!(r.pr_checked, 1_000, "the start stamp stands: no write");
-        assert!(!pr_is_stale(r, 1_000 + PR_TTL_SECS), "so it waits a TTL");
+        assert_eq!(r.pr_checked, 5_000, "and waits a TTL from now");
+        assert!(!pr_is_stale(r, 5_000 + PR_TTL_SECS));
     }
 
-    /// But a number asked for another branch or directory does not answer
-    /// this question. A failed `gh` blanks it, because a wrong number is
-    /// worse than a blank one.
+    /// But a number asked for another branch, or from another directory,
+    /// does not answer this question. A failed `gh` blanks it, because a
+    /// wrong number is worse than a blank one. This is also a sync that died
+    /// after a branch switch: it wrote nothing, so the next one still sees
+    /// the old branch's number as the old branch's.
     #[test]
     fn a_failed_gh_blanks_a_number_asked_for_another_question() {
-        let mut s = store_with(Some(232));
+        let mut s = store_with(Some(100));
+        s.agents.get_mut("u").unwrap().pr_branch = "feat-a".into();
+        let died = pr_sync_target(&s, "u", 1_010).expect("a switch is stale");
+        assert_eq!(died, ask(), "the sync asks about the branch the row is on");
+        assert!(
+            pr_is_stale(&s.agents["u"], 1_011),
+            "a sync that died left it stale"
+        );
         assert!(apply_pr_answer(
             &mut s,
             "u",
-            &ask(false),
+            &ask(),
             PrLookup::Failed,
-            5_000
+            1_311
         ));
-        assert_eq!(s.seq, 11);
-        assert_eq!(s.agents["u"].pr_number, None);
+        assert_eq!((s.seq, s.agents["u"].pr_number), (11, None));
+
+        let mut s = store_with(Some(42));
+        s.agents.get_mut("u").unwrap().pr_checked = 0; // the checkout moved
+        assert!(apply_pr_answer(
+            &mut s,
+            "u",
+            &ask(),
+            PrLookup::Failed,
+            1_311
+        ));
+        assert_eq!((s.seq, s.agents["u"].pr_number), (11, None));
+
         let mut s = store_with(None);
+        s.agents.get_mut("u").unwrap().pr_checked = 0;
         assert!(!apply_pr_answer(
             &mut s,
             "u",
-            &ask(false),
+            &ask(),
             PrLookup::Failed,
-            5_000
+            1_311
         ));
-        assert_eq!(s.seq, 10, "a blank cell stays blank: no write");
+        assert_eq!(s.seq, 10, "a blank cell stays blank: no push");
+        assert_eq!(
+            s.agents["u"].pr_checked, 1_311,
+            "and a failing gh waits a TTL"
+        );
+    }
+
+    /// An answer that lands after the row moved answers a question the row no
+    /// longer asks: another branch, or another directory. It writes nothing,
+    /// and the row stays stale, so the next hook asks the right question.
+    #[test]
+    fn a_late_answer_for_an_old_question_writes_nothing() {
+        let late_branch = ask_for("feat-a");
+        let mut late_dir = ask();
+        late_dir.cwd = "/old".into();
+        for (late, what) in [(late_branch, "branch"), (late_dir, "directory")] {
+            let mut s = store_with(Some(9));
+            s.agents.get_mut("u").unwrap().pr_checked = 0; // the move made it stale
+            let before = s.agents["u"].clone();
+            assert!(!apply_pr_answer(
+                &mut s,
+                "u",
+                &late,
+                PrLookup::Open(5),
+                1_304
+            ));
+            assert_eq!(s.seq, 10, "an old {what}'s answer pushes nothing");
+            let r = &s.agents["u"];
+            assert_eq!((r.pr_number, r.pr_checked), (before.pr_number, 0), "{what}");
+            assert!(
+                pr_is_stale(r, 1_305),
+                "the row still owes a lookup ({what})"
+            );
+        }
+    }
+
+    /// A resume that relocates the row to another directory zeroes the stamp,
+    /// as a `cd` does (`hook::take_checkout`). Without it, a failing `gh`
+    /// keeps the old repo's number beside the new repo (review of PR #284,
+    /// case S2).
+    #[test]
+    fn a_relocation_makes_the_pr_cache_stale() {
+        let d = tempfile::tempdir().unwrap();
+        let paths = tmp_paths(d.path());
+        let now = store::now_unix();
+        store::with_store_mut(&paths, |s| {
+            let mut r = rec("u");
+            (r.cwd, r.branch, r.pr_number) = ("/repo-x".into(), "fix".into(), Some(42));
+            (r.pr_checked, r.pr_branch) = (now, "fix".into());
+            s.agents.insert("u".into(), r);
+        })
+        .unwrap();
+        store::apply_relocation(&paths, "u", "/repo-x", None).unwrap();
+        let r = &store::read_store(&paths).unwrap().agents["u"];
+        assert!(
+            !pr_is_stale(r, now),
+            "a relocation in place keeps the answer"
+        );
+        store::apply_relocation(&paths, "u", "/repo-y", None).unwrap();
+        let s = store::read_store(&paths).unwrap();
+        assert!(
+            pr_is_stale(&s.agents["u"], now),
+            "a new directory asks again"
+        );
+        let ask = pr_sync_target(&s, "u", now).unwrap();
+        let mut s = s;
+        assert!(apply_pr_answer(&mut s, "u", &ask, PrLookup::Failed, now));
+        assert_eq!(s.agents["u"].pr_number, None, "and a failure blanks #42");
     }
 
     #[test]
@@ -662,7 +758,7 @@ mod tests {
         assert!(!apply_pr_answer(
             &mut s,
             "gone",
-            &ask(true),
+            &ask(),
             PrLookup::Open(7),
             5_000
         ));
