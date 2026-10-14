@@ -231,6 +231,15 @@ want "a failing check_min exits non-zero" "$?" "1"
 want "a failing check_numeric exits non-zero" "$?" "1"
 (check_nonempty "d" "" >/dev/null 2>&1)
 want "a failing check_nonempty exits non-zero" "$?" "1"
+# And a passing one must return zero, or a verdict that ends in it reads as
+# failed to anything that checks its status, this selftest included. They
+# ended in `[[ FAIL ]] && fail_phase`, which returns 1 on a pass.
+(check_min "d" "5" 1 >/dev/null 2>&1)
+want "a passing check_min returns zero" "$?" "0"
+(check_numeric "d" "5" >/dev/null 2>&1)
+want "a passing check_numeric returns zero" "$?" "0"
+(check_nonempty "d" "x" >/dev/null 2>&1)
+want "a passing check_nonempty returns zero" "$?" "0"
 want "the failure prints the summary on its way out" \
   "$(check "d" "1" "2" 2>&1 | grep -c 'QA drive summary'; true)" "1"
 
@@ -372,6 +381,54 @@ want "an arrival that lifted the row to the top fails" "$?" "1"
 (arrival_checks "u-eager" "$LEFT_LIVE" "$(relaunch_status '["u-eager","u-a"]' "touched" '["u-b"]')" >/dev/null 2>&1)
 want "an arrival whose tab took a birth touch fails" "$?" "1"
 
+# --- the shown verdict (phase 4) -------------------------------------------
+# A stock switch sends no beacon, so `Visible(true)` is the only event that
+# reopens a bar's clicks after it jumped away itself (model.rs
+# `sent_focus_away`). The reading must count our bar in the tab the drive
+# switched to, and nothing else: not a bar whose id announced another build,
+# not a `visible false`, not a line from before the switch, not a neighbour
+# whose tab id starts with the same digit, and not an old bar whose line
+# names no tab.
+SHOWN_FIXTURE="$(mktemp "${TMPDIR:-/tmp}/qa-lib-selftest-shown.XXXXXX")"
+if [[ -z "$SHOWN_FIXTURE" || ! -f "$SHOWN_FIXTURE" ]]; then
+  echo "FAIL cannot create the shown fixture log — every reading below would be vacuous" >&2
+  exit 1
+fi
+trap 'rm -f "$FIXTURE" "$SHOWN_FIXTURE"; rm -rf "$CWD_DIR"' EXIT
+cat >"$SHOWN_FIXTURE" <<'LOG'
+DEBUG  |/Users/x/.local| 2026-10-14 10:00:00.000 [id: 2     ] clave-bar: loaded v0.5.5 build=deadbee
+DEBUG  |/Users/x/.local| 2026-10-14 10:00:00.100 [id: 3     ] clave-bar: loaded v0.5.5 build=cafe123
+DEBUG  |/Users/x/.local| 2026-10-14 10:00:00.200 [id: 4     ] clave-bar: loaded v0.5.5 build=cafe123
+DEBUG  |/Users/x/.local| 2026-10-14 10:00:01.000 [id: 4     ] clave-bar: visible true own=Some(15)
+DEBUG  |/Users/x/.local| 2026-10-14 10:00:02.000 [id: 4     ] clave-bar: visible true own=Some(12)
+DEBUG  |/Users/x/.local| 2026-10-14 10:00:02.100 [id: 3     ] clave-bar: visible false own=Some(14)
+DEBUG  |/Users/x/.local| 2026-10-14 10:00:02.200 [id: 2     ] clave-bar: visible true own=Some(13)
+DEBUG  |/Users/x/.local| 2026-10-14 10:00:02.300 [id: 3     ] clave-bar: visible true own=Some(1)
+DEBUG  |/Users/x/.local| 2026-10-14 10:00:02.400 [id: 3     ] clave-bar: visible true
+LOG
+# The drive's sub-mark sits after the fourth line: the switch happened there.
+SHOWN_MARK=4
+shown_at() { ZLOG="$SHOWN_FIXTURE" shown_count_since "$SHOWN_MARK" "$1"; }
+
+want "shown_count_since counts our bar in the tab the drive switched to" "$(shown_at 12)" "1"
+want "shown_count_since leaves out a bar whose id announced another build" "$(shown_at 13)" "0"
+want "shown_count_since does not count a hide" "$(shown_at 14)" "0"
+want "shown_count_since honours the mark" "$(shown_at 15)" "0"
+want "shown_count_since does not read tab 12 as tab 1" "$(shown_at 1)" "1"
+want "shown_count_since reads a line that names no tab as no arrival" \
+  "$(ZLOG="$SHOWN_FIXTURE" sandbox_line_count_since "$SHOWN_MARK" 'clave-bar: visible true own=None')" "0"
+
+phase "shown"
+(arrival_shown_check "walk 2:" 12 "$(shown_at 12)" >/dev/null 2>&1)
+want "an arrival our bar heard passes" "$?" "0"
+MISSED="$(arrival_shown_check "walk 2:" 13 "$(shown_at 13)" 2>&1)"
+want "an arrival only the maintainer's bar heard fails" "$?" "1"
+want "and the verdict names the tab and the count" \
+  "$(grep -c 'bar in tab 13 heard it was shown.*measured=0 expected=>=1 FAIL' <<<"$MISSED")" "1"
+(arrival_shown_check "walk 2:" 15 "$(shown_at 15)" >/dev/null 2>&1)
+want "an arrival heard only before the switch fails" "$?" "1"
+(arrival_shown_check "walk 2:" 12 "" >/dev/null 2>&1)
+want "a dead read is refused, not passed" "$?" "1"
 # --- the slim push (phases 5, 6a and 6c) ----------------------------------
 # A log of its own, so the counts above keep their fixture. Two launch bars
 # (ids 1 and 2) ask before the mark at line 5, and bar 1 is answered after
@@ -380,7 +437,7 @@ want "an arrival whose tab took a birth touch fails" "$?" "1"
 # leg: every bar asks once and is answered at the store's seq.
 SLIM_LOG="$(mktemp "${TMPDIR:-/tmp}/qa-lib-selftest-slim.XXXXXX")"
 TAG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qa-selftest-tag.XXXXXX")"
-trap 'rm -f "$FIXTURE" "$SLIM_LOG"; rm -rf "$CWD_DIR" "$TAG_DIR"' EXIT
+trap 'rm -f "$FIXTURE" "$SHOWN_FIXTURE" "$SLIM_LOG"; rm -rf "$CWD_DIR" "$TAG_DIR"' EXIT
 cat >"$SLIM_LOG" <<'LOG'
 DEBUG  |/home/x/.local| 2026-10-14 10:43:58.393 [id: 1     ] clave-bar: loaded v0.5.6 build=cafe123
 DEBUG  |/home/x/.local| 2026-10-14 10:43:58.401 [id: 2     ] clave-bar: loaded v0.5.6 build=cafe123

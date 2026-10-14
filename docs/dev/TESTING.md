@@ -205,6 +205,7 @@ reached `main` or the field.
 | `Alt+w` close stranded Alt-↑/↓ nav until a mouse click (#23) | live sessions only | the beacon/anchor relationship only exists once real tabs open and close | `Effect::ReanchorVisit`, executor-gated; tier 2 will assert it (#47 first scenarios) |
 | `CliPipe did not complete within 1s` + empty-payload deliveries (#45) | present since the log's first line, v0.1.0 era; buried the real evidence during the v0.1.1 incident | no tier reads the zellij log; nothing asserts on pipe delivery | nothing yet — it is filed. Observability discipline (below) is the only detector |
 | `clave-organic` dead on arrival: the empty-payload guard special-cased only `clave-toggle`, so the payload-less organic pipe never reached its named match arm (#128) | live only: the Alt+o beacon never announced, so a departed bar kept `cursor` and `current_tab == own` **indefinitely** — an `Alt+Enter` 18 s after the switch still opened the pre-switch selection; the #100 commit-race fix keyed off this dead arm and was dead with it | the model test called `set_organic_pending` directly (green); `main.rs` is `test = false`, so nothing routes a real payload-less `PipeMessage` — the adapter seam is unmodelled, the classic pattern of this table | the payload-less branch now matches names (toggle AND organic); caught by the sandbox drive loop's re-validation of the very fix that depended on it — the checklist §5 beacon-gap item is the standing detector |
+| Late clicks moved focus to tabs Ollie had already left (2026-10-14, 0.5.4 and 0.5.5) | the live fleet under status pushes: "focus randomly swaps to a different tab". A bar handled a click up to 7.5 s late (60 s on 0.5.4), and 30 of 160 clicks ran on a bar that had already sent focus away | every model test hands the bar its events at once and in gesture order. Nothing models a plugin thread's queue, and the drive cannot click (zellij-utils-0.45.1 has `Action::MouseEvent` and no CLI subcommand for it) | `BarModel::sent_focus_away`, its unit tests and property 10 (`prop_late_gestures_never_act_and_fresh_clicks_always_do`). Phase 4 of the drive checks the seam the gate leans on: a stock switch reaches the bar as `Visible(true)`. Found by reading the live zellij log |
 | (The six #261 rows below are history: the live-set restore was removed on 2026-09-22, commit `9670fbf`, FOOTGUNS "The restore that sequenced tabs through the bar". The seam they teach is still real.) | | | |
 | Restored tabs rendered as TERMINAL rows, each agent shown a second time as dormant (#261) | the first live launch of the relaunch feature | every row-to-tab question read the store's bind, and a restored tab is by definition the state where the spawn exists and has not run, so no bind can exist. Green suite, because no fixture held a tab whose command had not run | `model::spawn_binds` joins on the pane's launch command; fixtures now hold cold tabs. Found by the maintainer looking at a screenshot |
 | A relaunch started the wrong agent (#261) | same launch | `last_live` is written in ascending tab id, i.e. creation order; the layout baked it in that order and focused the first. The fixture staged recency IN AGREEMENT with tab order, so a bake that ignored the rank passed | `setup::restore_rows` ranks before baking; the fixture now stages recency AGAINST tab order. Found by the maintainer asking whether the order was right |
@@ -1219,9 +1220,11 @@ Four windows into what actually happened. Learn all four.
   `OnceLock` so a render — which fires on every event this plugin subscribes
   to — costs no env lookup per frame). Off by default because that volume
   would drown the one line that IS always on: `clave-bar click: raw_line=…
-  lines_per_row=… row_line=… top=… -> key=…` (`model.rs`'s `click()`), logged
-  unconditionally on every mouse click since clicks are rare enough to afford
-  it and are what the next `#148`-class bug gets debugged from.
+  lines_per_row=… row_line=… top=… -> key=… sent_away=…` (`model.rs`'s
+  `click()`), logged unconditionally on every mouse click since clicks are
+  rare enough to afford it and are what the next `#148`-class bug gets
+  debugged from. `sent_away=true` marks a late click the gate dropped
+  (FOOTGUNS, "A click can reach the bar SECONDS LATE").
 
   **The two nav lines are on the same footing — a gesture, not a frame — and
   are also always on** (`#141`). `clave-bar: nav landed <payload>` comes from
@@ -1245,10 +1248,11 @@ Four windows into what actually happened. Learn all four.
   per beacon, so the id column says who started a beacon and the kind says
   why: `announce` is a birth, click or nav landing, and `reanchor` is the
   `#162` family. It does not match `nav-bench.sh`'s `"clave-bar: beacon "`
-  (the trailing space is load-bearing). `clave-bar: visible <true|false>`
-  comes from a bar whose tab was shown or hidden (zellij's `Event::Visible`).
-  It logs a flip only: zellij repeats `Visible(false)` on every CLI client
-  exit. A hidden bar asks for no paint (zellij still paints it on a resize),
+  (the trailing space is load-bearing). `clave-bar: visible <true|false>
+  own=<Some(tab)|None>` comes from a bar whose tab was shown or hidden
+  (zellij's `Event::Visible`), and names the bar's own tab so a reader can
+  attribute it by content. It logs a flip only: zellij repeats
+  `Visible(false)` on every CLI client exit. A hidden bar asks for no paint (zellij still paints it on a resize),
   so a bar that logs `visible false` and is then seen stale on screen is a
   missed `Visible(true)`, not a slow paint.
 - **The evlog** — `clave.log`, JSON lines, one per host-side decision. There is
