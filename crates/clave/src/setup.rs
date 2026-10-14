@@ -1263,9 +1263,10 @@ pub fn needs_version_refresh(
 /// `PATH` with `dir` added at the END, or `None` when `dir` is on it already.
 ///
 /// The zellij server, every pane, every agent and every hook it spawns take
-/// the launcher's `PATH`. A hook that says bare `clave` then needs clave's own
-/// folder on it, and a launch over a non-interactive ssh command does not
-/// have it: `~/.zshrc` adds it, and an ssh command reads only `~/.zshenv`.
+/// the `PATH` of the clave that launched them. A hook that says bare `clave`
+/// then needs the **launch folder** (`launch_folder`) on it, and a launch
+/// over a non-interactive ssh command does not have it: `~/.zshrc` adds it,
+/// and an ssh command reads only `~/.zshenv`.
 /// Measured 2026-10-13: every hook in the live session failed `clave: not
 /// found` for 19 hours. Added last, so the sandbox's shim
 /// (`dev::shim_first_on_path`) and anything the user put first still win.
@@ -1281,14 +1282,16 @@ fn path_with_dir(current: Option<&std::ffi::OsStr>, dir: &Path) -> Option<std::f
     std::env::join_paths(dirs).ok()
 }
 
-/// The folder that holds the running launcher, made absolute.
+/// The **launch folder**: the folder of the running clave, made absolute.
+/// It is the **launcher**'s folder only in a release install; in a sandbox
+/// it is `<checkout>/target/release`.
 ///
 /// Canonical because macOS `current_exe` is the path as TYPED
 /// (`_NSGetExecutablePath`, rust-src `library/std/src/sys/paths/unix.rs`):
 /// `just launch` types `./target/release/clave`, and a relative PATH entry
 /// resolves against each pane's own cwd. Linux reads `/proc/self/exe`, which
 /// is absolute already. The same move as `run_setup`'s versioned copy.
-fn launcher_dir(exe: &Path) -> Option<PathBuf> {
+fn launch_folder(exe: &Path) -> Option<PathBuf> {
     std::fs::canonicalize(exe)
         .ok()?
         .parent()
@@ -1448,7 +1451,7 @@ pub fn launch_session() -> Result<()> {
     let mut zellij_cmd = std::process::Command::new(&zellij);
     if let Some(path) = std::env::current_exe()
         .ok()
-        .and_then(|exe| launcher_dir(&exe))
+        .and_then(|exe| launch_folder(&exe))
         .and_then(|dir| path_with_dir(std::env::var_os("PATH").as_deref(), &dir))
     {
         zellij_cmd.env("PATH", path);
@@ -2488,7 +2491,7 @@ mod tests {
     }
 
     #[test]
-    fn the_launcher_dir_is_added_last_and_only_once() {
+    fn the_launch_folder_is_added_last_and_only_once() {
         let dir = Path::new("/home/u/.local/share/clave/bin");
         let ssh = std::ffi::OsStr::new("/usr/bin:/bin");
         assert_eq!(
@@ -2519,13 +2522,13 @@ mod tests {
     }
 
     #[test]
-    fn a_launcher_typed_as_a_relative_path_gives_an_absolute_folder() {
+    fn a_clave_typed_as_a_relative_path_gives_an_absolute_launch_folder() {
         // macOS `current_exe` is the path as typed (`_NSGetExecutablePath`,
         // rust-src `library/std/src/sys/paths/unix.rs`), and `just launch`
         // types `./target/release/clave`. A relative PATH entry resolves
         // against each pane's own cwd. Cargo runs this test from the crate
         // root, so the relative path below names a real file.
-        let dir = launcher_dir(Path::new("./src/setup.rs")).unwrap();
+        let dir = launch_folder(Path::new("./src/setup.rs")).unwrap();
         assert!(dir.is_absolute(), "{}", dir.display());
         assert_eq!(
             dir,

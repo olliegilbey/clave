@@ -457,7 +457,9 @@ launch_path_checks() {
   check "zellij server processes for this session" "$(uuid_count "$pids")" "1"
   measure "the sandbox server's PATH" "$path"
   if [[ -z "$path" ]]; then
-    skip_phase 'this machine cannot read the server env (no /proc, and ps -E showed none), so the launch-folder seam is UNMEASURED'
+    # Empty is also a server started with NO PATH: a launch leaves an unset
+    # PATH unset (setup.rs `path_with_dir`, dev.rs `path_with_shim_first`).
+    skip_phase 'the server env has no PATH, or this machine cannot read it (no /proc, and ps -E showed none), so the launch-folder seam is UNMEASURED'
     return 0
   fi
   IFS=: read -r -a entries <<<"$path"
