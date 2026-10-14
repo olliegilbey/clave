@@ -2124,7 +2124,17 @@ wait_field() {
 # (`SessionEnd` — the state the ladder starts from anyway), then wait for the
 # cache to reach the shape `pr_is_stale` calls fresh. `PR_TTL_SECS` is 300s
 # and the ladder is seconds long, so nothing re-spawns inside it.
+#
+# Since 0.5.6 a `pr-sync` stamps the cache fresh when it STARTS, before `gh`
+# answers (pr.rs `begin_pr_sync`), so "fresh" is not yet the answer. `gh` is
+# killed at 5s (pr.rs `gh_runner`), so the settle waits 6s for the answer.
+# The same warm-up is the quiet-answer check: a `pr-sync` that finds the PR
+# it already had writes no seq, and so pushes nothing (`pr_sync_quiet_checks`).
+pr_field() { jq -r --arg u "$P5B_UUID" ".store.agents[\$u].$1" < <(dev_status) 2>/dev/null; }
+P5B_PR_STAMP0="$(pr_field pr_checked)"
+P5B_PR0="$(pr_field pr_number)"
 hook_fire SessionEnd >/dev/null
+P5B_PR_SEQ_HOOK="$(jq -r '.store.seq' < <(dev_status) 2>/dev/null)"
 P5B_PR_WARM="stale"
 for _ in $(seq 1 15); do
   if [[ "$(jq -r --arg u "$P5B_UUID" \
@@ -2136,13 +2146,15 @@ for _ in $(seq 1 15); do
   sleep 1
 done
 measure "phase-5b PR cache before the count begins" "$P5B_PR_WARM"
-sleep 2 # the settling write is async — let it land before the baseline read
+sleep 6 # the answer lands after the start stamp, inside gh's 5s bound
 
 # Re-read: the baseline must be taken AFTER the warm-up, not from the status
 # captured at phase start.
 P5B_SEQ0="$(jq -r '.store.seq' < <(dev_status) 2>/dev/null)"
 check_numeric "phase-5b start store seq readable" "$P5B_SEQ0"
 measure "phase-5b row" "$P5B_UUID tail=$P5B_TAIL"
+pr_sync_quiet_checks "$P5B_PR_STAMP0" "$(pr_field pr_checked)" \
+  "$P5B_PR0" "$(pr_field pr_number)" "$P5B_PR_SEQ_HOOK" "$P5B_SEQ0"
 
 # --- wants: the words come off the agent's own notification -----------------
 # The anchor is Claude Code's wording and is matched as a substring, because

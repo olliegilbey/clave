@@ -522,6 +522,30 @@ want "a refusal that wrote the store fails" "$?" "1"
 (refusal_checks "" "$EACH_ONCE" "$EACH_ONCE" "13" 13 13 >/dev/null 2>&1)
 want "an unreadable live tab count fails" "$?" "1"
 
+# The quiet pr-sync (phase 5b): an answer the bar already shows writes no seq.
+# Args: stamp before/after, PR number before/after, seq after hook/settle.
+(pr_sync_quiet_checks 0 1700 null null 40 40 >/dev/null 2>&1)
+want "a pr-sync that found no PR again and wrote no seq passes" "$?" "0"
+QUIET_LOUD="$(pr_sync_quiet_checks 0 1700 null null 40 41 2>&1)"
+want "a pr-sync that wrote seq for an unchanged answer fails (0.5.5 pushed every answer)" "$?" "1"
+want "and the verdict names both seqs" \
+  "$(grep -c 'pushed nothing): measured=41 expected=40 FAIL' <<<"$QUIET_LOUD")" "1"
+(pr_sync_quiet_checks 1000 1700 232 232 40 41 >/dev/null 2>&1)
+want "the same PR number found again and written fails" "$?" "1"
+(pr_sync_quiet_checks 1000 1700 232 null 40 41 >/dev/null 2>&1)
+want "a PR that went away is one write, and passes" "$?" "0"
+(pr_sync_quiet_checks 0 1700 null 281 40 42 >/dev/null 2>&1)
+want "a new PR written twice fails" "$?" "1"
+(pr_sync_quiet_checks 0 1700 null null "" 40 >/dev/null 2>&1)
+want "an unreadable seq fails" "$?" "1"
+# No new stamp: no pr-sync ran, and the verdict must say so, not pass on it.
+QUIET_NONE="$(pr_sync_quiet_checks 1700 1700 null null 40 41 2>&1)"
+want "a warm-up with no pr-sync does not fail the run" "$?" "0"
+want "and gives no verdict on the answer" "$(grep -c 'CHECK a pr-sync' <<<"$QUIET_NONE")" "0"
+want "and says why" "$(grep -c 'NOTE no pr-sync stamped' <<<"$QUIET_NONE")" "1"
+(pr_sync_quiet_checks 0 null null null 40 41 >/dev/null 2>&1)
+want "an unreadable stamp is no pr-sync, not a pass on the answer" "$?" "0"
+
 SLIM_LEDGER="$(ZLOG="$SLIM_LOG" LOGMARK=5 instance_ledger)"
 want "the ledger names the slim push lines per bar" \
   "$(grep -c 'id 3 .*slim ask answer' <<<"$SLIM_LEDGER")" "1"

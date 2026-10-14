@@ -108,15 +108,62 @@ fn checkout_dir(rec: &AgentRecord) -> String {
         .unwrap_or_else(|| rec.repo_root.clone())
 }
 
-/// Re-checks staleness UNDER the store lock and hands back exactly what a
-/// caller needs to run `gh` (checkout dir, repo root, branch) — `None` means
-/// "nothing to do," whether because the uuid is gone or a racing `pr-sync`
-/// already answered. Split out from [`run_pr_sync`] so the double-spawn race
-/// (two hooks both observing staleness before either writes) is testable
-/// without a `gh` binary.
-fn pr_sync_target(s: &store::Store, uuid: &str, now: u64) -> Option<(String, String, String)> {
-    let rec = s.agents.get(uuid)?;
-    pr_is_stale(rec, now).then(|| (checkout_dir(rec), rec.repo_root.clone(), rec.branch.clone()))
+/// Starts a sync UNDER the store lock: re-checks staleness and hands back
+/// what a caller needs to run `gh` (checkout dir, repo root, branch). `None`
+/// means "nothing to do": the uuid is gone, or another `pr-sync` started first.
+///
+/// It stamps the cache fresh BEFORE `gh` runs. Without the stamp the row
+/// stays stale while `gh` is out, so every hook in that window spawns a
+/// `pr-sync` and each one asks `gh` again. The live 0.5.5 fleet showed two
+/// syncs that wrote the same answer after one double prompt (2026-10-14). The
+/// stamp is host-side only (`store::snapshot_from`), so it moves no seq and
+/// pushes nothing. A sync that dies before its answer leaves the old answer
+/// for one TTL, which is the delay [`pr_is_stale`] already allows for a miss.
+fn begin_pr_sync(s: &mut store::Store, uuid: &str, now: u64) -> Option<(String, String, String)> {
+    let rec = s.agents.get_mut(uuid)?;
+    if !pr_is_stale(rec, now) {
+        return None;
+    }
+    rec.pr_checked = now;
+    rec.pr_branch = rec.branch.clone();
+    Some((checkout_dir(rec), rec.repo_root.clone(), rec.branch.clone()))
+}
+
+/// Records `gh`'s answer for `branch`, a miss included, and bumps `seq` only
+/// when the bar renders something new. It returns that decision, and the
+/// caller pushes on it.
+///
+/// Of the answer, only the number reaches the wire (`store::snapshot_from`
+/// keeps `pr_checked` and `pr_branch` host-side). A gone PR is a change: the
+/// card drops the `#N` cell and gives its columns to the branch (card.rs,
+/// `pr_extra`). The same number again is not. On the live 0.5.5 fleet, 25 of
+/// 27 `pr-sync` pushes in 21 minutes changed nothing on screen (2026-10-14),
+/// and each push costs every bar a decode and a render.
+///
+/// A write with no seq bump is safe, the slim push included, because it
+/// changes nothing in the snapshot. The stamps are not on the wire, so the
+/// dormant tag cannot move (`store::dormant_tag`). A bar takes only a newer
+/// seq (clave-bar model.rs `rebuild`), so it must already hold every rendered
+/// field at this seq, and it does. `hook::apply_hook_event` writes
+/// `live_session` the same way.
+fn apply_pr_answer(
+    s: &mut store::Store,
+    uuid: &str,
+    pr: Option<u32>,
+    branch: &str,
+    now: u64,
+) -> bool {
+    let Some(rec) = s.agents.get_mut(uuid) else {
+        return false;
+    };
+    rec.pr_checked = now; // a miss is an answer too: no new ask for a TTL
+    rec.pr_branch = branch.to_string();
+    if rec.pr_number == pr {
+        return false;
+    }
+    rec.pr_number = pr;
+    s.seq += 1; // monotonic pipe contract (§5)
+    true
 }
 
 /// The real `gh` runner: a process-level 5s timeout via a watchdog thread
@@ -174,20 +221,19 @@ fn gh_runner(cwd: String) -> impl Fn(&[&str]) -> Option<String> {
     }
 }
 
-/// `clave pr-sync <uuid>` (main.rs's hidden subcommand): loads the store,
-/// re-checks staleness under the lock, and — only if still stale — runs the
-/// real `gh` lookup OUTSIDE the lock (§6.5: nothing that shells out or hits
-/// the network runs under the store flock) and writes the answer back,
-/// including a miss, bumping seq and pushing the snapshot exactly like every
-/// other locked writer in this crate. Every failure (unreadable store,
-/// vanished uuid, no `gh`) degrades silently — this runs detached from the
-/// hook with nobody watching its exit code.
+/// `clave pr-sync <uuid>` (main.rs's hidden subcommand): starts the sync
+/// under the lock ([`begin_pr_sync`]), runs the real `gh` lookup OUTSIDE the
+/// lock (§6.5: nothing that shells out or hits the network runs under the
+/// store flock), and writes the answer back ([`apply_pr_answer`]). It pushes
+/// only an answer the bar renders differently. Every failure (unreadable
+/// store, vanished uuid, no `gh`) degrades silently — this runs detached from
+/// the hook with nobody watching its exit code.
 pub fn run_pr_sync(uuid: &str) {
     let Ok(paths) = store::store_paths() else {
         return;
     };
     let now = store::now_unix();
-    let target = store::with_store_mut(&paths, |s| pr_sync_target(s, uuid, now))
+    let target = store::with_store_mut(&paths, |s| begin_pr_sync(s, uuid, now))
         .ok()
         .flatten();
     let Some((cwd, repo_root, branch)) = target else {
@@ -198,12 +244,8 @@ pub fn run_pr_sync(uuid: &str) {
     let pr_number = resolve_pr(&run, &repo_root, &branch);
 
     let snap = store::with_store_mut(&paths, |s| {
-        let rec = s.agents.get_mut(uuid)?;
-        rec.pr_number = pr_number; // a miss (None) IS the answer — no retrigger for a TTL
-        rec.pr_checked = store::now_unix();
-        rec.pr_branch = branch.clone();
-        s.seq += 1; // monotonic pipe contract (§5)
-        Some(store::snapshot_from(s))
+        apply_pr_answer(s, uuid, pr_number, &branch, store::now_unix())
+            .then(|| store::snapshot_from(s))
     });
     if let Ok(Some(snap)) = snap {
         crate::hook::push_snapshot(&snap);
@@ -354,7 +396,7 @@ mod tests {
         .unwrap();
 
         let target =
-            |uuid: &str| store::with_store_mut(&paths, |s| pr_sync_target(s, uuid, 1_000)).unwrap();
+            |uuid: &str| store::with_store_mut(&paths, |s| begin_pr_sync(s, uuid, 1_000)).unwrap();
         let asks_from = |uuid: &str| target(uuid).map(|(cwd, _, _)| cwd);
 
         assert_eq!(
@@ -381,42 +423,122 @@ mod tests {
         assert_eq!(target("gone"), None, "a vanished uuid is nothing to do");
     }
 
-    /// The double-spawn race the design calls out: two hooks can both
-    /// observe a stale row before either has written back (each ran its own
-    /// lock-free-ish window before spawning `pr-sync`). The SECOND `pr-sync`
-    /// to acquire the store must see the first's answer and back off rather
-    /// than issuing a second `gh` call.
+    /// The double-spawn race: every hook that fires while `gh` is out sees a
+    /// stale row and spawns a `pr-sync`. The second one to take the lock must
+    /// back off on the first one's START, before any answer exists, or both
+    /// ask `gh` (two syncs after one double prompt, live fleet 2026-10-14).
     #[test]
-    fn a_second_pr_sync_sees_the_firsts_answer_and_backs_off() {
+    fn a_second_pr_sync_backs_off_while_the_first_waits_on_gh() {
         let d = tempfile::tempdir().unwrap();
         let paths = tmp_paths(d.path());
         let mut r = rec("u");
         r.branch = "drive-launch".into();
+        r.pr_branch = "old-branch".into(); // stale on the branch too: the start stamps both
         store::with_store_mut(&paths, |s| {
             s.agents.insert("u".into(), r.clone());
         })
         .unwrap();
 
-        // First pr-sync observes staleness (never checked).
         let now = 1_000;
-        let first = store::with_store_mut(&paths, |s| pr_sync_target(s, "u", now)).unwrap();
+        let first = store::with_store_mut(&paths, |s| begin_pr_sync(s, "u", now)).unwrap();
         assert!(first.is_some(), "a never-checked row is stale");
 
-        // It resolves and writes its answer (standing in for the gh round trip).
-        store::with_store_mut(&paths, |s| {
-            let rec = s.agents.get_mut("u").unwrap();
-            rec.pr_number = Some(7);
-            rec.pr_checked = now;
-            rec.pr_branch = "drive-launch".into();
-        })
-        .unwrap();
-
-        // A second pr-sync racing the same staleness window re-checks under
-        // the lock and finds nothing left to do.
-        let second = store::with_store_mut(&paths, |s| pr_sync_target(s, "u", now)).unwrap();
+        // No answer is written: the first sync is still waiting on `gh`.
+        let second = store::with_store_mut(&paths, |s| begin_pr_sync(s, "u", now)).unwrap();
         assert!(
             second.is_none(),
-            "the second racer must back off, not re-ask gh"
+            "the second racer must back off, not ask gh"
         );
+
+        let seq = store::read_store(&paths).unwrap().seq;
+        assert_eq!(seq, 0, "the start stamp is host-side: no seq, no push");
+    }
+
+    /// A store with one row on `drive-launch`, holding `pr`, at seq 10.
+    fn store_with(pr: Option<u32>) -> store::Store {
+        let mut s = store::Store::default();
+        let mut r = rec("u");
+        r.branch = "drive-launch".into();
+        r.pr_number = pr;
+        s.agents.insert("u".into(), r);
+        s.seq = 10;
+        s
+    }
+
+    /// 25 of 27 `pr-sync` pushes on the live fleet changed nothing on screen
+    /// (2026-10-14). The same answer again must not bump seq, so the caller
+    /// does not push. The stamps still land, or the next hook asks `gh` again.
+    #[test]
+    fn the_same_answer_again_moves_no_seq_but_still_stamps_the_cache() {
+        for pr in [Some(232), None] {
+            let mut s = store_with(pr);
+            assert!(
+                !apply_pr_answer(&mut s, "u", pr, "drive-launch", 5_000),
+                "{pr:?} again renders nothing new"
+            );
+            assert_eq!(s.seq, 10, "{pr:?} again must not bump seq");
+            let r = &s.agents["u"];
+            assert_eq!(r.pr_number, pr);
+            assert_eq!(
+                (r.pr_checked, r.pr_branch.as_str()),
+                (5_000, "drive-launch")
+            );
+            assert!(!pr_is_stale(r, 5_001), "the answer holds for a TTL");
+        }
+    }
+
+    #[test]
+    fn a_new_pr_number_bumps_seq_once() {
+        let mut s = store_with(None);
+        assert!(apply_pr_answer(
+            &mut s,
+            "u",
+            Some(281),
+            "drive-launch",
+            5_000
+        ));
+        assert_eq!(s.seq, 11, "a new number is one store write");
+        assert_eq!(s.agents["u"].pr_number, Some(281));
+        assert!(!apply_pr_answer(
+            &mut s,
+            "u",
+            Some(281),
+            "drive-launch",
+            5_300
+        ));
+        assert_eq!(s.seq, 11, "and finding it again is none");
+        assert!(apply_pr_answer(
+            &mut s,
+            "u",
+            Some(282),
+            "drive-launch",
+            5_600
+        ));
+        assert_eq!(s.seq, 12, "another number is another write");
+    }
+
+    /// A PR that went away (merged or closed: `gh pr list` lists open PRs)
+    /// changes the card. It drops the `#N` cell and gives its columns to the
+    /// branch (card.rs, `pr_extra`), so the bar must hear about it.
+    #[test]
+    fn a_pr_that_went_away_blanks_the_cell_and_bumps_seq() {
+        let mut s = store_with(Some(232));
+        assert!(apply_pr_answer(&mut s, "u", None, "drive-launch", 5_000));
+        assert_eq!(s.seq, 11);
+        assert_eq!(s.agents["u"].pr_number, None);
+    }
+
+    #[test]
+    fn an_answer_for_a_vanished_row_writes_nothing() {
+        let mut s = store_with(None);
+        assert!(!apply_pr_answer(
+            &mut s,
+            "gone",
+            Some(7),
+            "drive-launch",
+            5_000
+        ));
+        assert_eq!(s.seq, 10);
+        assert!(!s.agents.contains_key("gone"));
     }
 }
