@@ -2097,30 +2097,30 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
         // [`TAIL_BYTES`] read on a prompt, a Stop, and a turn end that is not
         // a Stop (`ends_turn`), well inside the §6.5 hook budget; the other
         // events read nothing.
-        let tail = s.agents.get(&uuid).and_then(|rec| {
-            // Event gate FIRST. `resolve_transcript` does up to two
-            // `canonicalize` calls, and this closure runs while
-            // `with_store_mut` holds the exclusive flock — computing a path
-            // only to discard it would put filesystem syscalls under the lock
-            // on every `PreToolUse`, i.e. on every tool call of every tracked
-            // agent. The comment above promises the other events read nothing;
-            // this is what makes that true. (CodeRabbit, #98 — the previous
-            // ordering was a regression against the code this replaced.)
-            if !reads_tail(event, &payload, rec.status) {
-                return None;
-            }
-            // The payload names its own CURRENT transcript, so this is right
-            // through both a relocation and an id rotation without the store
-            // having to remember anything (#87 dissolves #97's read half).
-            resolve_transcript(
-                &claude_dir,
-                payload.transcript_path.as_deref(),
-                session.as_deref(),
-                &rec.cwd,
-                &uuid,
-            )
-            .and_then(|path| read_tail(&path, TAIL_BYTES))
-        });
+        //
+        // Event gate FIRST. `resolve_transcript` does up to two `canonicalize`
+        // calls, and this runs while `with_store_mut` holds the exclusive
+        // flock — computing a path only to discard it would put filesystem
+        // syscalls under the lock on every tool batch of every tracked agent.
+        // The gate is what keeps the promise above. (CodeRabbit, #98 — the
+        // previous ordering was a regression against the code this replaced.)
+        let tail = s
+            .agents
+            .get(&uuid)
+            .filter(|rec| reads_tail(event, &payload, rec.status))
+            .and_then(|rec| {
+                // The payload names its own CURRENT transcript, so this is right
+                // through both a relocation and an id rotation without the store
+                // having to remember anything (#87 dissolves #97's read half).
+                resolve_transcript(
+                    &claude_dir,
+                    payload.transcript_path.as_deref(),
+                    session.as_deref(),
+                    &rec.cwd,
+                    &uuid,
+                )
+                .and_then(|path| read_tail(&path, TAIL_BYTES))
+            });
         let mut changed =
             apply_hook_event(s, &uuid, event, &payload, tail.as_deref(), now, own_claude);
         // The pane half (#226): register on any event, revert on SessionEnd —
