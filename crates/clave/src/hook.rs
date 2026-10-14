@@ -1565,8 +1565,8 @@ pub fn apply_hook_event(
     if turn_end {
         rec.metered_at = 0;
     }
-    // A tail reaches us only on a prompt or a turn end (`run_hook`'s event
-    // gate). No tail, or a tail carrying no usage line, HOLDS the previous
+    // A tail reaches us only on a prompt or a turn end (`reads_tail`). No
+    // tail, or a tail carrying no usage line, HOLDS the previous
     // reading — §5.4 fail-closed. Never invent a measurement.
     //
     // The resting count. The meter paces a working row's count, so the count
@@ -2002,16 +2002,25 @@ fn changes_nothing(
     probe == *store
 }
 
-/// The events that may spawn `pr-sync` for a stale PR cache: the five clave
-/// registered before PR #285. PostToolBatch fires once per tool batch, so a
-/// burst of batches inside one `gh` call would spawn a `gh` for each. The
-/// subagent events and StopFailure add nothing the five do not already
-/// cover: the turn's prompt, its Stop and its notifications.
-fn asks_pr_sync(event: &str) -> bool {
+/// Whether this event owes the row a `pr-sync`: its PR cache is stale, and
+/// the event is one of the five clave registered before PR #285.
+/// PostToolBatch fires once per tool batch, so a burst of batches inside one
+/// `gh` call would spawn a `gh` for each. The subagent events and StopFailure
+/// add nothing the five do not already cover: the turn's prompt, its Stop
+/// and its notifications.
+fn owes_pr_sync(event: &str, rec: &AgentRecord, now: u64) -> bool {
     matches!(
         event,
         "UserPromptSubmit" | "Stop" | "Notification" | "SessionEnd" | "SessionStart"
-    )
+    ) && crate::pr::pr_is_stale(rec, now)
+}
+
+/// Whether this event reads the transcript's tail: a prompt (the label, the
+/// interrupt marker), a Stop (the summary, the checkout), and any other turn
+/// end (the resting count). The rest read nothing, because the read runs
+/// under the lock.
+fn reads_tail(event: &str, payload: &HookPayload, current: Status) -> bool {
+    matches!(event, "Stop" | "UserPromptSubmit") || ends_turn(event, payload, current)
 }
 
 /// The whole hook flow. Errors bubble up ONLY so main can log them to
@@ -2060,7 +2069,7 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
     let own_claude = env_uuid.as_deref() == Some(uuid.as_str());
     // The second fast path, the `statusline::meter` pattern: a tool batch on
     // a row that is not red moves nothing, so it exits before the lock. It
-    // owes no PR sync either (`asks_pr_sync`).
+    // owes no PR sync either (`owes_pr_sync`).
     if changes_nothing(&store, &uuid, event, &payload, pane, now, own_claude) {
         return Ok(());
     }
@@ -2097,9 +2106,7 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
             // agent. The comment above promises the other events read nothing;
             // this is what makes that true. (CodeRabbit, #98 — the previous
             // ordering was a regression against the code this replaced.)
-            if !(matches!(event, "Stop" | "UserPromptSubmit")
-                || ends_turn(event, &payload, rec.status))
-            {
+            if !reads_tail(event, &payload, rec.status) {
                 return None;
             }
             // The payload names its own CURRENT transcript, so this is right
@@ -2124,10 +2131,10 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
         // Read-only (#232): comparing two integers/strings against the row
         // this same write just touched. NOT a network call — that discipline
         // is the whole point (§6.5) — just the decision whether one is owed.
-        let pr_stale = asks_pr_sync(event)
-            && s.agents
-                .get(&uuid)
-                .is_some_and(|rec| crate::pr::pr_is_stale(rec, now));
+        let pr_stale = s
+            .agents
+            .get(&uuid)
+            .is_some_and(|rec| owes_pr_sync(event, rec, now));
         (changed.then(|| snapshot_from(s)), pr_stale)
     })?;
     if let Some(snap) = snap {
@@ -2734,10 +2741,15 @@ mod tests {
         );
     }
 
-    /// Only the five events clave registered before PR #285 spawn `pr-sync`.
-    /// A tool batch fires once per batch, and each spawn may run `gh`.
+    /// Only the five events clave registered before PR #285 spawn `pr-sync`,
+    /// and only for a stale cache. A tool batch fires once per batch, and
+    /// each spawn may run `gh`.
     #[test]
     fn a_tool_batch_never_asks_for_a_pr_sync() {
+        let stale = rec("u1"); // never checked
+        let mut fresh = rec("u1");
+        fresh.pr_checked = 1000;
+        fresh.pr_branch = fresh.branch.clone();
         for ev in [
             "UserPromptSubmit",
             "Stop",
@@ -2745,7 +2757,8 @@ mod tests {
             "SessionEnd",
             "SessionStart",
         ] {
-            assert!(asks_pr_sync(ev), "{ev}");
+            assert!(owes_pr_sync(ev, &stale, 1010), "{ev}");
+            assert!(!owes_pr_sync(ev, &fresh, 1010), "{ev} on a fresh cache");
         }
         for ev in [
             "PostToolBatch",
@@ -2753,7 +2766,45 @@ mod tests {
             "SubagentStart",
             "SubagentStop",
         ] {
-            assert!(!asks_pr_sync(ev), "{ev}");
+            assert!(!owes_pr_sync(ev, &stale, 1010), "{ev}");
+        }
+    }
+
+    /// The tail is read under the lock, so only the events that use it read
+    /// it: a prompt, a Stop, and any other turn end.
+    #[test]
+    fn only_a_prompt_or_a_turn_end_reads_the_tail() {
+        use Status::*;
+        let of_kind = |kind: Option<&str>, agent: Option<&str>| HookPayload {
+            notification_type: kind.map(str::to_string),
+            agent_id: agent.map(str::to_string),
+            ..Default::default()
+        };
+        let own = of_kind(None, None);
+        let sub = of_kind(None, Some("a1"));
+        let nag = of_kind(Some("idle_prompt"), None);
+        let ask = of_kind(Some("permission_prompt"), None);
+        assert!(reads_tail("UserPromptSubmit", &own, Done));
+        assert!(reads_tail("Stop", &own, Done), "a Stop on any row");
+        assert!(reads_tail("StopFailure", &own, Working));
+        assert!(
+            reads_tail("Notification", &nag, Working),
+            "the nag ends a turn"
+        );
+        assert!(!reads_tail("Notification", &nag, Done), "the turn is over");
+        assert!(!reads_tail("Notification", &ask, Working));
+        assert!(
+            !reads_tail("StopFailure", &sub, Working),
+            "a subagent's error"
+        );
+        for ev in [
+            "PostToolBatch",
+            "SessionEnd",
+            "SessionStart",
+            "SubagentStart",
+            "SubagentStop",
+        ] {
+            assert!(!reads_tail(ev, &own, Working), "{ev}");
         }
     }
 
