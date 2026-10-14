@@ -299,6 +299,95 @@ mod shell_text {
         );
     }
 
+    #[test]
+    fn every_bar_runs_its_own_hydrate_and_every_snapshot_goes_through_the_push_gate() {
+        // `run_effects` ends in a catch-all that drops the gated writes on a
+        // background bar. A guarded or missing `Hydrate` arm falls into it, and
+        // that bar never rebuilds a slim push again.
+        let effects = fn_body("run_effects");
+        let arm = effects
+            .find("Effect::Hydrate => {")
+            .expect("`Effect::Hydrate` needs an unguarded arm of its own");
+        let catch_all = effects
+            .find("_ => {} // non-active instance skips writes")
+            .expect("the catch-all went stale");
+        assert!(
+            arm < catch_all,
+            "the Hydrate arm must come before the catch-all"
+        );
+        // A pushed snapshot and an answer each pass their own gate: only an
+        // answer ends the ask in flight. A push sent down the answer's gate
+        // would let a bar ask without end. Both then settle in one method.
+        let pipe = fn_body("handle_pipe");
+        assert!(
+            pipe.contains("let fx = self.model.apply_push(snap, mono_ms());\n")
+                && !pipe.contains("apply_answer"),
+            "a pushed snapshot passes the push gate:\n{pipe}"
+        );
+        // The host sends a slim push on its own name, so a bar that does not
+        // listen on that name never hears most pushes.
+        assert!(
+            pipe.contains("clave_types::STATUS_PIPE | clave_types::SLIM_STATUS_PIPE =>"),
+            "both status names must reach the snapshot arm:\n{pipe}"
+        );
+        let events = fn_body("handle_event");
+        assert!(
+            events.contains("let fx = self.model.apply_answer(snap, mono_ms());\n")
+                && !events.contains("apply_push"),
+            "a `clave snapshot` answer passes the answer gate:\n{events}"
+        );
+        assert!(
+            events.contains("let fx = self.model.hydrate(mono_ms());\n"),
+            "the birth ask is booked as the ask in flight:\n{events}"
+        );
+        for body in [pipe, events] {
+            assert!(body.contains("self.settle_snapshot(fx);"));
+        }
+    }
+
+    /// The QA drive reads the slim push's refusal path from two log lines:
+    /// one per full-snapshot ask, one per answer (scripts/qa/lib.sh,
+    /// `HYDRATE_ASK` and `HYDRATE_ANSWER`; `crates/clave/tests/qa_lib.rs`
+    /// holds the drive to the same text). Moved out of its arm, the ask line
+    /// counts asks that never ran, or misses the ones that did.
+    #[test]
+    fn the_bar_logs_each_full_snapshot_ask_and_each_answer() {
+        let effects = fn_body("run_effects");
+        let at = effects
+            .find("Effect::Hydrate => {")
+            .expect("the Hydrate arm went stale");
+        let arm = &effects[at..];
+        let arm = &arm[..arm.find("\n                }").unwrap_or(arm.len())];
+        let logged = arm
+            .find(r#"eprintln!("clave-bar: hydrate ask build={BUILD}");"#)
+            .expect("each ask must log one line, in the arm that runs it");
+        let ran = arm
+            .find(r#"run_command(&[bin.as_str(), "snapshot"]"#)
+            .expect("the arm must still run `clave snapshot`");
+        assert!(logged < ran, "log the ask, then run it:\n{arm}");
+
+        let events = fn_body("handle_event");
+        let logged = events
+            .find(r#"eprintln!("clave-bar: hydrate answer seq={} build={BUILD}", snap.seq);"#)
+            .expect("each answer must log one line with its seq");
+        let applied = events
+            .find("let fx = self.model.apply_answer(snap, mono_ms());")
+            .expect("the answer arm went stale");
+        assert!(
+            logged < applied,
+            "the line reads the seq before the answer moves into the model:\n{events}"
+        );
+    }
+
+    #[test]
+    fn the_bar_takes_the_keymap_once_and_not_on_every_tab_switch() {
+        let load = fn_body("load");
+        assert!(
+            load.contains("EventType::InitialKeybinds,"),
+            "without it, every ModeUpdate carries the whole keymap:\n{load}"
+        );
+    }
+
     /// The last expression of a shell `fn`: its answer.
     fn last_expr(body: &str) -> &str {
         let inner = body.trim_end().strip_suffix('}').unwrap_or(body);

@@ -29,7 +29,7 @@ use anyhow::{Context, Result};
 // change unless the field already read leniently in the version before it
 // ships. Its cost on the store side is the entry below that one: the guess is
 // written back, so it erases rather than misreads.
-use clave_types::{Agent, AgentSnapshot, Status, lenient};
+use clave_types::{Agent, AgentSnapshot, DormantRows, Status, lenient};
 use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 
@@ -396,7 +396,7 @@ pub(crate) fn bump_bucket(map: &mut BTreeMap<u32, u32>, now_hour: u32) {
     // Strict `>`, not `>=`: an hour exactly BUCKET_RETAIN_HOURS back is out
     // of the rolling window — the test pins now_hour=1000 pruning hour=832
     // (1000-832=168). Day-era keys (pre-v0.4.0) fall out here too.
-    map.retain(|hour, _| *hour + BUCKET_RETAIN_HOURS > now_hour);
+    map.retain(|hour, _| clave_types::bucket_scores(*hour, now_hour));
 }
 
 /// The newborn-inheritance source (spec: newborn initialisation): the
@@ -489,13 +489,28 @@ pub fn with_store_mut<T>(paths: &StorePaths, f: impl FnOnce(&mut Store) -> T) ->
 /// field it lays a column from arrives here as a value, never as a position
 /// inside `label` (#69).
 pub fn snapshot_from(store: &Store) -> AgentSnapshot {
-    AgentSnapshot {
+    let now_hour = unix_hour(now_unix());
+    // Only the buckets that still score ride the wire. The store prunes a
+    // row's buckets only when the row is bumped, so a dormant row keeps hours
+    // the bar scores as zero at this `now_hour` and every later one: 20 KB of
+    // a 92 KB dormant set, measured live 2026-10-13.
+    let scoring = |b: &BTreeMap<u32, u32>| -> BTreeMap<u32, u32> {
+        let mut b = b.clone();
+        b.retain(|hour, _| clave_types::bucket_scores(*hour, now_hour));
+        b
+    };
+    let mut snap = AgentSnapshot {
+        dormant: DormantRows::default(),
         seq: store.seq,
         tab_order: store.tab_order.clone(),
         collapsed: store.collapsed,
-        tab_buckets: store.tab_buckets.clone(),
+        tab_buckets: store
+            .tab_buckets
+            .iter()
+            .map(|(tab, b)| (*tab, scoring(b)))
+            .collect(),
         order: store.order,
-        now_hour: unix_hour(now_unix()),
+        now_hour,
         tab_touched: store.tab_touched.clone(),
         agents: store
             .agents
@@ -535,7 +550,7 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
                 // The frecency numerator (2026-08-19 spec) — copied, not
                 // recomputed, for the same reason context_level is: this
                 // runs inside whichever agent's hook fired.
-                buckets: r.buckets.clone(),
+                buckets: scoring(&r.buckets),
                 // #232. `pr_checked`/`pr_branch` stay host-side: cache
                 // bookkeeping the bar has no use for.
                 model: r.model.clone(),
@@ -546,7 +561,69 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
                 subagents: r.subagents,
             })
             .collect(),
+    };
+    snap.dormant = DormantRows::Included {
+        tag: Some(dormant_tag(&snap.agents)),
+    };
+    snap
+}
+
+/// Names the dormant rows of `agents` by their content: FNV-1a over their
+/// JSON. Equal tags mean equal rows, so a bar that holds the rows of a tag can
+/// rebuild any push that names it, whatever order the pushes arrive in. The
+/// bar never computes a tag; it only compares them, so two clave versions
+/// that hash differently only cost a full push, never a wrong row.
+fn dormant_tag(agents: &[Agent]) -> u64 {
+    let rows: Vec<&Agent> = agents.iter().filter(|a| a.in_dormant_tag()).collect();
+    let bytes = serde_json::to_vec(&rows).unwrap_or_default();
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// The payload a push sends. `last_pushed` is the dormant tag the last push
+/// carried, if any. When `snap` holds the same dormant rows, the push leaves
+/// them out and names them by tag; the bars kept them from that push. Any other
+/// snapshot goes out whole. A bar that missed the push that carried the rows
+/// asks for a full snapshot, so a lost or late push costs one full snapshot
+/// per bar, never a wrong row.
+pub fn wire_for_push(snap: &AgentSnapshot, last_pushed: Option<u64>) -> AgentSnapshot {
+    let mut wire = snap.clone();
+    match snap.dormant {
+        DormantRows::Included { tag: Some(tag) } if last_pushed == Some(tag) => {
+            wire.agents.retain(|a| !a.in_dormant_tag());
+            wire.dormant = DormantRows::Omitted { tag };
+        }
+        _ => {}
     }
+    wire
+}
+
+/// The dormant tag the last push from this store carried, from a file beside
+/// the store. Read and written without the flock: two pushes that race here can
+/// only carry the rows twice, or name a tag a bar does not hold yet, and that
+/// bar then asks for a full snapshot. A missing file, or one that does not
+/// parse, reads as `None`, which sends the rows. Two racing writes can also
+/// leave a number that parses but names no rows; that one never matches a
+/// snapshot, so the next push goes whole.
+pub fn last_pushed_tag(paths: &StorePaths) -> Option<u64> {
+    fs::read_to_string(pushed_tag_path(paths))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Records the tag `wire` carried its dormant rows under, if it carried them.
+/// Call it only after the push went out.
+pub fn note_pushed(paths: &StorePaths, wire: &AgentSnapshot) {
+    if let DormantRows::Included { tag: Some(tag) } = wire.dormant {
+        let _ = fs::write(pushed_tag_path(paths), tag.to_string());
+    }
+}
+
+fn pushed_tag_path(paths: &StorePaths) -> PathBuf {
+    paths.dir.join("pushed-dormant-tag")
 }
 
 /// `clave focus <uuid>` (§6.5): persist the "user looked at it" transition
@@ -2914,16 +2991,21 @@ mod tests {
         assert_eq!(snap2.seq, 2);
     }
 
+    /// Only the hours that still score ride the wire: the bar's score cuts the
+    /// rest to zero at this hour and every later one. Hours one back and one
+    /// window back, so a clock tick inside the test moves neither verdict.
     #[test]
-    fn snapshot_carries_buckets_tab_buckets_order_and_today() {
+    fn snapshot_carries_the_buckets_that_score_tab_buckets_order_and_today() {
+        let now_hour = unix_hour(now_unix());
+        let (fresh, expired) = (now_hour - 1, now_hour - BUCKET_RETAIN_HOURS);
         let mut s = Store::default();
         let mut a = rec("u1");
-        a.buckets = [(100, 5)].into();
+        a.buckets = [(expired, 9), (fresh, 5)].into();
         s.agents.insert("u1".into(), a);
-        s.tab_buckets.insert(3, [(100, 1)].into());
+        s.tab_buckets.insert(3, [(expired, 9), (fresh, 1)].into());
         let snap = snapshot_from(&s);
-        assert_eq!(snap.agents[0].buckets, [(100u32, 5u32)].into());
-        assert_eq!(snap.tab_buckets.get(&3), Some(&[(100u32, 1u32)].into()));
+        assert_eq!(snap.agents[0].buckets, [(fresh, 5u32)].into());
+        assert_eq!(snap.tab_buckets.get(&3), Some(&[(fresh, 1u32)].into()));
         assert_eq!(snap.order, clave_types::OrderMode::default());
         assert_eq!(snap.now_hour, unix_hour(now_unix()));
     }
@@ -3068,6 +3150,349 @@ mod tests {
                     .map(|(u, r)| (u.clone(), r.commit_ord))
                     .collect();
                 prop_assert_eq!(ords_after, ords_before, "a non-prompt event re-ranked a row");
+            }
+        }
+    }
+
+    // ---- Dormant rows on the wire: the slim push (2026-10-13) ----
+
+    /// Rows `u-…` with a tab each for `live`, and none for `dormant`.
+    fn fleet(live: &[(&str, usize)], dormant: &[&str]) -> Store {
+        let mut s = Store::default();
+        for (uuid, tab) in live {
+            let mut r = rec(uuid);
+            r.tab_id = Some(*tab);
+            s.agents.insert((*uuid).into(), r);
+        }
+        for uuid in dormant {
+            s.agents.insert((*uuid).into(), rec(uuid));
+        }
+        s.seq = 1;
+        s
+    }
+
+    fn tag_of(snap: &AgentSnapshot) -> u64 {
+        match snap.dormant {
+            DormantRows::Included { tag: Some(tag) } | DormantRows::Omitted { tag } => tag,
+            DormantRows::Included { tag: None } => panic!("snapshot_from always tags"),
+        }
+    }
+
+    #[test]
+    fn the_dormant_tag_moves_with_the_dormant_rows_and_nothing_else() {
+        let before = tag_of(&snapshot_from(&fleet(&[("u-live", 1)], &["u-d1", "u-d2"])));
+
+        let mut s = fleet(&[("u-live", 1)], &["u-d1", "u-d2"]);
+        s.agents.get_mut("u-live").unwrap().summary = "moved on".into();
+        s.seq = 9;
+        assert_eq!(
+            tag_of(&snapshot_from(&s)),
+            before,
+            "a live row and the seq do not move it"
+        );
+
+        s.agents.get_mut("u-d2").unwrap().summary = "renamed".into();
+        assert_ne!(
+            tag_of(&snapshot_from(&s)),
+            before,
+            "a dormant row's words move it"
+        );
+
+        let mut s = fleet(&[("u-live", 1)], &["u-d1", "u-d2"]);
+        s.agents.get_mut("u-live").unwrap().tab_id = None;
+        assert_ne!(
+            tag_of(&snapshot_from(&s)),
+            before,
+            "a row that goes dormant moves it"
+        );
+
+        let mut s = fleet(&[("u-live", 1)], &["u-d1", "u-d2"]);
+        s.agents.get_mut("u-d1").unwrap().pane_id = Some(4);
+        assert_ne!(
+            tag_of(&snapshot_from(&s)),
+            before,
+            "a row mid-spawn (a pane, no tab yet) leaves the dormant rows"
+        );
+    }
+
+    #[test]
+    fn a_push_leaves_out_only_the_dormant_rows_the_last_push_carried() {
+        let whole = snapshot_from(&fleet(&[("u-live", 1)], &["u-d1", "u-d2"]));
+        let tag = tag_of(&whole);
+
+        let slim = wire_for_push(&whole, Some(tag));
+        assert_eq!(slim.dormant, DormantRows::Omitted { tag });
+        let uuids: Vec<&str> = slim.agents.iter().map(|a| a.uuid.as_str()).collect();
+        assert_eq!(
+            uuids,
+            ["u-live"],
+            "the live row rides; the dormant ones do not"
+        );
+        assert_eq!((slim.seq, &slim.tab_order), (whole.seq, &whole.tab_order));
+
+        assert_eq!(
+            wire_for_push(&whole, Some(tag ^ 1)),
+            whole,
+            "another tag: whole"
+        );
+        assert_eq!(
+            wire_for_push(&whole, None),
+            whole,
+            "no tag on record: whole"
+        );
+    }
+
+    #[test]
+    fn the_pushed_tag_is_kept_beside_the_store_and_only_a_carrying_push_writes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = tmp_paths(dir.path());
+        assert_eq!(last_pushed_tag(&paths), None, "no push yet");
+
+        let whole = snapshot_from(&fleet(&[], &["u-d1"]));
+        note_pushed(&paths, &whole);
+        assert_eq!(last_pushed_tag(&paths), Some(tag_of(&whole)));
+
+        // A slim push carried no rows, so it must not claim a tag.
+        fs::write(pushed_tag_path(&paths), "7").unwrap();
+        let slim = wire_for_push(&whole, Some(tag_of(&whole)));
+        note_pushed(&paths, &slim);
+        assert_eq!(last_pushed_tag(&paths), Some(7));
+
+        fs::write(pushed_tag_path(&paths), " 12\n").unwrap();
+        assert_eq!(
+            last_pushed_tag(&paths),
+            Some(12),
+            "whitespace is not a tear"
+        );
+        fs::write(pushed_tag_path(&paths), "12ab").unwrap();
+        assert_eq!(
+            last_pushed_tag(&paths),
+            None,
+            "a file that does not parse reads as none, which sends the rows"
+        );
+    }
+
+    mod slim_push {
+        use super::*;
+        use clave_bar::model::{BarModel, Effect, TabMeta};
+        use proptest::prelude::*;
+
+        const ROWS: usize = 5;
+
+        #[derive(Debug, Clone)]
+        enum Step {
+            /// The row binds to a tab the bar can see, so it shows as live.
+            Open(usize, usize),
+            /// The row gets a pane and no tab yet: mid-spawn, outside the tag.
+            Spawn(usize),
+            Close(usize),
+            Reword(usize, u8),
+        }
+
+        fn step() -> impl Strategy<Value = Step> {
+            prop_oneof![
+                (0..ROWS, 1..4usize).prop_map(|(r, t)| Step::Open(r, t)),
+                (0..ROWS).prop_map(Step::Spawn),
+                (0..ROWS).prop_map(Step::Close),
+                (0..ROWS, 0..3u8).prop_map(|(r, w)| Step::Reword(r, w)),
+            ]
+        }
+
+        fn run(s: &mut Store, step: &Step) {
+            let (Step::Open(r, _) | Step::Spawn(r) | Step::Close(r) | Step::Reword(r, _)) = step;
+            let row = s.agents.get_mut(&format!("u{r}")).unwrap();
+            match step {
+                Step::Open(_, tab) => row.tab_id = Some(*tab),
+                Step::Spawn(r) => row.pane_id = Some(10 + *r as u32),
+                Step::Close(_) => (row.tab_id, row.pane_id) = (None, None),
+                Step::Reword(_, w) => row.summary = format!("words {w}"),
+            }
+            s.seq += 1;
+        }
+
+        /// The tabs `Open` binds to, as the bar sees them.
+        fn tabs() -> Vec<TabMeta> {
+            (1..4)
+                .map(|id| TabMeta {
+                    tab_id: id,
+                    position: id - 1,
+                    name: format!("t{id}"),
+                    active: id == 1,
+                    floating_visible: false,
+                })
+                .collect()
+        }
+
+        fn newborn() -> BarModel {
+            let mut bar = BarModel::default();
+            bar.apply_tabs(tabs());
+            bar
+        }
+
+        type Rows = Vec<(clave_bar::model::RowKey, clave_bar::render::Row)>;
+
+        /// One bar on the far side of a pipe that loses and reorders. Each
+        /// ask for a full snapshot gets the store as it is when `clave
+        /// snapshot` runs. That is no older than the newest push the bar has
+        /// heard, because the host pushes only after its store write commits.
+        /// The answer can land after later pushes. In a `broken` run that
+        /// premise fails, as when the store goes back or a push comes from
+        /// another store: an answer can be any state, or never come.
+        struct Drive {
+            bar: BarModel,
+            /// `states[i]` is the store after `i` steps.
+            states: Vec<AgentSnapshot>,
+            /// What a bar shows for each state, fed that state alone.
+            shown: Vec<Rows>,
+            /// The newest state a push this bar heard carried.
+            heard: usize,
+            arrivals: usize,
+            now: u64,
+            broken: bool,
+            /// (arrivals before it lands, the state it carries).
+            answers: Vec<(usize, usize)>,
+            picks: Vec<(u8, usize, bool)>,
+            asks: usize,
+        }
+
+        impl Drive {
+            fn feed(&mut self, snap: AgentSnapshot, answer: bool) {
+                let fx = if answer {
+                    self.bar.apply_answer(snap, self.now)
+                } else {
+                    self.bar.apply_push(snap, self.now)
+                };
+                if fx.contains(&Effect::Hydrate) {
+                    self.ask();
+                }
+                assert!(
+                    self.shown.contains(&self.bar.rows()),
+                    "the bar shows a fleet the store never held"
+                );
+            }
+
+            fn ask(&mut self) {
+                let (pick, delay, lost) = self.picks[self.asks % self.picks.len()];
+                self.asks += 1;
+                // One ask at birth and at most one per push is the whole
+                // budget; a rule that asks past it is spinning, and fails
+                // here at once rather than after a thousand loops.
+                assert!(
+                    self.asks <= self.states.len(),
+                    "more asks than pushes: the asks never settle"
+                );
+                let n = self.states.len();
+                let at = match (self.broken, lost) {
+                    (false, _) => Some(self.heard + usize::from(pick) % (n - self.heard)),
+                    (true, true) => None,
+                    (true, false) => Some(usize::from(pick) % n),
+                };
+                if let Some(at) = at {
+                    self.answers.push((self.arrivals + delay, at));
+                }
+            }
+
+            fn land_answers(&mut self, all: bool) {
+                while let Some(k) = self
+                    .answers
+                    .iter()
+                    .position(|&(due, _)| all || due <= self.arrivals)
+                {
+                    let (_, at) = self.answers.remove(k);
+                    self.feed(self.states[at].clone(), true);
+                }
+            }
+        }
+
+        proptest! {
+            // 2048, not the default 256: the shortest case that fails on the
+            // pre-fix ask (two lost carrying pushes, then a refusal inside the
+            // window) took about 1000 cases to find, measured 2026-10-13.
+            #![proptest_config(ProptestConfig { cases: 2048, ..ProptestConfig::default() })]
+            /// Property — the slim push cannot be seen, and costs at most one
+            /// ask per push. The host slims each push against the tag it last
+            /// pushed. The pushes arrive in any order, at any pace, and any of
+            /// them can be lost. Then (1) the bar only ever shows a fleet the
+            /// store held; (2) it asks once at birth and at most once per slim
+            /// push it heard, even when the answers are wrong or never come;
+            /// (3) when the answers keep the premise, it ends no older than
+            /// the newest push it heard.
+            #[test]
+            fn prop_a_bar_shows_only_whole_fleets_and_catches_up(
+                steps in prop::collection::vec(step(), 1..12),
+                keys in prop::collection::vec(any::<u16>(), 12),
+                lost in prop::collection::vec(any::<bool>(), 12),
+                gaps in prop::collection::vec(0..3_000u64, 12),
+                picks in prop::collection::vec((any::<u8>(), 0..3usize, any::<bool>()), 12),
+                broken in any::<bool>(),
+            ) {
+                let mut s = fleet(&[], &[]);
+                for r in 0..ROWS {
+                    s.agents.insert(format!("u{r}"), rec(&format!("u{r}")));
+                }
+                let mut states = vec![snapshot_from(&s)];
+                let mut wires = vec![states[0].clone()];
+                let mut last_pushed = None;
+                for step in &steps {
+                    run(&mut s, step);
+                    let whole = snapshot_from(&s);
+                    let wire = wire_for_push(&whole, last_pushed);
+                    if let DormantRows::Included { tag } = wire.dormant {
+                        last_pushed = tag;
+                    }
+                    states.push(whole);
+                    wires.push(wire);
+                }
+                let shown = states
+                    .iter()
+                    .map(|st| {
+                        let mut fresh = newborn();
+                        fresh.apply_push(st.clone(), 0);
+                        fresh.rows()
+                    })
+                    .collect();
+                let mut d = Drive {
+                    bar: newborn(),
+                    states,
+                    shown,
+                    heard: 0,
+                    arrivals: 0,
+                    now: 0,
+                    broken,
+                    answers: Vec::new(),
+                    picks,
+                    asks: 1,
+                };
+                // The bar asks at birth, as `load` makes it, and the store
+                // has not moved yet.
+                prop_assert_eq!(d.bar.hydrate(0), vec![Effect::Hydrate]);
+                d.feed(d.states[0].clone(), true);
+                let mut arrival: Vec<usize> = (1..wires.len()).collect();
+                arrival.sort_by_key(|&i| keys[i - 1]);
+                let mut slim_heard = 0;
+                for i in arrival.into_iter().filter(|&i| !lost[i - 1]) {
+                    d.now += gaps[i - 1];
+                    d.land_answers(false);
+                    d.heard = d.heard.max(i);
+                    if matches!(wires[i].dormant, DormantRows::Omitted { .. }) {
+                        slim_heard += 1;
+                    }
+                    d.feed(wires[i].clone(), false);
+                    d.arrivals += 1;
+                }
+                d.land_answers(true);
+                prop_assert!(
+                    d.asks <= 1 + slim_heard,
+                    "{} asks for {} slim pushes",
+                    d.asks,
+                    slim_heard
+                );
+                if !broken {
+                    prop_assert!(
+                        d.shown[d.heard..].contains(&d.bar.rows()),
+                        "the bar shows a fleet older than a push it heard"
+                    );
+                }
             }
         }
     }

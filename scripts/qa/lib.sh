@@ -209,7 +209,8 @@ instance_count_logging() {
 # flap is one instance logging the same ask sixteen times (the devbox,
 # 2026-09-22), and an instance count reads that as 1. Attributed the same
 # way: the line's `[id: N]` must belong to an instance that announced this
-# build.
+# build. That is an id filter only, and ids collide across servers: a line
+# that carries the build tag is read with `build_lines_since` instead.
 sandbox_lines_since() {
   local mark="$1" pattern="$2" ids
   ids="$(sandbox_instance_ids | tr '\n' ' ')"
@@ -398,6 +399,205 @@ arrival_checks() {
     .store as $s | ($s.tab_touched // {})[($s.agents[$u].tab_id | tostring)]
     | if . == null then "none" else "touched at \(.)" end' <<<"$status" 2>/dev/null)"
   check "and no birth touch lifted it to the top first" "$touched" "none"
+}
+
+# ---------------------------------------------------------------------------
+# The slim push (PR #281): its readings and its verdicts.
+# ---------------------------------------------------------------------------
+# A status push leaves out the dormant rows when the push before it carried
+# the same ones, and rides `clave-status-slim` (UBIQUITOUS_LANGUAGE, "slim
+# push"). Each bar puts the rows back from the last whole push it kept. A bar
+# that cannot rebuild a push applies nothing and asks `clave snapshot` once.
+# Two bar lines trace that path, one per ask and one per answer (main.rs,
+# `Effect::Hydrate` and `RunCommandResult`). The fragments below are pinned
+# to the bar's text by `crates/clave/tests/qa_lib.rs`, so a renamed line
+# fails the build and cannot silently empty a check.
+#
+# Attribution. Every line these checks count is read through the `build_`
+# readers below, never through `sandbox_lines_since`. An id filter is not
+# enough: plugin ids restart per zellij server, so a bar in the maintainer's
+# session can carry the same `[id: N]` as a sandbox bar (FOOTGUNS, "The
+# zellij log is USER-GLOBAL"). Measured on the devbox log (2026-10-14, 103k
+# lines): his 0.5.5 fleet logged ~540 `dropped clave-status pipe` twins per
+# id. From 0.5.6 on his bars also print the slim twin and both hydrate lines.
+# So each counted line ends its fixed words with `build=<tag>` (main.rs
+# `BUILD`), and the readers keep a line only when that tag is this build's.
+# A 0.5.5 bar prints the same words with no tag, so it is never counted.
+# What the tag cannot split: two sandboxes built from the same commit.
+# shellcheck disable=SC2034 # the drive reads these; lib.sh reads one
+{
+SLIM_TWIN='clave-bar: dropped clave-status-slim pipe'
+WHOLE_TWIN='clave-bar: dropped clave-status pipe'
+HYDRATE_ASK='clave-bar: hydrate ask'
+HYDRATE_ANSWER='clave-bar: hydrate answer seq='
+BAD_STATUS='clave-bar: bad clave-status'
+RUN_FAILED='clave-bar: run_command failed'
+}
+
+# The lines since <mark> that hold <pattern> and end their fixed words with
+# THIS build's tag. The tag must be whole: `build=cafe123` must not keep a
+# line from `build=cafe1234`, so the tag ends the line or a space or a colon
+# follows it (main.rs `BUILD` puts it before any free text).
+build_lines_since() {
+  zlog_from "$1" | grep -F "$2" | awk -v t=" build=$BUILD_TAG" '{
+    i = index($0, t)
+    if (!i) next
+    c = substr($0, i + length(t), 1)
+    if (c == "" || c == " " || c == ":") print
+  }'
+}
+
+build_line_count_since() { build_lines_since "$1" "$2" | grep -c . || true; }
+
+# The instances of this build that logged <pattern> since <mark>.
+build_instances_logging_since() { build_lines_since "$1" "$2" | log_ids; }
+
+# "<id> <count>" for each instance of this build that logged <pattern> since
+# <mark>, sorted by id. LINES per instance: an ask loop is one bar asking
+# many times, and a set of ids reads that as one.
+build_line_counts_since() {
+  build_lines_since "$1" "$2" | sed -n 's/.*\[id: *\([0-9][0-9]*\) *\].*/\1/p' |
+    sort -n | uniq -c | awk '{ print $2, $1 }'
+}
+
+# The ids of an "<id> <count>" list, one per line.
+ids_of() { awk 'NF { print $1 }' <<<"${1:-}"; }
+
+# The ids that asked more often than they were answered. $1 and $2 are
+# "<id> <count>" lists of asks and answers. An answer can outnumber its ask
+# (a launch bar asks before the run's mark and is answered after it); an ask
+# that outnumbers its answers left its bar on the fleet before the push it
+# refused.
+unanswered_ids() {
+  awk 'NR == FNR { if (NF) got[$1] = $2; next } NF && $2 > got[$1] + 0 { print $1 }' \
+    <(printf '%s\n' "${2:-}") <(printf '%s\n' "${1:-}")
+}
+
+# The ids in an "<id> <count>" list that asked more than once.
+repeat_askers() { awk 'NF && $2 > 1 { print $1 }' <<<"${1:-}"; }
+
+# The members of set $1 that set $2 does not hold. Both one id per line.
+ids_missing_from() { comm -23 <(sort -u <<<"${1:-}" | grep .) <(sort -u <<<"${2:-}" | grep .); }
+
+# The distinct seqs the answers since <mark> carried, sorted.
+answer_seqs_since() {
+  build_lines_since "$1" "$HYDRATE_ANSWER" |
+    sed -n 's/.*hydrate answer seq=\([0-9][0-9]*\).*/\1/p' | sort -n -u
+}
+
+# The bar instances that LOADED this build since <mark>. Read after the mark,
+# so after a relaunch the second server's ids count as the new bars they are,
+# even where they reuse the first server's numbers.
+instances_born_since() {
+  zlog_from "$1" | grep -F 'clave-bar: loaded' | grep -F "build=$BUILD_TAG" | log_ids
+}
+
+# The tag the host wrote after its last aimed whole push (store.rs
+# `note_pushed`), from the file beside the store. $1 is the state dir. Empty
+# when the file is absent: no aimed whole push yet, so no push goes slim.
+pushed_dormant_tag() {
+  local f="$1/pushed-dormant-tag"
+  [[ -r "$f" ]] && tr -d '[:space:]' <"$f"
+  return 0
+}
+
+# The dormant tag in a `clave snapshot` document. Read with sed, NOT jq: the
+# tag is a u64 (store.rs `dormant_tag`, FNV-1a), and a jq older than 1.7
+# reads every number as a double, so a tag above 2^53 (nearly all of them)
+# comes back rounded and two equal tags compare unequal. A quote inside a
+# JSON string is escaped, so the same words in a row's text cannot match.
+snapshot_dormant_tag() {
+  sed -n 's/.*"dormant":{"included":{"tag":\([0-9][0-9]*\)}.*/\1/p' <<<"${1:-}"
+}
+
+# A slim push that no bar can rebuild: one seq past the store's $1, naming
+# tag 0. A real tag is FNV-1a over the rows' JSON, so no kept rows carry 0 in
+# practice. It carries no rows at all, so a bar that took it as whole would
+# show an empty fleet, which is the defect the refusal exists to prevent.
+# `crates/clave/tests/qa_lib.rs` parses this shape as the bar does.
+refusal_payload() {
+  printf '{"seq":%s,"agents":[],"dormant":{"omitted":{"tag":0}}}' "$(($1 + 1))"
+}
+
+# The host half (phase 6a, at rest). $1 is the tag of the last aimed whole
+# push, $2 the tag of the store's dormant rows now. Equal means the next push
+# goes slim. A missing file means no push ever will. A tag that moves only
+# with the hour (a bucket leaving the 168-hour window, store.rs
+# `snapshot_from`) cannot move in a drive: the scenario seeds no buckets.
+slim_host_checks() {
+  local pushed="$1" current="$2"
+  measure "the tag of the last aimed whole push (pushed-dormant-tag)" "$pushed"
+  measure "the tag of the store's dormant rows now (clave snapshot)" "$current"
+  check_nonempty "the host recorded an aimed whole push (without it no push goes slim)" "$pushed"
+  check_nonempty "the store's snapshot names its dormant rows by tag" "$current"
+  check "at rest, the last whole push carried the store's dormant rows (the next push goes slim)" \
+    "$pushed" "$current"
+}
+
+# The seam over a span of the run (phase 6a since the run's mark; 6c since
+# the quit). $1 names the span. $2 the instances that heard a slim push, $3
+# and $4 the bad-payload and failed-subprocess LINE counts, $5 the instances
+# born in the span, $6 and $7 the "<id> <count>" asks and answers.
+slim_seam_checks() {
+  local span="$1" heard="$2" bad="$3" failed="$4" born="$5" asks="$6" answers="$7"
+  measure "$span: sandbox bars that heard a slim push" "$(uuid_line "$heard")"
+  measure "$span: bars born" "$(uuid_line "$born")"
+  measure "$span: full-snapshot asks per bar (id count)" "$(tr '\n' ',' <<<"$asks")"
+  measure "$span: answers per bar (id count)" "$(tr '\n' ',' <<<"$answers")"
+  check_nonempty "$span: the host sent slim pushes and sandbox bars heard them" "$(uuid_line "$heard")"
+  check "$span: no sandbox bar refused a status payload it could not parse" "$bad" "0"
+  check "$span: no sandbox bar subprocess failed (a failed clave snapshot leaves its bar behind)" "$failed" "0"
+  # Two empty sets compare equal, so the births are pinned first: the birth
+  # ask is the one every bar makes, and a span with none proves nothing here.
+  check_nonempty "$span: bars were born, so the birth ask ran" "$(uuid_line "$born")"
+  check "$span: every bar born asked for the fleet and got it (the birth hydrate)" \
+    "$(uuid_line "$(ids_missing_from "$born" "$(ids_of "$answers")")")" ""
+  check "$span: every bar that asked for a full snapshot got one" \
+    "$(uuid_line "$(unanswered_ids "$asks" "$answers")")" ""
+}
+
+# A window of real slim pushes (phase 5's burst; 6c's two presses; 6a's two
+# presses after the refusal). $1 names the window, $2 the live tab count (one
+# bar per tab), $3 the instances that heard a slim push in it, $4 the
+# "<id> <count>" asks in it. A bar that holds the rows asks nothing; a bar
+# that asks here could not rebuild a push the host sent to it.
+slim_rebuild_checks() {
+  local window="$1" live="$2" heard="$3" asks="$4"
+  measure "$window: sandbox bars that heard a slim push" "n=$(uuid_count "$heard") $(uuid_line "$heard")"
+  measure "$window: full-snapshot asks (id count)" "$(tr '\n' ',' <<<"$asks")"
+  check_numeric "$window: live tab count readable" "$live"
+  check_nonempty "$window: the presses rode slim pushes" "$(uuid_line "$heard")"
+  check_min "$window: every live bar heard them (one bar per tab)" "$(uuid_count "$heard")" "$live"
+  check "$window: no bar asked for a full snapshot (each rebuilt every push from the rows it kept)" \
+    "$(uuid_line "$(ids_of "$asks")")" ""
+}
+
+# The refusal leg (phase 6a). The drive pipes `refusal_payload`: a slim push
+# one seq past the store, naming a tag no bar holds. Each bar must refuse it,
+# ask once, and take the answer, which is OLDER than the push it refused:
+# the shape that made every bar ask without end until e4bc858 (model.rs
+# `an_answer_older_than_the_push_it_was_asked_for_does_not_ask_again`, here
+# through the real pipe, shell and `clave snapshot`). $1 live tabs, $2 and $3
+# the "<id> <count>" asks and answers since the leg's mark, $4 the answers'
+# seqs, $5 and $6 the store seq before and after.
+refusal_checks() {
+  local live="$1" asks="$2" answers="$3" seqs="$4" before="$5" after="$6"
+  local askers
+  askers="$(ids_of "$asks")"
+  measure "bars that asked for a full snapshot (id count)" "$(tr '\n' ',' <<<"$asks")"
+  measure "bars that were answered (id count)" "$(tr '\n' ',' <<<"$answers")"
+  measure "the seqs the answers carried" "$(uuid_line "$seqs")"
+  check_numeric "live tab count readable" "$live"
+  check_numeric "store seq readable before the push" "$before"
+  check_nonempty "a bar refused the push it could not rebuild, and asked" "$(uuid_line "$askers")"
+  check_min "every live bar refused it (a bar that took it as whole shows no dormant rows)" \
+    "$(uuid_count "$askers")" "$live"
+  check "each bar asked once (an answer older than the push asks no more, e4bc858)" \
+    "$(uuid_line "$(repeat_askers "$asks")")" ""
+  check "every bar that asked got its answer" "$(uuid_line "$(unanswered_ids "$asks" "$answers")")" ""
+  check "every answer read this sandbox's store as it stands (each bar ends caught up)" \
+    "$(uuid_line "$seqs")" "$before"
+  check "the refusal wrote nothing (store seq flat)" "$after" "$before"
 }
 
 # ---------------------------------------------------------------------------
@@ -630,6 +830,10 @@ QA_CAPABILITIES=(
   "cwd-delta:clave-bar: term-facts cwd delta"
   "cmd-delta:clave-bar: term-facts command delta"
   "dropped:clave-bar: dropped"
+  # The slim push (phase 6a): heard one, asked for the fleet, got it.
+  "slim:clave-bar: dropped clave-status-slim pipe"
+  "ask:clave-bar: hydrate ask"
+  "answer:clave-bar: hydrate answer"
 )
 
 instance_ledger() {
