@@ -863,20 +863,29 @@ fn nested_launch_refusal(sb: &crate::sandbox::Sandbox) -> String {
 /// the three `CLAVE_*` vars (`enter_sandbox`); deriving the fourth makes the
 /// prefix unnecessary rather than merely tedious.
 fn shim_first_on_path(sb: &crate::sandbox::Sandbox) {
-    let shim = sb.shim_dir();
-    let current = std::env::var_os("PATH").unwrap_or_default();
+    if let Some(path) = path_with_shim_first(std::env::var_os("PATH").as_deref(), &sb.shim_dir()) {
+        // SAFETY: single-threaded CLI entry point; set before any spawn.
+        unsafe { std::env::set_var("PATH", path) };
+    }
+}
+
+/// `PATH` with `shim` FIRST, or `None` when it is first already.
+///
+/// An UNSET `PATH` stays unset, by the same rule as the launch folder
+/// (`setup::path_with_dir`): the process then uses the system default search
+/// path. The old form made `shim:`, which hid `/usr/bin`, and its empty entry
+/// searched each pane's own cwd (PR #282 review).
+fn path_with_shim_first(
+    current: Option<&std::ffi::OsStr>,
+    shim: &Path,
+) -> Option<std::ffi::OsString> {
+    let dirs: Vec<std::path::PathBuf> = std::env::split_paths(current?).collect();
     // Idempotent: a caller still pasting the old prefix has it first already,
     // and a second copy would only make `PATH` harder to read in a bug report.
-    if let Some(s) = current.to_str()
-        && s.split(':').next() == shim.to_str()
-    {
-        return;
+    if dirs.first().is_some_and(|d| d == shim) {
+        return None;
     }
-    let mut joined = std::ffi::OsString::from(&shim);
-    joined.push(":");
-    joined.push(&current);
-    // SAFETY: single-threaded CLI entry point; set before any spawn.
-    unsafe { std::env::set_var("PATH", joined) };
+    std::env::join_paths(std::iter::once(shim.to_path_buf()).chain(dirs)).ok()
 }
 
 /// `clave dev instance`: which sandbox this working tree stages into.
@@ -2264,6 +2273,34 @@ mod tests {
     /// The refusal has to TEACH, not just decline: whoever hit it is either a
     /// human in the wrong terminal or an agent that should have handed the
     /// command over, and both need the next action spelled out.
+    #[test]
+    fn the_shim_goes_first_once_and_an_unset_path_stays_unset() {
+        let shim = Path::new("/s/shim");
+        let os = std::ffi::OsStr::new;
+        assert_eq!(
+            path_with_shim_first(Some(os("/usr/bin:/bin")), shim).unwrap(),
+            "/s/shim:/usr/bin:/bin"
+        );
+        assert_eq!(
+            path_with_shim_first(Some(os("/s/shim:/usr/bin")), shim),
+            None,
+            "first already: unchanged"
+        );
+        assert_eq!(
+            path_with_shim_first(Some(os("/usr/bin:/s/shim")), shim).unwrap(),
+            "/s/shim:/usr/bin:/s/shim",
+            "on PATH but not first: the shim must still win"
+        );
+        // The rule `setup::path_with_dir` holds for the launch folder. The
+        // old form made `shim:`, which hides /usr/bin, and whose empty entry
+        // searches each pane's own cwd.
+        assert_eq!(
+            path_with_shim_first(None, shim),
+            None,
+            "an unset PATH stays unset"
+        );
+    }
+
     #[test]
     fn the_nested_launch_refusal_names_the_command_to_hand_over() {
         let home = std::path::Path::new("/home/u");
