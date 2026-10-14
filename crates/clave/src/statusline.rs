@@ -142,7 +142,7 @@ impl Reading {
 /// How often a moved count is allowed to land on its own. Measured 2026-10-14
 /// on the live 0.5.5 fleet: in 21 minutes the meter made 175 of 311 pushes
 /// (56%), and 25 of the 175 moved no pixel. Each push re-renders every bar.
-/// At ten seconds a working row pushed its count about six times a minute.
+/// At ten seconds a working row could push its count six times a minute.
 /// The decision (Ollie, through the coordinator, 2026-10-14): the count on a
 /// working row lags up to 60 s. The band, the model and effort cells and the
 /// resting count stay exact, because those land at once (`count_due`).

@@ -1848,8 +1848,11 @@ fn adoption_inputs(raw_cwd: &str, claude_dir: &Path, session: &str) -> Option<Ad
 /// Whether this event would leave the store exactly as it is: both halves of
 /// the hook write, run on a lock-free copy and compared whole. The whole
 /// store, not the `changed` bools: those gate the PUSH, and a write can
-/// persist a field that pushes nothing (`live_session`, `metered_at`). Valid
-/// only for events that read no tail, because the copy is handed none.
+/// persist a field that pushes nothing (`live_session`, `metered_at`).
+///
+/// `false` wherever the copy cannot know. Stop and UserPromptSubmit read a
+/// tail under the lock, and the copy is handed none. A row the store does not
+/// hold is an adoption, and its mint is the change.
 fn changes_nothing(
     store: &Store,
     uuid: &str,
@@ -1859,6 +1862,9 @@ fn changes_nothing(
     now: u64,
     own_claude: bool,
 ) -> bool {
+    if matches!(event, "Stop" | "UserPromptSubmit") || !store.agents.contains_key(uuid) {
+        return false;
+    }
     let mut probe = store.clone();
     apply_hook_event(&mut probe, uuid, event, payload, None, now, own_claude);
     apply_hook_pane(
@@ -1920,14 +1926,9 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
     // moves nothing exits before the lock: a PostToolBatch on a row that is
     // not red (one per tool batch of every agent), a SubagentStart or
     // SubagentStop that leaves the mark where it was, a repeat Notification,
-    // or a SessionStart from a pane the row holds already. Stop and
-    // UserPromptSubmit read a tail under the lock,
-    // so the probe cannot see what they would write; they always go on.
-    let reads_tail = matches!(event, "Stop" | "UserPromptSubmit");
-    if mint.is_none()
-        && !reads_tail
-        && changes_nothing(&store, &uuid, event, &payload, pane, now, own_claude)
-    {
+    // or a SessionStart from a pane the row holds already. An adoption and
+    // the two events that read a tail always go on (`changes_nothing`).
+    if changes_nothing(&store, &uuid, event, &payload, pane, now, own_claude) {
         // Read-only, as below: a quiet event still owes a stale PR its sync.
         if store
             .agents
@@ -2562,6 +2563,34 @@ mod tests {
             !quiet("SessionEnd", &said("u", None), None),
             "Working -> Idle"
         );
+        // A row the store does not hold is an adoption: the mint is the
+        // change, though the copy, with no row to move, moves nothing.
+        assert!(
+            !changes_nothing(
+                &s,
+                "new",
+                "SessionStart",
+                &said("new", None),
+                Some(4),
+                100,
+                true
+            ),
+            "an adoption always takes the lock"
+        );
+        // The two events that read a tail take the lock whatever the copy
+        // says: a harness turn on a working row moves no cell the copy can
+        // see, and a Stop on a finished row moves none either.
+        let harness = HookPayload {
+            prompt: Some("<task-notification>\n<task-id>b1</task-id>".into()),
+            ..said("u", None)
+        };
+        assert!(!quiet("UserPromptSubmit", &harness, Some(4)), "a tail read");
+        let mut done = s.clone();
+        done.agents.get_mut("u").unwrap().status = Status::Done;
+        assert!(
+            !changes_nothing(&done, "u", "Stop", &said("u", None), Some(4), 100, true),
+            "a tail read"
+        );
     }
 
     /// #97, the bug this exists to prevent recurring.
@@ -2807,6 +2836,34 @@ mod tests {
         let before = s.agents["u1"].commit_ord;
         apply_hook_event(&mut s, "u1", ups, &quoting, None, 2300, true);
         assert!(s.agents["u1"].commit_ord > before);
+    }
+
+    /// A status move is a change on its own, with the turn clock still: a
+    /// finished row closing (Done to Idle) keeps a zero clock, and it must
+    /// still push, or every bar keeps showing Done for a session that ended.
+    #[test]
+    fn a_status_move_is_a_change_while_the_clock_stands_still() {
+        let mut s = Store::default();
+        let mut r = rec("u1");
+        r.status = Status::Done;
+        s.agents.insert("u1".into(), r);
+        let p = HookPayload {
+            session_id: Some("u1".into()),
+            ..Default::default()
+        };
+        assert!(apply_hook_event(
+            &mut s,
+            "u1",
+            "SessionEnd",
+            &p,
+            None,
+            100,
+            true
+        ));
+        assert_eq!(
+            (s.agents["u1"].status, s.agents["u1"].turn_started),
+            (Status::Idle, 0)
+        );
     }
 
     /// The turn clock lives exactly as long as the turn: a prompt that starts
@@ -3350,6 +3407,24 @@ mod tests {
         // of one: the leading `a` puts every `é` on an odd offset.
         std::fs::write(&path, format!("a{}\n{}", "é".repeat(600), "é".repeat(100))).unwrap();
         assert_eq!(read_tail(&path, 1024), Some("é".repeat(100)));
+    }
+
+    /// The window must reach the newest token reading. Measured 2026-10-14
+    /// over 278 local transcripts: the newest assistant `usage` record starts
+    /// a median 6.7 KB from the end, p90 42 KB, and 5 of 278 lie past 64 KB.
+    /// A record at the p90 distance must still land.
+    #[test]
+    fn the_tail_window_reaches_a_reading_behind_a_large_record() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("t.jsonl");
+        let reading = r#"{"type":"assistant","message":{"model":"claude-opus-5","usage":{"input_tokens":1200,"cache_read_input_tokens":800}}}"#;
+        let big = format!(
+            r#"{{"type":"user","message":{{"role":"user","content":"{}"}}}}"#,
+            "x".repeat(42 * 1024)
+        );
+        std::fs::write(&path, format!("{reading}\n{big}\n")).unwrap();
+        let tail = read_tail(&path, TAIL_BYTES).unwrap();
+        assert_eq!(tokens_from_tail(&tail), Some(2000));
     }
 
     /// `split_once`, not `split(anchor).nth(1)`. The two agree until the
