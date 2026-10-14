@@ -8,6 +8,21 @@ owns everything they structurally cannot reach._
 
 ## Run ledger — the useful recent history
 
+- **runs 42 to 44, 2026-10-13 and 14 — the slim push (#281) and the launch
+  folder (#282).** Box only; the Mac half did not run. Run 42 at `d5aceb3`:
+  red in 5b, because the phase appended to ANOTHER sandbox's fixture
+  transcript (its glob sorted `clave-dev-agent-a2-d8ae` first); 5b now picks
+  the fixture by the row's cwd. Run 43 at `d5aceb3`: 0-7 green, 250 checks;
+  the slim path was confirmed only by hand (283 slim and 55 whole blank
+  twins in the log). Run 44 at `eb212f6`, both branches merged, with the new
+  phases 0b and 6a: 0-7 green, 299 checks; both eyeballs passed. Every live
+  bar refused the crafted slim push, asked once, and caught up. Found, not
+  fixed: a drive slows the maintainer's session, because every zellij CLI
+  call first probes every session socket (zellij-utils-0.45.1
+  `sessions.rs:19-45`, `:148-172`); A/B measured about 20-50 ms of
+  live-server CPU per call. A per-sandbox socket dir would end it; the
+  maintainer deferred it on 2026-10-14 in favour of cutting the cost itself.
+
 - **runs 40 and 41, 2026-10-12 — the 0.5.4 cut, the first drive on zellij
   0.45.1.** Box only; the Mac half did not run. Run 40 at `5e67e0c`: red
   once in phase 3. After a tab close, one `list-panes` got "Session not
