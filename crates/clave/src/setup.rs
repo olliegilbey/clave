@@ -623,7 +623,7 @@ pub fn is_clave_hook_command(cmd: &str, event: &str) -> bool {
 
 /// The §6.5 state machine's input events — hook registration AND doctor's
 /// exactly-one-entry check key off the same list.
-pub const HOOK_EVENTS: [&str; 5] = [
+pub const HOOK_EVENTS: [&str; 7] = [
     "UserPromptSubmit",
     "Stop",
     "Notification",
@@ -632,6 +632,14 @@ pub const HOOK_EVENTS: [&str; 5] = [
     // hand-run claude joins (or re-joins) the fleet before its first prompt.
     // Maps to no status transition — its job is the pane register + mint.
     "SessionStart",
+    // The "answered" event: once per tool batch, after every tool in it
+    // resolved. It is what clears red. No matcher support, so the entry
+    // `merge_hooks` writes (none) is the right shape.
+    "PostToolBatch",
+    // An API error ends the turn here, not in Stop (code.claude.com/docs/en/
+    // hooks: "API errors fire StopFailure instead"). Unregistered, a failed
+    // turn never showed Failed.
+    "StopFailure",
 ];
 
 /// Is `bin` one of ours? Shared by the hook and statusLine matchers here, so
@@ -1549,6 +1557,23 @@ mod tests {
     #[test]
     fn session_start_is_a_registered_hook_event() {
         assert!(HOOK_EVENTS.contains(&"SessionStart"));
+    }
+
+    /// An event the status table acts on, and that nothing registers, is a
+    /// rule that never runs: `StopFailure` sat in the table unregistered, so
+    /// a failed turn never showed Failed.
+    #[test]
+    fn every_event_that_moves_status_is_registered() {
+        for ev in [
+            "UserPromptSubmit",
+            "Stop",
+            "StopFailure",
+            "SessionEnd",
+            "Notification",
+            "PostToolBatch",
+        ] {
+            assert!(HOOK_EVENTS.contains(&ev), "{ev} is not registered");
+        }
     }
 
     #[test]

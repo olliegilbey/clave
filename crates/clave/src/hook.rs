@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use anyhow::Result;
-use clave_types::{AgentSnapshot, Status};
+use clave_types::{AgentSnapshot, Status, lenient};
 use serde::Deserialize;
 
 use crate::spawn::jsonl_path;
@@ -32,21 +32,27 @@ use crate::store::{
 /// from this payload, so the status transition is still driven by something
 /// trustworthy. With no `session_id` there is no transcript to trust either,
 /// so the tail read is skipped and `title`/`summary` hold. (opus review, #98)
+///
+/// EVERY field reads through `lenient`. serde fails the WHOLE struct on one
+/// field of the wrong type, and `run_hook` reads a failed parse as the empty
+/// payload, so a novel shape in a field clave barely uses would blank
+/// `session_id` and drop the event. FOOTGUNS has the trap. A new field takes
+/// the same attribute.
 #[derive(Debug, Default, Deserialize)]
 pub struct HookPayload {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub session_id: Option<String>,
     /// UserPromptSubmit carries the prompt text — the §6.4 first-label fast
     /// path (no jsonl read needed for the initial label).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub prompt: Option<String>,
     /// Notification carries a human message; §6.5 matches on its text.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub message: Option<String>,
     /// SessionEnd carries why the session ended: `clear`, `resume`,
     /// `logout`, `prompt_input_exit` or `other` (code.claude.com/docs/en/hooks).
     /// Only `other` can be a zellij quit, which is what stamps standby.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub reason: Option<String>,
     /// Where Claude is writing this session's transcript RIGHT NOW (#87).
     ///
@@ -60,48 +66,93 @@ pub struct HookPayload {
     /// is read from it is written into the store, so an unvalidated path is a
     /// write primitive rather than a bad read. Always go through
     /// [`resolve_transcript`], never straight to the filesystem.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub transcript_path: Option<String>,
     /// The session's working directory, carried by every hook event. Read
     /// only on the #226 adoption path — the one mint input the payload must
     /// supply — and canonicalized (S0b) before it touches the store.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub cwd: Option<String>,
+    /// Notification's kind (`permission_prompt`, `idle_prompt`, …). The
+    /// contract the message text only hinted at; see [`notice`].
+    #[serde(default, deserialize_with = "lenient")]
+    pub notification_type: Option<String>,
+    /// Present only when the hook fires INSIDE a subagent or an in-process
+    /// teammate (code.claude.com/docs/en/hooks, common input fields). The
+    /// `session_id` is still the parent's, so this is the one field that
+    /// tells the parent's own events from its agents'.
+    #[serde(default, deserialize_with = "lenient")]
+    pub agent_id: Option<String>,
 }
 
-/// §6.5's transition table. Latest-wins, with ONE status-aware exception
-/// (revised 2026-07-08): each event maps directly to the new status (a later
-/// lower-"priority" event must be able to downgrade needs_you after you
-/// answer), but the CLI's idle notification consults `current` — see below.
-pub fn status_for_event(event: &str, message: Option<&str>, current: Status) -> Option<Status> {
+/// §6.5's transition table. Latest-wins, except where `current` decides:
+/// a tool batch clears only red, and the idle nag clears only a live turn.
+pub fn status_for_event(event: &str, payload: &HookPayload, current: Status) -> Option<Status> {
     match event {
         "UserPromptSubmit" => Some(Status::Working),
         "Stop" => Some(Status::Done),
         "StopFailure" => Some(Status::Failed),
         "SessionEnd" => Some(Status::Idle),
-        "PermissionRequest" => Some(Status::NeedsYou),
-        "Notification" => {
-            // §4: match the notification MESSAGE TEXT. Substrings chosen from
-            // the live payloads observed in S1; Task 9 C2 re-verified them
-            // against CLI 2.1.201.
-            let m = message.unwrap_or("");
-            if m.contains("permission") {
-                // Permission prompt = blocked mid-turn: red, unconditionally.
-                Some(Status::NeedsYou)
-            } else if m.contains("waiting for your input") {
-                // The CLI fires this ~60s after EVERY turn. It means
-                // "blocked mid-turn" only while still working (an in-turn
-                // question/approval — no Stop yet). For a finished agent it
-                // is just an idle nag: swallowing it keeps red meaningful
-                // (green-until-read → grey already covers "turn over").
-                (current == Status::Working).then_some(Status::NeedsYou)
-            } else {
-                None
-            }
+        // The "answered" event that clave lacked. A batch resolves only after
+        // every tool in it ran, so a permission or a question in it has been
+        // answered (code.claude.com/docs/en/hooks, PostToolBatch). Only red
+        // moves: a batch inside a live turn says nothing new.
+        "PostToolBatch" if !from_a_subagent_batch(event, payload) => {
+            (current == Status::NeedsYou).then_some(Status::Working)
         }
+        "Notification" => match notice(payload) {
+            // Blocked on the human: red, whatever the row showed.
+            Notice::Ask => Some(Status::NeedsYou),
+            // Claude Code sends this about 60s after a response ends, only
+            // if nothing was typed since and no background agent runs. A row
+            // that still shows a turn missed its Stop (an interrupt sends
+            // none), so the turn is over and nothing is owed. Done keeps its
+            // green until read; Idle and Failed have nothing to say.
+            Notice::Idle => {
+                matches!(current, Status::Working | Status::NeedsYou).then_some(Status::Idle)
+            }
+            Notice::Other => None,
+        },
         // Unknown/other events: strictly no-op. The hook is registered for a
         // fixed set, but a defensive default keeps novel events harmless.
         _ => None,
+    }
+}
+
+/// A tool batch from inside a subagent. Its `session_id` names the parent,
+/// but the parent's red is not its to clear (Claude Code 2.1.299 builds the
+/// PostToolBatch input from the subagent's own tool context). `run_hook`
+/// exits on it before the store read: a busy subagent fires one per batch.
+fn from_a_subagent_batch(event: &str, payload: &HookPayload) -> bool {
+    event == "PostToolBatch" && payload.agent_id.is_some()
+}
+
+/// What a Notification asks of the row.
+#[derive(Debug, PartialEq, Eq)]
+enum Notice {
+    Ask,
+    Idle,
+    Other,
+}
+
+/// `notification_type` is the contract (code.claude.com/docs/en/hooks,
+/// Notification input). The message text is the fallback for a payload that
+/// lacks the field; its substrings were verified against CLI 2.1.201.
+fn notice(payload: &HookPayload) -> Notice {
+    match payload.notification_type.as_deref() {
+        Some("permission_prompt" | "elicitation_dialog" | "elicitation_url_dialog") => Notice::Ask,
+        Some("idle_prompt") => Notice::Idle,
+        Some(_) => Notice::Other,
+        None => {
+            let m = payload.message.as_deref().unwrap_or("");
+            if m.contains("permission") {
+                Notice::Ask
+            } else if m.contains("waiting for your input") {
+                Notice::Idle
+            } else {
+                Notice::Other
+            }
+        }
     }
 }
 
@@ -836,10 +887,10 @@ const PERMISSION_ANCHOR: &str = "permission to use ";
 /// Bash` yields `Bash`.
 ///
 /// The MESSAGE is the source and that is the whole point of the tier: the tool
-/// name is also on a `PreToolUse` payload, but clave registers five hook events
-/// and that is not one of them — reading it there would mean a hook firing on
-/// every tool call of every tracked session, to learn something the
-/// notification hands over for free. `None` for every other message, including
+/// name is also on a `PreToolUse` payload, but clave does not register that
+/// event — reading it there would mean a hook firing on every tool call of
+/// every tracked session, to learn something the notification hands over for
+/// free. `None` for every other message, including
 /// the idle nag: the card's word for "nothing measured" is blank.
 pub fn wants_from_message(message: &str) -> Option<String> {
     // `split_once`, not `split(..).nth(1)`: the two differ the moment the
@@ -1637,17 +1688,7 @@ pub fn apply_hook_event(
         return false; // raced a prune — fine
     };
     let mut changed = false;
-    if let Some(next) = status_for_event(event, payload.message.as_deref(), rec.status) {
-        // Entering the block clears the meter's stamp, exactly as `Stop` does
-        // below and for the same reason: the next reading must land whatever
-        // the interval says. `statusline::apply_statusline` reads a zero stamp
-        // as "no count has landed since the block began", which is what stops
-        // a count the PACING withheld before the block from reading as the
-        // response that ended it. Only on the transition IN — a repeated
-        // notification must not re-open that window.
-        if next == Status::NeedsYou && rec.status != next {
-            rec.metered_at = 0;
-        }
+    if let Some(next) = status_for_event(event, payload, rec.status) {
         changed |= rec.status != next;
         rec.status = next;
     }
@@ -1743,7 +1784,7 @@ pub fn apply_hook_event(
     // bug avoided. (CodeRabbit and the spec review agreed here, #147.)
     changed |= level_moved || rec.context_tokens != tokens_before;
     // §6.6 / S1 / #39: a PROMPT is the ONLY event that reorders. Stop,
-    // StopFailure, Notification, PermissionRequest and SessionEnd change the
+    // StopFailure, Notification, PostToolBatch and SessionEnd change the
     // STATUS and nothing else — "claude finishing should not move it up"
     // (maintainer ruling, 2026-07-22).
     let commitment = event == "UserPromptSubmit";
@@ -2106,6 +2147,9 @@ fn changes_nothing(
 /// stderr — main exits 0 no matter what (Global Constraint).
 pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
     let payload: HookPayload = serde_json::from_str(stdin_json).unwrap_or_default();
+    if from_a_subagent_batch(event, &payload) {
+        return Ok(());
+    }
     let session = payload.session_id.clone();
     let paths = store_paths()?;
     // FAST PATH (§6.5): lock-free read; untracked session → exit immediately.
@@ -2144,8 +2188,9 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
     let now = now_unix();
     let own_claude = env_uuid.as_deref() == Some(uuid.as_str());
     // The second fast path, the `statusline::meter` pattern: an event that
-    // moves nothing exits before the lock: a repeat Notification, or a
-    // SessionStart from a pane the row holds already. Stop and
+    // moves nothing exits before the lock: a PostToolBatch on a row that is
+    // not red (one per tool batch of every agent), a repeat Notification, or
+    // a SessionStart from a pane the row holds already. Stop and
     // UserPromptSubmit read a tail under the lock,
     // so the probe cannot see what they would write; they always go on.
     let reads_tail = matches!(event, "Stop" | "UserPromptSubmit");
@@ -2987,11 +3032,7 @@ mod tests {
         s.agents.insert("u1".into(), r);
         let p = HookPayload {
             session_id: Some("u1".into()),
-            prompt: None,
-            message: None,
-            reason: None,
-            transcript_path: None,
-            cwd: None,
+            ..Default::default()
         };
         // One real commitment first, so there is a rank to preserve.
         assert!(apply_hook_event(
@@ -3011,17 +3052,14 @@ mod tests {
         // rank alone — the pairing is the ruling.
         let perm = HookPayload {
             session_id: Some("u1".into()),
-            prompt: None,
             message: Some("needs your permission".into()),
-            reason: None,
-            transcript_path: None,
-            cwd: None,
+            ..Default::default()
         };
         for (event, payload, expected) in [
             ("Stop", &p, Status::Done),
             ("StopFailure", &p, Status::Failed),
-            ("PermissionRequest", &p, Status::NeedsYou),
             ("Notification", &perm, Status::NeedsYou),
+            ("PostToolBatch", &p, Status::Working),
             ("SessionEnd", &p, Status::Idle),
         ] {
             apply_hook_event(&mut s, "u1", event, payload, None, 9999, true);
@@ -3070,19 +3108,11 @@ mod tests {
         s.agents.insert("u-b".into(), b);
         let pa = HookPayload {
             session_id: Some("u-a".into()),
-            prompt: None,
-            message: None,
-            reason: None,
-            transcript_path: None,
-            cwd: None,
+            ..Default::default()
         };
         let pb = HookPayload {
             session_id: Some("u-b".into()),
-            prompt: None,
-            message: None,
-            reason: None,
-            transcript_path: None,
-            cwd: None,
+            ..Default::default()
         };
         apply_hook_event(&mut s, "u-a", "UserPromptSubmit", &pa, None, 1000, true);
         apply_hook_event(&mut s, "u-b", "UserPromptSubmit", &pb, None, 1000, true);
@@ -3115,11 +3145,7 @@ mod tests {
         s.agents.insert("u2".into(), rec("u2")); // unbound
         let p = HookPayload {
             session_id: Some("u1".into()),
-            prompt: None,
-            message: None,
-            reason: None,
-            transcript_path: None,
-            cwd: None,
+            ..Default::default()
         };
         assert!(apply_hook_event(
             &mut s,
@@ -3186,11 +3212,7 @@ mod tests {
         s.agents.insert("u1".into(), r);
         let p = HookPayload {
             session_id: Some("u1".into()),
-            prompt: None,
-            message: None,
-            reason: None,
-            transcript_path: None,
-            cwd: None,
+            ..Default::default()
         };
         assert!(apply_hook_event(
             &mut s,
@@ -3218,85 +3240,126 @@ mod tests {
         s.agents.insert("u1".into(), r);
         let p = HookPayload {
             session_id: Some("u1".into()),
-            prompt: None,
-            message: None,
-            reason: None,
-            transcript_path: None,
-            cwd: None,
+            ..Default::default()
         };
         apply_hook_event(&mut s, "u1", "Stop", &p, None, 1700, true);
         assert!(s.agents["u1"].buckets.is_empty());
         assert!(s.tab_buckets.get(&4).is_none_or(|m| m.is_empty()));
     }
 
+    /// A payload with only the fields the status table reads.
+    fn said(kind: Option<&str>, message: Option<&str>, agent: Option<&str>) -> HookPayload {
+        HookPayload {
+            notification_type: kind.map(str::to_string),
+            message: message.map(str::to_string),
+            agent_id: agent.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn state_machine_is_latest_wins() {
-        // Spec §6.5 transition table, verbatim.
-        assert_eq!(
-            status_for_event("UserPromptSubmit", None, Status::Idle),
-            Some(Status::Working)
-        );
-        assert_eq!(
-            status_for_event("Stop", None, Status::Working),
-            Some(Status::Done)
-        );
-        assert_eq!(
-            status_for_event("StopFailure", None, Status::Working),
-            Some(Status::Failed)
-        );
-        assert_eq!(
-            status_for_event("SessionEnd", None, Status::Done),
-            Some(Status::Idle)
-        );
-        assert_eq!(
-            status_for_event("PermissionRequest", None, Status::Working),
-            Some(Status::NeedsYou)
-        );
-        // Notification matches on MESSAGE TEXT (§4). Permission prompts are a
-        // mid-turn block → red regardless of current status.
-        assert_eq!(
-            status_for_event(
-                "Notification",
-                Some("Claude needs your permission to use Bash"),
-                Status::Done
-            ),
-            Some(Status::NeedsYou)
-        );
-        // §6.5 revised 2026-07-08: the CLI's ~60s idle nag fires after EVERY
-        // turn. It means "blocked mid-turn" ONLY while still working (an
-        // in-turn question/approval — no Stop yet). A finished agent stays
-        // done/idle: green-until-read already tells the user everything.
-        assert_eq!(
-            status_for_event(
-                "Notification",
-                Some("Claude is waiting for your input"),
-                Status::Working
-            ),
-            Some(Status::NeedsYou)
-        );
-        assert_eq!(
-            status_for_event(
-                "Notification",
-                Some("Claude is waiting for your input"),
-                Status::Done
-            ),
-            None
-        );
-        assert_eq!(
-            status_for_event(
-                "Notification",
-                Some("Claude is waiting for your input"),
-                Status::Idle
-            ),
-            None
-        );
-        // Other notifications don't touch status.
-        assert_eq!(
-            status_for_event("Notification", Some("compacting…"), Status::Working),
-            None
-        );
+        use Status::*;
+        let none = HookPayload::default();
+        let at = |event, p: &HookPayload, current| status_for_event(event, p, current);
+        // Spec §6.5 transition table: these four ignore `current`.
+        assert_eq!(at("UserPromptSubmit", &none, Idle), Some(Working));
+        assert_eq!(at("Stop", &none, Working), Some(Done));
+        assert_eq!(at("StopFailure", &none, Working), Some(Failed));
+        assert_eq!(at("SessionEnd", &none, Done), Some(Idle));
+        // PermissionRequest is not registered (setup.rs HOOK_EVENTS): the
+        // Notification below carries the same ask. An arm for it was dead.
+        assert_eq!(at("PermissionRequest", &none, Working), None);
         // Unknown events are a no-op — the global hook must never guess.
-        assert_eq!(status_for_event("PreToolUse", None, Status::Idle), None);
+        assert_eq!(at("PreToolUse", &none, Idle), None);
+    }
+
+    /// The ask is the contract's three kinds, and red whatever the row
+    /// showed. The text is only the fallback for a payload with no kind.
+    #[test]
+    fn a_notification_asks_by_its_kind_and_falls_back_to_its_text() {
+        use Status::*;
+        for kind in [
+            "permission_prompt",
+            "elicitation_dialog",
+            "elicitation_url_dialog",
+        ] {
+            for current in [Working, Done, Idle] {
+                let p = said(Some(kind), None, None);
+                assert_eq!(
+                    status_for_event("Notification", &p, current),
+                    Some(NeedsYou)
+                );
+            }
+        }
+        let text = said(None, Some("Claude needs your permission to use Bash"), None);
+        assert_eq!(
+            status_for_event("Notification", &text, Done),
+            Some(NeedsYou)
+        );
+        // The kind wins over the text: a kind clave does not act on stays
+        // quiet, whatever words its message holds.
+        let auth = said(Some("auth_success"), Some("permission granted"), None);
+        assert_eq!(status_for_event("Notification", &auth, Working), None);
+        let other = said(None, Some("compacting…"), None);
+        assert_eq!(status_for_event("Notification", &other, Working), None);
+    }
+
+    /// The idle nag ends a live turn whose Stop never came (an interrupt sends
+    /// none). It never touches a turn that did end: Done keeps its green.
+    #[test]
+    fn the_idle_nag_ends_only_a_live_turn() {
+        use Status::*;
+        let by_kind = said(Some("idle_prompt"), None, None);
+        let by_text = said(None, Some("Claude is waiting for your input"), None);
+        for p in [&by_kind, &by_text] {
+            assert_eq!(status_for_event("Notification", p, Working), Some(Idle));
+            assert_eq!(status_for_event("Notification", p, NeedsYou), Some(Idle));
+            for held in [Done, Idle, Failed] {
+                assert_eq!(status_for_event("Notification", p, held), None, "{held:?}");
+            }
+        }
+    }
+
+    /// The answer clave lacked: a tool batch resolves only after every tool
+    /// in it ran, so red is over. A subagent's batch carries `agent_id` and
+    /// names the parent's session; it is not the parent's answer.
+    #[test]
+    fn a_tool_batch_clears_red_and_nothing_else() {
+        use Status::*;
+        let own = said(None, None, None);
+        assert_eq!(
+            status_for_event("PostToolBatch", &own, NeedsYou),
+            Some(Working)
+        );
+        for held in [Working, Done, Idle, Failed] {
+            assert_eq!(
+                status_for_event("PostToolBatch", &own, held),
+                None,
+                "{held:?}"
+            );
+        }
+        let sub = said(None, None, Some("a1b2"));
+        assert_eq!(status_for_event("PostToolBatch", &sub, NeedsYou), None);
+        assert!(from_a_subagent_batch("PostToolBatch", &sub));
+        assert!(!from_a_subagent_batch("PostToolBatch", &own));
+        assert!(!from_a_subagent_batch("Notification", &sub), "only a batch");
+    }
+
+    /// The strict-payload trap (FOOTGUNS). One field of a novel type used to
+    /// fail the whole parse, and `run_hook` read that as an empty payload:
+    /// no `session_id`, so the event was lost. Every field is lenient now.
+    #[test]
+    fn a_field_of_a_novel_type_does_not_blank_the_session() {
+        let json = r#"{"session_id":"s1","agent_id":7,"notification_type":["x"],
+            "message":{"text":"hi"},"cwd":"/w","background_tasks":"later"}"#;
+        let p: HookPayload = serde_json::from_str(json).unwrap();
+        assert_eq!(p.session_id.as_deref(), Some("s1"));
+        assert_eq!(p.cwd.as_deref(), Some("/w"));
+        assert_eq!(
+            (p.agent_id, p.notification_type, p.message),
+            (None, None, None)
+        );
     }
 
     /// NO TAIL holds the mark. A QUIET TAIL clears it. The two are different
@@ -4542,71 +4605,31 @@ mod tests {
         apply_hook_event(&mut s, "u1", "Notification", &perm, None, 1001, true);
         assert_eq!(s.agents["u1"].wants.as_deref(), Some("Bash"));
 
-        // The ~60s idle nag arrives while the SAME block stands. It names no
-        // tool, and blanking here would drop a true reading for a message that
-        // carries no news.
-        let nag = msg("Claude is waiting for your input");
-        apply_hook_event(&mut s, "u1", "Notification", &nag, None, 1002, true);
+        // A repeat ask that names no tool arrives while the SAME block
+        // stands: the interactive dialog's own text is the bare "Claude needs
+        // your permission" (Claude Code 2.1.299). Blanking here would drop a
+        // true reading for a message that carries no news.
+        let bare_ask = msg("Claude needs your permission");
+        apply_hook_event(&mut s, "u1", "Notification", &bare_ask, None, 1002, true);
         assert_eq!(
             s.agents["u1"].wants.as_deref(),
             Some("Bash"),
-            "a nag mid-block holds the ask it cannot restate"
+            "a repeat mid-block holds the ask it cannot restate"
         );
 
-        // You answered: the row is working again, so nothing is wanted.
-        apply_hook_event(&mut s, "u1", "UserPromptSubmit", &bare, None, 1003, true);
+        // You answered: the batch resolved, so nothing is wanted.
+        apply_hook_event(&mut s, "u1", "PostToolBatch", &bare, None, 1003, true);
+        assert_eq!(s.agents["u1"].status, Status::Working);
         assert_eq!(
             s.agents["u1"].wants, None,
             "leaving needs-you clears the ask"
         );
 
-        // The nag ALONE can flag a working row (§6.5), and that row is blocked
-        // on something clave cannot name. Blank, not a guess.
-        apply_hook_event(&mut s, "u1", "Notification", &nag, None, 1004, true);
-        assert_eq!(s.agents["u1"].status, Status::NeedsYou);
-        assert_eq!(s.agents["u1"].wants, None);
-    }
-
-    #[test]
-    fn entering_the_block_clears_the_meters_stamp_but_a_repeat_does_not() {
-        // The meter needs a baseline taken INSIDE the block, or a count the
-        // pacing withheld beforehand reads as the response that ended it
-        // (`statusline::apply_statusline`). A zero stamp is how the meter
-        // knows it has not read one yet, so entering the block clears it —
-        // and a repeated notification must NOT, or the window re-opens on
-        // every ~60s nag.
-        let mut s = Store::default();
-        s.agents.insert("u1".into(), rec("u1"));
-        let msg = |m: &str| HookPayload {
-            session_id: Some("u1".into()),
-            message: Some(m.into()),
-            ..HookPayload::default()
-        };
-        let perm = msg("Claude needs your permission to use Bash");
+        // The idle nag ends the turn; it never invents a block.
         let nag = msg("Claude is waiting for your input");
-
-        // A working row mid-turn, with a reading already stamped.
-        let bare = HookPayload {
-            session_id: Some("u1".into()),
-            ..HookPayload::default()
-        };
-        apply_hook_event(&mut s, "u1", "UserPromptSubmit", &bare, None, 1000, true);
-        s.agents.get_mut("u1").unwrap().metered_at = 1000;
-        assert_eq!(s.agents["u1"].status, Status::Working);
-
-        apply_hook_event(&mut s, "u1", "Notification", &perm, None, 1001, true);
-        assert_eq!(s.agents["u1"].status, Status::NeedsYou);
-        assert_eq!(s.agents["u1"].metered_at, 0, "the block resets the meter");
-
-        // A reading lands and stamps again; the nag that follows must leave
-        // that baseline alone.
-        s.agents.get_mut("u1").unwrap().metered_at = 1002;
-        apply_hook_event(&mut s, "u1", "Notification", &nag, None, 1003, true);
-        assert_eq!(s.agents["u1"].status, Status::NeedsYou);
-        assert_eq!(
-            s.agents["u1"].metered_at, 1002,
-            "a repeated notification must not re-open the window"
-        );
+        apply_hook_event(&mut s, "u1", "Notification", &nag, None, 1004, true);
+        assert_eq!(s.agents["u1"].status, Status::Idle);
+        assert_eq!(s.agents["u1"].wants, None);
     }
 
     #[test]
@@ -4981,10 +5004,7 @@ mod tests {
         let p = HookPayload {
             session_id: Some("u1".into()),
             prompt: Some("fix the flaky auth test".into()),
-            message: None,
-            reason: None,
-            transcript_path: None,
-            cwd: None,
+            ..Default::default()
         };
         assert!(refresh_label(&mut r, "UserPromptSubmit", &p, None));
         assert_eq!(r.label, "x · main · fix the flaky auth");
@@ -5011,10 +5031,7 @@ mod tests {
         let injected = HookPayload {
             session_id: Some("u1".into()),
             prompt: Some("<task-notification> <task-id>bai</task-notification>".into()),
-            message: None,
-            reason: None,
-            transcript_path: None,
-            cwd: None,
+            ..Default::default()
         };
         assert!(!refresh_label(&mut r, "UserPromptSubmit", &injected, None));
         assert_eq!(r.label, "x · main"); // unchanged — still the bare prefix
@@ -5024,10 +5041,7 @@ mod tests {
         let real = HookPayload {
             session_id: Some("u1".into()),
             prompt: Some("fix the flaky auth test".into()),
-            message: None,
-            reason: None,
-            transcript_path: None,
-            cwd: None,
+            ..Default::default()
         };
         assert!(refresh_label(&mut r, "UserPromptSubmit", &real, None));
         assert_eq!(r.label, "x · main · fix the flaky auth");
@@ -5046,10 +5060,7 @@ mod tests {
             let p = HookPayload {
                 session_id: Some("u1".into()),
                 prompt: Some(injected_text.clone()),
-                message: None,
-                reason: None,
-                transcript_path: None,
-                cwd: None,
+                ..Default::default()
             };
             assert!(
                 !refresh_label(&mut r, "UserPromptSubmit", &p, None),
@@ -5206,10 +5217,7 @@ mod tests {
         let p = HookPayload {
             session_id: Some("u1".into()),
             prompt: Some("a prompt that must not win".into()),
-            message: None,
-            reason: None,
-            transcript_path: None,
-            cwd: None,
+            ..Default::default()
         };
         let mut r = rec("u1");
         let tail = format!(
@@ -5233,10 +5241,7 @@ mod tests {
         let p2 = HookPayload {
             session_id: Some("u1".into()),
             prompt: Some("a later prompt".into()),
-            message: None,
-            reason: None,
-            transcript_path: None,
-            cwd: None,
+            ..Default::default()
         };
         refresh_label(&mut r, "UserPromptSubmit", &p2, None);
         assert_eq!(r.summary, "a prompt that must not win");
@@ -5304,10 +5309,7 @@ mod tests {
         let prompted = HookPayload {
             session_id: Some("u1".into()),
             prompt: Some("a prompt that must not win".into()),
-            message: None,
-            reason: None,
-            transcript_path: None,
-            cwd: None,
+            ..Default::default()
         };
         refresh_label(&mut r, "UserPromptSubmit", &prompted, None);
         assert_eq!(r.summary, "the recap");
@@ -5442,10 +5444,7 @@ mod tests {
         let p = HookPayload {
             session_id: Some("u1".into()),
             prompt: Some(r#"fix the \d "regex" now"#.into()),
-            message: None,
-            reason: None,
-            transcript_path: None,
-            cwd: None,
+            ..Default::default()
         };
         assert!(refresh_label(&mut r, "UserPromptSubmit", &p, None));
         assert!(

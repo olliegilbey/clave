@@ -3114,7 +3114,7 @@ mod tests {
             "StopFailure",
             "SessionEnd",
             "Notification",
-            "PermissionRequest",
+            "PostToolBatch",
             "PreToolUse",
         ];
 
@@ -3149,11 +3149,8 @@ mod tests {
                     let uuid = format!("u{agent}");
                     let p = HookPayload {
                         session_id: Some(uuid.clone()),
-                        prompt: None,
                         message: Some("needs your permission".into()),
-                        reason: None,
-                        transcript_path: None,
-                        cwd: None,
+                        ..Default::default()
                     };
                     if apply_hook_event(s, &uuid, event, &p, None, 1000, true) {
                         // Any accepted write mints exactly one ordinal, which is
