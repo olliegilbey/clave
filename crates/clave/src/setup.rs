@@ -955,10 +955,14 @@ pub fn write_generated(dir: &std::path::Path, binary: &str, wasm: &str) -> Resul
 
     // Hooks: read-merge-write $CLAUDE_CONFIG_DIR/settings.json. The path may
     // be a symlink into a dotfiles repo — fs::read/write follow it, which is
-    // exactly what we want (§6.5). Routed via claude_config_dir() (not
-    // hardcoded home) so `clave dev`'s sandbox (§6.9) merges hooks into its
-    // OWN settings.json — else sandbox sessions get no clave hooks and
-    // scenario agents never report status. Env unset ⇒ ~/.claude, unchanged.
+    // exactly what we want (§6.5). Routed via claude_config_dir(), which
+    // honours CLAUDE_CONFIG_DIR as Claude does, else ~/.claude. The sandbox
+    // does NOT set that variable: sandboxing Claude's identity broke its
+    // auth (ruling 2026-07-18, `dev.rs` `enter_sandbox`). So a sandbox stage
+    // merges into the SHARED settings.json. It writes bare `clave` there,
+    // and the live fleet's hooks then resolve that by PATH to the stable
+    // launcher until the next release (FOOTGUNS, "A sandbox stage rewrites
+    // the LIVE session's hooks to bare `clave`").
     let settings_path = crate::env::claude_config_dir()?.join("settings.json");
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent)?; // fresh box: ~/.claude may not exist yet
