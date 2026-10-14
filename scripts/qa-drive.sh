@@ -2184,12 +2184,28 @@ quiet_fire() {
 # (`SessionEnd` — the state the ladder starts from anyway), then wait for the
 # cache to reach the shape `pr_is_stale` calls fresh. `PR_TTL_SECS` is 300s
 # and the ladder is well inside it, so nothing re-spawns inside it.
+#
+# Since 0.5.6 only a `pr-sync` answer writes the cache (pr.rs
+# `apply_pr_answer`), so the wait is for `pr_checked` to MOVE. The shape
+# `pr_is_stale` calls fresh is not enough: that test ignores the TTL, so a row
+# whose last answer is old reads fresh while its `pr-sync` is still out. A row
+# that owes no lookup (the jq below is `pr_is_stale`, with `PR_TTL_SECS`)
+# spawns none, and is fresh at once.
+#
+# The same warm-up is the quiet-lookup check (`pr_sync_quiet_checks`). Each
+# moment is ONE `dev status` read, so the seq and the stamp it holds come
+# from the same store file.
+P5B_PR_PRE="$(dev_status)"
+P5B_PR_STAMP0="$(jq -r --arg u "$P5B_UUID" '.store.agents[$u].pr_checked' <<<"$P5B_PR_PRE" 2>/dev/null)"
+P5B_PR_OWED="$(jq -r --arg u "$P5B_UUID" '.store.agents[$u]
+  | (.pr_checked == 0 or (now - .pr_checked) > 300 or .pr_branch != .branch)' \
+  <<<"$P5B_PR_PRE" 2>/dev/null)"
 hook_fire SessionEnd >/dev/null
+P5B_PR_HOOK="$(dev_status)"
 P5B_PR_WARM="stale"
 for _ in $(seq 1 15); do
-  if [[ "$(jq -r --arg u "$P5B_UUID" \
-    '.store.agents[$u] | (.pr_checked > 0 and .pr_branch == .branch)' \
-    < <(dev_status) 2>/dev/null)" == "true" ]]; then
+  if [[ "$P5B_PR_OWED" == "false" || "$(jq -r --arg u "$P5B_UUID" \
+    '.store.agents[$u].pr_checked' < <(dev_status) 2>/dev/null)" != "$P5B_PR_STAMP0" ]]; then
     P5B_PR_WARM="fresh"
     break
   fi
@@ -2204,6 +2220,7 @@ P5B_SEQ0="$(store_seq)"
 P5B_EVENTS=0
 check_numeric "phase-5b start store seq readable" "$P5B_SEQ0"
 measure "phase-5b row" "$P5B_UUID tail=$P5B_TAIL"
+pr_sync_quiet_checks "$P5B_UUID" "$P5B_PR_PRE" "$P5B_PR_HOOK" "$(dev_status)"
 
 # --- a typed prompt starts the turn, and the turn clock ---------------------
 # No `prompt` field. The hook reads a missing prompt as typed, and a prompt's
