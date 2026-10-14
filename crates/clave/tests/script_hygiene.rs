@@ -501,3 +501,61 @@ fn the_relaunch_phase_reads_the_set_through_the_tested_readers() {
          (witness {witness}, relaunch {relaunch}, teardown {teardown})"
     );
 }
+
+#[test]
+fn the_slim_push_phase_reads_the_seam_through_the_tested_verdicts() {
+    // The slim push (PR #281) leaves the dormant rows out of a push and lets
+    // each bar put them back. Its refusal path crosses the host, the bar and
+    // the bar's `clave snapshot`, which no unit test runs together. Phase 6a
+    // reads it, and phases 5 and 6c read it again in their own windows.
+    for verdict in [
+        "slim_host_checks",
+        "slim_seam_checks",
+        "slim_rebuild_checks",
+        "refusal_checks",
+    ] {
+        assert!(
+            DRIVE.contains(verdict),
+            "the drive must reach its slim push verdicts through `{verdict}`"
+        );
+    }
+    for reader in [
+        "slim_host_checks",
+        "slim_seam_checks",
+        "slim_rebuild_checks",
+        "refusal_checks",
+        "instance_line_counts_since",
+        "instances_born_since",
+        "answer_seqs_since",
+        "unanswered_ids",
+        "repeat_askers",
+        "ids_missing_from",
+        "pushed_dormant_tag",
+        "snapshot_dormant_tag",
+        "refusal_payload",
+    ] {
+        assert!(
+            LIB.contains(&format!("{reader}()")),
+            "`{reader}` must live in qa/lib.sh, where the selftest reaches it"
+        );
+        assert!(
+            SELFTEST.contains(reader),
+            "`{reader}` must be covered by the offline selftest"
+        );
+    }
+    let at = |needle: &str| {
+        DRIVE
+            .find(needle)
+            .unwrap_or_else(|| panic!("the drive must contain `{needle}`"))
+    };
+    let quiescence = at(r#"phase "P6-quiescence""#);
+    let slim = at(r#"phase "P6a-slim-push""#);
+    let witness = at(r#"phase "P6b-isolation-witness""#);
+    // After quiescence, so the host's tag is read at rest. Before the
+    // relaunch, because the refusal needs the first session's bars.
+    assert!(
+        quiescence < slim && slim < witness,
+        "the slim push phase must sit between quiescence and the isolation \
+         witness (quiescence {quiescence}, slim {slim}, witness {witness})"
+    );
+}

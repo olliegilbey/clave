@@ -38,3 +38,74 @@ fn the_qa_instrument_passes_its_own_selftest() {
         String::from_utf8_lossy(&out.stderr),
     );
 }
+
+// The slim push checks (phases 5, 6a and 6c) count bar log lines by a
+// fragment held in qa/lib.sh. A fragment that drifts from the bar's text
+// counts nothing, and most of those checks pass on nothing: "no bar asked"
+// is true of a line that no longer exists. So each fragment is held to the
+// text the bar prints, here in the gate.
+const LIB: &str = include_str!("../../../scripts/qa/lib.sh");
+const BAR_SHELL: &str = include_str!("../../clave-bar/src/main.rs");
+
+/// The value of a `NAME='…'` assignment in qa/lib.sh.
+fn lib_fragment(name: &str) -> &'static str {
+    let head = format!("{name}='");
+    let line = LIB
+        .lines()
+        .find(|l| l.starts_with(&head))
+        .unwrap_or_else(|| panic!("qa/lib.sh must assign {name}"));
+    let value = &line[head.len()..];
+    &value[..value.find('\'').expect("the fragment must close its quote")]
+}
+
+#[test]
+fn the_slim_push_fragments_match_what_the_bar_prints() {
+    // The bar's own format strings, pinned first, then rendered the way the
+    // bar renders them (main.rs `pipe`, the CLI blank twin; the status arm).
+    for text in [
+        r#""clave-bar: dropped {} pipe with empty payload","#,
+        r#"eprintln!("clave-bar: bad {name} payload: {e}");"#,
+        r#"eprintln!("clave-bar: hydrate ask");"#,
+        r#"eprintln!("clave-bar: hydrate answer seq={}", snap.seq);"#,
+        r#""clave-bar: run_command failed: {}","#,
+    ] {
+        assert!(
+            BAR_SHELL.contains(text),
+            "the bar no longer prints {text}; move qa/lib.sh with it"
+        );
+    }
+    let twin = |pipe: &str| format!("clave-bar: dropped {pipe} pipe with empty payload");
+    let slim = twin(clave_types::SLIM_STATUS_PIPE);
+    let whole = twin(clave_types::STATUS_PIPE);
+    assert!(slim.contains(lib_fragment("SLIM_TWIN")));
+    assert!(whole.contains(lib_fragment("WHOLE_TWIN")));
+    // The whole name is a prefix of the slim one, so this is the half that
+    // can go wrong: a whole-twin fragment that also counts every slim push.
+    assert!(!slim.contains(lib_fragment("WHOLE_TWIN")));
+    for pipe in [clave_types::STATUS_PIPE, clave_types::SLIM_STATUS_PIPE] {
+        let bad = format!("clave-bar: bad {pipe} payload: expected value");
+        assert!(bad.contains(lib_fragment("BAD_STATUS")), "{bad}");
+    }
+    assert!("clave-bar: hydrate ask".contains(lib_fragment("HYDRATE_ASK")));
+    assert!("clave-bar: hydrate answer seq=41".contains(lib_fragment("HYDRATE_ANSWER")));
+    assert!("clave-bar: run_command failed: boom".contains(lib_fragment("RUN_FAILED")));
+}
+
+#[test]
+fn the_refusal_push_is_a_slim_push_the_bar_parses() {
+    // Phase 6a pipes this to every bar. If the bar cannot parse it, each bar
+    // logs a bad payload and asks nothing, and the leg fails for the wrong
+    // reason. If it parsed as whole, no bar would refuse it.
+    let line = LIB
+        .lines()
+        .find(|l| l.contains(r#"printf '{"seq":%s"#))
+        .expect("qa/lib.sh `refusal_payload` must print the push");
+    let start = line.find('\'').expect("the printf format opens a quote") + 1;
+    let format = &line[start..start + line[start..].find('\'').expect("and closes it")];
+    let payload = format.replace("%s", "8");
+    let snap: clave_types::AgentSnapshot =
+        serde_json::from_str(&payload).expect("the bar's status arm must parse the refusal push");
+    assert_eq!(snap.seq, 8);
+    assert!(snap.agents.is_empty());
+    assert_eq!(snap.dormant, clave_types::DormantRows::Omitted { tag: 0 });
+}
