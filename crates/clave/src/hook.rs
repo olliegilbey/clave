@@ -1326,6 +1326,7 @@ fn discover_pipe_bound() -> PipeBound {
 /// session to name, and there is nothing to guess.
 fn bounded_pipe_command(
     zellij: &Path,
+    pipe: &str,
     payload: &str,
     bound: &PipeBound,
     secs: u32,
@@ -1337,7 +1338,7 @@ fn bounded_pipe_command(
     if let Some(name) = session {
         zellij_args.extend(["--session", name]);
     }
-    zellij_args.extend(["pipe", "--name", "clave-status", "--", payload]);
+    zellij_args.extend(["pipe", "--name", pipe, "--", payload]);
     match bound {
         PipeBound::Coreutils(wrapper) => {
             let mut cmd = Command::new(wrapper);
@@ -1395,7 +1396,13 @@ const PUSH_BOUND_SECS: u32 = 15;
 /// zellij's fallback resolution (see `bounded_pipe_command`); stdio is nulled
 /// so nothing leaks into the hook protocol on stdout.
 pub fn push_snapshot(snap: &AgentSnapshot) {
-    let Ok(payload) = serde_json::to_string(snap) else {
+    let paths = crate::store::store_paths().ok();
+    // Leave the dormant rows out when the last push carried the same ones
+    // (`store::wire_for_push`): they are most of the bytes, and every bar
+    // decodes every byte.
+    let last_pushed = paths.as_ref().and_then(crate::store::last_pushed_tag);
+    let wire = crate::store::wire_for_push(snap, last_pushed);
+    let Ok(payload) = serde_json::to_string(&wire) else {
         return;
     };
     // WHERE this is allowed to land, decided from the store rather than from
@@ -1405,7 +1412,6 @@ pub fn push_snapshot(snap: &AgentSnapshot) {
     // the maintainer's fleet looks like, and it aimed a sandbox snapshot at
     // his live bar and hung his session (FOOTGUNS #281, again on
     // 2026-09-11). The env is the caller's claim; the store is the fact.
-    let paths = crate::store::store_paths().ok();
     let aim = aim_push(
         paths.as_ref().map(|p| p.dir.as_path()),
         own_session().as_deref(),
@@ -1429,8 +1435,9 @@ pub fn push_snapshot(snap: &AgentSnapshot) {
     // status push a silent no-op. Fire-and-forget stays: failure here must
     // never become a hook failure (§6.5 zero-risk citizen).
     let zellij = crate::discover::tool_path(crate::discover::ToolId::Zellij);
-    let _ = bounded_pipe_command(
+    let spawned = bounded_pipe_command(
         &zellij,
+        status_pipe(&wire),
         &payload,
         &discover_pipe_bound(),
         PUSH_BOUND_SECS,
@@ -1439,7 +1446,24 @@ pub fn push_snapshot(snap: &AgentSnapshot) {
     .stdin(Stdio::null())
     .stdout(Stdio::null())
     .stderr(Stdio::null())
-    .spawn();
+    .spawn()
+    .is_ok();
+    // Remember the tag only for a push aimed at a named session. An unaimed
+    // push lands where zellij chooses, and fails when several sessions run,
+    // so no bar may hold what it carried (review of 4b3d524).
+    if let (true, Some(p), Some(_)) = (spawned, paths.as_ref(), aim.target()) {
+        crate::store::note_pushed(p, &wire);
+    }
+}
+
+/// The pipe a payload rides. A slim push has its own, so a bar older than it
+/// drops it rather than reading it as the whole fleet
+/// ([`clave_types::SLIM_STATUS_PIPE`]).
+fn status_pipe(wire: &AgentSnapshot) -> &'static str {
+    match wire.dormant {
+        clave_types::DormantRows::Omitted { .. } => clave_types::SLIM_STATUS_PIPE,
+        clave_types::DormantRows::Included { .. } => clave_types::STATUS_PIPE,
+    }
 }
 
 /// Where a snapshot push may land.
@@ -2324,6 +2348,7 @@ mod tests {
     fn the_perl_rung_alarms_the_real_pipe_client_not_a_wrapper() {
         let cmd = bounded_pipe_command(
             Path::new("/opt/zellij"),
+            "clave-status",
             "p",
             &PipeBound::PerlAlarm(PathBuf::from("/usr/bin/perl")),
             15,
@@ -2366,7 +2391,7 @@ mod tests {
             "dev/CI machines must discover a rung (perl at minimum)"
         );
 
-        let mut child = bounded_pipe_command(&fake, "p", &bound, 1, None)
+        let mut child = bounded_pipe_command(&fake, "clave-status", "p", &bound, 1, None)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -2432,6 +2457,7 @@ mod tests {
         for bound in &rungs {
             let cmd = bounded_pipe_command(
                 Path::new("/opt/zellij"),
+                "clave-status",
                 "p",
                 bound,
                 15,
@@ -2478,6 +2504,7 @@ mod tests {
     fn a_hook_outside_zellij_sends_the_same_unaimed_push_it_always_did() {
         let cmd = bounded_pipe_command(
             Path::new("/opt/zellij"),
+            "clave-status",
             "p",
             &PipeBound::Unbounded,
             15,
@@ -2486,12 +2513,36 @@ mod tests {
         assert_eq!(args_of(&cmd), ["pipe", "--name", "clave-status", "--", "p"]);
     }
 
+    /// A 0.5.5 bar listens only on `clave-status` and reads every push there
+    /// as the whole fleet. A slim push on that name would drop its dormant
+    /// rows, so a slim push rides its own name, which an old bar never hears.
+    #[test]
+    fn a_slim_push_rides_its_own_pipe_and_a_whole_push_rides_the_old_one() {
+        let mut wire: AgentSnapshot = serde_json::from_str(r#"{"seq":1,"agents":[]}"#).unwrap();
+        assert_eq!(status_pipe(&wire), "clave-status");
+        wire.dormant = clave_types::DormantRows::Omitted { tag: 7 };
+        assert_eq!(status_pipe(&wire), "clave-status-slim");
+        let cmd = bounded_pipe_command(
+            Path::new("/opt/zellij"),
+            status_pipe(&wire),
+            "p",
+            &PipeBound::Unbounded,
+            15,
+            None,
+        );
+        assert_eq!(
+            args_of(&cmd),
+            ["pipe", "--name", "clave-status-slim", "--", "p"]
+        );
+    }
+
     /// A machine with no wrapper at all keeps TODAY's behavior — a status
     /// push is never sacrificed to the bound (#233 story 5).
     #[test]
     fn no_rung_degrades_to_the_bare_unbounded_pipe() {
         let cmd = bounded_pipe_command(
             Path::new("/opt/zellij"),
+            "clave-status",
             "p",
             &PipeBound::Unbounded,
             15,
@@ -2508,6 +2559,7 @@ mod tests {
     fn a_coreutils_rung_wraps_the_pipe_in_a_process_level_bound() {
         let cmd = bounded_pipe_command(
             Path::new("/opt/zellij"),
+            "clave-status",
             r#"{"agents":[]}"#,
             &PipeBound::Coreutils(PathBuf::from("/usr/bin/timeout")),
             15,

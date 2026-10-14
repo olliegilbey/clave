@@ -17,6 +17,19 @@ use clave_bar::render::{Row, render_rows};
 use clave_bar::theme::Theme;
 use zellij_tile::prelude::*;
 
+/// The build this wasm came from, set by the build recipes through
+/// `CLAVE_BUILD_TAG`; "dev" is an untagged local build.
+///
+/// Each log line the QA drive counts ends its fixed words with
+/// `build=<tag>`. The zellij log serves every session the user runs, and
+/// plugin ids restart per server, so a bar in the maintainer's session can
+/// carry the same `[id: N]` as a sandbox bar. Only the line's own text can
+/// say which build printed it (FOOTGUNS, "The zellij log is USER-GLOBAL").
+const BUILD: &str = match option_env!("CLAVE_BUILD_TAG") {
+    Some(tag) => tag,
+    None => "dev",
+};
+
 /// Event::Timer echoes the elapsed seconds, and the bar's timer kinds sit
 /// either side of this line: the fast tick (0.2s) below it, the peek sink
 /// (0.9s) above. The dwell era's classify_timer scheme, revived.
@@ -502,6 +515,19 @@ impl State {
                     }
                     run_command(&argv, BTreeMap::new());
                 }
+                // UNGATED: each bar keeps its own copy of the dormant rows, so
+                // each must fetch its own. The catch-all below would swallow
+                // it silently.
+                //
+                // One line per ask, at birth or for a refused slim push. The
+                // QA drive counts them per bar (scripts/qa/lib.sh, phases 5,
+                // 6a and 6c): a bar that holds the rows asks nothing, and a
+                // bar that asks again for one refused push is the e4bc858
+                // loop. Rare by design, so it is not gated.
+                Effect::Hydrate => {
+                    eprintln!("clave-bar: hydrate ask build={BUILD}");
+                    run_command(&[bin.as_str(), "snapshot"], BTreeMap::new());
+                }
                 Effect::PersistCollapse { collapsed } if presumed => {
                     // Issue #5: report the ABSOLUTE collapse mode to the
                     // store (the one writer); its seq-bumped push heals any
@@ -551,8 +577,10 @@ impl State {
     /// `clave-status` push both land here. Two call sites that each had to
     /// remember `settle_identity()` is how the hydrate came to be the only
     /// snapshot that never bound anything (RC-B).
-    fn apply_snapshot_and_settle(&mut self, snap: clave_types::AgentSnapshot) {
-        let fx = self.model.apply_snapshot(snap);
+    /// Both snapshot paths end here, the pipe and the `clave snapshot` answer
+    /// (RC-B #55): the model's effects run, then the binds settle against the
+    /// agents the snapshot brought.
+    fn settle_snapshot(&mut self, fx: Vec<Effect>) {
         self.run_effects(fx);
         self.settle_identity();
     }
@@ -596,7 +624,7 @@ impl State {
             message.payload.as_deref(),
         ) {
             eprintln!(
-                "clave-bar: dropped {} pipe with empty payload",
+                "clave-bar: dropped {} pipe with empty payload build={BUILD}",
                 message.name
             );
             return false;
@@ -633,22 +661,27 @@ impl State {
                     return false;
                 }
                 _ => {
-                    eprintln!("clave-bar: dropped {name} pipe with empty payload");
+                    eprintln!("clave-bar: dropped {name} pipe with empty payload build={BUILD}");
                     return false;
                 }
             }
         };
         match name {
-            "clave-status" => match serde_json::from_str(payload) {
-                Ok(snap) => {
-                    self.apply_snapshot_and_settle(snap);
-                    true
+            // Two names, one gate: a slim push rides its own name so that a
+            // bar from before the slim push never reads it as the whole fleet.
+            clave_types::STATUS_PIPE | clave_types::SLIM_STATUS_PIPE => {
+                match serde_json::from_str(payload) {
+                    Ok(snap) => {
+                        let fx = self.model.apply_push(snap, mono_ms());
+                        self.settle_snapshot(fx);
+                        true
+                    }
+                    Err(e) => {
+                        eprintln!("clave-bar: bad {name} payload build={BUILD}: {e}");
+                        false
+                    }
                 }
-                Err(e) => {
-                    eprintln!("clave-bar: bad clave-status payload: {e}");
-                    false
-                }
-            },
+            }
             "clave-register" => match serde_json::from_str::<clave_types::Register>(payload) {
                 Ok(reg) => {
                     self.model.register(reg.uuid, reg.pane_id);
@@ -805,8 +838,10 @@ impl State {
                 // Permissions just landed (pre-seeded → immediate): hydrate
                 // from the store via `clave snapshot` (was spike S5). The
                 // result arrives as RunCommandResult below; the seq gate
-                // makes any race with live pushes benign (§5).
-                run_command(&[self.clave_binary.as_str(), "snapshot"], BTreeMap::new());
+                // makes any race with live pushes benign (§5). The model
+                // books it as the ask in flight.
+                let fx = self.model.hydrate(mono_ms());
+                self.run_effects(fx);
                 false
             }
             Event::RunCommandResult(exit, stdout, stderr, _ctx) => {
@@ -815,13 +850,17 @@ impl State {
                 // anything that doesn't parse as a snapshot.
                 if exit != Some(0) {
                     eprintln!(
-                        "clave-bar: run_command failed: {}",
+                        "clave-bar: run_command failed build={BUILD}: {}",
                         String::from_utf8_lossy(&stderr)
                     );
                     return false;
                 }
-                match serde_json::from_slice(&stdout) {
+                match serde_json::from_slice::<clave_types::AgentSnapshot>(&stdout) {
                     Ok(snap) => {
+                        // One line per answer, the ask's other half. Its seq
+                        // tells the QA drive which store the bar read and
+                        // whether the bar ended caught up (phase 6a).
+                        eprintln!("clave-bar: hydrate answer seq={} build={BUILD}", snap.seq);
                         // RC-B (#55): this is the arm that FIRST populates
                         // `agents`. TabUpdate/PaneUpdate normally arrive
                         // before the snapshot result — permissions land, the
@@ -831,8 +870,11 @@ impl State {
                         // changes, so the eager cold-start tab stayed unbound
                         // and its first prompt never moved it. Both snapshot
                         // paths now go through one method, so this cannot
-                        // diverge from the `clave-status` arm again.
-                        self.apply_snapshot_and_settle(snap);
+                        // diverge from the `clave-status` arm again. Only
+                        // `clave snapshot` answers here, so this is the
+                        // answer to the ask in flight.
+                        let fx = self.model.apply_answer(snap, mono_ms());
+                        self.settle_snapshot(fx);
                         true
                     }
                     Err(_) => false, // not a snapshot (e.g. clave focus) — fine
@@ -1126,12 +1168,10 @@ impl ZellijPlugin for State {
     fn load(&mut self, config: BTreeMap<String, String>) {
         // Version marker for the hot-reload workflow (`zellij action
         // start-or-reload-plugin`): stamp the build so the zellij log tells
-        // you WHICH wasm produced a trace. Set by the rebuild recipe via
-        // CLAVE_BUILD_TAG; "dev" means an untagged local build.
+        // you WHICH wasm produced a trace.
         eprintln!(
-            "clave-bar: loaded v{} build={}",
-            env!("CARGO_PKG_VERSION"),
-            option_env!("CLAVE_BUILD_TAG").unwrap_or("dev")
+            "clave-bar: loaded v{} build={BUILD}",
+            env!("CARGO_PKG_VERSION")
         );
         // #44: resolve the CLI from plugin configuration instead of PATH. A
         // stale `clave` on PATH previously served a live session's `clave
@@ -1215,6 +1255,15 @@ impl ZellijPlugin for State {
             // Whether this bar's tab is on screen: the paint gate
             // (`BarModel::paints`) and the spinner read it.
             EventType::Visible,
+            // Not read: the bar never looks at keybinds. Subscribing is what
+            // strips them from every later ModeUpdate (zellij-server
+            // plugins/wasm_bridge.rs:2139-2146 at v0.45.1), and a tab switch
+            // sends the arriving tab's bar one (`move_clients_between_tabs`
+            // → `update_input_modes`, screen.rs:2018). Unsubscribed, each
+            // switch decoded the whole keymap in the bar the user had just
+            // switched to. The keymap now arrives once, at subscribe
+            // (plugins/mod.rs:762), and needs no permission.
+            EventType::InitialKeybinds,
             EventType::Timer, // peek-on-nav sink (set_timeout per peek)
                               // NO InputReceived: it fires for EVERY keystroke INCLUDING the
                               // nav keybinds themselves (C5 round 4: each walk press touched

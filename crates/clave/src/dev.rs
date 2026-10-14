@@ -1957,7 +1957,7 @@ mod tests {
 
         let snapshot = crate::store::snapshot_from(&store);
         let mut model = BarModel::default();
-        model.apply_snapshot(snapshot);
+        model.apply_push(snapshot, 0);
         // ONE tab is focused. A fleet with nothing selected renders no
         // selected-row caps, no waveBlue2 background and — because recession is
         // RELATIVE (lock §6) — no 25% fade on anybody: three quarters of the

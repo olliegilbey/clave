@@ -47,6 +47,7 @@ Rust stable, over zellij 0.45.1. Write code that passes the gate by construction
 - **Design errors out of existence.** A type that cannot hold the bad state beats a branch that handles it. Conflating the minted and live uuids passed every test, then froze the row in the field.
 - **Comments give the reason and the source.** A comment that repeats the line is noise. Name the measurement, the issue, or the file you read.
 - **Write tests that fail when the logic flips.** Run `just mutants` over what the branch changed; it is expected, and deliberately not a gate.
+- **Grow the QA drive as you grow the tests.** A change that crosses a seam ships with a drive check that goes red when the seam breaks. The how is in QA-DRIVE.md, "Adding a check to the drive".
 - **Delete dead code.** Do not annotate around it.
 - **The bar is read at a glance, all day.** Legibility is the feature: two states a person cannot tell apart are one state, whatever the model holds. Show what changed, not that something changed.
 

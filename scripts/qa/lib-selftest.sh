@@ -372,5 +372,259 @@ want "an arrival that lifted the row to the top fails" "$?" "1"
 (arrival_checks "u-eager" "$LEFT_LIVE" "$(relaunch_status '["u-eager","u-a"]' "touched" '["u-b"]')" >/dev/null 2>&1)
 want "an arrival whose tab took a birth touch fails" "$?" "1"
 
+# --- the slim push (phases 5, 6a and 6c) ----------------------------------
+# A log of its own, so the counts above keep their fixture. Two launch bars
+# (ids 1 and 2) ask before the mark at line 5, and bar 1 is answered after
+# it. Bar 3 is born in the span. Id 9 is the maintainer's bar: it never
+# loaded this build, so its ask is not ours. Lines 17 to 22 are a refusal
+# leg: every bar asks once and is answered at the store's seq.
+SLIM_LOG="$(mktemp "${TMPDIR:-/tmp}/qa-lib-selftest-slim.XXXXXX")"
+TAG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qa-selftest-tag.XXXXXX")"
+trap 'rm -f "$FIXTURE" "$SLIM_LOG"; rm -rf "$CWD_DIR" "$TAG_DIR"' EXIT
+cat >"$SLIM_LOG" <<'LOG'
+DEBUG  |/home/x/.local| 2026-10-14 10:43:58.393 [id: 1     ] clave-bar: loaded v0.5.6 build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 10:43:58.401 [id: 2     ] clave-bar: loaded v0.5.6 build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 10:43:58.500 [id: 1     ] clave-bar: hydrate ask build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 10:43:58.510 [id: 2     ] clave-bar: hydrate ask build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 10:43:58.600 [id: 2     ] clave-bar: hydrate answer seq=10 build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 10:43:58.700 [id: 1     ] clave-bar: hydrate answer seq=10 build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 10:44:10.000 [id: 3     ] clave-bar: loaded v0.5.6 build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 10:44:10.100 [id: 3     ] clave-bar: hydrate ask build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 10:44:10.200 [id: 3     ] clave-bar: hydrate answer seq=12 build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 10:44:20.000 [id: 1     ] clave-bar: dropped clave-status-slim pipe with empty payload build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 10:44:20.001 [id: 2     ] clave-bar: dropped clave-status-slim pipe with empty payload build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 10:44:20.002 [id: 3     ] clave-bar: dropped clave-status-slim pipe with empty payload build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 10:44:21.000 [id: 9     ] clave-bar: hydrate ask build=v0.5.6
+DEBUG  |/home/x/.local| 2026-10-14 10:44:22.000 [id: 1     ] clave-bar: dropped clave-status pipe with empty payload build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 10:44:23.000 [id: 2     ] clave-bar: hydrate ask build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 10:44:23.100 [id: 2     ] clave-bar: hydrate answer seq=13 build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 10:45:00.000 [id: 1     ] clave-bar: hydrate ask build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 10:45:00.001 [id: 2     ] clave-bar: hydrate ask build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 10:45:00.002 [id: 3     ] clave-bar: hydrate ask build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 10:45:00.100 [id: 1     ] clave-bar: hydrate answer seq=13 build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 10:45:00.101 [id: 2     ] clave-bar: hydrate answer seq=13 build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 10:45:00.102 [id: 3     ] clave-bar: hydrate answer seq=13 build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 10:43:00.000 [id: 9     ] clave-bar: loaded v0.5.5 build=v0.5.5
+LOG
+
+want "build_line_counts_since counts lines per bar, and leaves the maintainer's bar out" \
+  "$(ZLOG="$SLIM_LOG" build_line_counts_since 5 "$HYDRATE_ASK" | tr '\n' ',')" "1 1,2 2,3 2,"
+want "build_line_counts_since honours the mark" \
+  "$(ZLOG="$SLIM_LOG" build_line_counts_since 16 "$HYDRATE_ANSWER" | tr '\n' ',')" "1 1,2 1,3 1,"
+want "instances_born_since names the bar born after the mark, not the launch bars" \
+  "$(ZLOG="$SLIM_LOG" instances_born_since 5 | tr '\n' ' ')" "3 "
+want "the slim twin fragment reads every bar that heard a slim push" \
+  "$(ZLOG="$SLIM_LOG" build_instances_logging_since 5 "$SLIM_TWIN" | tr '\n' ' ')" "1 2 3 "
+# The whole name is a prefix of the slim one but for the space after it. A
+# fragment that matched both would count every slim push as a whole one too.
+want "the whole twin fragment does not match a slim twin" \
+  "$(ZLOG="$SLIM_LOG" build_line_count_since 0 "$WHOLE_TWIN")" "1"
+want "answer_seqs_since takes the distinct seqs, sorted" \
+  "$(ZLOG="$SLIM_LOG" answer_seqs_since 5 | tr '\n' ' ')" "10 12 13 "
+want "answer_seqs_since honours the mark" \
+  "$(ZLOG="$SLIM_LOG" answer_seqs_since 16 | tr '\n' ' ')" "13 "
+
+want "ids_of takes the ids of a count list" "$(ids_of "$(printf '1 1\n7 3')" | tr '\n' ' ')" "1 7 "
+want "repeat_askers names a bar that asked twice" \
+  "$(repeat_askers "$(printf '1 1\n2 2\n3 1')" | tr '\n' ' ')" "2 "
+want "unanswered_ids accepts more answers than asks (a launch bar asked before the mark)" \
+  "$(unanswered_ids "$(printf '1 1\n3 1')" "$(printf '1 2\n3 1')")" ""
+want "unanswered_ids names a bar answered fewer times than it asked" \
+  "$(unanswered_ids "$(printf '1 1\n2 2')" "$(printf '1 1\n2 1')")" "2"
+want "unanswered_ids names a bar never answered" \
+  "$(unanswered_ids "$(printf '4 1')" "")" "4"
+want "ids_missing_from names the members of the first set the second lacks" \
+  "$(ids_missing_from "$(printf '3\n5')" "$(printf '1\n3')")" "5"
+want "ids_missing_from of an empty set is empty" "$(ids_missing_from "" "$(printf '1')")" ""
+
+# The tags are u64. jq before 1.7 rounds a number above 2^53, so the readers
+# are sed, and a tag at the top of the range must come back digit for digit.
+BIG_TAG="14695981039346656037"
+printf '%s\n' "$BIG_TAG" >"$TAG_DIR/pushed-dormant-tag"
+want "pushed_dormant_tag reads the file, digit for digit" "$(pushed_dormant_tag "$TAG_DIR")" "$BIG_TAG"
+want "pushed_dormant_tag reads no file as empty" "$(pushed_dormant_tag "$TAG_DIR/none")" ""
+# A summary may hold the field's own words; inside a JSON string its quotes
+# are escaped, so the reader must not take the decoy.
+SNAP_DOC='{"seq":3,"agents":[{"summary":"a \"dormant\":{\"included\":{\"tag\":1}} decoy"}],"dormant":{"included":{"tag":'"$BIG_TAG"'}}}'
+want "snapshot_dormant_tag reads the field, not a decoy in a summary" \
+  "$(snapshot_dormant_tag "$SNAP_DOC")" "$BIG_TAG"
+want "snapshot_dormant_tag reads a slim document as no tag" \
+  "$(snapshot_dormant_tag '{"seq":3,"agents":[],"dormant":{"omitted":{"tag":7}}}')" ""
+want "refusal_payload is one seq past the store and names tag 0" \
+  "$(jq -c '[.seq, .dormant.omitted.tag, (.agents | length)]' <<<"$(refusal_payload 41)")" "[42,0,0]"
+
+# The host half: the tag of the last whole push against the store's own.
+(slim_host_checks "$BIG_TAG" "$BIG_TAG" >/dev/null 2>&1)
+want "a pushed tag equal to the store's passes" "$?" "0"
+(slim_host_checks "" "$BIG_TAG" >/dev/null 2>&1)
+want "no pushed tag fails (no push would ever go slim)" "$?" "1"
+(slim_host_checks "$BIG_TAG" "" >/dev/null 2>&1)
+want "an unreadable store tag fails" "$?" "1"
+(slim_host_checks "" "" >/dev/null 2>&1)
+want "two empty tags are refused, not passed" "$?" "1"
+HOST_STALE="$(slim_host_checks "7" "$BIG_TAG" 2>&1)"
+want "a pushed tag that is not the store's fails" "$?" "1"
+want "and the verdict names both" "$(grep -c "measured=7 expected=$BIG_TAG FAIL" <<<"$HOST_STALE")" "1"
+
+# The seam over a span. The passing case is the fixture log's own reading.
+SEAM_OK=("1 2 3" 0 0 "3" "$(printf '1 1\n2 2\n3 2')" "$(printf '1 2\n2 2\n3 2')")
+seam() { slim_seam_checks "span" "$(tr ' ' '\n' <<<"$1")" "$2" "$3" "$4" "$5" "$6"; }
+(seam "${SEAM_OK[@]}" >/dev/null 2>&1)
+want "a span where every bar asked and was answered passes" "$?" "0"
+(seam "" 0 0 "3" "${SEAM_OK[4]}" "${SEAM_OK[5]}" >/dev/null 2>&1)
+want "a span with no slim push heard fails" "$?" "1"
+(seam "1 2 3" 1 0 "3" "${SEAM_OK[4]}" "${SEAM_OK[5]}" >/dev/null 2>&1)
+want "a status payload a bar could not parse fails" "$?" "1"
+(seam "1 2 3" 0 1 "3" "${SEAM_OK[4]}" "${SEAM_OK[5]}" >/dev/null 2>&1)
+want "a failed bar subprocess fails" "$?" "1"
+(seam "1 2 3" 0 0 "" "${SEAM_OK[4]}" "${SEAM_OK[5]}" >/dev/null 2>&1)
+want "a span with no birth is refused, not passed" "$?" "1"
+(seam "1 2 3" 0 0 "3" "$(printf '1 1\n2 2')" "$(printf '1 2\n2 2')" >/dev/null 2>&1)
+want "a born bar never answered fails" "$?" "1"
+SEAM_LOST="$(seam "1 2 3" 0 0 "3" "${SEAM_OK[4]}" "$(printf '1 2\n2 1\n3 2')" 2>&1)"
+want "a bar that asked twice and was answered once fails" "$?" "1"
+want "and the verdict names the bar" \
+  "$(grep -c 'got one: measured=2 expected=empty FAIL' <<<"$SEAM_LOST")" "1"
+
+# A window of real slim pushes: every live bar heard them, none asked.
+rebuild() { slim_rebuild_checks "window" "$1" "$(tr ' ' '\n' <<<"$2")" "$3"; }
+(rebuild 3 "1 2 3" "" >/dev/null 2>&1)
+want "a window every bar rebuilt without an ask passes" "$?" "0"
+REBUILD_ASK="$(rebuild 3 "1 2 3" "2 1" 2>&1)"
+want "a bar that asked in the window fails" "$?" "1"
+want "and the verdict names it" "$(grep -c 'rows it kept): measured=2 expected=empty FAIL' <<<"$REBUILD_ASK")" "1"
+(rebuild 3 "1 2" "" >/dev/null 2>&1)
+want "a live bar that heard no slim push fails" "$?" "1"
+(rebuild 0 "" "" >/dev/null 2>&1)
+want "a window with no slim push is refused, not passed" "$?" "1"
+(rebuild "" "1 2 3" "" >/dev/null 2>&1)
+want "an unreadable live tab count fails" "$?" "1"
+
+# The refusal leg: each bar asks once and is answered at the store's seq.
+EACH_ONCE="$(printf '1 1\n2 1\n3 1')"
+(refusal_checks 3 "$EACH_ONCE" "$EACH_ONCE" "13" 13 13 >/dev/null 2>&1)
+want "a refusal every bar asked for once and was answered passes" "$?" "0"
+(refusal_checks 3 "" "" "" 13 13 >/dev/null 2>&1)
+want "no ask fails: the bars took a push they could not rebuild as whole" "$?" "1"
+(refusal_checks 3 "$(printf '1 1\n2 1')" "$(printf '1 1\n2 1')" "13" 13 13 >/dev/null 2>&1)
+want "a live bar that did not refuse fails" "$?" "1"
+LOOP="$(refusal_checks 3 "$(printf '1 1\n2 2\n3 1')" "$(printf '1 1\n2 2\n3 1')" "13" 13 13 2>&1)"
+want "a bar that asked again for the same refusal fails (the e4bc858 loop)" "$?" "1"
+want "and the verdict names it" "$(grep -c 'asks no more, e4bc858): measured=2 expected=empty FAIL' <<<"$LOOP")" "1"
+(refusal_checks 3 "$EACH_ONCE" "$(printf '1 1\n3 1')" "13" 13 13 >/dev/null 2>&1)
+want "an ask with no answer fails" "$?" "1"
+(refusal_checks 3 "$EACH_ONCE" "$EACH_ONCE" "$(printf '13\n57')" 13 13 >/dev/null 2>&1)
+want "an answer from another store fails" "$?" "1"
+(refusal_checks 3 "$EACH_ONCE" "$EACH_ONCE" "12" 13 13 >/dev/null 2>&1)
+want "an answer behind the store fails" "$?" "1"
+(refusal_checks 3 "$EACH_ONCE" "$EACH_ONCE" "13" 13 14 >/dev/null 2>&1)
+want "a refusal that wrote the store fails" "$?" "1"
+(refusal_checks "" "$EACH_ONCE" "$EACH_ONCE" "13" 13 13 >/dev/null 2>&1)
+want "an unreadable live tab count fails" "$?" "1"
+
+SLIM_LEDGER="$(ZLOG="$SLIM_LOG" LOGMARK=5 instance_ledger)"
+want "the ledger names the slim push lines per bar" \
+  "$(grep -c 'id 3 .*slim ask answer' <<<"$SLIM_LEDGER")" "1"
+
+# --- the same id on two servers ------------------------------------------
+# The maintainer's session runs 0.5.6 (build=v0.5.6) while the sandbox runs
+# cafe123. Plugin ids restart per server, so his bars 2 and 3 share their
+# ids with sandbox bars 2 and 3 (sandbox bar 3 closed before these windows).
+# Every reading below must count only the sandbox's lines. Each proof also
+# runs the verdict on the id filter alone, the reader these checks used
+# first, and that one must give the wrong answer.
+COLLIDE_HEAD="$(cat <<'LOG'
+DEBUG  |/home/x/.local| 2026-10-14 11:00:00.000 [id: 1     ] clave-bar: loaded v0.5.6 build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 11:00:00.001 [id: 2     ] clave-bar: loaded v0.5.6 build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 11:00:00.002 [id: 3     ] clave-bar: loaded v0.5.6 build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 11:00:00.003 [id: 2     ] clave-bar: loaded v0.5.6 build=v0.5.6
+DEBUG  |/home/x/.local| 2026-10-14 11:00:00.004 [id: 3     ] clave-bar: loaded v0.5.6 build=v0.5.6
+LOG
+)"
+COLLIDE_MARK=5
+# One window per log, so no window reads another's lines.
+collide_log() {
+  local f="$TAG_DIR/collide-$1.log"
+  { printf '%s\n' "$COLLIDE_HEAD"; cat; } >"$f"
+  printf '%s' "$f"
+}
+# The id filter alone: the body these readers had before the tag.
+id_filtered_counts() {
+  sandbox_lines_since "$1" "$2" | sed -n 's/.*\[id: *\([0-9][0-9]*\) *\].*/\1/p' |
+    sort -n | uniq -c | awk '{ print $2, $1 }'
+}
+
+# A false green. Sandbox bar 2 lost the slim push; his bar 2 heard one from
+# his own host. Two sandbox tabs are live.
+LOST="$(collide_log lost <<'LOG'
+DEBUG  |/home/x/.local| 2026-10-14 11:00:01.000 [id: 1     ] clave-bar: dropped clave-status-slim pipe with empty payload build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 11:00:01.001 [id: 2     ] clave-bar: dropped clave-status-slim pipe with empty payload build=v0.5.6
+DEBUG  |/home/x/.local| 2026-10-14 11:00:01.002 [id: 3     ] clave-bar: dropped clave-status-slim pipe with empty payload build=v0.5.6
+LOG
+)"
+want "a colliding id: only the sandbox bar that heard the slim push is read" \
+  "$(ZLOG="$LOST" build_instances_logging_since "$COLLIDE_MARK" "$SLIM_TWIN" | tr '\n' ' ')" "1 "
+(ZLOG="$LOST" rebuild 2 "$(ZLOG="$LOST" build_instances_logging_since "$COLLIDE_MARK" "$SLIM_TWIN" | tr '\n' ' ')" "" >/dev/null 2>&1)
+want "a sandbox bar that lost the push fails, though a live bar with its id heard one" "$?" "1"
+(ZLOG="$LOST" rebuild 2 "$(ZLOG="$LOST" instances_logging_since "$COLLIDE_MARK" "$SLIM_TWIN" | tr '\n' ' ')" "" >/dev/null 2>&1)
+want "and the id filter alone passes it (the trap the tag closes)" "$?" "0"
+
+# A false red. Both sandbox bars rebuilt the burst; his bar 2 was born in
+# the same window and asked for its fleet. His bar 3 logged a bad payload
+# and a failed command in it too.
+LIVE_ASK="$(collide_log ask <<'LOG'
+DEBUG  |/home/x/.local| 2026-10-14 11:00:02.000 [id: 1     ] clave-bar: dropped clave-status-slim pipe with empty payload build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 11:00:02.001 [id: 2     ] clave-bar: dropped clave-status-slim pipe with empty payload build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 11:00:02.002 [id: 2     ] clave-bar: hydrate ask build=v0.5.6
+DEBUG  |/home/x/.local| 2026-10-14 11:00:02.003 [id: 3     ] clave-bar: bad clave-status-slim payload build=v0.5.6: expected value at line 1
+DEBUG  |/home/x/.local| 2026-10-14 11:00:02.004 [id: 3     ] clave-bar: run_command failed build=v0.5.6: boom
+LOG
+)"
+(ZLOG="$LIVE_ASK" rebuild 2 "$(ZLOG="$LIVE_ASK" build_instances_logging_since "$COLLIDE_MARK" "$SLIM_TWIN" | tr '\n' ' ')" \
+  "$(ZLOG="$LIVE_ASK" build_line_counts_since "$COLLIDE_MARK" "$HYDRATE_ASK")" >/dev/null 2>&1)
+want "a live bar's ask under a sandbox id does not fail the burst" "$?" "0"
+(ZLOG="$LIVE_ASK" rebuild 2 "$(ZLOG="$LIVE_ASK" instances_logging_since "$COLLIDE_MARK" "$SLIM_TWIN" | tr '\n' ' ')" \
+  "$(ZLOG="$LIVE_ASK" id_filtered_counts "$COLLIDE_MARK" "$HYDRATE_ASK")" >/dev/null 2>&1)
+want "and the id filter alone fails it" "$?" "1"
+want "a live bar's bad payload is not counted" \
+  "$(ZLOG="$LIVE_ASK" build_line_count_since "$COLLIDE_MARK" "$BAD_STATUS")" "0"
+want "a live bar's failed command is not counted" \
+  "$(ZLOG="$LIVE_ASK" build_line_count_since "$COLLIDE_MARK" "$RUN_FAILED")" "0"
+want "and the id filter alone counts both" \
+  "$(($(ZLOG="$LIVE_ASK" sandbox_line_count_since "$COLLIDE_MARK" "$BAD_STATUS") + $(ZLOG="$LIVE_ASK" sandbox_line_count_since "$COLLIDE_MARK" "$RUN_FAILED")))" "2"
+
+# The refusal leg. Each sandbox bar asked once and was answered at the
+# store's seq. His bar 2 asked in the same window and read his store (seq
+# 900). A 0.5.5 bar printed the old untagged twin. A build whose tag starts
+# with the sandbox's (cafe1234) asked too: a whole-tag match leaves it out.
+REFUSED="$(collide_log refusal <<'LOG'
+DEBUG  |/home/x/.local| 2026-10-14 11:00:03.000 [id: 1     ] clave-bar: hydrate ask build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 11:00:03.001 [id: 2     ] clave-bar: hydrate ask build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 11:00:03.002 [id: 2     ] clave-bar: hydrate ask build=v0.5.6
+DEBUG  |/home/x/.local| 2026-10-14 11:00:03.003 [id: 1     ] clave-bar: hydrate answer seq=13 build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 11:00:03.004 [id: 2     ] clave-bar: hydrate answer seq=13 build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 11:00:03.005 [id: 2     ] clave-bar: hydrate answer seq=900 build=v0.5.6
+DEBUG  |/home/x/.local| 2026-10-14 11:00:03.006 [id: 1     ] clave-bar: dropped clave-status pipe with empty payload
+DEBUG  |/home/x/.local| 2026-10-14 11:00:03.007 [id: 1     ] clave-bar: hydrate ask build=cafe1234
+LOG
+)"
+refused() { # $1: the asks reader, $2: the answers reader
+  refusal_checks 2 "$(ZLOG="$REFUSED" "$1" "$COLLIDE_MARK" "$HYDRATE_ASK")" \
+    "$(ZLOG="$REFUSED" "$2" "$COLLIDE_MARK" "$HYDRATE_ANSWER")" \
+    "$(ZLOG="$REFUSED" answer_seqs_since "$COLLIDE_MARK")" 13 13
+}
+(refused build_line_counts_since build_line_counts_since >/dev/null 2>&1)
+want "a live bar's ask and answer under a sandbox id do not fail the refusal" "$?" "0"
+(refused id_filtered_counts id_filtered_counts >/dev/null 2>&1)
+want "and the id filter alone fails it (bar 2 reads as asking twice)" "$?" "1"
+want "build_lines_since keeps the sandbox's two asks, not v0.5.6's or cafe1234's" \
+  "$(ZLOG="$REFUSED" build_lines_since "$COLLIDE_MARK" "$HYDRATE_ASK" | grep -c .)" "2"
+want "the answers' seqs are the sandbox store's alone" \
+  "$(ZLOG="$REFUSED" answer_seqs_since "$COLLIDE_MARK" | tr '\n' ' ')" "13 "
+want "a 0.5.5 bar's untagged twin is not this build's" \
+  "$(ZLOG="$REFUSED" build_line_count_since "$COLLIDE_MARK" "$WHOLE_TWIN")" "0"
+want "and the old text still matches the fragment, for the readers that want it" \
+  "$(ZLOG="$REFUSED" zlog_from "$COLLIDE_MARK" | grep -cF "$WHOLE_TWIN")" "1"
+
 printf '\n%s\n' "== qa/lib selftest: $FAILURES failure(s) =="
 [[ "$FAILURES" -eq 0 ]]

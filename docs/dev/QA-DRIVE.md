@@ -221,13 +221,14 @@ loudly and stops the run; later phases assume earlier truth.
 | 2 | **Bind ladder (mixed paths)** | ~6 binds through mixed paths: dormant wakes via nav pipes (`{"row":N}` pick + commit) plus ≥1 scripted create | after EACH bind, within a bounded wait: `tab_id` bound in store (bind is the proxy for row class); dormant count decremented in the shared store (`dev status` — per-instance snapshots are not observable from outside); EOF-twin delta recorded (unattributable in the shared log — see Delivery accounting); seek-trace resting width == target only when the build carries the seek instrumentation, else an honest NOTE (the shipped bar has no emitter; model belief, NOT pane truth — the eyeball stays the oracle). First discriminator: is the bind budget spent-and-never-refilled after bind 2 (#178's fleet signature)? | **P9 (#178)**, **B22 (#181 detection)**, P10, P11, P14, R1 |
 | 3 | Tab churn | close a NON-last tab; close the HIGHEST tab then create one; re-join after each | nav answers with exactly one focus change; no `bind-evict` in evlog; no stale binds; recycled id carries no inherited stamp | B14, B15 (#55), Z15, P4, P12/P13 |
 | 4 | Ring walk | pick into the dormant block, walk both directions, wrap; Alt+Enter one commit | single executor (one focus change per press, never two); walk stays in-block; commit opens exactly one tab | P1 (#162), P2, P16, K8 — becomes single-ring on #179 |
-| 5 | Collapse burst | 12× toggle with pauses, then 5× rapid, then 1 more | store writes per press ≤ 2; every paced press lands its store flip within a bounded wait; the rapid burst settles at parity (per-instance snapshots are not observable from outside — the store flag plus the phase-5 eyeball stand in for them); bar still answers press 18; then the WIDTH probe — the bar's pane size read from the layout dump in both settled modes, asserted only if the two readings DIFFER (a number that moves with the toggle is the applied swap position; one that does not is the declared layout, and asserting on it would be a tautology — the eyeball stays the oracle then) | B6–B9, B10/B11, P5, the #232 band collision |
+| 5 | Collapse burst | 12× toggle with pauses, then 5× rapid, then 1 more | store writes per press ≤ 2; every paced press lands its store flip within a bounded wait; the rapid burst settles at parity (per-instance snapshots are not observable from outside — the store flag plus the phase-5 eyeball stand in for them); bar still answers press 18; then the WIDTH probe — the bar's pane size read from the layout dump in both settled modes, asserted only if the two readings DIFFER (a number that moves with the toggle is the applied swap position; one that does not is the declared layout, and asserting on it would be a tautology — the eyeball stays the oracle then); the 18 presses ride slim pushes, every live bar heard one, and no bar asked for a full snapshot (each rebuilt every push from the rows it kept) | B6–B9, B10/B11, P5, the #232 band collision, the slim push (#281) |
 | 5b | **Card cells (hook side)** | eight real `clave hook` events against the sandbox store: a permission `Notification`, `UserPromptSubmit`, five `Stop`s (on a tail carrying a fresh `Agent` launch, on a background-command notification, on the agent's own notification, on a launch stamped seven hours ago, and on a second fresh launch), then `SessionEnd` | `wants` arrives from the notification's own words and leaves with the next prompt; the subagent mark rises on a fan-out, ignores a background command finishing beside it, clears on the notification naming its own `tool-use-id`, is never raised by a launch past its age bound, and is forced down by `SessionEnd` **from a raised mark**; status follows each event; ≤1 store write per event, counted AFTER a PR-cache warm-up (`seq` is not a per-event counter — a stale cache makes the hook spawn `pr-sync`, a second writer landing off-schedule; FOOTGUNS). Fires every event through `ct.sh --hook`, never `clave hook` directly, and appends only to a `c85c` scenario transcript, guarded | #232's card cells — the seam three of its defects lived at |
 | 5d | **The meter seam (statusLine side)** — SPECIFIED, NOT YET SCRIPTED | three `clave statusline` runs against the sandbox store, fed the captured payload shapes on stdin: one while the row is `Working`, one after a permission `Notification` has turned it red carrying the SAME token count, one carrying a HIGHER count | the red survives the repeated count and clears on the moved one (`statusline::apply_statusline`, 2026-09-14); the cleared row reads `Working` in the shared store within a bounded wait; ≤1 store write per run, counted after the PR-cache warm-up 5b already does. Runs with the drive's scrubbed identity like every other leg — `run_statusline` PUSHES a snapshot, so an unscrubbed run aims at the maintainer's fleet exactly as a hand-written `clave hook` does (FOOTGUNS #281) | the meter seam — phase 5b drives the HOOK side only, and the statusLine is the other half of the card's live cells |
 | 5c | **Terminal facts (OS side)** | a real `sleep` typed into a plain shell tab, behind a shell allowlist, while that tab is focused; then focus moves to an agent tab with the command still running | leg A: at least one sandbox bar learns the change — the OS-facts pipeline (`get_pane_cwd`/`get_pane_running_command` → `apply_pane_facts` → the terminal row) delivers end to end, which nothing tested before. Leg B MEASURES whether a second instance learns it from another tab, the open question under the store-backed fix, and asserts nothing: the facts are per-instance today, so "every bar agrees" is not yet true and a drive must not go red on a known-open defect | the 2026-09-12 flicker (a terminal row with facts under one tab and none under another), #206, #239 |
 | 6 | Quiescence | idle 60s | evlog and store `seq` flat; zellij log flat after the mark for sandbox-attributable lines only (the shared log is never globally flat with a live maintainer fleet — see Delivery accounting) | P17, B19/B20, drive step 6 |
+| 6a | **Slim push** | one crafted `clave-status-slim` push that no bar can rebuild (one seq past the store, tag 0); then the phase-5 anchor and two `clave-toggle` presses | at rest, the tag of the host's last aimed whole push (`pushed-dormant-tag`) equals the store's own dormant tag; over the run, sandbox bars heard slim pushes, none logged a bad status payload or a failed subprocess, and every bar born in the run asked for the fleet and was answered; the refusal: every live bar asks ONCE, every answer carries the store's seq, and the store does not move; after it, every live bar rebuilds both presses' slim pushes with no ask | the slim push (#281); the ask loop fixed in `e4bc858` |
 | 6b | **Isolation witness** | nothing (reads this run's own evidence) | zero `push-refused` events across the run — no push was aimed at a bar that does not own this store; the ambient zellij identity is STILL the sandbox's at the END of the run, not just at the start; the inherited session's name appears nowhere as a push target | FOOTGUNS #281, the 2026-09-11 incident |
-| 6c | **Relaunch (the second launch)** | quit the sandbox session, then ask the maintainer to `just launch` it again | exactly ONE row is bound after the relaunch — the most-recent row, the eager tab the launch bakes — and every other row is unbound: no `tab_id`, no `pane_id`, and no stale `Working` or `NeedsYou` carried over from the first session. Every row the quit left live (bound pre-quit, less the eager row) carries a standby stamp; one missing is a `SessionEnd` that did not say `other`, or a bar that pruned its tab while the session went down. Then the beacon leg: two `clave-toggle` presses in the eager tab, with NO anchor pipe first. Each press is ONE width ask, from that tab's bar, painted by that bar. Then the arrival leg: one `{"dir":"next"}` binds exactly one more row, it was on standby, its bind spent the stamp, and its tab ranks by the row's own ordinal (a walk is not a commitment), with no birth touch on its tab (the touch is the hop to the top) | the relaunch seam (TESTING.md's escape record); the one-eager-tab rule, commit `9670fbf`; standby rows (FOOTGUNS, "A launch cannot tell which rows were live") |
+| 6c | **Relaunch (the second launch)** | quit the sandbox session, then ask the maintainer to `just launch` it again | exactly ONE row is bound after the relaunch — the most-recent row, the eager tab the launch bakes — and every other row is unbound: no `tab_id`, no `pane_id`, and no stale `Working` or `NeedsYou` carried over from the first session. Every row the quit left live (bound pre-quit, less the eager row) carries a standby stamp; one missing is a `SessionEnd` that did not say `other`, or a bar that pruned its tab while the session went down. Then the beacon leg: two `clave-toggle` presses in the eager tab, with NO anchor pipe first. Each press is ONE width ask, from that tab's bar, painted by that bar. Then the arrival leg: one `{"dir":"next"}` binds exactly one more row, it was on standby, its bind spent the stamp, and its tab ranks by the row's own ordinal (a walk is not a commitment), with no birth touch on its tab (the touch is the hop to the top). Between the two legs, the slim push across the relaunch: the beacon presses rode slim pushes that every live bar rebuilt with no ask, and every bar the second session bore asked for the fleet and was answered | the relaunch seam (TESTING.md's escape record); the one-eager-tab rule, commit `9670fbf`; standby rows (FOOTGUNS, "A launch cannot tell which rows were live") |
 | 7 | Teardown | nothing | prints the kill pair (the agent may run it once both eyeballs are in) | drive step 9 |
 
 **Why 5b could not catch the 2026-09-14 red-glyph defect.** Its event
@@ -335,6 +336,13 @@ reach: a store written by several processes, a zellij behaviour, a
 relaunch. Logic belongs in a unit test in the pure model; the drive checks
 that the parts meet.
 
+**The drive grows with the change, as the tests do.** A change in a seam
+class of TESTING.md's taxonomy (cross-process, across a relaunch, install)
+ships with the drive check that goes red when its seam breaks, in the same
+PR. An eyeball that the drive could measure is a missing check: write it,
+and keep the eyeball only for what a person must judge. A gap that you find
+and cannot close goes in the run's ledger entry, with what would close it.
+
 1. **Find the trace.** Pick a store field that only the path under test
    writes, and read it from `clave dev status` (JSON). Example: only `clave
    touch` writes `tab_touched`, so an entry for a tab proves a birth touch
@@ -358,6 +366,64 @@ that the parts meet.
    that goes red on its first run is evidence to read, not a script to
    patch until it is green.
 
+## Phase 6a, the slim push
+
+A status push leaves out the dormant rows when the last whole push carried
+the same ones (PR #281; UBIQUITOUS_LANGUAGE, "slim push"). Each bar keeps the
+rows from the last whole push and puts them back. A bar that does not hold
+the rows a push names applies nothing, and asks `clave snapshot` once. The
+seam crosses the host, every bar and each bar's own `clave snapshot`, so no
+unit test sees it whole.
+
+What it asserts (2026-10-14):
+
+- **At rest,** the tag in `<state>/pushed-dormant-tag` equals the dormant
+  tag in `clave snapshot`. If they differ at rest, the next push goes whole,
+  and the change saves nothing. If the file is absent, no push ever goes
+  slim.
+- **Over the run,** sandbox bars heard slim pushes; no bar logged a status
+  payload it could not parse, or a subprocess that failed; and every bar
+  born in the run asked for the fleet and got an answer.
+- **The refusal.** The drive pipes a slim push with seq one past the store
+  and tag 0. A real tag is FNV-1a over the rows' JSON, so no bar holds 0.
+  The push carries no rows, so a bar that took it as whole would show an
+  empty fleet. Every live bar must ask once and be answered. The answer
+  carries the store's seq, which is OLDER than the push it was asked for.
+  That shape made every bar ask without end until `e4bc858`. The drive
+  waits past the bar's 2s retry window before it counts, so a second ask
+  shows. The store must not move: a refusal writes nothing.
+- **After the refusal,** two `clave-toggle` presses push slim, and every
+  live bar rebuilds both with no ask.
+
+What the refusal leaves behind: each bar shows seq S and asked for S+1. The
+next real write also takes S+1. If a bar refused that real push too, it
+would wait for the write after it, because its ask was spent on the crafted
+one. That costs one push, in the first session only, and the two presses are
+that next write.
+
+Two log lines exist for this phase: `clave-bar: hydrate ask build=<tag>`
+(one per ask) and `clave-bar: hydrate answer seq=N build=<tag>` (one per
+answer). `qa_lib.rs` holds
+the drive's fragments to the bar's text, because a fragment that drifts
+counts nothing, and "no bar asked" passes on nothing.
+
+Attribution. Plugin ids restart per zellij server, so a bar in the
+maintainer's session can carry the same `[id: N]` as a sandbox bar. On the
+devbox log on 2026-10-14 his 0.5.5 fleet logged about 540 `dropped
+clave-status pipe` twins per id, and from 0.5.6 his bars print the slim twin
+and both hydrate lines too. So every line this phase counts ends its fixed
+words with `build=<tag>`, and `scripts/qa/lib.sh` reads them only through
+its `build_` readers, which keep a line when the tag is this sandbox's. The
+selftest gives a sandbox bar and a live bar the same id, and requires each
+verdict to count only the sandbox one; on the id filter alone, each proof
+gives the wrong answer. `script_hygiene.rs` fails the build if the drive
+passes one of these fragments to an id-filtered reader. What the tag cannot
+split: two sandboxes built from the same commit.
+
+What it cannot see: in 6c, a whole push follows the launch's bind, so the
+drive cannot tell rows from the birth answer from rows from that push. And
+whether the rows a bar rebuilt are the right rows is checkpoint 1's eyeball.
+
 ## Phase 6c, the relaunch
 
 **Phase 6c needs two maintainer launches, and that is the point.** Every other
@@ -377,7 +443,10 @@ come first, before anything is driven, so they are the launch's own work.
 Last, the arrival leg: one `{"dir":"next"}` nav binds exactly one more row. It
 was on standby, its bind spent the stamp, and its tab ranks by the row's own
 ordinal. No birth touch reached its tab, so the row never jumped to the top
-before it settled.
+before it settled. Between the two legs it reads the slim push again, for the
+second session alone (phase 6a has the design): its bars were born holding no
+rows, so each must have asked for the fleet, and each must rebuild the beacon
+presses' slim pushes without an ask.
 
 Two things about how it is built, each of which a later edit could undo
 without any test noticing:
