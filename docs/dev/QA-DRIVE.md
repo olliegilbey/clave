@@ -335,6 +335,13 @@ reach: a store written by several processes, a zellij behaviour, a
 relaunch. Logic belongs in a unit test in the pure model; the drive checks
 that the parts meet.
 
+**The drive grows with the change, as the tests do.** A change in a seam
+class of TESTING.md's taxonomy (cross-process, across a relaunch, install)
+ships with the drive check that goes red when its seam breaks, in the same
+PR. An eyeball that the drive could measure is a missing check: write it,
+and keep the eyeball only for what a person must judge. A gap that you find
+and cannot close goes in the run's ledger entry, with what would close it.
+
 1. **Find the trace.** Pick a store field that only the path under test
    writes, and read it from `clave dev status` (JSON). Example: only `clave
    touch` writes `tab_touched`, so an entry for a tab proves a birth touch
