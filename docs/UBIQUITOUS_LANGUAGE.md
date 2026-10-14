@@ -98,6 +98,14 @@ update, but it asks for no paint. A **timer chain** is one run of fast ticks
 (the spinner's 0.2s timer) that re-arms itself; two chains at once are a defect
 (FOOTGUNS.md).
 
+A **late gesture** is a click or wheel step that zellij hands to an instance
+after the focus has already left its tab: the instance's event queue lagged
+behind the human. An instance that **sent focus away** moved the focus off
+its own tab by its own click, walk or wheel step, and has not been shown
+since. It ignores clicks and wheel steps until it is shown again
+(`BarModel::sent_focus_away`), because every gesture it gets in that state is
+late.
+
 Its two width
 states are **expanded** and **collapsed** — never "mini", "wide" or "narrow".
 Each is a **geometry**: a named layout in the generated KDL that zellij switches

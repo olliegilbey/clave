@@ -815,6 +815,47 @@ pub struct BarModel {
     /// existed, until the next CLI client exit tells it otherwise
     /// ([`Self::set_visible`]).
     hidden: bool,
+    /// This bar moved the focus off its own tab by its own click, walk or
+    /// wheel step, and zellij has not shown its tab since. While it is set,
+    /// [`Self::click`] and [`Self::wheel`] do nothing: the first gesture wins.
+    ///
+    /// Why: zellij runs the events of a plugin thread in arrival order, and
+    /// several bars share one thread (`PinnedExecutor`,
+    /// `zellij-server/src/plugins/pinned_executor.rs` at v0.45.1). A status
+    /// push costs each bar real time, so a bar can handle a click seconds
+    /// after Ollie made it (the live log of 2026-10-14: median 0.10 s, max
+    /// 7.5 s on 0.5.5, up to 60 s on 0.5.4). A click on this bar was made
+    /// while its tab was on screen. So every click queued behind the one that
+    /// moved focus was made before focus left, and it is stale when it runs:
+    /// it can pull focus off a tab Ollie has already moved on to. 30 of 160
+    /// clicks in that log ran in this state. At 16:40:07 one bar sent focus
+    /// to tab 13 and then to tab 12, 300 ms apart.
+    ///
+    /// Cleared by `Visible(true)` ([`Self::set_visible`]), which zellij sends
+    /// on every arrival, a stock `Alt+h`/`Alt+l` switch included
+    /// (`zellij-server/src/screen.rs` at v0.45.1, `move_clients_between_tabs`
+    /// `:2025`), and by a beacon that names this bar's own tab
+    /// ([`Self::beacon`]). A beacon that names ANOTHER tab neither sets nor
+    /// clears it: a stock switch into this tab sends no beacon, so that gate
+    /// would kill the tab's clicks after every `Alt+h`.
+    ///
+    /// An open (a standby click, a standby walk, Alt+Enter) does not set it.
+    /// `clave open` moves the focus later, from another process, and can
+    /// decide not to (`open.rs` `run_open`: already live, cwd gone, a failed
+    /// `new-tab`). Nothing tells this bar that, so a gated bar would stay deaf
+    /// until its tab is shown again. A repeat click on the same row is safe
+    /// already, because the row is in flight (`opening`).
+    ///
+    /// The cost: a jump that zellij does not carry out moves no focus and
+    /// sends no event. That is a switch to a stale position
+    /// (`switch_active_tab`, `screen.rs:2059-2064`), or a focus on a pane
+    /// that is gone (`focus_pane_with_id`, `screen.rs:6359-6390`, which only
+    /// logs "Could not find pane"). The bar then ignores clicks and wheel
+    /// steps until a tab switch shows its tab again. Both need a stale map on
+    /// the bar Ollie is looking at. A stale tab position is rare there,
+    /// because that bar gets every `TabUpdate` (FOOTGUNS, "TabUpdate reaches
+    /// only the ACTIVE tab").
+    sent_focus_away: bool,
     /// The width of the most recent paint, recorded deaf or not — what the
     /// cooldown expiry judges instead of the paint that preceded the ask.
     last_painted: Option<usize>,
@@ -934,6 +975,11 @@ impl BarModel {
     /// commitment).
     pub fn beacon(&mut self, tab_id: usize) {
         self.current_tab = Some(tab_id);
+        // A gesture landed on this bar's own tab, so focus is back here and
+        // a click on this bar is new (`sent_focus_away`).
+        if self.own_tab() == Some(tab_id) {
+            self.sent_focus_away = false;
+        }
         self.organic_pending = false; // truth arrived; leftover flags are poison
         // A new beacon re-anchors the election, so whatever an earlier tab
         // frame proved about the OLD beacon is spent, debt included (#162):
@@ -2735,7 +2781,8 @@ impl BarModel {
     /// dormant row SELECTS it (#100): with the mouse as the main path to
     /// dormant rows past Alt+9, a click that launched would move the
     /// accidental-spawn problem into the mouse channel — only Alt+Enter
-    /// wakes a dormant row.
+    /// wakes a dormant row. After a click moves the focus away, this bar
+    /// ignores clicks until its tab is shown again (`sent_focus_away`).
     pub fn click(&mut self, line: usize, pane_height: usize) -> Vec<Effect> {
         // #148: `line` is a line of the VIEWPORT — it counts from the first row
         // on screen, not from row 0 of the list. It reads the offset off the
@@ -2775,10 +2822,17 @@ impl BarModel {
         // UNCONDITIONAL (#232, the maintainer's ask): clicks are rare, and
         // this one line is what debugs the next #148 — every term of the
         // conversion, plus the row it resolved to, in the order they apply.
+        // `sent_away=true` marks a late click that the gate dropped.
         eprintln!(
-            "clave-bar click: raw_line={raw_line} lines_per_row={lines_per_row} row_line={line} top={top} -> key={:?}",
-            hit.as_ref().map(|(k, _)| k)
+            "clave-bar click: raw_line={raw_line} lines_per_row={lines_per_row} row_line={line} top={top} -> key={:?} sent_away={}",
+            hit.as_ref().map(|(k, _)| k),
+            self.sent_focus_away
         );
+        // A late click changes nothing at all, the selection included: it
+        // was made before this bar moved the focus away (`sent_focus_away`).
+        if self.sent_focus_away {
+            return Vec::new();
+        }
         let Some((key, _)) = hit else {
             return Vec::new();
         };
@@ -2793,7 +2847,7 @@ impl BarModel {
                 else {
                     return Vec::new();
                 };
-                self.beacon(tab_id); // clears any dormant selection too
+                self.jump_to(tab_id); // clears any dormant selection too
                 vec![
                     Effect::SwitchTab { position },
                     Effect::AnnounceVisit { tab_id },
@@ -2810,6 +2864,18 @@ impl BarModel {
                 self.open_effects(&uuid)
             }
         }
+    }
+
+    /// This bar moves the focus to `tab_id` itself: a click, a walk or a wheel
+    /// step that lands on a live row. The beacon moves here, and the pipe echo
+    /// confirms it. A jump to a tab that is known not to be this bar's own
+    /// closes the click gate (`sent_focus_away`). While the frames cannot
+    /// name the own tab, the gate stays open. That jump can be a click on
+    /// the bar's own row, and no event would open the gate after it
+    /// (`a_click_while_the_bar_cannot_name_its_own_tab_leaves_the_gate_open`).
+    fn jump_to(&mut self, tab_id: usize) {
+        self.beacon(tab_id);
+        self.sent_focus_away = self.own_tab().is_some_and(|own| own != tab_id);
     }
 
     /// The replicated focus truth — the beacon the nav election reads.
@@ -3039,7 +3105,12 @@ impl BarModel {
     /// same reason: a standby row is only selected, never opened. The walk
     /// opens standby rows on arrival, and one flick after a quit would open
     /// the whole old fleet (review of #275). A click or Alt+Enter opens it.
+    /// A fourth, shared with `click`: after a step moves the focus away, the
+    /// rest of the burst is late and does nothing (`sent_focus_away`).
     pub fn wheel(&mut self, down: bool) -> Vec<Effect> {
+        if self.sent_focus_away {
+            return Vec::new();
+        }
         let Some(own) = self.own_tab() else {
             return Vec::new();
         };
@@ -3161,7 +3232,7 @@ impl BarModel {
                         Effect::SwitchTab { position }
                     }
                 };
-                self.beacon(tab_id); // executor hand-off hint; pipe echo confirms
+                self.jump_to(tab_id); // executor hand-off hint; pipe echo confirms
                 vec![jump, Effect::AnnounceVisit { tab_id }]
             }
             RowKey::Dormant(uuid) => {
@@ -3515,9 +3586,15 @@ impl BarModel {
     /// twice (`route.rs:2677`, `:2941`; `src/commands.rs:409`). So most of
     /// these are repeats: about four per CLI call for each hidden bar.
     /// Unlike the beacon, it cannot lag a native tab switch.
+    ///
+    /// A `Visible(true)` also opens the click gate (`sent_focus_away`), repeat
+    /// or not: the tab is on screen, so the next click on it is new.
     pub fn set_visible(&mut self, visible: bool) -> bool {
         let flipped = self.hidden == visible;
         self.hidden = !visible;
+        if visible {
+            self.sent_focus_away = false;
+        }
         flipped
     }
 
@@ -5913,6 +5990,9 @@ mod tests {
         // Walking must not reorder: c is still row 1 after both walks.
         assert_eq!(keys(&m)[0], RowKey::Tab(12));
         // Clicks land on ONE instance (the visible bar): same effect shape.
+        // The walks above sent focus away from this bar, so it takes a click
+        // only after zellij shows its tab again (`sent_focus_away`).
+        m.set_visible(true);
         assert_eq!(
             m.click(1, TALL_PANE),
             vec![
@@ -5931,6 +6011,189 @@ mod tests {
         assert_eq!(m.nav("not json", Some(10)), Vec::<Effect>::new());
         assert_eq!(m.nav("{\"row\":9}", Some(10)), Vec::<Effect>::new());
         assert_eq!(m.click(9, TALL_PANE), Vec::<Effect>::new());
+    }
+
+    // --- late gestures: a bar that sent focus away -------------------------
+
+    /// The bar in tab 10 of the three-tab fleet, with its tab on screen and
+    /// its frames coherent. One row per line, so line N of a tall pane is
+    /// row N: tabs 10, 11, 12, by the position tie-break.
+    fn shown_bar_in_ten() -> BarModel {
+        let m = one_line_bar(fleet_bar(10, 10));
+        assert_eq!(
+            keys(&m),
+            vec![RowKey::Tab(10), RowKey::Tab(11), RowKey::Tab(12)]
+        );
+        assert_eq!(m.own_tab(), Some(10));
+        m
+    }
+
+    fn jump(position: usize, tab_id: usize) -> Vec<Effect> {
+        vec![
+            Effect::SwitchTab { position },
+            Effect::AnnounceVisit { tab_id },
+        ]
+    }
+
+    #[test]
+    fn a_bar_that_sent_focus_away_ignores_late_clicks_until_it_is_shown_again() {
+        // The live log of 2026-10-14 (0.5.5). Zellij runs the events of a
+        // plugin thread in arrival order, several bars share one thread, and
+        // a status push costs each bar real time. So a bar can handle a click
+        // up to 7.5 s after Ollie made it. At 16:40:07 one bar sent focus to
+        // tab 13 and then to tab 12, 300 ms apart. Ollie made the second
+        // click before the first moved focus, so it was stale when it ran.
+        // 30 of 160 clicks in that log ran in this state.
+        let mut m = shown_bar_in_ten();
+        assert_eq!(m.click(1, TALL_PANE), jump(1, 11));
+        assert_eq!(
+            m.click(2, TALL_PANE),
+            Vec::<Effect>::new(),
+            "a click queued behind the jump must not move focus again"
+        );
+        assert_eq!(m.current_tab(), Some(11), "and it must change nothing");
+        assert_eq!(
+            m.wheel(true),
+            Vec::<Effect>::new(),
+            "the wheel shares the gate"
+        );
+        // Zellij hides the tab, and repeats that on every CLI client exit.
+        // A hidden tab cannot get a new click, so this opens nothing.
+        m.set_visible(false);
+        assert_eq!(m.click(2, TALL_PANE), Vec::<Effect>::new());
+        // Ollie comes back. The tab is shown again, so a click is new.
+        m.set_visible(true);
+        assert_eq!(m.click(2, TALL_PANE), jump(2, 12));
+    }
+
+    #[test]
+    fn a_stock_switch_into_the_tab_leaves_its_clicks_working() {
+        // Alt+h and Alt+l are zellij's own switch, and they send no beacon.
+        // So after one, the beacon still names the tab Ollie left. A gate
+        // that read "the beacon names another tab" as "this bar sent focus
+        // away" would kill every click after every stock switch. Only this
+        // bar's own jump closes the gate.
+        let mut m = one_line_bar(fleet_bar(10, 11));
+        m.set_visible(false);
+        m.set_visible(true);
+        m.apply_tabs(vec![
+            tab(10, 0, "a", true),
+            tab(11, 1, "b", false),
+            tab(12, 2, "c", false),
+        ]);
+        assert_eq!(m.current_tab(), Some(11), "a stock switch sends no beacon");
+        assert_eq!(m.click(2, TALL_PANE), jump(2, 12));
+    }
+
+    #[test]
+    fn a_beacon_that_names_the_bars_own_tab_opens_the_gate_and_no_other_does() {
+        let mut m = shown_bar_in_ten();
+        assert_eq!(m.click(1, TALL_PANE), jump(1, 11));
+        // A walk moves on from tab 11. That says nothing about tab 10.
+        m.beacon(12);
+        assert_eq!(m.click(2, TALL_PANE), Vec::<Effect>::new());
+        // A walk lands on tab 10: focus is back here.
+        m.beacon(10);
+        assert_eq!(m.click(2, TALL_PANE), jump(2, 12));
+    }
+
+    #[test]
+    fn a_click_on_the_bars_own_row_moves_no_focus_and_leaves_the_gate_open() {
+        let mut m = shown_bar_in_ten();
+        assert_eq!(m.click(0, TALL_PANE), jump(0, 10));
+        assert_eq!(m.click(1, TALL_PANE), jump(1, 11));
+    }
+
+    #[test]
+    fn a_bar_that_wheeled_focus_away_ignores_late_wheel_steps_until_it_is_shown_again() {
+        // Trackpad momentum sends a burst, and every event in it queues
+        // behind the step that moved focus.
+        let mut m = shown_bar_in_ten();
+        assert_eq!(m.wheel(true), jump(1, 11));
+        assert_eq!(m.wheel(true), Vec::<Effect>::new());
+        assert_eq!(
+            m.click(2, TALL_PANE),
+            Vec::<Effect>::new(),
+            "the click shares the gate"
+        );
+        m.set_visible(false);
+        m.set_visible(true);
+        assert_eq!(m.wheel(true), jump(1, 11));
+    }
+
+    #[test]
+    fn a_selection_in_the_dormant_block_moves_no_focus_and_leaves_the_gate_open() {
+        let mut m = shown_bar_in_ten();
+        m.apply_snapshot(snap(
+            1,
+            vec![
+                agent("d1", Status::Idle, None),
+                agent("d2", Status::Idle, None),
+            ],
+        ));
+        assert_eq!(m.click(3, TALL_PANE), Vec::<Effect>::new());
+        assert!(m.cursor.is_some(), "the click selected a dormant row");
+        assert_eq!(m.wheel(true), Vec::<Effect>::new());
+        assert_eq!(m.click(1, TALL_PANE), jump(1, 11));
+    }
+
+    #[test]
+    fn a_late_click_on_a_dormant_row_selects_nothing() {
+        // A dormant click emits no effect, gated or not. So only the cursor
+        // shows whether the gate runs before the row's kind is read.
+        let mut m = shown_bar_in_ten();
+        m.apply_snapshot(snap(
+            1,
+            vec![
+                agent("d1", Status::Idle, None),
+                agent("d2", Status::Idle, None),
+            ],
+        ));
+        assert_eq!(m.click(1, TALL_PANE), jump(1, 11));
+        assert_eq!(m.cursor, None, "the jump clears the selection");
+        assert_eq!(m.click(3, TALL_PANE), Vec::<Effect>::new());
+        assert_eq!(m.cursor, None, "a late click selected a dormant row");
+    }
+
+    #[test]
+    fn a_click_while_the_bar_cannot_name_its_own_tab_leaves_the_gate_open() {
+        // While a tab is created or closed, the tab and pane frames disagree
+        // and the bar cannot name its own tab. Then it cannot tell a click on
+        // its own row, which moves no focus, from a jump away. Zellij sends
+        // no event for a switch to the tab already on screen
+        // (`switch_active_tab`, `screen.rs:2059-2064` at v0.45.1). So a gate
+        // closed on that click would stay closed until Ollie changes tab,
+        // and every click until then would do nothing. Inside this window a
+        // late click acts, as it did before the gate.
+        let mut m = shown_bar_in_ten();
+        m.apply_tabs(vec![
+            tab(10, 0, "a", true),
+            tab(11, 1, "b", false),
+            tab(12, 2, "c", false),
+            tab(13, 3, "d", false),
+        ]); // a new tab, and its panes are not in yet
+        assert_eq!(m.own_tab(), None);
+        assert_eq!(m.click(0, TALL_PANE), jump(0, 10));
+        assert_eq!(m.click(1, TALL_PANE), jump(1, 11));
+    }
+
+    #[test]
+    fn a_standby_open_leaves_the_bars_clicks_working() {
+        // Decided 2026-10-14: an open does not close the gate. `clave open`
+        // moves focus later, from another process, and it can decide not to
+        // (`open.rs` `run_open`: the row is already live, its cwd is gone, or
+        // `new-tab` failed). No event tells this bar that, so a gated bar
+        // would stay deaf until its tab is shown again. A repeat click on the
+        // same row is safe already: the row is in flight, so it opens nothing.
+        let mut m = one_line_bar(standby_fleet());
+        assert_eq!(
+            m.click(2, TALL_PANE),
+            vec![Effect::OpenAgent {
+                uuid: "u-s2".into()
+            }]
+        );
+        assert_eq!(m.click(2, TALL_PANE), Vec::<Effect>::new());
+        assert_eq!(m.click(1, TALL_PANE), jump(1, 2));
     }
 
     #[test]
@@ -9843,6 +10106,9 @@ mod tests {
         assert!(m.nav("{\"row\":5}", Some(2)).is_empty());
         assert_eq!(m.cursor.as_deref(), Some("u-d0"), "Alt+5 reaches the last");
         // A click reaches the same row — the mouse is the route past Alt+9.
+        // The Alt+2 above sent focus away from this bar, so it takes a click
+        // only after zellij shows its tab again (`sent_focus_away`).
+        m.set_visible(true);
         m.click(3, TALL_PANE);
         assert_eq!(m.cursor.as_deref(), Some("u-d1"));
     }
@@ -10734,7 +11000,7 @@ mod tests {
     // the wasm --target build (see crates/clave-bar/Cargo.toml).
     mod proptests {
         use super::super::*;
-        use super::{agent, agent_at, tab};
+        use super::{TALL_PANE, agent, agent_at, fleet_bar, one_line_bar, snap, tab};
         use proptest::prelude::*;
 
         proptest! {
@@ -11416,6 +11682,82 @@ mod tests {
                                 let mut w = IdentityWorld::new();
                                 for op in ops {
                                     w.step(op)?;
+                                }
+                            }
+
+                            /// Property 10 — late gestures (2026-10-14). Over any mix of
+                            /// clicks, wheel steps, `Visible` events, beacons and walks, the
+                            /// bar in tab 10 obeys one rule: after it moves the focus to
+                            /// another tab itself, no click and no wheel step acts until its
+                            /// tab is shown again or a beacon names it. And outside that
+                            /// window the gate drops nothing: a click on a live row always
+                            /// jumps. The rule is spread over five entry points
+                            /// (`click`, `wheel`, `land`, `beacon`, `set_visible`), so only
+                            /// an interleaving test sees all of it at once.
+                            #[test]
+                            fn prop_late_gestures_never_act_and_fresh_clicks_always_do(
+                                ops in prop::collection::vec((0u8..5, 0usize..6, any::<bool>()), 1..40),
+                            ) {
+                                const OWN: usize = 10;
+                                let mut m = one_line_bar(fleet_bar(OWN, OWN));
+                                // Two dormant rows under the three live ones, so clicks
+                                // and wheel steps also land where no focus moves.
+                                m.apply_snapshot(snap(1, vec![
+                                    agent("d1", Status::Idle, None),
+                                    agent("d2", Status::Idle, None),
+                                ]));
+                                let announced = |fx: &[Effect]| fx.iter().find_map(|e| match e {
+                                    Effect::AnnounceVisit { tab_id } => Some(*tab_id),
+                                    _ => None,
+                                });
+                                let mut away = false;
+                                for (op, line, flag) in ops {
+                                    match op {
+                                        0 => {
+                                            // TALL_PANE and five rows: no scroll, so line N is row N.
+                                            let hit = m.rows().get(line).map(|(k, _)| k.clone());
+                                            let fx = m.click(line, TALL_PANE);
+                                            if away {
+                                                prop_assert!(fx.is_empty(), "a late click acted: {:?}", fx);
+                                            } else if let Some(RowKey::Tab(t)) = hit {
+                                                prop_assert_eq!(announced(&fx), Some(t), "a fresh click was dropped");
+                                                away = t != OWN;
+                                            } else {
+                                                prop_assert_eq!(announced(&fx), None, "a selection moved focus");
+                                            }
+                                        }
+                                        1 => {
+                                            let fx = m.wheel(flag);
+                                            if away {
+                                                prop_assert!(fx.is_empty(), "a late wheel step acted: {:?}", fx);
+                                            } else if let Some(t) = announced(&fx) {
+                                                away = t != OWN;
+                                            }
+                                        }
+                                        2 => {
+                                            m.set_visible(flag);
+                                            if flag {
+                                                away = false;
+                                            }
+                                        }
+                                        3 => {
+                                            let t = OWN + line % 3;
+                                            m.beacon(t);
+                                            if t == OWN {
+                                                away = false;
+                                            }
+                                        }
+                                        _ => {
+                                            // A walk, run as main.rs runs it: only on the
+                                            // executor. The gate does not stop it, but a
+                                            // walk that lands away closes the gate.
+                                            let payload = if flag { "{\"dir\":\"next\"}" } else { "{\"dir\":\"prev\"}" };
+                                            let fx = m.nav(payload, m.nav_executor());
+                                            if let Some(t) = announced(&fx) {
+                                                away = t != OWN;
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }

@@ -1649,7 +1649,12 @@ measure "phase 3 EOF-twin delta (user-global log, unattributable — forensic on
 #     one step each way), so the COMMIT must land on the row that was picked.
 #     The landing uuid is the walk's only witness, and predicting it is the
 #     assertion;
-#   - one commit, one tab → the evlog's `open` count and the live tab delta.
+#   - one commit, one tab → the evlog's `open` count and the live tab delta;
+#   - the stock switch into each standing tab reaches its bar → that bar's
+#     `visible true own=Some(<tab>)` line (`arrival_shown_check`). A bar that
+#     sent focus away takes no click until it hears this (model.rs
+#     `sent_focus_away`), and the drive cannot click, so this is the part of
+#     the late-click gate a drive can see.
 # The walk is driven twice from two different focused tabs: ring movement is
 # supposed to work regardless of which tab you are standing in.
 phase "P4-ring-walk"
@@ -1710,8 +1715,25 @@ check "phase-4 the two standing tabs are different tabs" \
 # read, and that read is the assertion — see `assert_focus_unchanged`.
 # ---------------------------------------------------------------------------
 walk_leg() {
-  local stand="$1" label="$2" i rc
+  local stand="$1" label="$2" i rc before shown_mark shown=0
+  # The stock switch below sends no beacon, so `Visible(true)` is the only
+  # news the standing tab's bar gets of the arrival — and the only event
+  # that reopens its clicks after it has jumped away itself (model.rs
+  # `sent_focus_away`). Witnessed when focus was elsewhere before the switch.
+  # Walk 2 always is; walk 1 is whenever phase 3 left focus on another tab.
+  before="$(focused_tab_id)"
+  shown_mark="$(zlog_now)"
   focus_tab_checked "$stand" "$label"
+  if [[ -n "$before" && "$before" != "$stand" ]]; then
+    for _ in $(seq 1 6); do
+      shown="$(shown_count_since "$shown_mark" "$stand")"
+      ((shown >= 1)) && break
+      sleep 0.5
+    done
+    arrival_shown_check "$label" "$stand" "$shown"
+  else
+    note '%s focus was on tab %s before the switch, so there is no arrival to witness' "$label" "${before:-unread}"
+  fi
   # Elect the standing tab's bar before the pick. Without this the walk is
   # answered by whichever bar the LAST beacon named (a native focus change
   # emits none), so both walks would exercise one bar's cursor and the
