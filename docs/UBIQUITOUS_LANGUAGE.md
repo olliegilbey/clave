@@ -223,6 +223,7 @@ the tab is a terminal tab.
 |---|---|
 | **stable** | The released install under `~/.local/share/clave/`. Only `just release` writes it. |
 | **launcher** | The **unversioned** entry point a cut installs at `~/.local/share/clave/bin/clave` — the one name an operator *types*, refreshed on every release (#43a). Never a *baked* reference: generated artifacts always name the **versioned copy**, because an unversioned plugin location is a different plugin identity to zellij. |
+| **launch folder** | The folder of the clave binary that ran a cold start, made absolute. The launch adds it to the END of the session's PATH, so a bare `clave` in a hook resolves however the session was launched (2026-10-13, FOOTGUNS). For a release install it is the **launcher**'s folder, `~/.local/share/clave/bin`; for a sandbox it is `<checkout>/target/release`; for a cargo-dist install it is `$CARGO_HOME/bin`. Not the **launcher**, which is one file, and not the shim folder, which the sandbox launch puts FIRST. |
 | **versioned copy** | `<data>/bin/clave-vX.Y.Z` — the immutable per-cut CLI that keybinds, layouts and hooks bake. Typed by nobody. |
 | **dev binary** | `~/.cargo/bin/clave-dev` — the working-tree build from `just dev-install` (#43b). It shares a name with neither of the above; that is the point. |
 | **sandbox** | The isolated dev environment and its zellij session. The only place an agent may hot-reload. |
