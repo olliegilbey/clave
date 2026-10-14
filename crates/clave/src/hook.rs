@@ -166,30 +166,60 @@ fn notice(payload: &HookPayload) -> Notice {
     }
 }
 
-/// Harness-injected prefixes that must NEVER be treated as user intent for
-/// labelling (issue #17, observed live 2026-07-21): resuming a session that
-/// died with a pending background task makes Claude Code auto-fire a turn
-/// whose "prompt" is an orphaned `<task-notification>` tag, not anything the
-/// user typed. Because earned labels stick (§6.4: no self-heal), letting one
-/// through once bakes it permanently. This list is expected to grow as more
-/// injected shapes surface — keep it one named const so every check-site
-/// stays in sync. Note: issue #24's rename tier (extracting a `customTitle`
-/// for user-driven renames) sits ABOVE this guard and is separate — this
-/// const only prevents MIS-earning, it adds no rename affordance.
-const HARNESS_INJECTED_PREFIXES: &[&str] = &[
+/// Turns the agent CLI submits on its own: nobody typed them, so they move
+/// the row to Working but are not a commitment (no `last_interacted`, no
+/// ordinal, no frecency). Read from Claude Code 2.1.299: the task-notification
+/// and loop-tick turns, the peer, coordinator and observer wrappers (one
+/// module, which also defines the `<cross-session-message>` and
+/// `<teammate-message>` tags), and the bound-conversation activity lines.
+/// Measured over the local transcripts 2026-10-14: 1262 `<task-notification`
+/// and 1127 peer turns against 1901 typed ones, each with its prefix at the
+/// start. The hook payload carries no prompt source (the builder sends none),
+/// so the text is the only witness.
+///
+/// The hook's `prompt` is the text the turn's user message is built from
+/// (the same `prompt.submit` input), so these match the hook as they match
+/// the transcript. A turn whose text starts with none of these counts as
+/// typed: a queued message the human typed carries no prefix, and it IS a
+/// commitment. Known gap: a scheduled prompt (`/loop`, a cron) carries the
+/// human's own words, so it counts as typed.
+const HARNESS_TURN_PREFIXES: &[&str] = &[
     "<task-notification",
     "<system-reminder",
-    "<local-command-caveat",
-    "<command-name",
+    "<cross-session-message",
+    "<teammate-message",
+    "Another Claude session sent a message",
+    "A peer session sent a message",
+    "The coordinator sent a message",
+    "Your background observer (",
+    "Activity in the bound conversation",
+    "Activity was observed in the bound conversation",
+    "# Autonomous loop tick",
+    "# Autonomous loop check",
 ];
 
-/// True if `text`'s trimmed start matches a harness-injected tag (#17). We
-/// check the START, not a substring search, and we never try to strip the
-/// tag and use what follows — an injected body is harness text end to end,
-/// not user intent with a prefix to peel off.
+/// True if `text`'s trimmed start is a harness turn. The START, never a
+/// substring: a typed prompt may quote one.
+pub(crate) fn is_harness_turn(text: &str) -> bool {
+    let t = text.trim_start();
+    HARNESS_TURN_PREFIXES.iter().any(|p| t.starts_with(p))
+}
+
+/// Wrappers around text the human DID type (a slash command, a local
+/// command's output): a commitment, but never words to earn a label from.
+const TYPED_WRAPPER_PREFIXES: &[&str] = &["<local-command-caveat", "<command-name"];
+
+/// True if `text` must NEVER be treated as user intent for labelling (issue
+/// #17, observed live 2026-07-21): resuming a session that died with a
+/// pending background task makes Claude Code auto-fire a turn whose "prompt"
+/// is an orphaned `<task-notification>` tag. Because earned labels stick
+/// (§6.4: no self-heal), letting one through once bakes it permanently. We
+/// check the START, and we never strip the tag to use what follows: an
+/// injected body is harness text end to end. Issue #24's rename tier sits
+/// ABOVE this guard; this only prevents MIS-earning.
 fn is_harness_injected(text: &str) -> bool {
     let t = text.trim_start();
-    HARNESS_INJECTED_PREFIXES.iter().any(|p| t.starts_with(p))
+    is_harness_turn(t) || TYPED_WRAPPER_PREFIXES.iter().any(|p| t.starts_with(p))
 }
 
 /// First 4 words, hard cap 32 chars — enough to recognise, short enough for
@@ -1389,10 +1419,22 @@ pub fn apply_hook_event(
         return false; // raced a prune — fine
     };
     let mut changed = false;
+    let was = rec.status;
     if let Some(next) = status_for_event(event, payload, rec.status) {
         changed |= rec.status != next;
         rec.status = next;
     }
+    // The turn clock. A prompt that starts a turn starts it, typed or not:
+    // the spinner counts the work, whoever asked for it. A block inside the
+    // turn keeps it, so the answer resumes the same count. Every other status
+    // ends the turn, and a zero renders blank.
+    let turn_started = match rec.status {
+        Status::Working if event == "UserPromptSubmit" && was != Status::Working => now,
+        Status::Working | Status::NeedsYou => rec.turn_started,
+        _ => 0,
+    };
+    changed |= rec.turn_started != turn_started;
+    rec.turn_started = turn_started;
     // The card's `wants` cell (lock §4.7). AFTER the transition, never before:
     // the gate reads the status this event just produced, so the ask and the
     // flag it explains can never disagree by one event.
@@ -1466,11 +1508,15 @@ pub fn apply_hook_event(
     // (15k tokens at the default), which is a bug shipped early rather than a
     // bug avoided. (CodeRabbit and the spec review agreed here, #147.)
     changed |= level_moved || rec.context_tokens != tokens_before;
-    // §6.6 / S1 / #39: a PROMPT is the ONLY event that reorders. Stop,
+    // §6.6 / S1 / #39: a TYPED prompt is the ONLY event that reorders. Stop,
     // StopFailure, Notification, PostToolBatch and SessionEnd change the
     // STATUS and nothing else — "claude finishing should not move it up"
-    // (maintainer ruling, 2026-07-22).
-    let commitment = event == "UserPromptSubmit";
+    // (maintainer ruling, 2026-07-22). A harness turn is the agent CLI
+    // talking to itself: measured 2026-10-14 on the live fleet, 32 of 40
+    // turn-starting prompts were harness turns, and each one ranked its row
+    // above the rows the human was working in.
+    let commitment =
+        event == "UserPromptSubmit" && !payload.prompt.as_deref().is_some_and(is_harness_turn);
     let mut commit_tab = None;
     if commitment {
         rec.last_interacted = now; // wall clock: `clave ls`, picker, eager_row
@@ -2359,6 +2405,7 @@ mod tests {
             label: "x · main".into(),
             status: Status::Idle,
             last_interacted: 0,
+            turn_started: 0,
             commit_ord: 0,
             last_visited: 0,
             worktree: None,
@@ -2695,6 +2742,112 @@ mod tests {
                 "the planted file must never be accepted"
             );
         }
+    }
+
+    /// A harness turn works the row and commits nothing. Measured 2026-10-14
+    /// on the live fleet: 32 of 40 turn-starting prompts were the agent CLI
+    /// talking to itself, and each one ranked its row and stamped "you last
+    /// spoke" as if the human had typed.
+    #[test]
+    fn a_harness_turn_works_the_row_but_commits_nothing() {
+        let mut s = Store::default();
+        let mut r = rec("u1");
+        r.status = Status::Done;
+        r.tab_id = Some(4);
+        r.last_interacted = 1000;
+        s.agents.insert("u1".into(), r);
+        let say = |text: &str| HookPayload {
+            session_id: Some("u1".into()),
+            prompt: Some(text.into()),
+            ..Default::default()
+        };
+        let peer = say("Another Claude session sent a message:\n<cross-session-message>");
+        let ups = "UserPromptSubmit";
+
+        // On a finished row it starts a turn: Working, and the clock runs.
+        assert!(apply_hook_event(&mut s, "u1", ups, &peer, None, 2000, true));
+        let r = &s.agents["u1"];
+        assert_eq!((r.status, r.turn_started), (Status::Working, 2000));
+        assert_eq!(r.last_interacted, 1000, "nobody typed");
+        assert_eq!(r.commit_ord, 0, "no ordinal");
+        assert!(r.buckets.is_empty(), "no frecency");
+        assert!(s.tab_order.is_empty() && s.tab_buckets.is_empty());
+        assert!(s.tab_touched.is_empty());
+
+        // On a working row it changes nothing, so it pushes nothing. Every
+        // prefix, padded the way the harness pads.
+        for prefix in HARNESS_TURN_PREFIXES {
+            let seq = s.seq;
+            let text = format!("  \n{prefix} body");
+            assert!(
+                !apply_hook_event(&mut s, "u1", ups, &say(&text), None, 2100, true),
+                "{prefix}"
+            );
+            assert_eq!(s.seq, seq, "{prefix}");
+        }
+        assert_eq!(s.agents["u1"].turn_started, 2000, "the turn goes on");
+
+        // A typed prompt on the same working row IS a commitment, and it
+        // does not restart the turn it joins (a queued message).
+        assert!(apply_hook_event(
+            &mut s,
+            "u1",
+            ups,
+            &say("also fix the docs"),
+            None,
+            2200,
+            true
+        ));
+        let r = &s.agents["u1"];
+        assert_eq!((r.last_interacted, r.turn_started), (2200, 2000));
+        assert_ne!(r.commit_ord, 0);
+        assert_eq!(s.tab_order.get(&4), Some(&r.commit_ord));
+        // A prompt that merely QUOTES a prefix is typed: the rule is the start.
+        let quoting = say("why did <task-notification> fire twice?");
+        let before = s.agents["u1"].commit_ord;
+        apply_hook_event(&mut s, "u1", ups, &quoting, None, 2300, true);
+        assert!(s.agents["u1"].commit_ord > before);
+    }
+
+    /// The turn clock lives exactly as long as the turn: a prompt that starts
+    /// one starts it, a block inside it keeps it, every ending zeroes it.
+    #[test]
+    fn the_turn_clock_lives_exactly_as_long_as_the_turn() {
+        let mut s = Store::default();
+        s.agents.insert("u1".into(), rec("u1"));
+        let of_kind = |kind: Option<&str>| HookPayload {
+            session_id: Some("u1".into()),
+            notification_type: kind.map(str::to_string),
+            ..Default::default()
+        };
+        let (p, ask, nag) = (
+            of_kind(None),
+            of_kind(Some("permission_prompt")),
+            of_kind(Some("idle_prompt")),
+        );
+        let mut at = |event, payload: &HookPayload, now| {
+            apply_hook_event(&mut s, "u1", event, payload, None, now, true);
+            (s.agents["u1"].status, s.agents["u1"].turn_started)
+        };
+        use Status::*;
+        assert_eq!(at("UserPromptSubmit", &p, 100), (Working, 100));
+        assert_eq!(
+            at("Notification", &ask, 110),
+            (NeedsYou, 100),
+            "a block keeps it"
+        );
+        assert_eq!(
+            at("PostToolBatch", &p, 120),
+            (Working, 100),
+            "the answer resumes it"
+        );
+        assert_eq!(at("Stop", &p, 130), (Done, 0));
+        assert_eq!(at("UserPromptSubmit", &p, 300), (Working, 300));
+        assert_eq!(at("StopFailure", &p, 310), (Failed, 0));
+        assert_eq!(at("UserPromptSubmit", &p, 400), (Working, 400));
+        assert_eq!(at("Notification", &nag, 460), (Idle, 0), "a missed Stop");
+        assert_eq!(at("UserPromptSubmit", &p, 500), (Working, 500));
+        assert_eq!(at("SessionEnd", &p, 510), (Idle, 0));
     }
 
     #[test]
@@ -4170,7 +4323,7 @@ mod tests {
         // a prefix that guards only one earn path is a latent re-leak — so
         // table-drive EVERY prefix through BOTH paths, with leading whitespace
         // (the guard trims start, matching how the harness pads injections).
-        for prefix in HARNESS_INJECTED_PREFIXES {
+        for prefix in HARNESS_TURN_PREFIXES.iter().chain(TYPED_WRAPPER_PREFIXES) {
             let injected_text = format!("  \n\t{prefix}> payload we must never earn");
             // First-prompt path: the upgrade is skipped outright.
             let mut r = rec("u1");
@@ -4280,7 +4433,7 @@ mod tests {
     fn harness_injected_summary_writes_neither_field() {
         // #17's rule is about the SOURCE, not about which field it lands in:
         // an injected tag must never earn the label, the summary, or the title.
-        for prefix in HARNESS_INJECTED_PREFIXES {
+        for prefix in HARNESS_TURN_PREFIXES.iter().chain(TYPED_WRAPPER_PREFIXES) {
             let injected = format!("  \n\t{prefix}> payload we must never earn");
             let mut r = rec("u1");
             let p = HookPayload::default();

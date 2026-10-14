@@ -974,6 +974,7 @@ fn agent_record(
         label: format!("{scenario_name}-{} · seeded", a.slug),
         status: a.status,
         last_interacted: now.saturating_sub(a.ago_secs),
+        turn_started: 0,
         // Deliberately unminted (S1). Seeding runs BEFORE any session exists,
         // and `launch_session` calls `clear_session_order` on the way into a
         // create — whose backfill seeds ordinals from `last_interacted`, oldest

@@ -383,6 +383,13 @@ pub struct Agent {
     /// NOT the bar's sort key (S1/#39: whole seconds tie, and ties resolved
     /// on tab position, so the wrong row won).
     pub last_interacted: u64,
+    /// unix seconds; when the turn in flight began, `0` when none is. The
+    /// TURN CLOCK, and a different instant from `last_interacted`: a harness
+    /// turn (a task notification, a peer message) starts a turn but is no
+    /// typed prompt. The bar reads it only on a thinking row; `0` renders
+    /// blank. `default` keeps pre-field payloads parseable.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub turn_started: u64,
     /// §6.6 commitment ORDINAL: the store `seq` of this row's last user
     /// commitment (a prompt, its creation, or the ordinal inherited from its
     /// tab when that tab closed). Minted under the store flock, so it is a
@@ -1241,6 +1248,7 @@ mod tests {
             label: "x · main".into(),
             status: Status::Idle,
             last_interacted: 5,
+            turn_started: 0,
             commit_ord: 0,
             last_visited: 6,
             tab_id: None,
@@ -1361,6 +1369,7 @@ mod tests {
             label: "x · main".into(),
             status: Status::Idle,
             last_interacted: 0,
+            turn_started: 0,
             commit_ord: 0,
             last_visited: 0,
             tab_id: None,
@@ -1404,6 +1413,7 @@ mod tests {
                 label: "clave · main · hello".into(),
                 status: Status::Working,
                 last_interacted: 1000,
+                turn_started: 0,
                 commit_ord: 0,
                 last_visited: 0,
                 tab_id: None,
@@ -1445,6 +1455,7 @@ mod tests {
             label: "x · main".into(),
             status: Status::Idle,
             last_interacted: 0,
+            turn_started: 0,
             commit_ord: 0,
             last_visited: 0,
             tab_id: Some(4),
@@ -1488,6 +1499,7 @@ mod tests {
             label: "x · main".into(),
             status: Status::Idle,
             last_interacted: 0,
+            turn_started: 0,
             commit_ord: 0,
             last_visited: 0,
             tab_id: None,
@@ -1533,6 +1545,7 @@ mod tests {
             label: "x \u{00b7} main".into(),
             status: Status::Idle,
             last_interacted: 0,
+            turn_started: 0,
             commit_ord: 0,
             last_visited: 0,
             tab_id: None,
@@ -1592,6 +1605,7 @@ mod tests {
             label: "x \u{00b7} trunk".into(),
             status: Status::Idle,
             last_interacted: 0,
+            turn_started: 0,
             commit_ord: 0,
             last_visited: 0,
             tab_id: None,
@@ -1680,6 +1694,7 @@ mod tests {
             label: "x".into(),
             status: Status::Idle,
             last_interacted: 0,
+            turn_started: 0,
             commit_ord: 7,
             last_visited: 0,
             tab_id: None,

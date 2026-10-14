@@ -94,6 +94,11 @@ pub struct AgentRecord {
     /// bar's sort key any more (S1/#39). Wire twin of
     /// `clave_types::Agent::last_interacted`, which carries the rationale.
     pub last_interacted: u64,
+    /// When the turn in flight began; `0` when none is. Wire twin of
+    /// `clave_types::Agent::turn_started`. Written by `hook::apply_hook_event`
+    /// and zeroed by every writer that ends a turn outside a hook.
+    #[serde(default)]
+    pub turn_started: u64,
     /// The commitment ORDINAL that orders this row (S1/#39). Wire twin of
     /// `clave_types::Agent::commit_ord`. Minted by [`Store::mint_ord`] under the
     /// flock, so it is a total order with no clock and no ties; 0 = never
@@ -545,6 +550,7 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
                 label: r.label.clone(),
                 status: r.status,
                 last_interacted: r.last_interacted,
+                turn_started: r.turn_started,
                 commit_ord: r.commit_ord,
                 last_visited: r.last_visited,
                 tab_id: r.tab_id,
@@ -1131,6 +1137,8 @@ pub fn clear_session_order(paths: &StorePaths) -> Result<()> {
         for r in s.agents.values_mut() {
             if matches!(r.status, Status::Working | Status::NeedsYou) {
                 r.status = Status::Idle;
+                // The turn died with the process, so its clock goes too.
+                r.turn_started = 0;
                 changed = true;
             }
         }
@@ -1243,6 +1251,7 @@ mod tests {
             label: "x · main".into(),
             status: Status::Idle,
             last_interacted: 0,
+            turn_started: 0,
             commit_ord: 0,
             last_visited: 0,
             worktree: None,
@@ -2267,6 +2276,7 @@ mod tests {
             ] {
                 let mut a = rec(uuid);
                 a.status = st;
+                a.turn_started = 500;
                 s.agents.insert(uuid.into(), a);
             }
         })
@@ -2280,6 +2290,10 @@ mod tests {
                 s.agents[uuid].status,
                 Status::Idle,
                 "{uuid} must make no claim about a process the new session has not started"
+            );
+            assert_eq!(
+                s.agents[uuid].turn_started, 0,
+                "{uuid}: the turn died with it"
             );
         }
         assert_eq!(

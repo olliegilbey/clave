@@ -824,6 +824,8 @@ pub fn merge_resume_record(existing: Option<&AgentRecord>, fresh: AgentRecord) -
             // then print the PREVIOUS conversation's ask as this one's
             // (CodeRabbit, 2026-09-13).
             wants: None,
+            // The turn clock belongs to a turn in flight, and `Idle` has none.
+            turn_started: 0,
             // Fill, never erase (2026-09-14). A resume MEASURES the worktree
             // again, and that is the only heal for every row written while
             // the field was set solely by `clave add --worktree`. A `None`
@@ -885,6 +887,7 @@ pub(crate) fn mint_record(s: &mut Store, inputs: FreshRecordInputs) -> AgentReco
         label: inputs.label.to_string(),
         status: clave_types::Status::Idle,
         last_interacted: now_unix(),
+        turn_started: 0,
         commit_ord: ord,
         last_visited: 0,
         worktree: inputs.worktree,
@@ -1610,6 +1613,7 @@ mod tests {
             label: "x · main".into(),
             status: Status::Idle,
             last_interacted: 0,
+            turn_started: 0,
             commit_ord: 0,
             last_visited: 0,
             worktree: None,
@@ -2190,6 +2194,7 @@ mod tests {
         row.tab_id = Some(3); // the DEAD tab that hosted it last time
         row.pane_id = Some(9); // and the dead pane inside it (#178)
         row.wants = Some("Bash(rm -rf)".into()); // what it asked LAST time
+        row.turn_started = 70; // the turn that died with the pane
         let fresh = rec("u-wt"); // what the weave derives from the PICKED dir
         let merged = merge_resume_record(Some(&row), fresh.clone());
         assert_eq!(merged.status, Status::Idle);
@@ -2215,6 +2220,9 @@ mod tests {
         // a permission prompt carries no message, and the card prints the
         // last conversation's ask beside this one's work.
         assert_eq!(merged.wants, None);
+        // Kept, an Idle row would carry a dead turn's start, and the next
+        // turn that keeps the clock would count from it.
+        assert_eq!(merged.turn_started, 0);
         assert_eq!(merged.cwd, row.cwd); // worktree cwd NOT relocated
         assert_eq!(merged.worktree, row.worktree);
         assert_eq!(merged.label, row.label); // earned label survives
