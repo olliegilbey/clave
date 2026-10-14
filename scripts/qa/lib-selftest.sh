@@ -372,5 +372,39 @@ want "an arrival that lifted the row to the top fails" "$?" "1"
 (arrival_checks "u-eager" "$LEFT_LIVE" "$(relaunch_status '["u-eager","u-a"]' "touched" '["u-b"]')" >/dev/null 2>&1)
 want "an arrival whose tab took a birth touch fails" "$?" "1"
 
+# --- the launcher's PATH (phase 0) -----------------------------------------
+# The launch must add its own folder to the END of the PATH it hands zellij,
+# or a bare `clave` in a hook is not found in a session launched over ssh
+# (2026-10-13). The drive reads the server's PATH once per run, so the verdict
+# runs here against each wrong shape and must go red.
+LDIR="/home/u/code/clave/target/release"
+(launcher_path_checks "/usr/bin:/bin:$LDIR" "$LDIR" >/dev/null 2>&1)
+want "a PATH that ends with the launcher folder passes" "$?" "0"
+(launcher_path_checks "/usr/bin:$LDIR/" "$LDIR" >/dev/null 2>&1)
+want "a trailing slash is the same folder" "$?" "0"
+(launcher_path_checks "/usr/bin:/bin" "$LDIR" >/dev/null 2>&1)
+want "a PATH without the launcher folder fails" "$?" "1"
+(launcher_path_checks "/usr/bin:${LDIR}-old" "$LDIR" >/dev/null 2>&1)
+want "a longer folder with the same start is not the folder" "$?" "1"
+# What macOS hands over if the launch does not make `current_exe` absolute:
+# `just launch` types `./target/release/clave`.
+(launcher_path_checks "/usr/bin:./target/release" "$LDIR" >/dev/null 2>&1)
+want "a relative launcher folder fails" "$?" "1"
+(launcher_path_checks "/usr/bin:$LDIR" "" >/dev/null 2>&1)
+want "an empty expected folder is refused, not passed" "$?" "1"
+UNREAD="$(launcher_path_checks "" "$LDIR" 2>&1)"
+want "an unreadable server PATH does not stop the run" "$?" "0"
+want "and says UNMEASURED, with no verdict on the folder" \
+  "$(grep -c 'UNMEASURED' <<<"$UNREAD")/$(grep -c "launcher's own folder" <<<"$UNREAD")" "1/0"
+
+# macOS reads the env from `ps -E`, one line, variables split by spaces.
+PS_LINE="/opt/homebrew/bin/zellij --server /var/folders/x/T/zellij-501/contract_version_1/clave-test-wt HOME=/Users/u PATH=/usr/bin:/Users/u/Library/Application Support/JetBrains/Toolbox/scripts:$LDIR MANPATH=/usr/share/man SHELL=/bin/zsh"
+want "path_from_ps_env keeps an entry with a space and stops at the next variable" \
+  "$(path_from_ps_env <<<"$PS_LINE")" "/usr/bin:/Users/u/Library/Application Support/JetBrains/Toolbox/scripts:$LDIR"
+want "path_from_ps_env reads a PATH that is the last variable" \
+  "$(path_from_ps_env <<<"/bin/zellij --server /s HOME=/h PATH=/a:/b")" "/a:/b"
+want "path_from_ps_env reads nothing when there is no PATH" \
+  "$(path_from_ps_env <<<"/bin/zellij --server /s HOME=/h MANPATH=/m")" ""
+
 printf '\n%s\n' "== qa/lib selftest: $FAILURES failure(s) =="
 [[ "$FAILURES" -eq 0 ]]

@@ -525,6 +525,20 @@ for CAND in "${OTHER_CLAVES[@]+"${OTHER_CLAVES[@]}"}"; do
   fi
 done
 
+# The launcher's own folder on the PATH the sandbox server was born with
+# (2026-10-14). The launch adds it at the END (setup.rs `path_with_dir`), so a
+# bare `clave` in a hook resolves in any session, however it was launched:
+# without it, every hook in the live session failed `clave: not found` for 19
+# hours (FOOTGUNS, "A sandbox stage rewrites the LIVE session's hooks"). The
+# sandbox runs the same launch code, and `just launch` runs
+# `./target/release/clave` from this checkout (justfile `launch`), so that
+# folder, made absolute, is the one to look for. That relative spelling is
+# also the macOS trap: there `current_exe` is the path as typed. A launching
+# shell that already had this folder on its PATH passes without the fix; no
+# reading from here can tell those apart.
+LAUNCHER_DIR="$(cd "$ROOT/target/release" 2>/dev/null && pwd -P)"
+launcher_path_checks "$(sandbox_server_path "$SESSION")" "$LAUNCHER_DIR"
+
 # config.kdl <-> layout.kdl identity pair (the #44 self-check `just sandbox`
 # already runs at stage time — re-asserted here because config coherence can
 # rot between staging and this run, e.g. a `clave setup` run by hand).
