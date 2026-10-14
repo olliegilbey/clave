@@ -2075,6 +2075,33 @@ fn adoption_inputs(raw_cwd: &str, claude_dir: &Path, session: &str) -> Option<Ad
     })
 }
 
+/// Whether this event would leave the store exactly as it is: both halves of
+/// the hook write, run on a lock-free copy and compared whole. The whole
+/// store, not the `changed` bools: those gate the PUSH, and a write can
+/// persist a field that pushes nothing (`live_session`, `metered_at`). Valid
+/// only for events that read no tail, because the copy is handed none.
+fn changes_nothing(
+    store: &Store,
+    uuid: &str,
+    event: &str,
+    payload: &HookPayload,
+    pane: Option<u32>,
+    now: u64,
+    own_claude: bool,
+) -> bool {
+    let mut probe = store.clone();
+    apply_hook_event(&mut probe, uuid, event, payload, None, now, own_claude);
+    apply_hook_pane(
+        &mut probe,
+        uuid,
+        event,
+        pane,
+        payload.reason.as_deref(),
+        now,
+    );
+    probe == *store
+}
+
 /// The whole hook flow. Errors bubble up ONLY so main can log them to
 /// stderr — main exits 0 no matter what (Global Constraint).
 pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
@@ -2114,6 +2141,28 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
     } else {
         None
     };
+    let now = now_unix();
+    let own_claude = env_uuid.as_deref() == Some(uuid.as_str());
+    // The second fast path, the `statusline::meter` pattern: an event that
+    // moves nothing exits before the lock: a repeat Notification, or a
+    // SessionStart from a pane the row holds already. Stop and
+    // UserPromptSubmit read a tail under the lock,
+    // so the probe cannot see what they would write; they always go on.
+    let reads_tail = matches!(event, "Stop" | "UserPromptSubmit");
+    if mint.is_none()
+        && !reads_tail
+        && changes_nothing(&store, &uuid, event, &payload, pane, now, own_claude)
+    {
+        // Read-only, as below: a quiet event still owes a stale PR its sync.
+        if store
+            .agents
+            .get(&uuid)
+            .is_some_and(|rec| crate::pr::pr_is_stale(rec, now))
+        {
+            crate::pr::spawn_pr_sync(&uuid);
+        }
+        return Ok(());
+    }
     let (snap, pr_stale) = with_store_mut(&paths, |s| {
         if let Some(m) = &mint {
             // Re-checked under the flock: a racing hook may have minted first,
@@ -2164,27 +2213,20 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
             )
             .and_then(|path| read_tail(&path, SUBAGENT_TAIL_BYTES))
         });
-        let mut changed = apply_hook_event(
-            s,
-            &uuid,
-            event,
-            &payload,
-            tail.as_deref(),
-            now_unix(),
-            env_uuid.as_deref() == Some(uuid.as_str()),
-        );
+        let mut changed =
+            apply_hook_event(s, &uuid, event, &payload, tail.as_deref(), now, own_claude);
         // The pane half (#226): register on any event, revert on SessionEnd —
         // pane-verified, change-gated, and the bar renders from it. A fresh
         // mint always lands here too (row pane None → Some), so an adoption
         // pushes even when the event itself moved nothing.
-        changed |= apply_hook_pane(s, &uuid, event, pane, payload.reason.as_deref(), now_unix());
+        changed |= apply_hook_pane(s, &uuid, event, pane, payload.reason.as_deref(), now);
         // Read-only (#232): comparing two integers/strings against the row
         // this same write just touched. NOT a network call — that discipline
         // is the whole point (§6.5) — just the decision whether one is owed.
         let pr_stale = s
             .agents
             .get(&uuid)
-            .is_some_and(|rec| crate::pr::pr_is_stale(rec, now_unix()));
+            .is_some_and(|rec| crate::pr::pr_is_stale(rec, now));
         (changed.then(|| snapshot_from(s)), pr_stale)
     })?;
     if let Some(snap) = snap {
@@ -2708,6 +2750,45 @@ mod tests {
             false,
         );
         assert_eq!(live(&s).as_deref(), Some("rotated"));
+    }
+
+    /// The probe that lets a quiet event skip the lock. It may say "nothing"
+    /// only when the locked write would persist nothing, and that includes a
+    /// field that pushes no pixel: a live-id write must still take the lock,
+    /// or a rotation is lost and the next release resumes the old file.
+    #[test]
+    fn only_an_event_that_moves_nothing_skips_the_lock() {
+        let mut s = Store::default();
+        let mut r = rec("u");
+        r.status = Status::Working;
+        r.pane_id = Some(4);
+        s.agents.insert("u".into(), r);
+        let said = |id: &str, msg: Option<&str>| HookPayload {
+            session_id: Some(id.into()),
+            message: msg.map(str::to_string),
+            ..Default::default()
+        };
+        let quiet =
+            |event, p: &HookPayload, pane| changes_nothing(&s, "u", event, p, pane, 100, true);
+        assert!(
+            quiet("SessionStart", &said("u", None), Some(4)),
+            "the pane it holds"
+        );
+        assert!(quiet("Notification", &said("u", Some("auth ok")), None));
+        let ask = said("u", Some("Claude needs your permission to use Bash"));
+        assert!(!quiet("Notification", &ask, None), "a status move");
+        assert!(
+            !quiet("SessionStart", &said("u", None), Some(5)),
+            "a new pane"
+        );
+        assert!(
+            !quiet("SessionStart", &said("rotated", None), Some(4)),
+            "a live-id write"
+        );
+        assert!(
+            !quiet("SessionEnd", &said("u", None), None),
+            "Working -> Idle"
+        );
     }
 
     /// #97, the bug this exists to prevent recurring.
