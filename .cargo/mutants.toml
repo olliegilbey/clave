@@ -94,4 +94,12 @@ exclude_re = [
     # carries the empty-is-not-unset rule. The seam itself is a live check —
     # a row's cells moving in the sandbox bar after a driven hook.
     "push_snapshot",
+    # Writes the process-wide `PATH` for `dev launch`, then the caller execs
+    # zellij. A test that could see the write must set `PATH` itself, and that
+    # is the race `smart_zone` forbids. Measured on PR #282: with its body
+    # replaced by `()`, every workspace test passes. The rule it applies is
+    # split out and mutated: `path_with_shim_first` (shim first, once; an
+    # unset PATH stays unset). The seam is a live check: drive phase 0b reads
+    # the sandbox server's PATH and asserts the shim is the first entry.
+    "shim_first_on_path",
 ]

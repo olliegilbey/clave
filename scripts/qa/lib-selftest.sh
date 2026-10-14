@@ -626,5 +626,55 @@ want "a 0.5.5 bar's untagged twin is not this build's" \
 want "and the old text still matches the fragment, for the readers that want it" \
   "$(ZLOG="$REFUSED" zlog_from "$COLLIDE_MARK" | grep -cF "$WHOLE_TWIN")" "1"
 
+# --- the launch folder on the server's PATH (phase 0b) ---------------------
+# A launch must add its launch folder to the PATH it hands zellij, or a bare
+# `clave` in a hook is not found in a session launched over ssh (2026-10-13).
+# The sandbox launch must also put the shim first. The drive reads the
+# server's PATH once per run, so the verdict runs here against each wrong
+# shape and must go red.
+LDIR="/home/u/code/clave/target/release"
+SHIM="/home/u/.local/state/clave-dev-wt/shim"
+GOOD="$SHIM:/usr/bin:/bin:$LDIR"
+(launch_path_checks "4242" "$GOOD" "$LDIR" "$SHIM" >/dev/null 2>&1)
+want "a PATH with the shim first that carries the launch folder passes" "$?" "0"
+(launch_path_checks "4242" "$SHIM/:/usr/bin:$LDIR/" "$LDIR" "$SHIM" >/dev/null 2>&1)
+want "a trailing slash is the same folder" "$?" "0"
+(launch_path_checks "4242" "$SHIM:/usr/bin:/bin" "$LDIR" "$SHIM" >/dev/null 2>&1)
+want "a PATH without the launch folder fails" "$?" "1"
+(launch_path_checks "4242" "$SHIM:/usr/bin:${LDIR}-old" "$LDIR" "$SHIM" >/dev/null 2>&1)
+want "a longer folder with the same start is not the folder" "$?" "1"
+(launch_path_checks "4242" "/usr/bin:$SHIM:$LDIR" "$LDIR" "$SHIM" >/dev/null 2>&1)
+want "a shim that is on the PATH but not first fails" "$?" "1"
+# Each PATH below holds an EMPTY entry, so a verdict without its guard would
+# match an empty expectation against it and pass.
+(launch_path_checks "4242" "$SHIM:/usr/bin::$LDIR" "" "$SHIM" >/dev/null 2>&1)
+want "an empty expected launch folder is refused, not passed" "$?" "1"
+(launch_path_checks "4242" ":/usr/bin:$LDIR" "$LDIR" "" >/dev/null 2>&1)
+want "an empty expected shim folder is refused, not passed" "$?" "1"
+# The session is live before this phase runs, so the reader must find ONE
+# server. None, or two, is a broken reader.
+(launch_path_checks "" "$GOOD" "$LDIR" "$SHIM" >/dev/null 2>&1)
+want "no server process fails" "$?" "1"
+(launch_path_checks "$(printf '4242\n4343')" "$GOOD" "$LDIR" "$SHIM" >/dev/null 2>&1)
+want "two server processes fail" "$?" "1"
+# An env this machine cannot read is neither a pass nor a failure. The phase
+# is NOT RUN, so the summary and the exit code both say the run is not green.
+UNREAD="$(launch_path_checks "4242" "" "$LDIR" "$SHIM" 2>&1)"
+want "an unreadable server env does not stop the run" "$?" "0"
+want "and gives no verdict on either folder" \
+  "$(grep -c 'starts with the sandbox shim\|carries the launch folder' <<<"$UNREAD")" "0"
+phase "launch-path"
+launch_path_checks "4242" "" "$LDIR" "$SHIM" >/dev/null 2>&1
+want "and marks its phase NOT RUN" "${PHASE_RESULTS[$((${#PHASE_RESULTS[@]} - 1))]}" "NOT RUN"
+
+# macOS reads the env from `ps -E`, one line, variables split by spaces.
+PS_LINE="/opt/homebrew/bin/zellij --server /var/folders/x/T/zellij-501/contract_version_1/clave-test-wt HOME=/Users/u PATH=$SHIM:/usr/bin:/Users/u/Library/Application Support/JetBrains/Toolbox/scripts:$LDIR MANPATH=/usr/share/man SHELL=/bin/zsh"
+want "path_from_ps_env keeps an entry with a space and stops at the next variable" \
+  "$(path_from_ps_env <<<"$PS_LINE")" "$SHIM:/usr/bin:/Users/u/Library/Application Support/JetBrains/Toolbox/scripts:$LDIR"
+want "path_from_ps_env reads a PATH that is the last variable" \
+  "$(path_from_ps_env <<<"/bin/zellij --server /s HOME=/h PATH=/a:/b")" "/a:/b"
+want "path_from_ps_env reads nothing when there is no PATH" \
+  "$(path_from_ps_env <<<"/bin/zellij --server /s HOME=/h MANPATH=/m")" ""
+
 printf '\n%s\n' "== qa/lib selftest: $FAILURES failure(s) =="
 [[ "$FAILURES" -eq 0 ]]

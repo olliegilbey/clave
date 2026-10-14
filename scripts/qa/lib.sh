@@ -600,6 +600,76 @@ refusal_checks() {
   check "the refusal wrote nothing (store seq flat)" "$after" "$before"
 }
 
+# ---------------------------------------------------------------------------
+# The launch folder on the server's PATH (phase 0b).
+# ---------------------------------------------------------------------------
+# A launch adds its LAUNCH FOLDER, the folder of the clave that ran it, to the
+# END of the PATH it hands zellij (setup.rs `path_with_dir`). The server, its
+# panes, the agents and their hooks all take that PATH, so a bare `clave` in a
+# hook resolves however the session was launched. Without it, every hook in a
+# session launched over an ssh command failed `clave: not found` for 19 hours
+# (2026-10-13, FOOTGUNS). The sandbox launch also puts the shim FIRST (dev.rs
+# `shim_first_on_path`), so one reading shows both ends of the PATH.
+
+# The PATH value from one `ps -E -ww -o command=` line, for macOS, which has
+# no /proc. The env follows the argv, one space between variables, and a
+# PATH entry can hold a space (`Application Support`). So cut at the next
+# ` NAME=`, not at the next space. ` PATH=` needs the space before it, so
+# `MANPATH=` is not PATH.
+path_from_ps_env() {
+  sed -n 's/.* PATH=//p' | sed 's/ [A-Za-z_][A-Za-z0-9_]*=.*//'
+}
+
+# The pids of this sandbox's zellij server, one per line. The needle is the
+# server's argv, `zellij --server <socket dir>/<session>`, ended at the
+# session name so `clave-test` cannot match the server of `clave-test-<key>`.
+# ct.sh ends its match the same way, on the whole socket path. This reads the
+# process table and touches no session.
+sandbox_server_pids() {
+  pgrep -f "zellij --server .*/${1}( |\$)" 2>/dev/null || true
+}
+
+# The PATH one process started with, or nothing when this machine cannot read
+# its env: /proc on Linux, `ps -E` on macOS.
+server_env_path() {
+  if [[ -r "/proc/$1/environ" ]]; then
+    tr '\0' '\n' <"/proc/$1/environ" | sed -n 's/^PATH=//p'
+  else
+    ps -E -ww -o command= -p "$1" 2>/dev/null | path_from_ps_env
+  fi
+}
+
+# launch_path_checks <server pids> <server PATH> <launch folder> <shim folder>
+#
+# The phase runs only after the session is live: the drive refuses to start
+# otherwise, and every ct.sh call proves a server holds the socket. So no
+# server, or two, is a broken READER, and it fails. The launch folder must be
+# an ENTRY of the PATH, not a substring, so `…/release-old` does not pass for
+# `…/release`. Membership, not position: a PATH that has the folder already
+# keeps it where it was. The shim must be the FIRST entry. An env this
+# machine cannot read is not a pass: the phase is NOT RUN, so the run is not
+# green (`exit_on_incomplete`).
+launch_path_checks() {
+  local pids="$1" path="$2" dir="$3" shim="$4" verdict="absent" entry entries=()
+  check_nonempty "the launch folder to look for" "$dir"
+  check_nonempty "the shim folder to look for" "$shim"
+  measure "zellij server pids for this session" "$(uuid_line "$pids")"
+  check "zellij server processes for this session" "$(uuid_count "$pids")" "1"
+  measure "the sandbox server's PATH" "$path"
+  if [[ -z "$path" ]]; then
+    # Empty is also a server started with NO PATH: a launch leaves an unset
+    # PATH unset (setup.rs `path_with_dir`, dev.rs `path_with_shim_first`).
+    skip_phase 'the server env has no PATH, or this machine cannot read it (no /proc, and ps -E showed none), so the launch-folder seam is UNMEASURED'
+    return 0
+  fi
+  IFS=: read -r -a entries <<<"$path"
+  check "the server's PATH starts with the sandbox shim" "${entries[0]%/}" "${shim%/}"
+  for entry in "${entries[@]}"; do
+    [[ "${entry%/}" == "${dir%/}" ]] && verdict="present"
+  done
+  check "the server's PATH carries the launch folder" "$verdict" "present"
+}
+
 # Guarded list-panes read. Never the bare env-var form (TESTING.md, "the
 # sandbox drive loop" step — a dead/absent session hangs `zellij action`
 # forever; ct.sh bounds it). Returns "[]" and a non-zero status on any

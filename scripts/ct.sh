@@ -145,7 +145,11 @@ SOCKET="${SOCKETS[0]}"
 
 # 2. A stale socket file outlives its server. Require a live server process
 #    holding this exact path, so a leftover socket cannot green the check.
-if ! pgrep -f "zellij --server ${SOCKET}" >/dev/null 2>&1; then
+#    ENDED at the path: a bare substring let a stale `clave-test` socket pass
+#    on the server of `clave-test-<key>` (PR #282 review;
+#    crates/clave/tests/ct_server_match.rs). qa/lib.sh `sandbox_server_pids`
+#    ends its match the same way.
+if ! pgrep -f "zellij --server ${SOCKET}( |\$)" >/dev/null 2>&1; then
   echo "REFUSING: socket exists but no 'zellij --server ${SOCKET}' process is alive." >&2
   echo "That is a stale socket from a dead sandbox — treat it as not running." >&2
   exit 1

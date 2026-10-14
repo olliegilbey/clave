@@ -90,10 +90,11 @@ usage() {
   cat <<EOF
 usage: $0 <scenario>
 
-Drives QA-DRIVE phases 0-7 (preflight, baseline join, bind ladder, tab churn,
-ring walk, collapse burst, card cells, terminal facts, quiescence, slim push,
-isolation witness, relaunch, teardown hand-back) against THIS checkout's per-worktree sandbox
-instance (\`clave dev instance\`). Never launches or kills a zellij session.
+Drives QA-DRIVE phases 0-7 (preflight, launch folder, baseline join, bind
+ladder, tab churn, ring walk, collapse burst, card cells, terminal facts,
+quiescence, slim push, isolation witness, relaunch, teardown hand-back)
+against THIS checkout's per-worktree sandbox instance (\`clave dev
+instance\`). Never launches or kills a zellij session.
 
 Phase 6c asks you to quit the sandbox and launch it again, then reads what
 came back. It prints the commands and waits up to QA_RELAUNCH_WAIT seconds
@@ -635,6 +636,32 @@ if [[ -n "$ORPHANS" ]]; then
   measure "stale pipe forensics (pgrep -fl)" "$(pgrep -fl 'zellij pipe' 2>/dev/null || true)"
 fi
 check "orphan 'zellij pipe' processes (pid in both probes, 2s apart)" "$ORPHANS" ""
+
+# ===========================================================================
+# Phase 0b — the launch folder on the server's PATH
+# ===========================================================================
+# Its own phase, so an env this machine cannot read marks THIS phase NOT RUN
+# and leaves phase 0's verdicts standing (`skip_phase`).
+phase "P0b-launch-path"
+
+# The launch folder on the PATH the sandbox server was born with (2026-10-14).
+# A launch adds it at the END (setup.rs `path_with_dir`), so a bare `clave` in
+# a hook resolves in any session, however it was launched: without it, every
+# hook in the live session failed `clave: not found` for 19 hours (FOOTGUNS,
+# "A sandbox stage rewrites the LIVE session's hooks"). The sandbox runs the
+# same launch code, and `just launch` runs `./target/release/clave` from this
+# checkout (justfile `launch`), so that folder, made absolute, is the one to
+# look for. That relative spelling is also the macOS trap: there
+# `current_exe` is the path as typed. The same reading checks the other end:
+# `dev launch` puts the shim FIRST (dev.rs `shim_first_on_path`). A launching
+# shell that already had the launch folder on its PATH passes without the
+# fix; no reading from here can tell those apart.
+P0B_PIDS="$(sandbox_server_pids "$SESSION")"
+P0B_PATH=""
+[[ "$(uuid_count "$P0B_PIDS")" -eq 1 ]] && P0B_PATH="$(server_env_path "$P0B_PIDS")"
+LAUNCH_DIR="$(cd "$ROOT/target/release" 2>/dev/null && pwd -P)"
+SHIM_DIR="$("$CLAVE_BIN" dev instance --field shim 2>/dev/null || true)"
+launch_path_checks "$P0B_PIDS" "$P0B_PATH" "$LAUNCH_DIR" "$SHIM_DIR"
 
 # ===========================================================================
 # Phase 1 — baseline join
