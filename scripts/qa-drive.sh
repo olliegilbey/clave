@@ -1924,8 +1924,8 @@ measure "phase 5 EOF-twin delta (user-global log, unattributable — forensic on
 # one from the rows it kept, so none asked for the fleet. The verdict lives
 # in qa/lib.sh, where the selftest makes each half go red.
 slim_rebuild_checks "the burst" "$(count_live_tabs)" \
-  "$(instances_logging_since "$P5_SLIM_MARK" "$SLIM_TWIN")" \
-  "$(instance_line_counts_since "$P5_SLIM_MARK" "$HYDRATE_ASK")"
+  "$(build_instances_logging_since "$P5_SLIM_MARK" "$SLIM_TWIN")" \
+  "$(build_line_counts_since "$P5_SLIM_MARK" "$HYDRATE_ASK")"
 
 # --- the width the fleet actually rests at ---------------------------------
 # The bug this branch found and fixed rests the bar at the WRONG WIDTH after
@@ -2425,16 +2425,16 @@ phase "P6a-slim-push"
 slim_host_checks "$(pushed_dormant_tag "$STATE_DIR")" \
   "$(snapshot_dormant_tag "$("$CLAVE_BIN" snapshot 2>/dev/null)")"
 
-slim_seam_checks "the run" "$(instances_logging "$SLIM_TWIN")" \
-  "$(sandbox_line_count_since "$LOGMARK" "$BAD_STATUS")" \
-  "$(sandbox_line_count_since "$LOGMARK" "$RUN_FAILED")" \
+slim_seam_checks "the run" "$(build_instances_logging_since "$LOGMARK" "$SLIM_TWIN")" \
+  "$(build_line_count_since "$LOGMARK" "$BAD_STATUS")" \
+  "$(build_line_count_since "$LOGMARK" "$RUN_FAILED")" \
   "$(instances_born_since "$LOGMARK")" \
-  "$(instance_line_counts_since "$LOGMARK" "$HYDRATE_ASK")" \
-  "$(instance_line_counts_since "$LOGMARK" "$HYDRATE_ANSWER")"
+  "$(build_line_counts_since "$LOGMARK" "$HYDRATE_ASK")" \
+  "$(build_line_counts_since "$LOGMARK" "$HYDRATE_ANSWER")"
 measure "slim pushes the sandbox bars heard over the run (twin lines)" \
-  "$(sandbox_line_count_since "$LOGMARK" "$SLIM_TWIN")"
-measure "whole pushes heard over the run (twin lines; ids collide with the maintainer's fleet, so forensic only)" \
-  "$(sandbox_line_count_since "$LOGMARK" "$WHOLE_TWIN")"
+  "$(build_line_count_since "$LOGMARK" "$SLIM_TWIN")"
+measure "whole pushes the sandbox bars heard over the run (twin lines)" \
+  "$(build_line_count_since "$LOGMARK" "$WHOLE_TWIN")"
 
 # --- the refusal ------------------------------------------------------------
 # The crafted seq is one past the store, so the next real write takes the
@@ -2457,7 +2457,7 @@ check "the refusal push accepted (clave-status-slim, one seq past ${P6A_SEQ0:-em
   "$([[ $P6A_RC -eq 0 ]] && echo ok || echo failed)" "ok"
 P6A_WAITED=0
 while ((P6A_WAITED < 15)); do
-  [[ "$(uuid_count "$(ids_of "$(instance_line_counts_since "$P6A_REFUSE_MARK" "$HYDRATE_ANSWER")")")" -ge "$P6A_TARGET" ]] && break
+  [[ "$(uuid_count "$(ids_of "$(build_line_counts_since "$P6A_REFUSE_MARK" "$HYDRATE_ANSWER")")")" -ge "$P6A_TARGET" ]] && break
   sleep 1
   P6A_WAITED=$((P6A_WAITED + 1))
 done
@@ -2466,8 +2466,8 @@ measure "the live bars answered the refusal" "after ${P6A_WAITED}s (live tabs: $
 # that asks again for the same refusal has done it by the reading below.
 sleep 3
 refusal_checks "$P6A_LIVE" \
-  "$(instance_line_counts_since "$P6A_REFUSE_MARK" "$HYDRATE_ASK")" \
-  "$(instance_line_counts_since "$P6A_REFUSE_MARK" "$HYDRATE_ANSWER")" \
+  "$(build_line_counts_since "$P6A_REFUSE_MARK" "$HYDRATE_ASK")" \
+  "$(build_line_counts_since "$P6A_REFUSE_MARK" "$HYDRATE_ANSWER")" \
   "$(answer_seqs_since "$P6A_REFUSE_MARK")" \
   "$P6A_SEQ0" "$(jq -r '.store.seq' < <(dev_status) 2>/dev/null)"
 
@@ -2493,8 +2493,8 @@ for i in 1 2; do
   sleep 2
 done
 slim_rebuild_checks "after the refusal" "$(count_live_tabs)" \
-  "$(instances_logging_since "$P6A_AFTER_MARK" "$SLIM_TWIN")" \
-  "$(instance_line_counts_since "$P6A_AFTER_MARK" "$HYDRATE_ASK")"
+  "$(build_instances_logging_since "$P6A_AFTER_MARK" "$SLIM_TWIN")" \
+  "$(build_line_counts_since "$P6A_AFTER_MARK" "$HYDRATE_ASK")"
 
 # ===========================================================================
 # Phase 6b — the isolation witness
@@ -2736,14 +2736,14 @@ if [[ "$P6C_RAN" == "yes" ]]; then
   # Honest gap: the launch's bind sends a whole push after the births, so
   # the drive cannot tell rows from the birth answer from rows from it.
   slim_rebuild_checks "post-relaunch presses" "$(count_live_tabs)" \
-    "$(instances_logging_since "$P6C_TOGGLE_MARK" "$SLIM_TWIN")" \
-    "$(instance_line_counts_since "$P6C_TOGGLE_MARK" "$HYDRATE_ASK")"
-  slim_seam_checks "the second session" "$(instances_logging_since "$P6C_DOWN_MARK" "$SLIM_TWIN")" \
-    "$(sandbox_line_count_since "$P6C_DOWN_MARK" "$BAD_STATUS")" \
-    "$(sandbox_line_count_since "$P6C_DOWN_MARK" "$RUN_FAILED")" \
+    "$(build_instances_logging_since "$P6C_TOGGLE_MARK" "$SLIM_TWIN")" \
+    "$(build_line_counts_since "$P6C_TOGGLE_MARK" "$HYDRATE_ASK")"
+  slim_seam_checks "the second session" "$(build_instances_logging_since "$P6C_DOWN_MARK" "$SLIM_TWIN")" \
+    "$(build_line_count_since "$P6C_DOWN_MARK" "$BAD_STATUS")" \
+    "$(build_line_count_since "$P6C_DOWN_MARK" "$RUN_FAILED")" \
     "$(instances_born_since "$P6C_DOWN_MARK")" \
-    "$(instance_line_counts_since "$P6C_DOWN_MARK" "$HYDRATE_ASK")" \
-    "$(instance_line_counts_since "$P6C_DOWN_MARK" "$HYDRATE_ANSWER")"
+    "$(build_line_counts_since "$P6C_DOWN_MARK" "$HYDRATE_ASK")" \
+    "$(build_line_counts_since "$P6C_DOWN_MARK" "$HYDRATE_ANSWER")"
 
   # The arrival leg. One Alt+Down from the baked tab lands on the top standby
   # row, and the landing opens it with no Alt+Enter. It runs AFTER the beacon

@@ -524,7 +524,10 @@ fn the_slim_push_phase_reads_the_seam_through_the_tested_verdicts() {
         "slim_seam_checks",
         "slim_rebuild_checks",
         "refusal_checks",
-        "instance_line_counts_since",
+        "build_lines_since",
+        "build_line_count_since",
+        "build_instances_logging_since",
+        "build_line_counts_since",
         "instances_born_since",
         "answer_seqs_since",
         "unanswered_ids",
@@ -541,6 +544,43 @@ fn the_slim_push_phase_reads_the_seam_through_the_tested_verdicts() {
         assert!(
             SELFTEST.contains(reader),
             "`{reader}` must be covered by the offline selftest"
+        );
+    }
+    // The lines these checks count carry the build tag, and only the `build_`
+    // readers look at it. The id-filtered readers keep a line from a bar in
+    // the maintainer's session that shares a sandbox id (ids restart per
+    // zellij server), so a fragment passed to one reads his fleet as ours.
+    let id_filtered = [
+        "sandbox_lines_since",
+        "sandbox_line_count_since",
+        "instances_logging",
+        "instance_count_logging",
+    ];
+    // A call, not a substring: `build_instances_logging_since` holds
+    // `instances_logging`, so the name must not follow an identifier char.
+    let calls = |line: &str, name: &str| {
+        line.match_indices(name).any(|(i, _)| {
+            !line[..i]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+    };
+    let fragments = [
+        "$SLIM_TWIN",
+        "$WHOLE_TWIN",
+        "$HYDRATE_ASK",
+        "$HYDRATE_ANSWER",
+        "$BAD_STATUS",
+        "$RUN_FAILED",
+    ];
+    for (n, line) in code_lines(DRIVE) {
+        let misread = fragments.iter().any(|f| line.contains(f))
+            && id_filtered.iter().any(|r| calls(line, r));
+        assert!(
+            !misread,
+            "drive line {n} reads a build-tagged line through an id filter; use \
+             the `build_` readers:\n{line}"
         );
     }
     let at = |needle: &str| {

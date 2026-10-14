@@ -401,17 +401,24 @@ would wait for the write after it, because its ask was spent on the crafted
 one. That costs one push, in the first session only, and the two presses are
 that next write.
 
-Two log lines exist for this phase: `clave-bar: hydrate ask` (one per ask)
-and `clave-bar: hydrate answer seq=N` (one per answer). `qa_lib.rs` holds
+Two log lines exist for this phase: `clave-bar: hydrate ask build=<tag>`
+(one per ask) and `clave-bar: hydrate answer seq=N build=<tag>` (one per
+answer). `qa_lib.rs` holds
 the drive's fragments to the bar's text, because a fragment that drifts
 counts nothing, and "no bar asked" passes on nothing.
 
-Attribution, measured on the devbox log on 2026-10-14: the maintainer's
-0.5.5 fleet logged about 540 `dropped clave-status pipe` twins per bar id,
-and ids collide across servers. So the whole-push count is recorded and
-never asserted. His 0.5.5 bars send no slim push and print neither hydrate
-line, so those counts are this sandbox's. When he runs a release that has
-them, they collide too; a build tag on the two lines then closes it.
+Attribution. Plugin ids restart per zellij server, so a bar in the
+maintainer's session can carry the same `[id: N]` as a sandbox bar. On the
+devbox log on 2026-10-14 his 0.5.5 fleet logged about 540 `dropped
+clave-status pipe` twins per id, and from 0.5.6 his bars print the slim twin
+and both hydrate lines too. So every line this phase counts ends its fixed
+words with `build=<tag>`, and `scripts/qa/lib.sh` reads them only through
+its `build_` readers, which keep a line when the tag is this sandbox's. The
+selftest gives a sandbox bar and a live bar the same id, and requires each
+verdict to count only the sandbox one; on the id filter alone, each proof
+gives the wrong answer. `script_hygiene.rs` fails the build if the drive
+passes one of these fragments to an id-filtered reader. What the tag cannot
+split: two sandboxes built from the same commit.
 
 What it cannot see: in 6c, a whole push follows the launch's bind, so the
 drive cannot tell rows from the birth answer from rows from that push. And

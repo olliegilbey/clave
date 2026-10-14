@@ -62,19 +62,24 @@ fn lib_fragment(name: &str) -> &'static str {
 fn the_slim_push_fragments_match_what_the_bar_prints() {
     // The bar's own format strings, pinned first, then rendered the way the
     // bar renders them (main.rs `pipe`, the CLI blank twin; the status arm).
+    // Each ends its fixed words with the build tag: the drive's `build_`
+    // readers keep a line only when the tag is the sandbox's, because a bar
+    // in another session can carry the same `[id: N]` (ids restart per
+    // zellij server).
     for text in [
-        r#""clave-bar: dropped {} pipe with empty payload","#,
-        r#"eprintln!("clave-bar: bad {name} payload: {e}");"#,
-        r#"eprintln!("clave-bar: hydrate ask");"#,
-        r#"eprintln!("clave-bar: hydrate answer seq={}", snap.seq);"#,
-        r#""clave-bar: run_command failed: {}","#,
+        r#""clave-bar: dropped {} pipe with empty payload build={BUILD}","#,
+        r#"eprintln!("clave-bar: bad {name} payload build={BUILD}: {e}");"#,
+        r#"eprintln!("clave-bar: hydrate ask build={BUILD}");"#,
+        r#"eprintln!("clave-bar: hydrate answer seq={} build={BUILD}", snap.seq);"#,
+        r#""clave-bar: run_command failed build={BUILD}: {}","#,
     ] {
         assert!(
             BAR_SHELL.contains(text),
             "the bar no longer prints {text}; move qa/lib.sh with it"
         );
     }
-    let twin = |pipe: &str| format!("clave-bar: dropped {pipe} pipe with empty payload");
+    let t = "cafe123";
+    let twin = |pipe: &str| format!("clave-bar: dropped {pipe} pipe with empty payload build={t}");
     let slim = twin(clave_types::SLIM_STATUS_PIPE);
     let whole = twin(clave_types::STATUS_PIPE);
     assert!(slim.contains(lib_fragment("SLIM_TWIN")));
@@ -83,12 +88,18 @@ fn the_slim_push_fragments_match_what_the_bar_prints() {
     // can go wrong: a whole-twin fragment that also counts every slim push.
     assert!(!slim.contains(lib_fragment("WHOLE_TWIN")));
     for pipe in [clave_types::STATUS_PIPE, clave_types::SLIM_STATUS_PIPE] {
-        let bad = format!("clave-bar: bad {pipe} payload: expected value");
+        let bad = format!("clave-bar: bad {pipe} payload build={t}: expected value");
         assert!(bad.contains(lib_fragment("BAD_STATUS")), "{bad}");
     }
-    assert!("clave-bar: hydrate ask".contains(lib_fragment("HYDRATE_ASK")));
-    assert!("clave-bar: hydrate answer seq=41".contains(lib_fragment("HYDRATE_ANSWER")));
-    assert!("clave-bar: run_command failed: boom".contains(lib_fragment("RUN_FAILED")));
+    assert!(format!("clave-bar: hydrate ask build={t}").contains(lib_fragment("HYDRATE_ASK")));
+    assert!(
+        format!("clave-bar: hydrate answer seq=41 build={t}")
+            .contains(lib_fragment("HYDRATE_ANSWER"))
+    );
+    assert!(
+        format!("clave-bar: run_command failed build={t}: boom")
+            .contains(lib_fragment("RUN_FAILED"))
+    );
 }
 
 #[test]

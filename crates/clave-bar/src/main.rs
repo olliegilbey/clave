@@ -17,6 +17,19 @@ use clave_bar::render::{Row, render_rows};
 use clave_bar::theme::Theme;
 use zellij_tile::prelude::*;
 
+/// The build this wasm came from, set by the build recipes through
+/// `CLAVE_BUILD_TAG`; "dev" is an untagged local build.
+///
+/// Each log line the QA drive counts ends its fixed words with
+/// `build=<tag>`. The zellij log serves every session the user runs, and
+/// plugin ids restart per server, so a bar in the maintainer's session can
+/// carry the same `[id: N]` as a sandbox bar. Only the line's own text can
+/// say which build printed it (FOOTGUNS, "The zellij log is USER-GLOBAL").
+const BUILD: &str = match option_env!("CLAVE_BUILD_TAG") {
+    Some(tag) => tag,
+    None => "dev",
+};
+
 /// Event::Timer echoes the elapsed seconds, and the bar's timer kinds sit
 /// either side of this line: the fast tick (0.2s) below it, the peek sink
 /// (0.9s) above. The dwell era's classify_timer scheme, revived.
@@ -512,7 +525,7 @@ impl State {
                 // bar that asks again for one refused push is the e4bc858
                 // loop. Rare by design, so it is not gated.
                 Effect::Hydrate => {
-                    eprintln!("clave-bar: hydrate ask");
+                    eprintln!("clave-bar: hydrate ask build={BUILD}");
                     run_command(&[bin.as_str(), "snapshot"], BTreeMap::new());
                 }
                 Effect::PersistCollapse { collapsed } if presumed => {
@@ -611,7 +624,7 @@ impl State {
             message.payload.as_deref(),
         ) {
             eprintln!(
-                "clave-bar: dropped {} pipe with empty payload",
+                "clave-bar: dropped {} pipe with empty payload build={BUILD}",
                 message.name
             );
             return false;
@@ -648,7 +661,7 @@ impl State {
                     return false;
                 }
                 _ => {
-                    eprintln!("clave-bar: dropped {name} pipe with empty payload");
+                    eprintln!("clave-bar: dropped {name} pipe with empty payload build={BUILD}");
                     return false;
                 }
             }
@@ -664,7 +677,7 @@ impl State {
                         true
                     }
                     Err(e) => {
-                        eprintln!("clave-bar: bad {name} payload: {e}");
+                        eprintln!("clave-bar: bad {name} payload build={BUILD}: {e}");
                         false
                     }
                 }
@@ -837,7 +850,7 @@ impl State {
                 // anything that doesn't parse as a snapshot.
                 if exit != Some(0) {
                     eprintln!(
-                        "clave-bar: run_command failed: {}",
+                        "clave-bar: run_command failed build={BUILD}: {}",
                         String::from_utf8_lossy(&stderr)
                     );
                     return false;
@@ -847,7 +860,7 @@ impl State {
                         // One line per answer, the ask's other half. Its seq
                         // tells the QA drive which store the bar read and
                         // whether the bar ended caught up (phase 6a).
-                        eprintln!("clave-bar: hydrate answer seq={}", snap.seq);
+                        eprintln!("clave-bar: hydrate answer seq={} build={BUILD}", snap.seq);
                         // RC-B (#55): this is the arm that FIRST populates
                         // `agents`. TabUpdate/PaneUpdate normally arrive
                         // before the snapshot result — permissions land, the
@@ -1155,12 +1168,10 @@ impl ZellijPlugin for State {
     fn load(&mut self, config: BTreeMap<String, String>) {
         // Version marker for the hot-reload workflow (`zellij action
         // start-or-reload-plugin`): stamp the build so the zellij log tells
-        // you WHICH wasm produced a trace. Set by the rebuild recipe via
-        // CLAVE_BUILD_TAG; "dev" means an untagged local build.
+        // you WHICH wasm produced a trace.
         eprintln!(
-            "clave-bar: loaded v{} build={}",
-            env!("CARGO_PKG_VERSION"),
-            option_env!("CLAVE_BUILD_TAG").unwrap_or("dev")
+            "clave-bar: loaded v{} build={BUILD}",
+            env!("CARGO_PKG_VERSION")
         );
         // #44: resolve the CLI from plugin configuration instead of PATH. A
         // stale `clave` on PATH previously served a live session's `clave

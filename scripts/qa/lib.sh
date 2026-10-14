@@ -209,7 +209,8 @@ instance_count_logging() {
 # flap is one instance logging the same ask sixteen times (the devbox,
 # 2026-09-22), and an instance count reads that as 1. Attributed the same
 # way: the line's `[id: N]` must belong to an instance that announced this
-# build.
+# build. That is an id filter only, and ids collide across servers: a line
+# that carries the build tag is read with `build_lines_since` instead.
 sandbox_lines_since() {
   local mark="$1" pattern="$2" ids
   ids="$(sandbox_instance_ids | tr '\n' ' ')"
@@ -412,12 +413,17 @@ arrival_checks() {
 # to the bar's text by `crates/clave/tests/qa_lib.rs`, so a renamed line
 # fails the build and cannot silently empty a check.
 #
-# Attribution, measured on the devbox log (2026-10-14, 103k lines): the
-# maintainer's 0.5.5 fleet logged ~540 `dropped clave-status pipe` twins per
-# instance id, and ids collide across servers, so a WHOLE-push count is not
-# ours to read. His 0.5.5 bars send no slim push and know neither hydrate
-# line, so those three are clean until he runs a release that has them. The
-# same log held no `run_command failed` and no `bad clave-status` line at all.
+# Attribution. Every line these checks count is read through the `build_`
+# readers below, never through `sandbox_lines_since`. An id filter is not
+# enough: plugin ids restart per zellij server, so a bar in the maintainer's
+# session can carry the same `[id: N]` as a sandbox bar (FOOTGUNS, "The
+# zellij log is USER-GLOBAL"). Measured on the devbox log (2026-10-14, 103k
+# lines): his 0.5.5 fleet logged ~540 `dropped clave-status pipe` twins per
+# id. From 0.5.6 on his bars also print the slim twin and both hydrate lines.
+# So each counted line ends its fixed words with `build=<tag>` (main.rs
+# `BUILD`), and the readers keep a line only when that tag is this build's.
+# A 0.5.5 bar prints the same words with no tag, so it is never counted.
+# What the tag cannot split: two sandboxes built from the same commit.
 # shellcheck disable=SC2034 # the drive reads these; lib.sh reads one
 {
 SLIM_TWIN='clave-bar: dropped clave-status-slim pipe'
@@ -428,11 +434,29 @@ BAD_STATUS='clave-bar: bad clave-status'
 RUN_FAILED='clave-bar: run_command failed'
 }
 
-# "<id> <count>" for each sandbox instance that logged <pattern> since
+# The lines since <mark> that hold <pattern> and end their fixed words with
+# THIS build's tag. The tag must be whole: `build=cafe123` must not keep a
+# line from `build=cafe1234`, so the tag ends the line or a space or a colon
+# follows it (main.rs `BUILD` puts it before any free text).
+build_lines_since() {
+  zlog_from "$1" | grep -F "$2" | awk -v t=" build=$BUILD_TAG" '{
+    i = index($0, t)
+    if (!i) next
+    c = substr($0, i + length(t), 1)
+    if (c == "" || c == " " || c == ":") print
+  }'
+}
+
+build_line_count_since() { build_lines_since "$1" "$2" | grep -c . || true; }
+
+# The instances of this build that logged <pattern> since <mark>.
+build_instances_logging_since() { build_lines_since "$1" "$2" | log_ids; }
+
+# "<id> <count>" for each instance of this build that logged <pattern> since
 # <mark>, sorted by id. LINES per instance: an ask loop is one bar asking
 # many times, and a set of ids reads that as one.
-instance_line_counts_since() {
-  sandbox_lines_since "$1" "$2" | sed -n 's/.*\[id: *\([0-9][0-9]*\) *\].*/\1/p' |
+build_line_counts_since() {
+  build_lines_since "$1" "$2" | sed -n 's/.*\[id: *\([0-9][0-9]*\) *\].*/\1/p' |
     sort -n | uniq -c | awk '{ print $2, $1 }'
 }
 
@@ -457,7 +481,7 @@ ids_missing_from() { comm -23 <(sort -u <<<"${1:-}" | grep .) <(sort -u <<<"${2:
 
 # The distinct seqs the answers since <mark> carried, sorted.
 answer_seqs_since() {
-  sandbox_lines_since "$1" "$HYDRATE_ANSWER" |
+  build_lines_since "$1" "$HYDRATE_ANSWER" |
     sed -n 's/.*hydrate answer seq=\([0-9][0-9]*\).*/\1/p' | sort -n -u
 }
 

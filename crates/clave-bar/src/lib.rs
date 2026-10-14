@@ -359,7 +359,7 @@ mod shell_text {
         let arm = &effects[at..];
         let arm = &arm[..arm.find("\n                }").unwrap_or(arm.len())];
         let logged = arm
-            .find(r#"eprintln!("clave-bar: hydrate ask");"#)
+            .find(r#"eprintln!("clave-bar: hydrate ask build={BUILD}");"#)
             .expect("each ask must log one line, in the arm that runs it");
         let ran = arm
             .find(r#"run_command(&[bin.as_str(), "snapshot"]"#)
@@ -368,7 +368,7 @@ mod shell_text {
 
         let events = fn_body("handle_event");
         let logged = events
-            .find(r#"eprintln!("clave-bar: hydrate answer seq={}", snap.seq);"#)
+            .find(r#"eprintln!("clave-bar: hydrate answer seq={} build={BUILD}", snap.seq);"#)
             .expect("each answer must log one line with its seq");
         let applied = events
             .find("let fx = self.model.apply_answer(snap, mono_ms());")
