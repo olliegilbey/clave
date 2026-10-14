@@ -2512,7 +2512,22 @@ impl BarModel {
             } else {
                 None
             },
-            subagents: a.subagents,
+            // Gated the same way, for the same reason: the mark says "agents
+            // run under this row", and only a row that shows its agent's own
+            // status has a process for them to run under. A dormant or
+            // standby row has none; an opening row's agents belong to the old
+            // session; a stale row's checkout is gone. The host clears the
+            // mark at SessionEnd, but a row that never sent one (a killed
+            // pane) keeps it on the wire.
+            subagents: a.subagents
+                && matches!(
+                    status,
+                    RowStatus::NeedsYou
+                        | RowStatus::Working
+                        | RowStatus::Done
+                        | RowStatus::Idle
+                        | RowStatus::Failed
+                ),
         }
     }
 
@@ -8558,6 +8573,76 @@ mod tests {
         m.apply_snapshot(snap(1, vec![a]));
         assert_eq!(status_at(&m, 0), Some(RowStatus::Stale));
         assert_eq!(wants_of(&m), None, "a stale row's checkout is gone");
+    }
+
+    /// The subagent mark follows the `wants` rule above: the wire can hold a
+    /// mark that no SessionEnd cleared (a killed pane sends none), and every
+    /// row state that outranks the store's status must leave it behind.
+    #[test]
+    fn only_a_row_with_a_running_agent_shows_the_subagent_mark() {
+        let fanned = |tab: Option<usize>| Agent {
+            subagents: true,
+            ..agent("u1", Status::Working, tab)
+        };
+        let mark_at = |m: &BarModel, line: usize| match content_at(m, line) {
+            RowContent::Agent { subagents, .. } => subagents,
+            other => panic!("expected an agent row, got {other:?}"),
+        };
+
+        // The live row it is for, asserted first so a gate that blanks
+        // everything cannot pass.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "t", false)]);
+        m.apply_snapshot(snap(1, vec![fanned(Some(10))]));
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Working));
+        assert!(mark_at(&m, 0), "a row with agents under it must say so");
+
+        let mut m = BarModel::default();
+        m.apply_snapshot(snap(1, vec![fanned(None)]));
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Dormant));
+        assert!(!mark_at(&m, 0), "a dormant row runs nothing");
+        m.opening.insert("u1".into());
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Opening));
+        assert!(!mark_at(&m, 0), "an opening row's agents are the old one's");
+
+        let mut m = BarModel::default();
+        let standby = Agent {
+            standby_since: Some(STANDBY_FLEET_SINCE),
+            ..fanned(None)
+        };
+        m.apply_snapshot(snap(1, vec![standby]));
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Standby));
+        assert!(!mark_at(&m, 0), "a standby row runs nothing yet");
+
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "t", false)]);
+        m.apply_snapshot(snap(
+            1,
+            vec![Agent {
+                stale: true,
+                ..fanned(Some(10))
+            }],
+        ));
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Stale));
+        assert!(!mark_at(&m, 0), "a stale row's checkout is gone");
+
+        let mut m = live_plus_dormant();
+        let mut s = snap(
+            2,
+            vec![Agent {
+                commit_ord: 999,
+                ..fanned(None)
+            }],
+        );
+        s.tab_order = [(1usize, 500u64)].into();
+        m.apply_snapshot(s);
+        m.beacon(1);
+        select_dormant(&mut m);
+        assert_eq!(
+            status_at(&m, DORMANT_LINE),
+            Some(RowStatus::DormantSelected)
+        );
+        assert!(!mark_at(&m, DORMANT_LINE));
     }
 
     #[test]

@@ -623,7 +623,7 @@ pub fn is_clave_hook_command(cmd: &str, event: &str) -> bool {
 
 /// The §6.5 state machine's input events — hook registration AND doctor's
 /// exactly-one-entry check key off the same list.
-pub const HOOK_EVENTS: [&str; 7] = [
+pub const HOOK_EVENTS: [&str; 9] = [
     "UserPromptSubmit",
     "Stop",
     "Notification",
@@ -640,6 +640,10 @@ pub const HOOK_EVENTS: [&str; 7] = [
     // hooks: "API errors fire StopFailure instead"). Unregistered, a failed
     // turn never showed Failed.
     "StopFailure",
+    // The subagent mark's two edges (`hook::fan_out_reading`). SubagentStop
+    // carries the task registry, so the mark falls with the last agent.
+    "SubagentStart",
+    "SubagentStop",
 ];
 
 /// Is `bin` one of ours? Shared by the hook and statusLine matchers here, so
@@ -1559,11 +1563,11 @@ mod tests {
         assert!(HOOK_EVENTS.contains(&"SessionStart"));
     }
 
-    /// An event the status table acts on, and that nothing registers, is a
-    /// rule that never runs: `StopFailure` sat in the table unregistered, so
-    /// a failed turn never showed Failed.
+    /// An event the status table or the subagent mark acts on, and that
+    /// nothing registers, is a rule that never runs: `StopFailure` sat in the
+    /// table unregistered, so a failed turn never showed Failed.
     #[test]
-    fn every_event_that_moves_status_is_registered() {
+    fn every_event_that_moves_a_cell_is_registered() {
         for ev in [
             "UserPromptSubmit",
             "Stop",
@@ -1571,6 +1575,8 @@ mod tests {
             "SessionEnd",
             "Notification",
             "PostToolBatch",
+            "SubagentStart",
+            "SubagentStop",
         ] {
             assert!(HOOK_EVENTS.contains(&ev), "{ev} is not registered");
         }

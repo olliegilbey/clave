@@ -283,11 +283,9 @@ pub struct AgentRecord {
     /// Whether this row has any agent still running under it — the card's
     /// subagent mark (lock 4.6). Wire twin of `clave_types::Agent::subagents`.
     ///
-    /// A BOOLEAN, not a count, and read from the transcript's closing
-    /// `turn_duration` record by `hook::subagents_from_tail`, which carries
-    /// the cadence caveat. Held when a tail carries no such record, so a
-    /// missed read never blanks a true mark. `default` keeps pre-field store
-    /// files loading.
+    /// A BOOLEAN, not a count, read from the agent CLI's own task registry
+    /// on the events that carry it (`hook::fan_out_reading`). Held by every
+    /// other event. `default` keeps pre-field store files loading.
     #[serde(default)]
     pub subagents: bool,
 }
