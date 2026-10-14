@@ -80,7 +80,7 @@ check_min() {
     verdict="PASS"
   fi
   printf '[%s %s] CHECK %s: measured=%s expected=>=%s %s\n' "$CURRENT_PHASE" "$(ts)" "$desc" "${measured:-empty}" "$min" "$verdict"
-  [[ "$verdict" == "FAIL" ]] && fail_phase
+  if [[ "$verdict" == "FAIL" ]]; then fail_phase; fi
 }
 
 # check_numeric <desc> <measured> — measured must be a bare integer. The
@@ -93,7 +93,7 @@ check_numeric() {
   local desc="$1" measured="${2:-}" verdict="FAIL"
   [[ "$measured" =~ ^[0-9]+$ ]] && verdict="PASS"
   printf '[%s %s] CHECK %s: measured=%s expected=<integer> %s\n' "$CURRENT_PHASE" "$(ts)" "$desc" "${measured:-empty}" "$verdict"
-  [[ "$verdict" == "FAIL" ]] && fail_phase
+  if [[ "$verdict" == "FAIL" ]]; then fail_phase; fi
 }
 
 # check_nonempty <desc> <measured> — measured must be non-blank (used where
@@ -102,7 +102,7 @@ check_nonempty() {
   local desc="$1" measured="${2:-}" verdict="FAIL"
   [[ -n "$measured" ]] && verdict="PASS"
   printf '[%s %s] CHECK %s: measured=%s expected=<non-empty> %s\n' "$CURRENT_PHASE" "$(ts)" "$desc" "${measured:-empty}" "$verdict"
-  [[ "$verdict" == "FAIL" ]] && fail_phase
+  if [[ "$verdict" == "FAIL" ]]; then fail_phase; fi
 }
 
 # ---------------------------------------------------------------------------
@@ -228,6 +228,35 @@ sandbox_line_count_since() {
 # declared width asks nothing, so outside a toggle this is a defect count.
 swap_ask_count_since() {
   sandbox_line_count_since "$1" 'clave-bar: swap-width'
+}
+
+# How many times this sandbox's bar in tab <tab> logged that zellij showed
+# it, since <mark>. The bar logs `clave-bar: visible true own=Some(<tab>)` on
+# each flip of `Event::Visible` (main.rs). The tab is in the line because the
+# id column alone cannot tell this sandbox's bar from the maintainer's bar
+# with the same id. The tab narrows that, but tab ids are per session too. So
+# a false pass is still possible: his bar with the same id, in a tab with the
+# same id, that he switches to inside the wait. The `)` in the pattern is
+# load-bearing: without it, tab 1 would also count tab 12.
+shown_count_since() {
+  sandbox_line_count_since "$1" "clave-bar: visible true own=Some($2)"
+}
+
+# The arrival verdict (phase 4). A stock focus change sends no beacon, and
+# zellij still sends `Visible(true)` to the bar of the tab it lands on
+# (`move_clients_between_tabs`, zellij-server/src/screen.rs:2025 at v0.45.1).
+# After a bar has moved the focus away itself, that event is the one thing
+# that makes it take clicks again (model.rs `sent_focus_away`). If it stops
+# arriving, the bar ignores every click after its first jump, and no other
+# phase would see it: the drive cannot click. A red can be false in two ways.
+# The bar logs only a flip, and a second attached client keeps a tab on
+# screen, so its bar never flips. And a bar whose frames disagree at that
+# moment logs `own=None`. $1 is the label, $2 the tab the drive switched to,
+# $3 the `shown_count_since` reading after the switch.
+arrival_shown_check() {
+  local label="$1" tab="$2" count="${3:-}"
+  check_min "$label the bar in tab $tab heard it was shown (Visible(true), which reopens its clicks)" \
+    "$count" 1
 }
 
 # ---------------------------------------------------------------------------
