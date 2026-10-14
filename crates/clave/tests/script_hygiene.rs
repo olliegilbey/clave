@@ -599,3 +599,33 @@ fn the_slim_push_phase_reads_the_seam_through_the_tested_verdicts() {
          witness (quiescence {quiescence}, slim {slim}, witness {witness})"
     );
 }
+
+#[test]
+fn the_card_cell_phase_reads_the_hook_seam_through_the_tested_verdicts() {
+    // Phase 5b fires real agent CLI events at the real binary. Three of its
+    // verdicts compare two readings, and two dead readings compare equal, so
+    // each one is held to its offline proof that it goes red. Phase 0 reads
+    // the registration the same way.
+    assert!(
+        DRIVE.contains(r#"phase "P5b-card-cells""#),
+        "the card cell phase must exist"
+    );
+    for verdict in [
+        "hook_registration_checks",
+        "quiet_event_checks",
+        "typed_clock_checks",
+    ] {
+        assert!(
+            DRIVE.contains(verdict),
+            "the drive must reach its event verdicts through `{verdict}`"
+        );
+        assert!(
+            LIB.contains(&format!("{verdict}()")),
+            "`{verdict}` must live in qa/lib.sh, where the selftest reaches it"
+        );
+        assert!(
+            SELFTEST.contains(verdict),
+            "`{verdict}` must be covered by the offline selftest"
+        );
+    }
+}
