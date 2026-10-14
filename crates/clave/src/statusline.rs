@@ -28,10 +28,12 @@
 //! - **The meter paces itself.** The statusLine runs on every assistant
 //!   message (6 runs, 4 distinct counts in one 15-second sandbox turn), and
 //!   every applied reading is a store rewrite under the flock plus a pipe
-//!   push that re-renders every bar. A moved count lands only once per
-//!   [`APPLY_INTERVAL_SECS`], unless the level moved (a glyph) or the model or
-//!   effort moved (a cell), which land at once — and bring the held count
-//!   with them, since the row is being written anyway.
+//!   push that re-renders every bar. A count is due only when its TEXT moves
+//!   (`clave_types::token_text`, the bar's own rounding), and then only once
+//!   per [`APPLY_INTERVAL_SECS`]. A level move (a glyph or an ink), a model or
+//!   effort move (a cell) and the first reading after a Stop land at once —
+//!   and a model or effort move brings the held count with it, since the row
+//!   is being written anyway.
 //!
 //! Never invent: a `0` total (session start) or a `null` `current_usage`
 //! (documented for the window after `/compact`) is not a token reading, and
@@ -47,7 +49,7 @@ use std::io::Write;
 use std::process::{Child, Command, Stdio};
 
 use anyhow::Result;
-use clave_types::AgentSnapshot;
+use clave_types::{AgentSnapshot, token_text};
 use serde::Deserialize;
 
 use crate::hook::{
@@ -137,11 +139,14 @@ impl Reading {
     }
 }
 
-/// How often a moved count is allowed to land on its own. Chosen against the
-/// measured turn (readings 0, 24, 26, 27, 29 and 38 seconds in): three of six
-/// land instead of four, and a long turn repaints the count every ten seconds
-/// rather than on every tool call. Tune against a live drive, not by feel.
-pub const APPLY_INTERVAL_SECS: u64 = 10;
+/// How often a moved count is allowed to land on its own. Measured 2026-10-14
+/// on the live 0.5.5 fleet: in 21 minutes the meter made 175 of 311 pushes
+/// (56%), and 25 of the 175 moved no pixel. Each push re-renders every bar.
+/// At ten seconds a working row pushed its count about six times a minute.
+/// The decision (Ollie, through the coordinator, 2026-10-14): the count on a
+/// working row lags up to 60 s. The band, the model and effort cells and the
+/// resting count stay exact, because those land at once (`count_due`).
+pub const APPLY_INTERVAL_SECS: u64 = 60;
 
 /// How long after the meter's last token reading the hook's tail readers hold
 /// their three cells. Long enough that a Stop after a multi-minute final tool
@@ -168,7 +173,10 @@ pub fn hook_yields(rec: &AgentRecord, now: u64) -> bool {
 
 /// Whether a moved count is owed a write on its own merits (the module doc's
 /// pacing rule). A row with no count yet, or none since its rotation, always
-/// takes the first one.
+/// takes the first one. A cleared stamp (a Stop) takes the next one whatever
+/// it renders, so the resting count is the turn's last. Otherwise a count
+/// that renders the same text is not a change: the bar would paint the same
+/// cell (25 of 175 meter pushes did, measured 2026-10-14).
 fn count_due(rec: &AgentRecord, tokens: u32, now: u64, zone: u32) -> bool {
     let Some(have) = rec.context_tokens else {
         return true;
@@ -176,7 +184,8 @@ fn count_due(rec: &AgentRecord, tokens: u32, now: u64, zone: u32) -> bool {
     tokens != have
         && (rec.metered_at == 0
             || rec.context_level != Some(battery_level(tokens, zone))
-            || now.saturating_sub(rec.metered_at) >= APPLY_INTERVAL_SECS)
+            || (token_text(tokens) != token_text(have)
+                && now.saturating_sub(rec.metered_at) >= APPLY_INTERVAL_SECS))
 }
 
 /// The one store mutation a statusLine run performs — the meter's twin of
@@ -512,18 +521,14 @@ mod tests {
         }
     }
 
+    /// The decision (2026-10-14): a working row's count lags up to 60 s.
+    /// Spelled in seconds, so a slip in the constant cannot pass. `19k` to
+    /// `20k` moves the text, so only the interval holds it.
     #[test]
     fn a_moved_count_inside_the_interval_holds() {
         let mut s = metered_store();
         let r = reading("minted", Some(19_811), "claude-fable-5-1", "medium");
-        assert!(!apply_statusline(
-            &mut s,
-            "minted",
-            &r,
-            1000 + APPLY_INTERVAL_SECS - 1,
-            true,
-            ZONE
-        ));
+        assert!(!apply_statusline(&mut s, "minted", &r, 1059, true, ZONE));
         assert_eq!(s.agents["minted"].context_tokens, Some(19_110));
         assert_eq!(s.agents["minted"].metered_at, 1000);
         assert_eq!(s.seq, 1);
@@ -533,17 +538,53 @@ mod tests {
     fn a_moved_count_after_the_interval_lands() {
         let mut s = metered_store();
         let r = reading("minted", Some(19_811), "claude-fable-5-1", "medium");
+        assert!(apply_statusline(&mut s, "minted", &r, 1060, true, ZONE));
+        assert_eq!(s.agents["minted"].context_tokens, Some(19_811));
+        assert_eq!(s.agents["minted"].metered_at, 1060);
+        assert_eq!(s.seq, 2);
+    }
+
+    /// A count that renders the same text is not a change, however late it
+    /// comes: every bar would paint the same `19k` (25 of 175 meter pushes
+    /// did, measured 2026-10-14). The store keeps the older figure, and the
+    /// stamp stays where it was.
+    #[test]
+    fn a_count_that_renders_the_same_text_is_not_due() {
+        let mut s = metered_store();
+        let r = reading("minted", Some(19_400), "claude-fable-5-1", "medium");
+        assert!(!apply_statusline(&mut s, "minted", &r, 5000, true, ZONE));
+        assert_eq!(s.agents["minted"].context_tokens, Some(19_110));
+        assert_eq!(s.agents["minted"].metered_at, 1000);
+        assert_eq!(s.seq, 1);
+    }
+
+    /// The band is the glyph and the ink, so it lands at once even when the
+    /// digits do not move: 14,900 and 15,100 both read `15k`, and they sit
+    /// either side of the first band edge of the default zone.
+    #[test]
+    fn a_band_move_with_the_same_text_lands_at_once() {
+        let mut s = Store::default();
+        s.agents.insert("minted".into(), rec("minted"));
+        let at = |t| reading("minted", Some(t), "claude-fable-5-1", "medium");
         assert!(apply_statusline(
             &mut s,
             "minted",
-            &r,
-            1000 + APPLY_INTERVAL_SECS,
+            &at(14_900),
+            1000,
             true,
             ZONE
         ));
-        assert_eq!(s.agents["minted"].context_tokens, Some(19_811));
-        assert_eq!(s.agents["minted"].metered_at, 1000 + APPLY_INTERVAL_SECS);
-        assert_eq!(s.seq, 2);
+        assert_eq!(s.agents["minted"].context_level, Some(0));
+        assert!(apply_statusline(
+            &mut s,
+            "minted",
+            &at(15_100),
+            1001,
+            true,
+            ZONE
+        ));
+        assert_eq!(s.agents["minted"].context_level, Some(1));
+        assert_eq!(s.agents["minted"].context_tokens, Some(15_100));
     }
 
     #[test]
@@ -771,6 +812,32 @@ mod tests {
         let before = std::fs::read(&paths.data).unwrap();
         assert!(meter(&paths, CAPTURED, None, 5000, ZONE).unwrap().is_none());
         assert_eq!(std::fs::read(&paths.data).unwrap(), before);
+    }
+
+    /// The locked half of the meter writes nothing for a reading that is
+    /// already in the store: two runs of one turn can both pass the
+    /// lock-free probe, and the second one finds its work done. The file
+    /// keeps its inode, so no temp file, no fsync and no rename ran.
+    #[test]
+    fn a_locked_apply_of_a_landed_reading_leaves_the_store_file_alone() {
+        use std::os::unix::fs::MetadataExt;
+        let d = tempfile::tempdir().unwrap();
+        let paths = tmp_paths(d.path());
+        crate::store::with_store_mut(&paths, |s| {
+            s.agents.insert(CAPTURED_UUID.into(), rec(CAPTURED_UUID));
+        })
+        .unwrap();
+        assert!(meter(&paths, CAPTURED, None, 1000, ZONE).unwrap().is_some());
+        let ino = || std::fs::metadata(&paths.data).unwrap().ino();
+        let (bytes, before) = (std::fs::read(&paths.data).unwrap(), ino());
+        let reading = Reading::parse(CAPTURED);
+        let moved = crate::store::with_store_mut(&paths, |s| {
+            apply_statusline(s, CAPTURED_UUID, &reading, 1005, false, ZONE)
+        })
+        .unwrap();
+        assert!(!moved);
+        assert_eq!(ino(), before, "a no-op apply must not swap the file");
+        assert_eq!(std::fs::read(&paths.data).unwrap(), bytes);
     }
 
     #[test]
