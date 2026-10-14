@@ -3,8 +3,9 @@
 #
 # What this is: preflight, baseline join, the dormant-row bind ladder, tab
 # churn, the nav ring walk, the collapse burst, the card cells, the terminal
-# facts, quiescence, the isolation witness, the relaunch and the teardown
-# hand-back, scripted against THIS checkout's per-worktree sandbox instance.
+# facts, quiescence, the slim push, the isolation witness, the relaunch and
+# the teardown hand-back, scripted against THIS checkout's per-worktree
+# sandbox instance.
 #
 # ONE phase asks the maintainer for a second thing: 6c wants the sandbox quit
 # and launched again, and waits for both. Everything else runs unattended once
@@ -89,10 +90,11 @@ usage() {
   cat <<EOF
 usage: $0 <scenario>
 
-Drives QA-DRIVE phases 0-7 (preflight, baseline join, bind ladder, tab churn,
-ring walk, collapse burst, card cells, terminal facts, quiescence, isolation
-witness, relaunch, teardown hand-back) against THIS checkout's per-worktree sandbox
-instance (\`clave dev instance\`). Never launches or kills a zellij session.
+Drives QA-DRIVE phases 0-7 (preflight, launch folder, baseline join, bind
+ladder, tab churn, ring walk, collapse burst, card cells, terminal facts,
+quiescence, slim push, isolation witness, relaunch, teardown hand-back)
+against THIS checkout's per-worktree sandbox instance (\`clave dev
+instance\`). Never launches or kills a zellij session.
 
 Phase 6c asks you to quit the sandbox and launch it again, then reads what
 came back. It prints the commands and waits up to QA_RELAUNCH_WAIT seconds
@@ -634,6 +636,32 @@ if [[ -n "$ORPHANS" ]]; then
   measure "stale pipe forensics (pgrep -fl)" "$(pgrep -fl 'zellij pipe' 2>/dev/null || true)"
 fi
 check "orphan 'zellij pipe' processes (pid in both probes, 2s apart)" "$ORPHANS" ""
+
+# ===========================================================================
+# Phase 0b — the launch folder on the server's PATH
+# ===========================================================================
+# Its own phase, so an env this machine cannot read marks THIS phase NOT RUN
+# and leaves phase 0's verdicts standing (`skip_phase`).
+phase "P0b-launch-path"
+
+# The launch folder on the PATH the sandbox server was born with (2026-10-14).
+# A launch adds it at the END (setup.rs `path_with_dir`), so a bare `clave` in
+# a hook resolves in any session, however it was launched: without it, every
+# hook in the live session failed `clave: not found` for 19 hours (FOOTGUNS,
+# "A sandbox stage rewrites the LIVE session's hooks"). The sandbox runs the
+# same launch code, and `just launch` runs `./target/release/clave` from this
+# checkout (justfile `launch`), so that folder, made absolute, is the one to
+# look for. That relative spelling is also the macOS trap: there
+# `current_exe` is the path as typed. The same reading checks the other end:
+# `dev launch` puts the shim FIRST (dev.rs `shim_first_on_path`). A launching
+# shell that already had the launch folder on its PATH passes without the
+# fix; no reading from here can tell those apart.
+P0B_PIDS="$(sandbox_server_pids "$SESSION")"
+P0B_PATH=""
+[[ "$(uuid_count "$P0B_PIDS")" -eq 1 ]] && P0B_PATH="$(server_env_path "$P0B_PIDS")"
+LAUNCH_DIR="$(cd "$ROOT/target/release" 2>/dev/null && pwd -P)"
+SHIM_DIR="$("$CLAVE_BIN" dev instance --field shim 2>/dev/null || true)"
+launch_path_checks "$P0B_PIDS" "$P0B_PATH" "$LAUNCH_DIR" "$SHIM_DIR"
 
 # ===========================================================================
 # Phase 1 — baseline join
@@ -1881,6 +1909,9 @@ anchor_executor "$P5_STAND"
 P5_RC=$?
 check "phase-5 executor anchor pipe accepted (clave-visited ${P5_STAND})" "$([[ $P5_RC -eq 0 ]] && echo ok || echo failed)" "ok"
 sleep 1
+# Every press below writes `collapsed` and nothing dormant, so its push goes
+# slim (PR #281). The window opens after the anchor, which pushes nothing.
+P5_SLIM_MARK="$(zlog_now)"
 
 P5_EXPECT="$P5_COLLAPSED0"
 for i in $(seq 1 12); do
@@ -1937,6 +1968,13 @@ check "total writes per press <= 2 (18 presses, delta <= 36)" \
   "$(((P5_SEQ_END - P5_SEQ0) <= 36 ? 1 : 0))" "1"
 measure "phase 5 EOF-twin delta (user-global log, unattributable — forensic only)" \
   "$(($(count_eof_twins) - P5_TWINS_BEFORE))"
+
+# The 18 presses as slim pushes: every live bar heard them and rebuilt each
+# one from the rows it kept, so none asked for the fleet. The verdict lives
+# in qa/lib.sh, where the selftest makes each half go red.
+slim_rebuild_checks "the burst" "$(count_live_tabs)" \
+  "$(build_instances_logging_since "$P5_SLIM_MARK" "$SLIM_TWIN")" \
+  "$(build_line_counts_since "$P5_SLIM_MARK" "$HYDRATE_ASK")"
 
 # --- the width the fleet actually rests at ---------------------------------
 # The bug this branch found and fixed rests the bar at the WRONG WIDTH after
@@ -2040,10 +2078,16 @@ check_nonempty "phase-5b target row (scenario-seeded, not stale)" "$P5B_UUID"
 
 # Its transcript, found by globbing rather than by munging the cwd here — the
 # munge is the binary's job and a second implementation of it in bash is a
-# second thing to get wrong.
+# second thing to get wrong. Every sandbox seeds the SAME fixture uuids, so the
+# glob also finds other sandboxes' copies, and the first match is whichever
+# root sorts first. Run 42 appended to `clave-dev-agent-a2-d8ae`'s copy, the
+# hook read this sandbox's own, and the mark never rose. So keep only the copy
+# whose own lines carry this row's cwd: the transcript's fact, not a munge.
+P5B_CWD="$(jq -r --arg u "$P5B_UUID" '.store.agents[$u].cwd // empty' <<<"$P5B_STATUS" 2>/dev/null)"
 P5B_TAIL=""
 for f in "$CLAUDE_PROJECTS"/*/"$P5B_UUID".jsonl; do
-  [[ -f "$f" ]] && P5B_TAIL="$f" && break
+  [[ -f "$f" && -n "$P5B_CWD" ]] && grep -qF "\"cwd\":\"$P5B_CWD\"" "$f" &&
+    P5B_TAIL="$f" && break
 done
 check_nonempty "phase-5b transcript on disk (${P5B_UUID})" "$P5B_TAIL"
 # GUARD, load-bearing: this phase APPENDS a line, and the only files it may
@@ -2402,6 +2446,106 @@ measure "global zellij log growth while idle (user-global, unattributable — fo
   "$((P6_ZLINES1 - P6_ZLINES0))"
 
 # ===========================================================================
+# Phase 6a — the slim push
+# ===========================================================================
+# A status push leaves out the dormant rows when the last whole push carried
+# the same ones, and rides its own pipe (PR #281, UBIQUITOUS_LANGUAGE "slim
+# push"). Each bar puts the rows back from the copy it kept. The seam crosses
+# three processes, the host, the bar and the bar's `clave snapshot`, so no
+# unit test sees it whole. This phase reads it in three legs:
+#
+#   1. At rest. The host writes the tag of each aimed whole push to a file
+#      beside the store. That tag must equal the store's own, or no push
+#      goes slim and the change saves nothing.
+#   2. Over the run. The bars heard slim pushes and parsed every payload.
+#      Each bar born in the run asked for the fleet and got it. No bar
+#      subprocess failed.
+#   3. The refusal. The drive pipes a slim push no bar can rebuild: one seq
+#      past the store, naming tag 0. Each live bar must refuse it, ask ONCE,
+#      and take the answer, which is older than the push. That shape made
+#      every bar ask without end until e4bc858. Two presses after it prove
+#      that the bars still rebuild real slim pushes, so each ends caught up.
+#
+# Ordering: after quiescence, so leg 1 reads the store at rest, and before
+# the relaunch, which needs the first session live. The refusal writes
+# nothing; the two presses leave `collapsed` where they found it.
+phase "P6a-slim-push"
+
+slim_host_checks "$(pushed_dormant_tag "$STATE_DIR")" \
+  "$(snapshot_dormant_tag "$("$CLAVE_BIN" snapshot 2>/dev/null)")"
+
+slim_seam_checks "the run" "$(build_instances_logging_since "$LOGMARK" "$SLIM_TWIN")" \
+  "$(build_line_count_since "$LOGMARK" "$BAD_STATUS")" \
+  "$(build_line_count_since "$LOGMARK" "$RUN_FAILED")" \
+  "$(instances_born_since "$LOGMARK")" \
+  "$(build_line_counts_since "$LOGMARK" "$HYDRATE_ASK")" \
+  "$(build_line_counts_since "$LOGMARK" "$HYDRATE_ANSWER")"
+measure "slim pushes the sandbox bars heard over the run (twin lines)" \
+  "$(build_line_count_since "$LOGMARK" "$SLIM_TWIN")"
+measure "whole pushes the sandbox bars heard over the run (twin lines)" \
+  "$(build_line_count_since "$LOGMARK" "$WHOLE_TWIN")"
+
+# --- the refusal ------------------------------------------------------------
+# The crafted seq is one past the store, so the next real write takes the
+# same seq. A real push at that seq that a bar also refused would wait for
+# the write after it, because the ask was spent here. It costs one push, in
+# this session only, and the presses below are that next write.
+P6A_LIVE="$(count_live_tabs)"
+P6A_TARGET=1
+[[ "$P6A_LIVE" =~ ^[0-9]+$ ]] && ((P6A_LIVE > 0)) && P6A_TARGET="$P6A_LIVE"
+P6A_SEQ0="$(jq -r '.store.seq' < <(dev_status) 2>/dev/null)"
+P6A_REFUSE_MARK="$(zlog_now)"
+P6A_RC=1
+# Guarded: the payload does arithmetic on the seq, and `set -u` ends the
+# script on a non-numeric one. `refusal_checks` names the bad read below.
+if [[ "$P6A_SEQ0" =~ ^[0-9]+$ ]]; then
+  "$CT" pipe --name clave-status-slim -- "$(refusal_payload "$P6A_SEQ0")"
+  P6A_RC=$?
+fi
+check "the refusal push accepted (clave-status-slim, one seq past ${P6A_SEQ0:-empty}, tag 0)" \
+  "$([[ $P6A_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+P6A_WAITED=0
+while ((P6A_WAITED < 15)); do
+  [[ "$(uuid_count "$(ids_of "$(build_line_counts_since "$P6A_REFUSE_MARK" "$HYDRATE_ANSWER")")")" -ge "$P6A_TARGET" ]] && break
+  sleep 1
+  P6A_WAITED=$((P6A_WAITED + 1))
+done
+measure "the live bars answered the refusal" "after ${P6A_WAITED}s (live tabs: ${P6A_LIVE:-empty})"
+# Past the bar's retry window (model.rs `HYDRATE_RETRY_MS`, 2s), so a bar
+# that asks again for the same refusal has done it by the reading below.
+sleep 3
+refusal_checks "$P6A_LIVE" \
+  "$(build_line_counts_since "$P6A_REFUSE_MARK" "$HYDRATE_ASK")" \
+  "$(build_line_counts_since "$P6A_REFUSE_MARK" "$HYDRATE_ANSWER")" \
+  "$(answer_seqs_since "$P6A_REFUSE_MARK")" \
+  "$P6A_SEQ0" "$(jq -r '.store.seq' < <(dev_status) 2>/dev/null)"
+
+# --- and after it -----------------------------------------------------------
+# The answer to a refusal is older than the push, so it changes nothing a
+# bar shows. What it must not do is leave a bar unable to take the NEXT slim
+# push. Two presses push slim, and every live bar must rebuild both from the
+# rows it kept, with no ask. The anchor is phase 5's: one writer must exist.
+P6A_STAND="$(focused_tab_id)"
+check_nonempty "phase-6a standing tab (focus read)" "$P6A_STAND"
+anchor_executor "$P6A_STAND"
+P6A_RC=$?
+check "phase-6a executor anchor pipe accepted (clave-visited ${P6A_STAND})" "$([[ $P6A_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+sleep 1
+P6A_AFTER_MARK="$(zlog_now)"
+P6A_EXPECT="$(jq -r '.store.collapsed // false' < <(dev_status) 2>/dev/null)"
+for i in 1 2; do
+  if [[ "$P6A_EXPECT" == "true" ]]; then P6A_EXPECT="false"; else P6A_EXPECT="true"; fi
+  toggle_pipe
+  P6A_RC=$?
+  check "phase-6a press ${i}/2 pipe accepted" "$([[ $P6A_RC -eq 0 ]] && echo ok || echo failed)" "ok"
+  check "phase-6a press ${i}/2 landed (store collapsed flipped)" "$(wait_collapsed "$P6A_EXPECT")" "$P6A_EXPECT"
+  sleep 2
+done
+slim_rebuild_checks "after the refusal" "$(count_live_tabs)" \
+  "$(build_instances_logging_since "$P6A_AFTER_MARK" "$SLIM_TWIN")" \
+  "$(build_line_counts_since "$P6A_AFTER_MARK" "$HYDRATE_ASK")"
+
+# ===========================================================================
 # Phase 6b — the isolation witness
 # ===========================================================================
 # The one property this whole harness rests on and never used to assert: the
@@ -2479,8 +2623,9 @@ fi
 #      starts no agent. So a row wearing either after the relaunch is a claim
 #      the second session made about a process that is not there.
 #
-# The phase leans on phase 6 above: quiescence has just proved the store is
-# flat, so the snapshot read here is still the store at the moment of the quit.
+# The phase leans on phases 6 and 6a above: quiescence proved the store
+# flat, and 6a's presses leave it settled, so the snapshot read here is still
+# the store at the moment of the quit.
 phase "P6c-relaunch"
 
 P6C_BEFORE_STATUS="$(dev_status)"
@@ -2546,6 +2691,9 @@ if [[ "$SESSION_LIVE" == "true" ]]; then
 fi
 if [[ "$P6C_RAN" == "yes" ]]; then
   measure "the first session is down" "after ${P6C_DOWN}s"
+  # Every bar line after this mark is the second session's, even where its
+  # ids reuse the first session's numbers (zellij numbers bars per server).
+  P6C_DOWN_MARK="$(zlog_now)"
 
   P6C_UP=0
   while [[ "$SESSION_LIVE" != "true" && "$P6C_UP" -lt "$P6C_WAIT" ]]; do
@@ -2629,6 +2777,22 @@ if [[ "$P6C_RAN" == "yes" ]]; then
   check "post-relaunch paints came from the bar that asked (the swap landed on the tab that asked for it)" \
     "$(instances_logging_since "$P6C_TOGGLE_MARK" 'clave-bar: painted' | tr '\n' ' ')" \
     "$P6C_ASKERS"
+
+  # The slim push across the relaunch (phase 6a has the design). The second
+  # session's bars were born holding no rows, so each asked for the fleet at
+  # birth. The two presses above pushed slim, and only a bar that holds rows
+  # can rebuild them; a bar whose birth answer was lost refuses and asks.
+  # Honest gap: the launch's bind sends a whole push after the births, so
+  # the drive cannot tell rows from the birth answer from rows from it.
+  slim_rebuild_checks "post-relaunch presses" "$(count_live_tabs)" \
+    "$(build_instances_logging_since "$P6C_TOGGLE_MARK" "$SLIM_TWIN")" \
+    "$(build_line_counts_since "$P6C_TOGGLE_MARK" "$HYDRATE_ASK")"
+  slim_seam_checks "the second session" "$(build_instances_logging_since "$P6C_DOWN_MARK" "$SLIM_TWIN")" \
+    "$(build_line_count_since "$P6C_DOWN_MARK" "$BAD_STATUS")" \
+    "$(build_line_count_since "$P6C_DOWN_MARK" "$RUN_FAILED")" \
+    "$(instances_born_since "$P6C_DOWN_MARK")" \
+    "$(build_line_counts_since "$P6C_DOWN_MARK" "$HYDRATE_ASK")" \
+    "$(build_line_counts_since "$P6C_DOWN_MARK" "$HYDRATE_ANSWER")"
 
   # The arrival leg. One Alt+Down from the baked tab lands on the top standby
   # row, and the landing opens it with no Alt+Enter. It runs AFTER the beacon

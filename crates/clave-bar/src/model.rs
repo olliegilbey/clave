@@ -12,7 +12,9 @@ use std::collections::{BTreeMap, BTreeSet};
 // The two width targets live in `clave-types` (S8 §3.3): the renderer draws
 // against the same numbers the layout sizes the pane to, and `clave`'s KDL
 // generators size the newborn pane from them — one definition, three artifacts.
-use clave_types::{Agent, AgentSnapshot, OrderMode, RowHeight, Status, frecency_millis};
+use clave_types::{
+    Agent, AgentSnapshot, DormantRows, OrderMode, RowHeight, Status, frecency_millis,
+};
 
 use crate::render::{
     PALETTE, Provenance, Row, RowContent, RowStatus, TermStatus, Widths, viewport_top,
@@ -351,6 +353,11 @@ pub enum Effect {
     /// every instance; main.rs gates EXECUTION to the active one, same as
     /// MarkRead/Bind (one writer, round 11).
     PersistCollapse { collapsed: bool },
+    /// run_command(clave snapshot): a push named dormant rows by a tag this bar
+    /// does not hold, so only a full snapshot can rebuild it
+    /// ([`BarModel::apply_push`]). Every instance asks for itself: each bar
+    /// keeps its own copy.
+    Hydrate,
     /// #178: the bind leg stopped emitting, and left no trace doing it. Every
     /// exit in `bind_effects` that produces nothing is silent by design — the
     /// frames disagree and the next frame is the retry, or a row's pane simply
@@ -440,6 +447,12 @@ pub const WALK_ASK_CAP: u8 = 3;
 /// mid-spawn — the all-None guard's original case — is back in reach within
 /// a few frames; its first answered delta clears the stand-down early anyway.
 pub const PROBE_FAILURE_STANDDOWN: u8 = 3;
+
+/// The least time between two asks for a full snapshot (`Effect::Hydrate`),
+/// while no answer has come. A `clave snapshot` answers well inside it, so a
+/// healthy bar asks once per missed push; a bar whose answer was lost asks
+/// again at the next push it cannot rebuild, once this has passed.
+pub const HYDRATE_RETRY_MS: u64 = 2_000;
 
 /// A row that has never received a user commitment (S1). Sorts below every row
 /// that has. Reachable for a LIVE tab only when its birth touch never landed —
@@ -628,6 +641,23 @@ pub struct BarModel {
     /// §5 pipe contract: apply only strictly-newer seq.
     seq: u64,
     agents: Vec<Agent>,
+    /// The dormant rows of the last accepted snapshot that carried them, under
+    /// their tag. A push that leaves them out names this tag
+    /// ([`DormantRows::Omitted`]), and `apply_push` puts them back.
+    dormant_rows: Option<(u64, Vec<Agent>)>,
+    /// When the ask in flight (`Effect::Hydrate`) was made; `None` once a
+    /// `clave snapshot` answers. Every bar hears every push, so without a
+    /// bound a missed push would ask once per push until the answer lands.
+    hydrate_asked_ms: Option<u64>,
+    /// The highest seq of a push this bar could not rebuild.
+    refused_seq: u64,
+    /// The `refused_seq` the last ask was made for. The bar asks again only
+    /// for a push refused after it, so each refused push costs at most one
+    /// ask. An answer older than the push it was asked for (a store that went
+    /// back, a push from another store) does not ask again: the same answer
+    /// would come back, and every bar would run `clave snapshot` without end
+    /// (adversarial review of 4b3d524).
+    asked_for: u64,
     /// uuid → terminal pane id, from clave-register (S2).
     uuid_to_pane: BTreeMap<String, u32>,
     tabs: Vec<TabMeta>,
@@ -1662,11 +1692,97 @@ impl BarModel {
         self.prune_opening();
     }
 
-    /// Apply a full-replace snapshot (§5). Returns rename effects (label
-    /// changes → real-tab renames) — main.rs gates their EXECUTION to the
-    /// active-tab instance, but the guard bookkeeping must run everywhere so
-    /// all instances agree on what has been renamed.
-    pub fn apply_snapshot(&mut self, snap: AgentSnapshot) -> Vec<Effect> {
+    /// A snapshot from the pipe or from `clave snapshot`, whole or with its
+    /// dormant rows named by tag. Returns rename effects (label changes →
+    /// real-tab renames) — main.rs gates their EXECUTION to the active-tab
+    /// instance, but the guard bookkeeping must run everywhere so all
+    /// instances agree on what has been renamed.
+    ///
+    /// A tag this bar holds rebuilds the whole snapshot, so the model below
+    /// only ever sees a whole one. A tag it does not hold applies nothing,
+    /// because half a fleet would show rows going and coming back. The bar
+    /// asks for a full snapshot instead ([`Self::ask_hydrate`]).
+    ///
+    /// Ordering: a tag names content, not time, so a kept copy rebuilds any
+    /// push that names it, in any arrival order. The ask converges because the
+    /// host pushes only after its store write commits (`main.rs`, every
+    /// `push_snapshot` follows a locked write), so a `clave snapshot` asked
+    /// for after a push arrived carries that push's seq or a newer one.
+    pub fn apply_push(&mut self, snap: AgentSnapshot, now_ms: u64) -> Vec<Effect> {
+        let mut fx = match self.rebuild(snap) {
+            Some(snap) => self.apply_snapshot(snap),
+            None => Vec::new(),
+        };
+        fx.extend(self.ask_hydrate(now_ms));
+        fx
+    }
+
+    /// A `clave snapshot` answer: [`Self::apply_push`], and the ask in flight
+    /// is over. If a push was refused after the ask, the answer can be older
+    /// than it, so the bar asks once more at once, not after the window.
+    pub fn apply_answer(&mut self, snap: AgentSnapshot, now_ms: u64) -> Vec<Effect> {
+        self.hydrate_asked_ms = None;
+        self.apply_push(snap, now_ms)
+    }
+
+    /// The ask a newborn bar makes, whatever it holds. It counts as the ask
+    /// in flight, so a push refused before the answer waits for it.
+    pub fn hydrate(&mut self, now_ms: u64) -> Vec<Effect> {
+        self.asked_for = self.refused_seq;
+        self.hydrate_asked_ms = Some(now_ms);
+        vec![Effect::Hydrate]
+    }
+
+    /// The whole snapshot a fresh push stands for. `None` for a stale push,
+    /// and for a push whose tag this bar does not hold (it is kept in
+    /// `refused_seq`). Only an accepted tagged snapshot replaces the kept rows.
+    fn rebuild(&mut self, mut snap: AgentSnapshot) -> Option<AgentSnapshot> {
+        if snap.seq <= self.seq {
+            return None;
+        }
+        match snap.dormant {
+            DormantRows::Included { tag } => {
+                if let Some(tag) = tag {
+                    let rows = snap.agents.iter().filter(|a| a.in_dormant_tag()).cloned();
+                    self.dormant_rows = Some((tag, rows.collect()));
+                }
+            }
+            DormantRows::Omitted { tag } => match &self.dormant_rows {
+                Some((held, rows)) if *held == tag => {
+                    snap.agents.extend(rows.iter().cloned());
+                    // The store's order: `Store::agents` is keyed by uuid, and
+                    // the row sort breaks its ties on this order.
+                    snap.agents.sort_by(|a, b| a.uuid.cmp(&b.uuid));
+                    snap.dormant = DormantRows::Included { tag: Some(tag) };
+                }
+                _ => {
+                    self.refused_seq = self.refused_seq.max(snap.seq);
+                    return None;
+                }
+            },
+        }
+        Some(snap)
+    }
+
+    /// `Effect::Hydrate`, when the bar shows an older fleet than a push it
+    /// refused, and no ask was made for that push. While an ask is in flight,
+    /// the next one waits [`HYDRATE_RETRY_MS`]: a `clave snapshot` that fails
+    /// sends no answer, and must not leave the bar unable to ask again.
+    fn ask_hydrate(&mut self, now_ms: u64) -> Vec<Effect> {
+        let behind = self.seq < self.refused_seq;
+        let unasked = self.asked_for < self.refused_seq;
+        let waiting = self
+            .hydrate_asked_ms
+            .is_some_and(|asked| now_ms.saturating_sub(asked) < HYDRATE_RETRY_MS);
+        if !behind || !unasked || waiting {
+            return Vec::new();
+        }
+        self.asked_for = self.refused_seq;
+        self.hydrate_asked_ms = Some(now_ms);
+        vec![Effect::Hydrate]
+    }
+
+    fn apply_snapshot(&mut self, snap: AgentSnapshot) -> Vec<Effect> {
         if snap.seq <= self.seq {
             return Vec::new(); // stale/out-of-order: discard (S1)
         }
@@ -3617,6 +3733,7 @@ mod tests {
 
     fn snap(seq: u64, agents: Vec<Agent>) -> AgentSnapshot {
         AgentSnapshot {
+            dormant: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -3632,6 +3749,7 @@ mod tests {
     /// (tab_id, commitment ordinal).
     fn snap_t(seq: u64, ords: &[(usize, u64)]) -> AgentSnapshot {
         AgentSnapshot {
+            dormant: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -4045,6 +4163,7 @@ mod tests {
         let mut a = agent("u-d", Status::Idle, None);
         a.commit_ord = 999;
         m.apply_snapshot(AgentSnapshot {
+            dormant: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -4097,6 +4216,7 @@ mod tests {
             })
             .collect();
         m.apply_snapshot(AgentSnapshot {
+            dormant: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -4660,6 +4780,226 @@ mod tests {
         assert_eq!(status_at(&m2, 0), None); // still a terminal row
     }
 
+    // ---- The slim push (2026-10-13): dormant rows named by tag ----
+
+    fn whole(seq: u64, tag: Option<u64>, agents: Vec<Agent>) -> AgentSnapshot {
+        AgentSnapshot {
+            dormant: DormantRows::Included { tag },
+            ..snap(seq, agents)
+        }
+    }
+
+    fn slim(seq: u64, tag: u64, agents: Vec<Agent>) -> AgentSnapshot {
+        AgentSnapshot {
+            dormant: DormantRows::Omitted { tag },
+            ..snap(seq, agents)
+        }
+    }
+
+    fn uuids(m: &BarModel) -> Vec<&str> {
+        m.agents.iter().map(|a| a.uuid.as_str()).collect()
+    }
+
+    #[test]
+    fn a_push_that_names_held_rows_gets_them_back_in_store_order() {
+        let mut m = BarModel::default();
+        m.apply_push(
+            whole(
+                1,
+                Some(7),
+                vec![
+                    agent("u-a", Status::Idle, None),
+                    agent("u-b", Status::Working, Some(1)),
+                    agent("u-c", Status::Idle, None),
+                ],
+            ),
+            0,
+        );
+        let fx = m.apply_push(slim(2, 7, vec![agent("u-b", Status::Done, Some(1))]), 0);
+        assert!(!fx.contains(&Effect::Hydrate));
+        assert_eq!(uuids(&m), ["u-a", "u-b", "u-c"]);
+        assert_eq!(
+            m.agents[1].status,
+            Status::Done,
+            "the live row is the push's own"
+        );
+        assert_eq!(m.seq, 2);
+    }
+
+    #[test]
+    fn a_push_that_names_rows_the_bar_lacks_asks_for_a_full_snapshot_and_applies_nothing() {
+        let mut m = BarModel::default();
+        assert_eq!(
+            m.apply_push(slim(1, 7, vec![]), 0),
+            vec![Effect::Hydrate],
+            "a newborn holds no rows"
+        );
+
+        m.apply_push(whole(1, Some(7), vec![agent("u-a", Status::Idle, None)]), 0);
+        let fx = m.apply_push(
+            slim(2, 8, vec![agent("u-b", Status::Working, Some(1))]),
+            5_000,
+        );
+        assert_eq!(fx, vec![Effect::Hydrate]);
+        assert_eq!(
+            (m.seq, uuids(&m)),
+            (1, vec!["u-a"]),
+            "half a fleet is never shown"
+        );
+
+        m.apply_push(
+            whole(2, Some(8), vec![agent("u-b", Status::Working, Some(1))]),
+            5_000,
+        );
+        assert_eq!(m.seq, 2, "the refused seq stays open to the answer");
+    }
+
+    #[test]
+    fn the_ask_waits_out_the_retry_window_then_repeats() {
+        let mut m = BarModel::default();
+        let t = 1_000;
+        assert_eq!(m.apply_push(slim(1, 7, vec![]), t), vec![Effect::Hydrate]);
+        assert!(
+            m.apply_push(slim(2, 7, vec![]), t + HYDRATE_RETRY_MS - 1)
+                .is_empty()
+        );
+        assert_eq!(
+            m.apply_push(slim(3, 7, vec![]), t + HYDRATE_RETRY_MS),
+            vec![Effect::Hydrate],
+            "a lost answer must not stop the asks"
+        );
+    }
+
+    #[test]
+    fn a_stale_push_asks_for_nothing() {
+        let mut m = BarModel::default();
+        m.apply_push(whole(5, Some(7), vec![]), 0);
+        assert!(m.apply_push(slim(5, 8, vec![]), 0).is_empty());
+        assert!(m.apply_push(slim(4, 8, vec![]), 0).is_empty());
+    }
+
+    /// The adversarial review's lost push: a second refusal falls inside the
+    /// window, and the first answer is older than it. Without a second ask,
+    /// the bar shows push 3's fleet until some later push, which an idle
+    /// fleet may never send.
+    #[test]
+    fn a_push_refused_inside_the_window_is_asked_for_when_an_older_answer_lands() {
+        let mut m = BarModel::default();
+        m.apply_push(whole(1, Some(7), vec![agent("u-a", Status::Idle, None)]), 0);
+        // Push 2 carried tag 8 and was lost. Push 3 names it.
+        assert_eq!(m.apply_push(slim(3, 8, vec![]), 100), vec![Effect::Hydrate]);
+        // Push 4 carried tag 9 and was lost too. Push 5 names it.
+        assert!(m.apply_push(slim(5, 9, vec![]), 200).is_empty());
+
+        let fx = m.apply_answer(
+            whole(3, Some(8), vec![agent("u-b", Status::Idle, None)]),
+            300,
+        );
+        assert_eq!(m.seq, 3);
+        assert!(
+            fx.contains(&Effect::Hydrate),
+            "the bar still shows an older fleet than push 5"
+        );
+
+        let fx = m.apply_answer(
+            whole(5, Some(9), vec![agent("u-c", Status::Idle, None)]),
+            400,
+        );
+        assert!(!fx.contains(&Effect::Hydrate), "push 5 is answered");
+        assert_eq!(uuids(&m), ["u-c"]);
+        assert!(
+            !m.apply_push(slim(6, 9, vec![]), 500)
+                .contains(&Effect::Hydrate)
+        );
+    }
+
+    /// The second review's spin: an answer older than the push it was asked
+    /// for, because the store went back (agents.json deleted) or the push
+    /// came from another store. Asking again gets the same answer, so a bar
+    /// that asked again would run `clave snapshot` back to back, on every
+    /// tab. It waits for the next push it cannot use, and asks once for that.
+    #[test]
+    fn an_answer_older_than_the_push_it_was_asked_for_does_not_ask_again() {
+        let mut m = BarModel::default();
+        m.apply_push(whole(4, Some(7), vec![]), 0);
+        assert_eq!(m.apply_push(slim(9, 8, vec![]), 100), vec![Effect::Hydrate]);
+        assert!(m.apply_answer(whole(3, Some(7), vec![]), 200).is_empty());
+        assert!(m.apply_answer(whole(6, Some(7), vec![]), 300).is_empty());
+        assert_eq!(m.seq, 6, "the newer answer is still applied");
+        assert_eq!(
+            m.apply_push(slim(10, 8, vec![]), 400),
+            vec![Effect::Hydrate]
+        );
+    }
+
+    /// A whole push from the pipe is not the answer. The ask in flight is
+    /// still out, so a push the bar refused before it costs no second ask.
+    #[test]
+    fn a_whole_push_that_overtakes_the_answer_asks_for_nothing_more() {
+        let mut m = BarModel::default();
+        m.apply_push(whole(9, Some(7), vec![]), 0);
+        // Push 11 named tag 8 and overtook push 10, which carries it.
+        assert_eq!(
+            m.apply_push(slim(11, 8, vec![]), 100),
+            vec![Effect::Hydrate]
+        );
+        assert!(m.apply_push(whole(10, Some(8), vec![]), 200).is_empty());
+        assert!(m.apply_push(slim(12, 8, vec![]), 300).is_empty());
+        assert_eq!(m.seq, 12, "the overtaken push brought the rows");
+    }
+
+    /// The birth ask counts as the ask in flight. A push refused before its
+    /// answer waits for it, and asks once more only if the answer is older.
+    #[test]
+    fn a_newborn_asks_once_and_a_push_before_the_answer_waits_for_it() {
+        let mut m = BarModel::default();
+        assert_eq!(m.hydrate(0), vec![Effect::Hydrate]);
+        assert!(m.apply_push(slim(5, 7, vec![]), 100).is_empty());
+        assert_eq!(
+            m.apply_answer(whole(4, Some(8), vec![]), 200),
+            vec![Effect::Hydrate],
+            "the birth answer predates push 5"
+        );
+        assert!(m.apply_answer(whole(5, Some(7), vec![]), 300).is_empty());
+    }
+
+    #[test]
+    fn only_an_accepted_tagged_snapshot_replaces_the_held_rows() {
+        let mut m = BarModel::default();
+        m.apply_push(whole(5, Some(7), vec![agent("u-a", Status::Idle, None)]), 0);
+        // Stale, so refused: tag 8 is not held.
+        m.apply_push(whole(4, Some(8), vec![agent("u-z", Status::Idle, None)]), 0);
+        // Accepted, but it names no tag, so tag 7 stays held.
+        let untagged = vec![
+            agent("u-a", Status::Idle, None),
+            agent("u-y", Status::Idle, None),
+        ];
+        m.apply_push(whole(6, None, untagged), 0);
+        assert_eq!(m.apply_push(slim(7, 8, vec![]), 0), vec![Effect::Hydrate]);
+        assert!(
+            !m.apply_push(slim(8, 7, vec![]), 0)
+                .contains(&Effect::Hydrate)
+        );
+        assert_eq!(uuids(&m), ["u-a"]);
+    }
+
+    #[test]
+    fn only_the_dormant_rows_are_held() {
+        let mut m = BarModel::default();
+        let rows = vec![
+            agent("u-a", Status::Idle, None),
+            agent("u-b", Status::Working, Some(1)),
+            agent_at("u-c", Status::Working, None, 3),
+        ];
+        m.apply_push(whole(1, Some(7), rows), 0);
+        m.apply_push(slim(2, 7, vec![]), 0);
+        assert_eq!(
+            uuids(&m),
+            ["u-a"],
+            "the tab row and the mid-spawn row ride every push; a push without them has none"
+        );
+    }
+
     #[test]
     fn snapshot_seq_gate_discards_stale() {
         let mut m = BarModel::default();
@@ -4804,6 +5144,7 @@ mod tests {
     /// binds alone.
     fn snap_full(seq: u64, agents: Vec<Agent>, ords: &[(usize, u64)]) -> AgentSnapshot {
         AgentSnapshot {
+            dormant: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -8679,6 +9020,7 @@ mod tests {
         let mut a = agent("u-dormant", Status::Idle, None);
         a.last_interacted = 500;
         m.apply_snapshot(AgentSnapshot {
+            dormant: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -8733,6 +9075,7 @@ mod tests {
         new.commit_ord = 900;
         new.last_interacted = 100;
         m.apply_snapshot(AgentSnapshot {
+            dormant: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -8962,6 +9305,7 @@ mod tests {
         let mut m = BarModel::default();
         m.apply_tabs(vec![tab(7, 0, "agent-tab", true)]);
         m.apply_snapshot(AgentSnapshot {
+            dormant: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -8978,6 +9322,7 @@ mod tests {
         m.register("u2".into(), 42);
         m.apply_panes(vec![pane(0, 42, false, true)]);
         m.apply_snapshot(AgentSnapshot {
+            dormant: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -9003,6 +9348,7 @@ mod tests {
             agents.push(a);
         }
         m.apply_snapshot(AgentSnapshot {
+            dormant: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -9527,6 +9873,7 @@ mod tests {
         // u-d comes up as a tab of its own; the cursor still names it.
         m.apply_tabs(vec![tab(1, 0, "live", false), tab(2, 1, "u-d", true)]);
         m.apply_snapshot(AgentSnapshot {
+            dormant: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -9577,6 +9924,7 @@ mod tests {
             agents.push(a);
         }
         m.apply_snapshot(AgentSnapshot {
+            dormant: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -10039,6 +10387,7 @@ mod tests {
         let mut a = agent("u-d", Status::Idle, None);
         a.commit_ord = 999;
         m.apply_snapshot(AgentSnapshot {
+            dormant: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -10115,6 +10464,7 @@ mod tests {
         a.stale = true;
         m.opening.insert("u1".into());
         m.apply_snapshot(AgentSnapshot {
+            dormant: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -10129,6 +10479,7 @@ mod tests {
         // In-flight (no stale): ↻.
         let mut m = BarModel::default();
         m.apply_snapshot(AgentSnapshot {
+            dormant: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -10180,6 +10531,7 @@ mod tests {
         // "u-d" but it no longer renders dormant.
         m.apply_tabs(vec![tab(1, 0, "live", false), tab(2, 1, "u-d", true)]);
         m.apply_snapshot(AgentSnapshot {
+            dormant: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -10217,6 +10569,7 @@ mod tests {
         // dormant block, below the two live rows.
         a.commit_ord = 999;
         m.apply_snapshot(AgentSnapshot {
+            dormant: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -10289,6 +10642,7 @@ mod tests {
         a.commit_ord = 999;
         a.stale = true;
         m.apply_snapshot(AgentSnapshot {
+            dormant: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -10403,6 +10757,7 @@ mod tests {
     /// behaviour these tests see is the collapse ledger's alone.
     fn collapse_snap(seq: u64, collapsed: bool) -> AgentSnapshot {
         AgentSnapshot {
+            dormant: Default::default(),
             order: OrderMode::default(),
             now_hour: 0,
             tab_buckets: Default::default(),
@@ -10547,7 +10902,7 @@ mod tests {
                                         .enumerate()
                                         .map(|(i, &id)| (id, timeline[i]))
                                         .collect();
-                                    m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 1, agents: vec![], tab_order: tl, order: OrderMode::default(), now_hour: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
+                                    m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 1, agents: vec![], tab_order: tl, order: OrderMode::default(), now_hour: 0, tab_buckets: Default::default(), tab_touched: Default::default(), dormant: Default::default() });
                                     m
                                 };
                                 let baseline: Vec<RowKey> =
@@ -10575,6 +10930,7 @@ mod tests {
                                     .enumerate()
                                 {
                                     m.apply_snapshot(AgentSnapshot {
+                dormant: Default::default(),
                 order: OrderMode::default(),
                 now_hour: 0,
                 tab_buckets: Default::default(),
@@ -10649,7 +11005,7 @@ mod tests {
                                     .enumerate()
                                     .map(|(i, &id)| (id, tl_vals[i]))
                                     .collect();
-                                m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 1, agents, tab_order: timeline.clone(), order: OrderMode::default(), now_hour: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
+                                m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 1, agents, tab_order: timeline.clone(), order: OrderMode::default(), now_hour: 0, tab_buckets: Default::default(), tab_touched: Default::default(), dormant: Default::default() });
 
                                 // Determinism: identical inputs → identical rows.
                                 prop_assert_eq!(m.rows(), m.rows());
@@ -10700,6 +11056,7 @@ mod tests {
                                 let mut m = BarModel::default();
                                 m.apply_tabs(vec![tab(0, 0, "a", true), tab(1, 1, "b", false)]);
                                 m.apply_snapshot(AgentSnapshot {
+                dormant: Default::default(),
                 order: OrderMode::default(),
                 now_hour: 0,
                 tab_buckets: Default::default(),
@@ -10712,6 +11069,7 @@ mod tests {
                                 let rows0 = m.rows();
                                 let timeline0 = m.tab_order.clone();
                                 m.apply_snapshot(AgentSnapshot {
+                dormant: Default::default(),
                 order: OrderMode::default(),
                 now_hour: 0,
                 tab_buckets: Default::default(),
@@ -10735,8 +11093,9 @@ mod tests {
                                 tl1 in prop::collection::btree_map(0usize..8, 0u64..500, 0..5),
                             ) {
                                 let mut m = BarModel::default();
-                                m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 1, agents: vec![], tab_order: tl0, order: OrderMode::default(), now_hour: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
+                                m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 1, agents: vec![], tab_order: tl0, order: OrderMode::default(), now_hour: 0, tab_buckets: Default::default(), tab_touched: Default::default(), dormant: Default::default() });
                                 m.apply_snapshot(AgentSnapshot {
+                dormant: Default::default(),
                 order: OrderMode::default(),
                 now_hour: 0,
                 tab_buckets: Default::default(),
@@ -10784,6 +11143,7 @@ mod tests {
                                 let timeline: std::collections::BTreeMap<usize, u64> =
                                     ids.iter().enumerate().map(|(i, &id)| (id, tl_vals[i])).collect();
                                 m.apply_snapshot(AgentSnapshot {
+                dormant: Default::default(),
                 order: OrderMode::default(),
                 now_hour: 0,
                 tab_buckets: Default::default(),
@@ -10891,6 +11251,7 @@ mod tests {
                                         .collect(),
                                 );
                                 m.apply_snapshot(AgentSnapshot {
+                dormant: Default::default(),
                 order: OrderMode::default(),
                 now_hour: 0,
                 tab_buckets: Default::default(),
@@ -10946,7 +11307,7 @@ mod tests {
                                         .collect();
                                     let mut tl = timeline.clone();
                                     tl.remove(&victim_id);
-                                    m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 2, agents, tab_order: tl, order: OrderMode::default(), now_hour: 0, tab_buckets: Default::default(), tab_touched: Default::default() });
+                                    m.apply_snapshot(AgentSnapshot { collapsed: false, seq: 2, agents, tab_order: tl, order: OrderMode::default(), now_hour: 0, tab_buckets: Default::default(), tab_touched: Default::default(), dormant: Default::default() });
                                 }
 
                                 let closed = RowKey::Dormant(format!("u{victim_id}"));
@@ -11023,6 +11384,7 @@ mod tests {
                                         Some(flag) => {
                                             seq += 1;
                                             m.apply_snapshot(AgentSnapshot {
+                dormant: Default::default(),
                 order: OrderMode::default(),
                 now_hour: 0,
                 tab_buckets: Default::default(),
@@ -11059,6 +11421,7 @@ mod tests {
                                         // carrying the OPPOSITE flag must change nothing —
                                         // not even the pending ledger.
                                         m.apply_snapshot(AgentSnapshot {
+                dormant: Default::default(),
                 order: OrderMode::default(),
                 now_hour: 0,
                 tab_buckets: Default::default(),
@@ -11111,6 +11474,7 @@ mod tests {
                                     agents.push(a);
                                 }
                                 m.apply_snapshot(AgentSnapshot {
+                dormant: Default::default(),
                 order: OrderMode::default(),
                 now_hour: 0,
                 tab_buckets: Default::default(),
@@ -11411,6 +11775,7 @@ mod tests {
                         self.seq += 1;
                         self.u1_holds = !self.u1_holds; // the eviction flip
                         self.m.apply_snapshot(AgentSnapshot {
+                            dormant: Default::default(),
                             order: OrderMode::default(),
                             now_hour: 0,
                             tab_buckets: Default::default(),
