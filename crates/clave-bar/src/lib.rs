@@ -345,6 +345,40 @@ mod shell_text {
         }
     }
 
+    /// The QA drive reads the slim push's refusal path from two log lines:
+    /// one per full-snapshot ask, one per answer (scripts/qa/lib.sh,
+    /// `HYDRATE_ASK` and `HYDRATE_ANSWER`; `crates/clave/tests/qa_lib.rs`
+    /// holds the drive to the same text). Moved out of its arm, the ask line
+    /// counts asks that never ran, or misses the ones that did.
+    #[test]
+    fn the_bar_logs_each_full_snapshot_ask_and_each_answer() {
+        let effects = fn_body("run_effects");
+        let at = effects
+            .find("Effect::Hydrate => {")
+            .expect("the Hydrate arm went stale");
+        let arm = &effects[at..];
+        let arm = &arm[..arm.find("\n                }").unwrap_or(arm.len())];
+        let logged = arm
+            .find(r#"eprintln!("clave-bar: hydrate ask");"#)
+            .expect("each ask must log one line, in the arm that runs it");
+        let ran = arm
+            .find(r#"run_command(&[bin.as_str(), "snapshot"]"#)
+            .expect("the arm must still run `clave snapshot`");
+        assert!(logged < ran, "log the ask, then run it:\n{arm}");
+
+        let events = fn_body("handle_event");
+        let logged = events
+            .find(r#"eprintln!("clave-bar: hydrate answer seq={}", snap.seq);"#)
+            .expect("each answer must log one line with its seq");
+        let applied = events
+            .find("let fx = self.model.apply_answer(snap, mono_ms());")
+            .expect("the answer arm went stale");
+        assert!(
+            logged < applied,
+            "the line reads the seq before the answer moves into the model:\n{events}"
+        );
+    }
+
     #[test]
     fn the_bar_takes_the_keymap_once_and_not_on_every_tab_switch() {
         let load = fn_body("load");

@@ -505,7 +505,14 @@ impl State {
                 // UNGATED: each bar keeps its own copy of the dormant rows, so
                 // each must fetch its own. The catch-all below would swallow
                 // it silently.
+                //
+                // One line per ask, at birth or for a refused slim push. The
+                // QA drive counts them per bar (scripts/qa/lib.sh, phases 5,
+                // 6a and 6c): a bar that holds the rows asks nothing, and a
+                // bar that asks again for one refused push is the e4bc858
+                // loop. Rare by design, so it is not gated.
                 Effect::Hydrate => {
+                    eprintln!("clave-bar: hydrate ask");
                     run_command(&[bin.as_str(), "snapshot"], BTreeMap::new());
                 }
                 Effect::PersistCollapse { collapsed } if presumed => {
@@ -835,8 +842,12 @@ impl State {
                     );
                     return false;
                 }
-                match serde_json::from_slice(&stdout) {
+                match serde_json::from_slice::<clave_types::AgentSnapshot>(&stdout) {
                     Ok(snap) => {
+                        // One line per answer, the ask's other half. Its seq
+                        // tells the QA drive which store the bar read and
+                        // whether the bar ended caught up (phase 6a).
+                        eprintln!("clave-bar: hydrate answer seq={}", snap.seq);
                         // RC-B (#55): this is the arm that FIRST populates
                         // `agents`. TabUpdate/PaneUpdate normally arrive
                         // before the snapshot result — permissions land, the
