@@ -8,6 +8,18 @@ owns everything they structurally cannot reach._
 
 ## Run ledger — the useful recent history
 
+- **run 45, 2026-10-15 — the 0.5.6 cut.** Box only; the Mac half did not
+  run. Build `cde1fe9`: main, plus the quiet PR lookup (#284) and the
+  row-status and subagent fix (#285), joined on one branch. Box 0-7 green,
+  348 checks; the maintainer passed the eyeballs. The three row-status hand
+  tests did not run: a real question goes red, then working on the answer;
+  Esc with no key shows idle at about 60 s; a background agent's mark rises
+  and falls. Phase 5b drives each of these events with Claude Code's own
+  payload shapes, so only the live Claude Code's timing stays unchecked. A
+  staged sandbox writes its hook events into the maintainer's
+  `settings.json`, and live sessions pick them up at once (FOOTGUNS). Cut
+  the release right after a drive that adds hook events.
+
 - **runs 42 to 44, 2026-10-13 and 14 — the slim push (#281) and the launch
   folder (#282).** Box only; the Mac half did not run. Run 42 at `d5aceb3`:
   red in 5b, because the phase appended to ANOTHER sandbox's fixture
