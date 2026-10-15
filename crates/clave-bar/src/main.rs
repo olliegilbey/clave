@@ -976,9 +976,15 @@ impl State {
             Event::Visible(visible) => {
                 // Zellij repeats `Visible(false)` to every hidden bar about
                 // four times per CLI call (`set_visible`). Log only a flip,
-                // so the line stays gesture-rate.
+                // so the line stays gesture-rate. `own` names the tab, so the
+                // drive can narrow an arrival to one tab: plugin ids collide
+                // across sessions (FOOTGUNS, "The zellij log is
+                // USER-GLOBAL"). Phase 4 reads it (`shown_count_since`).
                 if self.model.set_visible(visible) {
-                    eprintln!("clave-bar: visible {visible}");
+                    eprintln!(
+                        "clave-bar: visible {visible} own={:?}",
+                        self.model.own_tab()
+                    );
                 }
                 visible // a returning bar paints what it took while away
             }
