@@ -473,6 +473,72 @@ pr_sync_quiet_checks() {
 }
 
 # ---------------------------------------------------------------------------
+# The agent CLI's events: their registration (phase 0) and the card cells
+# they move (phase 5b).
+# ---------------------------------------------------------------------------
+# Every event the binary acts on must reach it exactly once. A missing one is
+# a rule that never runs: StopFailure sat unregistered, so a failed turn never
+# showed Failed. A duplicate fires twice. `clave doctor --json` counts the
+# entries with the matcher setup writes with, keyed by the binary's own event
+# list (doctor.rs `hook_entry_counts`), so the drive keeps no second list to
+# drift. $1 is that JSON.
+hook_registration_checks() {
+  local counts bad
+  counts="$(jq -r '.facts.hook_counts[]? | "\(.[0])=\(.[1])"' <<<"${1:-}" 2>/dev/null || true)"
+  measure "entries per agent CLI event in settings.json" "$(tr '\n' ' ' <<<"$counts")"
+  # An unreadable report has no counts, and no counts has no bad count.
+  check_nonempty "doctor reported the event registration" "$counts"
+  bad="$(grep -v '=1$' <<<"$counts" | tr '\n' ' ' || true)"
+  check "every event the binary acts on is registered exactly once" "${bad% }" ""
+}
+
+# The inode of a file, or nothing. GNU and BSD stat share a name and almost
+# nothing else, and a `-c … || -f …` chain does not fall through cleanly
+# between them, so the dialect is probed once and then branched on
+# (sandbox-setup.sh `stamp`, which measured why).
+if stat --version >/dev/null 2>&1; then _QA_STAT=gnu; else _QA_STAT=bsd; fi
+file_inode() {
+  [[ -e "${1:-}" ]] || return 0
+  case "$_QA_STAT" in
+    gnu) stat -c '%i' "$1" 2>/dev/null || true ;;
+    *) stat -f '%i' "$1" 2>/dev/null || true ;;
+  esac
+}
+
+# An event that moves nothing writes nothing (store.rs `with_store_mut`
+# compares the bytes). Two witnesses, because each misses a write the other
+# sees. `seq` moves only when a cell moved, so a rewrite of the same bytes
+# leaves it flat: main before PR #285 rewrote the store on every event, and
+# a seq check passed on it (PR #285 review). The store file's inode moves on
+# every write, because the write is a new file renamed over the old one, and
+# the new file is made while the old one still holds its inode. $2 and $3 are
+# the `seq` read before and after the event, $4 and $5 the inode. Each must
+# be a number: a dead read on both sides compares equal.
+quiet_event_checks() {
+  local desc="$1" before="${2:-}" after="${3:-}" ino_before="${4:-}" ino_after="${5:-}"
+  check_numeric "$desc: the store seq before it is readable" "$before"
+  check_numeric "$desc: the store seq after it is readable" "$after"
+  check "$desc" "$after" "$before"
+  check_numeric "$desc: the store file's inode before it is readable" "$ino_before"
+  check_numeric "$desc: the store file's inode after it is readable" "$ino_after"
+  check "$desc: the store file was not rewritten (inode)" "$ino_after" "$ino_before"
+}
+
+# A harness turn is not the human typing (hook.rs `is_harness_turn`). The row
+# may go to Working, but "since you last typed" (`last_interacted`) and the
+# row's rank (`commit_ord`) stay where the last typed prompt put them. $1 is
+# the row; $2 and $3 are `dev status` reads before and after the turn.
+typed_clock_checks() {
+  local uuid="$1" before="${2:-}" after="${3:-}" field b a
+  for field in last_interacted commit_ord; do
+    b="$(jq -r --arg u "$uuid" ".store.agents[\$u].$field" <<<"$before" 2>/dev/null || true)"
+    a="$(jq -r --arg u "$uuid" ".store.agents[\$u].$field" <<<"$after" 2>/dev/null || true)"
+    check_numeric "the row's $field before the harness turn is readable" "$b"
+    check "the harness turn left the row's $field alone" "$a" "$b"
+  done
+}
+
+# ---------------------------------------------------------------------------
 # The slim push (PR #281): its readings and its verdicts.
 # ---------------------------------------------------------------------------
 # A status push leaves out the dormant rows when the push before it carried

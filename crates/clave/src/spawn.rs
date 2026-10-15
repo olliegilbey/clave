@@ -961,6 +961,7 @@ mod tests {
                 label: "x \u{00b7} main".into(),
                 status: clave_types::Status::Idle,
                 last_interacted: 9,
+                turn_started: 0,
                 commit_ord: 3,
                 last_visited: 8, // visited is NOT evidence (birth tab focus)
                 worktree: None,

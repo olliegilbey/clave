@@ -56,6 +56,52 @@ pub const DEFAULT_SMART_ZONE_TOKENS: u32 = 150_000;
 /// must be exactly this long, and nothing else links the two numbers.
 pub const BATTERY_LEVELS: u8 = 11;
 
+/// A token count in at most four cells (#105): thousands below a million, tenths
+/// of a million above it, and a BARE `1m` rather than `1.0m` — the `.0` spends
+/// half the field on a digit that carries nothing, and mixing the two shapes
+/// makes the column jitter (Ollie's ruling).
+///
+/// ROUNDED to the nearest step, not floored: the cell is a measurement, and a
+/// battery that reads `999k` at 999,600 tokens is wrong in the one direction a
+/// battery must not be wrong in. Above 9.95m the decimal is dropped rather than
+/// overflowing the cell (`10m`), and the whole figure saturates at `999m` — the
+/// same "at least this bad" direction the ramp's own clamp takes.
+///
+/// Shared for the same reason as [`BATTERY_LEVELS`]: the bar paints this text,
+/// and the host's meter writes a count only when this text moves
+/// (`statusline::count_due`). Two copies would let a count land that no bar
+/// can show, or hold one that every bar would.
+pub fn token_text(tokens: u32) -> String {
+    // Widened before the arithmetic: `u32::MAX + 500` is not a `u32`, and the
+    // rounding is the whole point of doing it in the wider type.
+    let tokens = u64::from(tokens);
+    let thousands = (tokens + 500) / 1_000;
+    if thousands < 1_000 {
+        return format!("{thousands}k");
+    }
+    // Tenths of a million, rounded. `999_500` lands here rather than rendering a
+    // five-cell `1000k`, and reads `1m`.
+    let tenths = (tokens + 50_000) / 100_000;
+    let (millions, tenth) = (tenths / 10, tenths % 10);
+    // The decimal survives only while it fits: `9.9m` is four cells, `10.1m` is
+    // five, so from ten million on the tenth is what gives way. Written against
+    // `millions` rather than `tenths` so both halves of the condition are
+    // load-bearing — `tenths < 100` reads the same and is unfalsifiable at its
+    // own boundary, where the tenth is zero anyway (a survivor `just mutants`
+    // found, and the FOOTGUNS rule: drop the redundant guard, do not test around
+    // it).
+    if millions < 10 && tenth != 0 {
+        return format!("{millions}.{tenth}m");
+    }
+    // The decimal gave way, but the dropped tenth still says which whole
+    // million is nearer: floor here would under-report (10,940,000 → `10m`
+    // rather than the nearer `11m`), the one direction this cell must not be
+    // wrong in. Saturate AFTER rounding, not before, so a round-up at 999
+    // still lands on the four-cell cap rather than a five-cell `1000m`.
+    let millions = millions + u64::from(tenth >= 5);
+    format!("{}m", millions.min(999))
+}
+
 /// A value this binary has no name for is the FUTURE, not corruption — a newer
 /// clave wrote it. Take the field's default and keep reading.
 ///
@@ -383,6 +429,13 @@ pub struct Agent {
     /// NOT the bar's sort key (S1/#39: whole seconds tie, and ties resolved
     /// on tab position, so the wrong row won).
     pub last_interacted: u64,
+    /// unix seconds; when the turn in flight began, `0` when none is. The
+    /// TURN CLOCK, and a different instant from `last_interacted`: a harness
+    /// turn (a task notification, a peer message) starts a turn but is no
+    /// typed prompt. The bar reads it only on a thinking row; `0` renders
+    /// blank. `default` keeps pre-field payloads parseable.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub turn_started: u64,
     /// §6.6 commitment ORDINAL: the store `seq` of this row's last user
     /// commitment (a prompt, its creation, or the ordinal inherited from its
     /// tab when that tab closed). Minted under the store flock, so it is a
@@ -1006,6 +1059,55 @@ const _: () = assert!(
 mod tests {
     use super::*;
 
+    /// The four-character range from the ticket, which is the whole reason four
+    /// columns is the right size: every reading a real conversation produces
+    /// fits it. `1.0m` is deliberately NOT one of the shapes — mixing it with
+    /// `400k` would leave the field jittering between two widths of million.
+    #[test]
+    fn a_token_count_reads_as_thousands_or_millions() {
+        for (tokens, want) in [
+            // A row that just `/clear`ed is genuinely near zero, and says so
+            // rather than rounding itself up into a reading it has not spent.
+            (0, "0k"),
+            (1_000, "1k"),
+            (105_000, "105k"),
+            (400_000, "400k"),
+            (999_000, "999k"),
+            (1_000_000, "1m"),
+            (1_100_000, "1.1m"),
+        ] {
+            assert_eq!(token_text(tokens), want, "{tokens} tokens");
+        }
+    }
+
+    /// Rounding, and the two boundaries the branches meet at. Floored counts
+    /// under-report, and under-reporting is the one direction a battery must not
+    /// be wrong in.
+    #[test]
+    fn a_token_count_rounds_to_its_nearest_step() {
+        assert_eq!(token_text(1_499), "1k");
+        assert_eq!(token_text(1_500), "2k");
+        // A hair under a million rounds INTO millions rather than rendering a
+        // five-cell `1000k` that would break the row.
+        assert_eq!(token_text(999_499), "999k");
+        assert_eq!(token_text(999_500), "1m");
+        // A whole million reads bare from either side of it.
+        assert_eq!(token_text(1_049_999), "1m");
+        assert_eq!(token_text(1_050_000), "1.1m");
+        // Past 9.95m the DECIMAL gives way, not the cell: `10.1m` would be five
+        // columns, so double-digit millions round to whole ones.
+        assert_eq!(token_text(9_949_999), "9.9m");
+        assert_eq!(token_text(9_950_000), "10m");
+        assert_eq!(token_text(10_100_000), "10m");
+        // Past ten million the digit that gave way still decides which whole
+        // million is nearer: floor here under-reports (10,940,000 is nearer
+        // 11m than 10m), the one direction the doc forbids.
+        assert_eq!(token_text(10_940_000), "11m");
+        // And the whole figure saturates rather than overflowing the cell — the
+        // ramp's own "at least this bad" direction.
+        assert_eq!(token_text(u32::MAX), "999m");
+    }
+
     /// Ollie, 2026-09-22: standby lasts a day. Spelled in seconds here, so a
     /// slip in the product that builds the constant cannot pass.
     #[test]
@@ -1241,6 +1343,7 @@ mod tests {
             label: "x · main".into(),
             status: Status::Idle,
             last_interacted: 5,
+            turn_started: 0,
             commit_ord: 0,
             last_visited: 6,
             tab_id: None,
@@ -1361,6 +1464,7 @@ mod tests {
             label: "x · main".into(),
             status: Status::Idle,
             last_interacted: 0,
+            turn_started: 0,
             commit_ord: 0,
             last_visited: 0,
             tab_id: None,
@@ -1404,6 +1508,7 @@ mod tests {
                 label: "clave · main · hello".into(),
                 status: Status::Working,
                 last_interacted: 1000,
+                turn_started: 0,
                 commit_ord: 0,
                 last_visited: 0,
                 tab_id: None,
@@ -1445,6 +1550,7 @@ mod tests {
             label: "x · main".into(),
             status: Status::Idle,
             last_interacted: 0,
+            turn_started: 0,
             commit_ord: 0,
             last_visited: 0,
             tab_id: Some(4),
@@ -1488,6 +1594,7 @@ mod tests {
             label: "x · main".into(),
             status: Status::Idle,
             last_interacted: 0,
+            turn_started: 0,
             commit_ord: 0,
             last_visited: 0,
             tab_id: None,
@@ -1533,6 +1640,7 @@ mod tests {
             label: "x \u{00b7} main".into(),
             status: Status::Idle,
             last_interacted: 0,
+            turn_started: 0,
             commit_ord: 0,
             last_visited: 0,
             tab_id: None,
@@ -1592,6 +1700,7 @@ mod tests {
             label: "x \u{00b7} trunk".into(),
             status: Status::Idle,
             last_interacted: 0,
+            turn_started: 0,
             commit_ord: 0,
             last_visited: 0,
             tab_id: None,
@@ -1680,6 +1789,7 @@ mod tests {
             label: "x".into(),
             status: Status::Idle,
             last_interacted: 0,
+            turn_started: 0,
             commit_ord: 7,
             last_visited: 0,
             tab_id: None,

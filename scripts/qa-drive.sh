@@ -527,6 +527,14 @@ for CAND in "${OTHER_CLAVES[@]+"${OTHER_CLAVES[@]}"}"; do
   fi
 done
 
+# Every event this build acts on is registered, once. The stage's setup
+# writes them into the shared settings.json, and an event left out is a rule
+# that never runs in the field: StopFailure sat in the status table, never
+# registered, so a failed turn never showed Failed. Doctor counts the entries
+# with the matcher setup writes with, over the binary's own event list, so a
+# new event cannot be missed here by a list kept in bash.
+hook_registration_checks "$("$CLAVE_BIN" doctor --json 2>/dev/null || true)"
+
 # config.kdl <-> layout.kdl identity pair (the #44 self-check `just sandbox`
 # already runs at stage time — re-asserted here because config coherence can
 # rot between staging and this run, e.g. a `clave setup` run by hand).
@@ -2045,17 +2053,23 @@ fi
 # ===========================================================================
 # Phase 5b — the card's new cells, from the hook side
 # ===========================================================================
-# The four-line card added three cells that no earlier phase can reach:
-# `wants` (what a blocked agent is asking for, quoted from its own
-# notification), the subagent mark (a ledger over the transcript tail — every
-# launch it holds, minus every one it has seen finish) and the status the two
-# are gated on. Every one of them is written by `clave hook` into the store —
-# so this phase drives the REAL binary against the REAL store file and the
-# REAL transcript reader, which is the seam the unit tests cannot see. Three
-# of this branch's defects lived exactly here: the mark read the
-# statusLine-suppressed tail and so never landed in a released install; it
-# read a count written after the Stop hook and so always a turn late; and a
-# launch nothing closed held it for ever.
+# The four-line card carries three cells that no earlier phase reaches: the
+# status, `wants` (what a blocked agent asks for, in its own words) and the
+# subagent mark. `clave hook` writes all three into the store, from the
+# payload Claude Code hands it. So this phase drives the REAL binary against
+# the REAL store, with payloads in Claude Code's own shapes
+# (code.claude.com/docs/en/hooks). That is the seam the unit tests cannot
+# see: the parse of stdin, the store write and its skip, and the clock the
+# binary reads.
+#
+# What it pins (2026-10-14):
+# - PostToolBatch, the "answered" event, clears an ask; a subagent's batch
+#   (it carries `agent_id`) does not clear the parent;
+# - the idle nag ends only a live turn; an API error shows Failed;
+# - a harness turn (a task notification, a peer hand-back) moves the row to
+#   Working, and moves neither "since you last typed" nor the row's rank;
+# - the subagent mark follows Claude Code's task registry;
+# - an event that moves nothing writes nothing.
 #
 # Ordering: after the burst and before quiescence. It bumps `seq` and moves
 # statuses, which no later phase reads, and it deliberately leaves the row
@@ -2080,9 +2094,9 @@ check_nonempty "phase-5b target row (scenario-seeded, not stale)" "$P5B_UUID"
 # munge is the binary's job and a second implementation of it in bash is a
 # second thing to get wrong. Every sandbox seeds the SAME fixture uuids, so the
 # glob also finds other sandboxes' copies, and the first match is whichever
-# root sorts first. Run 42 appended to `clave-dev-agent-a2-d8ae`'s copy, the
-# hook read this sandbox's own, and the mark never rose. So keep only the copy
-# whose own lines carry this row's cwd: the transcript's fact, not a munge.
+# root sorts first. Run 42 handed the hook `clave-dev-agent-a2-d8ae`'s copy.
+# So keep only the copy whose own lines carry this row's cwd: the
+# transcript's fact, not a munge.
 P5B_CWD="$(jq -r --arg u "$P5B_UUID" '.store.agents[$u].cwd // empty' <<<"$P5B_STATUS" 2>/dev/null)"
 P5B_TAIL=""
 for f in "$CLAUDE_PROJECTS"/*/"$P5B_UUID".jsonl; do
@@ -2090,16 +2104,18 @@ for f in "$CLAUDE_PROJECTS"/*/"$P5B_UUID".jsonl; do
     P5B_TAIL="$f" && break
 done
 check_nonempty "phase-5b transcript on disk (${P5B_UUID})" "$P5B_TAIL"
-# GUARD, load-bearing: this phase APPENDS a line, and the only files it may
-# ever append to are scenario fixtures — deterministic `c85c` uuids that
-# `clave dev reset` sweeps (dev.rs `is_scenario_jsonl`). A real conversation
-# must be unreachable from here even if the row selection above is changed.
+# GUARD, load-bearing: the hook reads this file as the row's live transcript
+# (label, tokens, model), so only a scenario fixture may stand in for one —
+# deterministic `c85c` uuids that `clave dev reset` sweeps (dev.rs
+# `is_scenario_jsonl`). A real conversation must be unreachable from here even
+# if the row selection above is changed.
 check "phase-5b transcript is a scenario fixture (never a real conversation)" \
   "$(basename "$P5B_TAIL" | grep -c '^00000000-0000-4000-8000-c85c.*\.jsonl$' || true)" "1"
 
 # One hook event, exactly as Claude Code fires it: the event name as argv,
-# the payload on stdin, the sandbox's dirs in the environment. Exit status is
-# never the signal — the hook exits 0 by Global Constraint — so every
+# the payload on stdin, the sandbox's dirs in the environment. $2 is a JSON
+# object merged into the payload: the fields that event carries. Exit status
+# is never the signal — the hook exits 0 by Global Constraint — so every
 # assertion below reads the STORE.
 # THROUGH ct.sh, never `clave hook` directly. Setting CLAVE_STATE_DIR alone
 # looks completely correct and is not: the store write lands in the sandbox,
@@ -2111,10 +2127,13 @@ check "phase-5b transcript is a scenario fixture (never a real conversation)" \
 # a hook; a hand-rolled `hook_fire` that bypassed it hung the maintainer's
 # live session on 2026-09-11, which is why the rule is now enforced at the
 # only site in this script that fires one.
+P5B_EVENTS=0
 hook_fire() {
-  local event="$1" message="${2:-}" payload
-  payload="$(jq -nc --arg s "$P5B_UUID" --arg t "$P5B_TAIL" --arg m "$message" \
-    '{session_id:$s, transcript_path:$t} + (if $m == "" then {} else {message:$m} end)')"
+  local event="$1" extra="${2:-}" payload
+  [[ -n "$extra" ]] || extra='{}'
+  payload="$(jq -nc --arg s "$P5B_UUID" --arg t "$P5B_TAIL" --argjson x "$extra" \
+    '{session_id:$s, transcript_path:$t} + $x')"
+  P5B_EVENTS=$((P5B_EVENTS + 1))
   "$CT" --hook "$event" "$payload" 2>&1 | sed "s/^/[hook $event] /"
 }
 
@@ -2125,11 +2144,30 @@ hook_fire() {
 wait_field() {
   local field="$1" want="$2" i got=""
   for i in $(seq 1 10); do
-    got="$(jq -r --arg u "$P5B_UUID" ".store.agents[\$u].${field}" < <(dev_status) 2>/dev/null)"
+    got="$(row_field "$field")"
     [[ "$got" == "$want" ]] && break
     sleep 1
   done
   printf '%s' "$got"
+}
+row_field() { jq -r --arg u "$P5B_UUID" ".store.agents[\$u].$1" < <(dev_status) 2>/dev/null; }
+store_seq() { jq -r '.store.seq' < <(dev_status) 2>/dev/null; }
+store_inode() { file_inode "$STATE_DIR/agents.json"; }
+
+# An event that must move nothing, held to that: no `seq` move, and no
+# rewrite of the store file (its inode, `quiet_event_checks`). The hook runs
+# to completion before ct.sh returns, and the PR cache is warm (below), so
+# nothing of its own lands late. The second read still waits a second, so
+# that a late writer shows as a red here rather than in some later window.
+P5B_QUIET=0
+quiet_fire() {
+  local desc="$1" event="$2" extra="${3:-}" before ino
+  before="$(store_seq)"
+  ino="$(store_inode)"
+  hook_fire "$event" "$extra"
+  sleep 1
+  quiet_event_checks "$desc" "$before" "$(store_seq)" "$ino" "$(store_inode)"
+  P5B_QUIET=$((P5B_QUIET + 1))
 }
 
 # --- the PR cache, warmed before anything is counted ------------------------
@@ -2145,7 +2183,7 @@ wait_field() {
 # The confound is removed rather than budgeted for. One benign event first
 # (`SessionEnd` — the state the ladder starts from anyway), then wait for the
 # cache to reach the shape `pr_is_stale` calls fresh. `PR_TTL_SECS` is 300s
-# and the ladder is seconds long, so nothing re-spawns inside it.
+# and the ladder is well inside it, so nothing re-spawns inside it.
 #
 # Since 0.5.6 only a `pr-sync` answer writes the cache (pr.rs
 # `apply_pr_answer`), so the wait is for `pr_checked` to MOVE. The shape
@@ -2178,117 +2216,127 @@ sleep 2 # the settling write is async — let it land before the baseline read
 
 # Re-read: the baseline must be taken AFTER the warm-up, not from the status
 # captured at phase start.
-P5B_SEQ0="$(jq -r '.store.seq' < <(dev_status) 2>/dev/null)"
+P5B_SEQ0="$(store_seq)"
+P5B_EVENTS=0
 check_numeric "phase-5b start store seq readable" "$P5B_SEQ0"
 measure "phase-5b row" "$P5B_UUID tail=$P5B_TAIL"
 pr_sync_quiet_checks "$P5B_UUID" "$P5B_PR_PRE" "$P5B_PR_HOOK" "$(dev_status)"
 
-# --- wants: the words come off the agent's own notification -----------------
-# The anchor is Claude Code's wording and is matched as a substring, because
-# the CLI owns the sentence and has reworded it before.
-hook_fire Notification "Claude needs your permission to use Bash"
-check "a permission notification turns the row red" "$(wait_field status needs_you)" "needs_you"
-check "and the card learns what it is asking for" "$(wait_field wants Bash)" "Bash"
-
-# --- and it does not outlive the asking -------------------------------------
-# `wants` is coextensive with NeedsYou on the wire; the next prompt is what
-# ends the ask, and the words must go with it or the card contradicts its own
-# glyph.
+# --- a typed prompt starts the turn, and the turn clock ---------------------
+# No `prompt` field. The hook reads a missing prompt as typed, and a prompt's
+# words would earn the fixture row a label.
 hook_fire UserPromptSubmit
-check "the next turn clears the ask" "$(wait_field status working)" "working"
-check "and takes its words with it" "$(wait_field wants null)" "null"
+check "a typed prompt starts the turn" "$(wait_field status working)" "working"
+P5B_TURN="$(row_field turn_started)"
+check_min "and starts the turn clock" "$P5B_TURN" 1
 
-# --- the subagent mark: a ledger over the tail ------------------------------
-# A fan-out opens on an `Agent` tool_use and closes on the task-notification
-# naming the same `tool-use-id`. Both lines are appended to the real scenario
-# transcript rather than simulated, so the real tail reader is what answers.
-#
-# This leg replaced one that appended `pendingBackgroundAgentCount` on a
-# `turn_duration` line. That record is written AFTER the Stop hook, so a Stop
-# could never see the turn it had just ended and the glyph outlived its agents
-# by half an hour in the field (FOOTGUNS, and lock §4.6 has the numbers).
-#
-# The launch is stamped at the REAL current time, because the reader ages it:
-# a launch past its bound is read as closed. `date -u -r` is BSD and `-d @` is
-# GNU, so both are tried.
-iso_utc_at() { # epoch seconds -> 2026-09-14T15:17:24.000Z
-  date -u -r "$1" +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null ||
-    date -u -d "@$1" +%Y-%m-%dT%H:%M:%S.000Z
-}
-P5B_NOW="$(date +%s)"
-agent_launch_line() { # id, iso timestamp
-  printf '{"type":"assistant","isSidechain":false,"timestamp":"%s","message":{"role":"assistant","content":[{"type":"tool_use","id":"%s","name":"Agent","input":{"description":"QA lane"}}]}}\n' "$2" "$1"
-}
-check_nonempty "phase-5b clock readable (the mark ages its launches)" \
-  "$(iso_utc_at "$P5B_NOW")"
-agent_launch_line toolu_qa5b "$(iso_utc_at "$P5B_NOW")" >>"$P5B_TAIL"
-hook_fire Stop
-check "a fan-out raises the subagent mark" "$(wait_field subagents true)" "true"
-check "and the turn is over" "$(wait_field status "done")" "done"
+# --- an ask, and the event that answers it ----------------------------------
+# The kind is Claude Code's contract. The words are where `wants` comes
+# from, matched as a substring because the CLI owns the sentence.
+hook_fire Notification '{"notification_type":"permission_prompt","message":"Claude needs your permission to use Bash"}'
+check "a permission ask turns the row red" "$(wait_field status needs_you)" "needs_you"
+check "and the card learns what it asks for" "$(wait_field wants Bash)" "Bash"
 
-# The same record carries background commands, and its `tool-use-id` then
-# names a Bash call. The mark must match on the id, or every background
-# command finishing would blank a mark its agents still earn.
-printf '%s\n' '{"type":"queue-operation","operation":"enqueue","content":"<task-notification>\n<task-id>qa1</task-id>\n<tool-use-id>toolu_qabash</tool-use-id>\n<status>completed</status>\n<summary>Background command \"sleep 1\" completed (exit code 0)</summary>\n</task-notification>"}' >>"$P5B_TAIL"
-hook_fire Stop
-check "a background command finishing does not clear the mark" "$(wait_field subagents true)" "true"
+# A subagent's batch names the parent's session and carries its own
+# `agent_id`. It says nothing about the parent's ask, so it moves nothing,
+# and it never reaches the store lock (hook.rs `from_a_subagent`).
+quiet_fire "a subagent's tool batch writes nothing" PostToolBatch '{"agent_id":"qa-5b-agent"}'
+check "and the parent stays red" "$(row_field status)" "needs_you"
 
-# And the agent's own notification does close it — within seconds of the agent
-# stopping, which is the whole reason the ledger replaced the turn-close count.
-printf '%s\n' '{"type":"queue-operation","operation":"enqueue","content":"<task-notification>\n<task-id>qa2</task-id>\n<tool-use-id>toolu_qa5b</tool-use-id>\n<status>completed</status>\n<summary>Agent \"QA lane\" finished</summary>\n</task-notification>"}' >>"$P5B_TAIL"
-hook_fire Stop
-check "the agent's own notification clears the mark" "$(wait_field subagents false)" "false"
+# The parent's own batch resolves only after every tool in it ran, so its ask
+# was answered. The 2026-09-14 red glyph lived in exactly this gap: before
+# PostToolBatch, no event clave heard said "answered".
+hook_fire PostToolBatch
+check "the answered batch clears the red" "$(wait_field status working)" "working"
+check "and takes the ask's words with it" "$(wait_field wants null)" "null"
+check "and the turn clock ran on through the block" "$(row_field turn_started)" "$P5B_TURN"
 
-# --- a launch nothing ever closes must still stop holding the mark ----------
-# A session killed with `kill -9` writes no notification and fires no
-# SessionEnd, so its last launch has no closing record anywhere in the file.
-# Measured 2026-09-14: 4 of 1196 transcripts end their window on exactly that.
-# Age is what makes it unreachable, and this is the seam that proves the
-# shipped binary applies the bound — the unit test cannot see the clock the
-# hook actually reads.
-agent_launch_line toolu_qastale "$(iso_utc_at $((P5B_NOW - 7 * 3600)))" >>"$P5B_TAIL"
-hook_fire Stop
-check "a launch older than the bound never raises the mark" \
-  "$(wait_field subagents false)" "false"
+# Inside a live turn a batch says nothing new. It fires once per tool batch,
+# so it is the busiest event there is, and it must cost no write.
+quiet_fire "a tool batch inside a live turn writes nothing" PostToolBatch
 
-# --- and a dead session carries nothing, however the tail reads --------------
-# `SessionEnd` reads no transcript at all, so it has no window to judge. It
-# forces the mark down instead: nothing can still be pending under a session
-# that has exited, and a held mark would sit on a dormant row claiming depth
-# the user cannot go and look at.
-#
-# The mark is raised again FIRST. Firing SessionEnd on a row that is already
-# clear asserts nothing — the check passed before this line was added, and
-# would pass with the whole SessionEnd rule deleted.
-agent_launch_line toolu_qalive "$(iso_utc_at "$P5B_NOW")" >>"$P5B_TAIL"
-hook_fire Stop
+# --- a harness turn is not the human typing ---------------------------------
+# Claude Code fires UserPromptSubmit for turns nobody typed. On a working row
+# such a turn changes nothing at all, so it writes nothing and pushes nothing.
+P5B_TYPED="$(dev_status)"
+quiet_fire "a task notification on a working row writes nothing" UserPromptSubmit \
+  '{"prompt":"<task-notification>\n<task-id>qa5b</task-id>\n<status>completed</status>\n</task-notification>"}'
+typed_clock_checks "$P5B_UUID" "$P5B_TYPED" "$(dev_status)"
+
+# --- the idle nag ends only a live turn -------------------------------------
+# Claude Code sends it once the prompt has sat idle. On a working row it means
+# that a Stop never came, so the turn is over, and its clock with it.
+hook_fire Notification '{"notification_type":"idle_prompt","message":"Claude is waiting for your input"}'
+check "the idle nag ends a live turn" "$(wait_field status idle)" "idle"
+check "and its clock" "$(wait_field turn_started 0)" "0"
+
+# A peer hand-back starts a turn from rest. The row works, but "since you
+# last typed" and the rank stay with the typed prompt. One second first, so
+# a wrong stamp of `last_interacted` reads as a different number.
+sleep 1
+P5B_TYPED="$(dev_status)"
+hook_fire UserPromptSubmit '{"prompt":"Another Claude session sent a message:\nqa 5b hand-back"}'
+check "a peer hand-back starts a turn" "$(wait_field status working)" "working"
+typed_clock_checks "$P5B_UUID" "$P5B_TYPED" "$(dev_status)"
+check_min "and the turn has a clock of its own" "$(row_field turn_started)" 1
+
+# --- an API error is a failed turn, not a finished one ----------------------
+# It ends the turn in StopFailure, not in Stop (code.claude.com/docs/en/hooks).
+hook_fire StopFailure
+check "an API error shows Failed" "$(wait_field status failed)" "failed"
+
+# --- the subagent mark reads Claude Code's task registry --------------------
+# SubagentStart raises it. Stop and SubagentStop carry `background_tasks`,
+# the work still in flight, and the mark follows it. An agent that stops may
+# still be listed, so SubagentStop counts only the others (hook.rs
+# `fan_out_reading`).
+P5B_TASK='{"id":"qa-5b-a1","type":"subagent","status":"running","description":"QA lane"}'
+hook_fire SubagentStart '{"agent_id":"qa-5b-a1","agent_type":"general-purpose"}'
+check "a subagent start raises the mark" "$(wait_field subagents true)" "true"
+hook_fire Stop "{\"background_tasks\":[$P5B_TASK]}"
+check "the turn ends" "$(wait_field status "done")" "done"
+check "and the mark holds while the registry lists the agent" "$(wait_field subagents true)" "true"
+hook_fire SubagentStop "{\"agent_id\":\"qa-5b-a1\",\"background_tasks\":[$P5B_TASK]}"
+check "the agent's own stop lowers the mark" "$(wait_field subagents false)" "false"
+
+# A compaction continues the session, so its agents go on. The mark is
+# raised first, or the hold proves nothing.
+hook_fire SubagentStart '{"agent_id":"qa-5b-a2","agent_type":"general-purpose"}'
+check "a second start raises the mark again" "$(wait_field subagents true)" "true"
+quiet_fire "a compaction holds the mark and writes nothing" SessionStart '{"source":"compact"}'
+check "a compaction holds it" "$(wait_field subagents true)" "true"
+hook_fire Stop '{"background_tasks":[]}'
+check "an empty registry at Stop lowers it" "$(wait_field subagents false)" "false"
+
+# --- and a dead session carries nothing -------------------------------------
+# SessionEnd forces the mark down: nothing can still run under a session that
+# has exited. The mark is raised FIRST. On a clear row the check would pass
+# with the whole rule deleted.
+hook_fire SubagentStart '{"agent_id":"qa-5b-a3","agent_type":"general-purpose"}'
 check "the mark is up when the session dies, or SessionEnd proves nothing" \
   "$(wait_field subagents true)" "true"
 hook_fire SessionEnd
-# Main's wording: the mark is asserted DOWN, not "cleared" — SessionEnd forces
-# it down whatever it was, so the check must not read as a transition.
 check "SessionEnd leaves the subagent mark down" "$(wait_field subagents false)" "false"
 check "and the row goes idle (nothing left Working into phase 6)" \
   "$(wait_field status idle)" "idle"
 
-P5B_SEQ_END="$(jq -r '.store.seq' < <(dev_status) 2>/dev/null)"
+P5B_SEQ_END="$(store_seq)"
 check_numeric "phase-5b end store seq readable" "$P5B_SEQ_END"
+P5B_LOUD=$((P5B_EVENTS - P5B_QUIET))
 measure "store seq across the card-cell ladder" \
-  "before=${P5B_SEQ0} after=${P5B_SEQ_END} delta=$((P5B_SEQ_END - P5B_SEQ0))"
-# Eight events, and a write per event is the ceiling — the hook is one locked
-# RMW per event, the snapshot push is not a store write, and the warm-up above
-# is what makes the count attributable by taking `pr-sync` out of it. More
-# than that means something is writing twice per event, which is the shape the
-# paced-12 check watches for on the toggle side. (Fewer is fine and expected:
-# the background-command `Stop` re-asserts a state the row is already in.)
+  "before=${P5B_SEQ0} after=${P5B_SEQ_END} delta=$((P5B_SEQ_END - P5B_SEQ0)) events=${P5B_EVENTS} quiet=${P5B_QUIET}"
+# Exactly one write per event that moves a cell: the hook is one locked RMW
+# per event, the snapshot push is not a store write, and the quiet events are
+# pinned at zero above. The warm-up is what makes the count attributable, by
+# taking `pr-sync` out of it. More means something writes twice per event,
+# the shape the paced-12 check watches for on the toggle side. Fewer means an
+# event counted as loud moved nothing, so it belongs in `quiet_fire`.
 if [[ "$P5B_PR_WARM" == "fresh" ]]; then
-  check "phase-5b writes per hook event <= 1 (8 events, delta <= 8)" \
-    "$(((P5B_SEQ_END - P5B_SEQ0) <= 8 ? 1 : 0))" "1"
+  check "phase-5b writes exactly one store write per event that moves a cell" \
+    "$((P5B_SEQ_END - P5B_SEQ0))" "$P5B_LOUD"
 else
   note 'the PR cache never settled, so every event still spawns a `pr-sync` whose write lands off-schedule — the budget is not attributable here and is recorded above, not asserted'
 fi
-note 'this phase edited a scenario transcript — `clave dev scenario %s` re-seeds it' "$SCENARIO"
-note 'this phase leaves two launches open in that transcript, so it is NOT idempotent within the six-hour age bound — re-run it through `just qa`, which re-seeds, not by calling this script again'
 
 # ===========================================================================
 # Phase 5c — the terminal row's facts (the OS-facts witness)

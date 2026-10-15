@@ -266,7 +266,7 @@ fn cells<'a>(content: &'a RowContent, theme: &Theme) -> Cells<'a> {
                 // magnitude — the same two axes the single-line battery cell
                 // carries (#105), through the same formatter.
                 tokens: tokens.map_or(TokenCell::Blank, |t| {
-                    TokenCell::Count(crate::render::token_text(t), band)
+                    TokenCell::Count(clave_types::token_text(t), band)
                 }),
                 prov: provenance.mark(),
                 repo,
@@ -1469,7 +1469,7 @@ mod tests {
     fn the_collapsed_card_fits_its_widest_cells() {
         let row = A {
             // 9.9m is the widest the token formatter can produce below the
-            // point it drops the tenth (`render::token_text`), so this is the
+            // point it drops the tenth (`clave_types::token_text`), so this is the
             // worst case for that cell, not a big-looking number.
             tokens: Some(9_949_999),
             pr: Some(1234),

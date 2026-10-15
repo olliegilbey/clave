@@ -773,5 +773,65 @@ want "path_from_ps_env reads a PATH that is the last variable" \
 want "path_from_ps_env reads nothing when there is no PATH" \
   "$(path_from_ps_env <<<"/bin/zellij --server /s HOME=/h MANPATH=/m")" ""
 
+# --- the agent CLI's events (phases 0 and 5b) -----------------------------
+# Each verdict below compares two readings, and two dead readings compare
+# equal. So each one runs against the wrong store and the empty read, and
+# both must go red.
+doctor_json() { # one "Event=count" per argument, in doctor's --json shape
+  local pairs="[]" kv
+  for kv in "$@"; do
+    pairs="$(jq -c --arg e "${kv%=*}" --argjson n "${kv#*=}" '. + [[$e, $n]]' <<<"$pairs")"
+  done
+  jq -nc --argjson h "$pairs" '{facts: {hook_counts: $h}}'
+}
+(hook_registration_checks "$(doctor_json Stop=1 PostToolBatch=1 SubagentStart=1)" >/dev/null 2>&1)
+want "one entry per event passes" "$?" "0"
+UNREG="$(hook_registration_checks "$(doctor_json Stop=1 StopFailure=0)" 2>&1)"
+want "an unregistered event fails" "$?" "1"
+want "and the verdict names it" "$(grep -c 'exactly once: measured=StopFailure=0 expected=empty FAIL' <<<"$UNREG")" "1"
+(hook_registration_checks "$(doctor_json Stop=2 PostToolBatch=1)" >/dev/null 2>&1)
+want "a duplicated event fails" "$?" "1"
+(hook_registration_checks "$(doctor_json)" >/dev/null 2>&1)
+want "a report with no events is refused, not passed" "$?" "1"
+(hook_registration_checks "" >/dev/null 2>&1)
+want "an unreadable report is refused, not passed" "$?" "1"
+
+(quiet_event_checks "a quiet event" 41 41 7340 7340 >/dev/null 2>&1)
+want "a flat seq on the same file passes" "$?" "0"
+(quiet_event_checks "a quiet event" 41 42 7340 7340 >/dev/null 2>&1)
+want "a moved seq fails" "$?" "1"
+(quiet_event_checks "a quiet event" "" "" 7340 7340 >/dev/null 2>&1)
+want "two dead seq reads are refused, not passed" "$?" "1"
+(quiet_event_checks "a quiet event" null null 7340 7340 >/dev/null 2>&1)
+want "two null seq reads are refused, not passed" "$?" "1"
+REWROTE="$(quiet_event_checks "a quiet event" 41 41 7340 7351 2>&1)"
+want "a rewrite with a flat seq fails (the store file moved)" "$?" "1"
+want "and the verdict names the rewrite" "$(grep -c 'not rewritten (inode): measured=7351 expected=7340 FAIL' <<<"$REWROTE")" "1"
+(quiet_event_checks "a quiet event" 41 41 "" "" >/dev/null 2>&1)
+want "two dead inode reads are refused, not passed" "$?" "1"
+INO_DIR="$(mktemp -d "${TMPDIR:-/tmp}/qa-lib-selftest-ino.XXXXXX")"
+printf 'a' >"$INO_DIR/f"
+INO_A="$(file_inode "$INO_DIR/f")"
+want "file_inode reads a number" "$([[ "$INO_A" =~ ^[0-9]+$ ]] && echo yes)" "yes"
+printf 'a' >"$INO_DIR/f.tmp" && mv "$INO_DIR/f.tmp" "$INO_DIR/f"
+want "a write by rename moves the inode" "$([[ "$(file_inode "$INO_DIR/f")" != "$INO_A" ]] && echo yes)" "yes"
+want "a missing file reads as nothing" "$(file_inode "$INO_DIR/absent")" ""
+rm -rf "$INO_DIR"
+
+clock_status() { # last_interacted, commit_ord of row u1
+  jq -nc --argjson l "$1" --argjson o "$2" '{store: {agents: {u1: {last_interacted: $l, commit_ord: $o}}}}'
+}
+(typed_clock_checks u1 "$(clock_status 1000 7)" "$(clock_status 1000 7)" >/dev/null 2>&1)
+want "a harness turn that moved neither clock nor rank passes" "$?" "0"
+MOVED="$(typed_clock_checks u1 "$(clock_status 1000 7)" "$(clock_status 1004 7)" 2>&1)"
+want "a harness turn that moved last_interacted fails" "$?" "1"
+want "and the verdict names the field" "$(grep -c 'last_interacted alone: measured=1004 expected=1000 FAIL' <<<"$MOVED")" "1"
+(typed_clock_checks u1 "$(clock_status 1000 7)" "$(clock_status 1000 9)" >/dev/null 2>&1)
+want "a harness turn that took a fresh rank fails" "$?" "1"
+(typed_clock_checks u2 "$(clock_status 1000 7)" "$(clock_status 1000 7)" >/dev/null 2>&1)
+want "a row the reads do not hold is refused, not passed" "$?" "1"
+(typed_clock_checks u1 "" "" >/dev/null 2>&1)
+want "two dead status reads are refused, not passed" "$?" "1"
+
 printf '\n%s\n' "== qa/lib selftest: $FAILURES failure(s) =="
 [[ "$FAILURES" -eq 0 ]]

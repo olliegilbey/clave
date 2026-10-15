@@ -94,6 +94,11 @@ pub struct AgentRecord {
     /// bar's sort key any more (S1/#39). Wire twin of
     /// `clave_types::Agent::last_interacted`, which carries the rationale.
     pub last_interacted: u64,
+    /// When the turn in flight began; `0` when none is. Wire twin of
+    /// `clave_types::Agent::turn_started`. Written by `hook::apply_hook_event`
+    /// and zeroed by every writer that ends a turn outside a hook.
+    #[serde(default)]
+    pub turn_started: u64,
     /// The commitment ORDINAL that orders this row (S1/#39). Wire twin of
     /// `clave_types::Agent::commit_ord`. Minted by [`Store::mint_ord`] under the
     /// flock, so it is a total order with no clock and no ties; 0 = never
@@ -285,11 +290,9 @@ pub struct AgentRecord {
     /// Whether this row has any agent still running under it — the card's
     /// subagent mark (lock 4.6). Wire twin of `clave_types::Agent::subagents`.
     ///
-    /// A BOOLEAN, not a count, and read from the transcript's closing
-    /// `turn_duration` record by `hook::subagents_from_tail`, which carries
-    /// the cadence caveat. Held when a tail carries no such record, so a
-    /// missed read never blanks a true mark. `default` keeps pre-field store
-    /// files loading.
+    /// A BOOLEAN, not a count, read from the agent CLI's own task registry
+    /// on the events that carry it (`hook::fan_out_reading`). Held by every
+    /// other event. `default` keeps pre-field store files loading.
     #[serde(default)]
     pub subagents: bool,
 }
@@ -444,11 +447,24 @@ pub fn store_paths() -> Result<StorePaths> {
 /// atomic rename — a reader opens either the old whole file or the new whole
 /// file, never a torn write. Missing file = empty store (first run).
 pub fn read_store(paths: &StorePaths) -> Result<Store> {
+    parse_store(read_raw(paths)?.as_deref())
+}
+
+/// The file's bytes, or `None` for a missing file. Only NotFound is absence:
+/// any other error must abort, never read as an empty store.
+fn read_raw(paths: &StorePaths) -> Result<Option<Vec<u8>>> {
     match fs::read(&paths.data) {
-        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Store::default()),
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e).context("reading store"),
     }
+}
+
+fn parse_store(bytes: Option<&[u8]>) -> Result<Store> {
+    Ok(match bytes {
+        Some(bytes) => serde_json::from_slice(bytes)?,
+        None => Store::default(),
+    })
 }
 
 /// Locked read-modify-write. The exclusive flock on the lockfile is held
@@ -471,17 +487,28 @@ pub fn with_store_mut<T>(paths: &StorePaths, f: impl FnOnce(&mut Store) -> T) ->
     lock.lock_exclusive().context("locking store")?;
     // From here to the end of the function we hold the lock; any early return
     // (via ?) drops `lock`, which releases the flock — no poisoned state.
-    let mut store = read_store(paths)?;
+    let raw = read_raw(paths)?;
+    let mut store = parse_store(raw.as_deref())?;
     let out = f(&mut store);
-    let tmp = paths.dir.join("agents.json.tmp");
-    {
-        let mut t = fs::File::create(&tmp).context("creating temp store")?;
-        t.write_all(&serde_json::to_vec_pretty(&store)?)?;
-        // fsync BEFORE the rename so a crash can't leave a renamed-but-empty
-        // file (rename is atomic, buffered content is not).
-        t.sync_all()?;
+    let bytes = serde_json::to_vec_pretty(&store)?;
+    // A write that changes nothing writes nothing. Most hook events of a busy
+    // turn move no field, and each one paid a temp write, an fsync and a
+    // rename under the lock. The test is on BYTES, not on the closure's word,
+    // so no caller can forget it: a closure that only reads leaves the file
+    // alone, and a read-time migration (a renamed key, a lenient field, a
+    // pretty-print change) still differs from the bytes on disk and persists
+    // exactly as before. A missing file is never equal, so it is created.
+    if raw.as_deref() != Some(bytes.as_slice()) {
+        let tmp = paths.dir.join("agents.json.tmp");
+        {
+            let mut t = fs::File::create(&tmp).context("creating temp store")?;
+            t.write_all(&bytes)?;
+            // fsync BEFORE the rename so a crash can't leave a renamed-but-empty
+            // file (rename is atomic, buffered content is not).
+            t.sync_all()?;
+        }
+        fs::rename(&tmp, &paths.data).context("atomic store swap")?;
     }
-    fs::rename(&tmp, &paths.data).context("atomic store swap")?;
     FileExt::unlock(&lock).context("unlocking store")?;
     Ok(out)
 }
@@ -525,6 +552,7 @@ pub fn snapshot_from(store: &Store) -> AgentSnapshot {
                 label: r.label.clone(),
                 status: r.status,
                 last_interacted: r.last_interacted,
+                turn_started: r.turn_started,
                 commit_ord: r.commit_ord,
                 last_visited: r.last_visited,
                 tab_id: r.tab_id,
@@ -1114,6 +1142,8 @@ pub fn clear_session_order(paths: &StorePaths) -> Result<()> {
         for r in s.agents.values_mut() {
             if matches!(r.status, Status::Working | Status::NeedsYou) {
                 r.status = Status::Idle;
+                // The turn died with the process, so its clock goes too.
+                r.turn_started = 0;
                 changed = true;
             }
         }
@@ -1226,6 +1256,7 @@ mod tests {
             label: "x · main".into(),
             status: Status::Idle,
             last_interacted: 0,
+            turn_started: 0,
             commit_ord: 0,
             last_visited: 0,
             worktree: None,
@@ -1624,6 +1655,60 @@ mod tests {
         assert!(!p.dir.join("agents.json.tmp").exists());
         // The lockfile exists and was NOT renamed away (it is the lock anchor).
         assert!(p.lock.exists());
+    }
+
+    /// Most hook events of a busy turn move nothing, and each one paid a temp
+    /// write, an fsync and a rename while it held the lock. The inode is the
+    /// witness: the atomic swap gives the data path a new inode, so an equal
+    /// inode proves no write happened. Equal bytes alone would not, because a
+    /// rewrite of the same store writes the same bytes.
+    #[cfg(unix)]
+    #[test]
+    fn an_rmw_that_changes_nothing_leaves_the_file_untouched() {
+        use std::os::unix::fs::MetadataExt;
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        with_store_mut(&p, |s| {
+            s.agents.insert("u1".into(), rec("u1"));
+            s.seq = 7;
+        })
+        .unwrap();
+        let ino = || fs::metadata(&p.data).unwrap().ino();
+        let (bytes, before) = (fs::read(&p.data).unwrap(), ino());
+
+        let status = with_store_mut(&p, |s| s.agents["u1"].status).unwrap();
+        assert_eq!(status, Status::Idle, "a read-only closure still answers");
+        assert_eq!(ino(), before, "a no-op RMW must not swap the file");
+        assert_eq!(fs::read(&p.data).unwrap(), bytes);
+        assert_eq!(read_store(&p).unwrap().seq, 7);
+
+        // A real change still lands, through the swap.
+        with_store_mut(&p, |s| {
+            s.agents.get_mut("u1").unwrap().status = Status::Working
+        })
+        .unwrap();
+        assert_ne!(ino(), before, "a change goes through temp + rename");
+        assert_eq!(read_store(&p).unwrap().agents["u1"].status, Status::Working);
+    }
+
+    /// The other side of the skip: a store that READS differently from its
+    /// bytes is a migration, and a migration must persist on the next locked
+    /// write, as it did when every write rewrote the file. `tab_timeline` is
+    /// the retired key (see `Store::tab_order`): serde ignores it on read, so
+    /// the store in memory equals the empty store while the bytes do not.
+    #[test]
+    fn a_read_time_migration_still_persists_through_a_no_op_rmw() {
+        let d = tempfile::tempdir().unwrap();
+        let p = tmp_paths(d.path());
+        fs::write(&p.data, br#"{"seq":3,"tab_timeline":{"1":1700000000}}"#).unwrap();
+        with_store_mut(&p, |_| ()).unwrap();
+        let on_disk = fs::read_to_string(&p.data).unwrap();
+        assert!(!on_disk.contains("tab_timeline"), "{on_disk}");
+        assert_eq!(read_store(&p).unwrap().seq, 3);
+        // A missing file is no store at all, so the first RMW creates it.
+        let fresh = tmp_paths(&d.path().join("fresh"));
+        with_store_mut(&fresh, |_| ()).unwrap();
+        assert!(fresh.data.is_file());
     }
 
     #[test]
@@ -2196,6 +2281,7 @@ mod tests {
             ] {
                 let mut a = rec(uuid);
                 a.status = st;
+                a.turn_started = 500;
                 s.agents.insert(uuid.into(), a);
             }
         })
@@ -2209,6 +2295,10 @@ mod tests {
                 s.agents[uuid].status,
                 Status::Idle,
                 "{uuid} must make no claim about a process the new session has not started"
+            );
+            assert_eq!(
+                s.agents[uuid].turn_started, 0,
+                "{uuid}: the turn died with it"
             );
         }
         assert_eq!(
@@ -3041,7 +3131,7 @@ mod tests {
             "StopFailure",
             "SessionEnd",
             "Notification",
-            "PermissionRequest",
+            "PostToolBatch",
             "PreToolUse",
         ];
 
@@ -3076,11 +3166,8 @@ mod tests {
                     let uuid = format!("u{agent}");
                     let p = HookPayload {
                         session_id: Some(uuid.clone()),
-                        prompt: None,
                         message: Some("needs your permission".into()),
-                        reason: None,
-                        transcript_path: None,
-                        cwd: None,
+                        ..Default::default()
                     };
                     if apply_hook_event(s, &uuid, event, &p, None, 1000, true) {
                         // Any accepted write mints exactly one ordinal, which is

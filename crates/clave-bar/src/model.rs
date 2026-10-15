@@ -2532,10 +2532,24 @@ impl BarModel {
             // and those switch tabs without a beacon, so a bar can become
             // VISIBLE while it still believes it is not focused: it printed a
             // frozen `7s` for the whole turn.
-            elapsed: if self.animates_now() && status.thinking() {
-                turn_label(self.now, a.last_interacted)
-            } else {
-                elapsed_label(self.now, a.last_interacted)
+            //
+            // Two instants as well (2026-10-14). A thinking row counts the
+            // TURN, from `turn_started`; any other row says how long since
+            // the human last typed to it, from `last_interacted`. They differ
+            // when the turn is a harness turn (a task notification, a peer
+            // message): the work restarts, and the human did nothing. No
+            // fallback between them: a turn with no recorded start is blank.
+            elapsed: {
+                let then = if status.thinking() {
+                    a.turn_started
+                } else {
+                    a.last_interacted
+                };
+                if self.animates_now() && status.thinking() {
+                    turn_label(self.now, then)
+                } else {
+                    elapsed_label(self.now, then)
+                }
             },
             // Gated on the PROJECTED status, not the wire's — the same
             // `status`/`a.status` distinction the clock above makes, and for
@@ -2558,7 +2572,22 @@ impl BarModel {
             } else {
                 None
             },
-            subagents: a.subagents,
+            // Gated the same way, for the same reason: the mark says "agents
+            // run under this row", and only a row that shows its agent's own
+            // status has a process for them to run under. A dormant or
+            // standby row has none; an opening row's agents belong to the old
+            // session; a stale row's checkout is gone. The host clears the
+            // mark at SessionEnd, but a row that never sent one (a killed
+            // pane) keeps it on the wire.
+            subagents: a.subagents
+                && matches!(
+                    status,
+                    RowStatus::NeedsYou
+                        | RowStatus::Working
+                        | RowStatus::Done
+                        | RowStatus::Idle
+                        | RowStatus::Failed
+                ),
         }
     }
 
@@ -3663,6 +3692,7 @@ mod tests {
             label: uuid.into(),
             status,
             last_interacted: 0,
+            turn_started: 0,
             commit_ord: 0,
             buckets: Default::default(),
             last_visited: 0,
@@ -3708,6 +3738,7 @@ mod tests {
             label: label.into(),
             status: Status::Idle,
             last_interacted: 0,
+            turn_started: 0,
             commit_ord: 0,
             buckets: Default::default(),
             last_visited: 0,
@@ -7673,7 +7704,7 @@ mod tests {
         m.tick(1_003);
         let mut a = dressed("u1", "/r/one", "main", None, Some(11));
         a.status = Status::Working;
-        a.last_interacted = 1_000;
+        a.turn_started = 1_000;
         m.apply_snapshot(snap(1, vec![a]));
         let elapsed = |m: &BarModel| {
             m.rows()
@@ -8662,6 +8693,39 @@ mod tests {
         }
     }
 
+    /// Two instants behind one cell (2026-10-14). A harness turn (a task
+    /// notification, a peer message) restarts the work while the human does
+    /// nothing, so the turn's count and "since you last typed" part ways.
+    /// The fixture keeps the two far apart, so a clock that reads the wrong
+    /// one shows a different number.
+    #[test]
+    fn a_thinking_row_counts_its_turn_and_a_resting_row_counts_since_you_typed() {
+        let clock = |status: Status, turn_started: u64| {
+            let mut m = fleet_bar(11, 11);
+            m.beacon(11);
+            m.set_row_height(RowHeight::Card);
+            m.tick(1_003);
+            let mut a = dressed("u1", "/r/one", "main", None, Some(11));
+            a.status = status;
+            a.last_interacted = 500;
+            a.turn_started = turn_started;
+            m.apply_snapshot(snap(1, vec![a]));
+            m.rows()
+                .into_iter()
+                .find_map(|r| match r.1.content {
+                    RowContent::Agent { elapsed, .. } => Some(elapsed),
+                    RowContent::Terminal { .. } => None,
+                })
+                .expect("the fleet must hold the agent row")
+        };
+        assert_eq!(clock(Status::Working, 1_000).as_deref(), Some("3s"));
+        assert_eq!(clock(Status::Done, 1_000).as_deref(), Some("8m"));
+        assert_eq!(clock(Status::NeedsYou, 1_000).as_deref(), Some("8m"));
+        // No fallback: a turn with no recorded start says nothing, rather
+        // than passing the typed instant off as the turn's.
+        assert_eq!(clock(Status::Working, 0), None);
+    }
+
     #[test]
     fn only_a_bar_that_repaints_gets_a_seconds_clock() {
         // Seconds are only honest where something ticks them. The four-line
@@ -8684,7 +8748,7 @@ mod tests {
             m.tick(1_003);
             let mut a = dressed("u1", "/r/one", "main", None, Some(11));
             a.status = Status::Working;
-            a.last_interacted = 1_000;
+            a.turn_started = 1_000;
             m.apply_snapshot(snap(1, vec![a]));
             assert_eq!(m.own_tab_focused(), focused, "the fixture lies");
             m.rows()
@@ -8711,7 +8775,7 @@ mod tests {
         on_branch.provider = Some("claude".into());
         on_branch.effort = Some("xh".into());
         on_branch.pr_number = Some(232);
-        on_branch.last_interacted = 1_000;
+        on_branch.turn_started = 1_000; // a working row counts its turn
         let mut on_default = dressed("u-default", "/r/one", "main", None, Some(11));
         on_default.default_branch = Some("main".into());
         on_default.last_interacted = 0;
@@ -8734,7 +8798,7 @@ mod tests {
         assert_eq!(effort.as_deref(), Some("xh"));
         assert_eq!(pr, Some(232));
         assert_eq!(branch, "feature/x");
-        assert_eq!(elapsed.as_deref(), Some("1m")); // 100s since last_interacted
+        assert_eq!(elapsed.as_deref(), Some("1m")); // 100s since the turn began
         // The default checkout blanks its branch cell — the same predicate
         // `provenance` renders blank via its `Main` case — and never having
         // interacted (`last_interacted: 0`) renders no elapsed at all.
@@ -8821,6 +8885,76 @@ mod tests {
         m.apply_snapshot(snap(1, vec![a]));
         assert_eq!(status_at(&m, 0), Some(RowStatus::Stale));
         assert_eq!(wants_of(&m), None, "a stale row's checkout is gone");
+    }
+
+    /// The subagent mark follows the `wants` rule above: the wire can hold a
+    /// mark that no SessionEnd cleared (a killed pane sends none), and every
+    /// row state that outranks the store's status must leave it behind.
+    #[test]
+    fn only_a_row_with_a_running_agent_shows_the_subagent_mark() {
+        let fanned = |tab: Option<usize>| Agent {
+            subagents: true,
+            ..agent("u1", Status::Working, tab)
+        };
+        let mark_at = |m: &BarModel, line: usize| match content_at(m, line) {
+            RowContent::Agent { subagents, .. } => subagents,
+            other => panic!("expected an agent row, got {other:?}"),
+        };
+
+        // The live row it is for, asserted first so a gate that blanks
+        // everything cannot pass.
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "t", false)]);
+        m.apply_snapshot(snap(1, vec![fanned(Some(10))]));
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Working));
+        assert!(mark_at(&m, 0), "a row with agents under it must say so");
+
+        let mut m = BarModel::default();
+        m.apply_snapshot(snap(1, vec![fanned(None)]));
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Dormant));
+        assert!(!mark_at(&m, 0), "a dormant row runs nothing");
+        m.opening.insert("u1".into());
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Opening));
+        assert!(!mark_at(&m, 0), "an opening row's agents are the old one's");
+
+        let mut m = BarModel::default();
+        let standby = Agent {
+            standby_since: Some(STANDBY_FLEET_SINCE),
+            ..fanned(None)
+        };
+        m.apply_snapshot(snap(1, vec![standby]));
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Standby));
+        assert!(!mark_at(&m, 0), "a standby row runs nothing yet");
+
+        let mut m = BarModel::default();
+        m.apply_tabs(vec![tab(10, 0, "t", false)]);
+        m.apply_snapshot(snap(
+            1,
+            vec![Agent {
+                stale: true,
+                ..fanned(Some(10))
+            }],
+        ));
+        assert_eq!(status_at(&m, 0), Some(RowStatus::Stale));
+        assert!(!mark_at(&m, 0), "a stale row's checkout is gone");
+
+        let mut m = live_plus_dormant();
+        let mut s = snap(
+            2,
+            vec![Agent {
+                commit_ord: 999,
+                ..fanned(None)
+            }],
+        );
+        s.tab_order = [(1usize, 500u64)].into();
+        m.apply_snapshot(s);
+        m.beacon(1);
+        select_dormant(&mut m);
+        assert_eq!(
+            status_at(&m, DORMANT_LINE),
+            Some(RowStatus::DormantSelected)
+        );
+        assert!(!mark_at(&m, DORMANT_LINE));
     }
 
     #[test]

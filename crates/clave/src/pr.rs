@@ -328,6 +328,7 @@ mod tests {
             label: "x · main".into(),
             status: Status::Idle,
             last_interacted: 0,
+            turn_started: 0,
             commit_ord: 0,
             last_visited: 0,
             worktree: None,

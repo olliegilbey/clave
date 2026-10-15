@@ -934,7 +934,7 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool, theme:
                 BatteryCell::Count => match tokens {
                     Some(t) => {
                         out.push_str(&ink(battery.map_or(theme.default_ink, |i| BATTERY[i].1)));
-                        out.push_str(&rjust(&token_text(*t), battery_w));
+                        out.push_str(&rjust(&clave_types::token_text(*t), battery_w));
                         out.push_str(&o);
                     }
                     None => out.push_str(&" ".repeat(battery_w)),
@@ -1098,7 +1098,7 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool, theme:
 /// Right-aligned in `w` cells. The eye compares magnitudes on the RIGHT edge, so
 /// that is the edge the battery cell aligns to (#105).
 ///
-/// Never truncates, and does not need to: `token_text` is bounded at four cells
+/// Never truncates, and does not need to: `clave_types::token_text` is bounded at four cells
 /// by construction (pinned over every `u32` by
 /// `a_token_count_never_outgrows_its_cell`) and the console mark is one. A
 /// caller that broke that bound would show up as a ragged row in the width
@@ -1107,47 +1107,6 @@ fn rjust(s: &str, w: usize) -> String {
     let mut out = " ".repeat(w.saturating_sub(display_cells(s)));
     out.push_str(s);
     out
-}
-
-/// A token count in at most four cells (#105): thousands below a million, tenths
-/// of a million above it, and a BARE `1m` rather than `1.0m` — the `.0` spends
-/// half the field on a digit that carries nothing, and mixing the two shapes
-/// makes the column jitter (Ollie's ruling).
-///
-/// ROUNDED to the nearest step, not floored: the cell is a measurement, and a
-/// battery that reads `999k` at 999,600 tokens is wrong in the one direction a
-/// battery must not be wrong in. Above 9.95m the decimal is dropped rather than
-/// overflowing the cell (`10m`), and the whole figure saturates at `999m` — the
-/// same "at least this bad" direction the ramp's own clamp takes.
-pub(crate) fn token_text(tokens: u32) -> String {
-    // Widened before the arithmetic: `u32::MAX + 500` is not a `u32`, and the
-    // rounding is the whole point of doing it in the wider type.
-    let tokens = u64::from(tokens);
-    let thousands = (tokens + 500) / 1_000;
-    if thousands < 1_000 {
-        return format!("{thousands}k");
-    }
-    // Tenths of a million, rounded. `999_500` lands here rather than rendering a
-    // five-cell `1000k`, and reads `1m`.
-    let tenths = (tokens + 50_000) / 100_000;
-    let (millions, tenth) = (tenths / 10, tenths % 10);
-    // The decimal survives only while it fits: `9.9m` is four cells, `10.1m` is
-    // five, so from ten million on the tenth is what gives way. Written against
-    // `millions` rather than `tenths` so both halves of the condition are
-    // load-bearing — `tenths < 100` reads the same and is unfalsifiable at its
-    // own boundary, where the tenth is zero anyway (a survivor `just mutants`
-    // found, and the FOOTGUNS rule: drop the redundant guard, do not test around
-    // it).
-    if millions < 10 && tenth != 0 {
-        return format!("{millions}.{tenth}m");
-    }
-    // The decimal gave way, but the dropped tenth still says which whole
-    // million is nearer: floor here would under-report (10,940,000 → `10m`
-    // rather than the nearer `11m`), the one direction this cell must not be
-    // wrong in. Saturate AFTER rounding, not before, so a round-up at 999
-    // still lands on the four-cell cap rather than a five-cell `1000m`.
-    let millions = millions + u64::from(tenth >= 5);
-    format!("{}m", millions.min(999))
 }
 
 /// Cols 3–5: space, rule, space. The rule separates the status hue from the
@@ -1401,55 +1360,6 @@ mod tests {
         for level in [clave_types::BATTERY_LEVELS, u8::MAX] {
             assert_eq!(inked(level), saturated, "level {level} must saturate");
         }
-    }
-
-    /// The four-character range from the ticket, which is the whole reason four
-    /// columns is the right size: every reading a real conversation produces
-    /// fits it. `1.0m` is deliberately NOT one of the shapes — mixing it with
-    /// `400k` would leave the field jittering between two widths of million.
-    #[test]
-    fn a_token_count_reads_as_thousands_or_millions() {
-        for (tokens, want) in [
-            // A row that just `/clear`ed is genuinely near zero, and says so
-            // rather than rounding itself up into a reading it has not spent.
-            (0, "0k"),
-            (1_000, "1k"),
-            (105_000, "105k"),
-            (400_000, "400k"),
-            (999_000, "999k"),
-            (1_000_000, "1m"),
-            (1_100_000, "1.1m"),
-        ] {
-            assert_eq!(token_text(tokens), want, "{tokens} tokens");
-        }
-    }
-
-    /// Rounding, and the two boundaries the branches meet at. Floored counts
-    /// under-report, and under-reporting is the one direction a battery must not
-    /// be wrong in.
-    #[test]
-    fn a_token_count_rounds_to_its_nearest_step() {
-        assert_eq!(token_text(1_499), "1k");
-        assert_eq!(token_text(1_500), "2k");
-        // A hair under a million rounds INTO millions rather than rendering a
-        // five-cell `1000k` that would break the row.
-        assert_eq!(token_text(999_499), "999k");
-        assert_eq!(token_text(999_500), "1m");
-        // A whole million reads bare from either side of it.
-        assert_eq!(token_text(1_049_999), "1m");
-        assert_eq!(token_text(1_050_000), "1.1m");
-        // Past 9.95m the DECIMAL gives way, not the cell: `10.1m` would be five
-        // columns, so double-digit millions round to whole ones.
-        assert_eq!(token_text(9_949_999), "9.9m");
-        assert_eq!(token_text(9_950_000), "10m");
-        assert_eq!(token_text(10_100_000), "10m");
-        // Past ten million the digit that gave way still decides which whole
-        // million is nearer: floor here under-reports (10,940,000 is nearer
-        // 11m than 10m), the one direction the doc forbids.
-        assert_eq!(token_text(10_940_000), "11m");
-        // And the whole figure saturates rather than overflowing the cell — the
-        // ramp's own "at least this bad" direction.
-        assert_eq!(token_text(u32::MAX), "999m");
     }
 
     /// #105's deliverable, both halves of it: expanded prints the count in the
@@ -2935,7 +2845,7 @@ mod tests {
         /// fifth cell would push the whole row's text one column right.
         #[test]
         fn a_token_count_never_outgrows_its_cell(tokens: u32) {
-            let text = token_text(tokens);
+            let text = clave_types::token_text(tokens);
             prop_assert!(
                 display_cells(&text) <= BatteryCell::Count.width(),
                 "{tokens} rendered {text:?}"

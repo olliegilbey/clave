@@ -623,7 +623,7 @@ pub fn is_clave_hook_command(cmd: &str, event: &str) -> bool {
 
 /// The §6.5 state machine's input events — hook registration AND doctor's
 /// exactly-one-entry check key off the same list.
-pub const HOOK_EVENTS: [&str; 5] = [
+pub const HOOK_EVENTS: [&str; 9] = [
     "UserPromptSubmit",
     "Stop",
     "Notification",
@@ -632,6 +632,18 @@ pub const HOOK_EVENTS: [&str; 5] = [
     // hand-run claude joins (or re-joins) the fleet before its first prompt.
     // Maps to no status transition — its job is the pane register + mint.
     "SessionStart",
+    // The "answered" event: once per tool batch, after every tool in it
+    // resolved. It is what clears red. No matcher support, so the entry
+    // `merge_hooks` writes (none) is the right shape.
+    "PostToolBatch",
+    // An API error ends the turn here, not in Stop (code.claude.com/docs/en/
+    // hooks: "API errors fire StopFailure instead"). Unregistered, a failed
+    // turn never showed Failed.
+    "StopFailure",
+    // The subagent mark's two edges (`hook::fan_out_reading`). SubagentStop
+    // carries the task registry, so the mark falls with the last agent.
+    "SubagentStart",
+    "SubagentStop",
 ];
 
 /// Is `bin` one of ours? Shared by the hook and statusLine matchers here, so
@@ -943,10 +955,14 @@ pub fn write_generated(dir: &std::path::Path, binary: &str, wasm: &str) -> Resul
 
     // Hooks: read-merge-write $CLAUDE_CONFIG_DIR/settings.json. The path may
     // be a symlink into a dotfiles repo — fs::read/write follow it, which is
-    // exactly what we want (§6.5). Routed via claude_config_dir() (not
-    // hardcoded home) so `clave dev`'s sandbox (§6.9) merges hooks into its
-    // OWN settings.json — else sandbox sessions get no clave hooks and
-    // scenario agents never report status. Env unset ⇒ ~/.claude, unchanged.
+    // exactly what we want (§6.5). Routed via claude_config_dir(), which
+    // honours CLAUDE_CONFIG_DIR as Claude does, else ~/.claude. The sandbox
+    // does NOT set that variable: sandboxing Claude's identity broke its
+    // auth (ruling 2026-07-18, `dev.rs` `enter_sandbox`). So a sandbox stage
+    // merges into the SHARED settings.json. It writes bare `clave` there,
+    // and the live fleet's hooks then resolve that by PATH to the stable
+    // launcher until the next release (FOOTGUNS, "A sandbox stage rewrites
+    // the LIVE session's hooks to bare `clave`").
     let settings_path = crate::env::claude_config_dir()?.join("settings.json");
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent)?; // fresh box: ~/.claude may not exist yet
@@ -1551,6 +1567,25 @@ mod tests {
         assert!(HOOK_EVENTS.contains(&"SessionStart"));
     }
 
+    /// An event the status table or the subagent mark acts on, and that
+    /// nothing registers, is a rule that never runs: `StopFailure` sat in the
+    /// table unregistered, so a failed turn never showed Failed.
+    #[test]
+    fn every_event_that_moves_a_cell_is_registered() {
+        for ev in [
+            "UserPromptSubmit",
+            "Stop",
+            "StopFailure",
+            "SessionEnd",
+            "Notification",
+            "PostToolBatch",
+            "SubagentStart",
+            "SubagentStop",
+        ] {
+            assert!(HOOK_EVENTS.contains(&ev), "{ev} is not registered");
+        }
+    }
+
     #[test]
     fn dev_setup_refuses_a_release_install_but_not_foreign_siblings() {
         let s = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
@@ -1925,6 +1960,7 @@ mod tests {
             label: "repo · main".into(),
             status: clave_types::Status::Idle,
             last_interacted: 100,
+            turn_started: 0,
             commit_ord: 0,
             last_visited: 0,
             worktree: Some("/repo/.claude-worktrees/ab".into()),
@@ -1999,6 +2035,7 @@ mod tests {
             label: uuid.into(),
             status: clave_types::Status::Idle,
             last_interacted: li,
+            turn_started: 0,
             commit_ord: 0,
             last_visited: 0,
             worktree: None,
@@ -2052,6 +2089,7 @@ mod tests {
             label: uuid.into(),
             status: clave_types::Status::Idle,
             last_interacted: 0,
+            turn_started: 0,
             commit_ord: 0,
             last_visited: 0,
             worktree: None,
@@ -2320,6 +2358,7 @@ mod tests {
             label: "l".into(),
             status: clave_types::Status::Idle,
             last_interacted: 0,
+            turn_started: 0,
             commit_ord: 0,
             last_visited: 0,
             worktree: None,
@@ -2693,6 +2732,7 @@ mod tests {
             label: "l".into(),
             status: clave_types::Status::Idle,
             last_interacted: 0,
+            turn_started: 0,
             commit_ord: 0,
             last_visited: 0,
             worktree: None,

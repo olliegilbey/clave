@@ -22,16 +22,21 @@
 //!   quiet (a settings edit, a schema change) degrades back to today's
 //!   behaviour instead of freezing the row. A rotation (`/clear`) resets the
 //!   stamp with the battery: the new conversation has not been metered. A
-//!   Stop resets it too, after its own tail has yielded: the turn is over,
-//!   so the meter's next reading lands regardless of its interval and a
-//!   prompt's tail, post-turn and complete, may speak until it arrives.
+//!   turn end (Stop, StopFailure, or the idle nag that ends a turn) resets it
+//!   too, after the yield is decided: the turn is over, so the meter's next
+//!   reading lands regardless of its interval and a prompt's tail, post-turn
+//!   and complete, may speak until it arrives. The turn end also lands the
+//!   transcript's count over the yield when it is the higher one
+//!   (`hook::apply_hook_event`), because the statusLine runs on no turn end.
 //! - **The meter paces itself.** The statusLine runs on every assistant
 //!   message (6 runs, 4 distinct counts in one 15-second sandbox turn), and
 //!   every applied reading is a store rewrite under the flock plus a pipe
-//!   push that re-renders every bar. A moved count lands only once per
-//!   [`APPLY_INTERVAL_SECS`], unless the level moved (a glyph) or the model or
-//!   effort moved (a cell), which land at once — and bring the held count
-//!   with them, since the row is being written anyway.
+//!   push that re-renders every bar. A count is due only when its TEXT moves
+//!   (`clave_types::token_text`, the bar's own rounding), and then only once
+//!   per [`APPLY_INTERVAL_SECS`]. A level move (a glyph or an ink), a model or
+//!   effort move (a cell) and the first reading after a turn end land at once —
+//!   and a model or effort move brings the held count with it, since the row
+//!   is being written anyway.
 //!
 //! Never invent: a `0` total (session start) or a `null` `current_usage`
 //! (documented for the window after `/compact`) is not a token reading, and
@@ -47,7 +52,7 @@ use std::io::Write;
 use std::process::{Child, Command, Stdio};
 
 use anyhow::Result;
-use clave_types::AgentSnapshot;
+use clave_types::{AgentSnapshot, token_text};
 use serde::Deserialize;
 
 use crate::hook::{
@@ -137,11 +142,18 @@ impl Reading {
     }
 }
 
-/// How often a moved count is allowed to land on its own. Chosen against the
-/// measured turn (readings 0, 24, 26, 27, 29 and 38 seconds in): three of six
-/// land instead of four, and a long turn repaints the count every ten seconds
-/// rather than on every tool call. Tune against a live drive, not by feel.
-pub const APPLY_INTERVAL_SECS: u64 = 10;
+/// How often a moved count is allowed to land on its own. Measured 2026-10-14
+/// on the live 0.5.5 fleet: in 21 minutes the meter made 175 of 311 pushes
+/// (56%), and 25 of the 175 moved no pixel. Each push re-renders every bar.
+/// At ten seconds a working row could push its count six times a minute.
+/// The decision (Ollie, through the coordinator, 2026-10-14): the count on a
+/// working row lags up to 60 s. The band and the model and effort cells land
+/// at once (`count_due`). The resting count is the higher of two readings:
+/// the transcript's at the turn end, and the meter's first reading after it.
+/// The statusLine runs on no turn end (code.claude.com/docs/en/statusline),
+/// so the meter alone can rest on a count it held. What each reading misses
+/// is in `hook::apply_hook_event`, at the turn end.
+pub const APPLY_INTERVAL_SECS: u64 = 60;
 
 /// How long after the meter's last token reading the hook's tail readers hold
 /// their three cells. Long enough that a Stop after a multi-minute final tool
@@ -151,7 +163,7 @@ pub const HOOK_YIELD_SECS: u64 = 600;
 
 /// The hook's side of the bargain: while the meter has spoken recently the
 /// hook's tail readers keep quiet on tokens, model and effort. `0` is "not
-/// metered since the last rotation or Stop" — the resets those two perform.
+/// metered since the last rotation or turn end" — the resets those perform.
 /// A clock stepped backwards reads as recent, never as an underflow.
 ///
 /// **Three cells, and only these three.** The scope is not a style note: a
@@ -168,7 +180,10 @@ pub fn hook_yields(rec: &AgentRecord, now: u64) -> bool {
 
 /// Whether a moved count is owed a write on its own merits (the module doc's
 /// pacing rule). A row with no count yet, or none since its rotation, always
-/// takes the first one.
+/// takes the first one. A cleared stamp (a turn end) takes the next one whatever
+/// it renders, so the resting count is the turn's last. Otherwise a count
+/// that renders the same text is not a change: the bar would paint the same
+/// cell (25 of 175 meter pushes did, measured 2026-10-14).
 fn count_due(rec: &AgentRecord, tokens: u32, now: u64, zone: u32) -> bool {
     let Some(have) = rec.context_tokens else {
         return true;
@@ -176,7 +191,8 @@ fn count_due(rec: &AgentRecord, tokens: u32, now: u64, zone: u32) -> bool {
     tokens != have
         && (rec.metered_at == 0
             || rec.context_level != Some(battery_level(tokens, zone))
-            || now.saturating_sub(rec.metered_at) >= APPLY_INTERVAL_SECS)
+            || (token_text(tokens) != token_text(have)
+                && now.saturating_sub(rec.metered_at) >= APPLY_INTERVAL_SECS))
 }
 
 /// The one store mutation a statusLine run performs — the meter's twin of
@@ -202,53 +218,9 @@ pub fn apply_statusline(
     let tokens_before = rec.context_tokens;
     note_live_session(rec, uuid, reading.session_id.as_deref(), own_claude);
     let mut changed = false;
-    // Red must not outlive the block. Answering a permission prompt fires no
-    // hook clave listens to — `HOOK_EVENTS` (setup.rs) registers five events
-    // and none of them means "answered" — so `NeedsYou` used to survive to
-    // the turn's `Stop`, the card red while the agent's own footer counted
-    // the turn. Seen live on the 0.5.0 cut.
-    //
-    // The meter already answers it, and costs nothing: this process is being
-    // spawned anyway. A token count that has MOVED is an API response that
-    // landed, and no response lands while a prompt waits for an answer.
-    //
-    // TWO readings are needed, not one, and the stamp is what counts them.
-    // The count in the record can be OLDER than the reading, because
-    // `count_due` withholds a move inside `APPLY_INTERVAL_SECS` — in the
-    // measured turn (see that constant) the store held 19179 from 29s to 38s
-    // while every reading carried 19811. Comparing a reading against that
-    // withheld figure reads the LAST response before the block as the first
-    // one after it, and clears red with the prompt still on screen. The
-    // fixture in this file proves the re-run that would do it happens:
-    // `CAPTURED_WINDOWS` 2 and 3 are byte-identical, one response read twice.
-    //
-    // So the hook zeroes `metered_at` on the way into the block, and a zero
-    // stamp here means no reading has landed since. The first blocked reading
-    // therefore does not clear — it falls through and `count_due` lands it,
-    // establishing a baseline taken INSIDE the block. Only a later reading
-    // that exceeds THAT can clear, and only a response can produce one.
-    //
-    // The cost is one store write per block, and a clear that waits for the
-    // next reading when a prompt is answered before any reading arrives. Both
-    // are cheap against the alternative, which is not "red clears late" but
-    // red → amber → red: the idle nag restores it ~60s later, and the `wants`
-    // cell blanks with the colour (`clave-bar` gates the ask on `NeedsYou`).
-    // A flicker in the one colour that means "act now" is worse than a late
-    // clear, and the bar's rule is that two states a person cannot tell apart
-    // are one state.
-    //
-    // ONLY `NeedsYou` is cleared. A moved count after `Stop` is the
-    // one-response-behind case this whole module exists for, not a turn
-    // restarting, and promoting `Done` would undo the hook that just ran.
-    if rec.status == clave_types::Status::NeedsYou
-        && rec.metered_at != 0
-        && reading
-            .tokens
-            .is_some_and(|t| t > tokens_before.unwrap_or(0))
-    {
-        rec.status = clave_types::Status::Working;
-        changed = true;
-    }
+    // No status write here, in any direction. Status is the hook events'
+    // job: a moved count is weaker evidence than PostToolBatch, because the
+    // pacing can withhold one response and land it inside a block.
     if let Some(raw) = reading.model.as_deref() {
         changed |= take_model(rec, raw);
     }
@@ -406,6 +378,7 @@ mod tests {
             label: "x · main".into(),
             status: Status::Idle,
             last_interacted: 0,
+            turn_started: 0,
             commit_ord: 0,
             last_visited: 0,
             worktree: None,
@@ -528,100 +501,41 @@ mod tests {
         assert_eq!(s.seq, 1);
     }
 
+    /// Status belongs to the hook events alone. The meter cleared red on a
+    /// moved count once, because no hook said "answered". PostToolBatch says
+    /// it now, and a count is a weaker witness: the pacing can withhold one
+    /// response and land it inside the block. So no reading may move status,
+    /// in any direction, from any status.
     #[test]
-    fn a_count_that_moved_proves_the_permission_block_cleared() {
-        // Ollie, 2026-09-14: a row goes red on a permission prompt, he
-        // answers it, the agent resumes — and the row stays red for the rest
-        // of the turn. There is no "permission answered" hook to listen to,
-        // so the meter is the evidence.
-        // A block the meter has already read once inside: `metered_at` is
-        // stamped, so the count in the record was taken DURING the block and
-        // anything above it is a response that landed after it.
-        let blocked = || {
-            let mut s = metered_store();
-            s.agents.get_mut("minted").unwrap().status = Status::NeedsYou;
-            s
-        };
-        let later = 1000 + APPLY_INTERVAL_SECS;
-
-        let mut s = blocked();
-        let moved = reading("minted", Some(19_811), "claude-fable-5-1", "medium");
-        assert!(apply_statusline(
-            &mut s, "minted", &moved, later, true, ZONE
-        ));
-        assert_eq!(s.agents["minted"].status, Status::Working);
-
-        // The SAME count read twice is one response, not two. It proves
-        // nothing, and red must survive it — this is the case that runs while
-        // the prompt is still on screen.
-        let mut s = blocked();
-        let same = reading("minted", Some(19_110), "claude-fable-5-1", "medium");
-        apply_statusline(&mut s, "minted", &same, later, true, ZONE);
-        assert_eq!(s.agents["minted"].status, Status::NeedsYou);
-
-        // And nothing but red is touched. A moved count after `Stop` is this
-        // module's one-response-behind case, not a turn starting again.
-        let mut s = metered_store();
-        s.agents.get_mut("minted").unwrap().status = Status::Done;
-        apply_statusline(&mut s, "minted", &moved, later, true, ZONE);
-        assert_eq!(s.agents["minted"].status, Status::Done);
-    }
-
-    #[test]
-    fn the_count_the_pacing_withheld_does_not_pass_as_the_answer() {
-        // The reading can be AHEAD of the record, because `count_due` holds a
-        // move inside `APPLY_INTERVAL_SECS`: in the measured turn the store
-        // held 19179 from 29s to 38s while every reading carried 19811. If a
-        // permission prompt lands in that gap, the withheld figure is the LAST
-        // response before the block, and reading it as the first one after
-        // would clear red with the prompt still on screen — then the idle nag
-        // restores it, which is a flicker in the one colour that means "act
-        // now". `apply_hook_event` zeroes the stamp on the way in, and a zero
-        // stamp means no reading has landed since.
-        let entering = || {
-            let mut s = metered_store();
-            let r = s.agents.get_mut("minted").unwrap();
-            r.status = Status::NeedsYou;
-            r.metered_at = 0; // what the hook stamps entering the block
-            s
-        };
-        let withheld = reading("minted", Some(19_811), "claude-fable-5-1", "medium");
-        let answered = reading("minted", Some(20_508), "claude-fable-5-1", "medium");
-
-        // The first reading inside the block does NOT clear — but it lands,
-        // so the next one has a baseline taken inside the block.
-        let mut s = entering();
-        apply_statusline(&mut s, "minted", &withheld, 1100, true, ZONE);
-        assert_eq!(
-            s.agents["minted"].status,
+    fn the_meter_never_changes_status() {
+        let moved = reading("minted", Some(20_508), "claude-fable-5-1", "high");
+        for status in [
+            Status::Working,
             Status::NeedsYou,
-            "a count the pacing withheld is not proof the block ended"
-        );
-        assert_eq!(s.agents["minted"].context_tokens, Some(19_811));
-        assert_eq!(s.agents["minted"].metered_at, 1100);
-
-        // Re-runs carrying that same figure keep proving nothing.
-        apply_statusline(&mut s, "minted", &withheld, 1101, true, ZONE);
-        assert_eq!(s.agents["minted"].status, Status::NeedsYou);
-
-        // The response that follows the answer exceeds the baseline the block
-        // itself landed, and only that clears.
-        apply_statusline(&mut s, "minted", &answered, 1200, true, ZONE);
-        assert_eq!(s.agents["minted"].status, Status::Working);
+            Status::Done,
+            Status::Idle,
+            Status::Failed,
+        ] {
+            for stamp in [0, 1000] {
+                let mut s = metered_store();
+                let r = s.agents.get_mut("minted").unwrap();
+                r.status = status;
+                r.metered_at = stamp;
+                let later = 1000 + APPLY_INTERVAL_SECS;
+                apply_statusline(&mut s, "minted", &moved, later, true, ZONE);
+                assert_eq!(s.agents["minted"].status, status, "stamp {stamp}");
+            }
+        }
     }
 
+    /// The decision (2026-10-14): a working row's count lags up to 60 s.
+    /// Spelled in seconds, so a slip in the constant cannot pass. `19k` to
+    /// `20k` moves the text, so only the interval holds it.
     #[test]
     fn a_moved_count_inside_the_interval_holds() {
         let mut s = metered_store();
         let r = reading("minted", Some(19_811), "claude-fable-5-1", "medium");
-        assert!(!apply_statusline(
-            &mut s,
-            "minted",
-            &r,
-            1000 + APPLY_INTERVAL_SECS - 1,
-            true,
-            ZONE
-        ));
+        assert!(!apply_statusline(&mut s, "minted", &r, 1059, true, ZONE));
         assert_eq!(s.agents["minted"].context_tokens, Some(19_110));
         assert_eq!(s.agents["minted"].metered_at, 1000);
         assert_eq!(s.seq, 1);
@@ -631,17 +545,53 @@ mod tests {
     fn a_moved_count_after_the_interval_lands() {
         let mut s = metered_store();
         let r = reading("minted", Some(19_811), "claude-fable-5-1", "medium");
+        assert!(apply_statusline(&mut s, "minted", &r, 1060, true, ZONE));
+        assert_eq!(s.agents["minted"].context_tokens, Some(19_811));
+        assert_eq!(s.agents["minted"].metered_at, 1060);
+        assert_eq!(s.seq, 2);
+    }
+
+    /// A count that renders the same text is not a change, however late it
+    /// comes: every bar would paint the same `19k` (25 of 175 meter pushes
+    /// did, measured 2026-10-14). The store keeps the older figure, and the
+    /// stamp stays where it was.
+    #[test]
+    fn a_count_that_renders_the_same_text_is_not_due() {
+        let mut s = metered_store();
+        let r = reading("minted", Some(19_400), "claude-fable-5-1", "medium");
+        assert!(!apply_statusline(&mut s, "minted", &r, 5000, true, ZONE));
+        assert_eq!(s.agents["minted"].context_tokens, Some(19_110));
+        assert_eq!(s.agents["minted"].metered_at, 1000);
+        assert_eq!(s.seq, 1);
+    }
+
+    /// The band is the glyph and the ink, so it lands at once even when the
+    /// digits do not move: 14,900 and 15,100 both read `15k`, and they sit
+    /// either side of the first band edge of the default zone.
+    #[test]
+    fn a_band_move_with_the_same_text_lands_at_once() {
+        let mut s = Store::default();
+        s.agents.insert("minted".into(), rec("minted"));
+        let at = |t| reading("minted", Some(t), "claude-fable-5-1", "medium");
         assert!(apply_statusline(
             &mut s,
             "minted",
-            &r,
-            1000 + APPLY_INTERVAL_SECS,
+            &at(14_900),
+            1000,
             true,
             ZONE
         ));
-        assert_eq!(s.agents["minted"].context_tokens, Some(19_811));
-        assert_eq!(s.agents["minted"].metered_at, 1000 + APPLY_INTERVAL_SECS);
-        assert_eq!(s.seq, 2);
+        assert_eq!(s.agents["minted"].context_level, Some(0));
+        assert!(apply_statusline(
+            &mut s,
+            "minted",
+            &at(15_100),
+            1001,
+            true,
+            ZONE
+        ));
+        assert_eq!(s.agents["minted"].context_level, Some(1));
+        assert_eq!(s.agents["minted"].context_tokens, Some(15_100));
     }
 
     #[test]
@@ -869,6 +819,32 @@ mod tests {
         let before = std::fs::read(&paths.data).unwrap();
         assert!(meter(&paths, CAPTURED, None, 5000, ZONE).unwrap().is_none());
         assert_eq!(std::fs::read(&paths.data).unwrap(), before);
+    }
+
+    /// The locked half of the meter writes nothing for a reading that is
+    /// already in the store: two runs of one turn can both pass the
+    /// lock-free probe, and the second one finds its work done. The file
+    /// keeps its inode, so no temp file, no fsync and no rename ran.
+    #[test]
+    fn a_locked_apply_of_a_landed_reading_leaves_the_store_file_alone() {
+        use std::os::unix::fs::MetadataExt;
+        let d = tempfile::tempdir().unwrap();
+        let paths = tmp_paths(d.path());
+        crate::store::with_store_mut(&paths, |s| {
+            s.agents.insert(CAPTURED_UUID.into(), rec(CAPTURED_UUID));
+        })
+        .unwrap();
+        assert!(meter(&paths, CAPTURED, None, 1000, ZONE).unwrap().is_some());
+        let ino = || std::fs::metadata(&paths.data).unwrap().ino();
+        let (bytes, before) = (std::fs::read(&paths.data).unwrap(), ino());
+        let reading = Reading::parse(CAPTURED);
+        let moved = crate::store::with_store_mut(&paths, |s| {
+            apply_statusline(s, CAPTURED_UUID, &reading, 1005, false, ZONE)
+        })
+        .unwrap();
+        assert!(!moved);
+        assert_eq!(ino(), before, "a no-op apply must not swap the file");
+        assert_eq!(std::fs::read(&paths.data).unwrap(), bytes);
     }
 
     #[test]
