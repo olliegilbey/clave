@@ -255,16 +255,18 @@ pub struct AgentRecord {
     /// loading.
     #[serde(default)]
     pub pr_number: Option<u32>,
-    /// Unix seconds of the last PR lookup attempt for this row, whether or
-    /// not it found one; 0 = never checked. Host-side cache bookkeeping —
-    /// gates how often `clave` re-asks the git host, never rides the wire.
+    /// Unix seconds when `pr-sync` last wrote a lookup down, a miss or a
+    /// failed `gh` included; 0 = never, or the checkout moved since. Host-side
+    /// cache bookkeeping — gates how often `clave` re-asks the git host, never
+    /// rides the wire.
     #[serde(default)]
     pub pr_checked: u64,
-    /// The branch `pr_number` was resolved FOR. A branch switch invalidates
-    /// the cached number without forcing an immediate re-lookup; comparing
-    /// this against the row's current `branch` is how staleness is
-    /// detected. Empty string reads as "never resolved", matching
-    /// `pr_checked == 0`. `default` keeps pre-field store files loading.
+    /// The branch `pr_number` was resolved FOR. Only an answer writes it. A
+    /// branch switch makes the cache stale, so the next hook asks again; the
+    /// number stays on the card until that answer lands. Comparing this
+    /// against the row's current `branch` is how staleness is detected. Empty
+    /// string reads as "never resolved", matching `pr_checked == 0`.
+    /// `default` keeps pre-field store files loading.
     #[serde(default)]
     pub pr_branch: String,
     /// What this row is blocked on, in the words its own notification used —
@@ -657,6 +659,9 @@ pub fn apply_relocation(
             .is_some_and(|w| !std::path::Path::new(cwd).starts_with(w))
         {
             r.worktree = None;
+        }
+        if r.cwd != cwd {
+            r.pr_checked = 0; // the PR was asked from the old cwd (`hook::take_checkout`)
         }
         r.cwd = cwd.to_string();
         if let Some(b) = branch {

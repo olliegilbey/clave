@@ -579,6 +579,46 @@ want "a refusal that wrote the store fails" "$?" "1"
 (refusal_checks "" "$EACH_ONCE" "$EACH_ONCE" "13" 13 13 >/dev/null 2>&1)
 want "an unreadable live tab count fails" "$?" "1"
 
+# The quiet lookup (phase 5b): a pr-sync answer that changes nothing on
+# screen writes no seq. Each argument is one `dev status` read, built from
+# "seq stamp pr": before the hook, just after it, after the settle.
+st() {
+  local a
+  read -r -a a <<<"$1"
+  printf '{"store":{"seq":%s,"agents":{"u":{"pr_checked":%s,"pr_number":%s}}}}' "${a[0]}" "${a[1]}" "${a[2]}"
+}
+quiet() { pr_sync_quiet_checks u "$(st "$1")" "$(st "$2")" "$(st "$3")"; }
+(quiet "40 0 null" "40 0 null" "40 1700 null" >/dev/null 2>&1)
+want "a lookup that left no PR as no PR and wrote no seq passes" "$?" "0"
+QUIET_LOUD="$(quiet "40 0 null" "40 0 null" "41 1700 null" 2>&1)"
+want "a lookup that wrote seq for an unchanged number fails (0.5.5 pushed every answer)" "$?" "1"
+want "and the verdict names both seqs" \
+  "$(grep -c 'pushed nothing): measured=41 expected=40 FAIL' <<<"$QUIET_LOUD")" "1"
+(quiet "40 1000 232" "40 1000 232" "40 1700 232" >/dev/null 2>&1)
+want "a failed lookup that kept #232 and wrote no seq passes" "$?" "0"
+(quiet "40 1000 232" "40 1000 232" "41 1700 232" >/dev/null 2>&1)
+want "the same number written again fails" "$?" "1"
+(quiet "40 1000 232" "40 1000 232" "41 1700 null" >/dev/null 2>&1)
+want "a number that moved with one write passes" "$?" "0"
+(quiet "40 1000 232" "40 1000 232" "40 1700 null" >/dev/null 2>&1)
+want "a number that moved with no write fails (no bar hears it)" "$?" "1"
+(quiet "40 1000 232" "40 1000 232" "42 1700 null" >/dev/null 2>&1)
+want "a number that moved with two writes fails" "$?" "1"
+# The answer landed before the read after the hook: that read holds its
+# bump, so the 0.5.5 shape would compare equal. The verdict must not pass on it.
+QUIET_LATE="$(quiet "40 0 null" "41 1700 null" "41 1700 null" 2>&1)"
+want "an answer already in the post-hook read does not fail the run" "$?" "0"
+want "and gives no verdict on the lookup" "$(grep -c 'CHECK a pr-sync' <<<"$QUIET_LATE")" "0"
+want "and says why" "$(grep -c "NOTE the pr-sync answered before the read just after the hook" <<<"$QUIET_LATE")" "1"
+QUIET_NONE="$(quiet "40 1700 null" "40 1700 null" "41 1700 null" 2>&1)"
+want "a warm-up with no answer does not fail the run" "$?" "0"
+want "and gives no verdict on the lookup" "$(grep -c 'CHECK a pr-sync' <<<"$QUIET_NONE")" "0"
+want "and says why" "$(grep -c 'NOTE no pr-sync answer landed' <<<"$QUIET_NONE")" "1"
+(pr_sync_quiet_checks u "$(st "40 0 null")" "" "$(st "40 1700 null")" >/dev/null 2>&1)
+want "an unreadable post-hook seq fails" "$?" "1"
+(pr_sync_quiet_checks u "$(st "40 0 null")" "$(st "40 0 null")" '{"store":{"seq":40,"agents":{}}}' >/dev/null 2>&1)
+want "an unreadable stamp is no answer, not a pass on the lookup" "$?" "0"
+
 SLIM_LEDGER="$(ZLOG="$SLIM_LOG" LOGMARK=5 instance_ledger)"
 want "the ledger names the slim push lines per bar" \
   "$(grep -c 'id 3 .*slim ask answer' <<<"$SLIM_LEDGER")" "1"

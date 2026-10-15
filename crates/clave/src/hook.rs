@@ -2194,7 +2194,7 @@ pub fn run_hook(event: &str, stdin_json: &str) -> Result<()> {
     // returned, so `pr-sync` (its own locked RMW) can never deadlock against
     // this hook's lock. `pr-sync` re-checks staleness itself, so a hook that
     // fires again before `pr-sync` has answered spawns harmlessly again;
-    // the TTL is what keeps `gh` from being asked twice for the same answer.
+    // `gh` may be asked twice, but the same answer twice pushes nothing.
     if pr_stale {
         crate::pr::spawn_pr_sync(&uuid);
     }
@@ -3745,7 +3745,7 @@ mod tests {
         assert_eq!(detached.branch, "-", "the sentinel, not the old branch");
         assert_eq!(
             crate::pr::resolve_pr(&|_| Some("261".into()), "/repo", "-"),
-            None,
+            crate::pr::PrLookup::NoPr,
             "the sentinel must never reach `gh` as a --head argument"
         );
 
