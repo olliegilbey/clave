@@ -27,8 +27,25 @@ impl Drop for Fixture {
     }
 }
 
+/// Write an executable script, and never hold its write fd in this process.
+///
+/// The tests here run as threads of one process. A spawn copies every open fd
+/// into the child, and the child keeps the copies until its own exec (std
+/// spawns with `clone3(CLONE_VM|CLONE_VFORK)` and no `CLONE_FILES`; clone(2)).
+/// While a child holds a write fd on a script, each exec of the script fails
+/// with "Text file busy" (ETXTBSY, execve(2)): here, and in ct.sh too. With
+/// `std::fs::write` here, the fake server's spawn failed 8 runs in 1600
+/// (FOOTGUNS, "Text file busy"). A rename does not help, because the fd holds
+/// the inode and not the name. So `sh` writes the file. It holds the only
+/// write fd, and it closes that fd before it exits.
 fn write_exe(path: &Path, body: &str) {
-    std::fs::write(path, body).unwrap();
+    let written = Command::new("sh")
+        .args(["-c", r#"printf '%s' "$2" > "$1""#, "sh"])
+        .arg(path)
+        .arg(body)
+        .status()
+        .unwrap();
+    assert!(written.success(), "sh could not write {}", path.display());
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
