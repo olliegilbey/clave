@@ -79,10 +79,13 @@ pub fn pane_cwd_from(home: Option<&crate::spawn::Home>, row: &AgentRecord) -> St
     }
 }
 
-pub fn open_decision(_row: &AgentRecord, is_live: bool, cwd_exists: bool) -> OpenDecision {
+/// `cwd_exists` runs only for a row that is not live. It can read the whole
+/// transcript (`spawn::conversation_home`, PR #287), and a live row is the
+/// common open: a dwell or a click on a row that already has its tab.
+pub fn open_decision(is_live: bool, cwd_exists: impl FnOnce() -> bool) -> OpenDecision {
     if is_live {
         OpenDecision::AlreadyLive
-    } else if !cwd_exists {
+    } else if !cwd_exists() {
         OpenDecision::Stale
     } else {
         OpenDecision::Open
@@ -135,16 +138,18 @@ pub fn run_open(uuid: &str, collapsed: bool) -> Result<()> {
     // Issue #6: bind-first liveness (dump-layout scan is the additive
     // fallback) — `open_is_live` fixes the MCP-blind duplicate-tab spawn.
     let is_live = open_is_live(&store, row, &dump);
-    // A missing baked cwd is not stale when the conversation demonstrably
-    // MOVED somewhere spawnable (#139, #143 review): the removed-worktree
-    // wake was otherwise rejected here before spawn's relocation recovery
-    // could ever run. Open only decides tab creation; spawn re-runs the
-    // search and repoints the row.
-    let home = crate::env::claude_config_dir()
-        .ok()
-        .and_then(|d| crate::spawn::conversation_home(&d, &row.uuid, row.live_session.as_deref()));
-    let cwd_exists = std::path::Path::new(&row.cwd).is_dir() || home.is_some();
-    match open_decision(row, is_live, cwd_exists) {
+    // Stale means the pane has no dir to run from. That is the pane's own
+    // cwd (`pane_cwd`), not the row's: a missing row cwd is not stale when
+    // the conversation demonstrably MOVED somewhere spawnable (#139, #143
+    // review), and the removed-worktree wake was otherwise rejected here
+    // before spawn's relocation recovery could ever run. Open only decides
+    // tab creation; spawn re-runs the search and repoints the row.
+    let mut open_cwd = String::new();
+    let decision = open_decision(is_live, || {
+        open_cwd = pane_cwd(row);
+        std::path::Path::new(&open_cwd).is_dir()
+    });
+    match decision {
         OpenDecision::AlreadyLive => {
             crate::evlog::log_event("open", &format!("{uuid}: already live, no-op"));
             Ok(())
@@ -157,14 +162,13 @@ pub fn run_open(uuid: &str, collapsed: bool) -> Result<()> {
             Ok(())
         }
         OpenDecision::Open => {
-            // Bake the cwd the pane can actually RUN from (#143 review): a
-            // recovered relocation must not bake the missing row.cwd — the
-            // pane would be born in a dead dir before `clave spawn` could
-            // ever follow the move.
-            let open_cwd = &pane_cwd_from(home.as_ref(), row);
+            // Bake the cwd the pane can actually RUN from (#143 review), the
+            // one the gate above checked: a recovered relocation must not
+            // bake the missing row.cwd — the pane would be born in a dead dir
+            // before `clave spawn` could ever follow the move.
             // Guard the baked cwd before it reaches KDL (see
             // add::validate_cwd) — a `"`/control char breaks the layout.
-            crate::add::validate_cwd(open_cwd)?;
+            crate::add::validate_cwd(&open_cwd)?;
             let wasm = crate::setup::wasm_path()?;
             let binary = crate::release::runtime_binary();
             let label = crate::add::sanitize_label(&row.label);
@@ -179,7 +183,7 @@ pub fn run_open(uuid: &str, collapsed: bool) -> Result<()> {
                 wasm: wasm.to_str().context("wasm path")?,
                 label: &label,
                 uuid,
-                cwd: open_cwd,
+                cwd: &open_cwd,
                 collapsed,
                 row_height,
             });
@@ -377,10 +381,18 @@ mod tests {
         // 1. liveness no-op — dwell-timer/click double-fire protection
         //    (second guard; the bar's in-flight set is the first).
         // 2. staleness — missing cwd (deleted worktree) → no tab, bar ✗.
-        let r = rec("u1");
-        assert_eq!(open_decision(&r, true, true), OpenDecision::AlreadyLive);
-        assert_eq!(open_decision(&r, true, false), OpenDecision::AlreadyLive);
-        assert_eq!(open_decision(&r, false, false), OpenDecision::Stale);
-        assert_eq!(open_decision(&r, false, true), OpenDecision::Open);
+        assert_eq!(open_decision(true, || true), OpenDecision::AlreadyLive);
+        assert_eq!(open_decision(true, || false), OpenDecision::AlreadyLive);
+        assert_eq!(open_decision(false, || false), OpenDecision::Stale);
+        assert_eq!(open_decision(false, || true), OpenDecision::Open);
+    }
+
+    /// A live row never asks where its transcript lives: that search can
+    /// read the whole file (PR #287 review), and a live row is the common
+    /// open, so the no-op must stay a no-op.
+    #[test]
+    fn a_live_row_never_looks_up_its_transcript() {
+        let decision = open_decision(true, || panic!("looked up a live row's transcript"));
+        assert_eq!(decision, OpenDecision::AlreadyLive);
     }
 }
