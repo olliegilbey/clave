@@ -652,7 +652,24 @@ mod tests {
         let src = dir.path().join("clave-built");
         std::fs::write(&src, "#!/bin/sh\necho launched\n").unwrap();
         let launcher = install_launcher(&dir.path().join("bin"), &src).unwrap();
-        let out = std::process::Command::new(&launcher).output().unwrap();
+        // Retry "Text file busy" (ETXTBSY), and nothing else, a bounded number
+        // of times. The tests run as threads of one process. If another test
+        // spawns a child while install_launcher holds its staging file open
+        // for write, the child keeps a copy of that fd until its own exec, and
+        // each exec of the launcher fails until then (FOOTGUNS, "Text file
+        // busy"). The write is the code under test, so this test cannot keep
+        // the fd out of the process as tests/ct_server_match.rs does. The
+        // window ends when that child execs; 50 tries 10 ms apart allow 0.5 s.
+        let out = (0..50)
+            .find_map(|_| match std::process::Command::new(&launcher).output() {
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    None
+                }
+                other => Some(other),
+            })
+            .expect("the launcher stayed Text file busy for 50 tries")
+            .unwrap();
         assert!(out.status.success(), "launcher did not execute: {out:?}");
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "launched");
     }
