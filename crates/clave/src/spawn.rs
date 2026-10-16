@@ -148,20 +148,39 @@ fn head_site(transcript: &Path) -> Option<(String, Option<String>)> {
     BufReader::new(f.take(ANCHOR_HEAD_BYTES))
         .lines()
         .map_while(Result::ok)
-        .find_map(|l| {
-            let v: serde_json::Value = serde_json::from_str(&l).ok()?;
-            let cwd = v.get("cwd")?.as_str()?.trim();
-            if cwd.is_empty() {
-                return None;
-            }
-            let branch = v
-                .get("gitBranch")
-                .and_then(|b| b.as_str())
-                .map(str::trim)
-                .filter(|b| !b.is_empty())
-                .map(str::to_string);
-            Some((cwd.to_string(), branch))
-        })
+        .find_map(|l| line_site(&l))
+}
+
+/// The LATEST line anywhere in the transcript whose `cwd` passes `keys`,
+/// and the `gitBranch` on that line. The whole file, so it runs only after
+/// the tail and head reads have both missed. A line without `"cwd"` is
+/// skipped before it is parsed: most lines of a 12 MB transcript carry none.
+fn keyed_site(transcript: &Path, keys: impl Fn(&str) -> bool) -> Option<(String, Option<String>)> {
+    use std::io::{BufRead, BufReader};
+    let f = std::fs::File::open(transcript).ok()?;
+    BufReader::new(f)
+        .lines()
+        .map_while(Result::ok)
+        .filter(|l| l.contains("\"cwd\""))
+        .filter_map(|l| line_site(&l))
+        .filter(|(cwd, _)| keys(cwd))
+        .last()
+}
+
+/// One transcript line's top-level non-empty `cwd`, and its `gitBranch`.
+fn line_site(line: &str) -> Option<(String, Option<String>)> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    let cwd = v.get("cwd")?.as_str()?.trim();
+    if cwd.is_empty() {
+        return None;
+    }
+    let branch = v
+        .get("gitBranch")
+        .and_then(|b| b.as_str())
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+        .map(str::to_string);
+    Some((cwd.to_string(), branch))
 }
 
 /// The one place `<id>.jsonl` lives under `claude_dir/projects/*/`, by EXACT
@@ -323,13 +342,15 @@ pub fn verified_site(
 }
 
 /// A found-elsewhere transcript → the site Claude keys it on. A file sits
-/// under exactly one of two cwds (measured 2026-09-21, 338 transcripts,
-/// none under neither): its LAST — the relocation, the file moved with the
-/// session (#59/#69) — or its FIRST — the session moved and the file
-/// stayed. The tail decides the first, the head the second, and a file
-/// matching neither is refused: resuming there surfaces as Claude's opaque
-/// "No conversation found" (#143 review). Both are compared CANONICAL, as
-/// the exec cwd will be (S0b).
+/// under one of its own cwds. Usually that is its LAST — the relocation,
+/// the file moved with the session (#59/#69) — or its FIRST — the session
+/// moved and the file stayed (measured 2026-09-21 over 338 transcripts:
+/// 10 last, 12 first). It can also be one from the MIDDLE: the file moved
+/// into a worktree, and the session then went on into a subdir of it
+/// (2026-10-16). The tail decides the first, the head the second, a scan
+/// of the whole file the third. A file that matches none is refused:
+/// resuming there surfaces as Claude's opaque "No conversation found"
+/// (#143 review). All are compared CANONICAL, as the exec cwd will be (S0b).
 fn moved_site(transcript: &Path, session: &str) -> Result<SpawnSite> {
     let tail = crate::hook::read_tail(transcript, RELOC_TAIL_BYTES)
         .ok_or_else(|| anyhow::anyhow!("unreadable transcript {}", transcript.display()))?;
@@ -369,9 +390,29 @@ fn moved_site(transcript: &Path, session: &str) -> Result<SpawnSite> {
             branch: birth_branch,
         });
     }
+    // Keyed on a middle cwd. Live 2026-10-16, transcript 579b2ac2: born in
+    // `sesame`, filed under `sesame-bench` when the session entered that
+    // worktree, last cwd `sesame-bench/worker`. Without this the pane died
+    // in `clave spawn`, and every later open read the held pane as live.
+    // It resumes where the file is keyed, so the row repoints there, as a
+    // relocation does.
+    if let Some((cwd, branch)) = keyed_site(transcript, keys) {
+        let cwd = canonical(&cwd).map_err(|e| {
+            anyhow::anyhow!(
+                "transcript {} is keyed on {cwd}, which no longer exists: {e} — \
+                 nowhere to resume from",
+                transcript.display()
+            )
+        })?;
+        return Ok(SpawnSite::Moved {
+            session: session.to_string(),
+            cwd,
+            branch,
+        });
+    }
     anyhow::bail!(
-        "transcript {} lives under project dir {:?} but is keyed on neither its \
-         last cwd {} nor its first {} — resume from the transcript's own dir is \
+        "transcript {} lives under project dir {:?} but is keyed on none of its \
+         cwds (last {}, first {}) — resume from the transcript's own dir is \
          not derivable (munge is lossy). Refusing rather than resuming where \
          Claude would find nothing.",
         transcript.display(),
@@ -678,12 +719,15 @@ mod tests {
             .join(munge_cwd(&moved_here))
             .join("u-lag.jsonl");
         let err = moved_site(&transcript, "u-lag").unwrap_err().to_string();
-        assert!(err.contains("keyed on neither"), "unexpected error: {err}");
+        assert!(
+            err.contains("keyed on none of its cwds"),
+            "unexpected error: {err}"
+        );
         // And the open-time gate agrees: not recoverable through relocation.
         assert_eq!(conversation_home(&f.claude, "u-lag", None), None);
     }
 
-    /// A live transcript that exists but refuses (keyed on neither cwd) is
+    /// A live transcript that exists but refuses (keyed on none of its cwds) is
     /// the conversation's answer. The search must NOT fall through to the
     /// minted file, whose clean move would bake a dir the live conversation
     /// never saw. (CodeRabbit, 2026-09-21)
@@ -948,6 +992,64 @@ mod tests {
             err.contains("nowhere to resume from"),
             "the anchor diagnosis, not the generic one: {err}"
         );
+    }
+
+    /// Born in one dir, filed under a second (the session entered that
+    /// worktree, and Claude moved the file), last seen in a subdir of the
+    /// second: keyed on NEITHER its first nor its last cwd. The live
+    /// 2026-10-16 shape (transcript 579b2ac2): born `sesame`, filed under
+    /// `sesame-bench`, last cwd `sesame-bench/worker`. The pane died in
+    /// `clave spawn`, and every later open read the held pane as live.
+    #[test]
+    fn a_transcript_keyed_on_a_middle_cwd_resumes_there() {
+        let f = reloc_fixture();
+        let bench = f.other_cwd("bench");
+        let worker = f.other_cwd("bench/worker");
+        let lines = format!(
+            "{{\"cwd\":\"{}\",\"gitBranch\":\"main\",\"message\":\"born\"}}\n\
+             {{\"cwd\":\"{bench}\",\"gitBranch\":\"early\",\"message\":\"entered\"}}\n\
+             {}\n\
+             {{\"cwd\":\"{bench}\",\"gitBranch\":\"bench\",\"message\":\"later\"}}\n\
+             {{\"cwd\":\"{worker}\",\"gitBranch\":\"sub\",\"message\":\"cd'd in\"}}\n",
+            f.cwd, r#"{"type":"ai-title","aiTitle":"no cwd here"}"#,
+        );
+        f.plant(&bench, "minted", &lines);
+        let site = verified_site(&f.claude, Some(&worker), "minted", None, true).unwrap();
+        assert_eq!(
+            site,
+            SpawnSite::Moved {
+                session: "minted".into(),
+                cwd: bench.clone(),
+                // The LATEST line that names the file's dir, not the first
+                // one there and not the tail's subdir.
+                branch: Some("bench".into()),
+            }
+        );
+        // The open-time gate agrees, so open bakes the pane in `bench`.
+        assert_eq!(
+            conversation_home(&f.claude, "minted", None),
+            Some(Home::Moved(bench))
+        );
+    }
+
+    /// A middle cwd that keys the file but has since vanished is as loud as
+    /// a vanished first or last one: nowhere to resume from.
+    #[test]
+    fn a_middle_cwd_that_vanished_fails_loudly() {
+        let f = reloc_fixture();
+        let worker = f.other_cwd("worker");
+        let lines = format!(
+            "{{\"cwd\":\"{}\",\"message\":\"born\"}}\n\
+             {{\"cwd\":\"/gone/bench\",\"message\":\"entered\"}}\n\
+             {{\"cwd\":\"{worker}\",\"message\":\"cd'd in\"}}\n",
+            f.cwd,
+        );
+        f.plant("/gone/bench", "minted", &lines);
+        let err = verified_site(&f.claude, Some(&worker), "minted", None, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("/gone/bench"), "names the dir: {err}");
+        assert!(err.contains("no longer exists"), "says why: {err}");
     }
 
     #[test]
