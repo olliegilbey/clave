@@ -1384,8 +1384,11 @@ impl ZellijPlugin for State {
         // (and every other event this bar already re-renders on) keeps the
         // minutes honest between store pushes.
         self.model.tick(wall_now());
-        let list: Vec<Row> = self.model.rows().into_iter().map(|(_, row)| row).collect();
         let row_height = self.model.row_height();
+        // Only the rows on screen: `visible_rows` and `render_rows` below
+        // slice a list this short to all of itself.
+        let view = self.model.view(rows / row_height.lines_per_row());
+        let list = view.rows;
         // The spinner's next frame is armed HERE, by the paint that found a
         // row still working — so the animation starts with the first working
         // row and stops with the last, without any other code having to know
@@ -1410,19 +1413,14 @@ impl ZellijPlugin for State {
         // event, and an ungated line here would drown the CLICK line (which is
         // not gated) that the next #148 will actually be debugged from.
         //
-        // `top` re-runs `viewport_top` rather than reimplementing it, through
-        // the same `lines_per_row()` divisor `render_rows` and `click` both
-        // use — no second copy of the follow rule, which is the one thing this
-        // log line must not become.
+        // `top` is the one `viewport_top` the model sliced with, through the
+        // same `lines_per_row()` divisor `click` uses — no second copy of the
+        // follow rule, which is the one thing this log line must not become.
         if dbg_log() {
             eprintln!(
                 "clave-bar render: mode={row_height:?} cols={cols} height={rows} rows={} top={} shown={}",
-                list.len(),
-                clave_bar::render::viewport_top(
-                    list.len(),
-                    list.iter().position(|r| r.selected),
-                    rows / row_height.lines_per_row(),
-                ),
+                view.len,
+                view.top,
                 lines.len(),
             );
         }
