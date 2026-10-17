@@ -488,6 +488,34 @@ pub enum RowKey {
     Dormant(String),
 }
 
+/// A row once it is ranked and before its content is built. Content is most
+/// of a row's cost, so [`BarModel::view`] builds it only for the rows on
+/// screen.
+struct Pending<'a> {
+    key: RowKey,
+    selected: bool,
+    source: Source<'a>,
+}
+
+/// What a row's content comes from.
+enum Source<'a> {
+    /// A live tab, and the agent the snapshot binds to it, if any.
+    Tab(&'a TabMeta, Option<&'a Agent>),
+    /// A standby or dormant agent.
+    Asleep(&'a Agent),
+}
+
+/// The rows a viewport shows ([`BarModel::view`]).
+#[derive(Debug, PartialEq)]
+pub struct View {
+    /// The index of the first row shown, in the whole list.
+    pub top: usize,
+    /// How many rows the whole list holds.
+    pub len: usize,
+    /// The rows shown, in order.
+    pub rows: Vec<Row>,
+}
+
 /// The row comparator (S1): commitment ordinal DESCENDING, then the
 /// determinism tiebreak ascending. [`BarModel::rows`] applies it to the live
 /// block and the dormant block separately — one rule for both row classes, so
@@ -495,7 +523,7 @@ pub enum RowKey {
 /// ranks it.
 /// One block entry pre-sort: the primary key (widened to `(u64, u64)` for the
 /// frecency fallback), the determinism tiebreak, and the row it ranks.
-type Ranked = ((u64, u64), usize, (RowKey, Row));
+type Ranked<'a> = ((u64, u64), usize, Pending<'a>);
 
 fn rank_desc(a: &Ranked, b: &Ranked) -> std::cmp::Ordering {
     b.0.cmp(&a.0).then(a.1.cmp(&b.1))
@@ -2710,6 +2738,65 @@ impl BarModel {
     /// they now only ever break ties WITHIN a block — but does not retire
     /// them: two dormant rows at `NO_COMMITMENT` still need a stable order.
     pub fn rows(&self) -> Vec<(RowKey, Row)> {
+        self.build(self.ranked())
+    }
+
+    /// What a viewport of `budget` rows shows: [`Self::rows`] sliced at
+    /// [`viewport_top`], the slice the renderer draws. Only the slice gets
+    /// its content built. Content was 3.2 ms of a 7 ms paint on the live
+    /// fleet (131 rows, about 20 on screen; wasmi bench, 2026-10-17), and the
+    /// spinner repaints five times a second.
+    pub fn view(&self, budget: usize) -> View {
+        let mut ranked = self.ranked();
+        let len = ranked.len();
+        let top = viewport_top(len, ranked.iter().position(|p| p.selected), budget);
+        ranked.truncate(top.saturating_add(budget).min(len));
+        let rows = self
+            .build(ranked.drain(top..))
+            .into_iter()
+            .map(|(_, r)| r)
+            .collect();
+        View { top, len, rows }
+    }
+
+    /// The content for each ranked row, in order.
+    fn build<'a>(&'a self, ranked: impl IntoIterator<Item = Pending<'a>>) -> Vec<(RowKey, Row)> {
+        let inks = ProvisionalInks::allocate(&self.agents);
+        let live_now = self.liveness();
+        ranked
+            .into_iter()
+            .map(|p| {
+                // Lock §7.1: the zellij tab name is used ONLY for a terminal tab.
+                // An agent row's identity is its title chip and repo, both from the
+                // store — the tab name is clave's own rename echo and would be a
+                // second, drifting copy of the label.
+                let (content, dormant) = match p.source {
+                    Source::Tab(_, Some(a)) => {
+                        (self.agent_content(a, false, false, &inks, &live_now), false)
+                    }
+                    Source::Tab(t, None) => (self.terminal_content(t, &inks), false),
+                    // Block membership for the renderer's #206 fade — carried on
+                    // the Row because stale/opening outrank Dormant in the status
+                    // tier above.
+                    Source::Asleep(a) => (
+                        self.agent_content(a, true, p.selected, &inks, &live_now),
+                        true,
+                    ),
+                };
+                (
+                    p.key,
+                    Row {
+                        content,
+                        selected: p.selected,
+                        dormant,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Every row in [`Self::rows`] order, before content.
+    fn ranked(&self) -> Vec<Pending<'_>> {
         // §6.6 C8 virtual cursor: `Row.selected` means "visually SELECTED".
         // While nav sits on a dormant row, the selection follows the walk
         // (claude.ai-style) — that dormant row reads active and EVERY live
@@ -2729,30 +2816,18 @@ impl BarModel {
         // index. The dormant offset is now only ever compared against other
         // dormant rows, but it costs nothing and keeps the two keys readable
         // as the single scheme they are.
-        let inks = ProvisionalInks::allocate(&self.agents);
-        let mut live: Vec<clave_types::LiveRow<(RowKey, Row)>> = Vec::new();
+        let mut live: Vec<clave_types::LiveRow<Pending>> = Vec::new();
         for t in &self.tabs {
-            // Lock §7.1: the zellij tab name is used ONLY for a terminal tab.
-            // An agent row's identity is its title chip and repo, both from the
-            // store — the tab name is clave's own rename echo and would be a
-            // second, drifting copy of the label.
-            let content = match self.agent_in_tab(t.tab_id) {
-                Some(a) => self.agent_content(a, false, false, &inks, &live_now),
-                None => self.terminal_content(t, &inks),
-            };
             live.push(clave_types::LiveRow {
                 group: self.live_group(t),
                 key: self.live_key(t),
                 tiebreak: t.position,
-                row: (
-                    RowKey::Tab(t.tab_id),
-                    Row {
-                        content,
-                        // A dormant selection steals the highlight from every tab.
-                        selected: selected_dormant.is_none() && t.active,
-                        dormant: false,
-                    },
-                ),
+                row: Pending {
+                    key: RowKey::Tab(t.tab_id),
+                    // A dormant selection steals the highlight from every tab.
+                    selected: selected_dormant.is_none() && t.active,
+                    source: Source::Tab(t, self.agent_in_tab(t.tab_id)),
+                },
             });
         }
         let mut agents: Vec<&Agent> = self.agents.iter().filter(|a| live_now.dormant(a)).collect();
@@ -2771,23 +2846,11 @@ impl BarModel {
                 // uuid-DESCENDING (uuid-asc sort, key inverted) — stable and
                 // deterministic, which is all we need.
                 usize::MAX - i,
-                (
-                    key(a.uuid.clone()),
-                    Row {
-                        content: self.agent_content(
-                            a,
-                            true,
-                            selected_dormant == Some(a.uuid.as_str()),
-                            &inks,
-                            &live_now,
-                        ),
-                        selected: selected_dormant == Some(a.uuid.as_str()),
-                        // Block membership for the renderer's #206 fade —
-                        // carried on the Row because stale/opening outrank
-                        // Dormant in the status tier above.
-                        dormant: true,
-                    },
-                ),
+                Pending {
+                    key: key(a.uuid.clone()),
+                    selected: selected_dormant == Some(a.uuid.as_str()),
+                    source: Source::Asleep(a),
+                },
             ));
         }
         // ONE row comparator, applied twice — giving either block its own
@@ -11110,6 +11173,52 @@ mod tests {
                 for a in &m.agents {
                     prop_assert_eq!(live.dormant(a), dormant_by_scan(&m, a), "agent {}", a.uuid);
                 }
+            }
+
+            /// The view is the slice the renderer cut from the whole list
+            /// before `view` existed: the same top, length and rows, content
+            /// included. The selection sits on a live tab, on a dormant or
+            /// standby row, or nowhere, and the budget runs from zero to past
+            /// the list.
+            #[test]
+            fn prop_view_is_the_slice_of_rows(
+                tabs in proptest::collection::btree_set(0usize..8, 0..5),
+                active in proptest::option::of(0usize..5),
+                agents in proptest::collection::vec(
+                    (proptest::option::of(0usize..8), 0u64..20, any::<bool>()),
+                    0..12,
+                ),
+                cursor in proptest::option::of(0usize..12),
+                budget in 0usize..14,
+            ) {
+                let m = BarModel {
+                    tabs: tabs
+                        .iter()
+                        .enumerate()
+                        .map(|(pos, &id)| tab(id, pos, "t", active == Some(pos)))
+                        .collect(),
+                    agents: agents
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &(tab_id, ord, standby))| Agent {
+                            commit_ord: ord,
+                            // `now` is 0, so a stamp of 0 is a live standby.
+                            standby_since: standby.then_some(0),
+                            ..agent(&format!("u{i}"), Status::Idle, tab_id)
+                        })
+                        .collect(),
+                    cursor: cursor.map(|i| format!("u{i}")),
+                    ..BarModel::default()
+                };
+                let rows: Vec<Row> = m.rows().into_iter().map(|(_, r)| r).collect();
+                let top = viewport_top(rows.len(), rows.iter().position(|r| r.selected), budget);
+                let shown = rows[top..(top + budget).min(rows.len())].to_vec();
+                let view = m.view(budget);
+                prop_assert_eq!(&view, &View { top, len: rows.len(), rows: shown });
+                // The paint hands the view to the renderer, which slices again.
+                // That second slice must keep every row, or the bar draws less.
+                let again = crate::render::visible_rows(&view.rows, budget, RowHeight::Single);
+                prop_assert_eq!(again, &view.rows[..]);
             }
         }
 
