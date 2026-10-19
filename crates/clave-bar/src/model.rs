@@ -488,6 +488,34 @@ pub enum RowKey {
     Dormant(String),
 }
 
+/// A row once it is ranked and before its content is built. Content is most
+/// of a row's cost, so [`BarModel::view`] builds it only for the rows on
+/// screen.
+struct Pending<'a> {
+    key: RowKey,
+    selected: bool,
+    source: Source<'a>,
+}
+
+/// What a row's content comes from.
+enum Source<'a> {
+    /// A live tab, and the agent the snapshot binds to it, if any.
+    Tab(&'a TabMeta, Option<&'a Agent>),
+    /// A standby or dormant agent.
+    Asleep(&'a Agent),
+}
+
+/// The rows a viewport shows ([`BarModel::view`]).
+#[derive(Debug, PartialEq)]
+pub struct View {
+    /// The index of the first row shown, in the whole list.
+    pub top: usize,
+    /// How many rows the whole list holds.
+    pub len: usize,
+    /// The rows shown, in order.
+    pub rows: Vec<Row>,
+}
+
 /// The row comparator (S1): commitment ordinal DESCENDING, then the
 /// determinism tiebreak ascending. [`BarModel::rows`] applies it to the live
 /// block and the dormant block separately — one rule for both row classes, so
@@ -495,7 +523,7 @@ pub enum RowKey {
 /// ranks it.
 /// One block entry pre-sort: the primary key (widened to `(u64, u64)` for the
 /// frecency fallback), the determinism tiebreak, and the row it ranks.
-type Ranked = ((u64, u64), usize, (RowKey, Row));
+type Ranked<'a> = ((u64, u64), usize, Pending<'a>);
 
 fn rank_desc(a: &Ranked, b: &Ranked) -> std::cmp::Ordering {
     b.0.cmp(&a.0).then(a.1.cmp(&b.1))
@@ -560,6 +588,43 @@ impl ProvisionalInks {
                 })
                 .collect(),
         }
+    }
+}
+
+/// What makes an agent live in this bar's frames, from
+/// [`BarModel::liveness`]: a current tab carries its bind, a REGISTERED pane is
+/// in the manifest, or a tab's `clave spawn` pane names it. Built once and
+/// asked many times, because `rows()` asks about every agent on every paint.
+struct Liveness<'a> {
+    tabs: BTreeSet<usize>,
+    /// Terminal (non-plugin) pane ids in the manifest.
+    panes: BTreeSet<u32>,
+    /// Each live tab's spawn uuid ([`BarModel::spawned_agent`]'s pane leg).
+    spawned: BTreeSet<&'a str>,
+    uuid_to_pane: &'a BTreeMap<String, u32>,
+    now: u64,
+}
+
+impl Liveness<'_> {
+    /// §6.6 C8 dormancy. The spawn leg needs no tab check of its own: a row
+    /// whose tab is current is live by the first leg already.
+    fn dormant(&self, a: &Agent) -> bool {
+        !a.tab_id.is_some_and(|id| self.tabs.contains(&id))
+            && !self
+                .uuid_to_pane
+                .get(&a.uuid)
+                .is_some_and(|p| self.panes.contains(p))
+            && !self.spawned.contains(a.uuid.as_str())
+    }
+
+    /// A dormant row the last quit left live, less than a day ago by the
+    /// bar's own clock (`clave_types::standby_live`). A stale row cannot
+    /// open, so it stays plain dormant.
+    fn standby(&self, a: &Agent) -> bool {
+        a.standby_since
+            .is_some_and(|t| clave_types::standby_live(t, self.now))
+            && !a.stale
+            && self.dormant(a)
     }
 }
 
@@ -1424,18 +1489,23 @@ impl BarModel {
     /// (Ollie, 2026-09-23). An exited pane runs nothing, and a row the store
     /// binds to a live tab belongs to that tab, so neither joins here.
     fn spawned_agent(&self, tab_id: usize) -> Option<&Agent> {
-        let position = self.tabs.iter().find(|t| t.tab_id == tab_id)?.position;
-        let uuid = self
-            .panes
-            .iter()
-            .filter(|p| p.tab_position == position && !p.is_plugin && !p.exited)
-            .find_map(|p| spawn_uuid(p.terminal_command.as_deref()?))?;
+        let uuid = self.spawn_uuid_in_tab(tab_id)?;
         self.agents.iter().find(|a| {
             a.uuid == uuid
                 && !a
                     .tab_id
                     .is_some_and(|id| self.tabs.iter().any(|t| t.tab_id == id))
         })
+    }
+
+    /// The uuid a tab's `clave spawn` pane names: its first live terminal
+    /// pane that carries one.
+    fn spawn_uuid_in_tab(&self, tab_id: usize) -> Option<&str> {
+        let position = self.tabs.iter().find(|t| t.tab_id == tab_id)?.position;
+        self.panes
+            .iter()
+            .filter(|p| p.tab_position == position && !p.is_plugin && !p.exited)
+            .find_map(|p| spawn_uuid(p.terminal_command.as_deref()?))
     }
 
     /// §6.6 Design B bootstrap: agents whose REGISTERED pane sits in
@@ -1591,29 +1661,35 @@ impl BarModel {
     /// pane is present in the manifest. The pane-join leg is instance-local —
     /// divergence only flickers a dormant row briefly (harmless) — but it
     /// suppresses the duplicate row in the pre-bind beat after a tab spawns.
+    ///
+    /// Asking about many rows? Build [`Liveness`] once and ask it instead.
     fn is_dormant(&self, a: &Agent) -> bool {
-        let tab_live = a
-            .tab_id
-            .is_some_and(|id| self.tabs.iter().any(|t| t.tab_id == id));
-        let pane_live = self
-            .uuid_to_pane
-            .get(&a.uuid)
-            .is_some_and(|p| self.tab_position_of_pane(*p).is_some());
-        let spawn_live = self.tabs.iter().any(|t| {
-            self.spawned_agent(t.tab_id)
-                .is_some_and(|s| s.uuid == a.uuid)
-        });
-        !tab_live && !pane_live && !spawn_live
+        self.liveness().dormant(a)
     }
 
-    /// A dormant row the last quit left live, less than a day ago by the
-    /// bar's own clock (`clave_types::standby_live`). A stale row cannot
-    /// open, so it stays plain dormant.
-    fn is_standby(&self, a: &Agent) -> bool {
-        a.standby_since
-            .is_some_and(|t| clave_types::standby_live(t, self.now))
-            && !a.stale
-            && self.is_dormant(a)
+    /// The facts [`Self::is_dormant`] reads, gathered once. Each leg used to
+    /// rescan the tabs, the panes and every agent, once per agent asked
+    /// about, and `rows()` asks about every agent several times on every
+    /// paint. On a 128-row, 15-tab fleet that was 6.7 ms of a 9.6 ms paint
+    /// in wasmi, at five paints a second while a row thinks (the offline
+    /// wasm bench, 2026-10-17).
+    fn liveness(&self) -> Liveness<'_> {
+        Liveness {
+            tabs: self.tabs.iter().map(|t| t.tab_id).collect(),
+            panes: self
+                .panes
+                .iter()
+                .filter(|p| !p.is_plugin)
+                .map(|p| p.pane_id)
+                .collect(),
+            spawned: self
+                .tabs
+                .iter()
+                .filter_map(|t| self.spawn_uuid_in_tab(t.tab_id))
+                .collect(),
+            uuid_to_pane: &self.uuid_to_pane,
+            now: self.now,
+        }
     }
 
     /// Drop in-flight marks that resolved: the store bound the row to a tab or
@@ -2436,14 +2512,15 @@ impl BarModel {
 
     /// The row content for a live-or-dormant agent (lock §2). `dormant` and
     /// `selected` are the caller's own classification rather than a
-    /// re-derivation, because the two loops below already know which list
-    /// they are walking and where the cursor sits.
+    /// re-derivation, because [`Self::build`] already knows from the ranked
+    /// row which block it is in and whether the cursor sits on it.
     fn agent_content(
         &self,
         a: &Agent,
         dormant: bool,
         selected: bool,
         inks: &ProvisionalInks,
+        live: &Liveness,
     ) -> RowContent {
         // Ordered, and the order is the behaviour: `stale` and `opening` are
         // model states that OUTRANK the store's `Status` (a stale row's status
@@ -2457,7 +2534,7 @@ impl BarModel {
             RowStatus::Stale
         } else if self.opening.contains(&a.uuid) {
             RowStatus::Opening
-        } else if dormant && self.is_standby(a) {
+        } else if dormant && live.standby(a) {
             RowStatus::Standby
         } else if dormant && selected {
             RowStatus::DormantSelected
@@ -2661,6 +2738,70 @@ impl BarModel {
     /// they now only ever break ties WITHIN a block — but does not retire
     /// them: two dormant rows at `NO_COMMITMENT` still need a stable order.
     pub fn rows(&self) -> Vec<(RowKey, Row)> {
+        let live = self.liveness();
+        self.build(self.ranked(&live), &live)
+    }
+
+    /// What a viewport of `budget` rows shows: [`Self::rows`] sliced at
+    /// [`viewport_top`], the slice the renderer draws. Only the slice gets
+    /// its content built. Content was 3.2 ms of a 7 ms paint on the live
+    /// fleet (131 rows, about 20 on screen; wasmi bench, 2026-10-17), and the
+    /// spinner repaints five times a second.
+    pub fn view(&self, budget: usize) -> View {
+        let live = self.liveness();
+        let mut ranked = self.ranked(&live);
+        let len = ranked.len();
+        let top = viewport_top(len, ranked.iter().position(|p| p.selected), budget);
+        ranked.truncate(top.saturating_add(budget).min(len));
+        let rows = self
+            .build(ranked.drain(top..), &live)
+            .into_iter()
+            .map(|(_, r)| r)
+            .collect();
+        View { top, len, rows }
+    }
+
+    /// The content for each ranked row, in order.
+    fn build<'a>(
+        &'a self,
+        ranked: impl IntoIterator<Item = Pending<'a>>,
+        live_now: &Liveness,
+    ) -> Vec<(RowKey, Row)> {
+        let inks = ProvisionalInks::allocate(&self.agents);
+        ranked
+            .into_iter()
+            .map(|p| {
+                // Lock §7.1: the zellij tab name is used ONLY for a terminal tab.
+                // An agent row's identity is its title chip and repo, both from the
+                // store — the tab name is clave's own rename echo and would be a
+                // second, drifting copy of the label.
+                let (content, dormant) = match p.source {
+                    Source::Tab(_, Some(a)) => {
+                        (self.agent_content(a, false, false, &inks, live_now), false)
+                    }
+                    Source::Tab(t, None) => (self.terminal_content(t, &inks), false),
+                    // Block membership for the renderer's #206 fade — carried on
+                    // the Row because stale/opening outrank Dormant in the status
+                    // tier above.
+                    Source::Asleep(a) => (
+                        self.agent_content(a, true, p.selected, &inks, live_now),
+                        true,
+                    ),
+                };
+                (
+                    p.key,
+                    Row {
+                        content,
+                        selected: p.selected,
+                        dormant,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Every row in [`Self::rows`] order, before content.
+    fn ranked(&self, live_now: &Liveness) -> Vec<Pending<'_>> {
         // §6.6 C8 virtual cursor: `Row.selected` means "visually SELECTED".
         // While nav sits on a dormant row, the selection follows the walk
         // (claude.ai-style) — that dormant row reads active and EVERY live
@@ -2672,45 +2813,33 @@ impl BarModel {
         let selected_dormant: Option<&str> = self.cursor.as_deref().filter(|u| {
             self.agents
                 .iter()
-                .any(|a| &a.uuid == u && self.is_dormant(a))
+                .any(|a| &a.uuid == u && live_now.dormant(a))
         });
         // (ordinal desc, tiebreak asc), applied to each block separately —
         // tiebreak: live rows by position, dormant by a large offset + stable
         // index. The dormant offset is now only ever compared against other
         // dormant rows, but it costs nothing and keeps the two keys readable
         // as the single scheme they are.
-        let inks = ProvisionalInks::allocate(&self.agents);
-        let mut live: Vec<clave_types::LiveRow<(RowKey, Row)>> = Vec::new();
+        let mut live: Vec<clave_types::LiveRow<Pending>> = Vec::new();
         for t in &self.tabs {
-            // Lock §7.1: the zellij tab name is used ONLY for a terminal tab.
-            // An agent row's identity is its title chip and repo, both from the
-            // store — the tab name is clave's own rename echo and would be a
-            // second, drifting copy of the label.
-            let content = match self.agent_in_tab(t.tab_id) {
-                Some(a) => self.agent_content(a, false, false, &inks),
-                None => self.terminal_content(t, &inks),
-            };
             live.push(clave_types::LiveRow {
                 group: self.live_group(t),
                 key: self.live_key(t),
                 tiebreak: t.position,
-                row: (
-                    RowKey::Tab(t.tab_id),
-                    Row {
-                        content,
-                        // A dormant selection steals the highlight from every tab.
-                        selected: selected_dormant.is_none() && t.active,
-                        dormant: false,
-                    },
-                ),
+                row: Pending {
+                    key: RowKey::Tab(t.tab_id),
+                    // A dormant selection steals the highlight from every tab.
+                    selected: selected_dormant.is_none() && t.active,
+                    source: Source::Tab(t, self.agent_in_tab(t.tab_id)),
+                },
             });
         }
-        let mut agents: Vec<&Agent> = self.agents.iter().filter(|a| self.is_dormant(a)).collect();
+        let mut agents: Vec<&Agent> = self.agents.iter().filter(|a| live_now.dormant(a)).collect();
         agents.sort_by(|a, b| a.uuid.cmp(&b.uuid)); // stable tiebreak input
         let mut standby: Vec<Ranked> = Vec::new();
         let mut dormant: Vec<Ranked> = Vec::new();
         for (i, a) in agents.into_iter().enumerate() {
-            let (block, key): (&mut Vec<Ranked>, fn(String) -> RowKey) = if self.is_standby(a) {
+            let (block, key): (&mut Vec<Ranked>, fn(String) -> RowKey) = if live_now.standby(a) {
                 (&mut standby, RowKey::Standby)
             } else {
                 (&mut dormant, RowKey::Dormant)
@@ -2721,22 +2850,11 @@ impl BarModel {
                 // uuid-DESCENDING (uuid-asc sort, key inverted) — stable and
                 // deterministic, which is all we need.
                 usize::MAX - i,
-                (
-                    key(a.uuid.clone()),
-                    Row {
-                        content: self.agent_content(
-                            a,
-                            true,
-                            selected_dormant == Some(a.uuid.as_str()),
-                            &inks,
-                        ),
-                        selected: selected_dormant == Some(a.uuid.as_str()),
-                        // Block membership for the renderer's #206 fade —
-                        // carried on the Row because stale/opening outrank
-                        // Dormant in the status tier above.
-                        dormant: true,
-                    },
-                ),
+                Pending {
+                    key: key(a.uuid.clone()),
+                    selected: selected_dormant == Some(a.uuid.as_str()),
+                    source: Source::Asleep(a),
+                },
             ));
         }
         // ONE row comparator, applied twice — giving either block its own
@@ -10218,6 +10336,26 @@ mod tests {
         assert_ne!(status_at(&m, 1), Some(RowStatus::Opening));
     }
 
+    /// Alt+Enter spends a DORMANT selection only. A row can go live under a
+    /// held cursor (opened from another bar, or by `clave open`), and the
+    /// wake does not clear the cursor, so a commit then would open a second
+    /// session on a live row. (cargo mutants 2026-10-17: once `rows()`
+    /// stopped asking `is_dormant`, nothing failed when it always said yes.)
+    #[test]
+    fn commit_refuses_a_selection_whose_row_went_live() {
+        let mut m = live_plus_dormant();
+        m.beacon(1);
+        select_dormant(&mut m);
+        m.apply_tabs(vec![tab(1, 0, "live", true), tab(2, 1, "woken", false)]);
+        m.apply_snapshot(snap(2, vec![agent("u-d", Status::Idle, Some(2))]));
+        assert_eq!(
+            m.cursor.as_deref(),
+            Some("u-d"),
+            "the cursor must outlive the wake, or the next assertion cannot fail"
+        );
+        assert!(m.nav("{\"commit\":true}", Some(1)).is_empty());
+    }
+
     #[test]
     fn commit_without_a_dormant_selection_is_a_noop() {
         // The bind is global; the model is the gate. No cursor → nothing to
@@ -11000,8 +11138,130 @@ mod tests {
     // the wasm --target build (see crates/clave-bar/Cargo.toml).
     mod proptests {
         use super::super::*;
-        use super::{TALL_PANE, agent, agent_at, fleet_bar, one_line_bar, snap, tab};
+        use super::{TALL_PANE, agent, agent_at, fleet_bar, one_line_bar, pane, snap, tab};
         use proptest::prelude::*;
+
+        /// The dormancy rule as it read before `Liveness` (2026-10-17): every
+        /// leg rescans the frames. Kept as the oracle for the index, with the
+        /// old `spawned_agent` written out here, so the oracle shares no
+        /// helper with the index it checks.
+        fn spawned_by_scan(m: &BarModel, tab_id: usize) -> Option<&Agent> {
+            let position = m.tabs.iter().find(|t| t.tab_id == tab_id)?.position;
+            let uuid = m
+                .panes
+                .iter()
+                .filter(|p| p.tab_position == position && !p.is_plugin && !p.exited)
+                .find_map(|p| spawn_uuid(p.terminal_command.as_deref()?))?;
+            m.agents.iter().find(|a| {
+                a.uuid == uuid
+                    && !a
+                        .tab_id
+                        .is_some_and(|id| m.tabs.iter().any(|t| t.tab_id == id))
+            })
+        }
+
+        fn dormant_by_scan(m: &BarModel, a: &Agent) -> bool {
+            let tab_live = a
+                .tab_id
+                .is_some_and(|id| m.tabs.iter().any(|t| t.tab_id == id));
+            let pane_live = m
+                .uuid_to_pane
+                .get(&a.uuid)
+                .is_some_and(|p| m.tab_position_of_pane(*p).is_some());
+            let spawn_live = m
+                .tabs
+                .iter()
+                .any(|t| spawned_by_scan(m, t.tab_id).is_some_and(|s| s.uuid == a.uuid));
+            !tab_live && !pane_live && !spawn_live
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 512, ..ProptestConfig::default() })]
+
+            /// The index answers exactly what the scan answered, for every
+            /// agent, over small fleets where the legs collide: duplicate tab
+            /// ids, spawn panes naming bound and unbound rows, exited and
+            /// plugin panes, and registrations to absent panes.
+            #[test]
+            fn prop_liveness_index_matches_the_scan(
+                tabs in proptest::collection::vec((0usize..6, 0usize..4), 0..5),
+                panes in proptest::collection::vec(
+                    (0usize..4, 0u32..8, any::<bool>(), any::<bool>(), proptest::option::of(0usize..6)),
+                    0..10,
+                ),
+                agents in proptest::collection::vec(proptest::option::of(0usize..6), 0..6),
+                regs in proptest::collection::vec((0usize..6, 0u32..10), 0..6),
+            ) {
+                let m = BarModel {
+                    tabs: tabs.iter().map(|&(id, pos)| tab(id, pos, "t", false)).collect(),
+                    panes: panes
+                        .iter()
+                        .map(|&(pos, id, plugin, exited, spawn)| PaneMeta {
+                            exited,
+                            terminal_command: spawn.map(|n| format!("clave spawn u{n}")),
+                            ..pane(pos, id, plugin, false)
+                        })
+                        .collect(),
+                    agents: agents
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &tab_id)| agent(&format!("u{i}"), Status::Idle, tab_id))
+                        .collect(),
+                    uuid_to_pane: regs.iter().map(|&(n, p)| (format!("u{n}"), p)).collect(),
+                    ..BarModel::default()
+                };
+                let live = m.liveness();
+                for a in &m.agents {
+                    prop_assert_eq!(live.dormant(a), dormant_by_scan(&m, a), "agent {}", a.uuid);
+                }
+            }
+
+            /// The view is the slice the renderer cut from the whole list
+            /// before `view` existed: the same top, length and rows, content
+            /// included. The selection sits on a live tab, on a dormant or
+            /// standby row, or nowhere, and the budget runs from zero to past
+            /// the list.
+            #[test]
+            fn prop_view_is_the_slice_of_rows(
+                tabs in proptest::collection::btree_set(0usize..8, 0..5),
+                active in proptest::option::of(0usize..5),
+                agents in proptest::collection::vec(
+                    (proptest::option::of(0usize..8), 0u64..20, any::<bool>()),
+                    0..12,
+                ),
+                cursor in proptest::option::of(0usize..12),
+                budget in 0usize..14,
+            ) {
+                let m = BarModel {
+                    tabs: tabs
+                        .iter()
+                        .enumerate()
+                        .map(|(pos, &id)| tab(id, pos, "t", active == Some(pos)))
+                        .collect(),
+                    agents: agents
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &(tab_id, ord, standby))| Agent {
+                            commit_ord: ord,
+                            // `now` is 0, so a stamp of 0 is a live standby.
+                            standby_since: standby.then_some(0),
+                            ..agent(&format!("u{i}"), Status::Idle, tab_id)
+                        })
+                        .collect(),
+                    cursor: cursor.map(|i| format!("u{i}")),
+                    ..BarModel::default()
+                };
+                let rows: Vec<Row> = m.rows().into_iter().map(|(_, r)| r).collect();
+                let top = viewport_top(rows.len(), rows.iter().position(|r| r.selected), budget);
+                let shown = rows[top..(top + budget).min(rows.len())].to_vec();
+                let view = m.view(budget);
+                prop_assert_eq!(&view, &View { top, len: rows.len(), rows: shown });
+                // The paint hands the view to the renderer, which slices again.
+                // That second slice must keep every row, or the bar draws less.
+                let again = crate::render::visible_rows(&view.rows, budget, RowHeight::Single);
+                prop_assert_eq!(again, &view.rows[..]);
+            }
+        }
 
         proptest! {
                             // Each case drives a full feedback loop; 128 keeps CI modest while
