@@ -8,6 +8,16 @@ owns everything they structurally cannot reach._
 
 ## Run ledger — the useful recent history
 
+- **run 46, 2026-10-19 — the 0.5.7 cut.** Box only; the Mac half did not
+  run. Build `2432ec8`: main at #289 (the spawn fix #287, the ETXTBSY test
+  fix #288, the paint cut #289) plus the version bump. Box 0-7 green, 348
+  checks; the maintainer passed the eyeballs. The agent ran on the box and
+  the maintainer sat at the Mac, so the box's printed launch line failed
+  there (no such folder). The working line was the remote-drive form with
+  the worktree path: `ssh -t devbox 'cd ~/code/clave/.claude-worktrees/<wt>
+  && just launch'`. The first stage then timed out at 3600 s with nothing
+  driven; a fresh stage ran. The three row-status hand tests did not run.
+
 - **run 45, 2026-10-15 — the 0.5.6 cut.** Box only; the Mac half did not
   run. Build `cde1fe9`: main, plus the quiet PR lookup (#284) and the
   row-status and subagent fix (#285), joined on one branch. Box 0-7 green,
@@ -322,6 +332,10 @@ cannot (see "The remote drive").
    Wait for the Mac log to print `just launch`, then give the maintainer
    both launch lines together. Tell him now that 6c asks for a second
    launch. The `3600` is the wait for each launch, in seconds.
+   When you run on the box and he sits at the Mac, the printed `cd … &&
+   just launch` names a folder the Mac does not have. Hand him the ssh
+   form with the box's path instead: `ssh -t devbox 'cd <box checkout> &&
+   just launch'` (run 46).
 3. **The maintainer launches. You watch.** Poll the Mac log and
    `./scripts/remote-qa.sh qa-log 40` in one bounded loop. Stop when each
    log shows `PHASE 6c needs a SECOND launch`, a `FAIL`, or the summary.
