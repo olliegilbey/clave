@@ -129,7 +129,8 @@ const META_TAIL_W: usize = 12;
 /// rather than as a border between two. Chosen by eye from a swatch of four
 /// glyphs at three intensities, because how thin "thin" looks is a property of
 /// the font and the panel, not of the codepoint. Its ink is per ground
-/// (`Inks::shadow`): near the bar's own colour, darker on dark, lighter on light.
+/// (`Inks::shadow`): one step off the bar's own colour, lighter than the dark
+/// bar and darker than the light one.
 const SHADOW: char = '\u{2500}'; // box drawings light horizontal
 
 /// Claude Code's own spinner, in the card's status cell. ORDER IS THE
@@ -2350,6 +2351,129 @@ mod tests {
     /// The token cell wears the RAMP's band, not an approximation of it: the
     /// ink is `BATTERY`'s, indexed by the row's context level, and it saturates
     /// rather than blanking when a newer host sends a longer ramp.
+    /// Every colour the bar paints comes from the theme it is handed (review
+    /// finding, 2026-10-20). `Inks::DARK` is built from the fixed consts and
+    /// every other test renders `Theme::default()`, so a call site that went
+    /// back to a const would pass them all. Under lotus, no cell may wear a
+    /// dark-ground colour. A NEGATIVE `contains` is sound where the positive
+    /// one is not (FOOTGUNS): absence from the whole line is the claim. Every
+    /// row is selected, because a faded cell is a mix and matches nothing.
+    /// `failed` is the one ink both grounds share (samuraiRed), so it is not
+    /// on the list.
+    #[test]
+    fn a_light_theme_leaves_no_dark_colour_on_the_bar() {
+        use crate::render::{RowHeight, Widths, render_rows};
+        use crate::theme::Inks;
+        let (d, w) = (Inks::DARK, Theme::default());
+        let mut dark = vec![
+            d.needs_you,
+            d.working,
+            d.done,
+            d.opening,
+            d.green,
+            d.yellow,
+            d.orange,
+            d.red,
+            d.worktree,
+            d.branch,
+            d.turn,
+            d.subs,
+            d.bracket_a,
+            d.bracket_b,
+            d.meta,
+            d.pr,
+            d.shadow,
+            w.base,
+            w.sel_bg,
+            w.default_ink,
+            w.chip_ink,
+            w.term_ink,
+            w.untinted,
+        ];
+        dark.extend(w.palette);
+        use Provenance::{Branch, Main, Worktree};
+        use RowStatus::*;
+        let statuses = [
+            NeedsYou,
+            Working,
+            Done,
+            Idle,
+            Failed,
+            Dormant,
+            Standby,
+            DormantSelected,
+            Opening,
+            Stale,
+        ];
+        let mut rows: Vec<Row> = (0..=10)
+            .map(|i| {
+                A {
+                    status: statuses[i % statuses.len()],
+                    prov: [Main, Branch, Worktree][i % 3],
+                    chip: Some("CHIP"),
+                    chip_ink: Some(i as u8 % 8),
+                    repo_ink: Some(i as u8 % 8),
+                    branch: "feat",
+                    pr: Some(232),
+                    battery: Some(i as u8),
+                    summary: "summary",
+                    wants: Some("Bash (x)"),
+                    subs: true,
+                    selected: true,
+                    ..A::default()
+                }
+                .row()
+            })
+            .collect();
+        for status in [
+            TermStatus::Idle,
+            TermStatus::Running,
+            TermStatus::Done,
+            TermStatus::Failed,
+        ] {
+            let mut row = T {
+                name: "shell",
+                prov: Worktree,
+                repo: "clave",
+                repo_ink: Some(1),
+                branch: "feat",
+                command: "cargo test",
+                pr: Some(232),
+                elapsed: "2m",
+            }
+            .row();
+            row.selected = true;
+            if let RowContent::Terminal { status: s, .. } = &mut row.content {
+                *s = status;
+            }
+            rows.push(row);
+        }
+        let lotus = Theme::lotus();
+        for rh in [RowHeight::Single, RowHeight::Double, RowHeight::Card] {
+            for (collapsed, widths) in [(false, Widths::EXPANDED), (true, Widths::COLLAPSED)] {
+                let height = rows.len() * rh.lines_per_row();
+                let lines = render_rows(
+                    &rows,
+                    rh.target_cols(collapsed),
+                    height,
+                    widths,
+                    &lotus,
+                    rh,
+                    0,
+                );
+                for line in &lines {
+                    for c in &dark {
+                        assert!(
+                            !line.contains(&c.fg()) && !line.contains(&c.bg()),
+                            "{rh:?} collapsed={collapsed}: dark {} in {line:?}",
+                            c.hex()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn the_token_cell_wears_the_real_ramp_band() {
         let theme = Theme::default();

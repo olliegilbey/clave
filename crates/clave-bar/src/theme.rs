@@ -171,9 +171,11 @@ pub const TURN_INK: Rgb = Rgb(0x7E, 0x9C, 0xD8);
 pub const SUBS_INK: Rgb = Rgb(0x9C, 0xAB, 0xCA);
 pub const SUBS_MARK: char = '\u{f171a}';
 
-/// The status-mark inks (LEDGER D10's table). Fixed under every theme (#145):
-/// the COLOUR is the state, and a red that meant "failed" only under kanagawa
-/// would be a legend the reader has to relearn per theme.
+/// The status-mark inks (LEDGER D10's table), on the dark ground. The MEANING
+/// is fixed under every theme (#145): the COLOUR is the state, and a red that
+/// meant "failed" only under kanagawa would be a legend the reader has to
+/// relearn per theme. A light ground takes a darker shade of each
+/// ([`Inks::LIGHT`]).
 pub const NEEDS_YOU_INK: Rgb = Rgb(0xE4, 0x68, 0x76); // waveRed
 pub const WORKING_INK: Rgb = Rgb(0xFF, 0x9E, 0x3B); // roninYellow
 pub const DONE_INK: Rgb = Rgb(0x98, 0xBB, 0x6C); // springGreen
@@ -221,7 +223,11 @@ pub const PR_INK: Rgb = Rgb(0x98, 0xBB, 0x6C); // springGreen
 
 /// The provider brand cells. BRAND colours, so they are not themed at all —
 /// nf-cod-claude in Anthropic coral, nf-cod-openai in OpenAI green. A provider
-/// clave does not know renders nothing (`card::provider_mark`).
+/// clave does not know renders nothing (`card::provider_mark`). Not shaded per
+/// ground either: a brand's colour is the brand's. On the lotus bar they
+/// measure contrast 2.6 (coral) and 2.7 (green), under the 3.0 a mark wants;
+/// the glyph's shape names the provider as well (light-mode renders,
+/// 2026-10-20).
 pub const CLAUDE_GLYPH: char = '\u{ec82}';
 pub const CLAUDE_INK: Rgb = Rgb(0xD9, 0x77, 0x57);
 pub const OPENAI_GLYPH: char = '\u{ec81}';
@@ -539,8 +545,10 @@ impl Theme {
     /// zellij's stock colours would be a regression nobody asked for; they keep
     /// the curated design. (A deliberate `theme "default"` lands in the same
     /// arm, accepted at the grill.) The curated design comes in two grounds,
-    /// and `mode` picks one: zellij asks the terminal whether it is light or
-    /// dark (`CSI ? 996 n`, zellij-server-0.45.1 `panes/grid.rs:5496`) and
+    /// and `mode` picks one: zellij's client asks the terminal whether it is
+    /// light or dark at startup (`CSI ? 996 n`) and listens for changes
+    /// (`CSI ? 2031 h`). The client crate is not vendored; the server says so
+    /// at `zellij-server-0.45.1/src/panes/grid.rs:5497-5500`. The server
     /// passes the answer on as `HostTerminalThemeChanged`. Light paints
     /// [`Theme::lotus`]. Dark, or a terminal that never answers, paints
     /// kanagawa wave, as every release before this one did. Before that, a
@@ -581,8 +589,10 @@ impl Theme {
     /// (`kanagawa.nvim` `lua/kanagawa/themes.lua`). The bar background is
     /// `ui.bg`, the text `ui.fg`, the selection `ui.bg_search`, and the repo
     /// inks the same eight `syn` roles the curated palette takes from wave,
-    /// darkened by the rule on [`Inks::LIGHT`] (the yellow and orange slots
-    /// take the band inks, for the reason given there).
+    /// darkened by the rule on [`Inks::LIGHT`]. The yellow and orange slots
+    /// take the band shades, for the reason given there. They are the same
+    /// VALUES, not the same constants, for the reason the dark `GREEN` gives:
+    /// a repo ink and a risk band are two meanings.
     ///
     /// Three roles are not lotus's own (light-mode renders, 2026-10-20). The
     /// selection is `ui.bg_search`, not `ui.pmenu.bg_sel`: lotusBlue3 put the
@@ -596,16 +606,16 @@ impl Theme {
             sel_bg: Rgb(0xB5, 0xCB, 0xD2), // lotusBlue2   ← waveBlue2
             default_ink: Rgb(0x54, 0x54, 0x64), // lotusInk1    ← fujiWhite
             chip_ink: chip_ink(LOTUS_BASE),
-            term_ink: Inks::LIGHT.done,
+            term_ink: Rgb(0x5B, 0x70, 0x40), // lotusGreen, darkened
             untinted: Rgb(0xA0, 0x9C, 0xAC), // lotusViolet1 ← sumiInk6
             palette: [
                 Rgb(0x4D, 0x69, 0x9B), // lotusBlue4   ← crystalBlue
-                Inks::LIGHT.green,     // lotusGreen   ← springGreen
-                Inks::LIGHT.yellow,    // lotusYellow3 ← carpYellow
-                Inks::LIGHT.red,       // lotusRed     ← waveRed
+                Rgb(0x5B, 0x70, 0x40), // lotusGreen   ← springGreen
+                Rgb(0x8E, 0x61, 0x00), // lotusYellow3 ← carpYellow
+                Rgb(0xBA, 0x3C, 0x4D), // lotusRed     ← waveRed
                 Rgb(0x62, 0x4C, 0x83), // lotusViolet4 ← oniViolet
                 Rgb(0x51, 0x70, 0x6A), // lotusAqua    ← waveAqua2
-                Inks::LIGHT.orange,    // lotusOrange  ← surimiOrange
+                Rgb(0xB5, 0x44, 0x00), // lotusOrange  ← surimiOrange
                 Rgb(0x9F, 0x51, 0x6C), // lotusPink    ← sakuraPink
             ],
             inks: Inks::LIGHT,

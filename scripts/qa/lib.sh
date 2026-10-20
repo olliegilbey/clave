@@ -971,6 +971,10 @@ QA_CAPABILITIES=(
   "slim:clave-bar: dropped clave-status-slim pipe"
   "ask:clave-bar: hydrate ask"
   "answer:clave-bar: hydrate answer"
+  # The terminal's light or dark answer, as zellij relayed it. Blank on
+  # every instance means the terminal never answered, and the bar is dark.
+  "light:clave-bar: host mode Light"
+  "dark:clave-bar: host mode Dark"
 )
 
 instance_ledger() {

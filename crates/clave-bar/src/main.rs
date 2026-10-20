@@ -909,6 +909,11 @@ impl State {
                 self.retheme()
             }
             Event::HostTerminalThemeChanged(mode) => {
+                // CHANGED-ONLY, like the term-facts lines: the drive's
+                // instance ledger reads it as "this bar heard the terminal".
+                if self.host_mode != Some(mode) {
+                    eprintln!("clave-bar: host mode {mode:?}");
+                }
                 self.host_mode = Some(mode);
                 self.retheme()
             }
