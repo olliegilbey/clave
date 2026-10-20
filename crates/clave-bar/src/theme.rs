@@ -1050,6 +1050,17 @@ mod tests {
         }
     }
 
+    /// The cut is strictly ABOVE the channel midpoint. A colour can sit on it
+    /// exactly: eight of the 16.7M do, `#0DA371` among them (counted by brute
+    /// force over every triple, 2026-10-20), and those are dark grounds.
+    #[test]
+    fn the_ground_turns_light_only_above_the_midpoint() {
+        assert_eq!(luma(Rgb(13, 163, 113)), 127.5);
+        assert!(!light_ground(Rgb(13, 163, 113)), "on the midpoint is dark");
+        assert!(!light_ground(Rgb(127, 127, 127)));
+        assert!(light_ground(Rgb(128, 128, 128)));
+    }
+
     /// The light ground must read as well as the dark one does: each LIGHT
     /// ink, on the lotus bar and on its selected row, reaches the contrast its
     /// DARK twin has on the curated design. The floor stops at WCAG AA (4.5 on
