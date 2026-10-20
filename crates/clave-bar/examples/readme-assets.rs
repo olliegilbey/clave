@@ -41,7 +41,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use clave_bar::render::{
-    BASE, BATTERY, BRANCH_INK, CLAUDE_GLYPH, CLAUDE_INK, CONSOLE, DEFAULT_INK, DORMANT_FADE,
+    BASE, BATTERY, BRANCH_INK, CLAUDE_GLYPH, CLAUDE_INK, CONSOLE, DEFAULT_INK, DORMANT_FADE, Inks,
     OPENAI_GLYPH, OPENAI_INK, PALETTE, Provenance, Rgb, RowHeight, RowStatus, SUBS_INK, SUBS_MARK,
     TermStatus, Theme, WORKTREE_INK, Widths, display_cells, render_rows, strip_sgr,
 };
@@ -308,10 +308,10 @@ fn write_icons(fonts: &[Font], dir: &Path) {
             &icon_svg(fonts, ch, brand),
         );
     }
-    for (i, (ch, ink)) in BATTERY.iter().enumerate() {
+    for (i, (ch, band)) in BATTERY.iter().enumerate() {
         write_file(
             &dir.join(format!("battery-{i:02}.svg")),
-            &icon_svg(fonts, *ch, *ink),
+            &icon_svg(fonts, *ch, Inks::DARK.band(*band)),
         );
     }
     for (i, (ink, _)) in PALETTE.iter().enumerate() {

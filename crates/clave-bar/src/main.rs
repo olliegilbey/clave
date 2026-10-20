@@ -159,6 +159,14 @@ struct State {
     /// curated kanagawa — stands until the first one lands, which also keeps
     /// frame zero on the design the goldens pin.
     theme: Theme,
+    /// The two inputs `theme` is mapped from, kept so either event can
+    /// re-map without the other: the last `ModeUpdate`'s colours, and the
+    /// terminal's light or dark mode from `HostTerminalThemeChanged`. Stock
+    /// colours until the first ModeUpdate (`Styling::default()` is
+    /// `DEFAULT_STYLES`, zellij-utils-0.45.1 `data.rs:1614`), no mode until
+    /// the terminal answers.
+    styling: Styling,
+    host_mode: Option<HostTerminalThemeMode>,
     /// The CLI this bar shells out to, from plugin configuration (#44).
     /// Assigned in `load()`, which zellij invokes as its own wasm export
     /// before delivering any event (`register_plugin!`, zellij-tile-0.44.3
@@ -174,6 +182,17 @@ struct State {
 register_plugin!(State);
 
 impl State {
+    /// Re-map the theme from its two inputs; true when it moved, so the
+    /// caller repaints only a bar whose colours changed.
+    fn retheme(&mut self) -> bool {
+        let theme = Theme::from_styling(&self.styling, self.host_mode);
+        if theme == self.theme {
+            return false;
+        }
+        self.theme = theme;
+        true
+    }
+
     /// Execute model effects. Gate WRITES to the active-tab instance;
     /// FocusPane is intentionally ungated (every instance computes the same
     /// target — focusing twice is idempotent, and the keybind MessagePlugin
@@ -886,12 +905,12 @@ impl State {
                 // repaints, and only when the mapped theme actually moved —
                 // ModeUpdate also fires on every input-mode change, which
                 // must not repaint an unchanged bar.
-                let theme = Theme::from_styling(&mode_info.style.colors);
-                if theme == self.theme {
-                    return false;
-                }
-                self.theme = theme;
-                true
+                self.styling = mode_info.style.colors;
+                self.retheme()
+            }
+            Event::HostTerminalThemeChanged(mode) => {
+                self.host_mode = Some(mode);
+                self.retheme()
             }
             Event::TabUpdate(tabs) => {
                 let metas: Vec<TabMeta> = tabs
@@ -1250,6 +1269,12 @@ impl ZellijPlugin for State {
             // whenever the mode/style changes, so the bar repaints on a theme
             // switch without polling. Covered by ReadApplicationState above.
             EventType::ModeUpdate,
+            // The terminal's light or dark mode, for a user with no zellij
+            // theme: the curated design has a light ground too. zellij
+            // replays the last mode at subscribe and asks for no permission
+            // (zellij-server-0.45.1 `plugins/mod.rs:765`,
+            // `plugins/wasm_bridge.rs:2080`).
+            EventType::HostTerminalThemeChanged,
             // The #206 terminal-row deltas: cwd and foreground-command pushes
             // between manifests. Per-pane and quiet — nothing like
             // InputReceived's per-keystroke storm (see below).
