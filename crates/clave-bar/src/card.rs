@@ -2348,9 +2348,6 @@ mod tests {
         assert!(!strip_sgr(&l2).contains("colour"), "{}", strip_sgr(&l2));
     }
 
-    /// The token cell wears the RAMP's band, not an approximation of it: the
-    /// ink is `BATTERY`'s, indexed by the row's context level, and it saturates
-    /// rather than blanking when a newer host sends a longer ramp.
     /// Every colour the bar paints comes from the theme it is handed (review
     /// finding, 2026-10-20). `Inks::DARK` is built from the fixed consts and
     /// every other test renders `Theme::default()`, so a call site that went
@@ -2474,6 +2471,9 @@ mod tests {
         }
     }
 
+    /// The token cell wears the RAMP's band, not an approximation of it: the
+    /// ink is `BATTERY`'s, indexed by the row's context level, and it saturates
+    /// rather than blanking when a newer host sends a longer ramp.
     #[test]
     fn the_token_cell_wears_the_real_ramp_band() {
         let theme = Theme::default();

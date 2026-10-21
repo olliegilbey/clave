@@ -998,7 +998,9 @@ QA_CAPABILITIES=(
   "ask:clave-bar: hydrate ask"
   "answer:clave-bar: hydrate answer"
   # The terminal's light or dark answer, as zellij relayed it. Blank on
-  # every instance means the terminal never answered, and the bar is dark.
+  # every instance means no mode reached the bar, and the bar is dark.
+  # `dark` alone does not prove the terminal answered: with both theme_dark
+  # and theme_light set, zellij sends Dark at start (FOOTGUNS).
   "light:clave-bar: host mode Light"
   "dark:clave-bar: host mode Dark"
 )
