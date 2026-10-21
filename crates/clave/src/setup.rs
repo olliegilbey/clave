@@ -252,10 +252,13 @@ pub fn config_kdl(binary: &str, wasm: &str, row_height: clave_types::RowHeight) 
 /// The top-level node names [`passthrough_slice_from`] copies out of the
 /// user's config. Ordered as they are written; the order is cosmetic, the
 /// membership is not — see that function for why each name earns its place.
-const PASSTHROUGH_NODES: [&str; 5] = [
+const PASSTHROUGH_NODES: [&str; 8] = [
     "theme",
     "themes",
     "theme_dir",
+    "theme_dark",
+    "theme_light",
+    "explicit_theme_hue",
     "pane_frames",
     "pane_frame_style",
 ];
@@ -272,6 +275,14 @@ const PASSTHROUGH_NODES: [&str; 5] = [
 ///   even under `--config`, zellij still merges its built-in themes and the
 ///   user themes dir (`apply_themes_to_config`, zellij-utils setup.rs:318-341).
 ///   The SELECTION lives in `options`, which `--config` replaces, so it does.
+/// - `theme_dark`, `theme_light` and `explicit_theme_hue` — zellij 0.45's
+///   light and dark switch, a selection like `theme`. With both themes set,
+///   zellij swaps between them when the terminal reports its mode, and the
+///   hue pins that mode for a terminal that never reports
+///   (`zellij-utils-0.45.1/assets/config/default.kdl:370-383`). clave's bar
+///   follows the same mode with its own light design, so a user who pins
+///   the hue pins the bar too. 0.44.3 ignores the three keys, as it ignores
+///   `pane_frame_style` below.
 /// - `pane_frames` and `pane_frame_style` — #262. zellij 0.45.0 added the
 ///   style, defaulting to `"titles"` where 0.44.x only ever drew the full box,
 ///   so the same clave layout renders differently across a 0.44/0.45 pair of
@@ -1518,6 +1529,20 @@ mod tests {
             // Widening is deliberate and bounded: a neighbouring option the
             // list does not name stays behind.
             assert!(!slice.contains("mouse_mode"), "{slice}");
+        }
+
+        /// zellij 0.45's light and dark switch rides with the selection: a
+        /// user who set the pair, or pinned the hue, lost both in a clave
+        /// session before.
+        #[test]
+        fn copies_the_light_and_dark_switch() {
+            let user = "theme_dark \"nightfox\"\n\
+                        theme_light \"dayfox\"\n\
+                        explicit_theme_hue \"light\"\n";
+            let slice = passthrough_slice_from(user);
+            assert!(slice.contains("theme_dark \"nightfox\""), "{slice}");
+            assert!(slice.contains("theme_light \"dayfox\""), "{slice}");
+            assert!(slice.contains("explicit_theme_hue \"light\""), "{slice}");
         }
 
         /// The append would collide with itself if clave's own config already

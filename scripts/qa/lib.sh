@@ -569,6 +569,7 @@ HYDRATE_ASK='clave-bar: hydrate ask'
 HYDRATE_ANSWER='clave-bar: hydrate answer seq='
 BAD_STATUS='clave-bar: bad clave-status'
 RUN_FAILED='clave-bar: run_command failed'
+HOST_MODE='clave-bar: host mode '
 }
 
 # The lines since <mark> that hold <pattern> and end their fixed words with
@@ -669,6 +670,31 @@ slim_host_checks() {
   check_nonempty "the store's snapshot names its dormant rows by tag" "$current"
   check "at rest, the last whole push carried the store's dormant rows (the next push goes slim)" \
     "$pushed" "$current"
+}
+
+# The terminal's light or dark mode, over a span (6a since the run's mark;
+# 6c since the quit). zellij asks the terminal at startup. It gives the
+# answer to each plugin that subscribes, a late one too (zellij-server-0.45.1
+# plugins/mod.rs:765). Each bar logs the mode when it first hears it (main.rs,
+# CHANGED-ONLY). $1 names the span, $2 the instances born in it, $3 the
+# instances that heard a mode in it.
+#
+# A split is the finding: a bar born in the span heard nothing while others
+# heard the mode. That bar does not subscribe, or its replay did not come.
+# Silence on every bar has two causes: the terminal did not answer, or no bar
+# subscribes. The drive cannot tell them apart, so silence is a note.
+# QA_TERMINAL_REPORTS_MODE=1 says the launch terminal answers (Ghostty, kitty,
+# foot and contour do), and then silence fails too.
+host_mode_checks() {
+  local span="$1" born="$2" heard="$3"
+  measure "$span: sandbox bars that heard the terminal mode" "$(uuid_line "$heard")"
+  check_nonempty "$span: bars were born, so a replay at subscribe was due" "$(uuid_line "$born")"
+  if [[ -z "$heard" && "${QA_TERMINAL_REPORTS_MODE:-}" != 1 ]]; then
+    note '%s: no sandbox bar heard the terminal mode. The terminal did not answer, or no bar subscribes. Run with QA_TERMINAL_REPORTS_MODE=1 from a terminal that answers, and this fails.' "$span"
+    return
+  fi
+  check "$span: every bar born heard the terminal mode (the replay at subscribe)" \
+    "$(uuid_line "$(ids_missing_from "$born" "$heard")")" ""
 }
 
 # The seam over a span of the run (phase 6a since the run's mark; 6c since
@@ -971,6 +997,12 @@ QA_CAPABILITIES=(
   "slim:clave-bar: dropped clave-status-slim pipe"
   "ask:clave-bar: hydrate ask"
   "answer:clave-bar: hydrate answer"
+  # The terminal's light or dark answer, as zellij relayed it. Blank on
+  # every instance means no mode reached the bar, and the bar is dark.
+  # `dark` alone does not prove the terminal answered: with both theme_dark
+  # and theme_light set, zellij sends Dark at start (FOOTGUNS).
+  "light:clave-bar: host mode Light"
+  "dark:clave-bar: host mode Dark"
 )
 
 instance_ledger() {

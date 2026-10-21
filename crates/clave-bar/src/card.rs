@@ -37,9 +37,8 @@
 
 use crate::render::{Row, RowContent, cell_slice, clip_to_cells, display_cells, hue, strip_sgr};
 use crate::theme::{
-    BATTERY, BRACKET_A, BRACKET_B, BRANCH_INK, CARD_BOT, CARD_TOP, CLAUDE_GLYPH, CLAUDE_INK,
-    CONSOLE, DORMANT_FADE, ELLIPSIS, FADE, LCAP, META_INK, NEEDS_YOU_INK, OPENAI_GLYPH, OPENAI_INK,
-    PR_INK, RCAP, RESET, RULE, Rgb, SUBS_INK, SUBS_MARK, TERM_MARK, TURN_INK, Theme, WORKTREE_INK,
+    BATTERY, CARD_BOT, CARD_TOP, CLAUDE_GLYPH, CLAUDE_INK, CONSOLE, DORMANT_FADE, ELLIPSIS, FADE,
+    LCAP, OPENAI_GLYPH, OPENAI_INK, RCAP, RESET, RULE, Rgb, SUBS_MARK, TERM_MARK, Theme,
 };
 
 // ── the budgets (the example's fixed cells) ─────────────────────────────────
@@ -126,12 +125,13 @@ const CARD_CLOCK_W: usize = 5;
 /// profile, and hands entirely to the repo in the collapsed one.
 const META_TAIL_W: usize = 12;
 
-/// Line 4's hairline and its ink — a rule so dark it reads as a shadow under
-/// the card rather than as a border between two. Chosen by eye from a swatch
-/// of four glyphs at three intensities, because how thin "thin" looks is a
-/// property of the font and the panel, not of the codepoint.
+/// Line 4's hairline — a rule so quiet it reads as a shadow under the card
+/// rather than as a border between two. Chosen by eye from a swatch of four
+/// glyphs at three intensities, because how thin "thin" looks is a property of
+/// the font and the panel, not of the codepoint. Its ink is per ground
+/// (`Inks::shadow`): one step off the bar's own colour, lighter than the dark
+/// bar and darker than the light one.
 const SHADOW: char = '\u{2500}'; // box drawings light horizontal
-const SHADOW_INK: Rgb = Rgb(0x2A, 0x2A, 0x37); // sumiInk4
 
 /// Claude Code's own spinner, in the card's status cell. ORDER IS THE
 /// ANIMATION: the mark grows from a dot through progressively heavier stars
@@ -257,7 +257,7 @@ fn cells<'a>(content: &'a RowContent, theme: &Theme) -> Cells<'a> {
             // rather than blank.
             let band = battery
                 .map(|i| usize::from(i).min(BATTERY.len() - 1))
-                .map_or(theme.default_ink, |i| BATTERY[i].1);
+                .map_or(theme.default_ink, |i| theme.inks.band(BATTERY[i].1));
             Cells {
                 mark: status.mark(theme),
                 chip: title.as_deref().map(|t| (t, Some(hue(*title_ink, theme)))),
@@ -378,7 +378,11 @@ pub(crate) fn render_double_card(
         Some(b) => format!("{}{}{s}", b.bg(), c.fg()),
         None => format!("\u{1b}[49m{}{s}", c.fg()),
     };
-    let bracket_ink = ink(if zebra_paint { BRACKET_B } else { BRACKET_A });
+    let bracket_ink = ink(if zebra_paint {
+        theme.inks.bracket_b
+    } else {
+        theme.inks.bracket_a
+    });
 
     // ── line 1: status ╭ chip-pill summary tokens ──
     let mut l1 = String::new();
@@ -429,7 +433,7 @@ pub(crate) fn render_double_card(
             l1.push_str(&seg(ink(*band), &format!(" {}", rpad(text, TOKEN_W))))
         }
         TokenCell::Term => l1.push_str(&seg(
-            ink(META_INK),
+            ink(theme.inks.meta),
             &format!(" {}", rpad(TERM_MARK, TOKEN_W)),
         )),
         TokenCell::Blank => l1.push_str(&seg(
@@ -461,13 +465,13 @@ pub(crate) fn render_double_card(
         let repo_w = display_cells(c.repo).min(REPO_W);
         l2.push_str(&seg(ink(c.repo_ink), &format!(" {}", pad(c.repo, repo_w))));
         l2.push_str(&seg(
-            ink(META_INK),
+            ink(theme.inks.meta),
             &format!(" {}", pad(c.branch, total - repo_w - 1)),
         ));
     }
     if let Some(n) = c.pr {
         l2.push_str(&seg(
-            ink(PR_INK),
+            ink(theme.inks.pr),
             &format!(" {}", pad(&format!("#{n}"), PR_W)),
         ));
     }
@@ -478,14 +482,17 @@ pub(crate) fn render_double_card(
         Some((glyph, brand)) => l2.push_str(&seg(ink(brand), &format!(" {glyph}"))),
         None => l2.push_str(&seg(theme.default_ink, "  ")),
     }
-    l2.push_str(&seg(ink(META_INK), &format!(" {}", pad(c.model, MODEL_W))));
     l2.push_str(&seg(
-        ink(META_INK),
+        ink(theme.inks.meta),
+        &format!(" {}", pad(c.model, MODEL_W)),
+    ));
+    l2.push_str(&seg(
+        ink(theme.inks.meta),
         &format!(" {}", pad(c.effort, EFFORT_W)),
     ));
     let fill = build.saturating_sub(display_cells(&strip_sgr(&l2)) + ELAPSED_W + 1);
     l2.push_str(&seg(theme.default_ink, &" ".repeat(fill)));
-    l2.push_str(&seg(ink(META_INK), &rpad(c.elapsed, ELAPSED_W)));
+    l2.push_str(&seg(ink(theme.inks.meta), &rpad(c.elapsed, ELAPSED_W)));
     l2.push_str(&seg(theme.default_ink, " "));
 
     // ONE exit for both lines: the clip closes the SGR state and guarantees
@@ -610,8 +617,8 @@ pub(crate) fn render_card(
     // ── line 2: prov │ repo [branch] #PR provider model effort ──
     let mut l2 = String::new();
     let (prov, prov_ink) = match c.prov {
-        Some(g) if g == crate::render::WORKTREE_MARK => (g.to_string(), WORKTREE_INK),
-        Some(g) => (g.to_string(), BRANCH_INK),
+        Some(g) if g == crate::render::WORKTREE_MARK => (g.to_string(), theme.inks.worktree),
+        Some(g) => (g.to_string(), theme.inks.branch),
         None => (" ".to_string(), theme.default_ink),
     };
     l2.push_str(&seg(ink(prov_ink), &format!(" {prov} ")));
@@ -639,22 +646,25 @@ pub(crate) fn render_card(
         let repo_w = display_cells(c.repo).min(REPO_W);
         l2.push_str(&seg(ink(c.repo_ink), &pad(c.repo, repo_w)));
         l2.push_str(&seg(
-            ink(META_INK),
+            ink(theme.inks.meta),
             &format!(" {}", pad(c.branch, budget - repo_w - 1)),
         ));
     }
     if pr_w > 0 {
         let pr = c.pr.map_or_else(String::new, |n| format!("#{n}"));
-        l2.push_str(&seg(ink(PR_INK), &format!(" {}", pad(&pr, PR_W))));
+        l2.push_str(&seg(ink(theme.inks.pr), &format!(" {}", pad(&pr, PR_W))));
     }
     if expanded {
         match c.provider {
             Some((glyph, brand)) => l2.push_str(&seg(ink(brand), &format!(" {glyph}"))),
             None => l2.push_str(&seg(theme.default_ink, "  ")),
         }
-        l2.push_str(&seg(ink(META_INK), &format!(" {}", pad(c.model, MODEL_W))));
         l2.push_str(&seg(
-            ink(META_INK),
+            ink(theme.inks.meta),
+            &format!(" {}", pad(c.model, MODEL_W)),
+        ));
+        l2.push_str(&seg(
+            ink(theme.inks.meta),
             &format!(" {}", pad(c.effort, EFFORT_W)),
         ));
     }
@@ -666,13 +676,13 @@ pub(crate) fn render_card(
     // BOOLEAN, not a count: "this row has fanned out" is the whole signal, and
     // a digit beside it was noise.
     let subs = if c.subs { SUBS_MARK } else { ' ' };
-    l3.push_str(&seg(ink(SUBS_INK), &format!(" {subs} ")));
+    l3.push_str(&seg(ink(theme.inks.subs), &format!(" {subs} ")));
     l3.push_str(&seg(rail, &format!("{RULE} ")));
     // Left-aligned, unlike the two-line card's right-aligned count: the four
     // lines share ONE left edge, and line 3's numbers start at it.
     let token_text = match &c.tokens {
         TokenCell::Count(text, band) => (text.clone(), *band),
-        TokenCell::Term => (TERM_MARK.to_string(), META_INK),
+        TokenCell::Term => (TERM_MARK.to_string(), theme.inks.meta),
         TokenCell::Blank => (String::new(), theme.default_ink),
     };
     l3.push_str(&seg(ink(token_text.1), &pad(&token_text.0, TOKEN_W)));
@@ -692,13 +702,17 @@ pub(crate) fn render_card(
         // dimmed and coarse once it is over and the number means staleness.
         // The drive is what made this obvious — the card said `0m` through a
         // turn Claude Code's own footer was calling 3s.
-        let clock_ink = if c.thinking { TURN_INK } else { META_INK };
+        let clock_ink = if c.thinking {
+            theme.inks.turn
+        } else {
+            theme.inks.meta
+        };
         l3.push_str(&seg(
             ink(clock_ink),
             &format!("{}{}", " ".repeat(TOKEN_GAP), rpad(c.elapsed, CARD_CLOCK_W)),
         ));
         l3.push_str(&seg(
-            ink(NEEDS_YOU_INK),
+            ink(theme.inks.needs_you),
             &format!(" {}", pad(c.wants, wants_w)),
         ));
         l3.push_str(&seg(theme.default_ink, " "));
@@ -713,7 +727,11 @@ pub(crate) fn render_card(
         // `build` without a second constant to keep in step.
         let fill = build.saturating_sub(display_cells(&strip_sgr(&l3)) + CARD_CLOCK_W + 1);
         l3.push_str(&seg(theme.default_ink, &" ".repeat(fill)));
-        let clock_ink = if c.thinking { TURN_INK } else { META_INK };
+        let clock_ink = if c.thinking {
+            theme.inks.turn
+        } else {
+            theme.inks.meta
+        };
         l3.push_str(&seg(ink(clock_ink), &rpad(c.elapsed, CARD_CLOCK_W)));
         l3.push_str(&seg(theme.default_ink, " "));
     }
@@ -724,7 +742,7 @@ pub(crate) fn render_card(
     // lines that carry content.
     let l4 = format!(
         "\u{1b}[49m{}{}",
-        SHADOW_INK.fg(),
+        theme.inks.shadow.fg(),
         SHADOW.to_string().repeat(build)
     );
 
@@ -785,6 +803,9 @@ fn printable(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::render::{Provenance, RowStatus, TermStatus};
+    use crate::theme::{
+        BRACKET_A, BRACKET_B, BRANCH_INK, META_INK, SUBS_INK, TURN_INK, WORKTREE_INK,
+    };
 
     /// The mock the ratified preview renders, as real rows. Indices 0–15 are
     /// `double-preview.rs`'s sixteen in order, so a golden here can be read
@@ -2327,6 +2348,129 @@ mod tests {
         assert!(!strip_sgr(&l2).contains("colour"), "{}", strip_sgr(&l2));
     }
 
+    /// Every colour the bar paints comes from the theme it is handed (review
+    /// finding, 2026-10-20). `Inks::DARK` is built from the fixed consts and
+    /// every other test renders `Theme::default()`, so a call site that went
+    /// back to a const would pass them all. Under lotus, no cell may wear a
+    /// dark-ground colour. A NEGATIVE `contains` is sound where the positive
+    /// one is not (FOOTGUNS): absence from the whole line is the claim. Every
+    /// row is selected, because a faded cell is a mix and matches nothing.
+    /// `failed` is the one ink both grounds share (samuraiRed), so it is not
+    /// on the list.
+    #[test]
+    fn a_light_theme_leaves_no_dark_colour_on_the_bar() {
+        use crate::render::{RowHeight, Widths, render_rows};
+        use crate::theme::Inks;
+        let (d, w) = (Inks::DARK, Theme::default());
+        let mut dark = vec![
+            d.needs_you,
+            d.working,
+            d.done,
+            d.opening,
+            d.green,
+            d.yellow,
+            d.orange,
+            d.red,
+            d.worktree,
+            d.branch,
+            d.turn,
+            d.subs,
+            d.bracket_a,
+            d.bracket_b,
+            d.meta,
+            d.pr,
+            d.shadow,
+            w.base,
+            w.sel_bg,
+            w.default_ink,
+            w.chip_ink,
+            w.term_ink,
+            w.untinted,
+        ];
+        dark.extend(w.palette);
+        use Provenance::{Branch, Main, Worktree};
+        use RowStatus::*;
+        let statuses = [
+            NeedsYou,
+            Working,
+            Done,
+            Idle,
+            Failed,
+            Dormant,
+            Standby,
+            DormantSelected,
+            Opening,
+            Stale,
+        ];
+        let mut rows: Vec<Row> = (0..=10)
+            .map(|i| {
+                A {
+                    status: statuses[i % statuses.len()],
+                    prov: [Main, Branch, Worktree][i % 3],
+                    chip: Some("CHIP"),
+                    chip_ink: Some(i as u8 % 8),
+                    repo_ink: Some(i as u8 % 8),
+                    branch: "feat",
+                    pr: Some(232),
+                    battery: Some(i as u8),
+                    summary: "summary",
+                    wants: Some("Bash (x)"),
+                    subs: true,
+                    selected: true,
+                    ..A::default()
+                }
+                .row()
+            })
+            .collect();
+        for status in [
+            TermStatus::Idle,
+            TermStatus::Running,
+            TermStatus::Done,
+            TermStatus::Failed,
+        ] {
+            let mut row = T {
+                name: "shell",
+                prov: Worktree,
+                repo: "clave",
+                repo_ink: Some(1),
+                branch: "feat",
+                command: "cargo test",
+                pr: Some(232),
+                elapsed: "2m",
+            }
+            .row();
+            row.selected = true;
+            if let RowContent::Terminal { status: s, .. } = &mut row.content {
+                *s = status;
+            }
+            rows.push(row);
+        }
+        let lotus = Theme::lotus();
+        for rh in [RowHeight::Single, RowHeight::Double, RowHeight::Card] {
+            for (collapsed, widths) in [(false, Widths::EXPANDED), (true, Widths::COLLAPSED)] {
+                let height = rows.len() * rh.lines_per_row();
+                let lines = render_rows(
+                    &rows,
+                    rh.target_cols(collapsed),
+                    height,
+                    widths,
+                    &lotus,
+                    rh,
+                    0,
+                );
+                for line in &lines {
+                    for c in &dark {
+                        assert!(
+                            !line.contains(&c.fg()) && !line.contains(&c.bg()),
+                            "{rh:?} collapsed={collapsed}: dark {} in {line:?}",
+                            c.hex()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// The token cell wears the RAMP's band, not an approximation of it: the
     /// ink is `BATTERY`'s, indexed by the row's context level, and it saturates
     /// rather than blanking when a newer host sends a longer ramp.
@@ -2342,10 +2486,10 @@ mod tests {
             .row();
             render_double_card(&row, 38, false, false, &theme).0
         };
-        assert!(band(Some(0)).contains(&BATTERY[0].1.fg()));
-        assert!(band(Some(10)).contains(&BATTERY[10].1.fg()));
+        assert!(band(Some(0)).contains(&theme.inks.band(BATTERY[0].1).fg()));
+        assert!(band(Some(10)).contains(&theme.inks.band(BATTERY[10].1).fg()));
         // Out of range: the last band, never a blank cell.
-        assert!(band(Some(200)).contains(&BATTERY[BATTERY.len() - 1].1.fg()));
+        assert!(band(Some(200)).contains(&theme.inks.band(BATTERY[BATTERY.len() - 1].1).fg()));
         // No reading yet: the default ink carries the count it does have.
         assert!(band(None).contains(&theme.default_ink.fg()));
     }

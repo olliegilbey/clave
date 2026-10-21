@@ -320,6 +320,41 @@ fn config_with_the_frame_slice_parses_and_carries_pane_frames() {
     );
 }
 
+/// The light and dark switch (zellij 0.45): the pair and the pinned hue must
+/// come out of the real parser as options. A hue zellij refuses is a parse
+/// ERROR (`kdl/mod.rs:2787`, "Invalid value for explicit_theme_hue"), so the
+/// parse half matters as much as the carry half.
+#[test]
+fn config_with_the_hue_slice_parses_and_carries_the_switch() {
+    let user = "theme_dark \"nightfox\"\n\
+                theme_light \"dayfox\"\n\
+                explicit_theme_hue \"light\"\n";
+    let cfg = format!(
+        "{}{}",
+        setup::config_kdl("clave", WASM, clave_types::RowHeight::Double),
+        setup::passthrough_slice_from(user)
+    );
+    let parsed = match Config::from_kdl(&cfg, None) {
+        Ok(c) => c,
+        Err(e) => panic!("config.kdl + hue slice failed zellij's parser: {e:?}\n---\n{cfg}"),
+    };
+    assert_eq!(
+        parsed.options.theme_dark.as_deref(),
+        Some("nightfox"),
+        "{cfg}"
+    );
+    assert_eq!(
+        parsed.options.theme_light.as_deref(),
+        Some("dayfox"),
+        "{cfg}"
+    );
+    assert_eq!(
+        parsed.options.explicit_theme_hue,
+        Some(zellij_utils::data::ThemeHue::Light),
+        "the pinned hue must survive the round-trip:\n{cfg}"
+    );
+}
+
 #[test]
 fn config_kdl_unbinds_claude_code_keys_in_every_mode() {
     // #28 semantic guardrail: a substring check proves the `unbind` node is
