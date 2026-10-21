@@ -164,7 +164,8 @@ struct State {
     /// terminal's light or dark mode from `HostTerminalThemeChanged`. Stock
     /// colours until the first ModeUpdate (`Styling::default()` is
     /// `DEFAULT_STYLES`, zellij-utils-0.45.1 `data.rs:1614`), no mode until
-    /// the terminal answers.
+    /// the terminal answers. So a bar that paints before the answer paints
+    /// the dark design, and turns light when the answer lands.
     styling: Styling,
     host_mode: Option<HostTerminalThemeMode>,
     /// The CLI this bar shells out to, from plugin configuration (#44).
@@ -909,10 +910,12 @@ impl State {
                 self.retheme()
             }
             Event::HostTerminalThemeChanged(mode) => {
-                // CHANGED-ONLY, like the term-facts lines: the drive's
-                // instance ledger reads it as "this bar heard the terminal".
+                // CHANGED-ONLY, like the term-facts lines: the drive reads
+                // it as "this bar heard the terminal" (qa/lib.sh
+                // `host_mode_checks`). The build tag keeps a bar in another
+                // session out of the count: ids restart per zellij server.
                 if self.host_mode != Some(mode) {
-                    eprintln!("clave-bar: host mode {mode:?}");
+                    eprintln!("clave-bar: host mode {mode:?} build={BUILD}");
                 }
                 self.host_mode = Some(mode);
                 self.retheme()
