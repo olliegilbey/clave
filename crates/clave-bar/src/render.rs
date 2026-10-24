@@ -175,14 +175,11 @@ impl Widths {
 // dev preview reach the vocabulary through the module that uses it.
 
 pub use crate::theme::{
-    BASE, BATTERY, BRANCH_INK, CHIP_INK, CLAUDE_GLYPH, CLAUDE_INK, CONSOLE, DEFAULT_INK,
-    DORMANT_FADE, FADE, GREEN, OPENAI_GLYPH, OPENAI_INK, ORANGE, PALETTE, RED, RESET, Rgb, SEL_BG,
-    SUBS_INK, SUBS_MARK, Theme, UNTINTED, WORKTREE_INK, YELLOW,
+    BASE, BATTERY, BRANCH_INK, Band, CHIP_INK, CLAUDE_GLYPH, CLAUDE_INK, CONSOLE, DEFAULT_INK,
+    DORMANT_FADE, FADE, GREEN, Inks, OPENAI_GLYPH, OPENAI_INK, ORANGE, PALETTE, RED, RESET, Rgb,
+    SEL_BG, SUBS_INK, SUBS_MARK, Theme, UNTINTED, WORKTREE_INK, YELLOW,
 };
-use crate::theme::{
-    DONE_INK, ELLIPSIS, FAILED_INK, LCAP, NEEDS_YOU_INK, OPENING_INK, RCAP, RULE, TERM_GLYPH,
-    TERM_MARK, WORKING_INK,
-};
+use crate::theme::{ELLIPSIS, LCAP, RCAP, RULE, TERM_GLYPH, TERM_MARK};
 
 // ── the row ─────────────────────────────────────────────────────────────────
 
@@ -245,11 +242,11 @@ impl RowStatus {
         // at all: the terminal drew U+25D0 from a fallback font, visibly
         // larger.
         match self {
-            RowStatus::NeedsYou => ('\u{f111}', NEEDS_YOU_INK),
-            RowStatus::Working => ('\u{f111}', WORKING_INK),
-            RowStatus::Done => ('\u{f111}', DONE_INK),
+            RowStatus::NeedsYou => ('\u{f111}', theme.inks.needs_you),
+            RowStatus::Working => ('\u{f111}', theme.inks.working),
+            RowStatus::Done => ('\u{f111}', theme.inks.done),
             RowStatus::Idle => ('\u{f111}', theme.untinted),
-            RowStatus::Failed => ('\u{2716}', FAILED_INK),
+            RowStatus::Failed => ('\u{2716}', theme.inks.failed),
             // Hollow on the DEFAULT ink, never sumiInk4: that read as
             // near-invisible against the bar (#123), and the shape alone
             // carries "not running". #206's row-level fade is applied AFTER
@@ -259,9 +256,9 @@ impl RowStatus {
             // Half-filled: a row the last quit left live. It opens on
             // arrival, where ○ waits for Alt+Enter (Ollie, 2026-09-22).
             RowStatus::Standby => ('\u{f042}', theme.default_ink),
-            RowStatus::DormantSelected => ('\u{23ce}', OPENING_INK),
-            RowStatus::Opening => ('\u{21bb}', OPENING_INK),
-            RowStatus::Stale => ('\u{2717}', FAILED_INK),
+            RowStatus::DormantSelected => ('\u{23ce}', theme.inks.opening),
+            RowStatus::Opening => ('\u{21bb}', theme.inks.opening),
+            RowStatus::Stale => ('\u{2717}', theme.inks.failed),
         }
     }
 }
@@ -286,9 +283,9 @@ impl TermStatus {
     pub fn ink(self, theme: &Theme) -> Rgb {
         match self {
             TermStatus::Idle => theme.default_ink,
-            TermStatus::Running => WORKING_INK, // roninYellow — Working's ink
-            TermStatus::Done => DONE_INK,       // springGreen — Done's ink
-            TermStatus::Failed => FAILED_INK,   // samuraiRed — Failed's ink
+            TermStatus::Running => theme.inks.working, // roninYellow — Working's ink
+            TermStatus::Done => theme.inks.done,       // springGreen — Done's ink
+            TermStatus::Failed => theme.inks.failed,   // samuraiRed — Failed's ink
         }
     }
 }
@@ -916,8 +913,8 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool, theme:
             let battery = battery.map(|i| usize::from(i).min(BATTERY.len() - 1));
             match widths.battery {
                 BatteryCell::Glyph => match battery.map(|i| BATTERY[i]) {
-                    Some((glyph, colour)) => {
-                        out.push_str(&ink(colour));
+                    Some((glyph, band)) => {
+                        out.push_str(&ink(theme.inks.band(band)));
                         out.push(glyph);
                         out.push_str(&o);
                     }
@@ -933,7 +930,9 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool, theme:
                 // would be inventing a measurement.
                 BatteryCell::Count => match tokens {
                     Some(t) => {
-                        out.push_str(&ink(battery.map_or(theme.default_ink, |i| BATTERY[i].1)));
+                        out.push_str(&ink(
+                            battery.map_or(theme.default_ink, |i| theme.inks.band(BATTERY[i].1))
+                        ));
                         out.push_str(&rjust(&clave_types::token_text(*t), battery_w));
                         out.push_str(&o);
                     }

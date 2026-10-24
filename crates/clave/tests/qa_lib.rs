@@ -72,6 +72,7 @@ fn the_slim_push_fragments_match_what_the_bar_prints() {
         r#"eprintln!("clave-bar: hydrate ask build={BUILD}");"#,
         r#"eprintln!("clave-bar: hydrate answer seq={} build={BUILD}", snap.seq);"#,
         r#""clave-bar: run_command failed build={BUILD}: {}","#,
+        r#"eprintln!("clave-bar: host mode {mode:?} build={BUILD}");"#,
     ] {
         assert!(
             BAR_SHELL.contains(text),
@@ -100,6 +101,14 @@ fn the_slim_push_fragments_match_what_the_bar_prints() {
         format!("clave-bar: run_command failed build={t}: boom")
             .contains(lib_fragment("RUN_FAILED"))
     );
+    // The mode is zellij's `HostTerminalThemeMode` in Debug form. The ledger
+    // reads the same line by its own fragment (`QA_CAPABILITIES`).
+    for mode in ["Light", "Dark"] {
+        let line = format!("clave-bar: host mode {mode} build={t}");
+        assert!(line.contains(lib_fragment("HOST_MODE")), "{line}");
+        let ledger = format!("\"{}:clave-bar: host mode {mode}\"", mode.to_lowercase());
+        assert!(LIB.contains(&ledger), "the ledger must read {line}");
+    }
 }
 
 #[test]

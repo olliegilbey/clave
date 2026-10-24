@@ -2545,6 +2545,9 @@ slim_seam_checks "the run" "$(build_instances_logging_since "$LOGMARK" "$SLIM_TW
   "$(instances_born_since "$LOGMARK")" \
   "$(build_line_counts_since "$LOGMARK" "$HYDRATE_ASK")" \
   "$(build_line_counts_since "$LOGMARK" "$HYDRATE_ANSWER")"
+# The bars phase 3 opened heard the terminal mode by the replay at subscribe.
+host_mode_checks "the run" "$(instances_born_since "$LOGMARK")" \
+  "$(build_instances_logging_since "$LOGMARK" "$HOST_MODE")"
 measure "slim pushes the sandbox bars heard over the run (twin lines)" \
   "$(build_line_count_since "$LOGMARK" "$SLIM_TWIN")"
 measure "whole pushes the sandbox bars heard over the run (twin lines)" \
@@ -2858,6 +2861,9 @@ if [[ "$P6C_RAN" == "yes" ]]; then
     "$(instances_born_since "$P6C_DOWN_MARK")" \
     "$(build_line_counts_since "$P6C_DOWN_MARK" "$HYDRATE_ASK")" \
     "$(build_line_counts_since "$P6C_DOWN_MARK" "$HYDRATE_ANSWER")"
+  # The second server asked the terminal again at its start.
+  host_mode_checks "the second session" "$(instances_born_since "$P6C_DOWN_MARK")" \
+    "$(build_instances_logging_since "$P6C_DOWN_MARK" "$HOST_MODE")"
 
   # The arrival leg. One Alt+Down from the baked tab lands on the top standby
   # row, and the landing opens it with no Alt+Enter. It runs AFTER the beacon
