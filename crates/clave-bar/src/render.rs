@@ -809,15 +809,7 @@ fn render_row(row: &Row, cols: usize, widths: Widths, any_selected: bool, theme:
                 ..
             }
         );
-    let fade = if row.selected {
-        0.0
-    } else if dormant {
-        DORMANT_FADE
-    } else if !any_selected {
-        0.0
-    } else {
-        FADE
-    };
+    let fade = theme.row_fade(row.selected, dormant, any_selected);
     // Re-asserted after every span that sets its own colour. Emitting it more
     // often than strictly necessary is deliberate: the alternative is tracking
     // SGR state across the row, and a background that lapses for one cell is
@@ -2730,7 +2722,7 @@ mod tests {
                     if i == sel {
                         base
                     } else {
-                        base.mix(theme.base, FADE)
+                        base.mix(theme.base, theme.row_fade(false, false, true))
                     }
                     .fg()
                 })

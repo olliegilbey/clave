@@ -571,6 +571,16 @@ Consequences, all accepted at the grill:
   the green must clear WCAG AA (4.5) against the chip it sits on or the row
   falls back to the default ink; a luma-distance gate was tried first and
   shipped a 1.94-contrast chip under dayfox.
+- **Amended 2026-10-27, proposed, pending Ollie's look:** a light ground
+  fades less. His first live look at the light design read "contrast is not
+  great". Measured: a mix toward a light base costs more contrast than the
+  same mix toward a dark one. Lotus text faded 25% read 3.56 where wave text
+  reads 6.92, and dormant text 1.84 against 2.97. lotusInk1 itself reads 6.2
+  to fujiWhite's 11.3, so no fade alone could match. So the light text is
+  lotusInk1 darkened to 11.4, and the light ground fades 17% and 47%, where
+  its text reads as the dark ground's does at each depth
+  (`light_rows_recede_as_far_as_the_dark`). The dark ground's ratified 25%
+  and 60% do not move. Every status mark reads better faded than before.
 
 ### D41 — Snap-back is a contract; the drag arm restores it with one remembered width (2026-08-15)
 

@@ -262,6 +262,14 @@ pub const FADE: f64 = 0.25;
 /// fade `render_row` applies, not the raw mark ink.
 pub const DORMANT_FADE: f64 = 0.6;
 
+/// The two fades on a light ground. A mix toward a light base costs more
+/// contrast than the same mix toward a dark one: lotus text faded 25% read
+/// 3.56 where wave text reads 6.92, and dormant text 1.84 against 2.97. So the
+/// light ground fades less, until its text reads as the dark ground's does at
+/// each depth (`light_rows_recede_as_far_as_the_dark`).
+const LIGHT_FADE: f64 = 0.17;
+const LIGHT_DORMANT_FADE: f64 = 0.47;
+
 // ── glyphs (lock §5) ────────────────────────────────────────────────────────
 
 pub const LCAP: char = '\u{e0b6}'; // powerline half-circle thick, left
@@ -397,9 +405,10 @@ impl Inks {
     ///
     /// - on the ground, to WCAG AA's 4.5 at most;
     /// - on the selected row, to 3.0 at most;
-    /// - FADED, as most rows are ([`FADE`]): to the faded lotus text at most
-    ///   (lotusInk1, contrast 3.56). A mark need not outread the text beside
-    ///   it, and a cap at AA would turn amber and green to brown.
+    /// - FADED, as most rows are (each ground's own [`Theme::row_fade`]): to
+    ///   4.0 at most. A cap at AA would turn amber and green to brown. The
+    ///   cap was the faded lotus text (3.56) until the light ground got its
+    ///   own fade; that text now reads 7.0, and every mark reads 4.0 or more.
     ///
     /// The faded reading is the one that sets the shade. Tuned to the first
     /// two alone, every faded mark read near 2.9, where its wave twin reads
@@ -624,11 +633,28 @@ impl Theme {
     /// lotus's own sumiInk0 counterpart, lotusWhite0, is darker than the bar
     /// and read as grey on every chip.
     /// The terminal chip's name takes the darkened green, as `done` does.
+    /// How far a row's inks recede toward `base`: none when selected or when
+    /// nothing is, [`FADE`] for the rest, and [`DORMANT_FADE`] for a dormant
+    /// row whatever is selected. A light ground takes its own two depths.
+    pub fn row_fade(&self, selected: bool, dormant: bool, any_selected: bool) -> f64 {
+        let light = self.inks == Inks::LIGHT;
+        match (selected, dormant, any_selected) {
+            (true, _, _) => 0.0,
+            (false, true, _) if light => LIGHT_DORMANT_FADE,
+            (false, true, _) => DORMANT_FADE,
+            (false, false, false) => 0.0,
+            (false, false, true) if light => LIGHT_FADE,
+            (false, false, true) => FADE,
+        }
+    }
+
     pub fn lotus() -> Theme {
         Theme {
             base: LOTUS_BASE,
             sel_bg: Rgb(0xB5, 0xCB, 0xD2), // lotusBlue2   ← waveBlue2
-            default_ink: Rgb(0x54, 0x54, 0x64), // lotusInk1    ← fujiWhite
+            // lotusInk1 (#545464) read 6.2 to fujiWhite's 11.3, so no fade
+            // could match the dark rows; darkened by the `Inks::LIGHT` rule.
+            default_ink: Rgb(0x2D, 0x2D, 0x36), // lotusInk1, darkened ← fujiWhite
             chip_ink: chip_ink(LOTUS_BASE),
             term_ink: Rgb(0x4A, 0x5B, 0x34), // lotusGreen, darkened
             untinted: Rgb(0xA0, 0x9C, 0xAC), // lotusViolet1 ← sumiInk6
@@ -1284,8 +1310,42 @@ mod tests {
     /// row fades, reaches the contrast its DARK twin has on the curated
     /// design. Each floor stops somewhere, so a dark ink that is far brighter
     /// than it needs to be does not force a light ink into black: WCAG AA on
-    /// the bar (4.5), 3.0 on the selection, and the faded lotus text when
-    /// faded. The shadow rule is exempt: it is meant to be barely there.
+    /// the bar (4.5), 3.0 on the selection, and 4.0 when faded. The shadow rule is exempt: it is meant to be barely there.
+    /// A light ground fades less than a dark one: a mix toward a light base
+    /// costs more contrast, and at the dark depths the light rows washed out
+    /// (the maintainer's light-mode check, 2026-10-27). At each depth the
+    /// light text reads at least as the dark text does, and not much more,
+    /// so the rows still recede. Red if the light ground takes the dark
+    /// depths, and red if it stops fading.
+    #[test]
+    fn light_rows_recede_as_far_as_the_dark() {
+        let (wave, lotus) = (Theme::default(), Theme::lotus());
+        let reads = |t: &Theme, selected: bool, dormant: bool| {
+            let ink = t
+                .default_ink
+                .mix(t.base, t.row_fade(selected, dormant, true));
+            contrast(ink, t.base)
+        };
+        let mut last = f64::MAX;
+        for (depth, selected, dormant) in [
+            ("selected", true, false),
+            ("faded", false, false),
+            ("dormant", false, true),
+        ] {
+            let (dark, light) = (
+                reads(&wave, selected, dormant),
+                reads(&lotus, selected, dormant),
+            );
+            assert!(light >= dark, "{depth}: light {light:.2} < dark {dark:.2}");
+            assert!(
+                light < dark * 1.1,
+                "{depth}: light {light:.2} barely recedes"
+            );
+            assert!(light < last, "{depth} must recede past the depth above");
+            last = light;
+        }
+    }
+
     #[test]
     fn light_inks_read_as_well_as_the_dark() {
         let roles = |i: Inks| {
@@ -1310,12 +1370,12 @@ mod tests {
             ]
         };
         let (wave, lotus) = (Theme::default(), Theme::lotus());
-        let faded = |c: Rgb, t: &Theme| contrast(c.mix(t.base, FADE), t.base);
-        let faded_text = faded(lotus.default_ink, &lotus);
+        let faded =
+            |c: Rgb, t: &Theme| contrast(c.mix(t.base, t.row_fade(false, false, true)), t.base);
         let reads = |name: &str, dark: Rgb, light: Rgb| {
             let on_bar = contrast(dark, wave.base).min(4.5);
             let on_sel = contrast(dark, wave.sel_bg).min(3.0);
-            let as_faded = faded(dark, &wave).min(faded_text);
+            let as_faded = faded(dark, &wave).min(4.0);
             assert!(contrast(light, lotus.base) >= on_bar, "{name} on the bar");
             assert!(
                 contrast(light, lotus.sel_bg) >= on_sel,

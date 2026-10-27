@@ -209,7 +209,7 @@ These three are constantly confused. They are not interchangeable.
 | **ground** | Whether the bar's background is light or dark. It picks the shade of every fixed semantic ink (`Inks::DARK` or `Inks::LIGHT`) and the direction of the chip text. A themed bar takes its ground from the theme's background, by zellij's own light/dark rule. With no zellij theme, the terminal's reported mode picks between the two curated grounds: kanagawa wave (dark, also when the terminal does not answer) and kanagawa lotus (light). |
 | **chip** | Text on a filled background. Two chips exist: an agent row's title (title-ink background) and a terminal tab's name — **green on black**, black meaning *unclaimed by agent ink*, green meaning *terminal*, and it stays black on the selected row (#206). On a light **ground** the black is a near-white instead: the chip text always goes away from the hue chips. The green is theme-following (`term_ink`, the theme's `exit_code_success`), so it is springGreen by default and the user's own success hue under a theme. |
 | **tint** | Foreground colour on text or a glyph, no background. |
-| **fade** | Rendering a row blended toward the bar background. Unselected rows are faded; **selection is by recession**, not by ornament. |
+| **fade** | Rendering a row blended toward the bar background. Unselected rows are faded; **selection is by recession**, not by ornament. A light **ground** fades less (`Theme::row_fade`), so its rows read at each depth as the dark ground's do. |
 
 ### 3.5 The viewport
 
