@@ -895,6 +895,10 @@ want "zellij ships no theme named default, so it gets the curated design" \
   "$(asks 'theme "default"\n')" "curated"
 want "a light and dark pair leaves the drive unable to say" \
   "$(asks 'theme "kanagawa"\ntheme_light "dayfox"\n')" ""
+want "a block comment around a theme line is no theme" \
+  "$(asks '/* old:\ntheme "kanagawa"\n*/\npane_frames true\n')" "curated"
+want "a theme the config defines as default leaves the drive unable to say" \
+  "$(asks 'themes {\n  default {\n    fg 1\n  }\n}\n')" ""
 want "a missing config leaves the drive unable to say" \
   "$(theme_the_config_asks_for "$TAG_DIR/no-such.kdl")" ""
 

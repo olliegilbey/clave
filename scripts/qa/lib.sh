@@ -700,18 +700,23 @@ host_mode_checks() {
 }
 
 # The colours a sandbox config asks for: `curated` when it names no theme,
-# `zellij` when it names one. Blank when the drive cannot tell: with
-# theme_dark or theme_light set, zellij picks the theme by the terminal's
-# mode (FOOTGUNS). zellij ships no theme named "default", so that name gets
-# the stock set, which is the curated design. A name zellij cannot find
+# `zellij` when it names one. Blank when the drive cannot tell:
+# - theme_dark or theme_light is set. With both, zellij picks the theme by
+#   the terminal's mode (FOOTGUNS). With one, the drive does not model it.
+# - the config defines a theme named "default". With no `theme` line, zellij
+#   looks up that name (zellij-utils-0.45.1 `input/config.rs:204-209`).
+# No built-in theme has that name, so `theme "default"`, or no theme line,
+# gets the stock set, which is the curated design. A name zellij cannot find
 # also gets the stock set, and the check below then fails: the user's theme
-# does not load, which is worth a red.
+# does not load, which is worth a red. Block comments are removed first.
 theme_the_config_asks_for() {
-  local cfg="$1"
+  local cfg="$1" kdl
   [[ -r "$cfg" ]] || return 0
-  grep -Eq '^[[:space:]]*(theme_dark|theme_light)[[:space:]]' "$cfg" && return 0
-  if grep -Eq '^[[:space:]]*theme[[:space:]]+"' "$cfg" &&
-    ! grep -Eq '^[[:space:]]*theme[[:space:]]+"default"' "$cfg"; then
+  kdl="$(perl -0pe 's{/\*.*?\*/}{}gs' "$cfg")"
+  grep -Eq '^[[:space:]]*(theme_dark|theme_light)[[:space:]]' <<<"$kdl" && return 0
+  grep -Eq '^[[:space:]]*default[[:space:]]*\{' <<<"$kdl" && return 0
+  if grep -Eq '^[[:space:]]*theme[[:space:]]+"' <<<"$kdl" &&
+    ! grep -Eq '^[[:space:]]*theme[[:space:]]+"default"' <<<"$kdl"; then
     echo zellij
   else
     echo curated
