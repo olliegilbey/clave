@@ -875,7 +875,9 @@ want "the theme lines are read from the sandbox bars only, though his bar has an
 SPLIT="$(theme_source_checks span "$(printf '1\n2')" "$(took "$THEME_CURATED")" "$(took "$THEME_ZELLIJ")" curated 2>&1)"
 want "a born bar on a theme the config does not name fails" "$?" "1"
 want "and the verdict names it" \
-  "$(grep -c 'asks for (curated): measured=2 expected=empty FAIL' <<<"$SPLIT")" "1"
+  "$(grep -c 'took the other colours: measured=2 expected=empty FAIL' <<<"$SPLIT")" "1"
+(theme_source_checks span "$(printf '1\n2')" "1" "" curated >/dev/null 2>&1)
+want "a bar born on a tab never shown logs no colours, and passes" "$?" "0"
 (theme_source_checks span "$(printf '1\n2')" "$(printf '1\n2')" "" curated >/dev/null 2>&1)
 want "every born bar on the design the config asks for passes" "$?" "0"
 (theme_source_checks span "$(printf '1\n2')" "" "$(printf '1\n2')" curated >/dev/null 2>&1)
@@ -884,7 +886,7 @@ want "the drive 47 defect, every bar on a theme the config does not name, fails"
 want "a named theme that no bar took fails" "$?" "1"
 NOTED="$(theme_source_checks span "$(printf '1\n2')" "" "" "" 2>&1)"
 want "a config the drive cannot read passes" "$?" "0"
-want "and the run says so" "$(grep -c 'NOTE span: the sandbox config sets theme_dark' <<<"$NOTED")" "1"
+want "and the run says so" "$(grep -c 'NOTE span: the drive cannot say' <<<"$NOTED")" "1"
 (theme_source_checks span "" "1" "" curated >/dev/null 2>&1)
 want "a span with no birth is refused, not passed" "$?" "1"
 asks() { printf '%b' "$1" >"$TAG_DIR/theme.kdl"; theme_the_config_asks_for "$TAG_DIR/theme.kdl"; }

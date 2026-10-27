@@ -709,6 +709,8 @@ host_mode_checks() {
 # gets the stock set, which is the curated design. A name zellij cannot find
 # also gets the stock set, and the check below then fails: the user's theme
 # does not load, which is worth a red. Block comments are removed first.
+# A file in the themes directory can also define "default"; the drive does
+# not read that directory.
 theme_the_config_asks_for() {
   local cfg="$1" kdl
   [[ -r "$cfg" ]] || return 0
@@ -725,7 +727,12 @@ theme_the_config_asks_for() {
 
 # The colours each bar took, over a span (6a since the run's mark; 6c since
 # the quit). Each bar logs `theme curated` or `theme zellij` at its first
-# ModeUpdate and on each change (main.rs, CHANGED-ONLY). $1 names the span,
+# ModeUpdate and on each change (main.rs, CHANGED-ONLY). A ModeUpdate
+# reaches only a bar whose tab some client has active, and subscribing does
+# not replay one (zellij-server-0.45.1 `tab/mod.rs:2052`,
+# `plugins/mod.rs:755-766`). So a bar born and never shown logs no line,
+# and the checks ask that one bar took the right colours and none the
+# wrong ones, not that every bar logged. $1 names the span,
 # $2 the instances born in it, $3 and $4 the instances that logged each,
 # $5 what the sandbox config asks for (`theme_the_config_asks_for`).
 #
@@ -742,12 +749,12 @@ theme_source_checks() {
     curated) took="$curated" other="$themed" ;;
     zellij) took="$themed" other="$curated" ;;
     *)
-      note '%s: the sandbox config sets theme_dark or theme_light, so zellij picks the theme by the terminal mode. The drive cannot say which colours each bar must take.' "$span"
+      note '%s: the drive cannot say which colours each bar must take. The sandbox config is missing, picks the theme by the terminal mode, or defines its own default theme.' "$span"
       return
       ;;
   esac
-  check "$span: every bar born took the colours the config asks for ($asked)" \
-    "$(uuid_line "$(ids_missing_from "$born" "$took")")" ""
+  check_nonempty "$span: a bar born took the colours the config asks for ($asked)" \
+    "$(uuid_line "$(ids_missing_from "$born" "$(ids_missing_from "$born" "$took")")")"
   check "$span: no bar born took the other colours" \
     "$(uuid_line "$(ids_missing_from "$born" "$(ids_missing_from "$born" "$other")")")" ""
 }

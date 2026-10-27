@@ -1262,9 +1262,12 @@ impl ZellijPlugin for State {
         subscribe(&[
             EventType::TabUpdate,
             EventType::PaneUpdate,
-            // The user's theme (#145): zellij sends one on subscribe and again
-            // whenever the mode/style changes, so the bar repaints on a theme
-            // switch without polling. Covered by ReadApplicationState above.
+            // The user's theme (#145): zellij sends one to the bars of each
+            // client's active tab, at load and whenever the mode/style
+            // changes, so the bar repaints on a theme switch without polling.
+            // Subscribing replays none (zellij-server-0.45.1
+            // `tab/mod.rs:2046`, `plugins/mod.rs:755-766`). Covered by
+            // ReadApplicationState above.
             EventType::ModeUpdate,
             // The terminal's light or dark mode, for a user with no zellij
             // theme: the curated design has a light ground too. zellij

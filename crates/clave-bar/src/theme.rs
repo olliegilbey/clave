@@ -558,9 +558,9 @@ impl Theme {
     ///
     /// Stock colours ([`names_no_theme`]) mean "the user never set a theme",
     /// and such a user gets the curated design, not zellij's 256-colour stock
-    /// set. (A deliberate `theme "default"` lands in the same arm, accepted at
-    /// the grill: zellij ships no theme by that name.) The curated design comes in two grounds,
-    /// and `mode` picks one: zellij's client asks the terminal whether it is
+    /// set. A deliberate `theme "default"` lands in the same arm, accepted at
+    /// the grill: no built-in theme has that name. The curated design comes in
+    /// two grounds, and `mode` picks one: zellij's client asks the terminal whether it is
     /// light or dark at startup (`CSI ? 996 n`) and listens for changes
     /// (`CSI ? 2031 h`). The client crate is not vendored; the server says so
     /// at `zellij-server-0.45.1/src/panes/grid.rs:5497-5500`. The server
@@ -638,11 +638,12 @@ impl Theme {
     }
 }
 
-/// True when zellij names no theme. zellij sends one of two colour sets then,
-/// and neither is a theme the user chose:
+/// True when zellij names no theme. The bar can hold one of two colour sets
+/// then, and neither is a theme the user chose:
 ///
 /// - `DEFAULT_STYLES`, a plugin's own start value before any `ModeUpdate`
-///   (`Styling::default()`, zellij-utils-0.45.1 `data.rs:1614`);
+///   (`Styling::default()`, zellij-utils-0.45.1 `data.rs:1614`). zellij never
+///   sends it;
 /// - [`no_theme_styles`], which the server puts in every `ModeUpdate` when the
 ///   config names no theme (zellij-server-0.45.1 `lib.rs:1024-1026` at the
 ///   first client, `lib.rs:453-454` on a config reload).

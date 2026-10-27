@@ -356,8 +356,10 @@ fn config_with_the_hue_slice_parses_and_carries_the_switch() {
 }
 
 /// What a bar gets in `ModeUpdate` for a user's theme lines, built the way
-/// zellij 0.45.1 builds it: the real parser, the built-in themes merged in
-/// (`setup.rs:27-39`), the theme picked or the old default palette when the
+/// zellij 0.45.1 builds it: the real parser, the built-in themes merged over
+/// the config's own (zellij-utils-0.45.1 `setup.rs:331`; the user's themes
+/// directory is left out, so the test reads nothing from home), the theme
+/// picked or the old default palette when the
 /// config names none (zellij-server-0.45.1 `lib.rs:1024-1026`), then the
 /// protobuf hop into the plugin (`plugin_api/style.rs`).
 fn styles_a_bar_gets(user: &str) -> zellij_utils::data::Styling {
@@ -372,7 +374,9 @@ fn styles_a_bar_gets(user: &str) -> zellij_utils::data::Styling {
         Ok(c) => c,
         Err(e) => panic!("config.kdl failed zellij's parser: {e:?}\n---\n{cfg}"),
     };
-    parsed.themes = zellij_utils::setup::get_default_themes().merge(parsed.themes);
+    parsed.themes = parsed
+        .themes
+        .merge(zellij_utils::setup::get_default_themes());
     let colors = parsed
         .theme_config(parsed.options.theme.as_ref())
         .unwrap_or_else(|| zellij_utils::shared::default_palette().into());
