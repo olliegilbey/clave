@@ -29,7 +29,9 @@
 //! `\u{...}` escape, never a literal. Literal glyphs were silently lost in
 //! transit twice and the loss misdiagnosed as missing font coverage.
 
-use zellij_tile::prelude::{DEFAULT_STYLES, HostTerminalThemeMode, PaletteColor, Styling};
+use zellij_tile::prelude::{
+    DEFAULT_STYLES, Palette, PaletteColor, PaletteSource, Styling, ThemeHue,
+};
 
 // ── the colour type ─────────────────────────────────────────────────────────
 
@@ -226,10 +228,10 @@ pub const PR_INK: Rgb = Rgb(0x98, 0xBB, 0x6C); // springGreen
 /// The provider brand cells. BRAND colours, so they are not themed at all —
 /// nf-cod-claude in Anthropic coral, nf-cod-openai in OpenAI green. A provider
 /// clave does not know renders nothing (`card::provider_mark`). Not shaded per
-/// ground either: a brand's colour is the brand's. On the lotus bar they
-/// measure contrast 2.6 (coral) and 2.7 (green), under the 3.0 a mark wants;
-/// the glyph's shape names the provider as well (light-mode renders,
-/// 2026-10-20).
+/// ground either: a brand's colour is the brand's. On the light reference
+/// ground (kanagawa lotus) they measure contrast 2.6 (coral) and 2.7
+/// (green), under the 3.0 a mark wants; the glyph's shape names the provider
+/// as well (light-mode renders, 2026-10-20).
 pub const CLAUDE_GLYPH: char = '\u{ec82}';
 pub const CLAUDE_INK: Rgb = Rgb(0xD9, 0x77, 0x57);
 pub const OPENAI_GLYPH: char = '\u{ec81}';
@@ -259,6 +261,17 @@ pub const FADE: f64 = 0.25;
 /// Pub for the README asset generator: the dormant icon must carry the same
 /// fade `render_row` applies, not the raw mark ink.
 pub const DORMANT_FADE: f64 = 0.6;
+
+/// The two fades on a light ground, which only a light zellij theme gives. A
+/// mix toward a light base costs more contrast than the same mix toward a
+/// dark one: on the light reference ground (kanagawa lotus), text faded 25%
+/// read 3.56 where wave text reads 6.92, and dormant text 1.84 against 2.97.
+/// So the light ground fades less, until its text reads as the dark ground's
+/// does at each depth (`light_rows_recede_as_far_as_the_dark`). The
+/// maintainer found the rendered variants hard to tell apart and kept these
+/// (2026-10-27, LEDGER D42).
+const LIGHT_FADE: f64 = 0.17;
+const LIGHT_DORMANT_FADE: f64 = 0.47;
 
 // ── glyphs (lock §5) ────────────────────────────────────────────────────────
 
@@ -389,15 +402,17 @@ impl Inks {
     /// Raw lotus is too pale for a bar read at a glance: lotusOrange2 is
     /// contrast 2.2 on the lotus ground, where roninYellow is 7.9 on wave. So
     /// each ink is then darkened (every channel scaled toward black, which
-    /// keeps the hue) until it reads on [`Theme::lotus`] as well as its wave
-    /// twin reads on the curated design. Three readings count, and
+    /// keeps the hue) until it reads on the lotus ground (`Theme::lotus`, the
+    /// tests' light reference) as well as its wave twin reads on the curated
+    /// design. Three readings count, and
     /// `light_inks_read_as_well_as_the_dark` pins each one:
     ///
     /// - on the ground, to WCAG AA's 4.5 at most;
     /// - on the selected row, to 3.0 at most;
-    /// - FADED, as most rows are ([`FADE`]): to the faded lotus text at most
-    ///   (lotusInk1, contrast 3.56). A mark need not outread the text beside
-    ///   it, and a cap at AA would turn amber and green to brown.
+    /// - FADED, as most rows are (each ground's own [`Theme::row_fade`]): to
+    ///   4.0 at most. A cap at AA would turn amber and green to brown. The
+    ///   cap was the faded lotus text (3.56) until the light ground got its
+    ///   own fade; that text now reads 7.0, and every mark reads 4.0 or more.
     ///
     /// The faded reading is the one that sets the shade. Tuned to the first
     /// two alone, every faded mark read near 2.9, where its wave twin reads
@@ -554,26 +569,20 @@ impl Theme {
     /// - `inks` ← [`Inks::LIGHT`] when `base` is a light ground, else
     ///   [`Inks::DARK`]: the meanings stay fixed, the shade follows the ground.
     ///
-    /// Stock `DEFAULT_STYLES` means "the user never set a theme" — every such
-    /// user has been looking at curated kanagawa since v0.1.0, so honesty about
-    /// zellij's stock colours would be a regression nobody asked for; they keep
-    /// the curated design. (A deliberate `theme "default"` lands in the same
-    /// arm, accepted at the grill.) The curated design comes in two grounds,
-    /// and `mode` picks one: zellij's client asks the terminal whether it is
-    /// light or dark at startup (`CSI ? 996 n`) and listens for changes
-    /// (`CSI ? 2031 h`). The client crate is not vendored; the server says so
-    /// at `zellij-server-0.45.1/src/panes/grid.rs:5497-5500`. The server
-    /// passes the answer on as `HostTerminalThemeChanged`. Light paints
-    /// [`Theme::lotus`]. Dark, or no mode at all, paints
-    /// kanagawa wave, as every release before this one did. Before that, a
-    /// light terminal with no zellij theme got the dark design, and its
-    /// selected row was a fixed navy band on a light panel.
-    pub fn from_styling(s: &Styling, mode: Option<HostTerminalThemeMode>) -> Theme {
-        if *s == DEFAULT_STYLES {
-            return match mode {
-                Some(HostTerminalThemeMode::Light) => Theme::lotus(),
-                Some(HostTerminalThemeMode::Dark) | None => Theme::default(),
-            };
+    /// Stock colours ([`names_no_theme`]) mean "the user never set a theme",
+    /// and such a user gets the curated design, not zellij's 256-colour stock
+    /// set. A deliberate `theme "default"` lands in the same arm, accepted at
+    /// the grill: no built-in theme has that name. The curated design is dark
+    /// only. The bar does not read the terminal's light or dark report: Ghostty
+    /// reports light for a config with no light and dark theme pair
+    /// (ghostty-org/ghostty#13604), and a plugin cannot tell a wrong report
+    /// from a right one (ruled 2026-10-27, LEDGER D42). A light bar comes from
+    /// a light zellij theme. With both `theme_dark` and `theme_light` set,
+    /// zellij swaps the theme on the terminal's report and sends the new one
+    /// here (zellij-server-0.45.1 `src/screen.rs:6972-7027`).
+    pub fn from_styling(s: &Styling) -> Theme {
+        if names_no_theme(s) {
+            return Theme::default();
         }
         let base = rgb(s.text_unselected.background);
         let default_ink = rgb(s.text_unselected.base);
@@ -598,37 +607,45 @@ impl Theme {
         }
     }
 
-    /// The curated design on a light ground: kanagawa's own light variant,
+    /// How far a row's inks recede toward `base`: none when selected or when
+    /// nothing is, [`FADE`] for the rest, and [`DORMANT_FADE`] for a dormant
+    /// row whatever is selected. A light ground takes its own two depths.
+    pub fn row_fade(&self, selected: bool, dormant: bool, any_selected: bool) -> f64 {
+        let light = self.inks == Inks::LIGHT;
+        match (selected, dormant, any_selected) {
+            (true, _, _) => 0.0,
+            (false, true, _) if light => LIGHT_DORMANT_FADE,
+            (false, true, _) => DORMANT_FADE,
+            (false, false, false) => 0.0,
+            (false, false, true) if light => LIGHT_FADE,
+            (false, false, true) => FADE,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Theme {
+    /// The tests' light reference ground: kanagawa's own light variant,
     /// lotus, mapped role for role from the wave design the default carries
     /// (`kanagawa.nvim` `lua/kanagawa/themes.lua`). The bar background is
-    /// `ui.bg`, the text `ui.fg`, the selection `ui.bg_search`, and the repo
-    /// inks the same eight `syn` roles the curated palette takes from wave,
-    /// darkened by the rule on [`Inks::LIGHT`]. The yellow, red and orange
-    /// slots take the band shades, for the reason given there. They are the
-    /// same VALUES, not the same constants, for the reason the dark `GREEN`
-    /// gives: a repo ink and a risk band are two meanings.
+    /// `ui.bg` (lotusWhite3), the text `ui.fg`, and the selection
+    /// `ui.bg_search`. [`Inks::LIGHT`], [`LOTUS_PALETTE`] and the light fades
+    /// were tuned on it. No bar paints it: with no zellij theme the bar is
+    /// dark (LEDGER D42, 2026-10-27), and a light zellij theme brings its own
+    /// colours.
     ///
-    /// Darkening pulls hues together, and two repos must not share a colour.
-    /// Darkened alone, four pairs sat nearer than [`curated_spread`], the rule
-    /// [`harvest`] holds every themed palette to (blue beside violet was
-    /// 1286). So the five other slots were searched near their darkened shade
-    /// (hue within 20 degrees, every rule on [`Inks::LIGHT`] kept) for the set
-    /// whose closest pair clears it (review finding, PR #291). The green moved
-    /// furthest, 12 degrees toward yellow, away from the aqua.
-    /// `the_light_repo_inks_stay_apart` pins the spread.
-    ///
-    /// Three roles are not lotus's own (light-mode renders, 2026-10-20). The
-    /// selection is `ui.bg_search`, not `ui.pmenu.bg_sel`: lotusBlue3 put the
-    /// battery's yellow at contrast 1.2. The chip text follows [`chip_ink`]:
-    /// lotus's own sumiInk0 counterpart, lotusWhite0, is darker than the bar
-    /// and read as grey on every chip.
-    /// The terminal chip's name takes the darkened green, as `done` does.
-    pub fn lotus() -> Theme {
+    /// The selection is `ui.bg_search`, not `ui.pmenu.bg_sel`: lotusBlue3 put
+    /// the battery's yellow at contrast 1.2 (light-mode renders, 2026-10-20).
+    /// The chip text follows [`chip_ink`], as a light theme's does.
+    pub(crate) fn lotus() -> Theme {
+        let base = Rgb(0xF2, 0xEC, 0xBC); // lotusWhite3 ← sumiInk3
         Theme {
-            base: LOTUS_BASE,
+            base,
             sel_bg: Rgb(0xB5, 0xCB, 0xD2), // lotusBlue2   ← waveBlue2
-            default_ink: Rgb(0x54, 0x54, 0x64), // lotusInk1    ← fujiWhite
-            chip_ink: chip_ink(LOTUS_BASE),
+            // lotusInk1 (#545464) read 6.2 to fujiWhite's 11.3, so no fade
+            // could match the dark rows; darkened by the `Inks::LIGHT` rule.
+            default_ink: Rgb(0x2D, 0x2D, 0x36), // lotusInk1, darkened ← fujiWhite
+            chip_ink: chip_ink(base),
             term_ink: Rgb(0x4A, 0x5B, 0x34), // lotusGreen, darkened
             untinted: Rgb(0xA0, 0x9C, 0xAC), // lotusViolet1 ← sumiInk6
             palette: LOTUS_PALETTE,
@@ -637,58 +654,84 @@ impl Theme {
     }
 }
 
-/// The bar's theme, and the two events it is mapped from. Either event can
-/// come first, and either repeats: zellij sends `ModeUpdate` on every input
-/// mode change, and `HostTerminalThemeChanged` at subscribe and on each flip.
-/// Each event stores its own input, and the theme is re-mapped from both, so
-/// a later `ModeUpdate` cannot drop the terminal's mode. This rule sat in the
-/// bar's event shell, where no test reaches it (review finding, PR #291).
-/// The default is stock colours and no mode: `Styling::default()` is
-/// `DEFAULT_STYLES` (zellij-utils-0.45.1 `data.rs:1614`), which maps to
-/// `Theme::default()`, the frame the goldens pin.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ThemeInputs {
-    styling: Styling,
-    mode: Option<HostTerminalThemeMode>,
-    theme: Theme,
+/// True when zellij names no theme. The bar can hold one of two colour sets
+/// then, and neither is a theme the user chose:
+///
+/// - `DEFAULT_STYLES`, a plugin's own start value before any `ModeUpdate`
+///   (`Styling::default()`, zellij-utils-0.45.1 `data.rs:1614`). zellij never
+///   sends it;
+/// - [`no_theme_styles`], which the server puts in every `ModeUpdate` when the
+///   config names no theme (zellij-server-0.45.1 `lib.rs:1024-1026` at the
+///   first client, `lib.rs:453-454` on a config reload).
+///
+/// The two differ: the text is colour 255 on colour 16 in the second, and 245
+/// on 238 in the first. The bar checked for `DEFAULT_STYLES` only, so a live
+/// bar with no theme took zellij's stock set for a theme. It drew zellij's
+/// 256-colour greens and oranges (drive 47, 2026-10-27).
+fn names_no_theme(s: &Styling) -> bool {
+    *s == DEFAULT_STYLES || *s == no_theme_styles()
 }
 
-impl ThemeInputs {
-    pub fn current(&self) -> &Theme {
-        &self.theme
-    }
+/// zellij's colours for a config with no theme: `default_palette()`
+/// (zellij-utils-0.45.1 `shared.rs:114-136`, colour numbers at
+/// `shared.rs:85-103`) through `Styling::from`. A plugin cannot call it,
+/// because zellij-tile exports `data` and not `shared`. The guardrail
+/// `a_config_with_no_theme_gets_the_curated_design` (crates/clave) feeds the
+/// real one through zellij's own config parser, and fails if this copy drifts.
+fn no_theme_styles() -> Styling {
+    use PaletteColor::EightBit as C;
+    Styling::from(Palette {
+        source: PaletteSource::Default,
+        theme_hue: ThemeHue::Dark,
+        fg: C(245),
+        bg: C(238),
+        black: C(16),
+        red: C(124),
+        green: C(154),
+        yellow: C(226),
+        blue: C(45),
+        magenta: C(201),
+        cyan: C(51),
+        white: C(255),
+        orange: C(166),
+        gray: C(238),
+        purple: C(99),
+        gold: C(136),
+        silver: C(245),
+        pink: C(207),
+        brown: C(215),
+    })
+}
 
-    /// The terminal's last reported mode, if it ever answered.
-    pub fn mode(&self) -> Option<HostTerminalThemeMode> {
-        self.mode
-    }
-
-    /// A `ModeUpdate`'s colours. True when the theme moved, so the caller
-    /// repaints only a bar whose colours changed.
-    pub fn set_styling(&mut self, styling: Styling) -> bool {
-        self.styling = styling;
-        self.remap()
-    }
-
-    /// The terminal's light or dark mode. True when the theme moved.
-    pub fn set_mode(&mut self, mode: HostTerminalThemeMode) -> bool {
-        self.mode = Some(mode);
-        self.remap()
-    }
-
-    fn remap(&mut self) -> bool {
-        let theme = Theme::from_styling(&self.styling, self.mode);
-        let moved = theme != self.theme;
-        self.theme = theme;
-        moved
+/// Whose colours the bar paints for `s`: `curated` when zellij names no
+/// theme ([`names_no_theme`]), `zellij` for a theme. The bar logs it on each
+/// change, and the drive checks it against the sandbox config (qa/lib.sh
+/// `theme_source_checks`): that seam broke with every unit test green
+/// (drive 47).
+pub fn source(s: &Styling) -> &'static str {
+    if names_no_theme(s) {
+        "curated"
+    } else {
+        "zellij"
     }
 }
 
-/// lotusWhite3, kanagawa lotus's `ui.bg` — sumiInk3's counterpart.
-const LOTUS_BASE: Rgb = Rgb(0xF2, 0xEC, 0xBC);
-
-/// The repo inks on a light ground ([`Theme::lotus`] gives the rule). Also
-/// the pad pool for a light themed bar ([`harvest`]).
+/// The curated repo inks for a light ground: the pad pool for a light themed
+/// bar ([`harvest`]). They are the same eight `syn` roles the curated palette
+/// takes from wave (`kanagawa.nvim` `lua/kanagawa/themes.lua`), in their lotus
+/// shades, darkened by the rule on [`Inks::LIGHT`]. The yellow, red and orange
+/// slots take the band shades, for the reason given there. They are the same
+/// VALUES, not the same constants, for the reason the dark `GREEN` gives: a
+/// repo ink and a risk band are two meanings.
+///
+/// Darkening pulls hues together, and two repos must not share a colour.
+/// Darkened alone, four pairs sat nearer than [`curated_spread`], the rule
+/// [`harvest`] holds every themed palette to (blue beside violet was 1286).
+/// So the five other slots were searched near their darkened shade (hue
+/// within 20 degrees, every rule on [`Inks::LIGHT`] kept) for the set whose
+/// closest pair clears it (review finding, PR #291). The green moved
+/// furthest, 12 degrees toward yellow, away from the aqua.
+/// `the_light_repo_inks_stay_apart` pins the spread.
 const LOTUS_PALETTE: [Rgb; PALETTE_LEN] = [
     Rgb(0x32, 0x58, 0x85), // lotusBlue4   ← crystalBlue, 6 degrees toward cyan
     Rgb(0x50, 0x5A, 0x30), // lotusGreen   ← springGreen, 12 degrees toward yellow
@@ -1103,78 +1146,47 @@ mod tests {
         }
     }
 
-    /// The rule the bar's shell used to hold: each event keeps the other's
-    /// input. A later `ModeUpdate` keeps the terminal's mode, in either order,
-    /// and a repeat asks for no repaint. The last step is the one a dropped
-    /// mode fails: back on stock colours, the stored Light paints lotus.
+    /// The bar logs this, and the drive checks it against the sandbox config.
     #[test]
-    fn either_theme_event_keeps_the_other_ones_input() {
-        use HostTerminalThemeMode::{Dark, Light};
-        let mut a = ThemeInputs::default();
-        assert_eq!(*a.current(), Theme::default(), "frame zero is the goldens'");
-        assert!(a.set_mode(Light), "the mode moves a stock bar");
-        assert!(
-            !a.set_styling(DEFAULT_STYLES),
-            "an input-mode change keeps lotus"
-        );
-        assert_eq!(*a.current(), Theme::lotus());
-
-        let mut b = ThemeInputs::default();
-        assert!(
-            !b.set_styling(DEFAULT_STYLES),
-            "stock colours on a stock bar"
-        );
-        assert!(b.set_mode(Light));
-        assert!(!b.set_mode(Light), "a repeat mode asks for no repaint");
-        assert!(b.set_mode(Dark));
-        assert_eq!(*b.current(), Theme::default());
-
-        assert!(b.set_styling(zellij_kanagawa()));
-        assert!(!b.set_mode(Light), "a theme's own ground beats the mode");
-        assert_eq!(b.mode(), Some(Light));
-        assert!(b.set_styling(DEFAULT_STYLES));
-        assert_eq!(*b.current(), Theme::lotus(), "the stored mode paints lotus");
+    fn the_source_names_whose_colours_the_bar_paints() {
+        for (styling, want) in [
+            (no_theme_styles(), "curated"),
+            (zellij_kanagawa(), "zellij"),
+            (DEFAULT_STYLES, "curated"),
+        ] {
+            assert_eq!(source(&styling), want);
+        }
     }
 
+    /// With no zellij theme the bar paints the curated dark design, on a light
+    /// terminal too: the terminal's report is not an input (LEDGER D42,
+    /// 2026-10-27). Both sets zellij sends with no theme ([`names_no_theme`])
+    /// count. Before drive 47 only the first was known, and it is the one a
+    /// live bar never gets after its first `ModeUpdate`.
     #[test]
-    fn stock_default_styles_keep_the_curated_kanagawa() {
-        assert_eq!(Theme::from_styling(&DEFAULT_STYLES, None), Theme::default());
+    fn with_no_theme_the_bar_paints_the_curated_dark_design() {
+        for stock in [DEFAULT_STYLES, no_theme_styles()] {
+            let t = Theme::from_styling(&stock);
+            assert_eq!(t, Theme::default());
+            assert!(!light_ground(t.base), "the curated design is dark");
+        }
     }
 
-    /// The reported bug: a light terminal with no zellij theme got the dark
-    /// design, so its selected row was a navy band on a light panel. The
-    /// terminal's answer picks the ground; no answer keeps the dark design,
-    /// as every release before this one drew.
-    #[test]
-    fn the_terminal_mode_picks_the_curated_ground() {
-        let light = Theme::from_styling(&DEFAULT_STYLES, Some(HostTerminalThemeMode::Light));
-        assert_eq!(light, Theme::lotus());
-        assert!(light_ground(light.base), "lotus paints a light bar");
-        assert_eq!(light.inks, Inks::LIGHT);
-        let dark = Theme::from_styling(&DEFAULT_STYLES, Some(HostTerminalThemeMode::Dark));
-        assert_eq!(dark, Theme::default());
-    }
-
-    /// A user's own theme beats the terminal's answer: the mode only chooses
-    /// between the two curated grounds. A themed bar takes its ground from
-    /// its own background.
+    /// A themed bar takes its ground from its own background: a light zellij
+    /// theme is the one way to a light bar.
     #[test]
     fn a_themed_bar_takes_its_ground_from_its_background() {
         let mut s = zellij_kanagawa();
-        for mode in [None, Some(HostTerminalThemeMode::Light)] {
-            assert_eq!(Theme::from_styling(&s, mode).inks, Inks::DARK);
-        }
+        assert_eq!(Theme::from_styling(&s).inks, Inks::DARK);
         // catppuccin-latte's bar and text (`catppuccin-latte.kdl`).
         s.text_unselected.background = PaletteColor::Rgb((220, 224, 232));
         s.text_unselected.base = PaletteColor::Rgb((76, 79, 105));
-        for mode in [None, Some(HostTerminalThemeMode::Dark)] {
-            let t = Theme::from_styling(&s, mode);
-            assert_eq!(t.inks, Inks::LIGHT);
-            assert!(
-                luma(t.chip_ink) > luma(t.base),
-                "chip text lighter than the bar"
-            );
-        }
+        let t = Theme::from_styling(&s);
+        assert_eq!(t.inks, Inks::LIGHT);
+        assert!(
+            luma(t.chip_ink) > luma(t.base),
+            "chip text lighter than the bar"
+        );
     }
 
     /// The cut is zellij's (`detect_theme_hue`). The two colours nearest it,
@@ -1191,13 +1203,51 @@ mod tests {
         assert!(light_ground(Rgb(128, 128, 128)));
     }
 
+    /// A light ground fades less than a dark one: a mix toward a light base
+    /// costs more contrast, and at the dark depths the light rows washed out
+    /// (the maintainer's light-mode check, 2026-10-27). At each depth the
+    /// light text reads at least as the dark text does, and not much more,
+    /// so the rows still recede. Red if the light ground takes the dark
+    /// depths, and red if it stops fading. Measured on the lotus reference
+    /// ground, where the depths were tuned.
+    #[test]
+    fn light_rows_recede_as_far_as_the_dark() {
+        let (wave, lotus) = (Theme::default(), Theme::lotus());
+        let reads = |t: &Theme, selected: bool, dormant: bool| {
+            let ink = t
+                .default_ink
+                .mix(t.base, t.row_fade(selected, dormant, true));
+            contrast(ink, t.base)
+        };
+        let mut last = f64::MAX;
+        for (depth, selected, dormant) in [
+            ("selected", true, false),
+            ("faded", false, false),
+            ("dormant", false, true),
+        ] {
+            let (dark, light) = (
+                reads(&wave, selected, dormant),
+                reads(&lotus, selected, dormant),
+            );
+            assert!(light >= dark, "{depth}: light {light:.2} < dark {dark:.2}");
+            assert!(
+                light < dark * 1.1,
+                "{depth}: light {light:.2} barely recedes"
+            );
+            assert!(light < last, "{depth} must recede past the depth above");
+            last = light;
+        }
+    }
+
     /// The light ground must read as well as the dark one does: each LIGHT
-    /// ink, on the lotus bar, on its selected row, and faded as an unselected
-    /// row fades, reaches the contrast its DARK twin has on the curated
-    /// design. Each floor stops somewhere, so a dark ink that is far brighter
-    /// than it needs to be does not force a light ink into black: WCAG AA on
-    /// the bar (4.5), 3.0 on the selection, and the faded lotus text when
-    /// faded. The shadow rule is exempt: it is meant to be barely there.
+    /// ink, on the lotus reference ground, on its selected row, and faded as
+    /// an unselected row fades, reaches the contrast its DARK twin has on the
+    /// curated design. Each floor stops somewhere, so a dark ink that is far
+    /// brighter than it needs to be does not force a light ink into black:
+    /// WCAG AA on the bar (4.5), 3.0 on the selection, and 4.0 when faded.
+    /// The shadow rule is exempt: it is meant to be barely there. The repo
+    /// inks are the light pad pool ([`LOTUS_PALETTE`]), each under the chip
+    /// text the light ground's [`chip_ink`] rule gives.
     #[test]
     fn light_inks_read_as_well_as_the_dark() {
         let roles = |i: Inks| {
@@ -1222,12 +1272,12 @@ mod tests {
             ]
         };
         let (wave, lotus) = (Theme::default(), Theme::lotus());
-        let faded = |c: Rgb, t: &Theme| contrast(c.mix(t.base, FADE), t.base);
-        let faded_text = faded(lotus.default_ink, &lotus);
+        let faded =
+            |c: Rgb, t: &Theme| contrast(c.mix(t.base, t.row_fade(false, false, true)), t.base);
         let reads = |name: &str, dark: Rgb, light: Rgb| {
             let on_bar = contrast(dark, wave.base).min(4.5);
             let on_sel = contrast(dark, wave.sel_bg).min(3.0);
-            let as_faded = faded(dark, &wave).min(faded_text);
+            let as_faded = faded(dark, &wave).min(4.0);
             assert!(contrast(light, lotus.base) >= on_bar, "{name} on the bar");
             assert!(
                 contrast(light, lotus.sel_bg) >= on_sel,
@@ -1245,8 +1295,6 @@ mod tests {
                 "chip {i}"
             );
         }
-        reads("default ink", wave.default_ink, lotus.default_ink);
-        assert!(contrast(lotus.term_ink, lotus.chip_ink) >= MIN_CHIP_CONTRAST);
     }
 
     /// Two repos must not share a colour on the light ground either: the
@@ -1289,15 +1337,12 @@ mod tests {
             text_unselected: one,
             ..all_of(bar)
         };
-        let p = Theme::from_styling(&s, None).palette;
+        let p = Theme::from_styling(&s).palette;
         assert_eq!(p[0], Rgb(32, 113, 185), "the theme's own hue seeds");
         for c in &p[1..] {
             assert!(LOTUS_PALETTE.contains(c), "pad {} is lotus's", c.hex());
         }
-        assert_eq!(
-            Theme::from_styling(&all_of(bar), None).palette,
-            LOTUS_PALETTE
-        );
+        assert_eq!(Theme::from_styling(&all_of(bar)).palette, LOTUS_PALETTE);
     }
 
     /// The four bands are one gauge read by colour, so neighbours must not
@@ -1317,7 +1362,7 @@ mod tests {
 
     #[test]
     fn kanagawa_roles_map_to_their_semantic_slots() {
-        let t = Theme::from_styling(&zellij_kanagawa(), None);
+        let t = Theme::from_styling(&zellij_kanagawa());
         assert_eq!(t.base, Rgb(22, 22, 29), "bar bg = text_unselected bg");
         assert_eq!(t.default_ink, Rgb(220, 215, 186), "ink = text base");
         // zellij's kanagawa paints selections a BRIGHT green (118,148,106)
@@ -1343,26 +1388,26 @@ mod tests {
     #[test]
     fn a_success_colour_the_chip_cannot_carry_falls_back_to_the_default_ink() {
         let mut s = zellij_kanagawa();
-        let chip = Theme::from_styling(&s, None).chip_ink;
+        let chip = Theme::from_styling(&s).chip_ink;
         s.exit_code_success.base = PaletteColor::Rgb((chip.0, chip.1, chip.2));
-        let t = Theme::from_styling(&s, None);
+        let t = Theme::from_styling(&s);
         assert_eq!(t.term_ink, t.default_ink, "swallowed green reads as text");
         // The floor is strict, and that is the intent: molokai's `#008C00`
         // reads at 4.75 on molokai's own chip but only 4.32 on kanagawa's
         // near-black one, so the same green is kept there and dropped here.
         // The gate answers "on THIS chip", never "is this colour bright".
         s.exit_code_success.base = PaletteColor::Rgb((0, 140, 0));
-        assert_eq!(Theme::from_styling(&s, None).term_ink, t.default_ink);
+        assert_eq!(Theme::from_styling(&s).term_ink, t.default_ink);
         // dracula's success, 15.3 on the same chip — kept, obviously.
         s.exit_code_success.base = PaletteColor::Rgb((80, 250, 123));
-        assert_eq!(Theme::from_styling(&s, None).term_ink, Rgb(80, 250, 123));
+        assert_eq!(Theme::from_styling(&s).term_ink, Rgb(80, 250, 123));
         // dayfox, whole: a LIGHT bar. Its forest green read at 1.94 on the
         // old chip, a grey darker than the bar. The chip is lighter than the
         // bar now, so the same green is kept, and the gate still decides it.
         s.text_unselected.background = PaletteColor::Rgb((211, 199, 187));
         s.text_unselected.base = PaletteColor::Rgb((100, 63, 97));
         s.exit_code_success.base = PaletteColor::Rgb((57, 104, 71));
-        let t = Theme::from_styling(&s, None);
+        let t = Theme::from_styling(&s);
         assert!(contrast(Rgb(57, 104, 71), t.chip_ink) >= MIN_CHIP_CONTRAST);
         assert_eq!(t.term_ink, Rgb(57, 104, 71), "light chip carries the green");
     }
@@ -1393,7 +1438,7 @@ mod tests {
     /// Eight distinct hues, nothing wraps.
     #[test]
     fn kanagawa_harvest_takes_the_farthest_hues_first_and_pads_from_the_curated_palette() {
-        let t = Theme::from_styling(&zellij_kanagawa(), None);
+        let t = Theme::from_styling(&zellij_kanagawa());
         let expect = [
             Rgb(149, 127, 184),    // player_1 — oniViolet, the seed
             Rgb(255, 158, 59),     // player_4 — roninYellow, 167 from violet
@@ -1412,7 +1457,7 @@ mod tests {
     /// "distinct enough". This is the property the exact pin above serves.
     #[test]
     fn harvested_hues_are_pairwise_at_least_the_curated_spread_apart() {
-        let p = Theme::from_styling(&zellij_kanagawa(), None).palette;
+        let p = Theme::from_styling(&zellij_kanagawa()).palette;
         let spread = curated_spread();
         for (i, a) in p.iter().enumerate() {
             for b in &p[i + 1..] {
@@ -1447,7 +1492,7 @@ mod tests {
             text_unselected: one,
             ..all_black()
         };
-        let p = Theme::from_styling(&s, None).palette;
+        let p = Theme::from_styling(&s).palette;
         assert_eq!(p[0], Rgb(219, 115, 135));
         assert_eq!(p[7], p[0], "the tail cycles");
         let distinct: std::collections::BTreeSet<(u8, u8, u8)> =
@@ -1481,10 +1526,7 @@ mod tests {
             text_unselected: near,
             ..all_of(grey)
         };
-        assert_eq!(
-            Theme::from_styling(&s, None).palette,
-            Theme::default().palette
-        );
+        assert_eq!(Theme::from_styling(&s).palette, Theme::default().palette);
     }
 
     /// The selection stops at a full palette even when the pool has more
@@ -1516,7 +1558,7 @@ mod tests {
     #[test]
     fn an_all_degenerate_harvest_falls_back_to_the_curated_palette() {
         assert_eq!(
-            Theme::from_styling(&all_black(), None).palette,
+            Theme::from_styling(&all_black()).palette,
             Theme::default().palette
         );
     }

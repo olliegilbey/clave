@@ -569,7 +569,8 @@ HYDRATE_ASK='clave-bar: hydrate ask'
 HYDRATE_ANSWER='clave-bar: hydrate answer seq='
 BAD_STATUS='clave-bar: bad clave-status'
 RUN_FAILED='clave-bar: run_command failed'
-HOST_MODE='clave-bar: host mode '
+THEME_CURATED='clave-bar: theme curated'
+THEME_ZELLIJ='clave-bar: theme zellij'
 }
 
 # The lines since <mark> that hold <pattern> and end their fixed words with
@@ -672,29 +673,65 @@ slim_host_checks() {
     "$pushed" "$current"
 }
 
-# The terminal's light or dark mode, over a span (6a since the run's mark;
-# 6c since the quit). zellij asks the terminal at startup. It gives the
-# answer to each plugin that subscribes, a late one too (zellij-server-0.45.1
-# plugins/mod.rs:765). Each bar logs the mode when it first hears it (main.rs,
-# CHANGED-ONLY). $1 names the span, $2 the instances born in it, $3 the
-# instances that heard a mode in it.
-#
-# A split is the finding: a bar born in the span heard nothing while others
-# heard the mode. That bar does not subscribe, or its replay did not come.
-# Silence on every bar has two causes: the terminal did not answer, or no bar
-# subscribes. The drive cannot tell them apart, so silence is a note.
-# QA_TERMINAL_REPORTS_MODE=1 says the launch terminal answers (Ghostty, kitty,
-# foot and contour do), and then silence fails too.
-host_mode_checks() {
-  local span="$1" born="$2" heard="$3"
-  measure "$span: sandbox bars that heard the terminal mode" "$(uuid_line "$heard")"
-  check_nonempty "$span: bars were born, so a replay at subscribe was due" "$(uuid_line "$born")"
-  if [[ -z "$heard" && "${QA_TERMINAL_REPORTS_MODE:-}" != 1 ]]; then
-    note '%s: no sandbox bar heard the terminal mode. The terminal did not answer, or no bar subscribes. Run with QA_TERMINAL_REPORTS_MODE=1 from a terminal that answers, and this fails.' "$span"
-    return
+# The colours a sandbox config asks for: `curated` when it names no theme,
+# `zellij` when it names one. Blank when the drive cannot tell:
+# - theme_dark or theme_light is set. With both, zellij picks the theme by
+#   the terminal's report (zellij-server-0.45.1 `src/screen.rs:6972-7027`),
+#   which the drive cannot read. With one, the drive does not model it.
+# - the config defines a theme named "default". With no `theme` line, zellij
+#   looks up that name (zellij-utils-0.45.1 `input/config.rs:204-209`).
+# No built-in theme has that name, so `theme "default"`, or no theme line,
+# gets the stock set, which is the curated design. A name zellij cannot find
+# also gets the stock set, and the check below then fails: the user's theme
+# does not load, which is worth a red. Block comments are removed first.
+# A file in the themes directory can also define "default"; the drive does
+# not read that directory.
+theme_the_config_asks_for() {
+  local cfg="$1" kdl
+  [[ -r "$cfg" ]] || return 0
+  kdl="$(perl -0pe 's{/\*.*?\*/}{}gs' "$cfg")"
+  grep -Eq '^[[:space:]]*(theme_dark|theme_light)[[:space:]]' <<<"$kdl" && return 0
+  grep -Eq '^[[:space:]]*default[[:space:]]*\{' <<<"$kdl" && return 0
+  if grep -Eq '^[[:space:]]*theme[[:space:]]+"' <<<"$kdl" &&
+    ! grep -Eq '^[[:space:]]*theme[[:space:]]+"default"' <<<"$kdl"; then
+    echo zellij
+  else
+    echo curated
   fi
-  check "$span: every bar born heard the terminal mode (the replay at subscribe)" \
-    "$(uuid_line "$(ids_missing_from "$born" "$heard")")" ""
+}
+
+# The colours each bar took, over a span (6a since the run's mark; 6c since
+# the quit). Each bar logs `theme curated` or `theme zellij` at its first
+# ModeUpdate and on each change (main.rs, CHANGED-ONLY). A ModeUpdate
+# reaches only a bar whose tab some client has active, and subscribing does
+# not replay one (zellij-server-0.45.1 `tab/mod.rs:2052`,
+# `plugins/mod.rs:755-766`). So a bar born and never shown logs no line,
+# and the checks ask that one bar took the right colours and none the
+# wrong ones, not that every bar logged. $1 names the span,
+# $2 the instances born in it, $3 and $4 the instances that logged each,
+# $5 what the sandbox config asks for (`theme_the_config_asks_for`).
+#
+# The finding this exists for: with no theme, zellij sends a colour set the
+# bar did not know, so every bar took it for a theme and painted zellij's
+# 256-colour stock set. Every unit test was green, because each one fed the
+# bar a set zellij never sends (drive 47).
+theme_source_checks() {
+  local span="$1" born="$2" curated="$3" themed="$4" asked="$5" took other
+  measure "$span: sandbox bars on the curated design" "$(uuid_line "$curated")"
+  measure "$span: sandbox bars on a zellij theme" "$(uuid_line "$themed")"
+  check_nonempty "$span: bars were born, so each took its colours" "$(uuid_line "$born")"
+  case "$asked" in
+    curated) took="$curated" other="$themed" ;;
+    zellij) took="$themed" other="$curated" ;;
+    *)
+      note '%s: the drive cannot say which colours each bar must take. The sandbox config is missing, picks the theme by the terminal mode, or defines its own default theme.' "$span"
+      return
+      ;;
+  esac
+  check_nonempty "$span: a bar born took the colours the config asks for ($asked)" \
+    "$(uuid_line "$(ids_missing_from "$born" "$(ids_missing_from "$born" "$took")")")"
+  check "$span: no bar born took the other colours" \
+    "$(uuid_line "$(ids_missing_from "$born" "$(ids_missing_from "$born" "$other")")")" ""
 }
 
 # The seam over a span of the run (phase 6a since the run's mark; 6c since
@@ -997,12 +1034,9 @@ QA_CAPABILITIES=(
   "slim:clave-bar: dropped clave-status-slim pipe"
   "ask:clave-bar: hydrate ask"
   "answer:clave-bar: hydrate answer"
-  # The terminal's light or dark answer, as zellij relayed it. Blank on
-  # every instance means no mode reached the bar, and the bar is dark.
-  # `dark` alone does not prove the terminal answered: with both theme_dark
-  # and theme_light set, zellij sends Dark at start (FOOTGUNS).
-  "light:clave-bar: host mode Light"
-  "dark:clave-bar: host mode Dark"
+  # Whose colours the bar paints: its own design, or the zellij theme.
+  "curated:clave-bar: theme curated"
+  "zellij:clave-bar: theme zellij"
 )
 
 instance_ledger() {

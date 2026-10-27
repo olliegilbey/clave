@@ -355,6 +355,59 @@ fn config_with_the_hue_slice_parses_and_carries_the_switch() {
     );
 }
 
+/// What a bar gets in `ModeUpdate` for a user's theme lines, built the way
+/// zellij 0.45.1 builds it: the real parser, the built-in themes merged over
+/// the config's own (zellij-utils-0.45.1 `setup.rs:331`; the user's themes
+/// directory is left out, so the test reads nothing from home), the theme
+/// picked or the old default palette when the
+/// config names none (zellij-server-0.45.1 `lib.rs:1024-1026`), then the
+/// protobuf hop into the plugin (`plugin_api/style.rs`).
+fn styles_a_bar_gets(user: &str) -> zellij_utils::data::Styling {
+    use zellij_utils::data::Style;
+    use zellij_utils::plugin_api::generated_api::api::style::Style as WireStyle;
+    let cfg = format!(
+        "{}{}",
+        setup::config_kdl("clave", WASM, clave_types::RowHeight::Double),
+        setup::passthrough_slice_from(user)
+    );
+    let mut parsed = match Config::from_kdl(&cfg, None) {
+        Ok(c) => c,
+        Err(e) => panic!("config.kdl failed zellij's parser: {e:?}\n---\n{cfg}"),
+    };
+    parsed.themes = parsed
+        .themes
+        .merge(zellij_utils::setup::get_default_themes());
+    let colors = parsed
+        .theme_config(parsed.options.theme.as_ref())
+        .unwrap_or_else(|| zellij_utils::shared::default_palette().into());
+    let style = Style {
+        colors,
+        ..Style::default()
+    };
+    let wire = WireStyle::try_from(style).expect("styles go on the wire");
+    Style::try_from(wire)
+        .expect("styles come off the wire")
+        .colors
+}
+
+/// A config with no theme gets the curated design, which is dark whatever
+/// the terminal reports (LEDGER D42, 2026-10-27). The bar matched only
+/// `DEFAULT_STYLES`, which a live bar never gets: zellij sends its old
+/// default palette instead. So the bar took zellij's stock 256 colours for a
+/// theme (drive 47, 2026-10-27). Every unit test passed, because each one fed
+/// the bar `DEFAULT_STYLES`. This one feeds it what zellij sends.
+#[test]
+fn a_config_with_no_theme_gets_the_curated_design() {
+    use clave_bar::theme::{Theme, source};
+    let none = styles_a_bar_gets("");
+    assert_eq!(Theme::from_styling(&none), Theme::default());
+    assert_eq!(source(&none), "curated");
+    // A named theme keeps its own colours.
+    let kanagawa = styles_a_bar_gets("theme \"kanagawa\"\n");
+    assert_ne!(Theme::from_styling(&kanagawa), Theme::default());
+    assert_eq!(source(&kanagawa), "zellij");
+}
+
 #[test]
 fn config_kdl_unbinds_claude_code_keys_in_every_mode() {
     // #28 semantic guardrail: a substring check proves the `unbind` node is

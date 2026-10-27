@@ -279,9 +279,11 @@ const PASSTHROUGH_NODES: [&str; 8] = [
 ///   light and dark switch, a selection like `theme`. With both themes set,
 ///   zellij swaps between them when the terminal reports its mode, and the
 ///   hue pins that mode for a terminal that never reports
-///   (`zellij-utils-0.45.1/assets/config/default.kdl:370-383`). clave's bar
-///   follows the same mode with its own light design, so a user who pins
-///   the hue pins the bar too. 0.44.3 ignores the three keys, as it ignores
+///   (`zellij-utils-0.45.1/assets/config/default.kdl:370-383`). zellij sends
+///   the swapped theme to plugins in a `ModeUpdate` (zellij-server-0.45.1
+///   `src/screen.rs:6972-7027`), so clave's bar follows the pair through the
+///   theme it is given. The bar reads no light or dark report itself
+///   (LEDGER D42). 0.44.3 ignores the three keys, as it ignores
 ///   `pane_frame_style` below.
 /// - `pane_frames` and `pane_frame_style` — #262. zellij 0.45.0 added the
 ///   style, defaulting to `"titles"` where 0.44.x only ever drew the full box,

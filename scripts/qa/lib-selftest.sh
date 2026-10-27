@@ -833,31 +833,50 @@ want "a row the reads do not hold is refused, not passed" "$?" "1"
 (typed_clock_checks u1 "" "" >/dev/null 2>&1)
 want "two dead status reads are refused, not passed" "$?" "1"
 
-# --- the terminal mode (PR #291) -----------------------------------------
-# Sandbox bars 1 and 2 were born in the span (COLLIDE_HEAD). Sandbox bar 2
-# heard no mode. His bar 2, on a release that prints the line, heard his own
-# terminal under the same id.
-MODE_SPLIT="$(collide_log mode <<'LOG'
-DEBUG  |/home/x/.local| 2026-10-14 11:00:04.000 [id: 1     ] clave-bar: host mode Light build=cafe123
-DEBUG  |/home/x/.local| 2026-10-14 11:00:04.001 [id: 2     ] clave-bar: host mode Light build=v0.5.7
+# --- the colours each bar took (drive 47) ---------------------------------
+# Sandbox bars 1 and 2 were born in the span (COLLIDE_HEAD). Sandbox bar 1
+# took the curated design, sandbox bar 2 a zellij theme. His bar 2, on a
+# release that prints the line, took the curated design under the same id.
+THEME_SPLIT="$(collide_log theme <<'LOG'
+DEBUG  |/home/x/.local| 2026-10-14 11:00:04.000 [id: 1     ] clave-bar: theme curated build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 11:00:04.001 [id: 2     ] clave-bar: theme zellij build=cafe123
+DEBUG  |/home/x/.local| 2026-10-14 11:00:04.002 [id: 2     ] clave-bar: theme curated build=v0.5.8
 LOG
 )"
-heard_mode() { ZLOG="$MODE_SPLIT" build_instances_logging_since "$COLLIDE_MARK" "$HOST_MODE"; }
-want "the mode line is read from the sandbox bar only, though his bar has its id" \
-  "$(heard_mode | tr '\n' ' ')" "1 "
-SPLIT="$(host_mode_checks "span" "$(printf '1\n2')" "$(heard_mode)" 2>&1)"
-want "a born bar that heard no mode, while another did, fails" "$?" "1"
+took() { ZLOG="$THEME_SPLIT" build_instances_logging_since "$COLLIDE_MARK" "$1"; }
+want "the theme lines are read from the sandbox bars only, though his bar has an id" \
+  "$(took "$THEME_CURATED" | tr '\n' ' ')" "1 "
+SPLIT="$(theme_source_checks span "$(printf '1\n2')" "$(took "$THEME_CURATED")" "$(took "$THEME_ZELLIJ")" curated 2>&1)"
+want "a born bar on a theme the config does not name fails" "$?" "1"
 want "and the verdict names it" \
-  "$(grep -c 'replay at subscribe): measured=2 expected=empty FAIL' <<<"$SPLIT")" "1"
-(host_mode_checks "span" "$(printf '1\n2')" "$(printf '1\n2')" >/dev/null 2>&1)
-want "a span where every born bar heard the mode passes" "$?" "0"
-SILENT="$(QA_TERMINAL_REPORTS_MODE='' host_mode_checks "span" "$(printf '1\n2')" "" 2>&1)"
-want "silence on every bar passes, because the terminal may not answer" "$?" "0"
-want "and the run says so" "$(grep -c 'NOTE span: no sandbox bar heard' <<<"$SILENT")" "1"
-(QA_TERMINAL_REPORTS_MODE=1 host_mode_checks "span" "$(printf '1\n2')" "" >/dev/null 2>&1)
-want "silence fails when the launch terminal answers" "$?" "1"
-(host_mode_checks "span" "" "1" >/dev/null 2>&1)
+  "$(grep -c 'took the other colours: measured=2 expected=empty FAIL' <<<"$SPLIT")" "1"
+(theme_source_checks span "$(printf '1\n2')" "1" "" curated >/dev/null 2>&1)
+want "a bar born on a tab never shown logs no colours, and passes" "$?" "0"
+(theme_source_checks span "$(printf '1\n2')" "$(printf '1\n2')" "" curated >/dev/null 2>&1)
+want "every born bar on the design the config asks for passes" "$?" "0"
+(theme_source_checks span "$(printf '1\n2')" "" "$(printf '1\n2')" curated >/dev/null 2>&1)
+want "the drive 47 defect, every bar on a theme the config does not name, fails" "$?" "1"
+(theme_source_checks span "$(printf '1\n2')" "$(printf '1\n2')" "" zellij >/dev/null 2>&1)
+want "a named theme that no bar took fails" "$?" "1"
+NOTED="$(theme_source_checks span "$(printf '1\n2')" "" "" "" 2>&1)"
+want "a config the drive cannot read passes" "$?" "0"
+want "and the run says so" "$(grep -c 'NOTE span: the drive cannot say' <<<"$NOTED")" "1"
+(theme_source_checks span "" "1" "" curated >/dev/null 2>&1)
 want "a span with no birth is refused, not passed" "$?" "1"
+asks() { printf '%b' "$1" >"$TAG_DIR/theme.kdl"; theme_the_config_asks_for "$TAG_DIR/theme.kdl"; }
+want "a config with no theme asks for the curated design" "$(asks 'pane_frames true\n')" "curated"
+want "a commented-out theme is no theme" "$(asks '// theme "kanagawa"\n')" "curated"
+want "a named theme asks for a zellij theme" "$(asks 'theme "kanagawa"\n')" "zellij"
+want "zellij ships no theme named default, so it gets the curated design" \
+  "$(asks 'theme "default"\n')" "curated"
+want "a light and dark pair leaves the drive unable to say" \
+  "$(asks 'theme "kanagawa"\ntheme_light "dayfox"\n')" ""
+want "a block comment around a theme line is no theme" \
+  "$(asks '/* old:\ntheme "kanagawa"\n*/\npane_frames true\n')" "curated"
+want "a theme the config defines as default leaves the drive unable to say" \
+  "$(asks 'themes {\n  default {\n    fg 1\n  }\n}\n')" ""
+want "a missing config leaves the drive unable to say" \
+  "$(theme_the_config_asks_for "$TAG_DIR/no-such.kdl")" ""
 
 printf '\n%s\n' "== qa/lib selftest: $FAILURES failure(s) =="
 [[ "$FAILURES" -eq 0 ]]

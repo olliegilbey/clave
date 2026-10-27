@@ -37,8 +37,8 @@
 
 use crate::render::{Row, RowContent, cell_slice, clip_to_cells, display_cells, hue, strip_sgr};
 use crate::theme::{
-    BATTERY, CARD_BOT, CARD_TOP, CLAUDE_GLYPH, CLAUDE_INK, CONSOLE, DORMANT_FADE, ELLIPSIS, FADE,
-    LCAP, OPENAI_GLYPH, OPENAI_INK, RCAP, RESET, RULE, Rgb, SUBS_MARK, TERM_MARK, Theme,
+    BATTERY, CARD_BOT, CARD_TOP, CLAUDE_GLYPH, CLAUDE_INK, CONSOLE, ELLIPSIS, LCAP, OPENAI_GLYPH,
+    OPENAI_INK, RCAP, RESET, RULE, Rgb, SUBS_MARK, TERM_MARK, Theme,
 };
 
 // ── the budgets (the example's fixed cells) ─────────────────────────────────
@@ -361,15 +361,7 @@ pub(crate) fn render_double_card(
                 ..
             }
         );
-    let fade = if row.selected {
-        0.0
-    } else if dormant {
-        DORMANT_FADE
-    } else if !any_selected {
-        0.0
-    } else {
-        FADE
-    };
+    let fade = theme.row_fade(row.selected, dormant, any_selected);
     let ink = |c: Rgb| c.mix(theme.base, fade);
     // Glass: `None` paints NOTHING and re-asserts the default background, so
     // the selection bar never bleeds into the glass after it.
@@ -539,15 +531,7 @@ pub(crate) fn render_card(
                 ..
             }
         );
-    let fade = if row.selected {
-        0.0
-    } else if dormant {
-        DORMANT_FADE
-    } else if !any_selected {
-        0.0
-    } else {
-        FADE
-    };
+    let fade = theme.row_fade(row.selected, dormant, any_selected);
     let ink = |c: Rgb| c.mix(theme.base, fade);
     let row_bg: Option<Rgb> = row.selected.then_some(theme.sel_bg);
     let seg = |c: Rgb, s: &str| match row_bg {
@@ -804,7 +788,8 @@ mod tests {
     use super::*;
     use crate::render::{Provenance, RowStatus, TermStatus};
     use crate::theme::{
-        BRACKET_A, BRACKET_B, BRANCH_INK, META_INK, SUBS_INK, TURN_INK, WORKTREE_INK,
+        BRACKET_A, BRACKET_B, BRANCH_INK, DORMANT_FADE, FADE, META_INK, SUBS_INK, TURN_INK,
+        WORKTREE_INK,
     };
 
     /// The mock the ratified preview renders, as real rows. Indices 0–15 are
@@ -2351,10 +2336,11 @@ mod tests {
     /// Every colour the bar paints comes from the theme it is handed (review
     /// finding, 2026-10-20). `Inks::DARK` is built from the fixed consts and
     /// every other test renders `Theme::default()`, so a call site that went
-    /// back to a const would pass them all. Under lotus, no cell may wear a
-    /// dark-ground colour. A NEGATIVE `contains` is sound where the positive
-    /// one is not (FOOTGUNS): absence from the whole line is the claim. Every
-    /// row is selected, because a faded cell is a mix and matches nothing.
+    /// back to a const would pass them all. Under lotus, the light reference
+    /// ground (`Theme::lotus`), no cell may wear a dark-ground colour. A
+    /// NEGATIVE `contains` is sound where the positive one is not
+    /// (FOOTGUNS): absence from the whole line is the claim. Every row is
+    /// selected, because a faded cell is a mix and matches nothing.
     /// `failed` is the one ink both grounds share (samuraiRed), so it is not
     /// on the list.
     #[test]

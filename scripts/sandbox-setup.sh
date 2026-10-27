@@ -184,6 +184,20 @@ echo "==> Seeding scenario '$SCENARIO' (regenerates config.kdl + launch.kdl)"
 PATH="$SHIM:$PATH" "$CLI" dev reset
 PATH="$SHIM:$PATH" "$CLI" dev scenario "$SCENARIO"
 
+# CLAVE_SANDBOX_NO_THEME=1 (`just sandbox-no-theme`) comments out the zellij
+# theme in the SANDBOX config only. The sandbox copies the maintainer's
+# `theme "kanagawa"`, and a named theme wins by design, so without this no
+# sandbox shows the curated design (FOOTGUNS, "zellij's colours for a config
+# with no theme"). The drive reads this file, so its colour check follows.
+if [ -n "${CLAVE_SANDBOX_NO_THEME:-}" ]; then
+  perl -i -pe 's{^(\s*theme(?:_dark|_light)?\s)}{// $1}' "$SANDBOX/data/config.kdl"
+  if grep -Eq '^[[:space:]]*theme(_dark|_light)?[[:space:]]' "$SANDBOX/data/config.kdl"; then
+    fail "a theme line is still live in the sandbox config.kdl"
+  else
+    echo "    ok   no zellij theme in the sandbox config.kdl"
+  fi
+fi
+
 # Prove the generated pair agrees BEFORE a human spends time in a terminal.
 # This is the #44 invariant: config.kdl's MessagePlugin keybinds and the layout's
 # plugin node must carry an IDENTICAL clave_binary, or zellij resolves them as
