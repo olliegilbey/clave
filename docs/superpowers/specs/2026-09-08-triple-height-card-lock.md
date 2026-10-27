@@ -137,9 +137,8 @@ beside one other glyph, not once a third joins the column. It was replaced by
 this file and in §5.2 are the dark ground's. On a light ground each meaning
 keeps its ink but takes a darker shade: the same kanagawa role in its light
 variant, lotus, darkened until it reads as well as the dark ink does. A light
-terminal with no zellij theme showed the dark design with a navy selected row,
-and the dark inks did not read on a light bar. `theme.rs` `Inks::LIGHT` holds
-the values and the rule.
+zellij theme puts the bar on a light ground, where the dark inks do not read.
+`theme.rs` `Inks::LIGHT` holds the values and the rule.
 
 ### 4.3 ~~The two clocks stay apart~~ — REVERSED, see §4.4
 

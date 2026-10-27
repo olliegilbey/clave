@@ -390,28 +390,22 @@ fn styles_a_bar_gets(user: &str) -> zellij_utils::data::Styling {
         .colors
 }
 
-/// A config with no theme gets the curated design, light or dark as the
-/// terminal says. The bar matched only `DEFAULT_STYLES`, which a live bar
-/// never gets: zellij sends its old default palette instead. So the bar took
-/// zellij's stock 256 colours for a theme, and a light terminal got a dark
-/// bar (drive 47, 2026-10-27). Every unit test passed, because each one fed
+/// A config with no theme gets the curated design, which is dark whatever
+/// the terminal reports (LEDGER D42, 2026-10-27). The bar matched only
+/// `DEFAULT_STYLES`, which a live bar never gets: zellij sends its old
+/// default palette instead. So the bar took zellij's stock 256 colours for a
+/// theme (drive 47, 2026-10-27). Every unit test passed, because each one fed
 /// the bar `DEFAULT_STYLES`. This one feeds it what zellij sends.
 #[test]
 fn a_config_with_no_theme_gets_the_curated_design() {
-    use clave_bar::theme::Theme;
-    use zellij_utils::data::HostTerminalThemeMode::{Dark, Light};
+    use clave_bar::theme::{Theme, source};
     let none = styles_a_bar_gets("");
-    assert_eq!(Theme::from_styling(&none, Some(Light)), Theme::lotus());
-    for mode in [Some(Dark), None] {
-        assert_eq!(Theme::from_styling(&none, mode), Theme::default());
-    }
-    // A named theme keeps its own colours, whatever the terminal says.
+    assert_eq!(Theme::from_styling(&none), Theme::default());
+    assert_eq!(source(&none), "curated");
+    // A named theme keeps its own colours.
     let kanagawa = styles_a_bar_gets("theme \"kanagawa\"\n");
-    for mode in [Some(Light), Some(Dark), None] {
-        let t = Theme::from_styling(&kanagawa, mode);
-        assert_ne!(t, Theme::lotus(), "{mode:?}");
-        assert_ne!(t, Theme::default(), "{mode:?}");
-    }
+    assert_ne!(Theme::from_styling(&kanagawa), Theme::default());
+    assert_eq!(source(&kanagawa), "zellij");
 }
 
 #[test]

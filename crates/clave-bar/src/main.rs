@@ -14,7 +14,7 @@ use clave_bar::model::{
 };
 use clave_bar::plugin_config::{resolve_binary, resolve_row_height};
 use clave_bar::render::{Row, render_rows};
-use clave_bar::theme::ThemeInputs;
+use clave_bar::theme::{self, Theme};
 use zellij_tile::prelude::*;
 
 /// The build this wasm came from, set by the build recipes through
@@ -154,14 +154,14 @@ struct State {
     /// over ten frames, so what it needs is a monotonic index, and the render
     /// path stays a pure function of values passed to it.
     anim_frame: usize,
-    /// The user's zellij theme, mapped onto the bar's colour roles (#145),
-    /// with the terminal's light or dark mode. Both arrive as events, and the
-    /// rule that joins them is the lib's (`theme::ThemeInputs`), where the
-    /// tests reach it. The curated kanagawa stands until the first event
-    /// lands, which keeps frame zero on the design the goldens pin. So a bar
-    /// that paints before the terminal answers paints the dark design, and
-    /// turns light when the answer lands.
-    theme: ThemeInputs,
+    /// The user's zellij theme, mapped onto the bar's colour roles (#145).
+    /// Arrives via `ModeUpdate` (`ModeInfo.style.colors`); `Default` — the
+    /// curated kanagawa — stands until the first one lands, which also keeps
+    /// frame zero on the design the goldens pin.
+    theme: Theme,
+    /// Whose colours `theme` holds (`theme::source`), or None before the
+    /// first `ModeUpdate`. Kept only to log a change.
+    theme_source: Option<&'static str>,
     /// The CLI this bar shells out to, from plugin configuration (#44).
     /// Assigned in `load()`, which zellij invokes as its own wasm export
     /// before delivering any event (`register_plugin!`, zellij-tile-0.44.3
@@ -885,29 +885,27 @@ impl State {
             }
             Event::ModeUpdate(mode_info) => {
                 // The theme mapping lives in the host-tested lib
-                // (`theme::ThemeInputs`); this arm only forwards, and
-                // repaints only when the mapped theme actually moved —
+                // (`theme::Theme::from_styling`); this arm only stores and
+                // repaints, and only when the mapped theme actually moved —
                 // ModeUpdate also fires on every input-mode change, which
                 // must not repaint an unchanged bar.
-                let was = self.theme.source();
-                let moved = self.theme.set_styling(mode_info.style.colors);
-                // CHANGED-ONLY, like the host mode line below: the drive
-                // reads it as "this bar took these colours" (qa/lib.sh
-                // `theme_source_checks`).
-                if let Some(source) = self.theme.source().filter(|s| Some(*s) != was) {
-                    eprintln!("clave-bar: theme {source} build={BUILD}");
-                }
-                moved
-            }
-            Event::HostTerminalThemeChanged(mode) => {
+                let colors = &mode_info.style.colors;
+                let source = theme::source(colors);
                 // CHANGED-ONLY, like the term-facts lines: the drive reads
-                // it as "this bar heard the terminal" (qa/lib.sh
-                // `host_mode_checks`). The build tag keeps a bar in another
-                // session out of the count: ids restart per zellij server.
-                if self.theme.mode() != Some(mode) {
-                    eprintln!("clave-bar: host mode {mode:?} build={BUILD}");
+                // it as "this bar took these colours" (qa/lib.sh
+                // `theme_source_checks`). The build tag keeps a bar in
+                // another session out of the count: ids restart per zellij
+                // server.
+                if self.theme_source != Some(source) {
+                    eprintln!("clave-bar: theme {source} build={BUILD}");
+                    self.theme_source = Some(source);
                 }
-                self.theme.set_mode(mode)
+                let theme = Theme::from_styling(colors);
+                if theme == self.theme {
+                    return false;
+                }
+                self.theme = theme;
+                true
             }
             Event::TabUpdate(tabs) => {
                 let metas: Vec<TabMeta> = tabs
@@ -1267,14 +1265,11 @@ impl ZellijPlugin for State {
             // changes, so the bar repaints on a theme switch without polling.
             // Subscribing replays none (zellij-server-0.45.1
             // `tab/mod.rs:2046`, `plugins/mod.rs:755-766`). Covered by
-            // ReadApplicationState above.
+            // ReadApplicationState above. With both `theme_dark` and
+            // `theme_light` set, zellij swaps the theme when the terminal
+            // reports light or dark, and sends the new one here
+            // (`screen.rs:6972-7027`). The bar reads no report itself.
             EventType::ModeUpdate,
-            // The terminal's light or dark mode, for a user with no zellij
-            // theme: the curated design has a light ground too. zellij
-            // replays the last mode at subscribe and asks for no permission
-            // (zellij-server-0.45.1 `plugins/mod.rs:765`,
-            // `plugins/wasm_bridge.rs:2080`).
-            EventType::HostTerminalThemeChanged,
             // The #206 terminal-row deltas: cwd and foreground-command pushes
             // between manifests. Per-pane and quiet — nothing like
             // InputReceived's per-keystroke storm (see below).
@@ -1429,7 +1424,7 @@ impl ZellijPlugin for State {
             cols,
             rows,
             self.model.widths_at(cols),
-            self.theme.current(),
+            &self.theme,
             row_height,
             self.anim_frame,
         );

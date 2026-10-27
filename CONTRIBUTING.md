@@ -24,7 +24,7 @@ cd clave
 just setup-toolchain     # adds the wasm32-wasip1 target
 just sandbox             # builds, wires an isolated sandbox, verifies it
 just sandbox-no-theme    # the same, minus your zellij theme: the bar's own
-                         # design, light or dark as the terminal reports
+                         # curated dark design
 ```
 
 The same loop runs against a second machine over ssh — `just remote-qa`,

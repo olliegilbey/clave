@@ -25,8 +25,10 @@ owns everything they structurally cannot reach._
   gradient, so the lotus bar first sat on a dark ground. Ghostty reported
   Light because it answers light unless its config sets a light and dark
   theme pair (FOOTGUNS); he moved his config to a Lotus/Wave pair during
-  the run, and Ghostty then sent Dark. The bar follows the report; it
-  cannot read the background. A wait of
+  the run, and Ghostty then sent Dark. The bar followed the report then; it
+  cannot read the background. So the maintainer ruled the same day that
+  the bar reads no report (LEDGER D42), and the mode check and
+  `QA_TERMINAL_REPORTS_MODE` are gone from the drive. A wait of
   3600 s ran out twice before his launch; the agent then waited on the
   sandbox socket file instead, which costs his live session nothing.
 
@@ -286,9 +288,9 @@ loudly and stops the run; later phases assume earlier truth.
 | 5d | **The meter seam (statusLine side)** — SPECIFIED, NOT YET SCRIPTED | four `clave statusline` runs against the sandbox store, fed the captured payload shape on stdin: a first reading; a count that renders the same text (`19k` to `19k`); a count whose text moves, inside the interval; a count that crosses a band edge, inside the interval | the same-text count and the held count write nothing (`seq` flat); the band move lands at once; the meter never moves status. Not scripted, for two reasons: `run_statusline` PUSHES a snapshot, so it needs a `ct.sh` mode with the drive's scrubbed identity, as hooks have (FOOTGUNS #281); and a push rate per minute needs a live agent turn, which the drive does not run. The unit tests in `statusline.rs` pin the pacing rule; the live meter lag is a hand test | the meter seam — phase 5b drives the HOOK side only, and the statusLine is the other half of the card's live cells |
 | 5c | **Terminal facts (OS side)** | a real `sleep` typed into a plain shell tab, behind a shell allowlist, while that tab is focused; then focus moves to an agent tab with the command still running | leg A: at least one sandbox bar learns the change — the OS-facts pipeline (`get_pane_cwd`/`get_pane_running_command` → `apply_pane_facts` → the terminal row) delivers end to end, which nothing tested before. Leg B MEASURES whether a second instance learns it from another tab, the open question under the store-backed fix, and asserts nothing: the facts are per-instance today, so "every bar agrees" is not yet true and a drive must not go red on a known-open defect | the 2026-09-12 flicker (a terminal row with facts under one tab and none under another), #206, #239 |
 | 6 | Quiescence | idle 60s | evlog and store `seq` flat; zellij log flat after the mark for sandbox-attributable lines only (the shared log is never globally flat with a live maintainer fleet — see Delivery accounting) | P17, B19/B20, drive step 6 |
-| 6a | **Slim push** | one crafted `clave-status-slim` push that no bar can rebuild (one seq past the store, tag 0); then the phase-5 anchor and two `clave-toggle` presses | at rest, the tag of the host's last aimed whole push (`pushed-dormant-tag`) equals the store's own dormant tag; over the run, sandbox bars heard slim pushes, none logged a bad status payload or a failed subprocess, and every bar born in the run asked for the fleet and was answered, heard the terminal's light or dark mode (`host_mode_checks`), and none took colours the sandbox config does not ask for (`theme_source_checks`); the refusal: every live bar asks ONCE, every answer carries the store's seq, and the store does not move; after it, every live bar rebuilds both presses' slim pushes with no ask | the slim push (#281); the ask loop fixed in `e4bc858`; the terminal mode (PR #291) |
+| 6a | **Slim push** | one crafted `clave-status-slim` push that no bar can rebuild (one seq past the store, tag 0); then the phase-5 anchor and two `clave-toggle` presses | at rest, the tag of the host's last aimed whole push (`pushed-dormant-tag`) equals the store's own dormant tag; over the run, sandbox bars heard slim pushes, none logged a bad status payload or a failed subprocess, and every bar born in the run asked for the fleet and was answered, and none took colours the sandbox config does not ask for (`theme_source_checks`); the refusal: every live bar asks ONCE, every answer carries the store's seq, and the store does not move; after it, every live bar rebuilds both presses' slim pushes with no ask | the slim push (#281); the ask loop fixed in `e4bc858`; each bar's colours (drive 47) |
 | 6b | **Isolation witness** | nothing (reads this run's own evidence) | zero `push-refused` events across the run — no push was aimed at a bar that does not own this store; the ambient zellij identity is STILL the sandbox's at the END of the run, not just at the start; the inherited session's name appears nowhere as a push target | FOOTGUNS #281, the 2026-09-11 incident |
-| 6c | **Relaunch (the second launch)** | quit the sandbox session, then ask the maintainer to `just launch` it again | exactly ONE row is bound after the relaunch — the most-recent row, the eager tab the launch bakes — and every other row is unbound: no `tab_id`, no `pane_id`, and no stale `Working` or `NeedsYou` carried over from the first session. Every row the quit left live (bound pre-quit, less the eager row) carries a standby stamp; one missing is a `SessionEnd` that did not say `other`, or a bar that pruned its tab while the session went down. Then the beacon leg: two `clave-toggle` presses in the eager tab, with NO anchor pipe first. Each press is ONE width ask, from that tab's bar, painted by that bar. Then the arrival leg: one `{"dir":"next"}` binds exactly one more row, it was on standby, its bind spent the stamp, and its tab ranks by the row's own ordinal (a walk is not a commitment), with no birth touch on its tab (the touch is the hop to the top). Between the two legs, the slim push across the relaunch: the beacon presses rode slim pushes that every live bar rebuilt with no ask, and every bar the second session bore asked for the fleet, was answered, and heard the terminal's mode, and no bar took colours the sandbox config does not ask for | the relaunch seam (TESTING.md's escape record); the one-eager-tab rule, commit `9670fbf`; standby rows (FOOTGUNS, "A launch cannot tell which rows were live") |
+| 6c | **Relaunch (the second launch)** | quit the sandbox session, then ask the maintainer to `just launch` it again | exactly ONE row is bound after the relaunch — the most-recent row, the eager tab the launch bakes — and every other row is unbound: no `tab_id`, no `pane_id`, and no stale `Working` or `NeedsYou` carried over from the first session. Every row the quit left live (bound pre-quit, less the eager row) carries a standby stamp; one missing is a `SessionEnd` that did not say `other`, or a bar that pruned its tab while the session went down. Then the beacon leg: two `clave-toggle` presses in the eager tab, with NO anchor pipe first. Each press is ONE width ask, from that tab's bar, painted by that bar. Then the arrival leg: one `{"dir":"next"}` binds exactly one more row, it was on standby, its bind spent the stamp, and its tab ranks by the row's own ordinal (a walk is not a commitment), with no birth touch on its tab (the touch is the hop to the top). Between the two legs, the slim push across the relaunch: the beacon presses rode slim pushes that every live bar rebuilt with no ask, and every bar the second session bore asked for the fleet and was answered, and no bar took colours the sandbox config does not ask for | the relaunch seam (TESTING.md's escape record); the one-eager-tab rule, commit `9670fbf`; standby rows (FOOTGUNS, "A launch cannot tell which rows were live") |
 | 7 | Teardown | nothing | prints the kill pair (the agent may run it once both eyeballs are in) | drive step 9 |
 
 **Why 5b could not catch the 2026-09-14 red-glyph defect, and why it can
@@ -460,16 +462,6 @@ What it asserts (2026-10-14):
   shows. The store must not move: a refusal writes nothing.
 - **After the refusal,** two `clave-toggle` presses push slim, and every
   live bar rebuilds both with no ask.
-- **The terminal mode** (PR #291). zellij asks the terminal for light or
-  dark at its start. It gives the answer to each plugin that subscribes,
-  and a late one gets it again at subscribe. Each bar logs
-  `clave-bar: host mode Light|Dark build=<tag>` when it first hears it.
-  Every bar born in the run must have heard it. One bar that heard nothing
-  while others heard it is the finding. Silence on every bar is a NOTE,
-  because a terminal that does not answer gives the same reading. Run with
-  `QA_TERMINAL_REPORTS_MODE=1` when the launch terminal answers (Ghostty,
-  kitty, foot and contour do), and silence fails too. 6c reads it again for
-  the second session.
 - **The colours each bar took** (drive 47). Each bar logs
   `clave-bar: theme curated|zellij build=<tag>` at its first `ModeUpdate`
   and on each change. A sandbox config with no `theme` line asks for the
@@ -480,7 +472,7 @@ What it asserts (2026-10-14):
   config with `theme_dark` or `theme_light`, or its own `default` theme, is
   a NOTE: the drive cannot say what zellij picks. Drive 47 found why this check exists. With no
   theme, zellij sends a colour set the bar did not know, so every bar took
-  it for a theme, and a light terminal got a dark bar. The unit tests were
+  it for a theme and painted zellij's 256-colour stock set. The unit tests were
   green, because each one fed the bar a set zellij never sends. 6c reads it
   again for the second session. To drive the curated design on a machine
   whose zellij config names a theme, stage with

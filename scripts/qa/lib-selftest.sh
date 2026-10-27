@@ -833,32 +833,6 @@ want "a row the reads do not hold is refused, not passed" "$?" "1"
 (typed_clock_checks u1 "" "" >/dev/null 2>&1)
 want "two dead status reads are refused, not passed" "$?" "1"
 
-# --- the terminal mode (PR #291) -----------------------------------------
-# Sandbox bars 1 and 2 were born in the span (COLLIDE_HEAD). Sandbox bar 2
-# heard no mode. His bar 2, on a release that prints the line, heard his own
-# terminal under the same id.
-MODE_SPLIT="$(collide_log mode <<'LOG'
-DEBUG  |/home/x/.local| 2026-10-14 11:00:04.000 [id: 1     ] clave-bar: host mode Light build=cafe123
-DEBUG  |/home/x/.local| 2026-10-14 11:00:04.001 [id: 2     ] clave-bar: host mode Light build=v0.5.7
-LOG
-)"
-heard_mode() { ZLOG="$MODE_SPLIT" build_instances_logging_since "$COLLIDE_MARK" "$HOST_MODE"; }
-want "the mode line is read from the sandbox bar only, though his bar has its id" \
-  "$(heard_mode | tr '\n' ' ')" "1 "
-SPLIT="$(host_mode_checks "span" "$(printf '1\n2')" "$(heard_mode)" 2>&1)"
-want "a born bar that heard no mode, while another did, fails" "$?" "1"
-want "and the verdict names it" \
-  "$(grep -c 'replay at subscribe): measured=2 expected=empty FAIL' <<<"$SPLIT")" "1"
-(host_mode_checks "span" "$(printf '1\n2')" "$(printf '1\n2')" >/dev/null 2>&1)
-want "a span where every born bar heard the mode passes" "$?" "0"
-SILENT="$(QA_TERMINAL_REPORTS_MODE='' host_mode_checks "span" "$(printf '1\n2')" "" 2>&1)"
-want "silence on every bar passes, because the terminal may not answer" "$?" "0"
-want "and the run says so" "$(grep -c 'NOTE span: no sandbox bar heard' <<<"$SILENT")" "1"
-(QA_TERMINAL_REPORTS_MODE=1 host_mode_checks "span" "$(printf '1\n2')" "" >/dev/null 2>&1)
-want "silence fails when the launch terminal answers" "$?" "1"
-(host_mode_checks "span" "" "1" >/dev/null 2>&1)
-want "a span with no birth is refused, not passed" "$?" "1"
-
 # --- the colours each bar took (drive 47) ---------------------------------
 # Sandbox bars 1 and 2 were born in the span (COLLIDE_HEAD). Sandbox bar 1
 # took the curated design, sandbox bar 2 a zellij theme. His bar 2, on a

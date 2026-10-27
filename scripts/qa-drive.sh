@@ -2545,10 +2545,7 @@ slim_seam_checks "the run" "$(build_instances_logging_since "$LOGMARK" "$SLIM_TW
   "$(instances_born_since "$LOGMARK")" \
   "$(build_line_counts_since "$LOGMARK" "$HYDRATE_ASK")" \
   "$(build_line_counts_since "$LOGMARK" "$HYDRATE_ANSWER")"
-# The bars phase 3 opened heard the terminal mode by the replay at subscribe.
-host_mode_checks "the run" "$(instances_born_since "$LOGMARK")" \
-  "$(build_instances_logging_since "$LOGMARK" "$HOST_MODE")"
-# And each took the colours the sandbox config asks for.
+# The bars phase 3 opened took the colours the sandbox config asks for.
 theme_source_checks "the run" "$(instances_born_since "$LOGMARK")" \
   "$(build_instances_logging_since "$LOGMARK" "$THEME_CURATED")" \
   "$(build_instances_logging_since "$LOGMARK" "$THEME_ZELLIJ")" \
@@ -2866,9 +2863,6 @@ if [[ "$P6C_RAN" == "yes" ]]; then
     "$(instances_born_since "$P6C_DOWN_MARK")" \
     "$(build_line_counts_since "$P6C_DOWN_MARK" "$HYDRATE_ASK")" \
     "$(build_line_counts_since "$P6C_DOWN_MARK" "$HYDRATE_ANSWER")"
-  # The second server asked the terminal again at its start.
-  host_mode_checks "the second session" "$(instances_born_since "$P6C_DOWN_MARK")" \
-    "$(build_instances_logging_since "$P6C_DOWN_MARK" "$HOST_MODE")"
   theme_source_checks "the second session" "$(instances_born_since "$P6C_DOWN_MARK")" \
     "$(build_instances_logging_since "$P6C_DOWN_MARK" "$THEME_CURATED")" \
     "$(build_instances_logging_since "$P6C_DOWN_MARK" "$THEME_ZELLIJ")" \

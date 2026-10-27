@@ -2336,10 +2336,11 @@ mod tests {
     /// Every colour the bar paints comes from the theme it is handed (review
     /// finding, 2026-10-20). `Inks::DARK` is built from the fixed consts and
     /// every other test renders `Theme::default()`, so a call site that went
-    /// back to a const would pass them all. Under lotus, no cell may wear a
-    /// dark-ground colour. A NEGATIVE `contains` is sound where the positive
-    /// one is not (FOOTGUNS): absence from the whole line is the claim. Every
-    /// row is selected, because a faded cell is a mix and matches nothing.
+    /// back to a const would pass them all. Under lotus, the light reference
+    /// ground (`Theme::lotus`), no cell may wear a dark-ground colour. A
+    /// NEGATIVE `contains` is sound where the positive one is not
+    /// (FOOTGUNS): absence from the whole line is the claim. Every row is
+    /// selected, because a faded cell is a mix and matches nothing.
     /// `failed` is the one ink both grounds share (samuraiRed), so it is not
     /// on the list.
     #[test]

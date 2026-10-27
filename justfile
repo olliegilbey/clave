@@ -251,10 +251,9 @@ mutants-file file *args:
 sandbox scenario="c8-cold-start":
     ./scripts/sandbox-setup.sh {{scenario}}
 
-# The sandbox with no zellij theme, so the bar paints the curated design and
-# follows the terminal's light or dark mode. Your own config names a theme,
-# which wins over the terminal by design; only the sandbox copy changes.
-# For a drive, `CLAVE_SANDBOX_NO_THEME=1 just qa`.
+# The sandbox with no zellij theme, so the bar paints its curated dark
+# design. Your own config names a theme, and a named theme wins by design;
+# only the sandbox copy changes. For a drive, `CLAVE_SANDBOX_NO_THEME=1 just qa`.
 sandbox-no-theme scenario="qa-fleet":
     CLAVE_SANDBOX_NO_THEME=1 ./scripts/sandbox-setup.sh {{scenario}}
 

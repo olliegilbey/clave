@@ -186,10 +186,9 @@ PATH="$SHIM:$PATH" "$CLI" dev scenario "$SCENARIO"
 
 # CLAVE_SANDBOX_NO_THEME=1 (`just sandbox-no-theme`) comments out the zellij
 # theme in the SANDBOX config only. The sandbox copies the maintainer's
-# `theme "kanagawa"`, and a named theme wins over the terminal's light or
-# dark mode by design, so without this no sandbox shows the curated design
-# or its light ground (FOOTGUNS, "zellij's colours for a config with no
-# theme"). The drive reads this file, so its colour check follows.
+# `theme "kanagawa"`, and a named theme wins by design, so without this no
+# sandbox shows the curated design (FOOTGUNS, "zellij's colours for a config
+# with no theme"). The drive reads this file, so its colour check follows.
 if [ -n "${CLAVE_SANDBOX_NO_THEME:-}" ]; then
   perl -i -pe 's{^(\s*theme(?:_dark|_light)?\s)}{// $1}' "$SANDBOX/data/config.kdl"
   if grep -Eq '^[[:space:]]*theme(_dark|_light)?[[:space:]]' "$SANDBOX/data/config.kdl"; then
