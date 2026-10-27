@@ -482,9 +482,9 @@ What it asserts (2026-10-14):
   it for a theme, and a light terminal got a dark bar. The unit tests were
   green, because each one fed the bar a set zellij never sends. 6c reads it
   again for the second session. To drive the curated design on a machine
-  whose zellij config names a theme, comment out the `theme` line in the
-  sandbox's `config.kdl` (`clave dev instance --field data`) before the
-  launch. Your own config does not change.
+  whose zellij config names a theme, stage with
+  `CLAVE_SANDBOX_NO_THEME=1 just qa`: it comments out the theme lines in
+  the sandbox's `config.kdl` only. Your own config does not change.
 
 What the refusal leaves behind: each bar shows seq S and asked for S+1. The
 next real write also takes S+1. If a bar refused that real push too, it

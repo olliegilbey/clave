@@ -251,6 +251,13 @@ mutants-file file *args:
 sandbox scenario="c8-cold-start":
     ./scripts/sandbox-setup.sh {{scenario}}
 
+# The sandbox with no zellij theme, so the bar paints the curated design and
+# follows the terminal's light or dark mode. Your own config names a theme,
+# which wins over the terminal by design; only the sandbox copy changes.
+# For a drive, `CLAVE_SANDBOX_NO_THEME=1 just qa`.
+sandbox-no-theme scenario="qa-fleet":
+    CLAVE_SANDBOX_NO_THEME=1 ./scripts/sandbox-setup.sh {{scenario}}
+
 # Stage, wait for the launch, drive. The WHOLE loop in one command, because
 # the old one was three messages wide — stage, ask the human, be told, drive —
 # and every extra round trip is a chance to drive something that is not the
