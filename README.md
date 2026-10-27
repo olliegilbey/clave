@@ -118,7 +118,7 @@ Zellij's keys still belong to Zellij.
 - **Your agents survive restarts.** A relaunch opens one tab for the most recent conversation. The others you had open when you quit come back on standby for a day: they sit under the running tabs, and `Alt+↓` opens each one as you land on it, in its usual place in the list. Every other conversation is a dormant row; `Alt+Enter` opens it. Both resume where they left off. Plain terminal tabs do not come back.
 - **Running tabs sit above closed ones**, so the agents and terminals you're using are quick to cycle through (with `Alt+↑` `Alt+↓`).
 - **The tab list orders itself by attention.** A modified "frecency" algorithm is used to keep the tabs you're most likely to reuse at the top.
-- **The sidebar follows your colours.** It takes them from your zellij theme. With no theme set, it draws its own design, light or dark as your terminal reports. If your terminal does not report it, or reports light while it looks dark (a shader can do this), add `explicit_theme_hue "light"` or `explicit_theme_hue "dark"` to your zellij config. clave copies these settings when it sets up, so run `clave setup` and relaunch after you change them.
+- **The sidebar follows your colours.** It takes them from your zellij theme. With no theme set, it draws its own design, light or dark as your terminal reports. If your terminal does not report it, or reports light while it looks dark, add `explicit_theme_hue "light"` or `explicit_theme_hue "dark"` to your zellij config. Ghostty reports light unless its config sets a light and dark theme pair, such as `theme = light:Kanagawa Lotus,dark:Kanagawa Wave`. clave copies these settings when it sets up, so run `clave setup` and relaunch after you change them.
 
 ## Contributing
 

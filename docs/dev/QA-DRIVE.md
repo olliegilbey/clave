@@ -22,10 +22,11 @@ owns everything they structurally cannot reach._
   green, 358 checks, every bar `curated`, `Light` at launch, and `Dark` on
   every bar at 09:55, live; his second launch showed the dark design. His
   Mac was in dark mode throughout, and his ssh setup paints a purple
-  gradient, so the lotus bar first sat on a dark ground. Why Ghostty first
-  reported Light is not known; he moved his Ghostty config to a Lotus/Wave
-  pair during the run, which likely made the switch. The bar follows the
-  report; it cannot read the background. A wait of
+  gradient, so the lotus bar first sat on a dark ground. Ghostty reported
+  Light because it answers light unless its config sets a light and dark
+  theme pair (FOOTGUNS); he moved his config to a Lotus/Wave pair during
+  the run, and Ghostty then sent Dark. The bar follows the report; it
+  cannot read the background. A wait of
   3600 s ran out twice before his launch; the agent then waited on the
   sandbox socket file instead, which costs his live session nothing.
 
