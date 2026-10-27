@@ -20,6 +20,39 @@ map and the sanctioned-command list are binding here and are not repeated.
 | **agent** | Part A, the QA-drive gate (once the maintainer has launched its sandbox session), and Part D. Reads logs, the store, `clave dev status`. During the gate, runs **sandbox-scoped** zellij actions through `scripts/ct.sh` only; **prints** the launch command and every other zellij command; never launches a session; kills the gate's sandbox by exact name: the 6c quit, a restage, and the teardown (TESTING.md, "The interaction contract"). Never runs `just release`. |
 | **maintainer** | The tag, `just release`, launching the QA drive's sandbox session, every keypress in Part C, killing any session that is not a sandbox the agent staged, and the go/no-go. **The tag is pushed only after the go** — Part B. |
 
+**The agent runs every check that only reads files.** Part C Steps 1 and 2,
+the log half of Step 3, and Step 5 (`clave doctor`) read the box's files and
+run no zellij command. The agent runs them itself and reports the result.
+The maintainer keeps the keypresses: the relaunch, the look at the sidebars,
+and Step 4. The 0.5.7 cut handed all of it to him, and it cost an hour.
+
+## Where each command runs
+
+The maintainer works at a Mac. The fleet, the checkout that cuts the release
+and `~/.local/share/clave/` are on the box. **A command typed in a Mac
+terminal runs against the Mac's checkout, not the box's.** On the 0.5.7 cut,
+`git tag` and `just release` ran on the Mac, and the box stayed on 0.5.6.
+So hand the maintainer every box command in its ssh form.
+
+- **The cut, from a Mac terminal outside zellij, in one line:**
+
+  ```bash
+  command ssh -t devbox 'cd ~/code/clave && git pull && git tag vX.Y.Z && just release'
+  ```
+
+  `command` skips the Mac's ssh colour hook. Do not wrap the command in
+  `zsh -lic`. An interactive shell on the box runs the `.zshrc` auto-attach
+  (`exec zellij attach --create remote`), so it opens the `remote` session
+  and runs nothing (0.5.7 cut, 2026-10-27). A plain ssh command finds `cargo`
+  and `just`, because `.zshenv` puts them on PATH. The cut needs no
+  `OPENSSL_DIR`: only the host test build links OpenSSL (FOOTGUNS).
+- **The relaunch, from the Mac:** `box down`, then `box`. Between the cut and
+  the relaunch, press no clave shortcut (Part B, step 2).
+- **The tag push, from the Mac, on a go:**
+  `command ssh devbox 'cd ~/code/clave && git push origin vX.Y.Z'`.
+- **The Mac's own install** comes from the installer after the push
+  (README, "Upgrading?"). A `just release` on the Mac is not part of the cut.
+
 ---
 
 ## Part A — before the tag (agent, unattended)
