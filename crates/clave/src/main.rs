@@ -254,7 +254,8 @@ enum Command {
     /// Cut a release (invoked by `just release`, not for hand use): gate on a
     /// clean tree + a HEAD `vX.Y.Z` tag matching this binary's version, then
     /// install the versioned wasm + CLI copy and regenerate stable
-    /// config/layout/hooks at the versioned paths (§2).
+    /// config/layout at the versioned paths and Claude's settings in the
+    /// machine-neutral form (§2, setup.rs `HOOK_BIN`).
     #[command(hide = true)]
     Release {
         /// The freshly built release wasm to install as the versioned artifact.

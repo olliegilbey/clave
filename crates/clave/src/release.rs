@@ -49,8 +49,10 @@ pub const LAUNCHER_NAME: &str = "clave";
 /// drift between two artifact sets that no test compared).
 pub struct ReleaseArtifacts {
     pub wasm: PathBuf,
-    /// The versioned CLI copy. This is what generated config/layout/hooks
+    /// The versioned CLI copy. This is what the generated config and layout
     /// bake, because a baked reference must be immutable across cuts.
+    /// Claude's settings.json does not: it is shared between machines, so its
+    /// hooks run bare `clave` (setup.rs `HOOK_BIN`).
     pub cli: PathBuf,
     /// The unversioned launcher. Typed, never baked — see `LAUNCHER_NAME`.
     pub launcher: PathBuf,
@@ -158,7 +160,7 @@ pub fn long_version() -> String {
 ///
 /// Keyed on the versioned copy's EXISTENCE, not `current_exe()` (split spec §2
 /// Release mechanics — "stable sessions never invoke the dev binary: their
-/// keybinds/layout/hooks bake the versioned copy's absolute path"): a stable
+/// keybinds/layout bake the versioned copy's absolute path"): a stable
 /// session is cold-started by typing `clave`, which resolves on PATH to the
 /// unversioned launcher (`LAUNCHER_NAME` at `<data>/bin/clave` since #43a;
 /// before that, whatever `clave` happened to be — the 2026-07-22 outage) — so
@@ -320,7 +322,7 @@ fn git_output(args: &[&str]) -> Result<String> {
 
 /// `clave release` (invoked by `just release`): gate, then install the
 /// versioned artifacts and regenerate stable config/layout/hooks so every
-/// generated reference points at the versioned paths. `wasm_src`/`cli_src`
+/// generated zellij reference points at the versioned paths. `wasm_src`/`cli_src`
 /// are the freshly built release artifacts the justfile hands us — keeping
 /// the build in `just` and the version-shaped install here means every
 /// versioned filename is derived (and unit-tested) in one place.
@@ -373,11 +375,12 @@ pub fn run_release(wasm_src: &Path, cli_src: &Path) -> Result<()> {
 
     let wasm_str = wasm_dst.to_str().context("wasm path utf8")?;
     let cli_str = cli_dst.to_str().context("cli path utf8")?;
-    // Regenerate stable config/layout/hooks at the VERSIONED paths: keybind
-    // `Run` and pane `command` bake the absolute CLI copy; the plugin
-    // location and hook commands bake the versioned wasm/CLI. merge_hooks
-    // replaces any prior clave hook entry (old version, or the dev bare
-    // `clave`) rather than duplicating it.
+    // Regenerate stable config/layout at the VERSIONED paths: keybind `Run`
+    // and pane `command` bake the absolute CLI copy, and the plugin location
+    // the versioned wasm. settings.json takes the machine-neutral form
+    // instead (setup.rs `HOOK_BIN`, `STATUSLINE_BIN`), and merge_hooks
+    // replaces any prior clave hook entry, such as 0.5.7's absolute
+    // versioned one, rather than duplicating it.
     crate::setup::write_generated(&dir, cli_str, wasm_str)?;
 
     // #43a: the cut owns the unversioned entry point. LAST, and from the

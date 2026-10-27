@@ -108,6 +108,43 @@ Two invariants:
   clave is a thin wrapper for terminal control, and your identity is not its
   business.
 
+## The maintainer's setup: a Mac, and the box over ssh
+
+The maintainer dogfoods clave from a Mac. The fleet runs on a Linux box, the
+devbox, reached over ssh. An agent works on the box, inside the live fleet.
+Each machine has its own clave install.
+
+| Lives on the box | Lives on the Mac |
+|---|---|
+| The live fleet (zellij session `clave`) and every sandbox | The terminal (Ghostty) and the ssh to the box |
+| `~/code/clave`, its worktrees, the agents | Its own clave install, from the installer |
+| The release cut: `just release` writes the box's `~/.local/share/clave/` | |
+
+Four rules follow. Each one cost an hour on the 0.5.7 cut.
+
+1. **Hand every box command in its ssh form.** A command typed in a Mac
+   terminal runs on the Mac. Give the maintainer
+   `command ssh -t devbox 'cd <checkout> && <command>'`. The word `command`
+   skips the Mac's ssh colour hook. Never wrap it in `zsh -lic`: an
+   interactive box shell attaches to the `remote` session and runs nothing.
+   The full release form is in
+   [RELEASE-RUNBOOK](docs/dev/RELEASE-RUNBOOK.md), "Where each command runs".
+2. **Know the Mac functions.** `box` launches or attaches the fleet over ssh.
+   `box down` quits it. The `remote` zellij session on the box is the
+   maintainer's own ssh shell; never touch it.
+3. **Do what reads files yourself.** The agent cannot reach the Mac, but every
+   box file is in reach: versions, generated config, the zellij log,
+   `clave doctor`. Run those checks and report the result. Ask the maintainer
+   only for keypresses, looks, and output from the Mac.
+4. **Write nothing machine-shaped into a shared file.** His dotfiles carry
+   `~/.claude/settings.json`, `~/.claude/statusline.sh` and `~/.zshrc` between
+   the two machines through git, and the sandbox shares the same
+   `~/.claude`. So clave writes no home path and no version there: hooks run
+   bare `clave`, and the status line wrap runs
+   `"$HOME"/.local/share/clave/bin/clave`. After a cut or a stage on either
+   machine, the file reads the same, and it is safe to commit (FOOTGUNS,
+   "Claude's settings.json is shared").
+
 ## The rule that matters most
 
 **Never install over a running clave session, and never kill or launch a session
