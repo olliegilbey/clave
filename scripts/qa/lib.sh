@@ -498,8 +498,10 @@ hook_registration_checks() {
 # /home/<user>/.local/share/clave/bin/clave-vX.Y.Z there, so each machine's
 # install broke the other's copy, and each stage flipped it (2026-10-27,
 # setup.rs `HOOK_BIN`). The stage just wrote the hooks, so a hook in any other
-# form is this build's red. Only a cut writes the statusLine wrap, so an old
-# form there belongs to the installed cut: noted, not failed. $1 is the file.
+# form is this build's red. Only a cut writes the statusLine wrap, so in a
+# drive an old form there belongs to the installed cut: noted, not failed.
+# $2 = `cut` makes it a red, for the check the runbook runs after a cut
+# (CodeRabbit, PR review 2026-10-27). $1 is the file.
 settings_portability_checks() {
   # `[ ]` spells the space: script_hygiene reads a plain one as a hook fired
   # by hand, and this function only reads commands.
@@ -515,7 +517,11 @@ settings_portability_checks() {
   case "$sl" in
     '"$HOME"/.local/share/clave/bin/clave statusline'* | '') ;;
     *clave*statusline*)
-      note 'the statusLine wrap names a machine or a cut (%s); the next release rewrites it' "$sl" ;;
+      if [[ "${2:-}" == cut ]]; then
+        check "the statusLine wrap names no machine and no cut" "$sl" '"$HOME"/.local/share/clave/bin/clave statusline…'
+      else
+        note 'the statusLine wrap names a machine or a cut (%s); the next release rewrites it' "$sl"
+      fi ;;
   esac
 }
 

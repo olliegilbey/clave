@@ -56,7 +56,7 @@ So hand the maintainer every box command in its ssh form.
   maintainer's dotfiles share between the two machines. Every clave hook must
   be bare `clave`, and the status line wrap must start
   `"$HOME"/.local/share/clave/bin/clave`. From the checkout:
-  `bash -c 'source scripts/qa/lib.sh; settings_portability_checks ~/.claude/settings.json'`.
+  `bash -c 'source scripts/qa/lib.sh; settings_portability_checks ~/.claude/settings.json cut'`.
   A green check means the file is safe to commit from either machine
   (FOOTGUNS, "Claude's settings.json is shared").
 

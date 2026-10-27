@@ -811,6 +811,10 @@ want "an unreadable file is refused, not passed" "$?" "1"
 OLDSL="$(settings_portability_checks "$(settings "$(hooks_json clave ',"statusLine":{"type":"command","command":"/home/u/.local/share/clave/bin/clave-v0.5.7 statusline"}')")" 2>&1)"
 want "an old cut's statusLine is noted, not failed" "$?" "0"
 want "and the note names it" "$(grep -c 'names a machine or a cut' <<<"$OLDSL")" "1"
+(settings_portability_checks "$(settings "$(hooks_json clave ',"statusLine":{"type":"command","command":"/home/u/.local/share/clave/bin/clave-v0.5.7 statusline"}')")" cut >/dev/null 2>&1)
+want "after a cut, an old statusLine fails" "$?" "1"
+(settings_portability_checks "$(settings "$(hooks_json clave ',"statusLine":{"type":"command","command":"\"$HOME\"/.local/share/clave/bin/clave statusline"}')")" cut >/dev/null 2>&1)
+want "after a cut, the home launcher statusLine passes" "$?" "0"
 
 (quiet_event_checks "a quiet event" 41 41 7340 7340 >/dev/null 2>&1)
 want "a flat seq on the same file passes" "$?" "0"

@@ -22,7 +22,7 @@ You are picking up this work session from a prior agent that was making clave wr
 
 ## Next Steps
 
-1. The maintainer merges the PR. The next cut (0.5.8) rewrites settings.json on each machine; then the agent runs the settings check above, and the maintainer commits his dotfiles (settings.json, statusline.sh, the .zshrc PATH line) once.
+1. The maintainer merges the PR. The next cut (0.5.8) rewrites settings.json on each machine; then the agent runs the settings check with `cut` as its second argument (RELEASE-RUNBOOK), and the maintainer commits his dotfiles (settings.json, statusline.sh, the .zshrc PATH line) once.
 2. Optional: a QA drive on this branch shows `settings_portability_checks` green after the stage rewrites the hooks (the statusLine line stays a note until a cut).
 
 ## Context for the Work
