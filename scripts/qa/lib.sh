@@ -492,6 +492,39 @@ hook_registration_checks() {
   check "every event the binary acts on is registered exactly once" "${bad% }" ""
 }
 
+# The clave commands in settings.json must name no machine and no cut. It is
+# the maintainer's real file: the sandbox shares it, and his dotfiles share it
+# between his Mac and the box through git. A cut used to bake
+# /home/<user>/.local/share/clave/bin/clave-vX.Y.Z there, so each machine's
+# install broke the other's copy, and each stage flipped it (2026-10-27,
+# setup.rs `HOOK_BIN`). The stage just wrote the hooks, so a hook in any other
+# form is this build's red. Only a cut writes the statusLine wrap, so in a
+# drive an old form there belongs to the installed cut: noted, not failed.
+# $2 = `cut` makes it a red, for the check the runbook runs after a cut
+# (CodeRabbit, PR review 2026-10-27). $1 is the file.
+settings_portability_checks() {
+  # `[ ]` spells the space: script_hygiene reads a plain one as a hook fired
+  # by hand, and this function only reads commands.
+  local hooks first bad sl
+  hooks="$(jq -r '.hooks[]?[]?.hooks[]?.command // empty
+    | select(test("(^|/)clave(-v[0-9][^ ]*)?[ ]hook[ ]"))' "${1:-}" 2>/dev/null || true)"
+  first="$(head -1 <<<"$hooks")"
+  check_nonempty "settings.json registers clave's event commands" "$first"
+  bad="$(grep -v '^clave[ ]hook[ ][A-Za-z]*$' <<<"$hooks" | head -1 || true)"
+  check "every clave event command is bare clave (no machine path, no version)" "$bad" ""
+  sl="$(jq -r '.statusLine.command // empty' "${1:-}" 2>/dev/null || true)"
+  measure "the statusLine command" "${sl:-<none>}"
+  case "$sl" in
+    '"$HOME"/.local/share/clave/bin/clave statusline'* | '') ;;
+    *clave*statusline*)
+      if [[ "${2:-}" == cut ]]; then
+        check "the statusLine wrap names no machine and no cut" "$sl" '"$HOME"/.local/share/clave/bin/clave statusline…'
+      else
+        note 'the statusLine wrap names a machine or a cut (%s); the next release rewrites it' "$sl"
+      fi ;;
+  esac
+}
+
 # The inode of a file, or nothing. GNU and BSD stat share a name and almost
 # nothing else, and a `-c … || -f …` chain does not fall through cleanly
 # between them, so the dialect is probed once and then branched on

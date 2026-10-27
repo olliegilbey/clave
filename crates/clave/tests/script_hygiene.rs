@@ -621,6 +621,7 @@ fn the_card_cell_phase_reads_the_hook_seam_through_the_tested_verdicts() {
     );
     for verdict in [
         "hook_registration_checks",
+        "settings_portability_checks",
         "quiet_event_checks",
         "typed_clock_checks",
     ] {

@@ -694,14 +694,38 @@ pub fn unwrap_statusline(cmd: &str) -> Option<String> {
     }
 }
 
-/// Whether `binary` may be written into the statusLine slot at all. The one
-/// leak (CONTRIBUTING, #43/#44): a dev setup bakes bare `clave`, and the
-/// REAL settings.json is the one every Claude session reads — the maintainer's
-/// live Claude sessions would resolve that name to the stable launcher, whose
-/// version may not know `statusline` yet, and a failing status line command
-/// blanks the line in every Claude session. Hooks tolerate bare `clave` because
-/// every version has `hook`; this slot needs the version-pinned absolute
-/// path a release cut bakes, and a dev setup leaves it alone.
+/// The clave command every hook in settings.json runs. Bare, on every
+/// machine and in every arm, because settings.json is shared: the sandbox
+/// shares the real `~/.claude` (ruling 2026-07-18), and the maintainer's
+/// dotfiles share it between his Mac and the box through git. A release
+/// used to bake `/home/<user>/.local/share/clave/bin/clave-vX.Y.Z` here, so
+/// each machine's install broke the other's copy, every cut moved it, and
+/// each sandbox stage flipped it back to bare (2026-10-27). Bare is the one
+/// form all of them agree on. It resolves in every clave session, because
+/// the launch puts its own folder on the session's PATH (#282). Inside a
+/// sandbox the shim comes first on that PATH, so a sandbox hook runs the
+/// build under test. Claude runs a hook command through `sh -c` when it has
+/// no `args` (code.claude.com/docs/en/hooks, "Shell form").
+pub const HOOK_BIN: &str = "clave";
+
+/// The clave command the statusLine wrap runs: the stable launcher,
+/// through `$HOME`. Not bare, unlike [`HOOK_BIN`]: the status line runs in
+/// every Claude session, also one outside clave whose PATH has no clave
+/// folder, and a command that is not found blanks the user's own line. Not
+/// an absolute path or a versioned copy either, for the reason
+/// [`HOOK_BIN`] gives. The launcher is a full copy of the current cut
+/// (release.rs `install_launcher`), so this costs no extra exec. Claude runs
+/// the statusLine command in a shell (code.claude.com/docs/en/statusline:
+/// "The `command` field runs in a shell"), which expands `$HOME`. The
+/// quotes keep a home folder with a space in it whole.
+pub const STATUSLINE_BIN: &str = "\"$HOME\"/.local/share/clave/bin/clave";
+
+/// Whether a setup that bakes `binary` into the generated zellij files may
+/// wrap the statusLine. Only a release install may: it is the one that
+/// installs the launcher [`STATUSLINE_BIN`] names (release.rs
+/// `run_release`, `run_setup`'s single-file arm). A dev setup bakes bare
+/// `clave` and leaves the slot alone, so a contributor box with no stable
+/// install never points the status line at a file that does not exist.
 pub fn statusline_wrap_allowed(binary: &str) -> bool {
     std::path::Path::new(binary).is_absolute()
 }
@@ -760,21 +784,24 @@ impl SettingsMerge {
 }
 
 /// Both settings.json merges in one pass over one parsed value: the hooks
-/// (additive, every binary) and the statusLine slot (wrapped, release
-/// binaries only — see [`statusline_wrap_allowed`]).
+/// (additive, [`HOOK_BIN`] in every arm) and the statusLine slot (wrapped
+/// with [`STATUSLINE_BIN`], release installs only — see
+/// [`statusline_wrap_allowed`]). `binary` is what the generated zellij files
+/// bake; it picks the arm and never reaches settings.json, so the file reads
+/// the same on every machine and across cuts.
 pub fn merge_claude_settings(settings: &mut serde_json::Value, binary: &str) -> SettingsMerge {
     SettingsMerge {
-        hooks: merge_hooks(settings, binary),
-        statusline: statusline_wrap_allowed(binary) && merge_statusline(settings, binary),
+        hooks: merge_hooks(settings, HOOK_BIN),
+        statusline: statusline_wrap_allowed(binary) && merge_statusline(settings, STATUSLINE_BIN),
     }
 }
 
 /// Merge clave's hook registrations into a settings.json value, keyed on
-/// `clave_bin` (the command path to bake — bare `clave` for dev, the
-/// versioned copy's absolute path for a release).
+/// `clave_bin` (the command path to bake — [`HOOK_BIN`] in production).
 ///
 /// Replace-on-version-change (§2): an existing clave hook entry — ANY prior
-/// version's command path — is REPLACED in place by `clave_bin`'s, never
+/// command path, such as the absolute versioned copy 0.5.7 and earlier
+/// baked — is REPLACED in place by `clave_bin`'s, never
 /// duplicated; a same-version re-run is idempotent (no change). Non-clave
 /// entries are never touched (the never-clobber invariant, §6.5). Returns
 /// whether anything changed.
@@ -972,10 +999,9 @@ pub fn write_generated(dir: &std::path::Path, binary: &str, wasm: &str) -> Resul
     // honours CLAUDE_CONFIG_DIR as Claude does, else ~/.claude. The sandbox
     // does NOT set that variable: sandboxing Claude's identity broke its
     // auth (ruling 2026-07-18, `dev.rs` `enter_sandbox`). So a sandbox stage
-    // merges into the SHARED settings.json. It writes bare `clave` there,
-    // and the live fleet's hooks then resolve that by PATH to the stable
-    // launcher until the next release (FOOTGUNS, "A sandbox stage rewrites
-    // the LIVE session's hooks to bare `clave`").
+    // merges into the SHARED settings.json. Every arm writes the same hook
+    // commands there (`HOOK_BIN`), so a stage leaves the live fleet's hooks
+    // as it found them (FOOTGUNS, "settings.json is shared").
     let settings_path = crate::env::claude_config_dir()?.join("settings.json");
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent)?; // fresh box: ~/.claude may not exist yet
@@ -1002,7 +1028,7 @@ pub fn write_generated(dir: &std::path::Path, binary: &str, wasm: &str) -> Resul
         } else if statusline_wrap_allowed(binary) {
             "statusLine already wrapped".to_string()
         } else {
-            "statusLine left alone: a dev build bakes bare `clave`, which live sessions resolve to the stable launcher".to_string()
+            "statusLine left alone: only a release install wraps it".to_string()
         }
     );
 
@@ -2911,19 +2937,77 @@ mod tests {
         assert_eq!(unwrap_statusline("clave hook Stop"), None);
     }
 
-    /// The one leak (CONTRIBUTING, #43/#44): a dev setup bakes bare `clave`,
-    /// which the maintainer's LIVE sessions resolve to the stable launcher —
-    /// and a stable clave without this subcommand would blank his status
-    /// line in every Claude session. Only an absolute, version-pinned binary may
-    /// take the slot; hooks are safe with bare `clave` because every version
-    /// has `hook`.
+    /// Only a release install wraps the statusLine: it is the one that
+    /// installs the launcher the wrap names. A dev setup bakes bare `clave`.
     #[test]
-    fn only_a_version_pinned_binary_may_wrap_the_statusline() {
+    fn only_a_release_install_may_wrap_the_statusline() {
         assert!(statusline_wrap_allowed(
             "/h/.local/share/clave/bin/clave-v0.4.0"
         ));
         assert!(!statusline_wrap_allowed("clave"));
         assert!(!statusline_wrap_allowed("clave-dev"));
+    }
+
+    /// settings.json is shared: by the sandbox, and between the maintainer's
+    /// Mac and box through his dotfiles. So it must read the same whoever
+    /// wrote it. A box cut, a Mac cut of the next version and a sandbox stage
+    /// leave byte-identical files, and a file from the old absolute,
+    /// versioned form converges to it (2026-10-27: each machine's install
+    /// broke the other's copy). Red if any arm bakes its own binary path.
+    #[test]
+    fn settings_read_the_same_on_every_machine_cut_and_stage() {
+        let start = || {
+            serde_json::json!({
+                "statusLine": { "type": "command", "command": "bash ~/.claude/statusline.sh" }
+            })
+        };
+        let mut box_cut = start();
+        merge_claude_settings(&mut box_cut, "/home/u/.local/share/clave/bin/clave-v0.5.7");
+        let mut mac_cut = start();
+        merge_claude_settings(&mut mac_cut, "/Users/u/.local/share/clave/bin/clave-v0.5.8");
+        assert_eq!(box_cut, mac_cut);
+        // A sandbox stage on top of a cut changes nothing.
+        let staged = box_cut.clone();
+        assert!(!merge_claude_settings(&mut box_cut, "clave").changed());
+        assert_eq!(box_cut, staged);
+
+        let text = serde_json::to_string(&box_cut).unwrap();
+        assert!(
+            !text.contains("/home/u") && !text.contains("clave-v"),
+            "{text}"
+        );
+        assert_eq!(
+            box_cut["hooks"]["Stop"][0]["hooks"][0]["command"],
+            "clave hook Stop"
+        );
+        assert_eq!(
+            box_cut["statusLine"]["command"],
+            format!("{STATUSLINE_BIN} statusline -- 'bash ~/.claude/statusline.sh'")
+        );
+
+        // The old form, as a 0.5.7 cut wrote it, converges in place.
+        let old_bin = "/home/u/.local/share/clave/bin/clave-v0.5.7";
+        let mut old = start();
+        merge_hooks(&mut old, old_bin);
+        merge_statusline(&mut old, old_bin);
+        merge_claude_settings(&mut old, "/Users/u/.local/share/clave/bin/clave-v0.5.8");
+        assert_eq!(old, mac_cut);
+    }
+
+    /// The statusLine wrap names the launcher a cut installs: the default
+    /// data folder (`data_dir`), its `bin`, and `LAUNCHER_NAME`, once the
+    /// shell expands `$HOME`. Red if either side moves alone.
+    #[test]
+    fn the_statusline_wrap_names_the_installed_launcher() {
+        let home = "/home/u";
+        let expanded = STATUSLINE_BIN.replace("\"$HOME\"", home);
+        let installed = crate::release::release_artifacts(
+            &std::path::Path::new(home).join(".local/share/clave"),
+            "0.0.0",
+        )
+        .launcher;
+        assert_eq!(std::path::Path::new(&expanded), installed);
+        assert!(is_clave_bin(STATUSLINE_BIN), "the matchers must know it");
     }
 
     /// The write gate is EITHER merge, and a dev binary never takes the
@@ -2933,7 +3017,7 @@ mod tests {
     fn settings_are_written_when_either_merge_moved_and_dev_never_wraps() {
         let bin = "/h/.local/share/clave/bin/clave-v0.4.0";
         let mut v = serde_json::json!({});
-        assert!(merge_hooks(&mut v, bin));
+        assert!(merge_hooks(&mut v, HOOK_BIN));
         // Hooks already current: only the slot moves, and that alone writes.
         let m = merge_claude_settings(&mut v, bin);
         assert_eq!(

@@ -445,9 +445,9 @@ note 'same-HEAD re-runs cannot distinguish a stale load here — eyeball the tai
 # The clave that HOOKS will resolve must be able to read this sandbox's store.
 #
 # Added 2026-09-10 after a round lost to its absence. Hooks are registered in
-# the shared ~/.claude/settings.json as bare `clave` — they must be, since that
-# file is the maintainer's real one and a versioned path there is "the one
-# leak" (#43/#44). But the sandbox's PATH shim does NOT reach the hook process
+# the shared ~/.claude/settings.json as bare `clave`, by every setup and every
+# cut: the file is the maintainer's real one, shared with his other machine
+# through his dotfiles (setup.rs `HOOK_BIN`). But the sandbox's PATH shim does NOT reach the hook process
 # Claude Code spawns: the pane's env survives (CLAVE_SESSION, CLAVE_STATE_DIR,
 # ZELLIJ_PANE_ID are all correct, and `command -v clave` in the pane resolves
 # to the shim), while its PATH does not. So bare `clave` lands on the RELEASE
@@ -534,6 +534,9 @@ done
 # with the matcher setup writes with, over the binary's own event list, so a
 # new event cannot be missed here by a list kept in bash.
 hook_registration_checks "$("$CLAVE_BIN" doctor --json 2>/dev/null || true)"
+# The same file must read the same on every machine and after every stage:
+# the maintainer's dotfiles carry it between his Mac and the box.
+settings_portability_checks "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
 
 # config.kdl <-> layout.kdl identity pair (the #44 self-check `just sandbox`
 # already runs at stage time — re-asserted here because config coherence can

@@ -52,6 +52,13 @@ So hand the maintainer every box command in its ssh form.
   `command ssh devbox 'cd ~/code/clave && git push origin vX.Y.Z'`.
 - **The Mac's own install** comes from the installer after the push
   (README, "Upgrading?"). A `just release` on the Mac is not part of the cut.
+- **After the cut, the agent checks Claude's settings file**, which the
+  maintainer's dotfiles share between the two machines. Every clave hook must
+  be bare `clave`, and the status line wrap must start
+  `"$HOME"/.local/share/clave/bin/clave`. From the checkout:
+  `bash -c 'source scripts/qa/lib.sh; settings_portability_checks ~/.claude/settings.json cut'`.
+  A green check means the file is safe to commit from either machine
+  (FOOTGUNS, "Claude's settings.json is shared").
 
 ---
 
