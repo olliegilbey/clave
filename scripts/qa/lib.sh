@@ -570,6 +570,8 @@ HYDRATE_ANSWER='clave-bar: hydrate answer seq='
 BAD_STATUS='clave-bar: bad clave-status'
 RUN_FAILED='clave-bar: run_command failed'
 HOST_MODE='clave-bar: host mode '
+THEME_CURATED='clave-bar: theme curated'
+THEME_ZELLIJ='clave-bar: theme zellij'
 }
 
 # The lines since <mark> that hold <pattern> and end their fixed words with
@@ -695,6 +697,54 @@ host_mode_checks() {
   fi
   check "$span: every bar born heard the terminal mode (the replay at subscribe)" \
     "$(uuid_line "$(ids_missing_from "$born" "$heard")")" ""
+}
+
+# The colours a sandbox config asks for: `curated` when it names no theme,
+# `zellij` when it names one. Blank when the drive cannot tell: with
+# theme_dark or theme_light set, zellij picks the theme by the terminal's
+# mode (FOOTGUNS). zellij ships no theme named "default", so that name gets
+# the stock set, which is the curated design. A name zellij cannot find
+# also gets the stock set, and the check below then fails: the user's theme
+# does not load, which is worth a red.
+theme_the_config_asks_for() {
+  local cfg="$1"
+  [[ -r "$cfg" ]] || return 0
+  grep -Eq '^[[:space:]]*(theme_dark|theme_light)[[:space:]]' "$cfg" && return 0
+  if grep -Eq '^[[:space:]]*theme[[:space:]]+"' "$cfg" &&
+    ! grep -Eq '^[[:space:]]*theme[[:space:]]+"default"' "$cfg"; then
+    echo zellij
+  else
+    echo curated
+  fi
+}
+
+# The colours each bar took, over a span (6a since the run's mark; 6c since
+# the quit). Each bar logs `theme curated` or `theme zellij` at its first
+# ModeUpdate and on each change (main.rs, CHANGED-ONLY). $1 names the span,
+# $2 the instances born in it, $3 and $4 the instances that logged each,
+# $5 what the sandbox config asks for (`theme_the_config_asks_for`).
+#
+# The finding this exists for: with no theme, zellij sends a colour set the
+# bar did not know, so every bar took it for a theme, and a light terminal
+# got a dark bar. Every unit test was green, because each one fed the bar
+# a set zellij never sends (drive 47).
+theme_source_checks() {
+  local span="$1" born="$2" curated="$3" themed="$4" asked="$5" took other
+  measure "$span: sandbox bars on the curated design" "$(uuid_line "$curated")"
+  measure "$span: sandbox bars on a zellij theme" "$(uuid_line "$themed")"
+  check_nonempty "$span: bars were born, so each took its colours" "$(uuid_line "$born")"
+  case "$asked" in
+    curated) took="$curated" other="$themed" ;;
+    zellij) took="$themed" other="$curated" ;;
+    *)
+      note '%s: the sandbox config sets theme_dark or theme_light, so zellij picks the theme by the terminal mode. The drive cannot say which colours each bar must take.' "$span"
+      return
+      ;;
+  esac
+  check "$span: every bar born took the colours the config asks for ($asked)" \
+    "$(uuid_line "$(ids_missing_from "$born" "$took")")" ""
+  check "$span: no bar born took the other colours" \
+    "$(uuid_line "$(ids_missing_from "$born" "$(ids_missing_from "$born" "$other")")")" ""
 }
 
 # The seam over a span of the run (phase 6a since the run's mark; 6c since
@@ -1003,6 +1053,9 @@ QA_CAPABILITIES=(
   # and theme_light set, zellij sends Dark at start (FOOTGUNS).
   "light:clave-bar: host mode Light"
   "dark:clave-bar: host mode Dark"
+  # Whose colours the bar paints: its own design, or the zellij theme.
+  "curated:clave-bar: theme curated"
+  "zellij:clave-bar: theme zellij"
 )
 
 instance_ledger() {

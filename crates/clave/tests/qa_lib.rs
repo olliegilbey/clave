@@ -109,6 +109,24 @@ fn the_slim_push_fragments_match_what_the_bar_prints() {
         let ledger = format!("\"{}:clave-bar: host mode {mode}\"", mode.to_lowercase());
         assert!(LIB.contains(&ledger), "the ledger must read {line}");
     }
+    // Whose colours the bar paints (drive 47). The words come from the lib
+    // the bar logs them from, so a renamed source fails here.
+    use zellij_utils::data::{DEFAULT_STYLES, PaletteColor};
+    let mut themed = DEFAULT_STYLES;
+    themed.text_unselected.background = PaletteColor::Rgb((0x1F, 0x1F, 0x28));
+    let mut inputs = clave_bar::theme::ThemeInputs::default();
+    for (styling, frag, other) in [
+        (DEFAULT_STYLES, "THEME_CURATED", "THEME_ZELLIJ"),
+        (themed, "THEME_ZELLIJ", "THEME_CURATED"),
+    ] {
+        inputs.set_styling(styling);
+        let source = inputs.source().expect("a ModeUpdate names a source");
+        let line = format!("clave-bar: theme {source} build={t}");
+        assert!(line.contains(lib_fragment(frag)), "{line}");
+        assert!(!line.contains(lib_fragment(other)), "{line}");
+        let ledger = format!("\"{source}:clave-bar: theme {source}\"");
+        assert!(LIB.contains(&ledger), "the ledger must read {line}");
+    }
 }
 
 #[test]

@@ -889,7 +889,15 @@ impl State {
                 // repaints only when the mapped theme actually moved —
                 // ModeUpdate also fires on every input-mode change, which
                 // must not repaint an unchanged bar.
-                self.theme.set_styling(mode_info.style.colors)
+                let was = self.theme.source();
+                let moved = self.theme.set_styling(mode_info.style.colors);
+                // CHANGED-ONLY, like the host mode line below: the drive
+                // reads it as "this bar took these colours" (qa/lib.sh
+                // `theme_source_checks`).
+                if let Some(source) = self.theme.source().filter(|s| Some(*s) != was) {
+                    eprintln!("clave-bar: theme {source} build={BUILD}");
+                }
+                moved
             }
             Event::HostTerminalThemeChanged(mode) => {
                 // CHANGED-ONLY, like the term-facts lines: the drive reads

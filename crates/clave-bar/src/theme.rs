@@ -29,7 +29,9 @@
 //! `\u{...}` escape, never a literal. Literal glyphs were silently lost in
 //! transit twice and the loss misdiagnosed as missing font coverage.
 
-use zellij_tile::prelude::{DEFAULT_STYLES, HostTerminalThemeMode, PaletteColor, Styling};
+use zellij_tile::prelude::{
+    DEFAULT_STYLES, HostTerminalThemeMode, Palette, PaletteColor, PaletteSource, Styling, ThemeHue,
+};
 
 // ── the colour type ─────────────────────────────────────────────────────────
 
@@ -554,11 +556,10 @@ impl Theme {
     /// - `inks` ← [`Inks::LIGHT`] when `base` is a light ground, else
     ///   [`Inks::DARK`]: the meanings stay fixed, the shade follows the ground.
     ///
-    /// Stock `DEFAULT_STYLES` means "the user never set a theme" — every such
-    /// user has been looking at curated kanagawa since v0.1.0, so honesty about
-    /// zellij's stock colours would be a regression nobody asked for; they keep
-    /// the curated design. (A deliberate `theme "default"` lands in the same
-    /// arm, accepted at the grill.) The curated design comes in two grounds,
+    /// Stock colours ([`names_no_theme`]) mean "the user never set a theme",
+    /// and such a user gets the curated design, not zellij's 256-colour stock
+    /// set. (A deliberate `theme "default"` lands in the same arm, accepted at
+    /// the grill: zellij ships no theme by that name.) The curated design comes in two grounds,
     /// and `mode` picks one: zellij's client asks the terminal whether it is
     /// light or dark at startup (`CSI ? 996 n`) and listens for changes
     /// (`CSI ? 2031 h`). The client crate is not vendored; the server says so
@@ -569,7 +570,7 @@ impl Theme {
     /// light terminal with no zellij theme got the dark design, and its
     /// selected row was a fixed navy band on a light panel.
     pub fn from_styling(s: &Styling, mode: Option<HostTerminalThemeMode>) -> Theme {
-        if *s == DEFAULT_STYLES {
+        if names_no_theme(s) {
             return match mode {
                 Some(HostTerminalThemeMode::Light) => Theme::lotus(),
                 Some(HostTerminalThemeMode::Dark) | None => Theme::default(),
@@ -637,18 +638,67 @@ impl Theme {
     }
 }
 
+/// True when zellij names no theme. zellij sends one of two colour sets then,
+/// and neither is a theme the user chose:
+///
+/// - `DEFAULT_STYLES`, a plugin's own start value before any `ModeUpdate`
+///   (`Styling::default()`, zellij-utils-0.45.1 `data.rs:1614`);
+/// - [`no_theme_styles`], which the server puts in every `ModeUpdate` when the
+///   config names no theme (zellij-server-0.45.1 `lib.rs:1024-1026` at the
+///   first client, `lib.rs:453-454` on a config reload).
+///
+/// The two differ: the text is colour 255 on colour 16 in the second, and 245
+/// on 238 in the first. The bar checked for `DEFAULT_STYLES` only, so a live
+/// bar with no theme took zellij's stock set for a theme. It drew zellij's
+/// 256-colour greens and oranges, and a light terminal still got a dark bar
+/// (drive 47, 2026-10-27).
+fn names_no_theme(s: &Styling) -> bool {
+    *s == DEFAULT_STYLES || *s == no_theme_styles()
+}
+
+/// zellij's colours for a config with no theme: `default_palette()`
+/// (zellij-utils-0.45.1 `shared.rs:114-136`, colour numbers at
+/// `shared.rs:85-103`) through `Styling::from`. A plugin cannot call it,
+/// because zellij-tile exports `data` and not `shared`. The guardrail
+/// `a_config_with_no_theme_gets_the_curated_design` (crates/clave) feeds the
+/// real one through zellij's own config parser, and fails if this copy drifts.
+fn no_theme_styles() -> Styling {
+    use PaletteColor::EightBit as C;
+    Styling::from(Palette {
+        source: PaletteSource::Default,
+        theme_hue: ThemeHue::Dark,
+        fg: C(245),
+        bg: C(238),
+        black: C(16),
+        red: C(124),
+        green: C(154),
+        yellow: C(226),
+        blue: C(45),
+        magenta: C(201),
+        cyan: C(51),
+        white: C(255),
+        orange: C(166),
+        gray: C(238),
+        purple: C(99),
+        gold: C(136),
+        silver: C(245),
+        pink: C(207),
+        brown: C(215),
+    })
+}
+
 /// The bar's theme, and the two events it is mapped from. Either event can
 /// come first, and either repeats: zellij sends `ModeUpdate` on every input
 /// mode change, and `HostTerminalThemeChanged` at subscribe and on each flip.
 /// Each event stores its own input, and the theme is re-mapped from both, so
 /// a later `ModeUpdate` cannot drop the terminal's mode. This rule sat in the
 /// bar's event shell, where no test reaches it (review finding, PR #291).
-/// The default is stock colours and no mode: `Styling::default()` is
-/// `DEFAULT_STYLES` (zellij-utils-0.45.1 `data.rs:1614`), which maps to
-/// `Theme::default()`, the frame the goldens pin.
+/// Before the first `ModeUpdate` the colours are `DEFAULT_STYLES`, which a
+/// plugin starts on (zellij-utils-0.45.1 `data.rs:1614`), and there is no
+/// mode. That maps to `Theme::default()`, the frame the goldens pin.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ThemeInputs {
-    styling: Styling,
+    styling: Option<Styling>,
     mode: Option<HostTerminalThemeMode>,
     theme: Theme,
 }
@@ -663,10 +713,25 @@ impl ThemeInputs {
         self.mode
     }
 
+    /// Whose colours the bar paints: `curated` when zellij names no theme
+    /// ([`names_no_theme`]), `zellij` for a theme. None before the first
+    /// `ModeUpdate`. The bar logs it on each change, and the drive checks it
+    /// against the sandbox config (qa/lib.sh `theme_source_checks`): that
+    /// seam broke with every unit test green (drive 47).
+    pub fn source(&self) -> Option<&'static str> {
+        self.styling.as_ref().map(|s| {
+            if names_no_theme(s) {
+                "curated"
+            } else {
+                "zellij"
+            }
+        })
+    }
+
     /// A `ModeUpdate`'s colours. True when the theme moved, so the caller
     /// repaints only a bar whose colours changed.
     pub fn set_styling(&mut self, styling: Styling) -> bool {
-        self.styling = styling;
+        self.styling = Some(styling);
         self.remap()
     }
 
@@ -677,7 +742,8 @@ impl ThemeInputs {
     }
 
     fn remap(&mut self) -> bool {
-        let theme = Theme::from_styling(&self.styling, self.mode);
+        let styling = self.styling.as_ref().unwrap_or(&DEFAULT_STYLES);
+        let theme = Theme::from_styling(styling, self.mode);
         let moved = theme != self.theme;
         self.theme = theme;
         moved
@@ -1114,14 +1180,14 @@ mod tests {
         assert_eq!(*a.current(), Theme::default(), "frame zero is the goldens'");
         assert!(a.set_mode(Light), "the mode moves a stock bar");
         assert!(
-            !a.set_styling(DEFAULT_STYLES),
+            !a.set_styling(no_theme_styles()),
             "an input-mode change keeps lotus"
         );
         assert_eq!(*a.current(), Theme::lotus());
 
         let mut b = ThemeInputs::default();
         assert!(
-            !b.set_styling(DEFAULT_STYLES),
+            !b.set_styling(no_theme_styles()),
             "stock colours on a stock bar"
         );
         assert!(b.set_mode(Light));
@@ -1132,8 +1198,23 @@ mod tests {
         assert!(b.set_styling(zellij_kanagawa()));
         assert!(!b.set_mode(Light), "a theme's own ground beats the mode");
         assert_eq!(b.mode(), Some(Light));
-        assert!(b.set_styling(DEFAULT_STYLES));
+        assert!(b.set_styling(no_theme_styles()));
         assert_eq!(*b.current(), Theme::lotus(), "the stored mode paints lotus");
+    }
+
+    /// The bar logs this, and the drive checks it against the sandbox config.
+    #[test]
+    fn the_source_names_whose_colours_the_bar_paints() {
+        let mut t = ThemeInputs::default();
+        assert_eq!(t.source(), None, "no ModeUpdate yet");
+        for (styling, source) in [
+            (no_theme_styles(), "curated"),
+            (zellij_kanagawa(), "zellij"),
+            (DEFAULT_STYLES, "curated"),
+        ] {
+            t.set_styling(styling);
+            assert_eq!(t.source(), Some(source));
+        }
     }
 
     #[test]
@@ -1147,12 +1228,18 @@ mod tests {
     /// as every release before this one drew.
     #[test]
     fn the_terminal_mode_picks_the_curated_ground() {
-        let light = Theme::from_styling(&DEFAULT_STYLES, Some(HostTerminalThemeMode::Light));
-        assert_eq!(light, Theme::lotus());
-        assert!(light_ground(light.base), "lotus paints a light bar");
-        assert_eq!(light.inks, Inks::LIGHT);
-        let dark = Theme::from_styling(&DEFAULT_STYLES, Some(HostTerminalThemeMode::Dark));
-        assert_eq!(dark, Theme::default());
+        // Both sets zellij sends with no theme ([`names_no_theme`]). Before
+        // drive 47 only the first was here, and it is the one a live bar
+        // never gets after its first `ModeUpdate`.
+        for stock in [DEFAULT_STYLES, no_theme_styles()] {
+            let light = Theme::from_styling(&stock, Some(HostTerminalThemeMode::Light));
+            assert_eq!(light, Theme::lotus());
+            assert!(light_ground(light.base), "lotus paints a light bar");
+            assert_eq!(light.inks, Inks::LIGHT);
+            for mode in [Some(HostTerminalThemeMode::Dark), None] {
+                assert_eq!(Theme::from_styling(&stock, mode), Theme::default());
+            }
+        }
     }
 
     /// A user's own theme beats the terminal's answer: the mode only chooses

@@ -537,6 +537,8 @@ fn the_slim_push_phase_reads_the_seam_through_the_tested_verdicts() {
         "snapshot_dormant_tag",
         "refusal_payload",
         "host_mode_checks",
+        "theme_source_checks",
+        "theme_the_config_asks_for",
     ] {
         assert!(
             LIB.contains(&format!("{reader}()")),
@@ -576,10 +578,17 @@ fn the_slim_push_phase_reads_the_seam_through_the_tested_verdicts() {
         "$RUN_FAILED",
         // The terminal mode (PR #291): a released bar prints it too.
         "$HOST_MODE",
+        // Whose colours each bar paints (drive 47).
+        "$THEME_CURATED",
+        "$THEME_ZELLIJ",
     ];
     assert!(
         DRIVE.contains("host_mode_checks"),
         "the drive must read the terminal mode through `host_mode_checks`"
+    );
+    assert!(
+        DRIVE.contains("theme_source_checks"),
+        "the drive must read each bar's colours through `theme_source_checks`"
     );
     for (n, line) in code_lines(DRIVE) {
         let misread = fragments.iter().any(|f| line.contains(f))

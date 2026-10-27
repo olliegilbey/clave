@@ -541,9 +541,13 @@ Consequences, all accepted at the grill:
   wore oniViolet. Deterministic per theme, so a repo keeps its colour across
   restarts. Palette length is FIXED at eight (D7's `Option<u8>` indices
   persist in the store).
-- Stock `DEFAULT_STYLES` ⇒ curated kanagawa (`Theme::default()`, byte-identical
+- Stock colours ⇒ curated kanagawa (`Theme::default()`, byte-identical
   to the pre-#145 constants — every golden pins it). An unthemed user keeps
   today's exact bar; a deliberate `theme "default"` gets kanagawa too, accepted.
+  "Stock" is two colour sets, not one: `DEFAULT_STYLES` before the first
+  `ModeUpdate`, and zellij's old default palette in every `ModeUpdate` after
+  it (`theme::names_no_theme`). Until drive 47 (2026-10-27) the bar knew only
+  the first, so a live unthemed bar painted zellij's 256-colour stock set.
 - Under zellij's OWN kanagawa the bar shifts subtly — zellij's kanagawa picked
   autumnGreen/autumnRed where the lock picked springGreen/waveRed, and
   selection becomes green-backed (`list_selected`). Ollie: "the subtle shift
