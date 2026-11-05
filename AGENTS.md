@@ -35,7 +35,7 @@ Ordered by weight. When two collide, the earlier one wins.
 - **Ollie launches every session.** `just launch` refuses inside zellij, and you are always inside it. Hand him `cd <checkout>` then `just launch`. He also runs `just release` and owns anything that writes `~/.local/share/clave/`.
 - **You kill the sandboxes you staged.** Kill by exact name (`clave dev instance --field session`), never another agent's session and never his live one. Do it when he asks, and when a drive needs a quit or a clean restage.
 - **Fire hooks only through `scripts/ct.sh --hook`.** A hand-written `clave hook` aims its snapshot at the session your environment names, which is Ollie's. It hung his session once. A test fails the build if the drive does this.
-- **Remote surfaces wait for his go:** pushes, PRs, merges, issue writes.
+- **Ollie merges.** Push your branch, open the PR, and reply to and resolve review threads. Merges and issue writes wait for his go.
 - **Ask him to test what you cannot reach.**
 - **`just gates` must be green before you commit.** It runs fmt, test, the wasm build, then clippy, in that order, because CI runs fmt before clippy.
 
